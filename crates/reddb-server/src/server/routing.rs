@@ -1,6 +1,28 @@
 use super::*;
 use std::sync::{Mutex, OnceLock};
 
+/// Issue #767 / S8 — context handed to streaming handlers so they can
+/// emit `stream.opened` / `stream.closed` audit events without
+/// re-deriving the principal or peeking back into the request headers.
+///
+/// `principal` is the stable label produced by [`principal_for`] (the
+/// same value used by the QPS quota gate and the capacity registry).
+/// `token` is the raw bearer string, retained so handlers can decide
+/// whether the bearer credential's expiry is shorter than the lease's
+/// snapshot-TTL deadline.
+pub(crate) struct StreamAuditCtx<'a> {
+    pub principal: &'a str,
+    pub token: Option<&'a str>,
+}
+
+fn extract_bearer(headers: &BTreeMap<String, String>) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+}
+
 const CATALOG_DEPRECATION_DATE: &str = "2026-08-08";
 const CATALOG_DEPRECATION_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -116,6 +138,11 @@ impl RedDBServer {
                 // an NDJSON Accept header are present — ASK STREAM is
                 // the long-standing surface; NDJSON is opt-in for
                 // ordinary SELECTs.
+                let bearer = extract_bearer(&request.headers);
+                let audit_ctx = StreamAuditCtx {
+                    principal: &principal,
+                    token: bearer,
+                };
                 if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
                 } else if is_input_stream_post {
@@ -126,9 +153,14 @@ impl RedDBServer {
                         cfg.max_per_principal_streams,
                     ) {
                         Ok(_capacity_guard) => {
-                            self.handle_query_ndjson_input_stream(request.body.clone(), writer)?;
+                            self.handle_query_ndjson_input_stream(
+                                request.body.clone(),
+                                &audit_ctx,
+                                writer,
+                            )?;
                         }
                         Err(err) => {
+                            emit_capacity_refused_audit(&self.runtime, &principal, &err);
                             let response = stream_capacity_refusal_response(&err);
                             writer.write_all(&response.to_http_bytes())?;
                             writer.flush()?;
@@ -149,9 +181,14 @@ impl RedDBServer {
                         cfg.max_per_principal_streams,
                     ) {
                         Ok(_capacity_guard) => {
-                            self.handle_query_ndjson_stream(request.body.clone(), writer)?;
+                            self.handle_query_ndjson_stream(
+                                request.body.clone(),
+                                &audit_ctx,
+                                writer,
+                            )?;
                         }
                         Err(err) => {
+                            emit_capacity_refused_audit(&self.runtime, &principal, &err);
                             let response = stream_capacity_refusal_response(&err);
                             writer.write_all(&response.to_http_bytes())?;
                             writer.flush()?;
@@ -3595,6 +3632,297 @@ mod tests {
             "stream must still close with an end envelope: {text}"
         );
     }
+
+    // ───────────── Issue #767 / S8 — lease decoupling + audit ─────────────
+
+    fn read_audit_log(server: &RedDBServer) -> String {
+        let logger = server.runtime.audit_log();
+        assert!(
+            logger.wait_idle(std::time::Duration::from_secs(2)),
+            "audit writer did not drain in time"
+        );
+        std::fs::read_to_string(logger.path()).unwrap_or_default()
+    }
+
+    #[test]
+    fn ndjson_end_envelope_carries_opaque_lease_handle_not_internal_id() {
+        // Acceptance criterion #3 — wire-visible handle is opaque,
+        // hex-encoded, ≥128 bits. The deprecated `lease_id` field is
+        // gone from the envelope so clients cannot regress to it.
+        let server = fresh_server();
+        let raw = ndjson_query(&server, "SELECT 1 as n");
+        let (_head, body) = split_response(&raw);
+        let decoded = decode_chunked_body(&body);
+        let text = String::from_utf8(decoded).expect("utf8");
+        let end_line = text.lines().last().expect("at least one line");
+        assert!(end_line.starts_with("{\"end\":"));
+        assert!(
+            end_line.contains("\"lease_handle\":"),
+            "end envelope must carry lease_handle: {end_line}"
+        );
+        assert!(
+            !end_line.contains("\"lease_id\":"),
+            "end envelope must not leak internal lease_id: {end_line}"
+        );
+        // Extract handle value and check shape.
+        let needle = "\"lease_handle\":\"";
+        let start = end_line.find(needle).expect("lease_handle field") + needle.len();
+        let rest = &end_line[start..];
+        let end = rest.find('"').expect("handle terminator");
+        let handle = &rest[..end];
+        assert_eq!(
+            handle.len(),
+            32,
+            "lease_handle must be 32-char hex (128 bits): {handle}"
+        );
+        assert!(handle.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Extract the `lease_handle` value (32-char hex) from an NDJSON
+    /// `{"end": …}` envelope. Returns `None` when the envelope does not
+    /// carry one (e.g. a non-streaming HTTP error response). Tests use
+    /// the handle as a unique key when grepping the shared audit log —
+    /// `RedDBOptions::in_memory()` writes `.audit.log` next to the
+    /// (unique-per-test) data path's *parent* `/tmp`, so multiple
+    /// tests running in the same process share the file.
+    fn extract_lease_handle(raw: &[u8]) -> Option<String> {
+        let (_head, body) = split_response(raw);
+        let decoded = decode_chunked_body(&body);
+        let text = String::from_utf8(decoded).ok()?;
+        let needle = "\"lease_handle\":\"";
+        let start = text.find(needle)? + needle.len();
+        let rest = &text[start..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
+    #[test]
+    fn ndjson_stream_emits_open_and_close_audit_events() {
+        // Acceptance criterion #5 — every state transition produces
+        // an audit event. After a successful stream we expect both a
+        // `stream.opened` and a `stream.closed` line carrying our
+        // stream's unique lease_handle, with `reason=ok`. We filter
+        // by handle (not by action count) because the audit file is
+        // shared across in-process tests.
+        let server = fresh_server();
+        let raw = ndjson_query(&server, "SELECT 1 as n");
+        let handle = extract_lease_handle(&raw).expect("end envelope carries handle");
+        let body = read_audit_log(&server);
+        let opened: Vec<&str> = body
+            .lines()
+            .filter(|l| {
+                l.contains("\"action\":\"stream.opened\"")
+                    && l.contains(&format!("\"lease_handle\":\"{handle}\""))
+            })
+            .collect();
+        let closed: Vec<&str> = body
+            .lines()
+            .filter(|l| {
+                l.contains("\"action\":\"stream.closed\"")
+                    && l.contains(&format!("\"lease_handle\":\"{handle}\""))
+            })
+            .collect();
+        assert_eq!(
+            opened.len(),
+            1,
+            "expected exactly one stream.opened for handle {handle}"
+        );
+        assert_eq!(
+            closed.len(),
+            1,
+            "expected exactly one stream.closed for handle {handle}"
+        );
+        assert!(
+            opened[0].contains("\"snapshot_lsn\":") && opened[0].contains("\"query_hash\":"),
+            "stream.opened missing required fields: {}",
+            opened[0]
+        );
+        assert!(
+            closed[0].contains("\"reason\":\"ok\""),
+            "stream.closed must record reason=ok: {}",
+            closed[0]
+        );
+    }
+
+    #[test]
+    fn ndjson_capacity_refusal_emits_capacity_refused_audit_event() {
+        // Acceptance criterion #5 — capacity-refused is a state
+        // transition; the audit log must carry a `stream.closed` row
+        // with `reason: capacity_refused` even though no lease was
+        // ever issued.
+        let server = fresh_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_global = 1")
+            .expect("set cap");
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_per_principal = 1")
+            .expect("set cap");
+        // Hold the only slot so the next open is refused.
+        let cap_registry = Arc::clone(server.stream_capacity());
+        let _hold = cap_registry.try_acquire("anon", 1, 1).unwrap();
+
+        let request = ndjson_request_with_bearer("SELECT 1", None);
+        let raw = dispatch_streaming(&server, &request);
+        assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 429"));
+
+        let body = read_audit_log(&server);
+        assert!(
+            body.lines().any(|l| {
+                l.contains("\"action\":\"stream.closed\"")
+                    && l.contains("\"reason\":\"capacity_refused\"")
+            }),
+            "audit log missing capacity_refused close event: {body}"
+        );
+    }
+
+    #[test]
+    fn ndjson_token_expired_during_lease_audit_emitted_when_jwt_exp_is_short() {
+        // Acceptance criterion #4 — a JWT bearer whose `exp` lands
+        // inside the lease's snapshot-TTL window triggers the dedicated
+        // audit event exactly once per stream, with `lease_continued`
+        // = true. The stream itself still completes successfully —
+        // the lease, not the token, governs subsequent chunks (PRD
+        // #759 lease-decoupling property).
+        let server = fresh_server();
+        // Synthetic JWT — header.payload.signature where payload
+        // sets `exp: 1` (Unix epoch, well in the past). Auth is not
+        // configured on this server, so the bearer is unverified;
+        // but the audit emit consults the `exp` claim purely for
+        // bookkeeping.
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.sig";
+        let request = ndjson_request_with_bearer("SELECT 1 as n", Some(token));
+        let raw = dispatch_streaming(&server, &request);
+        assert!(
+            String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 200"),
+            "stream must complete despite bearer expiry: {}",
+            String::from_utf8_lossy(&raw)
+        );
+        let handle = extract_lease_handle(&raw).expect("end envelope carries handle");
+
+        let body = read_audit_log(&server);
+        let token_events: Vec<&str> = body
+            .lines()
+            .filter(|l| {
+                l.contains("\"action\":\"stream.token_expired_during_lease\"")
+                    && l.contains(&format!("\"lease_handle\":\"{handle}\""))
+            })
+            .collect();
+        assert_eq!(
+            token_events.len(),
+            1,
+            "expected exactly one token-expired event for handle {handle}"
+        );
+        assert!(
+            token_events[0].contains("\"lease_continued\":true"),
+            "token-expired event must mark lease_continued=true: {}",
+            token_events[0]
+        );
+        // And we still get the open/close pair for this handle.
+        assert!(body
+            .lines()
+            .any(|l| l.contains("\"action\":\"stream.opened\"")
+                && l.contains(&format!("\"lease_handle\":\"{handle}\""))));
+        assert!(body
+            .lines()
+            .any(|l| l.contains("\"action\":\"stream.closed\"")
+                && l.contains(&format!("\"lease_handle\":\"{handle}\""))));
+    }
+
+    #[test]
+    fn ndjson_opaque_token_does_not_emit_token_expired_event() {
+        // Counterpoint — an opaque (non-JWT) bearer carries no `exp`
+        // claim so the audit emitter has nothing to record. The
+        // detector must not false-positive on api-key shapes.
+        let server = fresh_server();
+        let request = ndjson_request_with_bearer("SELECT 1 as n", Some("opaque-api-key"));
+        let raw = dispatch_streaming(&server, &request);
+        assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 200"));
+        let handle = extract_lease_handle(&raw).expect("end envelope carries handle");
+        let body = read_audit_log(&server);
+        // Filter strictly by our stream's handle — the shared audit
+        // log may carry token-expired rows from other tests, but
+        // none should match this lease handle.
+        assert!(
+            !body.lines().any(|l| {
+                l.contains("\"action\":\"stream.token_expired_during_lease\"")
+                    && l.contains(&format!("\"lease_handle\":\"{handle}\""))
+            }),
+            "opaque tokens must not trigger the token-expired audit for this handle: {body}"
+        );
+    }
+
+    #[test]
+    fn ndjson_lease_outlives_short_jwt_exp_acceptance_criterion_one() {
+        // Acceptance criterion #1 — a token expiring mid-flight does
+        // not terminate the stream. In the shim slice, materialisation
+        // already de facto decouples the bearer from chunk delivery;
+        // this test pins that property at the wire layer. The stream
+        // must complete with `reason=ok` even though the JWT `exp` is
+        // already in the past at the moment the open call returns.
+        let server = fresh_server();
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.sig";
+        let request = ndjson_request_with_bearer("SELECT 1 as n", Some(token));
+        let raw = dispatch_streaming(&server, &request);
+        let handle = extract_lease_handle(&raw).expect("end envelope carries handle");
+        let (_head, http_body) = split_response(&raw);
+        let decoded = decode_chunked_body(&http_body);
+        let text = String::from_utf8(decoded).unwrap();
+        let end_line = text.lines().last().unwrap_or("");
+        assert!(
+            end_line.starts_with("{\"end\":"),
+            "stream must close with end envelope despite token expiry: {text}"
+        );
+        assert!(
+            text.lines().any(|l| l.starts_with("{\"row\":")),
+            "row data must still flow when bearer credential is expired: {text}"
+        );
+        // Close audit reason is `ok` — filter by handle so the shared
+        // audit file's other rows don't break the assertion.
+        let audit = read_audit_log(&server);
+        let close = audit
+            .lines()
+            .find(|l| {
+                l.contains("\"action\":\"stream.closed\"")
+                    && l.contains(&format!("\"lease_handle\":\"{handle}\""))
+            })
+            .expect("close event recorded");
+        assert!(
+            close.contains("\"reason\":\"ok\""),
+            "lease must close cleanly when token expired mid-flight: {close}"
+        );
+    }
+
+    #[test]
+    fn ndjson_input_stream_emits_open_and_close_audit_events() {
+        // Symmetric coverage for the input-stream surface. A
+        // successful insert path produces the same opened/closed
+        // pair, distinguishable from output streams only by the
+        // executed query (recorded via query_hash).
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows767 (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        let body = concat!(
+            "{\"open\":{\"target\":\"rows767\",\"columns\":[\"id\",\"name\"]}}\n",
+            "{\"row\":{\"id\":1,\"name\":\"alice\"}}\n",
+        );
+        let _ = dispatch_input_stream(&server, body);
+        let log = read_audit_log(&server);
+        assert!(
+            log.lines()
+                .any(|l| l.contains("\"action\":\"stream.opened\"")),
+            "input stream missing stream.opened: {log}"
+        );
+        assert!(
+            log.lines().any(|l| {
+                l.contains("\"action\":\"stream.closed\"") && l.contains("\"reason\":\"ok\"")
+            }),
+            "input stream missing stream.closed ok: {log}"
+        );
+    }
 }
 
 /// Issue #524 — `GET /collections/:name/chain-tip`. Returns the cached chain
@@ -3967,6 +4295,29 @@ fn principal_for(headers: &BTreeMap<String, String>) -> String {
 ///   `Retry-After: <seconds>`  header
 ///   `{"ok": false, "error": {"code": <code>, "limit": N, "current": M,
 ///                            "principal": "..."?}}`
+/// Issue #767 / S8 — record a `stream.closed { reason: capacity_refused }`
+/// audit event whenever the capacity guard refuses an open. The brief
+/// requires audit coverage of every state transition; capacity_refused
+/// is the only one that never produces a lease handle.
+fn emit_capacity_refused_audit(
+    runtime: &crate::runtime::RedDBRuntime,
+    principal: &str,
+    err: &crate::server::output_stream::AcquireError,
+) {
+    use crate::server::output_stream::AcquireError;
+    let (limit, current) = match err {
+        AcquireError::GlobalExhausted { limit, current } => (*limit, *current),
+        AcquireError::PrincipalExhausted { limit, current, .. } => (*limit, *current),
+    };
+    crate::server::output_stream::audit_stream_capacity_refused(
+        runtime,
+        principal,
+        err.code(),
+        limit,
+        current,
+    );
+}
+
 pub(crate) fn stream_capacity_refusal_response(
     err: &crate::server::output_stream::AcquireError,
 ) -> HttpResponse {
