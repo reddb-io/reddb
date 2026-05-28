@@ -73,6 +73,9 @@ pub(super) const SCHEMA_REGISTRY_INTERNAL: &str = "__red_schema_schema_registry"
 // Issue #784 — Analytics v0 metric descriptor catalog.
 pub(super) const ANALYTICS_METRICS: &str = "red.analytics.metrics";
 pub(super) const ANALYTICS_METRICS_INTERNAL: &str = "__red_schema_analytics_metrics";
+// Issue #787 — event-shaped analytics source profiles over normal collections.
+pub(super) const ANALYTICS_SOURCES: &str = "red.analytics.sources";
+pub(super) const ANALYTICS_SOURCES_INTERNAL: &str = "__red_schema_analytics_sources";
 // Issue #655 — governance/evidence surfaces. These are read-only
 // projections over runtime-owned stores, not SQL collections.
 pub(super) const GOVERNANCE_REGISTRY: &str = "red.registry";
@@ -224,6 +227,17 @@ const SCHEMA_REGISTRY_COLUMNS: [&str; 4] =
 
 const ANALYTICS_METRIC_COLUMNS: [&str; 4] = ["path", "kind", "role", "created_at"];
 
+const ANALYTICS_SOURCE_COLUMNS: [&str; 8] = [
+    "name",
+    "collection",
+    "time_field",
+    "event_field",
+    "actor_field",
+    "session_field",
+    "properties_field",
+    "created_at",
+];
+
 const GOVERNANCE_REGISTRY_COLUMNS: [&str; 12] = [
     "id",
     "version",
@@ -351,6 +365,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
         (QUEUES, QUEUES_INTERNAL),
         (ANALYTICS_METRICS, ANALYTICS_METRICS_INTERNAL),
+        (ANALYTICS_SOURCES, ANALYTICS_SOURCES_INTERNAL),
         (SCHEMA_REGISTRY, SCHEMA_REGISTRY_INTERNAL),
         (
             GOVERNANCE_REGISTRY_HISTORY,
@@ -415,6 +430,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(QUEUES)
         || table.eq_ignore_ascii_case(ANALYTICS_METRICS_INTERNAL)
         || table.eq_ignore_ascii_case(ANALYTICS_METRICS)
+        || table.eq_ignore_ascii_case(ANALYTICS_SOURCES_INTERNAL)
+        || table.eq_ignore_ascii_case(ANALYTICS_SOURCES)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY)
         || table.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_INTERNAL)
@@ -479,6 +496,9 @@ pub(super) fn red_query(
         VirtualTableKind::QueuePending => queue_pending_snapshot(runtime, visible_collections),
         VirtualTableKind::Queues => queues_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::AnalyticsMetrics => analytics_metrics_snapshot(runtime),
+        VirtualTableKind::AnalyticsSources => {
+            analytics_sources_snapshot(runtime, visible_collections)
+        }
         VirtualTableKind::SchemaRegistry => schema_registry_snapshot(runtime),
         VirtualTableKind::GovernanceRegistry => governance_registry_snapshot(runtime),
         VirtualTableKind::GovernanceRegistryHistory => {
@@ -596,6 +616,7 @@ enum VirtualTableKind {
     QueuePending,
     Queues,
     AnalyticsMetrics,
+    AnalyticsSources,
     SchemaRegistry,
     GovernanceRegistry,
     GovernanceRegistryHistory,
@@ -624,6 +645,7 @@ impl VirtualTableKind {
             Self::QueuePending => &QUEUE_PENDING_COLUMNS,
             Self::Queues => &QUEUE_COLUMNS,
             Self::AnalyticsMetrics => &ANALYTICS_METRIC_COLUMNS,
+            Self::AnalyticsSources => &ANALYTICS_SOURCE_COLUMNS,
             Self::SchemaRegistry => &SCHEMA_REGISTRY_COLUMNS,
             Self::GovernanceRegistry => &GOVERNANCE_REGISTRY_COLUMNS,
             Self::GovernanceRegistryHistory => &GOVERNANCE_REGISTRY_HISTORY_COLUMNS,
@@ -652,6 +674,7 @@ impl VirtualTableKind {
             Self::QueuePending => QUEUE_PENDING,
             Self::Queues => QUEUES,
             Self::AnalyticsMetrics => ANALYTICS_METRICS,
+            Self::AnalyticsSources => ANALYTICS_SOURCES,
             Self::SchemaRegistry => SCHEMA_REGISTRY,
             Self::GovernanceRegistry => GOVERNANCE_REGISTRY,
             Self::GovernanceRegistryHistory => GOVERNANCE_REGISTRY_HISTORY,
@@ -713,6 +736,11 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
         || name.eq_ignore_ascii_case(ANALYTICS_METRICS)
     {
         return Ok(VirtualTableKind::AnalyticsMetrics);
+    }
+    if name.eq_ignore_ascii_case(ANALYTICS_SOURCES_INTERNAL)
+        || name.eq_ignore_ascii_case(ANALYTICS_SOURCES)
+    {
+        return Ok(VirtualTableKind::AnalyticsSources);
     }
     if name.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
         || name.eq_ignore_ascii_case(SCHEMA_REGISTRY)
@@ -1168,6 +1196,45 @@ fn analytics_metrics_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
                     Value::text(entry.path),
                     Value::text(entry.kind),
                     Value::text(entry.role),
+                    timestamp_ms_value(entry.created_at_ms),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn analytics_sources_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let store = runtime.db().store();
+    let schema = Arc::new(
+        ANALYTICS_SOURCE_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    super::analytics_source_catalog::list(store.as_ref())
+        .into_iter()
+        .filter(|entry| {
+            visible_collections
+                .map(|visible| visible.contains(&entry.collection))
+                .unwrap_or(true)
+        })
+        .map(|entry| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(entry.name),
+                    Value::text(entry.collection),
+                    Value::text(entry.time_field),
+                    Value::text(entry.event_field),
+                    Value::text(entry.actor_field),
+                    entry.session_field.map(Value::text).unwrap_or(Value::Null),
+                    entry
+                        .properties_field
+                        .map(Value::text)
+                        .unwrap_or(Value::Null),
                     timestamp_ms_value(entry.created_at_ms),
                 ],
             )
