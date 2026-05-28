@@ -3624,6 +3624,226 @@ mod tests {
         assert!(text.contains("safe identifier"), "message: {text}");
     }
 
+    // ───────────── Issue #765 / S6 — opt-in SHA-256 integrity ─────────────
+
+    /// Rolling SHA-256 over the exact row-frame bytes, in arrival order —
+    /// the same convention the server hashes (raw line bytes, no newline).
+    fn s6_expected_digest(rows: &[&str]) -> String {
+        let mut hasher = crate::server::output_stream::PrefixHasher::new();
+        for row in rows {
+            hasher.update(row.as_bytes());
+        }
+        hasher.finalize_hex()
+    }
+
+    fn s6_input_body(table: &str, rows: &[&str], digest: &str) -> String {
+        let mut body = format!(
+            "{{\"open\":{{\"target\":\"{table}\",\"columns\":[\"id\",\"name\"],\"verify\":\"sha256\"}}}}\n"
+        );
+        for row in rows {
+            body.push_str(row);
+            body.push('\n');
+        }
+        body.push_str(&format!("{{\"end\":{{\"sha256\":\"{digest}\"}}}}\n"));
+        body
+    }
+
+    #[test]
+    fn ndjson_input_sha256_match_closes_ok_and_rows_visible() {
+        // Acceptance criterion #1 — matching digest → end envelope with
+        // `integrity: "ok"` and rows visible to normal readers.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows765 (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        let rows = [
+            "{\"row\":{\"id\":1,\"name\":\"alice\"}}",
+            "{\"row\":{\"id\":2,\"name\":\"bob\"}}",
+        ];
+        let digest = s6_expected_digest(&rows);
+        let body = s6_input_body("rows765", &rows, &digest);
+        let raw = dispatch_input_stream(&server, &body);
+        let (_head, body_bytes) = split_response(&raw);
+        let text = String::from_utf8(decode_chunked_body(&body_bytes)).expect("utf8");
+        let last = text.lines().last().unwrap_or("");
+        assert!(
+            last.starts_with("{\"end\":"),
+            "expected end envelope: {text}"
+        );
+        assert!(
+            last.contains("\"integrity\":\"ok\""),
+            "matching digest must report integrity ok: {last}"
+        );
+
+        let response = server.route(request_with(
+            "POST",
+            "/query",
+            br#"{"query":"SELECT id, name FROM rows765"}"#.to_vec(),
+        ));
+        let body_text = String::from_utf8_lossy(&response.body);
+        assert!(body_text.contains("alice"), "alice missing: {body_text}");
+        assert!(body_text.contains("bob"), "bob missing: {body_text}");
+    }
+
+    #[test]
+    fn ndjson_input_sha256_mismatch_tombstones_and_default_reads_filter() {
+        // Acceptance criterion #2 — non-matching digest → integrity_failed
+        // envelope with expected/actual/tombstoned_rid_range, and the
+        // affected RIDs are filtered out of default reads.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows765_bad (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        let rows = [
+            "{\"row\":{\"id\":1,\"name\":\"alice\"}}",
+            "{\"row\":{\"id\":2,\"name\":\"bob\"}}",
+        ];
+        let wrong_digest = "0".repeat(64);
+        let body = s6_input_body("rows765_bad", &rows, &wrong_digest);
+        let raw = dispatch_input_stream(&server, &body);
+        let (_head, body_bytes) = split_response(&raw);
+        let text = String::from_utf8(decode_chunked_body(&body_bytes)).expect("utf8");
+        let last = text.lines().last().unwrap_or("");
+        assert!(
+            last.contains("\"code\":\"integrity_failed\""),
+            "expected integrity_failed envelope: {text}"
+        );
+        assert!(
+            last.contains(&format!("\"expected\":\"{wrong_digest}\"")),
+            "envelope must echo the client digest: {last}"
+        );
+        assert!(
+            last.contains("\"actual\":"),
+            "envelope must carry actual: {last}"
+        );
+        assert!(
+            last.contains("\"tombstoned_rid_range\":["),
+            "envelope must carry the tombstoned RID range: {last}"
+        );
+
+        // Default reads filter the tombstoned rows.
+        let response = server.route(request_with(
+            "POST",
+            "/query",
+            br#"{"query":"SELECT id, name FROM rows765_bad"}"#.to_vec(),
+        ));
+        let body_text = String::from_utf8_lossy(&response.body);
+        assert!(
+            !body_text.contains("alice"),
+            "tombstoned alice must be filtered: {body_text}"
+        );
+        assert!(
+            !body_text.contains("bob"),
+            "tombstoned bob must be filtered: {body_text}"
+        );
+    }
+
+    #[test]
+    fn ndjson_input_without_verify_has_no_integrity_field() {
+        // Acceptance criterion #3 — default (no verify) computes no hash and
+        // emits no integrity field in the terminal envelope.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows765_noverify (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        let body = concat!(
+            "{\"open\":{\"target\":\"rows765_noverify\",\"columns\":[\"id\",\"name\"]}}\n",
+            "{\"row\":{\"id\":1,\"name\":\"alice\"}}\n",
+        );
+        let raw = dispatch_input_stream(&server, body);
+        let (_head, body_bytes) = split_response(&raw);
+        let text = String::from_utf8(decode_chunked_body(&body_bytes)).expect("utf8");
+        let last = text.lines().last().unwrap_or("");
+        assert!(
+            last.starts_with("{\"end\":"),
+            "expected end envelope: {text}"
+        );
+        assert!(
+            !last.contains("integrity"),
+            "no-verify stream must not carry an integrity field: {last}"
+        );
+        // And the row is visible — no tombstone, no filtering.
+        let response = server.route(request_with(
+            "POST",
+            "/query",
+            br#"{"query":"SELECT id, name FROM rows765_noverify"}"#.to_vec(),
+        ));
+        assert!(
+            String::from_utf8_lossy(&response.body).contains("alice"),
+            "row should be visible without verification"
+        );
+    }
+
+    #[test]
+    fn ndjson_input_sha256_tombstone_survives_restart() {
+        // Acceptance criterion #4 — tombstoning is durable: after a restart
+        // over the same on-disk store, default reads continue to filter the
+        // affected RIDs.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("s765.rdb");
+        let rows = [
+            "{\"row\":{\"id\":1,\"name\":\"alice\"}}",
+            "{\"row\":{\"id\":2,\"name\":\"bob\"}}",
+        ];
+        let wrong_digest = "f".repeat(64);
+
+        // Phase 1 — ingest with a bad digest; tombstone the committed range.
+        {
+            let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path))
+                .expect("runtime boots");
+            let server = RedDBServer::new(runtime);
+            ddl(
+                &server,
+                "CREATE TABLE rows765_restart (id INTEGER PRIMARY KEY, name TEXT)",
+            );
+            let body = s6_input_body("rows765_restart", &rows, &wrong_digest);
+            let raw = dispatch_input_stream(&server, &body);
+            let (_head, body_bytes) = split_response(&raw);
+            let text = String::from_utf8(decode_chunked_body(&body_bytes)).expect("utf8");
+            assert!(
+                text.lines()
+                    .last()
+                    .unwrap_or("")
+                    .contains("integrity_failed"),
+                "phase 1 must report integrity_failed: {text}"
+            );
+            // Same-process read already filters.
+            let response = server.route(request_with(
+                "POST",
+                "/query",
+                br#"{"query":"SELECT id, name FROM rows765_restart"}"#.to_vec(),
+            ));
+            assert!(
+                !String::from_utf8_lossy(&response.body).contains("alice"),
+                "phase 1 reads must filter tombstoned rows"
+            );
+        }
+
+        // Phase 2 — reopen the store; the tombstone must still filter.
+        {
+            let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path))
+                .expect("runtime reopens");
+            let server = RedDBServer::new(runtime);
+            let response = server.route(request_with(
+                "POST",
+                "/query",
+                br#"{"query":"SELECT id, name FROM rows765_restart"}"#.to_vec(),
+            ));
+            let body_text = String::from_utf8_lossy(&response.body);
+            assert!(
+                !body_text.contains("alice"),
+                "tombstone must survive restart (alice): {body_text}"
+            );
+            assert!(
+                !body_text.contains("bob"),
+                "tombstone must survive restart (bob): {body_text}"
+            );
+        }
+    }
+
     #[test]
     fn ndjson_invalid_query_surfaces_structured_error_line() {
         // Acceptance criterion #2 — mid-stream failures surface as
