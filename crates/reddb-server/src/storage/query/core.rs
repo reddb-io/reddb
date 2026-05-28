@@ -69,6 +69,8 @@ pub enum QueryExpr {
     CreateMetric(CreateMetricQuery),
     /// ALTER METRIC path SET <ROLE|KIND|TYPE|PATH> <value>
     AlterMetric(AlterMetricQuery),
+    /// CREATE SLO path ON metric_path TARGET t WINDOW d UNIT
+    CreateSlo(CreateSloQuery),
     /// DROP TIMESERIES name
     DropTimeSeries(DropTimeSeriesQuery),
     /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
@@ -1902,6 +1904,21 @@ pub struct AlterMetricQuery {
     pub set_role: Option<String>,
     pub attempted_kind: Option<String>,
     pub attempted_path: Option<String>,
+}
+
+/// CREATE SLO path ON metric_path TARGET t WINDOW d UNIT
+///
+/// Issue #791 — declared over an existing SLI-role metric descriptor.
+/// `target` is the objective (0 < target <= 1, e.g. 0.999); `window_ms`
+/// is the rolling window the objective is evaluated over. Burn-rate /
+/// error-budget evaluation is deferred to later slices — v0 stores
+/// catalog state only.
+#[derive(Debug, Clone)]
+pub struct CreateSloQuery {
+    pub path: String,
+    pub metric_path: String,
+    pub target: f64,
+    pub window_ms: u64,
 }
 
 /// CREATE COLLECTION name KIND kind [SIGNED_BY ('pubkey_hex', ...)]

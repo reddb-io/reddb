@@ -1,7 +1,8 @@
 //! Parser for CREATE/DROP TIMESERIES
 
 use super::super::ast::{
-    CreateTableQuery, CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl, QueryExpr,
+    CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl,
+    QueryExpr,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -263,6 +264,72 @@ impl<'a> Parser<'a> {
                 attempted_path,
             },
         ))
+    }
+
+    /// Parse CREATE SLO body (after CREATE SLO consumed).
+    ///
+    /// Grammar:
+    ///   CREATE SLO <dotted.path>
+    ///     ON <metric.dotted.path>
+    ///     TARGET <number>
+    ///     WINDOW <number> <duration_unit>
+    ///
+    /// Clauses are positional after the SLO path so the grammar stays
+    /// tight; the parser leaves semantic validation (metric exists, role
+    /// = sli, target in range) to the runtime catalog where the error
+    /// wording can reference the live catalog state.
+    pub fn parse_create_slo_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let mut path = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        while self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            path = format!("{path}.{next}");
+        }
+
+        if !self.consume(&Token::On)? {
+            return Err(ParseError::expected(
+                vec!["ON"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+
+        let mut metric_path = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        while self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            metric_path = format!("{metric_path}.{next}");
+        }
+
+        let mut target: Option<f64> = None;
+        let mut window_ms: Option<u64> = None;
+
+        loop {
+            if self.consume_ident_ci("TARGET")? {
+                target = Some(self.parse_float()?);
+            } else if self.consume_ident_ci("WINDOW")? {
+                let value = self.parse_float()?;
+                let unit = self.parse_duration_unit()?;
+                window_ms = Some((value * unit) as u64);
+            } else {
+                break;
+            }
+        }
+
+        Ok(QueryExpr::CreateSlo(CreateSloQuery {
+            path,
+            metric_path,
+            target: target.ok_or_else(|| {
+                ParseError::new(
+                    "SLO descriptor requires TARGET <number>".to_string(),
+                    self.position(),
+                )
+            })?,
+            window_ms: window_ms.ok_or_else(|| {
+                ParseError::new(
+                    "SLO descriptor requires WINDOW <duration>".to_string(),
+                    self.position(),
+                )
+            })?,
+        }))
     }
 
     /// Parse CREATE HYPERTABLE body — TimescaleDB-style.

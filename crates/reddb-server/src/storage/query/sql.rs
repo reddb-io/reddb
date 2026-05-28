@@ -4,9 +4,9 @@ use crate::storage::query::ast::{
     AskQuery, BinOp, CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateCollectionQuery,
     CreateForeignTableQuery, CreateIndexQuery, CreateMetricQuery, CreateMigrationQuery,
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
-    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateVectorQuery, CreateViewQuery,
-    DeleteQuery, DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery, DropGraphQuery,
-    DropIndexQuery, DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
+    CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateVectorQuery,
+    CreateViewQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery,
+    DropGraphQuery, DropIndexQuery, DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
     DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery,
     DropVectorQuery, DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery,
     Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery,
@@ -77,6 +77,7 @@ pub enum SqlCommand {
     CreateTimeSeries(CreateTimeSeriesQuery),
     CreateMetric(CreateMetricQuery),
     AlterMetric(AlterMetricQuery),
+    CreateSlo(CreateSloQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     AlterQueue(AlterQueueQuery),
@@ -244,6 +245,7 @@ pub enum SqlSchemaCommand {
     CreateTimeSeries(CreateTimeSeriesQuery),
     CreateMetric(CreateMetricQuery),
     AlterMetric(AlterMetricQuery),
+    CreateSlo(CreateSloQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     AlterQueue(AlterQueueQuery),
@@ -343,6 +345,9 @@ impl SqlStatement {
             }
             SqlStatement::Schema(SqlSchemaCommand::AlterMetric(query)) => {
                 SqlCommand::AlterMetric(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateSlo(query)) => {
+                SqlCommand::CreateSlo(query)
             }
             SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query)) => {
                 SqlCommand::DropTimeSeries(query)
@@ -498,6 +503,7 @@ impl SqlCommand {
             SqlCommand::CreateTimeSeries(query) => QueryExpr::CreateTimeSeries(query),
             SqlCommand::CreateMetric(query) => QueryExpr::CreateMetric(query),
             SqlCommand::AlterMetric(query) => QueryExpr::AlterMetric(query),
+            SqlCommand::CreateSlo(query) => QueryExpr::CreateSlo(query),
             SqlCommand::DropTimeSeries(query) => QueryExpr::DropTimeSeries(query),
             SqlCommand::CreateQueue(query) => QueryExpr::CreateQueue(query),
             SqlCommand::AlterQueue(query) => QueryExpr::AlterQueue(query),
@@ -592,6 +598,9 @@ impl SqlCommand {
             }
             SqlCommand::AlterMetric(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::AlterMetric(query))
+            }
+            SqlCommand::CreateSlo(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateSlo(query))
             }
             SqlCommand::DropTimeSeries(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query))
@@ -1473,6 +1482,14 @@ impl<'a> Parser<'a> {
                 QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
                 other => Err(ParseError::new(
                     format!("internal: CREATE METRICS produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.consume_ident_ci("SLO")? {
+            match self.parse_create_slo_body()? {
+                QueryExpr::CreateSlo(query) => Ok(SqlCommand::CreateSlo(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE SLO produced unexpected kind {other:?}"),
                     self.position(),
                 )),
             }
