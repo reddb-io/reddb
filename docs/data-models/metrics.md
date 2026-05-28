@@ -1,8 +1,12 @@
 # Metrics
 
-Metrics are RedDB's planned Prometheus-compatible observability data model. The
-goal is to let RedDB act as a metrics backend for Grafana while keeping the
-engine model RedDB-native.
+Metrics are named measures in RedDB's Analytics v0 ontology. The metric catalog
+defines what is being measured, where the source data comes from, what unit and
+kind it has, which dimensions are valid, and which role it plays.
+
+RedDB also has a planned Prometheus-compatible observability backend. That
+backend stores and queries operational telemetry while keeping the engine model
+RedDB-native and aligned with the Analytics v0 metric catalog.
 
 Metrics are related to [Time-Series](./timeseries.md), but they are not just a
 generic `metric, value, tags, timestamp` collection. A metrics collection adds
@@ -10,10 +14,13 @@ contracts that operational telemetry needs: tenant isolation, label
 normalization, series identity, metric kinds, histograms, cardinality budgets,
 staleness, TTL, and rollups.
 
+For the full ontology, including KPI, SLI, SLO, Time-Series, and probabilistic
+boundaries, see [Analytics v0 Ontology](./analytics.md).
+
 ## Status
 
-This is a design target, not a shipped SQL surface yet. The first planned
-compatibility target is:
+The Analytics v0 catalog is a design target, not a shipped SQL surface yet. The
+first planned compatibility target for operational telemetry is:
 
 - Prometheus `remote_write` ingestion.
 - Prometheus HTTP query API subset for Grafana:
@@ -34,6 +41,10 @@ Use Metrics when you want RedDB to store and query operational telemetry:
 
 Use [Time-Series](./timeseries.md) directly when you have generic timestamped
 measurements and do not need Prometheus/Grafana compatibility semantics.
+
+Use the Analytics v0 metric catalog when you need named measures over existing
+RedDB data, including product KPIs, service SLIs, or derived metrics sourced
+from tables, documents, events, metrics collections, or materialized queries.
 
 ## Proposed DDL
 
@@ -56,6 +67,28 @@ This declares a metrics collection with:
 Internally, the implementation should reuse RedDB's time-series chunks,
 hypertable routing, retention daemon, batch-write paths, and continuous
 aggregate machinery where those primitives fit.
+
+`CREATE METRICS` declares an operational telemetry collection for the
+Prometheus-compatible backend. It is not a generic analytics object.
+
+`INSERT INTO METRIC` is not part of Analytics v0. Raw source writes should use
+ordinary RedDB write paths such as table/document inserts, time-series point
+inserts, or the Prometheus remote-write adapter. Metrics define named measures
+over those sources.
+
+## Metric Catalog Roles
+
+Analytics v0 treats KPI and SLI as metric roles:
+
+| Role | Meaning |
+|:-----|:--------|
+| Ordinary metric | Named measure without a special review role |
+| KPI | Metric used for product, business, or operational outcome review |
+| SLI | Metric used to judge service quality |
+
+SLO is not a metric role. It is a separate objective over an SLI metric, with a
+target and window. Keeping SLOs separate lets multiple objectives refer to the
+same measured SLI without changing the metric definition.
 
 ## Series Identity
 
@@ -151,6 +184,7 @@ retry, backpressure, and DLQ. They are not the public metrics ingestion API.
 
 ## See Also
 
+- [Analytics v0 Ontology](./analytics.md)
 - [Time-Series](./timeseries.md)
 - [Hypertables](./hypertables.md)
 - [Continuous Aggregates](./continuous-aggregates.md)

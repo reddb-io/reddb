@@ -30,6 +30,9 @@ RedDB exposes multiple kinds of "structure", and they are not all the same thing
   │
   Are relationships between entities first-class?
   ├─ yes ─── [Graphs]
+  │
+  Do you need named measures, KPIs, SLIs, or SLOs over existing data?
+  ├─ yes ─── [Analytics v0 Ontology] + [Metrics]
 ```
 
 Most non-trivial workloads combine two or three of these on the same
@@ -42,6 +45,9 @@ on top of collections. RedDB does not use a hierarchy where a collection contain
 documents as separate child objects in the traditional sense.
 
 For application design, think in **user-facing data models** such as tables, documents, queues, and time-series.
+Analytics v0 sits above those models as a metric-centric catalog: raw data stays in ordinary collections,
+metrics are named measures over that data, KPI and SLI are roles on metrics, and SLO is a separate objective
+over an SLI metric.
 For engine work, compatibility checks, and storage refactors, it also matters to distinguish those models from
 the **native persisted entity kinds** in the unified storage core and from **supporting engine structures** such as
 indexes and probabilistic sketches.
@@ -141,7 +147,9 @@ Indexes accelerate reads and are attached to collections / columns rather than s
 
 ### Probabilistic Structures
 
-These are first-class commands and durable engine objects, but they are not collection entity kinds.
+These are first-class commands and durable engine objects, but they are not collection entity kinds. In
+Analytics v0 they are approximate execution sidecars for questions such as distinct count, frequency, and
+membership; they are not source-of-truth metric storage.
 
 | Structure | Syntax | Best for |
 |:----------|:-------|:---------|
@@ -164,6 +172,7 @@ Use this as the fast decision tree:
 - Need timestamp-first metrics with retention and downsampling: use **Time-Series**.
 - Need automatic chunk partitioning + `drop_chunks` + partition TTL: use **Hypertables**.
 - Need pre-aggregated dashboards with incremental refresh: use **Continuous Aggregates**.
+- Need named measures, KPI/SLI roles, or SLO objectives over existing data: use **Analytics v0**.
 - Need job processing, retries, DLQ, or consumer groups: use **Queues & Deques**.
 - Need approximate counting or membership at low memory cost: use **Probabilistic Structures**.
 
@@ -176,6 +185,7 @@ Use this as the fast decision tree:
 - [Cache](/data-models/cache.md)
 - [Graphs](/data-models/graphs.md)
 - [Vectors & Embeddings](/data-models/vectors.md)
+- [Analytics v0 Ontology](/data-models/analytics.md)
 - [Metrics](/data-models/metrics.md)
 - [Time-Series](/data-models/timeseries.md)
 - [Hypertables](/data-models/hypertables.md)
