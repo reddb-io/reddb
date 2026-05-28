@@ -73,6 +73,9 @@ pub(super) const SCHEMA_REGISTRY_INTERNAL: &str = "__red_schema_schema_registry"
 // Issue #784 — Analytics v0 metric descriptor catalog.
 pub(super) const ANALYTICS_METRICS: &str = "red.analytics.metrics";
 pub(super) const ANALYTICS_METRICS_INTERNAL: &str = "__red_schema_analytics_metrics";
+// Issue #791 — Analytics v0 SLO descriptor catalog over SLI metrics.
+pub(super) const ANALYTICS_SLOS: &str = "red.analytics.slos";
+pub(super) const ANALYTICS_SLOS_INTERNAL: &str = "__red_schema_analytics_slos";
 // Issue #787 — event-shaped analytics source profiles over normal collections.
 pub(super) const ANALYTICS_SOURCES: &str = "red.analytics.sources";
 pub(super) const ANALYTICS_SOURCES_INTERNAL: &str = "__red_schema_analytics_sources";
@@ -260,6 +263,8 @@ const SCHEMA_REGISTRY_COLUMNS: [&str; 4] =
     ["event_name", "version", "schema_json", "registered_at"];
 
 const ANALYTICS_METRIC_COLUMNS: [&str; 4] = ["path", "kind", "role", "created_at"];
+
+const ANALYTICS_SLO_COLUMNS: [&str; 5] = ["path", "metric", "target", "window_ms", "created_at"];
 
 const ANALYTICS_SOURCE_COLUMNS: [&str; 8] = [
     "name",
@@ -531,6 +536,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
         (QUEUES, QUEUES_INTERNAL),
         (ANALYTICS_METRICS, ANALYTICS_METRICS_INTERNAL),
+        (ANALYTICS_SLOS, ANALYTICS_SLOS_INTERNAL),
         (ANALYTICS_SOURCES, ANALYTICS_SOURCES_INTERNAL),
         (SCHEMA_REGISTRY, SCHEMA_REGISTRY_INTERNAL),
         (
@@ -603,6 +609,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(QUEUES)
         || table.eq_ignore_ascii_case(ANALYTICS_METRICS_INTERNAL)
         || table.eq_ignore_ascii_case(ANALYTICS_METRICS)
+        || table.eq_ignore_ascii_case(ANALYTICS_SLOS_INTERNAL)
+        || table.eq_ignore_ascii_case(ANALYTICS_SLOS)
         || table.eq_ignore_ascii_case(ANALYTICS_SOURCES_INTERNAL)
         || table.eq_ignore_ascii_case(ANALYTICS_SOURCES)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
@@ -683,6 +691,7 @@ pub(super) fn red_query(
         VirtualTableKind::QueuePending => queue_pending_snapshot(runtime, visible_collections),
         VirtualTableKind::Queues => queues_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::AnalyticsMetrics => analytics_metrics_snapshot(runtime),
+        VirtualTableKind::AnalyticsSlos => analytics_slos_snapshot(runtime),
         VirtualTableKind::AnalyticsSources => {
             analytics_sources_snapshot(runtime, visible_collections)
         }
@@ -810,6 +819,7 @@ enum VirtualTableKind {
     QueuePending,
     Queues,
     AnalyticsMetrics,
+    AnalyticsSlos,
     AnalyticsSources,
     SchemaRegistry,
     GovernanceRegistry,
@@ -846,6 +856,7 @@ impl VirtualTableKind {
             Self::QueuePending => &QUEUE_PENDING_COLUMNS,
             Self::Queues => &QUEUE_COLUMNS,
             Self::AnalyticsMetrics => &ANALYTICS_METRIC_COLUMNS,
+            Self::AnalyticsSlos => &ANALYTICS_SLO_COLUMNS,
             Self::AnalyticsSources => &ANALYTICS_SOURCE_COLUMNS,
             Self::SchemaRegistry => &SCHEMA_REGISTRY_COLUMNS,
             Self::GovernanceRegistry => &GOVERNANCE_REGISTRY_COLUMNS,
@@ -882,6 +893,7 @@ impl VirtualTableKind {
             Self::QueuePending => QUEUE_PENDING,
             Self::Queues => QUEUES,
             Self::AnalyticsMetrics => ANALYTICS_METRICS,
+            Self::AnalyticsSlos => ANALYTICS_SLOS,
             Self::AnalyticsSources => ANALYTICS_SOURCES,
             Self::SchemaRegistry => SCHEMA_REGISTRY,
             Self::GovernanceRegistry => GOVERNANCE_REGISTRY,
@@ -951,6 +963,11 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
         || name.eq_ignore_ascii_case(ANALYTICS_METRICS)
     {
         return Ok(VirtualTableKind::AnalyticsMetrics);
+    }
+    if name.eq_ignore_ascii_case(ANALYTICS_SLOS_INTERNAL)
+        || name.eq_ignore_ascii_case(ANALYTICS_SLOS)
+    {
+        return Ok(VirtualTableKind::AnalyticsSlos);
     }
     if name.eq_ignore_ascii_case(ANALYTICS_SOURCES_INTERNAL)
         || name.eq_ignore_ascii_case(ANALYTICS_SOURCES)
@@ -1432,6 +1449,31 @@ fn analytics_metrics_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
                     Value::text(entry.path),
                     Value::text(entry.kind),
                     Value::text(entry.role),
+                    timestamp_ms_value(entry.created_at_ms),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn analytics_slos_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let store = runtime.db().store();
+    let schema = Arc::new(
+        ANALYTICS_SLO_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    super::slo_descriptor_catalog::list(store.as_ref())
+        .into_iter()
+        .map(|entry| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(entry.path),
+                    Value::text(entry.metric_path),
+                    Value::Float(entry.target),
+                    Value::Integer(entry.window_ms as i64),
                     timestamp_ms_value(entry.created_at_ms),
                 ],
             )

@@ -1310,6 +1310,7 @@ pub mod schema_vocabulary;
 pub(crate) mod sessionize;
 pub mod signed_chain;
 pub mod signed_writes_kind;
+pub(crate) mod slo_descriptor_catalog;
 pub mod snapshot_reuse;
 mod statement_frame;
 mod table_row_mvcc_resolver;

@@ -294,6 +294,7 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::CreateTimeSeries(_)
         | QueryExpr::CreateMetric(_)
         | QueryExpr::AlterMetric(_)
+        | QueryExpr::CreateSlo(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
         | QueryExpr::AlterQueue(_)

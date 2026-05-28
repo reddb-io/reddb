@@ -592,6 +592,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
         QueryExpr::CreateMetric(_) => "create_metric",
         QueryExpr::AlterMetric(_) => "alter_metric",
+        QueryExpr::CreateSlo(_) => "create_slo",
         QueryExpr::DropTimeSeries(_) => "drop_timeseries",
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::AlterQueue(_) => "alter_queue",
