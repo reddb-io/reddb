@@ -283,6 +283,68 @@ mod tests {
     }
 
     #[test]
+    fn output_stream_lifecycle_envelopes_round_trip() {
+        // Golden encode/decode for every new variant added in
+        // issue #762 / PRD #759 S3. Pins the exact byte values
+        // and confirms `stream_id` multiplex routing survives the
+        // round trip (it is what `StreamCancel`'s per-stream
+        // targeting relies on).
+        let open = Frame::new(
+            MessageKind::OpenStream,
+            10,
+            br#"{"sql":"SELECT 1","opts":{}}"#.to_vec(),
+        )
+        .with_stream(7);
+        round_trip(open.clone());
+        assert_eq!(encode_frame(&open)[4], 0x29);
+
+        let ack = Frame::new(
+            MessageKind::OpenAck,
+            10,
+            br#"{"lease_handle":"42","resumable":false,"snapshot_lsn":1234}"#.to_vec(),
+        )
+        .with_stream(7);
+        round_trip(ack.clone());
+        assert_eq!(encode_frame(&ack)[4], 0x2A);
+
+        let chunk = Frame::new(
+            MessageKind::StreamChunk,
+            10,
+            br#"{"seq":0,"rows":[{"a":1}],"terminal":false}"#.to_vec(),
+        )
+        .with_stream(7);
+        round_trip(chunk.clone());
+        assert_eq!(encode_frame(&chunk)[4], 0x2B);
+
+        let serr = Frame::new(
+            MessageKind::StreamError,
+            10,
+            br#"{"code":"unknown_stream","message":"x"}"#.to_vec(),
+        )
+        .with_stream(7);
+        round_trip(serr.clone());
+        assert_eq!(encode_frame(&serr)[4], 0x2C);
+
+        let end = Frame::new(
+            MessageKind::StreamEnd,
+            10,
+            br#"{"stats":{"row_count":1}}"#.to_vec(),
+        )
+        .with_stream(7);
+        round_trip(end.clone());
+        assert_eq!(encode_frame(&end)[4], 0x25);
+
+        let cancel = Frame::new(
+            MessageKind::StreamCancel,
+            10,
+            br#"{"reason":"client-abort"}"#.to_vec(),
+        )
+        .with_stream(7);
+        round_trip(cancel.clone());
+        assert_eq!(encode_frame(&cancel)[4], 0x2D);
+    }
+
+    #[test]
     fn uncompressed_frame_decodes_unchanged_when_flag_unset() {
         let payload = b"hello world".to_vec();
         let frame = Frame::new(MessageKind::Result, 1, payload.clone());
