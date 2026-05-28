@@ -258,6 +258,14 @@ pub struct RedDBServer {
     /// across cloned server handles so flipping `retry_after_secs`
     /// via `with_http_limits` propagates to every accept loop.
     reject_503_bytes: Arc<Vec<u8>>,
+    /// Issue #761 / S2 — process-wide output-stream capacity registry.
+    /// Shared via `Arc` so cloned server handles (e.g.
+    /// `serve_in_background`) all enforce against one set of counters.
+    /// The HTTP NDJSON path acquires through this in
+    /// `try_route_streaming` before invoking the handler; the guard is
+    /// dropped on return so any stream-end path (success / mid-stream
+    /// error / snapshot expiry / panic unwind) releases the slot.
+    pub(crate) stream_capacity: Arc<output_stream::StreamCapacityRegistry>,
 }
 
 /// Default per-handler total-time budget (issue #571 slice 2).
@@ -364,7 +372,13 @@ impl RedDBServer {
             http_metrics: HttpHandlerMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
             reject_503_bytes: Arc::new(build_reject_503_bytes(DEFAULT_RETRY_AFTER_SECS)),
+            stream_capacity: output_stream::StreamCapacityRegistry::new(),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn stream_capacity(&self) -> &Arc<output_stream::StreamCapacityRegistry> {
+        &self.stream_capacity
     }
 
     #[doc(hidden)]
