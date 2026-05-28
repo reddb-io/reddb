@@ -216,6 +216,31 @@ pub fn decode(pager: &Pager, stored: &[u8]) -> Result<Vec<u8>, ValueLayoutError>
     }
 }
 
+/// Return the head overflow page id when `stored` represents a pointer
+/// cell, else `None`. Returns `None` for inline (raw or compressed)
+/// cells and for empty/malformed cells. Callers use this from the
+/// B-tree delete and shrinking-update paths (slice F of PRD #662) to
+/// free the chain before the leaf cell goes away.
+pub fn pointer_head(stored: &[u8]) -> Option<u32> {
+    if stored.is_empty() {
+        return None;
+    }
+    let flag = stored[0];
+    if flag & FLAG_RESERVED_MASK != 0 {
+        return None;
+    }
+    if flag & FLAG_POINTER == 0 {
+        return None;
+    }
+    if stored.len() < 1 + POINTER_PAYLOAD_LEN {
+        return None;
+    }
+    let payload = &stored[1..];
+    Some(u32::from_le_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+}
+
 /// `true` when [`encode`] would emit a spill pointer for a value of
 /// this length (without actually spilling). Used by the leaf-fit check
 /// in `bulk_insert_sorted` to size cells before allocation.
@@ -367,6 +392,29 @@ mod tests {
         let err = decode(&pager, &stored).unwrap_err();
         assert!(matches!(err, ValueLayoutError::UnknownFlag(_)));
         cleanup(&path);
+    }
+
+    #[test]
+    fn pointer_head_extracts_head_id_only_for_pointer_cells() {
+        // Inline raw (flag 0x00) → None.
+        assert_eq!(pointer_head(&[0x00, 1, 2, 3]), None);
+        // Inline compressed (flag 0x02) → None.
+        assert_eq!(pointer_head(&[0x02, 0, 0, 0, 5, 0xff, 0xfe]), None);
+        // Empty stored bytes → None.
+        assert_eq!(pointer_head(&[]), None);
+        // Reserved bits set → None (callers must not free anything they
+        // cannot interpret).
+        assert_eq!(pointer_head(&[0b0000_0100]), None);
+        // Pointer raw with head id 0x01020304 and total_len 0 → Some(...)
+        let mut cell = vec![FLAG_POINTER];
+        cell.extend_from_slice(&0x0102_0304u32.to_le_bytes());
+        cell.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(pointer_head(&cell), Some(0x0102_0304));
+        // Pointer compressed flag also yields the same head.
+        cell[0] = FLAG_POINTER | FLAG_COMPRESSED;
+        assert_eq!(pointer_head(&cell), Some(0x0102_0304));
+        // Pointer flag but payload truncated → None (no UB).
+        assert_eq!(pointer_head(&[FLAG_POINTER, 1, 2]), None);
     }
 
     #[test]

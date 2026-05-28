@@ -1,6 +1,26 @@
 use super::*;
+use crate::storage::engine::overflow::OverflowChain;
 
 impl BTree {
+    /// If `stored` is a pointer cell (slice E layout), walk the overflow
+    /// chain anchored at it and return every page to the free list.
+    /// No-op for inline cells (raw or compressed) and for empty cells.
+    ///
+    /// Used by the B-tree paths that drop or overwrite a pointer cell —
+    /// `delete` and the shrinking branches of `upsert` /
+    /// `upsert_batch_sorted` (slice F of PRD #662). At the B-tree layer
+    /// this is synchronous: a higher transactional layer that needs
+    /// MVCC-aware reclamation must defer freeing through its own
+    /// snapshot machinery rather than calling these primitives during a
+    /// rollback-capable window.
+    fn free_chain_if_pointer(&self, stored: &[u8]) -> BTreeResult<()> {
+        if let Some(head) = value_layout::pointer_head(stored) {
+            OverflowChain::new(&self.pager)
+                .free(head)
+                .map_err(value_layout::ValueLayoutError::from)?;
+        }
+        Ok(())
+    }
     /// Create a new B+ tree using the given pager
     pub fn new(pager: Arc<Pager>) -> Self {
         Self {
@@ -262,6 +282,11 @@ impl BTree {
         if let SearchResult::Found(pos) = search_leaf(&page, key)? {
             let (_, old_value) = read_leaf_cell(&page, pos)?;
             if new_stored.len() <= old_value.len() {
+                // Shrinking (or same-size) overwrite. If the old cell
+                // owned an overflow chain, free it before the new bytes
+                // overwrite the pointer header — otherwise the chain
+                // is unreachable but still allocated (slice F).
+                self.free_chain_if_pointer(&old_value)?;
                 overwrite_leaf_value(&mut page, pos, &new_stored)?;
                 let page_id = page.page_id();
                 self.pager.write_page(page_id, page)?;
@@ -326,6 +351,10 @@ impl BTree {
                     let (_, old_value) = read_leaf_cell(page, pos)?;
                     match value_layout::encode(&self.pager, value) {
                         Ok(new_stored) if new_stored.len() <= old_value.len() => {
+                            // Shrinking overwrite: free the old chain
+                            // before the pointer header is scribbled over
+                            // (slice F).
+                            self.free_chain_if_pointer(&old_value)?;
                             overwrite_leaf_value(page, pos, &new_stored)?;
                             *dirty = true;
                             true
@@ -574,7 +603,12 @@ impl BTree {
             let mut page = self.pager.read_page(current_id)?;
             match search_leaf(&page, key)? {
                 SearchResult::Found(pos) => {
-                    // Found — delete from this page (may differ from leaf_id)
+                    // Found — delete from this page (may differ from leaf_id).
+                    // If the cell carries a spill pointer, return every
+                    // overflow page to the free list before the leaf cell
+                    // goes away; otherwise the chain leaks (slice F).
+                    let (_, stored) = read_leaf_cell(&page, pos)?;
+                    self.free_chain_if_pointer(&stored)?;
                     delete_from_leaf(&mut page, pos)?;
                     page.update_checksum();
                     let page_id = page.page_id();
