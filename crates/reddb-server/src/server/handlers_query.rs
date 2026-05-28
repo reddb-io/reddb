@@ -538,6 +538,214 @@ impl RedDBServer {
         crate::server::output_stream::write_chunked_terminator(writer)
     }
 
+    /// Issue #763 / S4 — input-stream MVP over HTTP NDJSON.
+    ///
+    /// Wire shape (request body):
+    ///   line 0 — open frame: `{"open":{"target":"<table>","columns":["c1","c2"]}}`
+    ///   line N — row frame:  `{"row":{"c1": v1, "c2": v2}}`
+    ///
+    /// Wire shape (response, `application/x-ndjson` chunked):
+    ///   success → silent during ingest, single terminal
+    ///     `{"end":{"row_count":N,"committed_rid":L,"lease_id":I,"snapshot_lsn":S}}`
+    ///   error   → single `{"error":{"code":...,"message":...,
+    ///                                 "chunk_seq":K,"recoverable_rid":L}}` then close.
+    ///
+    /// Auto-commit per chunk: rows from a successful chunk are durable
+    /// and visible before the next chunk arrives. A mid-stream failure
+    /// leaves the recoverable prefix identified by `recoverable_rid`
+    /// (the current CDC LSN at last successful commit).
+    pub(crate) fn handle_query_ndjson_input_stream<W: std::io::Write>(
+        &self,
+        body: Vec<u8>,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        use crate::server::output_stream::{
+            self, ChunkProducer, Clock, OpenStreamError, StreamConfig, SystemClock,
+        };
+
+        // Acceptance criterion #4 — refuse OpenStream when a `BEGIN`
+        // is active on the session. Mirrors the output-stream gate so
+        // the structured code is identical across input/output.
+        let conn_id = crate::runtime::impl_core::current_connection_id();
+        if self.runtime.connection_in_transaction(conn_id) {
+            let err = OpenStreamError::TransactionActive;
+            let response = json_error_code(409, err.code(), err.message());
+            writer.write_all(&response.to_http_bytes())?;
+            return writer.flush();
+        }
+
+        // Parse line 0 as the open frame so the target table is bound
+        // before we send any wire framing — a missing/invalid open
+        // returns a non-streaming 400 so callers can distinguish
+        // "never accepted" from "accepted then failed mid-stream".
+        let mut lines = ndjson_split(&body);
+        let open_line = match lines.next() {
+            Some(b) if !b.is_empty() => b,
+            _ => {
+                let response = json_error(400, "input stream requires open frame as line 0");
+                writer.write_all(&response.to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+        let (target, columns) = match parse_open_frame(open_line) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                let response = json_error(400, message);
+                writer.write_all(&response.to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+
+        let clock = SystemClock;
+        let config = StreamConfig::load(&self.runtime);
+        let snapshot_lsn = self.runtime.cdc_current_lsn();
+        let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
+            .expect("OpenStream succeeds once the in-transaction gate has passed");
+
+        output_stream::write_chunked_response_header(writer, 200, "application/x-ndjson")?;
+
+        let mut row_count: u64 = 0;
+        let mut chunk_seq: u64 = 0;
+        let mut committed_rid: u64 = snapshot_lsn;
+        let mut pending: Vec<Vec<crate::json::Value>> = Vec::new();
+        let chunk_size = config.chunk_max_rows.max(1);
+        let mut stream_error: Option<(String, String)> = None;
+
+        let mut producer = ChunkProducer::new(&config, &clock);
+        {
+            let mut flush = |bytes: &[u8]| -> io::Result<()> {
+                crate::server::output_stream::write_chunk(writer, bytes)
+            };
+
+            let commit_chunk = |runtime: &crate::runtime::RedDBRuntime,
+                                rows: &mut Vec<Vec<crate::json::Value>>,
+                                committed_rid: &mut u64,
+                                row_count: &mut u64,
+                                chunk_seq: &mut u64|
+             -> Result<(), (String, String)> {
+                if rows.is_empty() {
+                    return Ok(());
+                }
+                let sql = match build_insert_sql(&target, &columns, rows) {
+                    Ok(sql) => sql,
+                    Err(message) => return Err(("invalid_row".to_string(), message)),
+                };
+                match runtime.execute_query(&sql) {
+                    Ok(_) => {
+                        *row_count += rows.len() as u64;
+                        *committed_rid = runtime.cdc_current_lsn();
+                        *chunk_seq += 1;
+                        rows.clear();
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let (_status, message) = map_runtime_error(&err);
+                        Err((ndjson_error_code(&err).to_string(), message))
+                    }
+                }
+            };
+
+            for (idx, raw) in lines.enumerate() {
+                if raw.is_empty() {
+                    continue;
+                }
+                if lease.snapshot_expired(clock.now_ms()) {
+                    stream_error = Some((
+                        "snapshot_expired".to_string(),
+                        "stream snapshot pin TTL elapsed".to_string(),
+                    ));
+                    break;
+                }
+                match parse_row_frame(raw, &columns) {
+                    Ok(row_values) => pending.push(row_values),
+                    Err(message) => {
+                        stream_error = Some((
+                            "invalid_row".to_string(),
+                            format!("line {}: {}", idx + 1, message),
+                        ));
+                        break;
+                    }
+                }
+                if pending.len() >= chunk_size {
+                    if let Err(err) = commit_chunk(
+                        &self.runtime,
+                        &mut pending,
+                        &mut committed_rid,
+                        &mut row_count,
+                        &mut chunk_seq,
+                    ) {
+                        stream_error = Some(err);
+                        break;
+                    }
+                }
+            }
+            // Drain the tail.
+            if stream_error.is_none() {
+                if let Err(err) = commit_chunk(
+                    &self.runtime,
+                    &mut pending,
+                    &mut committed_rid,
+                    &mut row_count,
+                    &mut chunk_seq,
+                ) {
+                    stream_error = Some(err);
+                }
+            }
+
+            if let Some((code, message)) = stream_error.as_ref() {
+                let mut envelope = crate::json::Map::new();
+                let mut payload = crate::json::Map::new();
+                payload.insert("code".to_string(), crate::json::Value::String(code.clone()));
+                payload.insert(
+                    "message".to_string(),
+                    crate::json_field::SerializedJsonField::tainted(message),
+                );
+                payload.insert(
+                    "chunk_seq".to_string(),
+                    crate::json::Value::Number(chunk_seq as f64),
+                );
+                payload.insert(
+                    "recoverable_rid".to_string(),
+                    crate::json::Value::Number(committed_rid as f64),
+                );
+                envelope.insert("error".to_string(), crate::json::Value::Object(payload));
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            } else {
+                let mut envelope = crate::json::Map::new();
+                let mut payload = crate::json::Map::new();
+                payload.insert(
+                    "row_count".to_string(),
+                    crate::json::Value::Number(row_count as f64),
+                );
+                payload.insert(
+                    "committed_rid".to_string(),
+                    crate::json::Value::Number(committed_rid as f64),
+                );
+                payload.insert(
+                    "chunk_count".to_string(),
+                    crate::json::Value::Number(chunk_seq as f64),
+                );
+                payload.insert(
+                    "lease_id".to_string(),
+                    crate::json::Value::Number(lease.id as f64),
+                );
+                payload.insert(
+                    "snapshot_lsn".to_string(),
+                    crate::json::Value::Number(lease.snapshot_lsn as f64),
+                );
+                envelope.insert("end".to_string(), crate::json::Value::Object(payload));
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            }
+            producer.finish(&mut flush)?;
+        }
+
+        crate::server::output_stream::write_chunked_terminator(writer)
+    }
+
     pub(crate) fn handle_query_sse_stream<W: std::io::Write>(
         &self,
         body: Vec<u8>,
@@ -641,6 +849,173 @@ pub(crate) fn ndjson_error_code(err: &crate::api::RedDBError) -> &'static str {
         QuotaExceeded(_) => "quota_exceeded",
         Engine(_) | Catalog(_) | Io(_) | VersionUnavailable | Internal(_) => "internal_error",
     }
+}
+
+/// Issue #763 — iterate over the NDJSON request body line by line,
+/// trimming optional trailing `\r`. Empty lines are kept as empty
+/// slices so callers can position-track for error reporting.
+pub(crate) fn ndjson_split(body: &[u8]) -> impl Iterator<Item = &[u8]> {
+    body.split(|b| *b == b'\n').map(|line| {
+        if line.last() == Some(&b'\r') {
+            &line[..line.len() - 1]
+        } else {
+            line
+        }
+    })
+}
+
+/// Issue #763 — parse the open frame.
+/// Shape: `{"open":{"target":"<table>","columns":["c1","c2",...]}}`
+pub(crate) fn parse_open_frame(line: &[u8]) -> Result<(String, Vec<String>), String> {
+    let value: crate::json::Value =
+        crate::json::from_slice(line).map_err(|err| format!("open frame is not JSON: {err}"))?;
+    let open = value
+        .get("open")
+        .ok_or_else(|| "open frame missing 'open' field".to_string())?;
+    let target = open
+        .get("target")
+        .and_then(crate::json::Value::as_str)
+        .ok_or_else(|| "open.target missing or not a string".to_string())?
+        .to_string();
+    if !is_safe_sql_identifier(&target) {
+        return Err(format!("open.target is not a safe identifier: {target}"));
+    }
+    let columns_v = open
+        .get("columns")
+        .and_then(crate::json::Value::as_array)
+        .ok_or_else(|| "open.columns missing or not an array".to_string())?;
+    if columns_v.is_empty() {
+        return Err("open.columns must be a non-empty array".to_string());
+    }
+    let mut columns = Vec::with_capacity(columns_v.len());
+    for c in columns_v {
+        let name = c
+            .as_str()
+            .ok_or_else(|| "open.columns entry is not a string".to_string())?;
+        if !is_safe_sql_identifier(name) {
+            return Err(format!("column name is not a safe identifier: {name}"));
+        }
+        columns.push(name.to_string());
+    }
+    Ok((target, columns))
+}
+
+/// Issue #763 — parse a row frame `{"row":{"c1":v1,...}}` into the
+/// values aligned with `columns`. Missing keys map to JSON `null`.
+pub(crate) fn parse_row_frame(
+    line: &[u8],
+    columns: &[String],
+) -> Result<Vec<crate::json::Value>, String> {
+    let value: crate::json::Value =
+        crate::json::from_slice(line).map_err(|err| format!("row is not JSON: {err}"))?;
+    let row = value
+        .get("row")
+        .ok_or_else(|| "row frame missing 'row' field".to_string())?;
+    let obj = row
+        .as_object()
+        .ok_or_else(|| "row.row must be an object".to_string())?;
+    let mut out = Vec::with_capacity(columns.len());
+    for col in columns {
+        out.push(obj.get(col).cloned().unwrap_or(crate::json::Value::Null));
+    }
+    Ok(out)
+}
+
+/// Issue #763 — only allow `[A-Za-z_][A-Za-z0-9_]*` identifiers so the
+/// generated INSERT statement cannot be broken out of by a crafted
+/// table or column name. Values are escaped separately.
+pub(crate) fn is_safe_sql_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Issue #763 — render one JSON value as a SQL literal. Strings are
+/// single-quote escaped; arrays/objects collapse to a JSON-encoded
+/// string literal so the row still parses (the engine accepts text
+/// for these in shim form).
+pub(crate) fn render_sql_literal(value: &crate::json::Value) -> String {
+    use crate::json::Value;
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(true) => "TRUE".to_string(),
+        Value::Bool(false) => "FALSE".to_string(),
+        Value::Number(n) => {
+            if n.is_finite() {
+                if n.fract() == 0.0 && n.abs() < 1e18 {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{n}")
+                }
+            } else {
+                "NULL".to_string()
+            }
+        }
+        Value::String(s) => sql_quote(s),
+        other => sql_quote(&other.to_string_compact()),
+    }
+}
+
+fn sql_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Issue #763 — build a single `INSERT INTO ... VALUES (...),(...),...`
+/// SQL statement for one chunk. Identifiers were validated at open;
+/// values are escaped per [`render_sql_literal`].
+pub(crate) fn build_insert_sql(
+    table: &str,
+    columns: &[String],
+    rows: &[Vec<crate::json::Value>],
+) -> Result<String, String> {
+    if rows.is_empty() {
+        return Err("cannot build INSERT for an empty chunk".to_string());
+    }
+    let mut sql = String::with_capacity(64 + rows.len() * 32);
+    sql.push_str("INSERT INTO ");
+    sql.push_str(table);
+    sql.push_str(" (");
+    for (i, c) in columns.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str(c);
+    }
+    sql.push_str(") VALUES ");
+    for (ri, row) in rows.iter().enumerate() {
+        if row.len() != columns.len() {
+            return Err(format!(
+                "row {ri} has {} values, expected {}",
+                row.len(),
+                columns.len()
+            ));
+        }
+        if ri > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('(');
+        for (i, v) in row.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&render_sql_literal(v));
+        }
+        sql.push(')');
+    }
+    Ok(sql)
 }
 
 pub(crate) fn is_stream_ask_query_body(body: &[u8]) -> bool {
