@@ -162,6 +162,21 @@ changing the public type. The `WITH EVENTS … TARGET STREAM <name>`
 DDL form, the on-startup catch-up scan, and the
 exactly-once-per-table-mutation guarantee are all deferred.
 
+## Transport availability
+
+The durable stream primitive landed as an in-process registry. The public
+SQL DDL (`CREATE STREAM`, `STREAM APPEND`, `STREAM READ FROM`) and the
+HTTP / RedWire / gRPC / Postgres-wire bindings are deliberately deferred to a
+later slice of PRD #718 — the registry contract is stable so transports can
+wire on top without further changes to the public event type. See
+[Event Workflow](event-workflow.md#transport-availability) for the cross-
+primitive matrix.
+
+Streams remain distinct from queues on the wire as well as in semantics: a
+queue read produces pending delivery state, while a stream read advances or
+records an offset. A future transport binding will preserve that boundary
+rather than overload queue commands.
+
 ## What this primitive is NOT
 
 - **Not a queue** — no per-message delivery state, no ACK/NACK,

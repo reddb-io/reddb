@@ -447,8 +447,22 @@ SELECT queue_mode FROM red.collections WHERE name = 'persistent'
 -- result: "fanout"
 ```
 
+## Transport availability
+
+`QUEUE PUSH`, `QUEUE READ`, `QUEUE ACK`, `QUEUE NACK`, delayed messages
+(`DELAY` / `AVAILABLE AT`), retry policy (`RETRY_DELAY` / `WITH DLQ`), and the
+live wait form `QUEUE READ ... WAIT <duration>` are available over HTTP,
+RedWire, gRPC, and Postgres-wire with the same semantic result shape on every
+transport. PG-wire carries RedDB queue wait — it does **not** map queue wait
+onto PG-like `LISTEN` / `NOTIFY`, which targets the separate
+[ephemeral notification primitive](notifications.md). See
+[Event Workflow](event-workflow.md#transport-availability) for the full matrix.
+
 ## See Also
 
+- [Event Workflow](event-workflow.md) — choosing between queues, streams, and notifications
+- [Notifications](notifications.md) — ephemeral, tenant-scoped pub / sub
+- [Streams](streams.md) — durable append-only logs with per-consumer offsets
 - [Key-Value](key-value.md) — simple key-value storage
 - [Time-Series](timeseries.md) — time-stamped metric data
 - [`red.collections` schema reference](../reference/red-schema.md#redcollections)
