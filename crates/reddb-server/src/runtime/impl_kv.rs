@@ -882,6 +882,26 @@ impl RedDBRuntime {
         Ok(value)
     }
 
+    /// Internal peek of a vault entry's unsealed value, bypassing audit and
+    /// policy checks. Used by `SecretRefGuard` to detect chained `secret_ref`
+    /// indirection at config write time without emitting vault read events.
+    /// Returns `Ok(None)` if the entry is absent, tombstoned, or its sealed
+    /// payload cannot be decrypted with the available key material.
+    pub(crate) fn peek_vault_unsealed(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<Option<crate::storage::schema::Value>> {
+        let ops = KvAtomicOps::new(self);
+        let Some(entry) = ops.get_vault_entry(collection, key)? else {
+            return Ok(None);
+        };
+        if entry.tombstone {
+            return Ok(None);
+        }
+        Ok(self.unseal_vault_value(collection, &entry.value).ok())
+    }
+
     fn vault_target_resource(collection: &str, key: &str) -> String {
         if collection == "red.vault" {
             return format!("red.vault/{}", key.to_ascii_lowercase());
