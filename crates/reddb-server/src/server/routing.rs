@@ -70,12 +70,16 @@ impl RedDBServer {
             (request.method.as_str(), request.path.as_str()),
             ("POST", "/query")
         );
-        if !is_query_post {
+        let is_input_stream_post = matches!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/streams/input")
+        ) && content_type_is_ndjson(&request.headers);
+        if !is_query_post && !is_input_stream_post {
             return Ok(false);
         }
-        let is_sse = is_stream_ask_query_body(&request.body);
-        let is_ndjson = wants_ndjson_response(&request.headers);
-        if !is_sse && !is_ndjson {
+        let is_sse = is_query_post && is_stream_ask_query_body(&request.body);
+        let is_ndjson = is_query_post && wants_ndjson_response(&request.headers);
+        if !is_sse && !is_ndjson && !is_input_stream_post {
             return Ok(false);
         }
 
@@ -114,6 +118,22 @@ impl RedDBServer {
                 // ordinary SELECTs.
                 if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
+                } else if is_input_stream_post {
+                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    match self.stream_capacity.try_acquire(
+                        &principal,
+                        cfg.max_global_streams,
+                        cfg.max_per_principal_streams,
+                    ) {
+                        Ok(_capacity_guard) => {
+                            self.handle_query_ndjson_input_stream(request.body.clone(), writer)?;
+                        }
+                        Err(err) => {
+                            let response = stream_capacity_refusal_response(&err);
+                            writer.write_all(&response.to_http_bytes())?;
+                            writer.flush()?;
+                        }
+                    }
                 } else {
                     // Issue #761 / S2 — capacity guard. Caps are read
                     // from `red.config` at OpenStream so subsequent
@@ -3370,6 +3390,193 @@ mod tests {
         );
     }
 
+    // ───────────────── Issue #763 / S4 — input streaming (NDJSON) ─────────────────
+
+    fn input_stream_request(body: &str) -> HttpRequest {
+        let mut request = request_with("POST", "/streams/input", body.as_bytes().to_vec());
+        request.headers.insert(
+            "content-type".to_string(),
+            "application/x-ndjson".to_string(),
+        );
+        request
+    }
+
+    fn dispatch_input_stream(server: &RedDBServer, body: &str) -> Vec<u8> {
+        let request = input_stream_request(body);
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(&request, &mut buf)
+            .expect("streaming dispatch");
+        assert!(
+            handled,
+            "POST /streams/input with x-ndjson should be streamed"
+        );
+        buf
+    }
+
+    #[test]
+    fn ndjson_input_round_trip_commits_rows_and_returns_end_envelope() {
+        // Acceptance criterion #1 — round-trip NDJSON insert. After the
+        // stream ends every row is visible to non-streaming readers
+        // (criterion #2 — chunked auto-commit is durable).
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows763 (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+
+        let body = concat!(
+            "{\"open\":{\"target\":\"rows763\",\"columns\":[\"id\",\"name\"]}}\n",
+            "{\"row\":{\"id\":1,\"name\":\"alice\"}}\n",
+            "{\"row\":{\"id\":2,\"name\":\"bob\"}}\n",
+            "{\"row\":{\"id\":3,\"name\":\"carol\"}}\n",
+        );
+        let raw = dispatch_input_stream(&server, body);
+        let (head, body_bytes) = split_response(&raw);
+        assert!(
+            head.contains("Content-Type: application/x-ndjson"),
+            "headers should advertise NDJSON: {head}"
+        );
+        let decoded = decode_chunked_body(&body_bytes);
+        let text = String::from_utf8(decoded).expect("ndjson body is utf8");
+        // Acceptance criterion #4 — server is silent on success: the
+        // only frame in the body is the terminal `{"end": …}` line.
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "server should emit exactly one frame on success: {text}"
+        );
+        let end_line = lines[0];
+        assert!(
+            end_line.starts_with("{\"end\":"),
+            "single line must be end envelope: {end_line}"
+        );
+        assert!(end_line.contains("\"row_count\":3"));
+
+        // Acceptance criterion #1 + #2 — rows are durable / visible.
+        let response = server.route(request_with(
+            "POST",
+            "/query",
+            br#"{"query":"SELECT id, name FROM rows763"}"#.to_vec(),
+        ));
+        assert_eq!(response.status, 200);
+        let body_text = String::from_utf8_lossy(&response.body);
+        assert!(body_text.contains("alice"), "alice missing: {body_text}");
+        assert!(body_text.contains("bob"), "bob missing: {body_text}");
+        assert!(body_text.contains("carol"), "carol missing: {body_text}");
+    }
+
+    #[test]
+    fn ndjson_input_malformed_row_terminates_with_error_envelope() {
+        // Acceptance criterion #3 — malformed row terminates the stream
+        // with a structured error envelope carrying chunk seq + reason
+        // + recoverable_rid. Earlier rows up to the failure remain
+        // visible.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows763_err (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        // Force per-chunk-of-1 commits so the row before the malformed
+        // one is durably committed before the failure point.
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.chunk.max_rows = 1")
+            .expect("set chunk size");
+
+        let body = concat!(
+            "{\"open\":{\"target\":\"rows763_err\",\"columns\":[\"id\",\"name\"]}}\n",
+            "{\"row\":{\"id\":1,\"name\":\"alice\"}}\n",
+            "not valid json at all\n",
+            "{\"row\":{\"id\":3,\"name\":\"carol\"}}\n",
+        );
+        let raw = dispatch_input_stream(&server, body);
+        let (_head, body_bytes) = split_response(&raw);
+        let decoded = decode_chunked_body(&body_bytes);
+        let text = String::from_utf8(decoded).expect("utf8");
+        let last = text.lines().last().unwrap_or("");
+        assert!(
+            last.starts_with("{\"error\":"),
+            "stream must end with error envelope: {text}"
+        );
+        assert!(last.contains("\"code\":\"invalid_row\""));
+        assert!(last.contains("\"chunk_seq\":"));
+        assert!(last.contains("\"recoverable_rid\":"));
+
+        // Acceptance criterion #3 — alice survives the mid-stream failure.
+        let response = server.route(request_with(
+            "POST",
+            "/query",
+            br#"{"query":"SELECT id, name FROM rows763_err"}"#.to_vec(),
+        ));
+        let body_text = String::from_utf8_lossy(&response.body);
+        assert!(
+            body_text.contains("alice"),
+            "alice should survive the failure: {body_text}"
+        );
+        assert!(
+            !body_text.contains("carol"),
+            "carol after the failure must not be committed: {body_text}"
+        );
+    }
+
+    #[test]
+    fn ndjson_input_refuses_when_session_has_active_begin() {
+        // Acceptance criterion #5 — opening an input stream inside
+        // `BEGIN` refuses with `stream_in_transaction_unsupported`.
+        use crate::runtime::impl_core::{clear_current_connection_id, set_current_connection_id};
+
+        let server = fresh_server();
+        set_current_connection_id(763_001);
+        let _ = server
+            .runtime
+            .execute_query("BEGIN")
+            .expect("BEGIN should succeed");
+        assert!(server.runtime.connection_in_transaction(763_001));
+
+        let body = "{\"open\":{\"target\":\"any\",\"columns\":[\"id\"]}}\n";
+        let request = input_stream_request(body);
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(&request, &mut buf)
+            .expect("dispatch");
+        assert!(handled);
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.starts_with("HTTP/1.1 409"),
+            "expected 409 refusal, got: {text}"
+        );
+        assert!(
+            text.contains("stream_in_transaction_unsupported"),
+            "structured code missing: {text}"
+        );
+
+        let _ = server.runtime.execute_query("ROLLBACK");
+        clear_current_connection_id();
+    }
+
+    #[test]
+    fn ndjson_input_rejects_unsafe_identifier_before_streaming_headers() {
+        // SQL-injection guard: identifiers must match the safe
+        // character class. A crafted target/column name returns a
+        // non-streaming 400 so the failure is unmistakable.
+        let server = fresh_server();
+        let body = "{\"open\":{\"target\":\"rows; DROP TABLE x\",\"columns\":[\"id\"]}}\n";
+        let request = input_stream_request(body);
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(&request, &mut buf)
+            .expect("dispatch");
+        assert!(handled);
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.starts_with("HTTP/1.1 400"),
+            "expected 400 refusal, got: {text}"
+        );
+        assert!(text.contains("safe identifier"), "message: {text}");
+    }
+
     #[test]
     fn ndjson_invalid_query_surfaces_structured_error_line() {
         // Acceptance criterion #2 — mid-stream failures surface as
@@ -3690,6 +3897,25 @@ fn collection_from_bare_path(path: &str) -> Option<&str> {
 /// case-insensitively, ignoring `q=` weight suffixes. A plain
 /// `application/json` Accept is *not* a streaming opt-in — that
 /// continues to ride the materialising one-shot path.
+/// Issue #763 — does the request carry an NDJSON body? Used to gate
+/// the input-stream entry point. Matches `application/x-ndjson` and
+/// the same alternates accepted by [`wants_ndjson_response`].
+pub(crate) fn content_type_is_ndjson(headers: &BTreeMap<String, String>) -> bool {
+    let Some(raw) = headers.get("content-type") else {
+        return false;
+    };
+    let token = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        token.as_str(),
+        "application/x-ndjson" | "application/ndjson" | "text/ndjson"
+    )
+}
+
 pub(crate) fn wants_ndjson_response(headers: &BTreeMap<String, String>) -> bool {
     let Some(raw) = headers.get("accept") else {
         return false;
