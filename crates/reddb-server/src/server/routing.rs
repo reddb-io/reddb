@@ -59,11 +59,23 @@ impl RedDBServer {
         request: &HttpRequest,
         writer: &mut W,
     ) -> io::Result<bool> {
-        if !matches!(
+        // Two streaming dispatch paths share this entry:
+        //   * SSE for `ASK ... STREAM` queries (pre-existing).
+        //   * NDJSON for clients that opt in with
+        //     `Accept: application/x-ndjson` (issue #760).
+        // Both ride the same auth + quota gate below so the streaming
+        // surface inherits the non-streaming /query authorisation
+        // model unchanged.
+        let is_query_post = matches!(
             (request.method.as_str(), request.path.as_str()),
             ("POST", "/query")
-        ) || !is_stream_ask_query_body(&request.body)
-        {
+        );
+        if !is_query_post {
+            return Ok(false);
+        }
+        let is_sse = is_stream_ask_query_body(&request.body);
+        let is_ndjson = wants_ndjson_response(&request.headers);
+        if !is_sse && !is_ndjson {
             return Ok(false);
         }
 
@@ -96,7 +108,15 @@ impl RedDBServer {
             }
             crate::runtime::quota_bucket::QuotaOutcome::Granted
             | crate::runtime::quota_bucket::QuotaOutcome::NotConfigured => {
-                self.handle_query_sse_stream(request.body.clone(), writer)?;
+                // SSE wins precedence when both an ASK STREAM body and
+                // an NDJSON Accept header are present — ASK STREAM is
+                // the long-standing surface; NDJSON is opt-in for
+                // ordinary SELECTs.
+                if is_sse {
+                    self.handle_query_sse_stream(request.body.clone(), writer)?;
+                } else {
+                    self.handle_query_ndjson_stream(request.body.clone(), writer)?;
+                }
                 Ok(true)
             }
         }
@@ -2939,6 +2959,207 @@ mod tests {
             String::from_utf8_lossy(&response.body)
         );
     }
+
+    // ───────────────── Issue #760 — output streaming (NDJSON) ─────────────────
+
+    fn ndjson_query(server: &RedDBServer, query: &str) -> Vec<u8> {
+        let mut request = request_with(
+            "POST",
+            "/query",
+            format!(r#"{{"query":"{query}"}}"#).into_bytes(),
+        );
+        request
+            .headers
+            .insert("accept".to_string(), "application/x-ndjson".to_string());
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(&request, &mut buf)
+            .expect("streaming dispatch");
+        assert!(handled, "Accept: application/x-ndjson should be streamed");
+        buf
+    }
+
+    fn split_response(raw: &[u8]) -> (String, Vec<u8>) {
+        let pos = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("header terminator");
+        (
+            String::from_utf8_lossy(&raw[..pos]).to_string(),
+            raw[pos + 4..].to_vec(),
+        )
+    }
+
+    fn decode_chunked_body(body: &[u8]) -> Vec<u8> {
+        // Tiny ad-hoc chunked decoder for the HTTP/1.1 framing we
+        // emit in `output_stream::write_chunk`. Sufficient for tests
+        // — does not handle trailers or chunk extensions.
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < body.len() {
+            let crlf = body[i..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .expect("chunk size line terminator");
+            let size_hex = std::str::from_utf8(&body[i..i + crlf]).expect("utf8 hex");
+            let size = usize::from_str_radix(size_hex.trim(), 16).expect("hex chunk size");
+            i += crlf + 2;
+            if size == 0 {
+                break;
+            }
+            out.extend_from_slice(&body[i..i + size]);
+            i += size + 2; // skip trailing \r\n
+        }
+        out
+    }
+
+    #[test]
+    fn wants_ndjson_response_matches_canonical_and_alternates() {
+        let mut headers = BTreeMap::new();
+        assert!(!wants_ndjson_response(&headers));
+
+        headers.insert("accept".to_string(), "application/json".to_string());
+        assert!(!wants_ndjson_response(&headers));
+
+        for accept in &[
+            "application/x-ndjson",
+            "application/ndjson",
+            "text/ndjson",
+            "Application/X-NDJSON",
+            "application/x-ndjson; q=1.0",
+            "text/html, application/x-ndjson;q=0.9",
+        ] {
+            headers.insert("accept".to_string(), (*accept).to_string());
+            assert!(wants_ndjson_response(&headers), "Accept={accept}");
+        }
+    }
+
+    #[test]
+    fn ndjson_round_trip_emits_row_lines_and_end_envelope() {
+        // End-to-end acceptance criterion #1 — NDJSON wire shape.
+        let server = fresh_server();
+        let raw = ndjson_query(&server, "SELECT 1 as n");
+        let (head, body) = split_response(&raw);
+        assert!(
+            head.contains("Content-Type: application/x-ndjson"),
+            "headers should advertise NDJSON: {head}"
+        );
+        assert!(
+            head.contains("Transfer-Encoding: chunked"),
+            "headers should advertise chunked transfer: {head}"
+        );
+        let decoded = decode_chunked_body(&body);
+        let text = String::from_utf8(decoded).expect("ndjson body is utf8");
+        let mut lines: Vec<&str> = text.lines().collect();
+        let end_line = lines.pop().expect("at least one line");
+        assert!(
+            end_line.starts_with("{\"end\":"),
+            "last line must be end envelope: {end_line}"
+        );
+        assert!(
+            !lines.is_empty(),
+            "expected at least one row line before end: {text}"
+        );
+        for row_line in &lines {
+            assert!(
+                row_line.starts_with("{\"row\":"),
+                "non-terminal line must be a row envelope: {row_line}"
+            );
+        }
+    }
+
+    #[test]
+    fn ndjson_path_does_not_regress_non_streaming_query() {
+        // Acceptance criterion #3 — without the streaming Accept the
+        // legacy materialising path keeps the prior wire shape.
+        let server = fresh_server();
+        let request = request_with("POST", "/query", br#"{"query":"SELECT 1 as n"}"#.to_vec());
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(&request, &mut buf)
+            .expect("dispatch");
+        assert!(!handled, "no Accept header → no streaming dispatch");
+
+        let response = server.route(request);
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(
+            body.contains("\"ok\":true"),
+            "legacy shape preserved: {body}"
+        );
+        assert!(
+            body.contains("\"descriptor\":"),
+            "descriptor metadata still present: {body}"
+        );
+    }
+
+    #[test]
+    fn ndjson_refuses_when_session_has_active_begin() {
+        // Acceptance criterion #4 — OpenStream against a session
+        // with an active `BEGIN` is rejected with
+        // `stream_in_transaction_unsupported`. We set a non-zero
+        // connection id on this thread, execute `BEGIN` to populate
+        // the runtime's `tx_contexts` registry, then invoke the
+        // streaming dispatch and expect a structured 409 refusal.
+        use crate::runtime::impl_core::{clear_current_connection_id, set_current_connection_id};
+
+        let server = fresh_server();
+        set_current_connection_id(760_001);
+        // Open a transaction on this synthetic connection. The
+        // runtime stamps a `TxnContext` keyed by the current id.
+        let _ = server
+            .runtime
+            .execute_query("BEGIN")
+            .expect("BEGIN should succeed on a fresh runtime");
+        // Sanity check — the accessor sees the open transaction.
+        assert!(server.runtime.connection_in_transaction(760_001));
+
+        let mut request = request_with("POST", "/query", br#"{"query":"SELECT 1"}"#.to_vec());
+        request
+            .headers
+            .insert("accept".to_string(), "application/x-ndjson".to_string());
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(&request, &mut buf)
+            .expect("dispatch");
+        assert!(handled, "should still be streaming-dispatched");
+
+        // The refusal is a regular HTTP response, not an NDJSON body
+        // — headers have not been sent yet at this gate.
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.starts_with("HTTP/1.1 409"),
+            "expected 409 refusal, got: {text}"
+        );
+        assert!(
+            text.contains("stream_in_transaction_unsupported"),
+            "structured code missing: {text}"
+        );
+
+        // Clean up — rollback so the test does not leak transaction
+        // state into other tests run on this thread.
+        let _ = server.runtime.execute_query("ROLLBACK");
+        clear_current_connection_id();
+    }
+
+    #[test]
+    fn ndjson_invalid_query_surfaces_structured_error_line() {
+        // Acceptance criterion #2 — mid-stream failures surface as
+        // structured NDJSON error envelopes, not silent disconnects.
+        let server = fresh_server();
+        let raw = ndjson_query(&server, "SELECT NOT_A_REAL_COLUMN FROM nowhere");
+        let (_head, body) = split_response(&raw);
+        let decoded = decode_chunked_body(&body);
+        let text = String::from_utf8(decoded).expect("utf8");
+        assert!(
+            text.lines().any(|l| l.starts_with("{\"error\":")),
+            "expected an error envelope in the stream: {text}"
+        );
+        assert!(
+            text.lines().last().unwrap_or("").starts_with("{\"end\":"),
+            "stream must still close with an end envelope: {text}"
+        );
+    }
 }
 
 /// Issue #524 — `GET /collections/:name/chain-tip`. Returns the cached chain
@@ -3233,6 +3454,30 @@ fn collection_from_bare_path(path: &str) -> Option<&str> {
     } else {
         Some(name)
     }
+}
+
+/// Issue #760 — does the request's `Accept` header opt in to NDJSON
+/// output streaming? Matches the canonical `application/x-ndjson` and
+/// the two common alternates (`application/ndjson`, `text/ndjson`),
+/// case-insensitively, ignoring `q=` weight suffixes. A plain
+/// `application/json` Accept is *not* a streaming opt-in — that
+/// continues to ride the materialising one-shot path.
+pub(crate) fn wants_ndjson_response(headers: &BTreeMap<String, String>) -> bool {
+    let Some(raw) = headers.get("accept") else {
+        return false;
+    };
+    raw.split(',').any(|part| {
+        let token = part
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        matches!(
+            token.as_str(),
+            "application/x-ndjson" | "application/ndjson" | "text/ndjson"
+        )
+    })
 }
 
 /// PLAN.md Phase 4.4 — derive a stable principal label from a

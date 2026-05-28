@@ -379,6 +379,165 @@ impl RedDBServer {
         }
     }
 
+    /// Issue #760 — output-stream MVP. NDJSON over HTTP/1.1
+    /// chunked encoding. Wraps the existing materialising
+    /// [`UnifiedResult`] (the shim slice per ADR 0029): server memory
+    /// is unchanged, but the client sees rows arrive incrementally as
+    /// the chunk producer flushes its N × 16 KiB production buffer.
+    ///
+    /// Wire shape (per row):  `{"row": {…projected values…}}\n`
+    /// Terminal envelope:     `{"end":  {row_count, lease_id, snapshot_lsn}}\n`
+    /// Mid-stream errors:     `{"error":{code, message}}\n` followed by `{"end": …}`.
+    ///
+    /// Failure modes are differentiated:
+    ///   * `OpenStream` time refusals (`stream_in_transaction_unsupported`)
+    ///     return a non-streaming JSON response so the client can
+    ///     distinguish "the server never accepted my stream" from
+    ///     "the server accepted it then failed midway".
+    ///   * Errors raised by the executor after headers have been sent
+    ///     surface inside the NDJSON body — the HTTP status is already
+    ///     200 OK on the wire, and the structured `{"error": …}` line
+    ///     carries the failure detail.
+    pub(crate) fn handle_query_ndjson_stream<W: std::io::Write>(
+        &self,
+        body: Vec<u8>,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        use crate::server::output_stream::{
+            self, ChunkProducer, Clock, OpenStreamError, StreamConfig, SystemClock,
+        };
+
+        let request = match extract_query_request(&body) {
+            Ok(req) => req,
+            Err(response) => {
+                writer.write_all(&response.to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+        let ParsedQueryRequest {
+            query,
+            entity_types,
+            capabilities,
+            ..
+        } = request;
+
+        // Acceptance criterion #4 — refuse OpenStream when a `BEGIN`
+        // is active on the session. HTTP currently runs with the
+        // default connection id (0); the stdio transport sets a real
+        // id. The gate calls into the runtime accessor either way so
+        // future HTTP-level connection-id plumbing wires through with
+        // no further routing change.
+        let conn_id = crate::runtime::impl_core::current_connection_id();
+        if self.runtime.connection_in_transaction(conn_id) {
+            let err = OpenStreamError::TransactionActive;
+            let response = json_error_code(409, err.code(), err.message());
+            writer.write_all(&response.to_http_bytes())?;
+            return writer.flush();
+        }
+
+        let clock = SystemClock;
+        let config = StreamConfig::load(&self.runtime);
+        // Snapshot pin (shim slice): record the current CDC LSN at
+        // OpenStream — bound to the lease for audit / future MVCC
+        // pull-based scans. Materialising executors do not consult it
+        // yet; later slices (PRD #759 phase 3) replace this with a
+        // real `Snapshot::sees(xid)` pin.
+        let snapshot_lsn = self.runtime.cdc_current_lsn();
+        let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
+            .expect("OpenStream succeeds once the in-transaction gate has passed");
+
+        output_stream::write_chunked_response_header(writer, 200, "application/x-ndjson")?;
+
+        let mut producer = ChunkProducer::new(&config, &clock);
+        let mut row_count: u64 = 0;
+        let mut stream_error: Option<(String, String)> = None;
+
+        let exec = self.query_use_cases().execute(ExecuteQueryInput {
+            query: query.clone(),
+        });
+
+        {
+            // `flush` owns the writer mutably for the duration of this
+            // scope; we drop the closure before writing the chunked
+            // terminator at the end.
+            let mut flush = |bytes: &[u8]| -> io::Result<()> {
+                crate::server::output_stream::write_chunk(writer, bytes)
+            };
+
+            match exec {
+                Ok(result) => {
+                    let records = crate::presentation::query_view::filter_query_records(
+                        &result.result.records,
+                        &entity_types,
+                        &capabilities,
+                    );
+                    let columns = &result.result.columns;
+                    for record in &records {
+                        if lease.snapshot_expired(clock.now_ms()) {
+                            stream_error = Some((
+                                "snapshot_expired".to_string(),
+                                "stream snapshot pin TTL elapsed".to_string(),
+                            ));
+                            break;
+                        }
+                        let values = crate::presentation::query_result_json::unified_record_json(
+                            record, columns,
+                        );
+                        let mut wrapper = crate::json::Map::new();
+                        wrapper.insert("row".to_string(), values);
+                        let mut line = crate::json::Value::Object(wrapper).to_string_compact();
+                        line.push('\n');
+                        producer.push_line(line.as_bytes(), &mut flush)?;
+                        row_count += 1;
+                    }
+                }
+                Err(err) => {
+                    let (_status, message) = map_runtime_error(&err);
+                    stream_error = Some((ndjson_error_code(&err).to_string(), message));
+                }
+            }
+
+            if let Some((code, message)) = stream_error.as_ref() {
+                let mut envelope = crate::json::Map::new();
+                let mut payload = crate::json::Map::new();
+                payload.insert("code".to_string(), crate::json::Value::String(code.clone()));
+                payload.insert(
+                    "message".to_string(),
+                    crate::json_field::SerializedJsonField::tainted(message),
+                );
+                envelope.insert("error".to_string(), crate::json::Value::Object(payload));
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            }
+
+            // Terminal envelope. Always emitted — including after an
+            // error — so the client can stop reading on `{"end":…}`
+            // rather than on EOF.
+            let mut envelope = crate::json::Map::new();
+            let mut payload = crate::json::Map::new();
+            payload.insert(
+                "row_count".to_string(),
+                crate::json::Value::Number(row_count as f64),
+            );
+            payload.insert(
+                "lease_id".to_string(),
+                crate::json::Value::Number(lease.id as f64),
+            );
+            payload.insert(
+                "snapshot_lsn".to_string(),
+                crate::json::Value::Number(lease.snapshot_lsn as f64),
+            );
+            envelope.insert("end".to_string(), crate::json::Value::Object(payload));
+            let mut line = crate::json::Value::Object(envelope).to_string_compact();
+            line.push('\n');
+            producer.push_line(line.as_bytes(), &mut flush)?;
+            producer.finish(&mut flush)?;
+        }
+
+        crate::server::output_stream::write_chunked_terminator(writer)
+    }
+
     pub(crate) fn handle_query_sse_stream<W: std::io::Write>(
         &self,
         body: Vec<u8>,
@@ -460,6 +619,27 @@ impl RedDBServer {
             }
         }
         Ok(())
+    }
+}
+
+/// Issue #760 — map a runtime error to a stable NDJSON error code so
+/// clients can branch on the failure class without parsing the
+/// (translated, operator-controlled) message string. Mirrors the HTTP
+/// status table in [`map_runtime_error`] but emits the shorter
+/// machine-readable token.
+pub(crate) fn ndjson_error_code(err: &crate::api::RedDBError) -> &'static str {
+    use crate::api::RedDBError::*;
+    match err {
+        NotFound(_) => "not_found",
+        ReadOnly(_) => "read_only",
+        InvalidConfig(_) => "invalid_config",
+        InvalidOperation(_) => "invalid_operation",
+        Query(_) => "query_error",
+        Validation { .. } => "validation_failed",
+        FeatureNotEnabled(_) => "feature_not_enabled",
+        SchemaVersionMismatch { .. } => "schema_version_mismatch",
+        QuotaExceeded(_) => "quota_exceeded",
+        Engine(_) | Catalog(_) | Io(_) | VersionUnavailable | Internal(_) => "internal_error",
     }
 }
 
