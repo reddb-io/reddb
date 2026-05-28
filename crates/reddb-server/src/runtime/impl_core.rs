@@ -171,6 +171,12 @@ impl RedDBRuntime {
             &query.path,
             &query.kind,
             &query.role,
+            super::metric_descriptor_catalog::DerivedSpec {
+                source: query.source.clone(),
+                query: query.query.clone(),
+                window_ms: query.window_ms,
+                time_field: query.time_field.clone(),
+            },
         )?;
         self.invalidate_result_cache();
         Ok(RuntimeQueryResult::ok_message(
@@ -5591,6 +5597,17 @@ impl RedDBRuntime {
         if let Some(create_source) = super::analytics_source_catalog::parse_create_statement(query)?
         {
             return self.execute_create_analytics_source(query, create_source);
+        }
+
+        // Issue #790 — `READ METRIC <path>` is intentionally rejected at
+        // v0. The descriptor itself is readable through
+        // `red.analytics.metrics`; the *output* read returns a
+        // structured error so callers can tell "execution engine not yet
+        // built" apart from "metric does not exist".
+        if let Some(path) = super::metric_descriptor_catalog::parse_read_metric_statement(query) {
+            return Err(super::metric_descriptor_catalog::read_output_unsupported(
+                &path,
+            ));
         }
 
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
