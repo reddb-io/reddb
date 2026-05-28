@@ -533,6 +533,13 @@ pub(crate) fn execute_aggregate_query(
         .drain()
         .map_err(|e| RedDBError::Query(format!("agg spill drain: {e}")))?;
 
+    // Issue #769 — cap the materialized in-memory state. `groups` is the
+    // full distinct-group set (in-memory + spilled, merged) so its
+    // cardinality is exactly the aggregation's materialized row count.
+    // A GROUP BY whose distinct-key count blows the ceiling terminates
+    // here rather than continuing to project a runaway result.
+    crate::runtime::materialization_limit::guard(db, "aggregation", groups.len())?;
+
     // Build result records from accumulated groups
     let mut records = Vec::with_capacity(groups.len().max(1));
     let mut columns = Vec::new();
@@ -2981,6 +2988,11 @@ fn try_execute_parallel_single_col_numeric_aggs(
         });
     }
 
+    // Issue #769 — same materialization ceiling as the generic path,
+    // enforced on the parallel single-column fast path before we
+    // project the per-group records.
+    crate::runtime::materialization_limit::guard(db, "aggregation", groups.len())?;
+
     let mut records = Vec::with_capacity(groups.len().max(1));
     for (key, state) in groups {
         let group_value = key.clone().into_value();
@@ -3391,5 +3403,182 @@ mod parallel_group_by_tests {
             "expected at least one group record"
         );
         assert!(total > 0, "expected some rows past filter");
+    }
+}
+
+/// Issue #769 (S10) — `stream.executor.max_materialized_rows` ceiling
+/// on the aggregating executors. These drive real SQL through the
+/// runtime so they cover whichever aggregation sub-path (push-down,
+/// parallel, generic+spill) the planner picks for the shape.
+#[cfg(test)]
+mod materialization_limit_tests {
+    use crate::api::RedDBError;
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    fn mk_runtime() -> RedDBRuntime {
+        RedDBRuntime::with_options(RedDBOptions::in_memory())
+            .expect("in-memory runtime should open")
+    }
+
+    /// Seed `distinct` rows, each with a unique city, so a `GROUP BY
+    /// city` materializes exactly `distinct` groups and a `SELECT *`
+    /// materializes exactly `distinct` rows.
+    fn seed_distinct(rt: &RedDBRuntime, distinct: usize) {
+        rt.execute_query("CREATE TABLE big_table (id INT, name TEXT, city TEXT)")
+            .unwrap();
+        for i in 0..distinct {
+            rt.execute_query(&format!(
+                "INSERT INTO big_table (id, name, city) VALUES ({i}, 'n{i}', 'c{i}')"
+            ))
+            .unwrap();
+        }
+    }
+
+    fn set_limit(rt: &RedDBRuntime, limit: u64) {
+        rt.execute_query(&format!(
+            "SET CONFIG stream.executor.max_materialized_rows = {limit}"
+        ))
+        .expect("set config ok");
+    }
+
+    #[test]
+    fn aggregation_over_limit_terminates_with_named_error() {
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+        set_limit(&rt, 10);
+        let err = rt
+            .execute_query("SELECT COUNT(*), city FROM big_table GROUP BY city")
+            .expect_err("aggregation past the ceiling must terminate");
+        match err {
+            RedDBError::MaterializationLimitExceeded {
+                executor,
+                limit,
+                current,
+            } => {
+                assert_eq!(executor, "aggregation");
+                assert_eq!(limit, 10);
+                assert!(current > 10, "current ({current}) should exceed the limit");
+            }
+            other => panic!("expected MaterializationLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sort_over_limit_terminates_with_named_error() {
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+        set_limit(&rt, 10);
+        let err = rt
+            .execute_query("SELECT * FROM big_table ORDER BY name")
+            .expect_err("sort past the ceiling must terminate");
+        match err {
+            RedDBError::MaterializationLimitExceeded {
+                executor,
+                limit,
+                current,
+            } => {
+                assert_eq!(executor, "sort");
+                assert_eq!(limit, 10);
+                assert!(current > 10, "current ({current}) should exceed the limit");
+            }
+            other => panic!("expected MaterializationLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aggregation_within_limit_returns_full_result() {
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+        set_limit(&rt, 1000);
+        let result = rt
+            .execute_query("SELECT COUNT(*), city FROM big_table GROUP BY city")
+            .expect("within-limit aggregation should succeed");
+        assert_eq!(
+            result.result.records.len(),
+            25,
+            "every distinct group should be present when under the ceiling"
+        );
+    }
+
+    #[test]
+    fn sort_within_limit_returns_full_result() {
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+        set_limit(&rt, 1000);
+        let result = rt
+            .execute_query("SELECT * FROM big_table ORDER BY name")
+            .expect("within-limit sort should succeed");
+        assert_eq!(result.result.records.len(), 25);
+    }
+
+    #[test]
+    fn default_ceiling_leaves_small_queries_untouched() {
+        // No SET CONFIG — the 10⁶ default must not perturb ordinary
+        // queries (acceptance: within-limit results identical).
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+        let agg = rt
+            .execute_query("SELECT COUNT(*), city FROM big_table GROUP BY city")
+            .expect("group by under default ceiling");
+        assert_eq!(agg.result.records.len(), 25);
+        let sorted = rt
+            .execute_query("SELECT * FROM big_table ORDER BY name")
+            .expect("sort under default ceiling");
+        assert_eq!(sorted.result.records.len(), 25);
+    }
+
+    #[test]
+    fn window_over_limit_terminates_with_named_error() {
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+        set_limit(&rt, 10);
+        let err = rt
+            .execute_query("SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM big_table")
+            .expect_err("window past the ceiling must terminate");
+        match err {
+            RedDBError::MaterializationLimitExceeded {
+                executor,
+                limit,
+                current,
+            } => {
+                assert_eq!(executor, "window");
+                assert_eq!(limit, 10);
+                assert!(current > 10, "current ({current}) should exceed the limit");
+            }
+            other => panic!("expected MaterializationLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn window_within_limit_returns_full_result() {
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+        set_limit(&rt, 1000);
+        let result = rt
+            .execute_query("SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM big_table")
+            .expect("within-limit window should succeed");
+        assert_eq!(result.result.records.len(), 25);
+    }
+
+    #[test]
+    fn config_hot_reload_affects_new_queries_only() {
+        let rt = mk_runtime();
+        seed_distinct(&rt, 25);
+
+        // Tight ceiling — the GROUP BY now blows it.
+        set_limit(&rt, 5);
+        assert!(matches!(
+            rt.execute_query("SELECT COUNT(*), city FROM big_table GROUP BY city"),
+            Err(RedDBError::MaterializationLimitExceeded { .. })
+        ));
+
+        // Raise it — the very next query reads the fresh value and
+        // succeeds. The limit is consulted per query, so the change
+        // takes effect for new queries without a restart.
+        set_limit(&rt, 1000);
+        let after = rt
+            .execute_query("SELECT COUNT(*), city FROM big_table GROUP BY city")
+            .expect("raised ceiling should let the same query through");
+        assert_eq!(after.result.records.len(), 25);
     }
 }
