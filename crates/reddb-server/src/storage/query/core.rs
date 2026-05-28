@@ -65,6 +65,8 @@ pub enum QueryExpr {
     ProbabilisticCommand(ProbabilisticCommand),
     /// CREATE TIMESERIES name [RETENTION duration] [CHUNK_SIZE n]
     CreateTimeSeries(CreateTimeSeriesQuery),
+    /// CREATE METRIC path TYPE kind ROLE role
+    CreateMetric(CreateMetricQuery),
     /// DROP TIMESERIES name
     DropTimeSeries(DropTimeSeriesQuery),
     /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
@@ -1862,6 +1864,14 @@ pub struct CreateTableQuery {
     /// `CREATE VAULT ... WITH OWN MASTER KEY`: provision per-vault
     /// key material instead of using the cluster vault key.
     pub vault_own_master_key: bool,
+}
+
+/// CREATE METRIC path TYPE kind ROLE role
+#[derive(Debug, Clone)]
+pub struct CreateMetricQuery {
+    pub path: String,
+    pub kind: String,
+    pub role: String,
 }
 
 /// CREATE COLLECTION name KIND kind [SIGNED_BY ('pubkey_hex', ...)]
