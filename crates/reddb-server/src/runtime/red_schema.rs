@@ -259,7 +259,20 @@ const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
 const SCHEMA_REGISTRY_COLUMNS: [&str; 4] =
     ["event_name", "version", "schema_json", "registered_at"];
 
-const ANALYTICS_METRIC_COLUMNS: [&str; 4] = ["path", "kind", "role", "created_at"];
+const ANALYTICS_METRIC_COLUMNS: [&str; 8] = [
+    "path",
+    "kind",
+    "role",
+    "created_at",
+    // Issue #790 — derived metric descriptor metadata. NULL on
+    // non-derived (raw) descriptors. These are stable taxonomy
+    // columns, not high-cardinality dimensions: they name the
+    // *inputs* the future execution layer would consume.
+    "source",
+    "query",
+    "window_ms",
+    "time_field",
+];
 
 const ANALYTICS_SOURCE_COLUMNS: [&str; 8] = [
     "name",
@@ -1433,6 +1446,13 @@ fn analytics_metrics_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
                     Value::text(entry.kind),
                     Value::text(entry.role),
                     timestamp_ms_value(entry.created_at_ms),
+                    entry.source.map(Value::text).unwrap_or(Value::Null),
+                    entry.query.map(Value::text).unwrap_or(Value::Null),
+                    entry
+                        .window_ms
+                        .map(|ms| Value::Integer(ms as i64))
+                        .unwrap_or(Value::Null),
+                    entry.time_field.map(Value::text).unwrap_or(Value::Null),
                 ],
             )
         })

@@ -1869,11 +1869,22 @@ pub struct CreateTableQuery {
 }
 
 /// CREATE METRIC path TYPE kind ROLE role
+///   [SOURCE <ident>] [QUERY '<text>'] [WINDOW <duration>] [TIME_FIELD <ident>]
+///
+/// Issue #790 — when any of the derived-metric clauses are present the
+/// descriptor is a *derived* metric: it names the inputs that a future
+/// execution layer would consume. v0 stores the metadata only; reads of
+/// the metric's *output* (not its descriptor) return a structured
+/// "not yet implemented" error.
 #[derive(Debug, Clone)]
 pub struct CreateMetricQuery {
     pub path: String,
     pub kind: String,
     pub role: String,
+    pub source: Option<String>,
+    pub query: Option<String>,
+    pub window_ms: Option<u64>,
+    pub time_field: Option<String>,
 }
 
 /// ALTER METRIC path SET <field> <value>

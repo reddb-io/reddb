@@ -153,9 +153,21 @@ fn prefix_read_only_exposes_stable_taxonomy_columns() {
         result.result.columns.iter().map(String::as_str).collect();
     assert_eq!(
         columns,
-        ["path", "kind", "role", "created_at"]
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>(),
+        [
+            "path",
+            "kind",
+            "role",
+            "created_at",
+            // Issue #790 — derived metric descriptor metadata. NULL on
+            // raw (non-derived) descriptors but always part of the
+            // taxonomy projection.
+            "source",
+            "query",
+            "window_ms",
+            "time_field",
+        ]
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>(),
         "prefix reads must only expose stable descriptor columns, got {:?}",
         result.result.columns
     );
