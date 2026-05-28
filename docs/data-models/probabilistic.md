@@ -2,6 +2,11 @@
 
 RedDB includes three built-in probabilistic data structures for real-time analytics at scale. These are first-class SQL commands -- no extensions or plugins required.
 
+In the Analytics v0 ontology, probabilistic structures are approximate
+execution sidecars. They can help implement metrics such as unique users,
+frequency estimates, or membership checks, but they are not source-of-truth
+metric storage and they do not replace the metric catalog.
+
 ## Overview
 
 | Structure | Purpose | Memory | Error | Deletion? |
@@ -194,5 +199,6 @@ Probabilistic structures are persisted during checkpoint/flush cycles and restor
 
 ## See Also
 
+- [Analytics v0 Ontology](/data-models/analytics.md) -- Metric catalog and sidecar boundaries
 - [Search Commands](/query/search-commands.md) -- Vector and text search
 - [Tables](/data-models/tables.md) -- When you need exact counts, use `SELECT COUNT(DISTINCT ...)`
