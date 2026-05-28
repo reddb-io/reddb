@@ -404,11 +404,68 @@ pub fn expr_to_filter(expr: &Expr) -> Filter {
             op: CompareOp::Eq,
             rhs: Expr::lit(Value::Boolean(true)),
         },
+        // Reverse-lower the string-predicate FunctionCall forms emitted by
+        // `filter_to_expr` (`LIKE`, `STARTS_WITH`, `ENDS_WITH`, `CONTAINS`)
+        // back to the typed `Filter` variants. The runtime filter
+        // evaluators (`runtime::join_filter`, virtual `red.*` reads) only
+        // understand the typed variants; without this round-trip step a
+        // `WHERE path STARTS WITH 'infra'` clause survives the parser as
+        // `Filter::StartsWith` but is reduced to a `where_expr`-only
+        // `FunctionCall` after subquery resolution clears `table.filter`,
+        // and `effective_table_filter` would then fall through to a
+        // generic `CompareExpr(FunctionCall, =, true)` that no virtual
+        // table can evaluate. Refs #785.
+        Expr::FunctionCall { name, args, .. } => string_predicate_from_function_call(name, args)
+            .unwrap_or_else(|| Filter::CompareExpr {
+                lhs: expr.clone(),
+                op: CompareOp::Eq,
+                rhs: Expr::lit(Value::Boolean(true)),
+            }),
         _ => Filter::CompareExpr {
             lhs: expr.clone(),
             op: CompareOp::Eq,
             rhs: Expr::lit(Value::Boolean(true)),
         },
+    }
+}
+
+fn string_predicate_from_function_call(name: &str, args: &[Expr]) -> Option<Filter> {
+    if args.len() != 2 {
+        return None;
+    }
+    let field = match &args[0] {
+        Expr::Column { field, .. } => field.clone(),
+        _ => return None,
+    };
+    let text = match &args[1] {
+        Expr::Literal {
+            value: Value::Text(value),
+            ..
+        } => value.as_ref().to_string(),
+        _ => return None,
+    };
+    if name.eq_ignore_ascii_case("LIKE") {
+        Some(Filter::Like {
+            field,
+            pattern: text,
+        })
+    } else if name.eq_ignore_ascii_case("STARTS_WITH") {
+        Some(Filter::StartsWith {
+            field,
+            prefix: text,
+        })
+    } else if name.eq_ignore_ascii_case("ENDS_WITH") {
+        Some(Filter::EndsWith {
+            field,
+            suffix: text,
+        })
+    } else if name.eq_ignore_ascii_case("CONTAINS") {
+        Some(Filter::Contains {
+            field,
+            substring: text,
+        })
+    } else {
+        None
     }
 }
 
