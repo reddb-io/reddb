@@ -151,11 +151,34 @@ impl<'a> Parser<'a> {
 
         let mut kind = None;
         let mut role = None;
+        let mut source: Option<String> = None;
+        let mut query: Option<String> = None;
+        let mut window_ms: Option<u64> = None;
+        let mut time_field: Option<String> = None;
         loop {
             if self.consume_ident_ci("TYPE")? || self.consume_ident_ci("KIND")? {
                 kind = Some(self.expect_ident_or_keyword()?.to_ascii_lowercase());
             } else if self.consume_ident_ci("ROLE")? {
                 role = Some(self.expect_ident_or_keyword()?.to_ascii_lowercase());
+            } else if self.consume_ident_ci("SOURCE")? {
+                source = Some(self.expect_ident_or_keyword()?);
+            } else if self.consume_ident_ci("QUERY")? {
+                let value = self.parse_literal_value()?;
+                match value {
+                    crate::storage::schema::Value::Text(s) => query = Some(s.to_string()),
+                    other => {
+                        return Err(ParseError::new(
+                            format!("derived metric QUERY expects a string literal, got {other:?}"),
+                            self.position(),
+                        ));
+                    }
+                }
+            } else if self.consume_ident_ci("WINDOW")? {
+                let value = self.parse_float()?;
+                let unit = self.parse_duration_unit()?;
+                window_ms = Some((value * unit) as u64);
+            } else if self.consume_ident_ci("TIME_FIELD")? {
+                time_field = Some(self.expect_ident_or_keyword()?);
             } else {
                 break;
             }
@@ -176,6 +199,10 @@ impl<'a> Parser<'a> {
                         self.position(),
                     )
                 })?,
+                source,
+                query,
+                window_ms,
+                time_field,
             },
         ))
     }
