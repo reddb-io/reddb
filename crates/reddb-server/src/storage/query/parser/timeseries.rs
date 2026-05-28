@@ -180,6 +180,64 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    /// Parse ALTER METRIC body (after ALTER METRIC consumed).
+    ///
+    /// Grammar:
+    ///   ALTER METRIC <dotted.path> SET ROLE <ident>
+    ///   ALTER METRIC <dotted.path> SET KIND <ident>      -- rejected at runtime
+    ///   ALTER METRIC <dotted.path> SET TYPE <ident>      -- rejected at runtime
+    ///   ALTER METRIC <dotted.path> SET PATH <dotted>     -- rejected at runtime
+    ///
+    /// Immutable-field attempts parse so the runtime can return a
+    /// structured "field X cannot be changed" error explaining *why*.
+    pub fn parse_alter_metric_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let mut path = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        while self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            path = format!("{path}.{next}");
+        }
+
+        if !self.consume(&Token::Set)? && !self.consume_ident_ci("SET")? {
+            return Err(ParseError::expected(
+                vec!["SET"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+
+        let mut set_role = None;
+        let mut attempted_kind = None;
+        let mut attempted_path = None;
+
+        if self.consume_ident_ci("ROLE")? {
+            set_role = Some(self.expect_ident_or_keyword()?.to_ascii_lowercase());
+        } else if self.consume_ident_ci("KIND")? || self.consume_ident_ci("TYPE")? {
+            attempted_kind = Some(self.expect_ident_or_keyword()?.to_ascii_lowercase());
+        } else if self.consume(&Token::Path)? || self.consume_ident_ci("PATH")? {
+            let mut new_path = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            while self.consume(&Token::Dot)? {
+                let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+                new_path = format!("{new_path}.{next}");
+            }
+            attempted_path = Some(new_path);
+        } else {
+            return Err(ParseError::expected(
+                vec!["ROLE", "KIND", "TYPE", "PATH"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+
+        Ok(QueryExpr::AlterMetric(
+            crate::storage::query::ast::AlterMetricQuery {
+                path,
+                set_role,
+                attempted_kind,
+                attempted_path,
+            },
+        ))
+    }
+
     /// Parse CREATE HYPERTABLE body — TimescaleDB-style.
     ///
     ///   CREATE HYPERTABLE metrics
