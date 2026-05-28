@@ -141,6 +141,45 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse CREATE METRIC body (after CREATE METRIC consumed).
+    pub fn parse_create_metric_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let mut path = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        while self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            path = format!("{path}.{next}");
+        }
+
+        let mut kind = None;
+        let mut role = None;
+        loop {
+            if self.consume_ident_ci("TYPE")? || self.consume_ident_ci("KIND")? {
+                kind = Some(self.expect_ident_or_keyword()?.to_ascii_lowercase());
+            } else if self.consume_ident_ci("ROLE")? {
+                role = Some(self.expect_ident_or_keyword()?.to_ascii_lowercase());
+            } else {
+                break;
+            }
+        }
+
+        Ok(QueryExpr::CreateMetric(
+            crate::storage::query::ast::CreateMetricQuery {
+                path,
+                kind: kind.ok_or_else(|| {
+                    ParseError::new(
+                        "metric descriptor requires TYPE or KIND".to_string(),
+                        self.position(),
+                    )
+                })?,
+                role: role.ok_or_else(|| {
+                    ParseError::new(
+                        "metric descriptor requires ROLE".to_string(),
+                        self.position(),
+                    )
+                })?,
+            },
+        ))
+    }
+
     /// Parse CREATE HYPERTABLE body — TimescaleDB-style.
     ///
     ///   CREATE HYPERTABLE metrics
