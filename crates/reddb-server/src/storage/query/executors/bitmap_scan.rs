@@ -173,3 +173,202 @@ pub enum BitmapCombine {
     And,
     Or,
 }
+
+// ──────── Issue #768 / S9 — pull-based bitmap heap scan ────────
+
+/// Lazily-evaluated, pull-based counterpart to
+/// [`execute_bitmap_scan`].
+///
+/// `execute_bitmap_scan` fetches every surviving row into a single
+/// `Vec<F::Row>` before returning — server memory scales with the
+/// result-set cardinality. `BitmapScanRows` instead holds only the
+/// page-grouped TID metadata (small: one `u32` page id plus the set
+/// row offsets per touched page) and fetches **one row at a time**
+/// on demand, skipping tombstones inline. Driven by the S1
+/// [`ChunkProducer`](crate::server::output_stream::ChunkProducer),
+/// the resident row payload is a single row, not the whole heap
+/// scan.
+///
+/// Order is identical to `execute_bitmap_scan`: rows are produced in
+/// ascending `(page, row_within_page)` TID order, so collecting the
+/// iterator reproduces the eager `Vec` exactly — the S9 parity
+/// contract.
+///
+/// Errors are surfaced as `Some(Err(_))`; the caller decides whether
+/// to abort. After a fetch error the iterator may still be polled,
+/// but well-behaved drivers stop on the first error.
+pub struct BitmapScanRows<'a, F: RowFetcher> {
+    fetcher: &'a F,
+    groups: std::vec::IntoIter<(u32, Vec<u32>)>,
+    current_page: u32,
+    current_rows: std::vec::IntoIter<u32>,
+    candidate_tids: u64,
+    rows_returned: u64,
+    pages_touched: u64,
+}
+
+impl<'a, F: RowFetcher> BitmapScanRows<'a, F> {
+    /// Diagnostic counters accumulated so far. After the iterator is
+    /// fully drained these equal what
+    /// [`execute_bitmap_scan_with_stats`] would have reported.
+    pub fn stats(&self) -> BitmapScanStats {
+        BitmapScanStats {
+            candidate_tids: self.candidate_tids,
+            rows_returned: self.rows_returned,
+            pages_touched: self.pages_touched,
+        }
+    }
+}
+
+impl<'a, F: RowFetcher> Iterator for BitmapScanRows<'a, F> {
+    type Item = Result<F::Row, F::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // Drain the current page's row offsets first; advance to
+            // the next page group only when exhausted.
+            match self.current_rows.next() {
+                Some(row) => match self.fetcher.fetch(self.current_page, row) {
+                    Ok(Some(r)) => {
+                        self.rows_returned += 1;
+                        return Some(Ok(r));
+                    }
+                    // Tombstone / deleted slot — skip without yielding.
+                    Ok(None) => continue,
+                    Err(e) => return Some(Err(e)),
+                },
+                None => match self.groups.next() {
+                    Some((page_id, rows_within)) => {
+                        self.current_page = page_id;
+                        self.current_rows = rows_within.into_iter();
+                    }
+                    None => return None,
+                },
+            }
+        }
+    }
+}
+
+/// Construct a pull-based [`BitmapScanRows`] over `bitmap`. The page
+/// grouping (sequential-read-friendly TID ordering) is computed up
+/// front — it is metadata-sized, not row-sized — while the heap
+/// fetches stay lazy.
+pub fn execute_bitmap_scan_stream<'a, F: RowFetcher>(
+    bitmap: &TidBitmap,
+    fetcher: &'a F,
+    rows_per_page: u32,
+) -> BitmapScanRows<'a, F> {
+    let groups = bitmap.group_by_page(rows_per_page);
+    let pages_touched = groups.len() as u64;
+    BitmapScanRows {
+        fetcher,
+        groups: groups.into_iter(),
+        current_page: 0,
+        current_rows: Vec::new().into_iter(),
+        candidate_tids: bitmap.len(),
+        rows_returned: 0,
+        pages_touched,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In-memory fetcher: a dense `(page, row) -> Option<u64>` map.
+    /// `None` models a tombstone the scan must skip.
+    struct MapFetcher {
+        rows: std::collections::HashMap<(u32, u32), Option<u64>>,
+    }
+
+    impl RowFetcher for MapFetcher {
+        type Row = u64;
+        type Error = ();
+        fn fetch(&self, page: u32, row: u32) -> Result<Option<u64>, ()> {
+            Ok(self.rows.get(&(page, row)).copied().flatten())
+        }
+    }
+
+    /// Fetcher that errors on a specific TID, to exercise the
+    /// `Some(Err(_))` path.
+    struct ErrFetcher {
+        fail_at: (u32, u32),
+    }
+    impl RowFetcher for ErrFetcher {
+        type Row = u64;
+        type Error = &'static str;
+        fn fetch(&self, page: u32, row: u32) -> Result<Option<u64>, &'static str> {
+            if (page, row) == self.fail_at {
+                Err("fetch failed")
+            } else {
+                Ok(Some((page as u64) * 1000 + row as u64))
+            }
+        }
+    }
+
+    fn bitmap_with(tids: &[u32]) -> TidBitmap {
+        let mut b = TidBitmap::new();
+        for &t in tids {
+            b.insert(t).unwrap();
+        }
+        b
+    }
+
+    #[test]
+    fn bitmap_stream_matches_eager_scan() {
+        // Acceptance #3 / #5: parity with the materialising path on a
+        // small fixture.
+        let rows_per_page = 128u32;
+        let tids: Vec<u32> = vec![0, 1, 5, 130, 131, 400];
+        let bitmap = bitmap_with(&tids);
+        let mut rows = std::collections::HashMap::new();
+        for &t in &tids {
+            let page = t / rows_per_page;
+            let row = t % rows_per_page;
+            rows.insert((page, row), Some(t as u64));
+        }
+        let fetcher = MapFetcher { rows };
+
+        let eager = execute_bitmap_scan(&bitmap, &fetcher, rows_per_page).unwrap();
+        let streamed: Vec<u64> = execute_bitmap_scan_stream(&bitmap, &fetcher, rows_per_page)
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(eager, streamed);
+    }
+
+    #[test]
+    fn bitmap_stream_skips_tombstones_and_tracks_stats() {
+        let rows_per_page = 128u32;
+        let tids: Vec<u32> = vec![0, 1, 2, 3];
+        let bitmap = bitmap_with(&tids);
+        let mut rows = std::collections::HashMap::new();
+        rows.insert((0, 0), Some(10u64));
+        rows.insert((0, 1), None); // tombstone
+        rows.insert((0, 2), Some(12u64));
+        rows.insert((0, 3), None); // tombstone
+        let fetcher = MapFetcher { rows };
+
+        let mut it = execute_bitmap_scan_stream(&bitmap, &fetcher, rows_per_page);
+        let collected: Vec<u64> = it.by_ref().map(|r| r.unwrap()).collect();
+        assert_eq!(collected, vec![10, 12]);
+
+        let stats = it.stats();
+        assert_eq!(stats.candidate_tids, 4);
+        assert_eq!(stats.rows_returned, 2);
+        // Parity with the eager stats path.
+        let (_eager_rows, eager_stats) =
+            execute_bitmap_scan_with_stats(&bitmap, &fetcher, rows_per_page).unwrap();
+        assert_eq!(eager_stats.rows_returned, stats.rows_returned);
+        assert_eq!(eager_stats.candidate_tids, stats.candidate_tids);
+        assert_eq!(eager_stats.pages_touched, stats.pages_touched);
+    }
+
+    #[test]
+    fn bitmap_stream_surfaces_fetch_errors() {
+        let bitmap = bitmap_with(&[0, 1, 2]);
+        let fetcher = ErrFetcher { fail_at: (0, 1) };
+        let mut it = execute_bitmap_scan_stream(&bitmap, &fetcher, 128);
+        assert_eq!(it.next(), Some(Ok(0))); // (0,0)
+        assert_eq!(it.next(), Some(Err("fetch failed"))); // (0,1)
+    }
+}
