@@ -229,7 +229,8 @@ fn subscription_create_requires_select_on_source() {
         &store,
         "events-target-only",
         r#"[
-            {"effect":"allow","actions":["write"],"resources":["queue:audit"]}
+            {"effect":"allow","actions":["write"],"resources":["queue:audit"]},
+            {"effect":"allow","actions":["create"],"resources":["collection:users"]}
         ]"#,
     );
 
@@ -253,7 +254,8 @@ fn subscription_alter_requires_write_on_target_queue() {
         &store,
         "events-source-only",
         r#"[
-            {"effect":"allow","actions":["select"],"resources":["table:users"]}
+            {"effect":"allow","actions":["select"],"resources":["table:users"]},
+            {"effect":"allow","actions":["alter"],"resources":["collection:users"]}
         ]"#,
     );
 
@@ -279,6 +281,7 @@ fn subscription_redact_covers_column_policy_without_warning() {
         r#"[
             {"effect":"allow","actions":["select"],"resources":["table:users"]},
             {"effect":"allow","actions":["write"],"resources":["queue:audit"]},
+            {"effect":"allow","actions":["alter"],"resources":["collection:users"]},
             {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
         ]"#,
     );
@@ -305,6 +308,7 @@ fn subscription_redact_gap_warns_but_allows_ddl() {
         r#"[
             {"effect":"allow","actions":["select"],"resources":["table:users"]},
             {"effect":"allow","actions":["write"],"resources":["queue:audit"]},
+            {"effect":"allow","actions":["alter"],"resources":["collection:users"]},
             {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
         ]"#,
     );
