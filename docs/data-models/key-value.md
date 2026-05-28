@@ -172,6 +172,30 @@ envelope. Compound assignment requires an existing, non-null numeric `value`;
 missing, null, non-numeric, division by zero, modulo by zero, and overflow
 abort the whole statement without partial writes.
 
+## Nested JSON Patch
+
+When the stored `value` is a JSON object or array, `PATCH
+/collections/{name}/kvs/{key}` applies JSON-pointer-shaped operations
+in place — `set` and `unset` on nested paths — without rewriting the
+whole value:
+
+```bash
+curl -X PATCH http://127.0.0.1:8080/collections/sessions/kvs/session:42 \
+  -H 'content-type: application/json' \
+  -d '{
+    "operations": [
+      { "op": "set",   "path": "/prefs/lang", "value": "en" },
+      { "op": "unset", "path": "/ephemeral" }
+    ]
+  }'
+```
+
+Add `"dry_run": true` to validate without mutating. Scalar values (number,
+boolean, text, null) reject nested patches with a structured
+`KV_VALUE_NOT_JSON` error — use `PUT` to replace the whole value instead.
+See [HTTP API › JSON Patch & path helpers](../api/http.md#json-patch--path-helpers)
+for the full error envelope.
+
 ## Deleting a Key
 
 ```bash
