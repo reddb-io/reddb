@@ -210,3 +210,166 @@ where
 {
     parallel_count(input, default_parallelism(), counter)
 }
+
+// ──────── Issue #768 / S9 — pull-based scan iterator ────────
+
+/// Default number of rows processed per pulled batch. Sized so the
+/// per-batch working set stays well under one engine page worth of
+/// row payload for typical row widths, while amortising the
+/// per-batch closure-call overhead. The streaming chunk producer
+/// (S1) re-buffers these into page-aligned wire chunks downstream,
+/// so this is purely the executor's internal pull granularity.
+pub const DEFAULT_SCAN_BATCH_ROWS: usize = 256;
+
+/// Lazily-evaluated, pull-based counterpart to [`parallel_scan`].
+///
+/// Where [`parallel_scan`] eagerly processes the whole input and
+/// concatenates every worker's output into a single `Vec<U>`,
+/// `ScanBatches` holds a borrow of the input and yields **one
+/// processed batch at a time** on demand. Only the rows of the
+/// current batch are materialised; the caller (the S1
+/// [`ChunkProducer`](crate::server::output_stream::ChunkProducer))
+/// drains each batch into the wire buffer before the next batch is
+/// pulled, so server-side memory tracks the chunk-buffer working
+/// set rather than the full result-set cardinality.
+///
+/// Ordering is preserved: batch *k* covers input rows
+/// `[k·batch_rows, (k+1)·batch_rows)`, so flattening the yielded
+/// batches reproduces the exact order (and contents) of
+/// `parallel_scan`'s `Vec<U>` — this is the parity contract the S9
+/// golden tests assert.
+///
+/// Parallelism note: the eager [`parallel_scan`] spreads work
+/// across worker threads, which is profitable for a one-shot
+/// collect. A pull-based scan that must yield rows *in order* to a
+/// single downstream consumer is inherently sequential at the
+/// boundary, so this iterator runs the worker on the consumer's
+/// thread. Bounded read-ahead parallelism (a Gather-style sync
+/// channel) is a future enhancement; it does not change this wire
+/// contract.
+pub struct ScanBatches<'a, T, U, F>
+where
+    F: Fn(&[T]) -> Vec<U>,
+{
+    input: &'a [T],
+    cursor: usize,
+    batch_rows: usize,
+    worker: F,
+    _marker: std::marker::PhantomData<fn() -> U>,
+}
+
+impl<'a, T, U, F> Iterator for ScanBatches<'a, T, U, F>
+where
+    F: Fn(&[T]) -> Vec<U>,
+{
+    type Item = Vec<U>;
+
+    fn next(&mut self) -> Option<Vec<U>> {
+        if self.cursor >= self.input.len() {
+            return None;
+        }
+        let end = (self.cursor + self.batch_rows).min(self.input.len());
+        let batch = &self.input[self.cursor..end];
+        self.cursor = end;
+        Some((self.worker)(batch))
+    }
+}
+
+/// Construct a pull-based [`ScanBatches`] over `input`, applying
+/// `worker` to each `batch_rows`-sized slice on demand. A
+/// `batch_rows` of 0 is clamped to 1 so the iterator always makes
+/// progress.
+pub fn parallel_scan_stream<T, U, F>(
+    input: &[T],
+    batch_rows: usize,
+    worker: F,
+) -> ScanBatches<'_, T, U, F>
+where
+    F: Fn(&[T]) -> Vec<U>,
+{
+    ScanBatches {
+        input,
+        cursor: 0,
+        batch_rows: batch_rows.max(1),
+        worker,
+        _marker: std::marker::PhantomData,
+    }
+}
+
+/// Per-row flattening helper over [`parallel_scan_stream`]. Yields
+/// one `U` at a time — the natural shape for a record-at-a-time
+/// streaming driver — while keeping the same lazy, bounded-memory
+/// pull semantics (at most one batch is materialised at a time).
+pub fn parallel_scan_rows<'a, T, U, F>(
+    input: &'a [T],
+    batch_rows: usize,
+    worker: F,
+) -> impl Iterator<Item = U> + 'a
+where
+    T: 'a,
+    U: 'a,
+    F: Fn(&[T]) -> Vec<U> + 'a,
+{
+    parallel_scan_stream(input, batch_rows, worker).flat_map(|batch| batch.into_iter())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn copy_worker(chunk: &[u64]) -> Vec<u64> {
+        chunk.to_vec()
+    }
+
+    #[test]
+    fn scan_stream_yields_batches_in_order_and_matches_eager_collect() {
+        // Acceptance #3 / #5: parity with the materialising path on a
+        // small fixture — flattening the pulled batches reproduces the
+        // exact Vec `parallel_scan` would have built.
+        let input: Vec<u64> = (0..1000).collect();
+        let eager = parallel_scan(&input, default_parallelism(), copy_worker);
+        let streamed: Vec<u64> = parallel_scan_rows(&input, 64, copy_worker).collect();
+        assert_eq!(eager, streamed);
+        assert_eq!(streamed, input);
+    }
+
+    #[test]
+    fn scan_stream_applies_filter_worker_with_parity() {
+        // A filtering worker (the WHERE-clause shape) must stream the
+        // same surviving rows, in the same order, as the eager path.
+        let input: Vec<u64> = (0..500).collect();
+        let even =
+            |chunk: &[u64]| -> Vec<u64> { chunk.iter().copied().filter(|n| n % 2 == 0).collect() };
+        let eager = parallel_scan(&input, default_parallelism(), even);
+        let streamed: Vec<u64> = parallel_scan_rows(&input, 16, even).collect();
+        assert_eq!(eager, streamed);
+        assert!(streamed.iter().all(|n| n % 2 == 0));
+    }
+
+    #[test]
+    fn scan_stream_batch_rows_zero_is_clamped_to_one() {
+        let input: Vec<u64> = (0..5).collect();
+        let batches: Vec<Vec<u64>> = parallel_scan_stream(&input, 0, copy_worker).collect();
+        assert_eq!(batches.len(), 5, "batch_rows 0 must clamp to 1 row/batch");
+        assert_eq!(batches.concat(), input);
+    }
+
+    #[test]
+    fn scan_stream_materialises_at_most_one_batch_at_a_time() {
+        // Acceptance #1: bounded memory. The worker asserts it is never
+        // handed more than `batch_rows` rows, so no call path can
+        // smuggle the full input through in one materialised slice.
+        let input: Vec<u64> = (0..10_000).collect();
+        const BATCH: usize = 128;
+        let bounded = |chunk: &[u64]| -> Vec<u64> {
+            assert!(
+                chunk.len() <= BATCH,
+                "worker saw {} rows, exceeding batch cap {BATCH}",
+                chunk.len()
+            );
+            chunk.to_vec()
+        };
+        let total: usize = parallel_scan_rows(&input, BATCH, bounded).count();
+        assert_eq!(total, input.len());
+    }
+}
