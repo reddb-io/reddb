@@ -57,7 +57,8 @@ impl BTree {
 
             match search_leaf(&page, key)? {
                 SearchResult::Found(pos) => {
-                    let (_, value) = read_leaf_cell(&page, pos)?;
+                    let (_, stored) = read_leaf_cell(&page, pos)?;
+                    let value = value_layout::decode(&self.pager, &stored)?;
                     return Ok(Some(value));
                 }
                 SearchResult::NotFound(_) => {
@@ -83,23 +84,37 @@ impl BTree {
         let page = self.pager.read_page(leaf_id)?;
         match search_leaf(&page, key)? {
             SearchResult::Found(pos) => {
-                let (_, value) = read_leaf_cell(&page, pos)?;
+                let (_, stored) = read_leaf_cell(&page, pos)?;
+                let value = value_layout::decode(&self.pager, &stored)?;
                 Ok(Some(value))
             }
             SearchResult::NotFound(_) => Ok(None),
         }
     }
 
-    /// Insert a key-value pair
+    /// Insert a key-value pair.
+    ///
+    /// Applies the value-layout spill ladder before touching the tree:
+    /// the 256 MB ceiling rejects here without any allocation; values
+    /// at or below `OVERFLOW_THRESHOLD` go inline raw; larger values may
+    /// inline compressed or spill into an [`crate::storage::engine::overflow::OverflowChain`].
+    /// The encoded bytes are then committed through [`Self::insert_encoded`].
     pub fn insert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
-        // Validate sizes
         if key.len() > MAX_KEY_SIZE {
             return Err(BTreeError::KeyTooLarge(key.len()));
         }
-        if value.len() > MAX_VALUE_SIZE {
-            return Err(BTreeError::ValueTooLarge(value.len()));
-        }
+        let stored = value_layout::encode(&self.pager, value)?;
+        self.insert_encoded(key, &stored)
+    }
 
+    /// Insert a key with bytes already produced by [`value_layout::encode`].
+    ///
+    /// Internal entry point used by `bulk_insert_sorted` so its fast
+    /// path can pre-encode the whole batch (eagerly allocating overflow
+    /// pages, surfacing oversize rows up front) and still re-use the
+    /// generic insert machinery for fallback. Public callers should go
+    /// through [`Self::insert`] which encodes for them.
+    pub(crate) fn insert_encoded(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
         let root_id = self.root_page_id();
 
         // Empty tree - create root leaf
@@ -235,32 +250,32 @@ impl BTree {
             return self.insert(key, value);
         }
 
+        // Encode the new value once. The in-place fast path compares
+        // encoded lengths so the leaf cell stays in the on-disk format
+        // documented in `value_layout`; without this the in-place write
+        // would scribble raw bytes over a flag-prefixed cell.
+        let new_stored = value_layout::encode(&self.pager, value)?;
+
         let (leaf_id, _path) = self.find_leaf(root_id, key)?;
         let mut page = self.pager.read_page(leaf_id)?;
 
         if let SearchResult::Found(pos) = search_leaf(&page, key)? {
             let (_, old_value) = read_leaf_cell(&page, pos)?;
-            if value.len() <= old_value.len() {
-                // Same-length or shrink: update cell in place. Shrinks
-                // leave a small gap of dead bytes until the page is
-                // naturally rewritten (split / compact) — slotted layout
-                // keeps correctness because each cell carries its own
-                // length header.
-                overwrite_leaf_value(&mut page, pos, value)?;
+            if new_stored.len() <= old_value.len() {
+                overwrite_leaf_value(&mut page, pos, &new_stored)?;
                 let page_id = page.page_id();
                 self.pager.write_page(page_id, page)?;
                 return Ok(());
             }
             // Grow case: fall through to delete+insert for a proper
             // reallocation + potential rebalance.
-            // Same key, different size — structural re-layout needed.
-            // Delete + re-insert preserves ordering + handles rebalance.
             let _ = self.delete(key);
-            return self.insert(key, value);
+            return self.insert_encoded(key, &new_stored);
         }
 
-        // Key is new — plain insert path.
-        self.insert(key, value)
+        // Key is new — plain insert path. Reuse the bytes we already
+        // encoded above instead of re-running LZ4 / re-allocating.
+        self.insert_encoded(key, &new_stored)
     }
 
     /// Batch upsert for sorted keys landing in a small set of leaves.
@@ -300,16 +315,22 @@ impl BTree {
                 current_leaf = Some((leaf_id, page, false));
             }
 
+            // Encode the new value through the spill ladder so the
+            // length comparison is between encoded bytes (matching the
+            // on-disk cell format). Compute lazily: only the in-place
+            // branch needs it, and an oversize value gets caught by the
+            // single-key `upsert` fallback below.
             let applied_in_place = {
                 let (_, page, dirty) = current_leaf.as_mut().expect("set above");
                 if let SearchResult::Found(pos) = search_leaf(page, key)? {
                     let (_, old_value) = read_leaf_cell(page, pos)?;
-                    if value.len() <= old_value.len() {
-                        overwrite_leaf_value(page, pos, value)?;
-                        *dirty = true;
-                        true
-                    } else {
-                        false
+                    match value_layout::encode(&self.pager, value) {
+                        Ok(new_stored) if new_stored.len() <= old_value.len() => {
+                            overwrite_leaf_value(page, pos, &new_stored)?;
+                            *dirty = true;
+                            true
+                        }
+                        _ => false,
                     }
                 } else {
                     false
@@ -345,28 +366,38 @@ impl BTree {
         if items.is_empty() {
             return Ok(());
         }
-        for (key, value) in items {
+        // Key check is a hard fail (oversized keys would corrupt the
+        // ordering invariant). Value oversize, by contrast, is skipped
+        // per-row so a single huge row in the middle of a batch cannot
+        // poison the rest — the caller still gets a signal because we
+        // return the first ValueTooLarge after the rest have landed.
+        for (key, _) in items {
             if key.len() > MAX_KEY_SIZE {
                 return Err(BTreeError::KeyTooLarge(key.len()));
             }
-            if value.len() > MAX_VALUE_SIZE {
-                return Err(BTreeError::ValueTooLarge(value.len()));
+        }
+
+        // Pre-encode every value through the spill ladder. Oversized
+        // rows are dropped from the encoded batch but remembered so we
+        // can surface the first violation at the end of the call.
+        // Encoding here also allocates overflow pages eagerly, which
+        // mirrors single-key `insert` behaviour and keeps the bulk fast
+        // path below opaque to value shape.
+        let mut encoded: Vec<(&[u8], Vec<u8>)> = Vec::with_capacity(items.len());
+        let mut first_oversize: Option<usize> = None;
+        for (key, value) in items {
+            match value_layout::encode(&self.pager, value) {
+                Ok(stored) => encoded.push((key.as_slice(), stored)),
+                Err(value_layout::ValueLayoutError::ValueTooLarge(n)) => {
+                    if first_oversize.is_none() {
+                        first_oversize = Some(n);
+                    }
+                }
+                Err(other) => return Err(other.into()),
             }
         }
 
-        // Callers are expected to supply lex-sorted keys. This is the
-        // case for the entity-insert path in `impl_entities.rs`, which
-        // encodes u64 IDs as big-endian bytes — so sequential IDs are
-        // monotonically increasing in lex order too, and the tail-append
-        // fast path below triggers naturally.
-        //
-        // If a caller ever passes out-of-order keys, the fast path will
-        // simply bail out on the first violation and delegate to the
-        // generic slow path for that item.
-        let items: Vec<(&[u8], &[u8])> = items
-            .iter()
-            .map(|(k, v)| (k.as_slice(), v.as_slice()))
-            .collect();
+        let items: Vec<(&[u8], &[u8])> = encoded.iter().map(|(k, v)| (*k, v.as_slice())).collect();
 
         // After a filled leaf is written to disk, the next ascending
         // key almost certainly belongs on the right-sibling leaf
@@ -380,9 +411,11 @@ impl BTree {
         while i < items.len() {
             let root_id = self.root_page_id();
             if root_id == 0 {
-                // Empty tree — use single insert to create root
+                // Empty tree — use single insert to create root.
+                // Bytes are already encoded, so go through the internal
+                // entry point that skips the spill ladder.
                 let (k, v) = items[i];
-                self.insert(k, v)?;
+                self.insert_encoded(k, v)?;
                 i += 1;
                 last_filled_leaf = None;
                 continue;
@@ -507,10 +540,18 @@ impl BTree {
                 // mid-leaf positioning. Splits can invalidate the
                 // leaf-chain topology so drop the hint.
                 let (k, v) = items[i];
-                self.insert(k, v)?;
+                self.insert_encoded(k, v)?;
                 i += 1;
                 last_filled_leaf = None;
             }
+        }
+
+        // Valid rows have all landed by this point; surface the first
+        // oversize so callers still see a `ValueTooLarge` signal
+        // without losing the rest of the batch (AC #5 — one oversized
+        // row in the middle is rejected but the rest land).
+        if let Some(n) = first_oversize {
+            return Err(BTreeError::ValueTooLarge(n));
         }
 
         Ok(())
