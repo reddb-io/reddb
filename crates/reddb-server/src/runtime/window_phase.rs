@@ -38,6 +38,7 @@ use super::join_filter::projection_name;
 /// label. After this call, the projection node can resolve window
 /// outputs via `record.get(label)` exactly like any other column.
 pub(crate) fn apply(
+    db: Option<&crate::RedDB>,
     records: &mut [UnifiedRecord],
     projections: &[Projection],
     table_name: Option<&str>,
@@ -45,6 +46,19 @@ pub(crate) fn apply(
 ) -> Result<(), RedDBError> {
     if records.is_empty() {
         return Ok(());
+    }
+    let has_window = projections
+        .iter()
+        .any(|p| matches!(p, Projection::Window { .. }));
+    // Issue #769 — window functions buffer every row to partition and
+    // rank them, so the row set must be materialized in full. Cap it
+    // before doing the per-partition work. Only relevant when a window
+    // projection is actually present; plain projections route through
+    // here untouched.
+    if has_window {
+        if let Some(db) = db {
+            crate::runtime::materialization_limit::guard(db, "window", records.len())?;
+        }
     }
     for projection in projections {
         let Projection::Window {
@@ -653,6 +667,7 @@ mod tests {
             frame: None,
         };
         apply(
+            None,
             &mut rows,
             &[window_proj("ROW_NUMBER", vec![], spec, "rn")],
             None,
@@ -700,6 +715,7 @@ mod tests {
             frame: None,
         };
         apply(
+            None,
             &mut rows,
             &[
                 window_proj("RANK", vec![], spec(), "rk"),
@@ -748,6 +764,7 @@ mod tests {
             frame: None,
         };
         apply(
+            None,
             &mut rows,
             &[window_proj(
                 "LAG",
@@ -788,6 +805,7 @@ mod tests {
             frame: None,
         };
         apply(
+            None,
             &mut rows,
             &[window_proj(
                 "LEAD",
@@ -833,6 +851,7 @@ mod tests {
             frame: None,
         };
         apply(
+            None,
             &mut rows,
             &[window_proj(
                 "LAG",

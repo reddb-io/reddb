@@ -180,6 +180,11 @@ pub(super) fn try_execute_pushdown_aggregate(
     }
 
     let group_count = stream.len();
+    // Issue #769 — enforce the materialization ceiling on the push-down
+    // aggregate path too. `group_count` is the planner's distinct-group
+    // cardinality (pre OFFSET/LIMIT), the aggregation's materialized row
+    // count for this query.
+    crate::runtime::materialization_limit::guard(db, "aggregation", group_count)?;
     let mut records: Vec<UnifiedRecord> = Vec::with_capacity(group_count);
     for row in stream {
         let mut record = UnifiedRecord::new();

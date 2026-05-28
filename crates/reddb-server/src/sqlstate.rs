@@ -192,6 +192,9 @@ pub fn sqlstate_for_reddb_error(err: &crate::api::RedDBError) -> SqlState {
         // 53400 = configuration_limit_exceeded — closest PG class for
         // operator-pinned RED_MAX_* enforcement (PLAN.md Phase 4.1).
         E::QuotaExceeded(_) => SqlState::new("53400"),
+        // Issue #769 — materialization ceiling is a configuration limit
+        // (same 53400 class as the operator-pinned RED_MAX_* caps).
+        E::MaterializationLimitExceeded { .. } => SqlState::new("53400"),
         E::Internal(_) => INTERNAL_ERROR,
     }
 }
