@@ -115,7 +115,28 @@ impl RedDBServer {
                 if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
                 } else {
-                    self.handle_query_ndjson_stream(request.body.clone(), writer)?;
+                    // Issue #761 / S2 — capacity guard. Caps are read
+                    // from `red.config` at OpenStream so subsequent
+                    // KV mutations apply to future acquisitions only.
+                    // The RAII guard is held for the duration of the
+                    // handler call so success / mid-stream error /
+                    // snapshot expiry / panic unwind all release the
+                    // slot through Drop.
+                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    match self.stream_capacity.try_acquire(
+                        &principal,
+                        cfg.max_global_streams,
+                        cfg.max_per_principal_streams,
+                    ) {
+                        Ok(_capacity_guard) => {
+                            self.handle_query_ndjson_stream(request.body.clone(), writer)?;
+                        }
+                        Err(err) => {
+                            let response = stream_capacity_refusal_response(&err);
+                            writer.write_all(&response.to_http_bytes())?;
+                            writer.flush()?;
+                        }
+                    }
                 }
                 Ok(true)
             }
@@ -3196,6 +3217,159 @@ mod tests {
         clear_current_connection_id();
     }
 
+    // ───────────────── Issue #761 / S2 — capacity guard ─────────────────
+
+    fn ndjson_request_with_bearer(server_query: &str, token: Option<&str>) -> HttpRequest {
+        let mut request = request_with(
+            "POST",
+            "/query",
+            format!(r#"{{"query":"{server_query}"}}"#).into_bytes(),
+        );
+        request
+            .headers
+            .insert("accept".to_string(), "application/x-ndjson".to_string());
+        if let Some(token) = token {
+            request
+                .headers
+                .insert("authorization".to_string(), format!("Bearer {token}"));
+        }
+        request
+    }
+
+    fn dispatch_streaming(server: &RedDBServer, request: &HttpRequest) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(request, &mut buf)
+            .expect("streaming dispatch");
+        assert!(handled);
+        buf
+    }
+
+    #[test]
+    fn ndjson_global_capacity_exhausted_returns_429_with_structured_body() {
+        // Acceptance criterion #1 + #6 — global cap fires with
+        // `server_stream_capacity_exhausted`, HTTP 429, Retry-After,
+        // and a structured body carrying `limit` and `current`.
+        let server = fresh_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_global = 1")
+            .expect("set global cap");
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_per_principal = 1")
+            .expect("set per-principal cap");
+
+        // Manually hold one slot to simulate an in-flight stream.
+        let cap_registry = Arc::clone(server.stream_capacity());
+        let _hold = cap_registry.try_acquire("anon", 1, 1).expect("first slot");
+
+        let request = ndjson_request_with_bearer("SELECT 1", None);
+        let raw = dispatch_streaming(&server, &request);
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 429"),
+            "expected 429 refusal, got: {text}"
+        );
+        assert!(
+            text.contains("Retry-After: 1"),
+            "Retry-After header missing: {text}"
+        );
+        assert!(
+            text.contains("server_stream_capacity_exhausted"),
+            "structured code missing: {text}"
+        );
+        assert!(text.contains("\"limit\":1"), "limit missing: {text}");
+        assert!(text.contains("\"current\":1"), "current missing: {text}");
+    }
+
+    #[test]
+    fn ndjson_per_principal_capacity_isolated_across_principals() {
+        // Acceptance criteria #2 + #3 — Alice's quota does not affect
+        // Bob, and Alice's overflow is refused with
+        // `principal_stream_quota_exhausted` even though global has
+        // room.
+        let server = fresh_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_global = 100")
+            .expect("set global cap");
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_per_principal = 1")
+            .expect("set per-principal cap");
+
+        let cap_registry = Arc::clone(server.stream_capacity());
+        // Pre-load: Alice's single slot already held.
+        let alice_principal = super::super::routing::principal_for(&{
+            let mut h = BTreeMap::new();
+            h.insert(
+                "authorization".to_string(),
+                "Bearer alice-token".to_string(),
+            );
+            h
+        });
+        let _hold = cap_registry
+            .try_acquire(&alice_principal, 100, 1)
+            .expect("Alice's first slot");
+
+        // Alice's second open is refused with the principal-scoped code.
+        let alice_request = ndjson_request_with_bearer("SELECT 1", Some("alice-token"));
+        let raw = dispatch_streaming(&server, &alice_request);
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 429"),
+            "expected 429, got: {text}"
+        );
+        assert!(
+            text.contains("principal_stream_quota_exhausted"),
+            "expected per-principal code: {text}"
+        );
+        assert!(text.contains("\"principal\":"), "principal missing: {text}");
+
+        // Bob is unaffected — his stream completes with 200.
+        let bob_request = ndjson_request_with_bearer("SELECT 1 as n", Some("bob-token"));
+        let raw = dispatch_streaming(&server, &bob_request);
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "Bob should not be affected by Alice's quota: {text}"
+        );
+    }
+
+    #[test]
+    fn ndjson_capacity_slot_released_on_stream_end() {
+        // Acceptance criterion #4 — releasing a slot on stream end
+        // (normal completion) frees it for both counters. After a
+        // successful round-trip the same principal can open a new
+        // stream against a cap-of-1 configuration.
+        let server = fresh_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_global = 1")
+            .expect("set global cap");
+        server
+            .runtime
+            .execute_query("SET CONFIG stream.max_per_principal = 1")
+            .expect("set per-principal cap");
+
+        for _ in 0..3 {
+            let request = ndjson_request_with_bearer("SELECT 1 as n", Some("solo-token"));
+            let raw = dispatch_streaming(&server, &request);
+            let text = String::from_utf8_lossy(&raw);
+            assert!(
+                text.starts_with("HTTP/1.1 200"),
+                "slot was not released between streams: {text}"
+            );
+        }
+        let (global, per_principal) = server.stream_capacity().snapshot();
+        assert_eq!(global, 0, "global counter leaked across streams");
+        assert!(
+            per_principal.is_empty(),
+            "per-principal map leaked: {per_principal:?}"
+        );
+    }
+
     #[test]
     fn ndjson_invalid_query_surfaces_structured_error_line() {
         // Acceptance criterion #2 — mid-stream failures surface as
@@ -3556,6 +3730,65 @@ fn principal_for(headers: &BTreeMap<String, String>) -> String {
         }
     }
     "anon".to_string()
+}
+
+/// Issue #761 / S2 — build the structured 429 refusal handed back when
+/// `try_route_streaming` cannot acquire a stream slot. Both cap-fired
+/// codes share the same response shape so clients can branch on the
+/// `code` field without re-parsing.
+///
+/// Wire shape:
+///   `Retry-After: <seconds>`  header
+///   `{"ok": false, "error": {"code": <code>, "limit": N, "current": M,
+///                            "principal": "..."?}}`
+pub(crate) fn stream_capacity_refusal_response(
+    err: &crate::server::output_stream::AcquireError,
+) -> HttpResponse {
+    use crate::json::{Map, Value as JsonValue};
+    use crate::server::output_stream::AcquireError;
+
+    let mut error_obj = Map::new();
+    error_obj.insert(
+        "code".to_string(),
+        JsonValue::String(err.code().to_string()),
+    );
+    error_obj.insert(
+        "message".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&err.message()),
+    );
+    match err {
+        AcquireError::GlobalExhausted { limit, current } => {
+            error_obj.insert("limit".to_string(), JsonValue::Number(*limit as f64));
+            error_obj.insert("current".to_string(), JsonValue::Number(*current as f64));
+        }
+        AcquireError::PrincipalExhausted {
+            principal,
+            limit,
+            current,
+        } => {
+            error_obj.insert(
+                "principal".to_string(),
+                crate::json_field::SerializedJsonField::tainted(principal),
+            );
+            error_obj.insert("limit".to_string(), JsonValue::Number(*limit as f64));
+            error_obj.insert("current".to_string(), JsonValue::Number(*current as f64));
+        }
+    }
+    let mut root = Map::new();
+    root.insert("ok".to_string(), JsonValue::Bool(false));
+    root.insert("error".to_string(), JsonValue::Object(error_obj));
+
+    let mut response = json_response(429, JsonValue::Object(root));
+    // `Retry-After: 1` (seconds) — a stream slot frees the moment any
+    // other stream ends, so a one-second hint matches the actual
+    // recovery cadence; the structured `current`/`limit` fields are
+    // the load-bearing signal for clients with smarter backoff.
+    if let Ok(retry_after) =
+        crate::server::header_escape_guard::HeaderEscapeGuard::header_value("1")
+    {
+        response = response.with_header("Retry-After", retry_after);
+    }
+    response
 }
 
 /// PLAN.md Phase 6.1 — read the operator admin token. Honors
