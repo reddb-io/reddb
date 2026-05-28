@@ -311,6 +311,7 @@ impl JoinReorderingPass {
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::CreateMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)

@@ -212,6 +212,7 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::CreateMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)
@@ -339,6 +340,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::CreateMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)
@@ -425,6 +427,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::CreateMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)

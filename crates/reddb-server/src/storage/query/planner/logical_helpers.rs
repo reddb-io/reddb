@@ -454,6 +454,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::CreateTimeSeries(_)
+        | QueryExpr::CreateMetric(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
         | QueryExpr::AlterQueue(_)
@@ -825,6 +826,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::SetTenant(_) => "set_tenant",
         QueryExpr::ShowTenant => "show_tenant",
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
+        QueryExpr::CreateMetric(_) => "create_metric",
         QueryExpr::DropTimeSeries(_) => "drop_timeseries",
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::AlterQueue(_) => "alter_queue",
