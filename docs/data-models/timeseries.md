@@ -1,6 +1,11 @@
 # Time-Series
 
-RedDB includes a dedicated time-series data model optimized for high-volume, time-stamped metric data. No need for a separate InfluxDB or TimescaleDB.
+RedDB includes a dedicated time-series data model optimized for high-volume,
+time-stamped metric data. No need for a separate InfluxDB or TimescaleDB.
+
+In the Analytics v0 ontology, Time-Series is storage/layout for timestamped
+samples and materializations. It is not the metric catalog itself: KPI and SLI
+meaning lives on metric descriptors, and SLOs are objectives over SLI metrics.
 
 ## When to Use
 
@@ -190,6 +195,7 @@ graduate to:
 - [INSERT](/query/insert.md) -- Inserting data
 - [SELECT](/query/select.md) -- Querying data
 - [Tables](/data-models/tables.md) -- Structured row storage
+- [Analytics v0 Ontology](/data-models/analytics.md) -- Metric-centric catalog boundaries
 - [Hypertables](/data-models/hypertables.md) -- Time-range partitioning
 - [Continuous Aggregates](/data-models/continuous-aggregates.md) -- Incremental rollups
 - [Partition TTL](/data-models/partition-ttl.md) -- Declarative chunk expiry
