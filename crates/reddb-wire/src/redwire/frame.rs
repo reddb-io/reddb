@@ -104,6 +104,15 @@ pub enum MessageKind {
     VectorSearch = 0x26,
     GraphTraverse = 0x27,
     QueryWithParams = 0x28,
+
+    // Output stream lifecycle (issue #762 / PRD #759 S3). Streamed
+    // class — these envelopes describe an in-flight multiplexed
+    // stream over the existing `stream_id` field.
+    OpenStream = 0x29,
+    OpenAck = 0x2A,
+    StreamChunk = 0x2B,
+    StreamError = 0x2C,
+    StreamCancel = 0x2D,
 }
 
 /// Coarse routing class for a `MessageKind`.
@@ -164,12 +173,20 @@ impl MessageKind {
 
             // BulkStream* + RowDescription/StreamEnd describe an
             // in-flight stream rather than a single round trip.
+            // OpenStream / OpenAck / StreamChunk / StreamError /
+            // StreamCancel (issue #762) also describe an in-flight
+            // multiplexed stream and share the same class.
             Self::BulkStreamStart
             | Self::BulkStreamRows
             | Self::BulkStreamCommit
             | Self::BulkStreamAck
             | Self::RowDescription
-            | Self::StreamEnd => MessageClass::Streamed,
+            | Self::StreamEnd
+            | Self::OpenStream
+            | Self::OpenAck
+            | Self::StreamChunk
+            | Self::StreamError
+            | Self::StreamCancel => MessageClass::Streamed,
 
             // 0x10..0x1F — handshake / lifecycle.
             Self::Hello
@@ -258,7 +275,9 @@ impl MessageKind {
             | Self::SetSession
             | Self::VectorSearch
             | Self::GraphTraverse
-            | Self::QueryWithParams => MessageDirection::ClientToServer,
+            | Self::QueryWithParams
+            | Self::OpenStream
+            | Self::StreamCancel => MessageDirection::ClientToServer,
 
             // Server-originated replies / push frames.
             Self::HelloAck
@@ -273,7 +292,10 @@ impl MessageKind {
             | Self::DeleteOk
             | Self::Notice
             | Self::RowDescription
-            | Self::StreamEnd => MessageDirection::ServerToClient,
+            | Self::StreamEnd
+            | Self::OpenAck
+            | Self::StreamChunk
+            | Self::StreamError => MessageDirection::ServerToClient,
 
             // Symmetric — either peer may initiate.
             Self::Bye | Self::Ping | Self::Pong => MessageDirection::Both,
@@ -318,6 +340,11 @@ impl MessageKind {
             0x26 => Some(Self::VectorSearch),
             0x27 => Some(Self::GraphTraverse),
             0x28 => Some(Self::QueryWithParams),
+            0x29 => Some(Self::OpenStream),
+            0x2A => Some(Self::OpenAck),
+            0x2B => Some(Self::StreamChunk),
+            0x2C => Some(Self::StreamError),
+            0x2D => Some(Self::StreamCancel),
             _ => None,
         }
     }
@@ -402,6 +429,11 @@ mod catalog_tests {
         MessageKind::VectorSearch,
         MessageKind::GraphTraverse,
         MessageKind::QueryWithParams,
+        MessageKind::OpenStream,
+        MessageKind::OpenAck,
+        MessageKind::StreamChunk,
+        MessageKind::StreamError,
+        MessageKind::StreamCancel,
     ];
 
     #[test]
@@ -442,6 +474,15 @@ mod catalog_tests {
         assert_eq!(MessageKind::BulkStreamAck.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::RowDescription.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::StreamEnd.class(), MessageClass::Streamed);
+
+        // Output stream lifecycle envelopes (issue #762). All in
+        // the Streamed class — they describe in-flight multiplexed
+        // streams identified by the frame's `stream_id`.
+        assert_eq!(MessageKind::OpenStream.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::OpenAck.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::StreamChunk.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::StreamError.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::StreamCancel.class(), MessageClass::Streamed);
 
         // Control plane.
         assert_eq!(MessageKind::Cancel.class(), MessageClass::ControlPlane);
@@ -566,6 +607,8 @@ mod catalog_tests {
             MessageKind::VectorSearch,
             MessageKind::GraphTraverse,
             MessageKind::QueryWithParams,
+            MessageKind::OpenStream,
+            MessageKind::StreamCancel,
         ] {
             assert_eq!(
                 k.direction(),
@@ -589,6 +632,9 @@ mod catalog_tests {
             MessageKind::Notice,
             MessageKind::RowDescription,
             MessageKind::StreamEnd,
+            MessageKind::OpenAck,
+            MessageKind::StreamChunk,
+            MessageKind::StreamError,
         ] {
             assert_eq!(
                 k.direction(),
