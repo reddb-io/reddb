@@ -815,50 +815,13 @@ impl UnifiedStore {
                 .collect();
             records.sort_by(|left, right| left.0.cmp(&right.0));
 
-            // Skip rows whose serialised value exceeds the B-tree's
-            // per-value limit. The bulk insert otherwise aborts the
-            // whole rebuild, which historically poisoned downstream
-            // operations on this collection (callers saw the rebuild
-            // error bubble up as `grpc BulkInsertBinary` failures even
-            // though the user-issued write itself was harmless). The
-            // primary write path enforces `MAX_VALUE_SIZE` already,
-            // so oversized rows here are leftovers from older inserts
-            // (e.g. `red_stats` MCV/histogram arrays predating the
-            // size cap in `stats_catalog`). Logging keeps them
-            // visible for VACUUM-style cleanup later.
-            let max_value_size = crate::storage::engine::btree::MAX_VALUE_SIZE;
-            let original_len = records.len();
-            records.retain(|(_, value)| {
-                if value.len() > max_value_size {
-                    // F-04: `name` is a tenant-supplied collection name.
-                    // Route through LogField escaper to neutralise
-                    // CR/LF/control-byte injection (ADR 0010).
-                    tracing::warn!(
-                        collection = %reddb_wire::audit_safe_log_field(name),
-                        bytes = value.len(),
-                        max = max_value_size,
-                        "skipping oversized row during B-tree bulk rebuild"
-                    );
-                    false
-                } else {
-                    true
-                }
-            });
-            let dropped = original_len - records.len();
-            if dropped > 0 {
-                // F-04: tenant-supplied `name` interpolated into the
-                // structured `collection` field AND the message
-                // string. Sanitize both via the LogField escaper.
-                let safe_name = format!("{}", reddb_wire::audit_safe_log_field(name));
-                tracing::warn!(
-                    collection = %safe_name,
-                    dropped,
-                    "dropped {dropped} oversized row(s) from '{safe_name}' on rebuild — \
-                     the rows remain readable via the in-memory entity store but \
-                     are absent from the on-disk B-tree until they are rewritten"
-                );
-            }
-
+            // Slice G (#704): no per-row skip. Oversized values are
+            // spilled through the slice-E write ladder inside
+            // `bulk_insert_sorted` (inline → compressed inline →
+            // overflow chain). The only rejection is the hard
+            // `MAX_VALUE_SIZE` (256 MiB) ceiling, which surfaces as
+            // `ValueTooLarge` from the bulk path after the rest of
+            // the batch has landed.
             if !records.is_empty() {
                 btree.bulk_insert_sorted(&records).map_err(|e| {
                     StoreError::Io(std::io::Error::other(format!(
