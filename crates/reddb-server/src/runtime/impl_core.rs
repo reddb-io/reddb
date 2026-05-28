@@ -9857,6 +9857,15 @@ impl RedDBRuntime {
                 );
             }
             QueryExpr::Graph(g) => {
+                // MATCH … RETURN is the explorer's pattern-traversal
+                // surface — gate on `graph:traverse` (#757).
+                self.check_graph_op_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "graph:traverse",
+                )?;
                 if auth_store.iam_authorization_enabled() {
                     self.check_graph_property_projection_privilege(
                         &auth_store,
@@ -9868,6 +9877,45 @@ impl RedDBRuntime {
                     return Ok(());
                 }
                 return Ok(());
+            }
+            QueryExpr::Path(_) => {
+                // PATH FROM … TO … is a path-traversal query — gates
+                // on `graph:traverse` like neighborhood/shortest-path
+                // (#757).
+                return self.check_graph_op_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "graph:traverse",
+                );
+            }
+            QueryExpr::GraphCommand(cmd) => {
+                use crate::storage::query::ast::GraphCommand;
+                let action_verb = match cmd {
+                    // Metadata / property reads.
+                    GraphCommand::Properties { .. } => "graph:read",
+                    // Traversal / pattern-walk surface.
+                    GraphCommand::Neighborhood { .. }
+                    | GraphCommand::Traverse { .. }
+                    | GraphCommand::ShortestPath { .. } => "graph:traverse",
+                    // Analytics algorithms — expensive enough that Red
+                    // UI needs to gate the runner independently of
+                    // ordinary traversal.
+                    GraphCommand::Centrality { .. }
+                    | GraphCommand::Community { .. }
+                    | GraphCommand::Components { .. }
+                    | GraphCommand::Cycles { .. }
+                    | GraphCommand::Clustering
+                    | GraphCommand::TopologicalSort => "graph:algorithm:run",
+                };
+                return self.check_graph_op_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    action_verb,
+                );
             }
             QueryExpr::Vector(v) => {
                 if auth_store.iam_authorization_enabled() {
@@ -10753,6 +10801,56 @@ impl RedDBRuntime {
             Err(format!(
                 "principal=`{}` action=`{}` resource=`queue:{}` denied by IAM policy",
                 principal, action, queue
+            ))
+        }
+    }
+
+    /// IAM privilege check for a graph operation (issue #757 / PRD
+    /// #735).
+    ///
+    /// Each graph operation maps to a stable verb in
+    /// [`crate::auth::action_catalog`] — `graph:read` for
+    /// metadata/property lookups, `graph:traverse` for MATCH / PATH /
+    /// NEIGHBORHOOD / TRAVERSE / SHORTEST_PATH, and
+    /// `graph:algorithm:run` for analytics algorithms (centrality,
+    /// community, components, cycles, clustering, topological sort).
+    /// The resource is `graph:*` scoped to the current tenant — the
+    /// runtime today operates on a singleton graph store so the name
+    /// has no concrete identifier; policies grant the explorer
+    /// surface by writing `graph:*` as the resource pattern.
+    ///
+    /// In legacy mode (no IAM authorization configured) the check is
+    /// a no-op so the existing role-based defaults continue to
+    /// govern. In IAM-enabled mode a missing grant produces the
+    /// UI-safe envelope `principal=… action=graph:… resource=graph:*
+    /// denied by IAM policy` Red UI keys on.
+    fn check_graph_op_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        action: &str,
+    ) -> Result<(), String> {
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("graph".to_string(), "*".to_string());
+        if let Some(t) = tenant {
+            resource = resource.with_tenant(t.to_string());
+        }
+        let ctx = runtime_iam_context(
+            role,
+            tenant,
+            auth_store.principal_is_system_owned(principal),
+        );
+        if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
+            Ok(())
+        } else {
+            Err(format!(
+                "principal=`{}` action=`{}` resource=`graph:*` denied by IAM policy",
+                principal, action
             ))
         }
     }
