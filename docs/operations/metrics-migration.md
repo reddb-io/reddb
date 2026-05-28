@@ -4,6 +4,10 @@ RedDB Metrics v0 is a Prometheus-compatible backend for remote-write ingest and
 Grafana panel reads. The migration path keeps collectors and Grafana's built-in
 Prometheus datasource, then points their write/read URLs at RedDB.
 
+This guide covers the Metrics collection compatibility surface. It is not the
+Analytics v0 descriptor catalog; product metrics and KPI/SLI definitions should
+continue to name ordinary RedDB collections or source profiles.
+
 ## RedDB Setup
 
 Start RedDB and create a metrics collection:
