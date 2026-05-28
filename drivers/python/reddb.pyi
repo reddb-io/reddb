@@ -89,6 +89,15 @@ class QueueClient:
     def pop(self, name: str, limit: Optional[int] = ...) -> ListResult: ...
     def len(self, name: str) -> int: ...
     def purge(self, name: str) -> DeleteResult: ...
+    def read_wait(
+        self,
+        name: str,
+        consumer: str,
+        wait_ms: int,
+        *,
+        group: Optional[str] = ...,
+        count: Optional[int] = ...,
+    ) -> ListResult: ...
 
 
 TxBody = Any  # Callable[[TxClient], Any]

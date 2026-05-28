@@ -201,6 +201,21 @@ public:
     int64_t      len(const std::string& queue);
     DeleteResult purge(const std::string& queue);
 
+    struct ReadWaitOptions {
+        std::optional<std::string> group;
+        std::optional<int> count;
+    };
+
+    // Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Blocks
+    // until a message is available for `consumer` on `queue`, the
+    // wait budget elapses, or the server cancels. Timeout returns an
+    // empty vector — same shape as an empty `pop`. `wait_ms` must be
+    // explicit; there is no infinite-wait default.
+    std::vector<JsonValue> read_wait(const std::string& queue,
+                                     const std::string& consumer,
+                                     int64_t wait_ms,
+                                     const ReadWaitOptions& opts = {});
+
 private:
     std::vector<JsonValue> fetch(const char* verb, const std::string& queue,
                                  std::optional<int> count);

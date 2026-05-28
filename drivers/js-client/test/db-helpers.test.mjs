@@ -60,7 +60,7 @@ test('db.from builds typed SELECT queries and returns rows', async () => {
   assert.deepEqual(calls[0], {
     method: 'query',
     params: {
-      sql: 'SELECT id, name FROM users WHERE (id = $1)',
+      sql: 'SELECT id, name FROM users WHERE id = $1',
       params: [2],
     },
   })

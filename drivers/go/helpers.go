@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SDK Helper Spec v1.0 — rich helper surface on top of the transport-agnostic
@@ -475,6 +476,72 @@ func (qc *QueueClient) Purge(ctx context.Context, queue string) (*DeleteResult, 
 	}
 	n := affectedFromBody(body)
 	return &DeleteResult{Affected: n, Deleted: n > 0}, nil
+}
+
+// ReadWaitOptions tunes a [QueueClient.ReadWait] call.
+type ReadWaitOptions struct {
+	// Group scopes the read to a consumer group. Zero value = no group clause.
+	Group string
+	// Count is the maximum number of messages to deliver. Zero = server default (1).
+	Count int
+}
+
+// ReadWait issues `QUEUE READ … WAIT <duration>` and blocks until a
+// message is available for `consumer` on `queue`, the wait budget
+// elapses, or the server cancels (PRD #718 / #725).
+//
+// Timeout returns an empty slice (same shape as an empty Pop) — never
+// an error. `wait` must be specified; this helper does not poll. The
+// caller's `ctx` may also cancel the underlying RPC; cancellation,
+// cap rejection, and shutdown surface as errors via the transport.
+func (qc *QueueClient) ReadWait(
+	ctx context.Context,
+	queue, consumer string,
+	wait time.Duration,
+	opts ...ReadWaitOptions,
+) ([]any, error) {
+	if err := assertIdentifier(queue, "queue name"); err != nil {
+		return nil, err
+	}
+	if err := assertIdentifier(consumer, "consumer name"); err != nil {
+		return nil, err
+	}
+	if wait < 0 {
+		return nil, NewError(CodeInvalidArgument,
+			"queue ReadWait requires a non-negative wait duration (no infinite wait)")
+	}
+	opt := ReadWaitOptions{}
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	groupClause := ""
+	if opt.Group != "" {
+		if err := assertIdentifier(opt.Group, "group name"); err != nil {
+			return nil, err
+		}
+		groupClause = " GROUP " + sqlIdentifier(opt.Group)
+	}
+	countClause := ""
+	if opt.Count != 0 {
+		if opt.Count < 0 {
+			return nil, NewError(CodeInvalidArgument,
+				"queue count must be a non-negative integer")
+		}
+		countClause = fmt.Sprintf(" COUNT %d", opt.Count)
+	}
+	waitMs := wait.Milliseconds()
+	sql := fmt.Sprintf("QUEUE READ %s%s CONSUMER %s%s WAIT %dms",
+		sqlIdentifier(queue), groupClause, sqlIdentifier(consumer), countClause, waitMs)
+	body, err := qc.q.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	rows := allRows(body)
+	out := make([]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row["payload"])
+	}
+	return out, nil
 }
 
 // Create makes the queue if it does not exist (idempotent). Wraps

@@ -376,6 +376,45 @@ class QueueClient {
     final body = await _q.query('QUEUE PURGE ${_sqlIdentifier(queue)}');
     return DeleteResult(_affectedFromBody(body));
   }
+
+  /// Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Blocks
+  /// until a message is available for [consumer] on [queue], the
+  /// [wait] budget elapses, or the server cancels. Timeout returns
+  /// an empty list — same shape as an empty [pop]; never throws.
+  /// [wait] is required; there is no infinite-wait default.
+  /// Cancellation and cap rejection surface via the transport.
+  Future<List<Object?>> readWait(
+    String queue,
+    String consumer, {
+    required Duration wait,
+    String? group,
+    int? count,
+  }) async {
+    _assertIdentifier(queue, 'queue name');
+    _assertIdentifier(consumer, 'consumer name');
+    if (wait.isNegative) {
+      throw InvalidArgument(
+        'queue readWait requires a non-negative wait duration (no infinite wait)',
+      );
+    }
+    var groupClause = '';
+    if (group != null && group.isNotEmpty) {
+      _assertIdentifier(group, 'group name');
+      groupClause = ' GROUP ${_sqlIdentifier(group)}';
+    }
+    var countClause = '';
+    if (count != null) {
+      if (count < 0) {
+        throw InvalidArgument('queue count must be a non-negative integer');
+      }
+      countClause = ' COUNT $count';
+    }
+    final waitMs = wait.inMilliseconds;
+    final sql =
+        'QUEUE READ ${_sqlIdentifier(queue)}$groupClause CONSUMER ${_sqlIdentifier(consumer)}$countClause WAIT ${waitMs}ms';
+    final body = await _q.query(sql);
+    return _allRows(body).map((r) => r['payload']).toList();
+  }
 }
 
 // --- Transactions ----------------------------------------------------

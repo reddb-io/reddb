@@ -94,4 +94,53 @@ final class Queue
         $body = $this->q->query('QUEUE PURGE ' . Sql::identifier($queue));
         return new DeleteResult(Sql::affectedFromBody($body));
     }
+
+    /**
+     * Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Blocks
+     * until a message is available for `$consumer` on `$queue`, the
+     * `waitMs` budget elapses, or the server cancels. Timeout returns
+     * an empty list — same shape as an empty pop, never throws.
+     * `waitMs` is required; no infinite-wait default. Cancellation and
+     * cap rejection surface as exceptions from the transport.
+     *
+     * @param array{waitMs:int, group?:string, count?:int} $opts
+     * @return list<mixed>
+     */
+    public function readWait(string $queue, string $consumer, array $opts): array
+    {
+        Sql::assertIdentifier($queue, 'queue name');
+        Sql::assertIdentifier($consumer, 'consumer name');
+        $waitMs = $opts['waitMs'] ?? null;
+        if (!is_int($waitMs) || $waitMs < 0) {
+            throw new InvalidArgument(
+                'queue readWait requires a non-negative integer waitMs (no infinite wait)'
+            );
+        }
+        $groupClause = '';
+        if (!empty($opts['group'])) {
+            Sql::assertIdentifier($opts['group'], 'group name');
+            $groupClause = ' GROUP ' . Sql::identifier($opts['group']);
+        }
+        $countClause = '';
+        if (array_key_exists('count', $opts) && $opts['count'] !== null) {
+            $count = (int) $opts['count'];
+            if ($count < 0) {
+                throw new InvalidArgument('queue count must be a non-negative integer');
+            }
+            $countClause = sprintf(' COUNT %d', $count);
+        }
+        $sql = sprintf(
+            'QUEUE READ %s%s CONSUMER %s%s WAIT %dms',
+            Sql::identifier($queue),
+            $groupClause,
+            Sql::identifier($consumer),
+            $countClause,
+            $waitMs,
+        );
+        $body = $this->q->query($sql);
+        $rows = Sql::allRows($body);
+        $out = [];
+        foreach ($rows as $r) $out[] = $r['payload'] ?? null;
+        return $out;
+    }
 }

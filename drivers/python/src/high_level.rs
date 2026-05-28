@@ -933,6 +933,52 @@ impl QueueClient {
         out.set_item("deleted", qr.affected > 0)?;
         Ok(out)
     }
+
+    /// Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Blocks
+    /// until a message is available for `consumer` on `name`, the
+    /// `wait_ms` budget elapses, or the server cancels.
+    ///
+    /// Timeout returns `{"items": [], "affected": 0}` — the same empty
+    /// shape a non-waiting empty read would produce — never raises.
+    /// `wait_ms` is required (no infinite-wait default). Cancellation
+    /// and cap rejection surface as `RedDbError` via the query layer.
+    #[pyo3(signature = (name, consumer, wait_ms, *, group=None, count=None))]
+    fn read_wait<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        consumer: &str,
+        wait_ms: i64,
+        group: Option<&str>,
+        count: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if wait_ms < 0 {
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "queue read_wait requires a non-negative wait_ms (no infinite wait)",
+            ));
+        }
+        let rt = self.embedded()?;
+        let queue = sql_identifier(name)?;
+        let consumer_id = sql_identifier(consumer)?;
+        let group_clause = match group {
+            Some(g) => format!(" GROUP {}", sql_identifier(g)?),
+            None => String::new(),
+        };
+        let count_clause = match count {
+            Some(0) => return Err(err("INVALID_ARGUMENT", "queue count must be positive")),
+            Some(n) => format!(" COUNT {n}"),
+            None => String::new(),
+        };
+        let sql = format!(
+            "QUEUE READ {queue}{group_clause} CONSUMER {consumer_id}{count_clause} WAIT {wait_ms}ms"
+        );
+        let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("items", rows_to_pylist(py, &qr.rows)?)?;
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
 }
 
 impl QueueClient {
