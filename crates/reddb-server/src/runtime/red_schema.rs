@@ -134,6 +134,21 @@ pub(super) const TIMESERIES: &str = "red.timeseries";
 pub(super) const TIMESERIES_INTERNAL: &str = "__red_schema_timeseries";
 pub(super) const METRICS: &str = "red.metrics";
 pub(super) const METRICS_INTERNAL: &str = "__red_schema_metrics";
+// Issue #748 — per-chunk metadata for hypertables (range bounds,
+// row count, sweep/expiry state) so the Red UI maintenance panel
+// can render a chunks-per-hypertable table without scraping the
+// internal registry.
+pub(super) const HYPERTABLE_CHUNKS: &str = "red.hypertable_chunks";
+pub(super) const HYPERTABLE_CHUNKS_INTERNAL: &str = "__red_schema_hypertable_chunks";
+// Issue #748 — writes-by-cohort bucketing over hypertable rows.
+// Emits one row per (hypertable, bucket_size_ms, bucket_start_ms)
+// tuple covering the canonical 1m/5m/10m cohort sizes. `events_count`
+// counts data rows by the hypertable's time column; `writes_count` is
+// the actual write/throughput field — held at `NULL` (unavailable)
+// until reliable WAL/operation telemetry exists, per the
+// thread-discussion decision on #748.
+pub(super) const TIMESERIES_WRITES: &str = "red.timeseries_writes";
+pub(super) const TIMESERIES_WRITES_INTERNAL: &str = "__red_schema_timeseries_writes";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -456,7 +471,14 @@ const VECTOR_COLUMNS: [&str; 10] = [
 // `retention_ms`, `session_key`, and `session_gap_ms` are sourced from
 // the collection descriptor so the UI can show TTL/sessionization
 // chips without a separate join.
-const TIMESERIES_COLUMNS: [&str; 16] = [
+// Issue #748 — extends the #747 column set with four operational
+// indicators the Red UI hypertable / timeseries maintenance panels
+// need: declared downsample policies, count and names of continuous
+// aggregates that materialise from this collection, and a last-sweep
+// timestamp (NULL today — per-collection sweep tracking is not yet
+// wired into `RetentionRegistry::stats`, AC #3 wants missing optional
+// features represented as unavailable rather than inferred).
+const TIMESERIES_COLUMNS: [&str; 20] = [
     "name",
     "schema_mode",
     "is_hypertable",
@@ -473,6 +495,48 @@ const TIMESERIES_COLUMNS: [&str; 16] = [
     "on_disk_bytes",
     "tenant_id",
     "internal",
+    "downsample_policies",
+    "continuous_aggregate_count",
+    "continuous_aggregate_names",
+    "last_sweep_ms",
+];
+
+// Issue #748 — per-chunk hypertable metadata. One row per
+// `(hypertable, chunk_start_ms)` covering the registry's chunk map.
+// `min_ts_ms` / `max_ts_ms` come back `NULL` for empty chunks rather
+// than reporting the sentinel `u64::MAX` minimum. `ttl_override_ms` is
+// the per-chunk override (if any), `effective_ttl_ms` falls back to
+// the hypertable-wide default, `expiry_ms` is `max_ts_ns +
+// effective_ttl_ms` and `is_expired` is computed against `now()` at
+// snapshot time — this is what the retention sweeper would drop on
+// the next cycle.
+const HYPERTABLE_CHUNK_COLUMNS: [&str; 12] = [
+    "hypertable",
+    "chunk_start_ms",
+    "chunk_end_ms",
+    "row_count",
+    "min_ts_ms",
+    "max_ts_ms",
+    "sealed",
+    "ttl_override_ms",
+    "effective_ttl_ms",
+    "expiry_ms",
+    "is_expired",
+    "tenant_id",
+];
+
+// Issue #748 — writes-by-cohort. `events_count` is the row count of
+// the hypertable's time column falling inside this bucket; the
+// thread-discussion decision (2026-05-27) on this issue requires we
+// keep a *separate* column for actual write throughput that may stay
+// `unavailable` until WAL/operation telemetry exists. `writes_count`
+// is that field — pinned `NULL` today.
+const TIMESERIES_WRITES_COLUMNS: [&str; 5] = [
+    "collection",
+    "bucket_size_ms",
+    "bucket_start_ms",
+    "events_count",
+    "writes_count",
 ];
 
 // Issue #746 — typed `red.graphs`. `supports_viewport` is the stable
@@ -567,6 +631,12 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (KV, KV_INTERNAL),
         (VECTORS, VECTORS_INTERNAL),
         (GRAPHS, GRAPHS_INTERNAL),
+        // `red.timeseries_writes` and `red.hypertable_chunks` must
+        // run before `red.timeseries` because the substring rewrite
+        // would otherwise turn `red.timeseries_writes` into
+        // `__red_schema_timeseries_writes` (the wrong target).
+        (TIMESERIES_WRITES, TIMESERIES_WRITES_INTERNAL),
+        (HYPERTABLE_CHUNKS, HYPERTABLE_CHUNKS_INTERNAL),
         (TIMESERIES, TIMESERIES_INTERNAL),
         (METRICS, METRICS_INTERNAL),
     ] {
@@ -658,6 +728,10 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(TIMESERIES)
         || table.eq_ignore_ascii_case(METRICS_INTERNAL)
         || table.eq_ignore_ascii_case(METRICS)
+        || table.eq_ignore_ascii_case(HYPERTABLE_CHUNKS_INTERNAL)
+        || table.eq_ignore_ascii_case(HYPERTABLE_CHUNKS)
+        || table.eq_ignore_ascii_case(TIMESERIES_WRITES_INTERNAL)
+        || table.eq_ignore_ascii_case(TIMESERIES_WRITES)
 }
 
 pub(super) fn red_query(
@@ -726,6 +800,12 @@ pub(super) fn red_query(
         VirtualTableKind::Graphs => graphs_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Timeseries => timeseries_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Metrics => metrics_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::HypertableChunks => {
+            hypertable_chunks_snapshot(runtime, tenant, visible_collections)
+        }
+        VirtualTableKind::TimeseriesWrites => {
+            timeseries_writes_snapshot(runtime, tenant, visible_collections, query)
+        }
     };
 
     let table_name = query.table.as_str();
@@ -850,6 +930,8 @@ enum VirtualTableKind {
     Graphs,
     Timeseries,
     Metrics,
+    HypertableChunks,
+    TimeseriesWrites,
 }
 
 impl VirtualTableKind {
@@ -887,6 +969,8 @@ impl VirtualTableKind {
             Self::Graphs => &GRAPH_COLUMNS,
             Self::Timeseries => &TIMESERIES_COLUMNS,
             Self::Metrics => &METRICS_COLUMNS,
+            Self::HypertableChunks => &HYPERTABLE_CHUNK_COLUMNS,
+            Self::TimeseriesWrites => &TIMESERIES_WRITES_COLUMNS,
         }
     }
 
@@ -924,6 +1008,8 @@ impl VirtualTableKind {
             Self::Graphs => GRAPHS,
             Self::Timeseries => TIMESERIES,
             Self::Metrics => METRICS,
+            Self::HypertableChunks => HYPERTABLE_CHUNKS,
+            Self::TimeseriesWrites => TIMESERIES_WRITES,
         }
     }
 }
@@ -1048,6 +1134,16 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(METRICS_INTERNAL) || name.eq_ignore_ascii_case(METRICS) {
         return Ok(VirtualTableKind::Metrics);
+    }
+    if name.eq_ignore_ascii_case(HYPERTABLE_CHUNKS_INTERNAL)
+        || name.eq_ignore_ascii_case(HYPERTABLE_CHUNKS)
+    {
+        return Ok(VirtualTableKind::HypertableChunks);
+    }
+    if name.eq_ignore_ascii_case(TIMESERIES_WRITES_INTERNAL)
+        || name.eq_ignore_ascii_case(TIMESERIES_WRITES)
+    {
+        return Ok(VirtualTableKind::TimeseriesWrites);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -2860,6 +2956,34 @@ fn timeseries_snapshot(
             let owner_tenant = collection_tenant(store.as_ref(), &collection.name);
             let visible_tenant = owner_tenant.as_deref().or(tenant);
             let internal = internal_registry.is_internal(&collection.name);
+            // Issue #748 — downsample / continuous-aggregate / sweep
+            // indicators. `downsample_policies` is the comma-joined
+            // list of policy specs stored at CREATE TIMESERIES time;
+            // `continuous_aggregate_*` reflect aggregates whose
+            // declared `source` is this collection. `last_sweep_ms` is
+            // pinned `NULL` (unavailable) because the retention
+            // registry tracks a global `last_sweep_unix_ns` rather
+            // than per-collection sweep state — see AC #3.
+            let downsample_policies = read_downsample_policies(store.as_ref(), &collection.name);
+            let downsample_policies_value = if downsample_policies.is_empty() {
+                Value::Null
+            } else {
+                Value::text(downsample_policies.join(","))
+            };
+            let mut ca_names: Vec<String> = db
+                .continuous_aggregates()
+                .list()
+                .into_iter()
+                .filter(|spec| spec.source == collection.name)
+                .map(|spec| spec.name)
+                .collect();
+            ca_names.sort();
+            let ca_count = ca_names.len() as u64;
+            let ca_names_value = if ca_names.is_empty() {
+                Value::Null
+            } else {
+                Value::text(ca_names.join(","))
+            };
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -2898,10 +3022,309 @@ fn timeseries_snapshot(
                     Value::UnsignedInteger(on_disk_bytes),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                     Value::Boolean(internal),
+                    downsample_policies_value,
+                    Value::UnsignedInteger(ca_count),
+                    ca_names_value,
+                    Value::Null,
                 ],
             )
         })
         .collect()
+}
+
+/// Issue #748 — read the `downsample_policies` array persisted in
+/// the `red_timeseries_meta` collection by
+/// `super::impl_timeseries::save_timeseries_metadata`. Returns the
+/// sorted list of policy spec strings (empty when none / collection
+/// is not a timeseries).
+fn read_downsample_policies(store: &UnifiedStore, collection: &str) -> Vec<String> {
+    const META: &str = "red_timeseries_meta";
+    let Some(manager) = store.get_collection(META) else {
+        return Vec::new();
+    };
+    let rows = manager.query_all(|entity| {
+        entity.data.as_row().is_some_and(|row| {
+            row.get_field("series").is_some_and(
+                |value| matches!(value, Value::Text(candidate) if &**candidate == collection),
+            )
+        })
+    });
+    let mut out: Vec<String> = Vec::new();
+    for row in rows {
+        let Some(row_data) = row.data.as_row() else {
+            continue;
+        };
+        let Some(Value::Array(specs)) = row_data.get_field("downsample_policies") else {
+            continue;
+        };
+        for value in specs {
+            if let Value::Text(s) = value {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Issue #748 — per-chunk hypertable metadata. One row per
+/// `(hypertable, chunk_start_ns)` covering every registered
+/// hypertable visible under the active tenant / scope. Empty chunks
+/// report `NULL` for `min_ts_ms` / `max_ts_ms` rather than leaking
+/// the registry's `u64::MAX` sentinel.
+fn hypertable_chunks_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        HYPERTABLE_CHUNK_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let db = runtime.db();
+    let store = db.store();
+    let registry = db.hypertables();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    let mut hypertables = registry.names();
+    hypertables.sort();
+
+    let mut rows: Vec<UnifiedRecord> = Vec::new();
+    for name in hypertables {
+        if !collection_is_visible(&name, visible_collections) {
+            continue;
+        }
+        let owner_tenant = collection_tenant(store.as_ref(), &name);
+        if let Some(scope) = tenant {
+            if let Some(owner) = owner_tenant.as_deref() {
+                if owner != scope {
+                    continue;
+                }
+            }
+        }
+        let visible_tenant = owner_tenant.as_deref().or(tenant);
+        let Some(spec) = registry.get(&name) else {
+            continue;
+        };
+        let mut chunks = registry.show_chunks(&name);
+        chunks.sort_by_key(|c| c.id.start_ns);
+        for chunk in chunks {
+            let has_rows = chunk.row_count > 0;
+            let min_ts_ms = if has_rows {
+                Value::UnsignedInteger(chunk.min_ts_ns / 1_000_000)
+            } else {
+                Value::Null
+            };
+            let max_ts_ms = if has_rows {
+                Value::UnsignedInteger(chunk.max_ts_ns / 1_000_000)
+            } else {
+                Value::Null
+            };
+            let ttl_override_ms = chunk
+                .ttl_override_ns
+                .map(|ns| Value::UnsignedInteger(ns / 1_000_000))
+                .unwrap_or(Value::Null);
+            let effective_ttl_ns = chunk.effective_ttl_ns(spec.default_ttl_ns);
+            let effective_ttl_ms = effective_ttl_ns
+                .map(|ns| Value::UnsignedInteger(ns / 1_000_000))
+                .unwrap_or(Value::Null);
+            // `expiry_ns` is `max_ts_ns + effective_ttl_ns`; only
+            // meaningful when the chunk has actually observed a row.
+            let expiry_ms = match (has_rows, chunk.expiry_ns(spec.default_ttl_ns)) {
+                (true, Some(ns)) => Value::UnsignedInteger(ns / 1_000_000),
+                _ => Value::Null,
+            };
+            let is_expired = has_rows && chunk.is_expired_at(now_ns, spec.default_ttl_ns);
+            rows.push(UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(name.clone()),
+                    Value::UnsignedInteger(chunk.id.start_ns / 1_000_000),
+                    Value::UnsignedInteger(chunk.end_ns_exclusive / 1_000_000),
+                    Value::UnsignedInteger(chunk.row_count),
+                    min_ts_ms,
+                    max_ts_ms,
+                    Value::Boolean(chunk.sealed),
+                    ttl_override_ms,
+                    effective_ttl_ms,
+                    expiry_ms,
+                    Value::Boolean(is_expired),
+                    visible_tenant.map(Value::text).unwrap_or(Value::Null),
+                ],
+            ));
+        }
+    }
+    rows
+}
+
+/// Issue #748 — writes-by-cohort bucketing. For each hypertable
+/// visible under the active scope, scans rows from the backing
+/// segment manager, reads the time column, and accumulates a count
+/// per `(bucket_size_ms, bucket_start_ms)` for each of the three
+/// canonical cohort sizes (1m / 5m / 10m). Empty buckets are not
+/// emitted. `writes_count` is held at `NULL` until reliable
+/// WAL/operation telemetry exists — the thread-discussion decision
+/// requires we distinguish event-time row counts from actual write
+/// throughput, and not paper over the gap by labelling the former.
+///
+/// Filters: an optional `WHERE collection = 'x'` narrows to a single
+/// hypertable; an optional `WHERE bucket_size_ms = N` narrows to a
+/// single cohort size. Both are evaluated by inspecting the
+/// `TableQuery` filter — heavier filters fall through (the row set
+/// is filtered by the normal execution path after this snapshot
+/// runs).
+fn timeseries_writes_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+    query: &TableQuery,
+) -> Vec<UnifiedRecord> {
+    const BUCKET_SIZES_MS: [u64; 3] = [60_000, 300_000, 600_000];
+
+    let schema = Arc::new(
+        TIMESERIES_WRITES_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let collection_filter = extract_text_eq(query, "collection");
+    let bucket_filter = extract_uint_eq(query, "bucket_size_ms");
+
+    let db = runtime.db();
+    let store = db.store();
+    let registry = db.hypertables();
+    let mut hypertables = registry.names();
+    hypertables.sort();
+
+    let mut rows: Vec<UnifiedRecord> = Vec::new();
+    for name in hypertables {
+        if let Some(want) = collection_filter.as_deref() {
+            if want != name {
+                continue;
+            }
+        }
+        if !collection_is_visible(&name, visible_collections) {
+            continue;
+        }
+        let owner_tenant = collection_tenant(store.as_ref(), &name);
+        if let Some(scope) = tenant {
+            if let Some(owner) = owner_tenant.as_deref() {
+                if owner != scope {
+                    continue;
+                }
+            }
+        }
+        let Some(spec) = registry.get(&name) else {
+            continue;
+        };
+        let Some(manager) = store.get_collection(&name) else {
+            continue;
+        };
+        let time_col = spec.time_column.clone();
+        let mut active_sizes: Vec<u64> = match bucket_filter {
+            Some(size) if BUCKET_SIZES_MS.contains(&size) => vec![size],
+            Some(_) => continue, // unsupported bucket size — skip silently
+            None => BUCKET_SIZES_MS.to_vec(),
+        };
+        active_sizes.sort();
+
+        // Scan the backing collection once, fold every row's time
+        // column into every active cohort.
+        let buckets: BTreeMap<(u64, u64), u64> = manager.fold_entities_parallel(
+            BTreeMap::new,
+            |mut local, entity| {
+                let Some(row) = entity.data.as_row() else {
+                    return local;
+                };
+                let Some(value) = row.get_field(&time_col) else {
+                    return local;
+                };
+                let Some(ts_ns) = value_to_unsigned_ns(value) else {
+                    return local;
+                };
+                let ts_ms = ts_ns / 1_000_000;
+                for size in &active_sizes {
+                    let bucket = (ts_ms / *size) * *size;
+                    *local.entry((*size, bucket)).or_insert(0) += 1;
+                }
+                local
+            },
+            |mut a, b| {
+                for (k, v) in b {
+                    *a.entry(k).or_insert(0) += v;
+                }
+                a
+            },
+        );
+
+        for ((bucket_size_ms, bucket_start_ms), events_count) in buckets {
+            rows.push(UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(name.clone()),
+                    Value::UnsignedInteger(bucket_size_ms),
+                    Value::UnsignedInteger(bucket_start_ms),
+                    Value::UnsignedInteger(events_count),
+                    // `writes_count` — actual write throughput is
+                    // unavailable until WAL/operation telemetry
+                    // exists; AC #3 + thread-discussion require we
+                    // surface NULL rather than inferring it from the
+                    // event-time row count.
+                    Value::Null,
+                ],
+            ));
+        }
+    }
+    rows
+}
+
+/// Extract `WHERE <column> = '<text>'` from a TableQuery filter for
+/// snapshot-time pushdown. Returns `None` if the filter is missing,
+/// not an equality, or compares a different column.
+fn extract_text_eq(query: &TableQuery, column: &str) -> Option<String> {
+    match query.filter.as_ref()? {
+        Filter::Compare {
+            field: FieldRef::TableColumn { column: c, .. },
+            op: CompareOp::Eq,
+            value: Value::Text(text),
+        } if c == column => Some(text.to_string()),
+        _ => None,
+    }
+}
+
+/// Extract `WHERE <column> = <unsigned int>` (accepting Int / BigInt
+/// / Unsigned variants). Returns `None` if the filter is missing or
+/// not an integer equality on the requested column.
+fn extract_uint_eq(query: &TableQuery, column: &str) -> Option<u64> {
+    match query.filter.as_ref()? {
+        Filter::Compare {
+            field: FieldRef::TableColumn { column: c, .. },
+            op: CompareOp::Eq,
+            value,
+        } if c == column => match value {
+            Value::UnsignedInteger(n) => Some(*n),
+            Value::Integer(n) | Value::BigInt(n) if *n >= 0 => Some(*n as u64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Convert a `Value` representing a unix-nanosecond timestamp into a
+/// `u64`. Mirrors the loose acceptance the hypertable INSERT path
+/// already applies (`Value::Integer | BigInt | UnsignedInteger`).
+fn value_to_unsigned_ns(value: &Value) -> Option<u64> {
+    match value {
+        Value::UnsignedInteger(n) => Some(*n),
+        Value::Integer(n) | Value::BigInt(n) if *n >= 0 => Some(*n as u64),
+        _ => None,
+    }
 }
 
 /// Issue #746 — typed `red.graphs` projection. Filtered to
