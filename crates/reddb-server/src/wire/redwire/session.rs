@@ -13,6 +13,7 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use crate::auth::store::AuthStore;
 use crate::runtime::RedDBRuntime;
@@ -43,7 +44,7 @@ pub async fn handle_session<S>(
     oauth: Option<Arc<crate::auth::oauth::OAuthValidator>>,
 ) -> io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Discriminator byte was already consumed by the service-router
     // detector when it dispatched here. If callers wire this from
@@ -66,10 +67,35 @@ where
     let mut prepared_stmts: std::collections::HashMap<u32, crate::wire::listener::PreparedStmt> =
         std::collections::HashMap::new();
 
+    // After handshake, split the socket so reads and writes are
+    // independent: this is what makes RedWire multiplex (PRD #759
+    // S3) — two concurrent output-stream workers can interleave
+    // their chunks back to the client without contending on the
+    // reader side. All outbound bytes are routed through an
+    // unbounded mpsc; a drain task flushes them to the write half
+    // under a mutex so chunk frames stay byte-atomic on the wire.
+    let (mut reader, writer) = tokio::io::split(stream);
+    let writer = Arc::new(TokioMutex::new(writer));
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let writer_drain = Arc::clone(&writer);
+    tokio::spawn(async move {
+        while let Some(bytes) = out_rx.recv().await {
+            let mut w = writer_drain.lock().await;
+            if w.write_all(&bytes).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    // Per-connection output-stream registry (issue #762). Tracks
+    // active stream workers so a `StreamCancel` for one stream_id
+    // does not disturb the rest of the connection.
+    let stream_registry = Arc::new(super::output_stream::StreamRegistry::new());
+
     let mut buf = vec![0u8; FRAME_HEADER_SIZE];
     loop {
         // Read header.
-        if let Err(err) = stream.read_exact(&mut buf[..FRAME_HEADER_SIZE]).await {
+        if let Err(err) = reader.read_exact(&mut buf[..FRAME_HEADER_SIZE]).await {
             if err.kind() == io::ErrorKind::UnexpectedEof {
                 return Ok(());
             }
@@ -84,7 +110,7 @@ where
         }
         let payload_len = length - FRAME_HEADER_SIZE;
         if payload_len > 0 {
-            stream
+            reader
                 .read_exact(&mut buf[FRAME_HEADER_SIZE..length])
                 .await?;
         }
@@ -101,7 +127,7 @@ where
                 .payload(format!("redwire: {:?} is server-only", frame.kind).into_bytes())
                 .build()
                 .map_err(|e| io::Error::other(format!("build Error frame: {e}")))?;
-            stream.write_all(&encode_frame(&err_frame)).await?;
+            queue_send(&out_tx, encode_frame(&err_frame))?;
             continue;
         }
 
@@ -112,7 +138,7 @@ where
                     MessageKind::Bye,
                     vec![],
                 )?);
-                let _ = stream.write_all(&bye).await;
+                let _ = out_tx.send(bye);
                 return Ok(());
             }
             MessageKind::Ping => {
@@ -121,56 +147,56 @@ where
                     MessageKind::Pong,
                     vec![],
                 )?);
-                stream.write_all(&pong).await?;
+                queue_send(&out_tx, pong)?;
             }
             MessageKind::Query => {
                 let response = run_query(&runtime, &frame);
-                stream.write_all(&encode_frame(&response)).await?;
+                queue_send(&out_tx, encode_frame(&response))?;
             }
             MessageKind::QueryWithParams => {
                 let response = run_query_with_params(&runtime, &frame);
-                stream.write_all(&encode_frame(&response)).await?;
+                queue_send(&out_tx, encode_frame(&response))?;
             }
             // BulkInsert handles both single-row and bulk shapes off
             // the same frame kind: payload `payload` = single,
             // payload `payloads` = array.
             MessageKind::BulkInsert => {
                 let response = run_insert_dispatch(&runtime, &frame);
-                stream.write_all(&encode_frame(&response)).await?;
+                queue_send(&out_tx, encode_frame(&response))?;
             }
-            // Binary fast paths — handlers produce a length-prefixed
-            // body which we extract and rewrap as a RedWire frame,
-            // moving the body Vec without a copy.
             MessageKind::BulkInsertBinary => {
                 let raw =
                     crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload);
-                stream
-                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                    .await?;
+                queue_send(
+                    &out_tx,
+                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                )?;
             }
             MessageKind::BulkInsertPrevalidated => {
                 let raw = crate::wire::listener::handle_bulk_insert_binary_prevalidated(
                     &runtime,
                     &frame.payload,
                 );
-                stream
-                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                    .await?;
+                queue_send(
+                    &out_tx,
+                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                )?;
             }
             MessageKind::QueryBinary => {
                 let raw = crate::wire::listener::handle_query_binary(&runtime, &frame.payload);
-                stream
-                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                    .await?;
+                queue_send(
+                    &out_tx,
+                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                )?;
             }
             // Streaming bulk insert (PG COPY equivalent).
-            // start/rows/commit; per-session state persists across frames.
             MessageKind::BulkStreamStart => {
                 let raw =
                     crate::wire::listener::handle_stream_start(&frame.payload, &mut stream_session);
-                stream
-                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                    .await?;
+                queue_send(
+                    &out_tx,
+                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                )?;
             }
             MessageKind::BulkStreamRows => {
                 let raw = crate::wire::listener::handle_stream_rows(
@@ -178,36 +204,31 @@ where
                     &frame.payload,
                     &mut stream_session,
                 );
-                // The legacy handler signals the success no-response
-                // path with an empty Vec — the client pipelines the
-                // next ROWS / COMMIT frame without an ack. Errors come
-                // back as a non-empty length-prefixed frame and must
-                // be forwarded so the client sees a terminal response.
                 if !raw.is_empty() {
-                    stream
-                        .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                        .await?;
+                    queue_send(
+                        &out_tx,
+                        encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    )?;
                 }
             }
             MessageKind::BulkStreamCommit => {
                 let raw =
                     crate::wire::listener::handle_stream_commit(&runtime, &mut stream_session);
-                stream
-                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                    .await?;
+                queue_send(
+                    &out_tx,
+                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                )?;
             }
-            // Prepared statements — parse SQL once via Prepare,
-            // bind + execute many times via ExecutePrepared.
-            // Per-session HashMap holds compiled shapes.
             MessageKind::Prepare => {
                 let raw = crate::wire::listener::handle_prepare(
                     &runtime,
                     &frame.payload,
                     &mut prepared_stmts,
                 );
-                stream
-                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                    .await?;
+                queue_send(
+                    &out_tx,
+                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                )?;
             }
             MessageKind::ExecutePrepared => {
                 let raw = crate::wire::listener::handle_execute_prepared(
@@ -215,17 +236,78 @@ where
                     &frame.payload,
                     &prepared_stmts,
                 );
-                stream
-                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
-                    .await?;
+                queue_send(
+                    &out_tx,
+                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                )?;
             }
             MessageKind::Get => {
                 let response = run_get(&runtime, &frame);
-                stream.write_all(&encode_frame(&response)).await?;
+                queue_send(&out_tx, encode_frame(&response))?;
             }
             MessageKind::Delete => {
                 let response = run_delete(&runtime, &frame);
-                stream.write_all(&encode_frame(&response)).await?;
+                queue_send(&out_tx, encode_frame(&response))?;
+            }
+            // Output-stream lifecycle (issue #762 / PRD #759 S3).
+            //
+            // OpenStream: parse payload, register the stream_id with
+            // the per-connection registry, and spawn a worker that
+            // emits OpenAck → StreamChunk* → StreamEnd through the
+            // shared outbound channel. The dispatch loop returns to
+            // reading immediately so concurrent streams interleave
+            // on the wire (AC #2).
+            MessageKind::OpenStream => {
+                use super::output_stream as os;
+                let frame_id = frame.correlation_id;
+                let sid = frame.stream_id;
+                let req = match os::parse_open_stream(&frame.payload) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let err =
+                            os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
+                        queue_send(&out_tx, encode_frame(&err))?;
+                        continue;
+                    }
+                };
+                let cancel_rx = match stream_registry.register(sid).await {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        let err =
+                            os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
+                        queue_send(&out_tx, encode_frame(&err))?;
+                        continue;
+                    }
+                };
+                let runtime_ref = Arc::clone(&runtime);
+                let registry_ref = Arc::clone(&stream_registry);
+                let send = os::FrameTx::new(out_tx.clone());
+                // RedWire today binds every connection to the
+                // default tenant id (0); transactions are managed
+                // per-connection via the task-local context that
+                // HTTP also relies on. The S3 acceptance gate
+                // mirrors S1's HTTP refusal.
+                let in_tx = runtime.connection_in_transaction(0);
+                tokio::spawn(async move {
+                    os::run_output_stream(runtime_ref, frame_id, sid, req, in_tx, cancel_rx, send)
+                        .await;
+                    registry_ref.unregister(sid).await;
+                });
+            }
+            MessageKind::StreamCancel => {
+                use super::output_stream as os;
+                let cancelled = stream_registry.cancel(frame.stream_id).await;
+                if !cancelled {
+                    // AC #6: protocol violation surfaces as a
+                    // StreamError envelope, not a connection drop.
+                    let err = os::build_stream_error_frame(
+                        frame.correlation_id,
+                        frame.stream_id,
+                        "unknown_stream",
+                        "no active stream for this stream_id",
+                    )?;
+                    queue_send(&out_tx, encode_frame(&err))?;
+                }
             }
             other => {
                 let err_frame = FrameBuilder::reply_to(frame.correlation_id)
@@ -233,11 +315,17 @@ where
                     .payload(format!("redwire: cannot dispatch {other:?} yet").into_bytes())
                     .build()
                     .map_err(|e| io::Error::other(format!("build Error frame: {e}")))?;
-                let err = encode_frame(&err_frame);
-                stream.write_all(&err).await?;
+                queue_send(&out_tx, encode_frame(&err_frame))?;
             }
         }
     }
+}
+
+#[inline]
+fn queue_send(out_tx: &mpsc::UnboundedSender<Vec<u8>>, bytes: Vec<u8>) -> io::Result<()> {
+    out_tx
+        .send(bytes)
+        .map_err(|_| io::Error::other("redwire: write channel closed"))
 }
 
 /// Run the handshake. Returns `Ok(None)` when the client disconnected
