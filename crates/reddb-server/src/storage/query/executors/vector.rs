@@ -590,6 +590,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropIndex(_) => "drop_index",
         QueryExpr::ProbabilisticCommand(_) => "probabilistic_command",
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
+        QueryExpr::CreateMetric(_) => "create_metric",
         QueryExpr::DropTimeSeries(_) => "drop_timeseries",
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::AlterQueue(_) => "alter_queue",
