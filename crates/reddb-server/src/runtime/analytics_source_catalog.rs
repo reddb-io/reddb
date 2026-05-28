@@ -54,8 +54,19 @@ pub fn parse_create_statement(sql: &str) -> RedDBResult<Option<CreateAnalyticsSo
         return Ok(None);
     }
     if !tokens[2].eq_ignore_ascii_case("SOURCE") {
+        // Issue #789 — Analytics v0 explicitly excludes generic
+        // `CREATE ANALYTICS …` objects (PRD #782 non-goal). The only
+        // supported form starting with `CREATE ANALYTICS` is the
+        // source-profile path `CREATE ANALYTICS SOURCE …` over an
+        // ordinary backing collection. Surface the v0 boundary in the
+        // message so accidental use does not look like a syntax glitch.
         return Err(RedDBError::Query(
-            "analytics source DDL must use CREATE ANALYTICS SOURCE".to_string(),
+            "CREATE ANALYTICS is not supported in Analytics v0 — \
+             use CREATE METRIC <dotted.path> for the metric-centric \
+             catalog, or CREATE ANALYTICS SOURCE … to register a \
+             source profile over an ordinary collection \
+             (PRD #782 non-goal)"
+                .to_string(),
         ));
     }
 
