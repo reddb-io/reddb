@@ -14,18 +14,28 @@ contracts that operational telemetry needs: tenant isolation, label
 normalization, series identity, metric kinds, histograms, cardinality budgets,
 staleness, TTL, and rollups.
 
+Prometheus compatibility is a Metrics collection and wire surface, not the
+Analytics v0 catalog. Analytics v0 can define metric descriptors over Metrics
+collections, but descriptor catalog records remain separate from write
+protocols and dashboard compatibility.
+
 For the full ontology, including KPI, SLI, SLO, Time-Series, and probabilistic
 boundaries, see [Analytics v0 Ontology](./analytics.md).
 
 ## Status
 
-The Analytics v0 catalog is a design target, not a shipped SQL surface yet. The
-first planned compatibility target for operational telemetry is:
+The Analytics v0 metric descriptor catalog is distinct from the operational
+Metrics collection surface. The existing Metrics compatibility target for
+operational telemetry is:
 
 - Prometheus `remote_write` ingestion.
 - Prometheus HTTP query API subset for Grafana:
   `/api/v1/query` and `/api/v1/query_range`.
 - Grafana using its built-in Prometheus datasource pointed at RedDB.
+
+Those compatibility endpoints feed and query Metrics collections. They are not
+the Analytics v0 product API and they are not how arbitrary product metrics,
+KPIs, or SLIs are declared.
 
 ## When to Use
 
@@ -42,9 +52,40 @@ Use Metrics when you want RedDB to store and query operational telemetry:
 Use [Time-Series](./timeseries.md) directly when you have generic timestamped
 measurements and do not need Prometheus/Grafana compatibility semantics.
 
-Use the Analytics v0 metric catalog when you need named measures over existing
-RedDB data, including product KPIs, service SLIs, or derived metrics sourced
-from tables, documents, events, metrics collections, or materialized queries.
+Use the Analytics v0 metric descriptor catalog when you need named measures over
+existing RedDB data, including product KPIs, service SLIs, or derived metrics
+sourced from tables, documents, event-shaped collections, Metrics collections,
+or materialized queries.
+
+## Raw Data And Source Profiles
+
+Raw data for Analytics v0 stays in ordinary RedDB collections. For example,
+product events can be inserted into a table and then described as an analytics
+source profile:
+
+```sql
+CREATE TABLE product_events (
+  ts INTEGER,
+  event_name TEXT,
+  actor_id TEXT,
+  session_id TEXT,
+  props TEXT
+);
+
+INSERT INTO product_events (ts, event_name, actor_id, session_id, props)
+  VALUES (1704067200000000000, 'signup', 'user-1', 'sess-1', '{}');
+
+CREATE ANALYTICS SOURCE product_events ON product_events
+  TIME FIELD ts
+  EVENT FIELD event_name
+  ACTOR FIELD actor_id
+  SESSION FIELD session_id
+  PROPERTIES FIELD props;
+```
+
+The source profile is catalog metadata in `red.analytics.sources`. Metric
+descriptors can refer to that source, but the raw write target remains the
+backing collection.
 
 ## Proposed DDL
 
@@ -69,12 +110,9 @@ hypertable routing, retention daemon, batch-write paths, and continuous
 aggregate machinery where those primitives fit.
 
 `CREATE METRICS` declares an operational telemetry collection for the
-Prometheus-compatible backend. It is not a generic analytics object.
-
-`INSERT INTO METRIC` is not part of Analytics v0. Raw source writes should use
-ordinary RedDB write paths such as table/document inserts, time-series point
-inserts, or the Prometheus remote-write adapter. Metrics define named measures
-over those sources.
+Prometheus-compatible backend. It does not create an Analytics v0 metric
+descriptor and it does not replace ordinary collection writes for product or
+event data.
 
 ## Metric Catalog Roles
 
@@ -165,13 +203,14 @@ semantics and can merge unrelated data.
 ## Adapters
 
 Prometheus and Grafana compatibility are adapters around the RedDB-native
-metrics engine:
+Metrics collection surface:
 
 - Prometheus `remote_write` becomes RedDB metrics batches.
 - Prometheus HTTP API responses are rendered at the adapter boundary.
 - Grafana initially connects through its built-in Prometheus datasource.
-- A native Grafana plugin can later expose RedDB-only capabilities such as SQL,
-  events, cohorts, and cross-model joins.
+
+These adapters are not Analytics v0 behavior. They only translate Prometheus and
+Grafana shapes to and from Metrics collections.
 
 ## Alerting
 
