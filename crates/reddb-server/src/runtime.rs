@@ -1192,6 +1192,16 @@ struct RuntimeInner {
     /// of pending-delivery state by design — see
     /// `storage::queue::presence` for the contract.
     queue_presence: std::sync::Arc<crate::storage::queue::presence::ConsumerPresenceRegistry>,
+    /// Issue #743 — vector + TurboQuant introspection registry. Red UI
+    /// vector toolbars (and `red.*` vector virtual tables) read
+    /// per-collection metadata + artifact state from here so they
+    /// never have to reach into `engine::vector_store` or
+    /// `engine::turboquant::*` internals. Engine publish points (build
+    /// start / finish, fallback toggle, drop) call into this in
+    /// follow-up slices of PRD #735; the public Rust surface lives on
+    /// the runtime and does not change when those land.
+    vector_introspection:
+        std::sync::Arc<crate::storage::vector::introspection::VectorIntrospectionRegistry>,
     /// Slice C of PRD #718 — local wait registry for `QUEUE READ … WAIT`.
     /// Producer commits notify; readers park here until wake-or-timeout
     /// or until `cancel_all` is invoked at shutdown.
