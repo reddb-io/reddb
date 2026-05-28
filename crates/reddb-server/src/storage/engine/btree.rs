@@ -1596,3 +1596,248 @@ mod overflow_pipeline_tests {
         cleanup(&path);
     }
 }
+
+/// Acceptance tests for slice F of PRD #662 — freeing overflow chains
+/// on delete and shrinking update so storage does not leak.
+#[cfg(test)]
+mod overflow_free_tests {
+    use super::value_layout::OVERFLOW_THRESHOLD;
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_db_path(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "reddb_btree_free_{}_{}_{}.db",
+            tag,
+            std::process::id(),
+            id
+        ));
+        path
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        for suffix in ["-hdr", "-meta", "-dwb"] {
+            let mut p = path.to_path_buf().into_os_string();
+            p.push(suffix);
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    fn incompressible(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
+    /// AC #1: deleting a row whose value spilled returns every overflow
+    /// page to the free list. Observable signal: page_count stays
+    /// constant when we insert a same-size row right after the delete
+    /// (no file growth on the second insert), and `tree.get` returns
+    /// the new value.
+    #[test]
+    fn delete_spilled_value_frees_overflow_chain() {
+        let path = temp_db_path("delete_frees");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+
+            // First spilled insert grows the file.
+            let v1 = incompressible(0xA11CE, 2 * 1024 * 1024);
+            tree.insert(b"k", &v1).unwrap();
+            let after_first = pager.page_count().unwrap();
+
+            // Delete: every overflow page returned to the free list.
+            assert!(tree.delete(b"k").unwrap());
+
+            // Re-insert the same size. With a working free list, the
+            // pager reuses the freed pages and the file does not grow.
+            let v2 = incompressible(0xB0B, 2 * 1024 * 1024);
+            tree.insert(b"k", &v2).unwrap();
+            let after_second = pager.page_count().unwrap();
+
+            assert_eq!(
+                after_second, after_first,
+                "second spill must reuse freed pages, not grow the file"
+            );
+            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(v2.as_slice()));
+        }
+        cleanup(&path);
+    }
+
+    /// AC #2: updating a spilled value to a small inline value frees
+    /// the old chain in full. Same observability trick: insert another
+    /// spilled value of the original size, see that the file does not
+    /// grow beyond the original high-water mark.
+    #[test]
+    fn shrinking_update_to_inline_frees_chain() {
+        let path = temp_db_path("shrink_to_inline");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+
+            let big = incompressible(0xDEAD, 2 * 1024 * 1024);
+            tree.insert(b"k", &big).unwrap();
+            let hwm = pager.page_count().unwrap();
+
+            // Shrink to inline raw (fits well under the threshold).
+            let small = b"tiny".to_vec();
+            tree.upsert(b"k", &small).unwrap();
+            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(small.as_slice()));
+
+            // If the chain was not freed, this insert would push the
+            // page count past `hwm`. If it was, the pager reuses freed
+            // pages and we stay at the high-water mark.
+            let big2 = incompressible(0xBEEF, 2 * 1024 * 1024);
+            tree.insert(b"k2", &big2).unwrap();
+            assert_eq!(
+                pager.page_count().unwrap(),
+                hwm,
+                "shrinking update must free the chain — replacement spill should reuse"
+            );
+            assert_eq!(tree.get(b"k2").unwrap().as_deref(), Some(big2.as_slice()));
+        }
+        cleanup(&path);
+    }
+
+    /// AC #3: updating a spilled value to a shorter (still spilled)
+    /// value frees the old chain in full. The new chain is independent
+    /// — no in-place reuse — so the freed pages must show up in the
+    /// allocator before any new growth happens.
+    #[test]
+    fn shrinking_update_to_shorter_spill_frees_old_chain() {
+        let path = temp_db_path("shrink_spill_to_spill");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+
+            // Two spilled values, the second clearly shorter than the
+            // first. Both encode through the pointer path because the
+            // bytes are incompressible.
+            let big = incompressible(0xF00D, 3 * 1024 * 1024);
+            tree.insert(b"k", &big).unwrap();
+            let hwm_after_big = pager.page_count().unwrap();
+
+            // Per slice F's acceptance the new chain is *independent*
+            // of the old — i.e. no in-place page reuse — so the
+            // upsert allocates fresh pages for the smaller chain
+            // before freeing the old one. The file may grow during
+            // this window; what we care about is that the freed pages
+            // re-enter the allocator. We measure that by dropping the
+            // row entirely (which frees the new chain too) and
+            // re-inserting at the original size: if both chains were
+            // freed, the pager reuses freed pages and we do not exceed
+            // the high-water mark observed during the transient.
+            let smaller = incompressible(0xCAFE, 1 * 1024 * 1024);
+            tree.upsert(b"k", &smaller).unwrap();
+            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(smaller.as_slice()));
+            let hwm_after_upsert = pager.page_count().unwrap();
+
+            assert!(tree.delete(b"k").unwrap());
+
+            let again = incompressible(0x1234, 3 * 1024 * 1024);
+            tree.insert(b"k", &again).unwrap();
+            assert!(
+                pager.page_count().unwrap() <= hwm_after_upsert,
+                "after delete+insert of original size, file must not grow past the upsert transient \
+                 (page_count = {}, transient high-water = {}, original = {}) — the upsert must have \
+                 freed the old chain so the re-insert reuses freed pages",
+                pager.page_count().unwrap(),
+                hwm_after_upsert,
+                hwm_after_big,
+            );
+            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(again.as_slice()));
+        }
+        cleanup(&path);
+    }
+
+    /// AC #5 regression: insert large → delete → insert same-size large
+    /// → file does not grow on the second insert.
+    #[test]
+    fn insert_delete_reinsert_does_not_grow_file() {
+        let path = temp_db_path("reinsert_no_grow");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+
+            let v1 = incompressible(0x5EED, 4 * 1024 * 1024);
+            tree.insert(b"row", &v1).unwrap();
+            let pages_after_first = pager.page_count().unwrap();
+
+            assert!(tree.delete(b"row").unwrap());
+
+            let v2 = incompressible(0xACE, 4 * 1024 * 1024);
+            tree.insert(b"row", &v2).unwrap();
+            let pages_after_second = pager.page_count().unwrap();
+
+            assert_eq!(
+                pages_after_second, pages_after_first,
+                "re-inserting at the same size must reuse the freed chain"
+            );
+            assert_eq!(tree.get(b"row").unwrap().as_deref(), Some(v2.as_slice()));
+        }
+        cleanup(&path);
+    }
+
+    /// Belt-and-braces: an in-place shrink via `upsert_batch_sorted`
+    /// — same in-place fast path as single-key `upsert` — must also
+    /// free the old chain. Without this hook the batch path would
+    /// silently leak on every `bulk_update` over spilled rows.
+    #[test]
+    fn upsert_batch_in_place_shrink_frees_chain() {
+        let path = temp_db_path("batch_shrink");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+
+            // Seed two spilled rows so the batch update lands in-place
+            // on the same leaf.
+            let big_a = incompressible(0x1111, 2 * 1024 * 1024);
+            let big_b = incompressible(0x2222, 2 * 1024 * 1024);
+            tree.insert(b"a", &big_a).unwrap();
+            tree.insert(b"b", &big_b).unwrap();
+            let hwm = pager.page_count().unwrap();
+
+            let updates = vec![
+                (b"a".to_vec(), b"shrunk-a".to_vec()),
+                (b"b".to_vec(), b"shrunk-b".to_vec()),
+            ];
+            tree.upsert_batch_sorted(&updates).unwrap();
+            assert_eq!(
+                tree.get(b"a").unwrap().as_deref(),
+                Some(b"shrunk-a".as_slice())
+            );
+            assert_eq!(
+                tree.get(b"b").unwrap().as_deref(),
+                Some(b"shrunk-b".as_slice())
+            );
+
+            // Both chains must be freed: a fresh pair of spilled
+            // inserts re-uses them instead of growing the file.
+            let again_a = incompressible(0xAAAA, 2 * 1024 * 1024);
+            let again_b = incompressible(0xBBBB, 2 * 1024 * 1024);
+            tree.insert(b"c", &again_a).unwrap();
+            tree.insert(b"d", &again_b).unwrap();
+            assert!(
+                pager.page_count().unwrap() <= hwm,
+                "batch in-place shrink must free chains — replacement spills should reuse"
+            );
+        }
+        cleanup(&path);
+    }
+}
