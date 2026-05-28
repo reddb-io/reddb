@@ -79,6 +79,12 @@ pub enum ActionCategory {
     /// principals that should not see them. See `crate::server::
     /// handlers_ops_policy`.
     Ops,
+    /// Vector verbs (`vector:read`, `vector:search`,
+    /// `vector:artifact:read`, ...). Gates vector metadata reads,
+    /// similarity / text / hybrid search, operational artifact
+    /// introspection, and rebuild / admin operations so Red UI can
+    /// grant toolbar actions independently.
+    Vector,
     /// Catch-all for actions that don't fit a tighter category yet
     /// (`evidence:export`, `red.registry:register`, `kv:invalidate`).
     Other,
@@ -106,6 +112,7 @@ impl ActionCategory {
             ActionCategory::Queue => "queue",
             ActionCategory::Graph => "graph",
             ActionCategory::Ops => "ops",
+            ActionCategory::Vector => "vector",
             ActionCategory::Other => "other",
         }
     }
@@ -686,6 +693,53 @@ pub const ACTIONS: &[ActionEntry] = &[
         category: ActionCategory::Wildcard,
         lifecycle_state: LifecycleState::Active,
         gates_description: "any operational read verb",
+    },
+    // -- Vector operations (#756 / PRD #735) -----------------------------
+    // Red UI needs to grant vector toolbar actions independently —
+    // metadata / data reads, similarity / text / hybrid search,
+    // operational artifact introspection, rebuild / status, and
+    // clustering / admin operations each fall under their own verb so a
+    // single broad `vector:write` cannot over-grant artifact rebuilds
+    // or destructive admin surfaces. Wired at the SQL runtime
+    // (`check_query_privilege`) for `QueryExpr::Vector` and
+    // `QueryExpr::Hybrid` today; the remaining entries (artifact /
+    // admin) are advertised through the catalog for /auth/can probing
+    // and will be enforced as their HTTP / SQL surfaces land.
+    ActionEntry {
+        name: "vector:read",
+        category: ActionCategory::Vector,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read vector metadata / data (non-search reads on a vector collection)",
+    },
+    ActionEntry {
+        name: "vector:search",
+        category: ActionCategory::Vector,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "similarity / text / hybrid search against a vector collection",
+    },
+    ActionEntry {
+        name: "vector:artifact:read",
+        category: ActionCategory::Vector,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "introspect operational vector index artifacts (pages, status)",
+    },
+    ActionEntry {
+        name: "vector:artifact:rebuild",
+        category: ActionCategory::Vector,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "rebuild / warmup vector index artifacts",
+    },
+    ActionEntry {
+        name: "vector:admin",
+        category: ActionCategory::Vector,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "admin operations on a vector collection (clustering, maintenance)",
+    },
+    ActionEntry {
+        name: "vector:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any vector verb",
     },
     // -- Wildcards (kept last for legacy ordering) -----------------------
     ActionEntry {

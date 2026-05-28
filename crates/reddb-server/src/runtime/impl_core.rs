@@ -10004,6 +10004,14 @@ impl RedDBRuntime {
             }
             QueryExpr::Vector(v) => {
                 if auth_store.iam_authorization_enabled() {
+                    self.check_vector_op_privilege(
+                        &auth_store,
+                        &principal_id,
+                        role,
+                        tenant.as_deref(),
+                        "vector:search",
+                        &v.collection,
+                    )?;
                     self.check_table_like_column_projection_privilege(
                         &auth_store,
                         &principal_id,
@@ -10011,6 +10019,54 @@ impl RedDBRuntime {
                         tenant.as_deref(),
                         &v.collection,
                         &["content".to_string()],
+                    )?;
+                    return Ok(());
+                }
+                return Ok(());
+            }
+            QueryExpr::SearchCommand(cmd) => {
+                use crate::storage::query::ast::SearchCommand;
+                if auth_store.iam_authorization_enabled() {
+                    // `SEARCH SIMILAR [..] COLLECTION <c>` and `SEARCH
+                    // HYBRID ... COLLECTION <c>` are the same UI
+                    // affordances as `VECTOR SEARCH` / hybrid joins —
+                    // Red UI must see the same `vector:search` envelope
+                    // so a single toolbar grant is sufficient.
+                    let collection = match cmd {
+                        SearchCommand::Similar { collection, .. }
+                        | SearchCommand::Hybrid { collection, .. } => Some(collection.as_str()),
+                        _ => None,
+                    };
+                    if let Some(c) = collection {
+                        self.check_vector_op_privilege(
+                            &auth_store,
+                            &principal_id,
+                            role,
+                            tenant.as_deref(),
+                            "vector:search",
+                            c,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                return Ok(());
+            }
+            QueryExpr::Hybrid(h) => {
+                if auth_store.iam_authorization_enabled() {
+                    // The vector half of a hybrid search is gated under
+                    // the same `vector:search` verb as a standalone
+                    // VECTOR SEARCH — Red UI's hybrid-search toolbar
+                    // must surface the same UI-safe denial envelope
+                    // when the principal lacks the grant. The
+                    // structured half is dispatched to its own gate via
+                    // the inner query during execution.
+                    self.check_vector_op_privilege(
+                        &auth_store,
+                        &principal_id,
+                        role,
+                        tenant.as_deref(),
+                        "vector:search",
+                        &h.vector.collection,
                     )?;
                     return Ok(());
                 }
@@ -10962,6 +11018,52 @@ impl RedDBRuntime {
             Err(format!(
                 "principal=`{}` action=`{}` resource=`graph:*` denied by IAM policy",
                 principal, action
+            ))
+        }
+    }
+
+    /// IAM privilege check for a granular vector operation (issue #756
+    /// / PRD #735).
+    ///
+    /// Each vector operation maps to a stable verb in
+    /// [`crate::auth::action_catalog`] (`vector:read`, `vector:search`,
+    /// `vector:artifact:read`, `vector:artifact:rebuild`,
+    /// `vector:admin`). The resource is `vector:<collection>` scoped to
+    /// the current tenant. In legacy mode (no IAM authorization
+    /// configured) the check is a no-op — the role gates and existing
+    /// `select` / column-projection grants continue to govern access.
+    /// In IAM-enabled mode a missing granular grant yields a
+    /// structured, UI-safe error of the form `principal=…
+    /// action=vector:… resource=vector:… denied by IAM policy` so Red
+    /// UI can surface the failing toolbar action.
+    fn check_vector_op_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        action: &str,
+        collection: &str,
+    ) -> Result<(), String> {
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("vector".to_string(), collection.to_string());
+        if let Some(t) = tenant {
+            resource = resource.with_tenant(t.to_string());
+        }
+        let ctx = runtime_iam_context(
+            role,
+            tenant,
+            auth_store.principal_is_system_owned(principal),
+        );
+        if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
+            Ok(())
+        } else {
+            Err(format!(
+                "principal=`{}` action=`{}` resource=`vector:{}` denied by IAM policy",
+                principal, action, collection
             ))
         }
     }
