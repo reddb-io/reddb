@@ -66,6 +66,11 @@ pub enum ActionCategory {
     /// producer / consumer / ack-lifecycle / DLQ / destructive-admin
     /// surface so Red UI can grant toolbar actions independently.
     Queue,
+    /// Graph verbs (`graph:read`, `graph:traverse`,
+    /// `graph:algorithm:run`). Gates the graph explorer's read /
+    /// traversal / analytics surface so Red UI can grant the algorithm
+    /// runner independently of plain metadata reads or pattern matching.
+    Graph,
     /// Catch-all for actions that don't fit a tighter category yet
     /// (`evidence:export`, `red.registry:register`, `kv:invalidate`).
     Other,
@@ -91,6 +96,7 @@ impl ActionCategory {
             ActionCategory::Notification => "notification",
             ActionCategory::Stream => "stream",
             ActionCategory::Queue => "queue",
+            ActionCategory::Graph => "graph",
             ActionCategory::Other => "other",
         }
     }
@@ -591,6 +597,40 @@ pub const ACTIONS: &[ActionEntry] = &[
         category: ActionCategory::Wildcard,
         lifecycle_state: LifecycleState::Active,
         gates_description: "any queue verb",
+    },
+    // -- Graph operations (#757 / PRD #735) ------------------------------
+    // Red UI needs to grant graph explorer toolbar actions
+    // independently — metadata/property reads, pattern/path traversal,
+    // and analytics algorithm execution each fall under their own verb.
+    // Gated at the SQL runtime (`check_query_privilege`) for
+    // `QueryExpr::Graph` (MATCH), `QueryExpr::Path`, and
+    // `QueryExpr::GraphCommand` variants. The resource is
+    // `graph:<name>` scoped to the current tenant — the runtime today
+    // operates on a singleton graph so the name is `*`, matched by a
+    // `graph:*` policy resource pattern.
+    ActionEntry {
+        name: "graph:read",
+        category: ActionCategory::Graph,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read graph node/edge metadata and graph-wide properties",
+    },
+    ActionEntry {
+        name: "graph:traverse",
+        category: ActionCategory::Graph,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "execute pattern match / neighborhood / path traversal queries",
+    },
+    ActionEntry {
+        name: "graph:algorithm:run",
+        category: ActionCategory::Graph,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "run a graph analytics algorithm (centrality, community, components, ...)",
+    },
+    ActionEntry {
+        name: "graph:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any graph verb",
     },
     // -- Wildcards (kept last for legacy ordering) -----------------------
     ActionEntry {
