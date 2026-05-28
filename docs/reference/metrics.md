@@ -6,6 +6,10 @@ RedDB exposes Prometheus text format at `GET /metrics`.
 
 The metrics adapter exposes the v0 Prometheus HTTP API surface for Grafana:
 
+This is a Metrics collection wire surface, not the Analytics v0 descriptor
+catalog. Analytics v0 descriptors may name Metrics collections as sources, but
+Prometheus request and response shapes stay at the adapter boundary.
+
 | Endpoint | Supported v0 shape |
 |----------|--------------------|
 | `POST /api/v1/write` | Prometheus `remote_write` snappy protobuf samples for counters and gauges. |
