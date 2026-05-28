@@ -38,12 +38,19 @@ use super::pager::{Pager, PagerError};
 /// Maximum key size (to ensure at least 2 keys per node)
 pub const MAX_KEY_SIZE: usize = 1024;
 
-/// Maximum value size for inline storage.
+/// Hard upper bound on logical value size.
 ///
-/// Derived as `PAGE_SIZE / 4` so it tracks the page size automatically and
-/// preserves the design invariant of at least two cells per leaf. At the
-/// 16KB page this is 4096 bytes (4x the legacy 4KB-page limit of 1024).
-pub const MAX_VALUE_SIZE: usize = PAGE_SIZE / 4;
+/// Per ADR 0023 (large-value overflow), values up to 256 MiB are stored
+/// transparently — inline below [`value_layout::OVERFLOW_THRESHOLD`],
+/// inline+compressed when LZ4 shrinks them under the same threshold, or
+/// spilled into an [`overflow::OverflowChain`] otherwise. Values above
+/// this ceiling are rejected with [`BTreeError::ValueTooLarge`] before
+/// any compression or page allocation runs.
+///
+/// Re-exported from [`value_layout::MAX_VALUE_SIZE`] so callers that
+/// historically read this constant (`unified::store::impl_pages`,
+/// `query::planner::stats_catalog`) continue to compile.
+pub const MAX_VALUE_SIZE: usize = value_layout::MAX_VALUE_SIZE;
 
 /// Minimum fill factor before merge (as percentage)
 pub const MIN_FILL_FACTOR: usize = 25;
@@ -94,6 +101,8 @@ pub enum BTreeError {
     Pager(String),
     /// Internal lock was poisoned by a panicked thread
     LockPoisoned(String),
+    /// Large-value layout encode/decode failed (overflow chain or LZ4).
+    ValueLayout(String),
 }
 
 impl std::fmt::Display for BTreeError {
@@ -112,6 +121,16 @@ impl std::fmt::Display for BTreeError {
             Self::Corrupted(msg) => write!(f, "B-tree corrupted: {}", msg),
             Self::Pager(msg) => write!(f, "Pager error: {}", msg),
             Self::LockPoisoned(msg) => write!(f, "Lock poisoned: {}", msg),
+            Self::ValueLayout(msg) => write!(f, "Value layout: {}", msg),
+        }
+    }
+}
+
+impl From<value_layout::ValueLayoutError> for BTreeError {
+    fn from(e: value_layout::ValueLayoutError) -> Self {
+        match e {
+            value_layout::ValueLayoutError::ValueTooLarge(n) => Self::ValueTooLarge(n),
+            other => Self::ValueLayout(other.to_string()),
         }
     }
 }
@@ -172,7 +191,8 @@ impl BTreeCursor {
 
         // Check if we have more cells in current page
         if self.position < cell_count {
-            let (key, value) = read_leaf_cell(&page, self.position)?;
+            let (key, stored) = read_leaf_cell(&page, self.position)?;
+            let value = value_layout::decode(&self.pager, &stored)?;
             self.position += 1;
             return Ok(Some((key, value)));
         }
@@ -194,7 +214,8 @@ impl BTreeCursor {
             return Ok(None);
         }
 
-        let (key, value) = read_leaf_cell(&page, 0)?;
+        let (key, stored) = read_leaf_cell(&page, 0)?;
+        let value = value_layout::decode(&self.pager, &stored)?;
         self.position = 1;
         Ok(Some((key, value)))
     }
@@ -212,7 +233,8 @@ impl BTreeCursor {
             return Ok(None);
         }
 
-        let (key, value) = read_leaf_cell(&page, self.position)?;
+        let (key, stored) = read_leaf_cell(&page, self.position)?;
+        let value = value_layout::decode(&self.pager, &stored)?;
         Ok(Some((key, value)))
     }
 }
@@ -239,6 +261,9 @@ mod btree_impl;
 
 #[path = "btree/lehman_yao.rs"]
 pub mod lehman_yao;
+
+#[path = "btree/value_layout.rs"]
+pub mod value_layout;
 // ==================== Search Helpers ====================
 
 enum SearchResult {
@@ -1332,6 +1357,242 @@ mod tests {
             prev = Some(key);
         }
 
+        cleanup(&path);
+    }
+}
+
+/// Acceptance tests for slice E of PRD #662 — spill pipeline that wires
+/// the per-cell value layout (`value_layout`), the LZ4 codec
+/// (`vector_btree::value_codec`), and the overflow chain (`overflow`)
+/// into the B-tree's `insert` / `bulk_insert_sorted` / `get` paths.
+#[cfg(test)]
+mod overflow_pipeline_tests {
+    use super::value_layout::{MAX_VALUE_SIZE, OVERFLOW_THRESHOLD};
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_db_path(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "reddb_btree_spill_{}_{}_{}.db",
+            tag,
+            std::process::id(),
+            id
+        ));
+        path
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        for suffix in ["-hdr", "-meta", "-dwb"] {
+            let mut p = path.to_path_buf().into_os_string();
+            p.push(suffix);
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    /// AC #1: a value at `OVERFLOW_THRESHOLD - 1` stores inline (raw or
+    /// compressed) and **no overflow pages are allocated**. We count
+    /// the file's pages before and after; the only growth should be the
+    /// leaf page itself.
+    #[test]
+    fn inline_path_allocates_no_overflow_pages() {
+        let path = temp_db_path("inline_no_overflow");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+            let before = pager.page_count().unwrap();
+
+            let value = vec![0x5Au8; OVERFLOW_THRESHOLD - 1];
+            tree.insert(b"k", &value).unwrap();
+
+            let after = pager.page_count().unwrap();
+            // Exactly one new page (the root leaf). An overflow path
+            // would have allocated ≥ 2 pages (leaf + chain head).
+            assert_eq!(
+                after - before,
+                1,
+                "inline value must allocate only the root leaf"
+            );
+            assert_eq!(tree.get(b"k").unwrap(), Some(value));
+        }
+        cleanup(&path);
+    }
+
+    /// AC #2: a 44 KB highly-compressible markdown payload stores via
+    /// the compressed-inline path (or via overflow if it still exceeds
+    /// the threshold after LZ4) and `get` returns byte-identical bytes.
+    #[test]
+    fn compressible_44kb_round_trips() {
+        let path = temp_db_path("compressible_44kb");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager);
+
+            // Repeating markdown chunk — compresses far below threshold.
+            let snippet = "# heading\n- bullet line that says the same thing over and over\n";
+            let mut value = Vec::with_capacity(44 * 1024);
+            while value.len() < 44 * 1024 {
+                value.extend_from_slice(snippet.as_bytes());
+            }
+            assert!(value.len() > OVERFLOW_THRESHOLD);
+
+            tree.insert(b"doc", &value).unwrap();
+            assert_eq!(tree.get(b"doc").unwrap(), Some(value));
+        }
+        cleanup(&path);
+    }
+
+    /// AC #3: a 5 MB incompressible payload spills via overflow chain
+    /// and `get` returns byte-identical bytes.
+    #[test]
+    fn incompressible_5mb_spills_and_round_trips() {
+        let path = temp_db_path("incompressible_5mb");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+
+            // xorshift produces incompressible bytes deterministically
+            // so the test never flakes on the codec's heuristic.
+            let mut state: u64 = 0xC0FFEE_DEAD_F00D;
+            let value: Vec<u8> = (0..5 * 1024 * 1024)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state as u8
+                })
+                .collect();
+
+            let before = pager.page_count().unwrap();
+            tree.insert(b"blob", &value).unwrap();
+            let after = pager.page_count().unwrap();
+            // 5 MB / overflow-page payload ≈ many pages — the leaf
+            // alone could not absorb this.
+            assert!(
+                after - before > 2,
+                "5 MB spill must allocate overflow pages (alloc'd {} pages)",
+                after - before
+            );
+
+            assert_eq!(
+                tree.get(b"blob").unwrap().as_deref(),
+                Some(value.as_slice())
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// AC #4: a value just above `MAX_VALUE_SIZE` is rejected with
+    /// `ValueTooLarge`; nothing is allocated (no LZ4 work, no overflow
+    /// pages, no leaf page).
+    #[test]
+    fn value_above_ceiling_rejected_without_allocation() {
+        let path = temp_db_path("ceiling_reject");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager.clone());
+            let before = pager.page_count().unwrap();
+
+            let value = vec![0u8; MAX_VALUE_SIZE + 1];
+            let err = tree.insert(b"too_big", &value).unwrap_err();
+            assert!(matches!(err, BTreeError::ValueTooLarge(_)));
+
+            assert_eq!(
+                pager.page_count().unwrap(),
+                before,
+                "rejected value must not allocate pages"
+            );
+            // Tree stays empty — no root leaf was created.
+            assert!(tree.is_empty());
+        }
+        cleanup(&path);
+    }
+
+    /// AC #5: `bulk_insert_sorted` with mixed value sizes inserts all
+    /// valid rows; an oversized row in the middle is rejected but the
+    /// rest land. The function still surfaces the violation in its
+    /// return value so callers do not silently lose data.
+    #[test]
+    fn bulk_insert_skips_oversized_row_keeps_rest() {
+        let path = temp_db_path("bulk_mixed");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager);
+
+            let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            // Five small rows ...
+            for i in 0..5u32 {
+                items.push((format!("k{:04}", i).into_bytes(), vec![b'a' + i as u8; 64]));
+            }
+            // ... one oversize row in the middle ...
+            items.push((b"k0005_huge".to_vec(), vec![0u8; MAX_VALUE_SIZE + 1]));
+            // ... and five more small rows after it. Keys stay sorted.
+            for i in 6..11u32 {
+                items.push((format!("k{:04}", i).into_bytes(), vec![b'z' - i as u8; 32]));
+            }
+
+            let res = tree.bulk_insert_sorted(&items);
+            assert!(matches!(res, Err(BTreeError::ValueTooLarge(_))));
+
+            // All valid rows persisted.
+            for (k, v) in items.iter().filter(|(_, v)| v.len() <= MAX_VALUE_SIZE) {
+                assert_eq!(
+                    tree.get(k).unwrap().as_deref(),
+                    Some(v.as_slice()),
+                    "valid row {:?} must land",
+                    k
+                );
+            }
+            // The oversize row did not land.
+            assert_eq!(tree.get(b"k0005_huge").unwrap(), None);
+        }
+        cleanup(&path);
+    }
+
+    /// AC #6: values that used to fail (≥ 1024 bytes) now persist
+    /// transparently. Walk a handful of sizes that straddle the
+    /// threshold and the compressed-inline / spill boundaries.
+    #[test]
+    fn large_values_persist_transparently() {
+        let path = temp_db_path("large_transparent");
+        cleanup(&path);
+        {
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(pager);
+
+            // Sizes hit: just over threshold, well over threshold,
+            // and several MB. Bytes pattern is the index — so the
+            // values differ across keys and are incompressible enough
+            // that LZ4 falls back to raw on the largest entries.
+            for (i, size) in [
+                OVERFLOW_THRESHOLD + 1,
+                OVERFLOW_THRESHOLD * 2,
+                64 * 1024,
+                1 * 1024 * 1024,
+            ]
+            .iter()
+            .enumerate()
+            {
+                let value: Vec<u8> = (0..*size).map(|n| ((n + i) & 0xff) as u8).collect();
+                let key = format!("size{:08}", size).into_bytes();
+                tree.insert(&key, &value).unwrap();
+                assert_eq!(
+                    tree.get(&key).unwrap().as_deref(),
+                    Some(value.as_slice()),
+                    "size {} must round-trip",
+                    size
+                );
+            }
+        }
         cleanup(&path);
     }
 }
