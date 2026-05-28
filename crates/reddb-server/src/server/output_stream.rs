@@ -338,6 +338,43 @@ impl<'a> ChunkProducer<'a> {
         Ok(false)
     }
 
+    /// Issue #768 / S9 — drive a pull-based line source into the
+    /// production buffer. The producer *pulls* one encoded line at a
+    /// time from `source` and routes it through [`push_line`], so the
+    /// resident working set is the page-aligned buffer plus the single
+    /// line currently in hand — never the full result set. Pair this
+    /// with the pull-based scan iterators
+    /// (`parallel_scan::parallel_scan_rows`,
+    /// `bitmap_scan::execute_bitmap_scan_stream`) whose records are
+    /// encoded lazily by `encode`.
+    ///
+    /// Returns the number of lines consumed. Flush caps (byte / row /
+    /// latency) fire mid-drain exactly as they would for hand-driven
+    /// [`push_line`] calls, so first-line latency stays bounded by
+    /// `chunk.max_latency_ms` regardless of how many lines the source
+    /// will ultimately yield.
+    ///
+    /// [`push_line`]: ChunkProducer::push_line
+    pub fn drive_lines<S, R, Enc, F>(
+        &mut self,
+        source: S,
+        mut encode: Enc,
+        flush: &mut F,
+    ) -> std::io::Result<u64>
+    where
+        S: IntoIterator<Item = R>,
+        Enc: FnMut(&R) -> Vec<u8>,
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let mut count = 0u64;
+        for record in source {
+            let line = encode(&record);
+            self.push_line(&line, flush)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Force-flush any buffered bytes — used after the final NDJSON line
     /// (`{"end": …}`) to push the tail of the buffer before closing the
     /// connection.
@@ -1124,5 +1161,163 @@ mod tests {
     fn stream_config_defaults_carry_s2_caps() {
         assert_eq!(StreamConfig::DEFAULT.max_global_streams, 256);
         assert_eq!(StreamConfig::DEFAULT.max_per_principal_streams, 32);
+    }
+
+    // ──────── Issue #768 / S9 — pull-based driver ────────
+
+    /// Sink that records every flushed chunk's length so a test can
+    /// assert the resident working set stayed bounded.
+    struct SizeSink {
+        sizes: std::cell::RefCell<Vec<usize>>,
+    }
+    impl SizeSink {
+        fn new() -> Self {
+            Self {
+                sizes: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        fn flushes(&self) -> usize {
+            self.sizes.borrow().len()
+        }
+        fn max_chunk(&self) -> usize {
+            self.sizes.borrow().iter().copied().max().unwrap_or(0)
+        }
+    }
+    fn size_capture<'a>(sink: &'a SizeSink) -> impl FnMut(&[u8]) -> std::io::Result<()> + 'a {
+        move |bytes: &[u8]| {
+            sink.sizes.borrow_mut().push(bytes.len());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn drive_lines_streams_large_source_with_bounded_working_set() {
+        // Acceptance #1: a huge scan flows through the chunk buffer
+        // without ever materialising the full result set. The source
+        // is a *lazy* range mapped to records — collecting it would
+        // allocate N rows, but `drive_lines` pulls one at a time. We
+        // assert every flushed chunk stays within a small multiple of
+        // the page buffer, i.e. memory tracks the buffer, not N.
+        let clock = FakeClock::new(0);
+        let cfg = StreamConfig {
+            chunk_default_pages: 1, // 16 KiB buffer
+            chunk_min_pages: 1,
+            chunk_max_pages: 1,
+            chunk_max_rows: 1_000_000, // don't let the row cap dominate
+            chunk_max_latency_ms: 1_000_000,
+            ..StreamConfig::DEFAULT
+        };
+        let sink = SizeSink::new();
+        let mut producer = ChunkProducer::new(&cfg, &clock);
+        let mut flush = size_capture(&sink);
+
+        const N: u64 = 1_000_000;
+        // Lazy source: never collected into a Vec.
+        let source = 0..N;
+        let consumed = producer
+            .drive_lines(
+                source,
+                |i: &u64| format!("{{\"row\":{{\"id\":{i}}}}}\n").into_bytes(),
+                &mut flush,
+            )
+            .unwrap();
+        producer.finish(&mut flush).unwrap();
+
+        assert_eq!(consumed, N);
+        assert_eq!(producer.total_rows(), N);
+        // Many flushes occurred (streamed), not one giant buffer.
+        assert!(
+            sink.flushes() > 1000,
+            "expected the source to stream across many chunks, saw {}",
+            sink.flushes()
+        );
+        // No chunk exceeded the byte cap plus one trailing line — the
+        // resident buffer is bounded independent of N.
+        let max_line = format!("{{\"row\":{{\"id\":{}}}}}\n", N - 1).len();
+        assert!(
+            sink.max_chunk() <= cfg.production_buffer_bytes() + max_line,
+            "chunk {} exceeded bounded working set {}",
+            sink.max_chunk(),
+            cfg.production_buffer_bytes() + max_line
+        );
+    }
+
+    #[test]
+    fn drive_lines_first_chunk_flushes_on_latency_before_source_drains() {
+        // Acceptance #2: first-row latency is bounded by the latency
+        // cap, not by full materialisation. The source yields rows
+        // whose pull advances the fake clock; the first chunk must
+        // flush as soon as the latency window elapses, long before the
+        // (large) source is exhausted.
+        let clock = FakeClock::new(0);
+        let cfg = StreamConfig {
+            chunk_default_pages: 64, // large byte cap — won't trip first
+            chunk_min_pages: 1,
+            chunk_max_pages: 64,
+            chunk_max_rows: 1_000_000, // large row cap — won't trip first
+            chunk_max_latency_ms: 50,
+            ..StreamConfig::DEFAULT
+        };
+        let sink = SizeSink::new();
+        let mut producer = ChunkProducer::new(&cfg, &clock);
+
+        // Drive manually so we can advance the clock between pulls and
+        // observe the first flush. Each pull advances 20 ms; the 50 ms
+        // latency cap trips on the third row.
+        let mut first_flush_after: Option<u64> = None;
+        let mut row = 0u64;
+        while row < 1_000_000 {
+            let line = format!("{{\"row\":{{\"id\":{row}}}}}\n");
+            clock.advance(20);
+            let mut flush = size_capture(&sink);
+            let flushed = producer.push_line(line.as_bytes(), &mut flush).unwrap();
+            row += 1;
+            if flushed {
+                first_flush_after = Some(row);
+                break;
+            }
+        }
+
+        assert_eq!(producer.last_flush_reason(), Some(FlushReason::Latency));
+        let rows_before_flush = first_flush_after.expect("a latency flush must occur");
+        assert!(
+            rows_before_flush <= 4,
+            "first chunk flushed only after {rows_before_flush} rows; latency bound not honoured"
+        );
+        // Crucially, the source was nowhere near drained (1e6 rows).
+        assert!(rows_before_flush < 1_000_000);
+    }
+
+    #[test]
+    fn drive_lines_parity_with_manual_push_line() {
+        // The driver must produce byte-identical output to hand-rolled
+        // push_line calls — the chunk producer's framing is unchanged.
+        let clock = FakeClock::new(0);
+        let cfg = StreamConfig::DEFAULT;
+
+        let lines: Vec<Vec<u8>> = (0..50)
+            .map(|i| format!("{{\"row\":{{\"id\":{i}}}}}\n").into_bytes())
+            .collect();
+
+        let driven = CapturingSink::new();
+        {
+            let mut p = ChunkProducer::new(&cfg, &clock);
+            let mut flush = capture(&driven);
+            p.drive_lines(lines.iter().cloned(), |l: &Vec<u8>| l.clone(), &mut flush)
+                .unwrap();
+            p.finish(&mut flush).unwrap();
+        }
+
+        let manual = CapturingSink::new();
+        {
+            let mut p = ChunkProducer::new(&cfg, &clock);
+            let mut flush = capture(&manual);
+            for l in &lines {
+                p.push_line(l, &mut flush).unwrap();
+            }
+            p.finish(&mut flush).unwrap();
+        }
+
+        assert_eq!(*driven.chunks.borrow(), *manual.chunks.borrow());
     }
 }
