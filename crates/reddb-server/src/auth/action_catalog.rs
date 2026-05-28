@@ -62,6 +62,10 @@ pub enum ActionCategory {
     /// the append-only event-log primitive defined in
     /// `crate::streams`.
     Stream,
+    /// Queue verbs (`queue:enqueue`, `queue:read`, ...). Gates the
+    /// producer / consumer / ack-lifecycle / DLQ / destructive-admin
+    /// surface so Red UI can grant toolbar actions independently.
+    Queue,
     /// Catch-all for actions that don't fit a tighter category yet
     /// (`evidence:export`, `red.registry:register`, `kv:invalidate`).
     Other,
@@ -86,6 +90,7 @@ impl ActionCategory {
             ActionCategory::Ai => "ai",
             ActionCategory::Notification => "notification",
             ActionCategory::Stream => "stream",
+            ActionCategory::Queue => "queue",
             ActionCategory::Other => "other",
         }
     }
@@ -499,6 +504,73 @@ pub const ACTIONS: &[ActionEntry] = &[
         category: ActionCategory::Wildcard,
         lifecycle_state: LifecycleState::Active,
         gates_description: "any durable stream verb",
+    },
+    // -- Queue operations (#755 / PRD #735) ------------------------------
+    // Red UI needs to grant queue toolbar actions independently —
+    // producer, consumer, ack lifecycle, DLQ admin, destructive purge,
+    // and consumer-presence reads each fall under their own verb so
+    // dangerous operations are not over-granted by a single broad
+    // `queue:write`. Wired at the SQL runtime (`check_query_privilege`)
+    // for `QueueCommand` / `QueueSelect` variants.
+    ActionEntry {
+        name: "queue:enqueue",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "push / produce a message onto a queue",
+    },
+    ActionEntry {
+        name: "queue:read",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "destructive read: pop, group-read, claim",
+    },
+    ActionEntry {
+        name: "queue:peek",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "non-destructive read: peek, len, pending, select",
+    },
+    ActionEntry {
+        name: "queue:ack",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "acknowledge a delivered queue message",
+    },
+    ActionEntry {
+        name: "queue:nack",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "negative-acknowledge / requeue a delivered queue message",
+    },
+    ActionEntry {
+        name: "queue:retry",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "override retry policy (e.g. per-failure NACK delay)",
+    },
+    ActionEntry {
+        name: "queue:dlq:move",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "move / replay messages between a queue and its DLQ",
+    },
+    ActionEntry {
+        name: "queue:purge",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "destructively purge all messages from a queue",
+    },
+    ActionEntry {
+        name: "queue:presence:read",
+        category: ActionCategory::Queue,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read consumer presence / heartbeat snapshots",
+    },
+    ActionEntry {
+        name: "queue:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any queue verb",
     },
     // -- Wildcards (kept last for legacy ordering) -----------------------
     ActionEntry {
