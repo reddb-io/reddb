@@ -10,6 +10,10 @@ target. It is intentionally narrower than full Prometheus. RedDB owns the
 native metrics engine; Prometheus and Grafana shapes are adapter contracts at
 the boundary.
 
+This compatibility target is separate from Analytics v0. It describes how
+Metrics collections accept and serve operational telemetry; it does not define
+Analytics v0 metric descriptors, source profiles, KPIs, SLIs, or SLOs.
+
 ## Upstream References
 
 The local study pointers live under ignored `.study/upstream/` paths:

@@ -33,11 +33,42 @@ Raw source data remains in ordinary RedDB collections:
 - application state remains in tables, documents, KV, graph, vectors, queues,
   or time-series according to the source model
 
-Analytics v0 metrics refer to those sources. They do not replace them.
+For example, raw product events stay in a normal table:
 
-`INSERT INTO METRIC` is explicitly out of scope for Analytics v0. If a future
-release adds direct metric ingest sugar, it must be specified as sugar over a
-normal sample collection or adapter path, not as a new raw-data storage model.
+```sql
+CREATE TABLE product_events (
+  ts INTEGER,
+  event_name TEXT,
+  actor_id TEXT,
+  session_id TEXT,
+  props TEXT
+);
+
+INSERT INTO product_events (ts, event_name, actor_id, session_id, props)
+  VALUES (1704067200000000000, 'signup', 'user-1', 'sess-1', '{}');
+```
+
+Analytics v0 metrics refer to those sources. They do not replace them, and
+Analytics v0 has no direct metric-ingest syntax or separate raw-data write path.
+
+## Source Profiles
+
+Analytics source profiles describe event-shaped ordinary collections so later
+metric descriptors can refer to stable source fields. A source profile is
+catalog metadata, not a collection and not a storage model:
+
+```sql
+CREATE ANALYTICS SOURCE product_events ON product_events
+  TIME FIELD ts
+  EVENT FIELD event_name
+  ACTOR FIELD actor_id
+  SESSION FIELD session_id
+  PROPERTIES FIELD props;
+```
+
+The profile is readable through `red.analytics.sources`. Creating the profile
+does not create a `product_events` analytics collection, and writes continue to
+target the backing table or document collection.
 
 ## Metric Descriptors
 
@@ -49,7 +80,7 @@ The descriptor should carry:
 - metric kind, such as counter, gauge, histogram, ratio, or derived value
 - unit
 - allowed dimensions and cardinality policy
-- source collection, query, adapter, or materialization plan
+- source profile, source collection, query, or materialization plan
 - retention or rollup policy when samples are materialized
 - role, such as `kpi`, `sli`, or ordinary metric
 
@@ -104,8 +135,11 @@ that hide metric truth only inside an approximate structure.
 
 Use this checklist when reviewing Analytics v0 runtime work:
 
-- Raw writes still enter ordinary RedDB collection, adapter, or time-series
-  paths; no `INSERT INTO METRIC`.
+- Raw writes still enter ordinary RedDB collections, Metrics collections, or
+  Time-Series collections; Analytics v0 adds catalog metadata, not a raw write
+  path.
+- Source profiles in `red.analytics.sources` describe existing collections and
+  must not create a second raw collection.
 - Metric descriptors are catalog records with stable names, sources, roles,
   dimensions, and policy metadata.
 - KPI and SLI are roles on metrics.

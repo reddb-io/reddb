@@ -32,7 +32,7 @@ RedDB exposes multiple kinds of "structure", and they are not all the same thing
   ├─ yes ─── [Graphs]
   │
   Do you need named measures, KPIs, SLIs, or SLOs over existing data?
-  ├─ yes ─── [Analytics v0 Ontology] + [Metrics]
+  ├─ yes ─── [Analytics v0 Ontology] + metric descriptors
 ```
 
 Most non-trivial workloads combine two or three of these on the same
@@ -46,8 +46,8 @@ documents as separate child objects in the traditional sense.
 
 For application design, think in **user-facing data models** such as tables, documents, queues, and time-series.
 Analytics v0 sits above those models as a metric-centric catalog: raw data stays in ordinary collections,
-metrics are named measures over that data, KPI and SLI are roles on metrics, and SLO is a separate objective
-over an SLI metric.
+metric descriptors are named measures over that data, KPI and SLI are roles on metrics, and SLO is a
+separate objective over an SLI metric.
 For engine work, compatibility checks, and storage refactors, it also matters to distinguish those models from
 the **native persisted entity kinds** in the unified storage core and from **supporting engine structures** such as
 indexes and probabilistic sketches.
@@ -90,7 +90,7 @@ These are the main structures most users mean when they ask "what can I build in
 | Cache | Internal Blob Cache Interface first; public API later | Exact key lookup, existence check, invalidation APIs | Arbitrary cached blobs with rich TTL and durable L2 | Proposed supporting engine structure |
 | Graphs | `INSERT INTO network NODE ...`, `INSERT INTO network EDGE (label, from_rid, to_rid) ...` | `MATCH`, `GRAPH ...`, `PATH ...` | Relationships, traversals, analytics | Native `GraphNode` and `GraphEdge` |
 | Vectors | `INSERT INTO embeddings VECTOR (...)` | `VECTOR SEARCH`, `HYBRID ... VECTOR SEARCH` | Embeddings, semantic retrieval, RAG | Native `Vector` |
-| Metrics | `CREATE METRICS` (planned), Prometheus `remote_write` | Prometheus query API subset, native metrics plans, SQL follow-up | SRE dashboards, Prometheus/Grafana backend, retained rollups | Planned model over time-series internals |
+| Metrics | `CREATE METRICS`, Prometheus `remote_write` | Prometheus query API subset, native metrics plans, SQL follow-up | SRE dashboards, Prometheus/Grafana backend, retained rollups | Operational telemetry model over time-series internals |
 | Time-Series | `CREATE TIMESERIES`, `INSERT INTO cpu_metrics (...)` | `SELECT`, `time_bucket(...)`, range filters | Metrics, telemetry, sensor data | Native `TimeSeriesPoint` |
 | Queues & Deques | `CREATE QUEUE`, `QUEUE PUSH`, `QUEUE READ`, `QUEUE ACK` | Queue commands and consumer-group flow | Job queues, retries, DLQ, work distribution | Native `QueueMessage` |
 | Events | `WITH EVENTS`, `ALTER TABLE ... ADD SUBSCRIPTION` | Queue reads over event payloads | CDC, audit, cache invalidation, downstream sync | Event envelope stored as queue messages |
@@ -168,11 +168,11 @@ Use this as the fast decision tree:
 - Need arbitrary cached bytes, rich TTL, and explicit invalidation: use **Cache**.
 - Need relationships, traversals, or graph analytics: use **Graphs**.
 - Need embedding similarity or semantic retrieval: use **Vectors**.
-- Need Prometheus/Grafana-compatible operational telemetry: use **Metrics**.
+- Need Prometheus/Grafana-compatible operational telemetry: use **Metrics**; this is separate from the Analytics v0 descriptor catalog.
 - Need timestamp-first metrics with retention and downsampling: use **Time-Series**.
 - Need automatic chunk partitioning + `drop_chunks` + partition TTL: use **Hypertables**.
 - Need pre-aggregated dashboards with incremental refresh: use **Continuous Aggregates**.
-- Need named measures, KPI/SLI roles, or SLO objectives over existing data: use **Analytics v0**.
+- Need named measures, KPI/SLI roles, or SLO objectives over existing data: use **Analytics v0** metric descriptors.
 - Need job processing, retries, DLQ, or consumer groups: use **Queues & Deques**.
 - Need approximate counting or membership at low memory cost: use **Probabilistic Structures**.
 
