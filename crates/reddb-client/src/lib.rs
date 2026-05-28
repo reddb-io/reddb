@@ -520,6 +520,51 @@ impl<'a> QueueClient<'a> {
             deleted: result.affected > 0,
         })
     }
+
+    /// `QUEUE READ … WAIT <wait>` — block until a message is available
+    /// for `consumer` on `queue` (optionally scoped to `group`), the
+    /// `wait` budget elapses, or the server cancels.
+    ///
+    /// Timeout returns an empty `ListResult` — the same shape an empty
+    /// non-waiting read would produce — never an error. Cancellation
+    /// and cap rejection surface as `ClientError`s from the underlying
+    /// transport (PRD #718 slice C). `wait` must be specified — there
+    /// is no infinite-wait default.
+    pub async fn read_wait(
+        &self,
+        queue: &str,
+        consumer: &str,
+        wait: std::time::Duration,
+        opts: QueueReadWaitOptions<'_>,
+    ) -> Result<ListResult> {
+        let queue = sql_identifier(queue)?;
+        let consumer = sql_identifier(consumer)?;
+        let group = match opts.group {
+            Some(g) => format!(" GROUP {}", sql_identifier(g)?),
+            None => String::new(),
+        };
+        let count = match opts.count {
+            Some(c) => format!(" COUNT {c}"),
+            None => String::new(),
+        };
+        let wait_ms = wait.as_millis() as u64;
+        let sql = format!("QUEUE READ {queue}{group} CONSUMER {consumer}{count} WAIT {wait_ms}ms");
+        let result = self.db.query(&sql).await?;
+        Ok(ListResult {
+            affected: result.affected,
+            items: result.rows,
+        })
+    }
+}
+
+/// Optional knobs for [`QueueClient::read_wait`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct QueueReadWaitOptions<'a> {
+    /// Consumer group. When `None`, the server uses the queue's
+    /// default fan-out group.
+    pub group: Option<&'a str>,
+    /// Maximum number of messages to deliver. Defaults to 1 server-side.
+    pub count: Option<u32>,
 }
 
 #[derive(Debug)]

@@ -61,6 +61,49 @@ test('queue len normalizes scalar result and purge returns query result', async 
   ])
 })
 
+test('queue readWait builds QUEUE READ … WAIT SQL and returns payloads', async () => {
+  const { queue, calls } = fakeQueue((_, params) => {
+    if (params.sql.endsWith('WAIT 0ms')) return { rows: [] }
+    return { rows: [{ payload: 'x' }] }
+  })
+
+  // Timeout returns empty list (same shape as an empty pop).
+  assert.deepEqual(
+    await queue.readWait('jobs', 'worker1', { waitMs: 0 }),
+    [],
+  )
+  // Available message returns payloads.
+  assert.deepEqual(
+    await queue.readWait('jobs', 'worker1', { waitMs: 30000 }),
+    ['x'],
+  )
+  // GROUP + COUNT both flow into the SQL.
+  await queue.readWait('jobs', 'worker1', { waitMs: 5000, group: 'g', count: 4 })
+
+  assert.deepEqual(calls.map((c) => c.params.sql), [
+    'QUEUE READ jobs CONSUMER worker1 WAIT 0ms',
+    'QUEUE READ jobs CONSUMER worker1 WAIT 30000ms',
+    'QUEUE READ jobs GROUP g CONSUMER worker1 COUNT 4 WAIT 5000ms',
+  ])
+})
+
+test('queue readWait requires explicit non-negative integer waitMs', async () => {
+  const { queue, calls } = fakeQueue()
+  await assert.rejects(
+    () => queue.readWait('jobs', 'w', {}),
+    (err) => err instanceof RedDBError && err.code === 'INVALID_QUEUE_WAIT',
+  )
+  await assert.rejects(
+    () => queue.readWait('jobs', 'w', { waitMs: -1 }),
+    (err) => err instanceof RedDBError && err.code === 'INVALID_QUEUE_WAIT',
+  )
+  await assert.rejects(
+    () => queue.readWait('jobs', 'w', { waitMs: 1.5 }),
+    (err) => err instanceof RedDBError && err.code === 'INVALID_QUEUE_WAIT',
+  )
+  assert.equal(calls.length, 0)
+})
+
 test('queue rejects invalid names counts and priorities before query', async () => {
   const { queue, calls } = fakeQueue()
   assert.throws(() => queue.push('bad-name', 'x'), (err) => {
