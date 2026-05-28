@@ -266,6 +266,11 @@ pub struct RedDBServer {
     /// dropped on return so any stream-end path (success / mid-stream
     /// error / snapshot expiry / panic unwind) releases the slot.
     pub(crate) stream_capacity: Arc<output_stream::StreamCapacityRegistry>,
+    /// Issue #766 / S7 — resume coordinator ledger. Tracks
+    /// `(snapshot_lsn → opened_at_ms, ttl_ms)` for resume-eligibility
+    /// checks. Shared via `Arc` so cloned server handles see one
+    /// ledger.
+    pub(crate) lease_registry: Arc<output_stream::LeaseRegistry>,
 }
 
 /// Default per-handler total-time budget (issue #571 slice 2).
@@ -373,12 +378,18 @@ impl RedDBServer {
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
             reject_503_bytes: Arc::new(build_reject_503_bytes(DEFAULT_RETRY_AFTER_SECS)),
             stream_capacity: output_stream::StreamCapacityRegistry::new(),
+            lease_registry: output_stream::LeaseRegistry::new(),
         }
     }
 
     #[doc(hidden)]
     pub fn stream_capacity(&self) -> &Arc<output_stream::StreamCapacityRegistry> {
         &self.stream_capacity
+    }
+
+    #[doc(hidden)]
+    pub fn lease_registry(&self) -> &Arc<output_stream::LeaseRegistry> {
+        &self.lease_registry
     }
 
     #[doc(hidden)]

@@ -404,7 +404,8 @@ impl RedDBServer {
         writer: &mut W,
     ) -> io::Result<()> {
         use crate::server::output_stream::{
-            self, ChunkProducer, Clock, OpenStreamError, StreamConfig, SystemClock,
+            self, ChunkProducer, Clock, LeaseLookup, OpenStreamError, PrefixHasher, StreamConfig,
+            SystemClock,
         };
 
         let request = match extract_query_request(&body) {
@@ -420,6 +421,13 @@ impl RedDBServer {
             capabilities,
             ..
         } = request;
+
+        // Issue #766 / S7 — resume coordinator. Parse the optional
+        // `resume` block from the body. When present, the request is
+        // a resumption of a prior stream: the server must validate
+        // resumability, lease freshness, and prefix-hash agreement
+        // before delivering any rows.
+        let resume_params = parse_resume_params(&body);
 
         // Acceptance criterion #4 — refuse OpenStream when a `BEGIN`
         // is active on the session. HTTP currently runs with the
@@ -437,12 +445,15 @@ impl RedDBServer {
 
         let clock = SystemClock;
         let config = StreamConfig::load(&self.runtime);
-        // Snapshot pin (shim slice): record the current CDC LSN at
-        // OpenStream — bound to the lease for audit / future MVCC
-        // pull-based scans. Materialising executors do not consult it
-        // yet; later slices (PRD #759 phase 3) replace this with a
-        // real `Snapshot::sees(xid)` pin.
-        let snapshot_lsn = self.runtime.cdc_current_lsn();
+        let resumable = output_stream::assess_resumability(&query);
+
+        // For a resume request, the snapshot_lsn comes from the client
+        // (the original OpenAck); for a fresh open we capture
+        // `cdc_current_lsn()` exactly as before.
+        let snapshot_lsn = resume_params
+            .as_ref()
+            .map(|r| r.snapshot_lsn)
+            .unwrap_or_else(|| self.runtime.cdc_current_lsn());
         let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
             .expect("OpenStream succeeds once the in-transaction gate has passed");
 
@@ -451,49 +462,176 @@ impl RedDBServer {
         let mut producer = ChunkProducer::new(&config, &clock);
         let mut row_count: u64 = 0;
         let mut stream_error: Option<(String, String)> = None;
-
-        let exec = self.query_use_cases().execute(ExecuteQueryInput {
-            query: query.clone(),
-        });
+        // Resume requests defer registry record until after validation;
+        // fresh opens record immediately so a subsequent resume can find
+        // them.
+        if resume_params.is_none() {
+            self.lease_registry
+                .record(snapshot_lsn, lease.opened_at_ms, config.snapshot_ttl_ms);
+        }
 
         {
-            // `flush` owns the writer mutably for the duration of this
-            // scope; we drop the closure before writing the chunked
-            // terminator at the end.
             let mut flush = |bytes: &[u8]| -> io::Result<()> {
                 crate::server::output_stream::write_chunk(writer, bytes)
             };
 
-            match exec {
-                Ok(result) => {
-                    let records = crate::presentation::query_view::filter_query_records(
-                        &result.result.records,
-                        &entity_types,
-                        &capabilities,
-                    );
-                    let columns = &result.result.columns;
-                    for record in &records {
-                        if lease.snapshot_expired(clock.now_ms()) {
+            // Issue #766 — every stream opens with an `open_ack`
+            // envelope so the client learns `lease_id`, `snapshot_lsn`,
+            // and `resumable` before any rows arrive.
+            {
+                let mut envelope = crate::json::Map::new();
+                let mut payload = crate::json::Map::new();
+                payload.insert(
+                    "lease_id".to_string(),
+                    crate::json::Value::Number(lease.id as f64),
+                );
+                payload.insert(
+                    "snapshot_lsn".to_string(),
+                    crate::json::Value::Number(lease.snapshot_lsn as f64),
+                );
+                payload.insert("resumable".to_string(), crate::json::Value::Bool(resumable));
+                envelope.insert("open_ack".to_string(), crate::json::Value::Object(payload));
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            }
+
+            // Validate resume preconditions before re-executing.
+            if let Some(rp) = resume_params.as_ref() {
+                if !resumable {
+                    stream_error = Some((
+                        "not_resumable".to_string(),
+                        "query plan is not resumable".to_string(),
+                    ));
+                } else {
+                    match self.lease_registry.lookup(rp.snapshot_lsn, clock.now_ms()) {
+                        LeaseLookup::Expired | LeaseLookup::Unknown => {
                             stream_error = Some((
                                 "snapshot_expired".to_string(),
                                 "stream snapshot pin TTL elapsed".to_string(),
                             ));
-                            break;
                         }
-                        let values = crate::presentation::query_result_json::unified_record_json(
-                            record, columns,
-                        );
-                        let mut wrapper = crate::json::Map::new();
-                        wrapper.insert("row".to_string(), values);
-                        let mut line = crate::json::Value::Object(wrapper).to_string_compact();
-                        line.push('\n');
-                        producer.push_line(line.as_bytes(), &mut flush)?;
-                        row_count += 1;
+                        LeaseLookup::Live => {}
                     }
                 }
-                Err(err) => {
-                    let (_status, message) = map_runtime_error(&err);
-                    stream_error = Some((ndjson_error_code(&err).to_string(), message));
+            }
+
+            let mut prefix_hash_emit = PrefixHasher::new();
+
+            if stream_error.is_none() {
+                let exec = self.query_use_cases().execute(ExecuteQueryInput {
+                    query: query.clone(),
+                });
+                match exec {
+                    Ok(result) => {
+                        let mut records = crate::presentation::query_view::filter_query_records(
+                            &result.result.records,
+                            &entity_types,
+                            &capabilities,
+                        );
+                        let columns = &result.result.columns;
+
+                        // For resumable plans, force RID ASC order so
+                        // both the original stream and any resume re-
+                        // execution produce rows in the same sequence.
+                        if resumable {
+                            records.sort_by_key(|r| record_rid(r).unwrap_or(u64::MAX));
+                        }
+
+                        if let Some(rp) = resume_params.as_ref() {
+                            // Resume path — hash the prefix up to and
+                            // including `resume_after_rid`, compare with
+                            // the client's hash, then emit rows whose
+                            // rid > resume_after_rid.
+                            let mut prefix_hash_check = PrefixHasher::new();
+                            let mut crossed = false;
+                            let mut hash_mismatch = false;
+                            for record in &records {
+                                let rid = record_rid(record).unwrap_or(0);
+                                let values =
+                                    crate::presentation::query_result_json::unified_record_json(
+                                        record, columns,
+                                    );
+                                let mut wrapper = crate::json::Map::new();
+                                wrapper.insert("row".to_string(), values);
+                                let line = crate::json::Value::Object(wrapper).to_string_compact();
+                                if !crossed && rid <= rp.resume_after_rid {
+                                    prefix_hash_check.update(line.as_bytes());
+                                    continue;
+                                }
+                                if !crossed {
+                                    // First row past the boundary —
+                                    // finalize and compare hashes.
+                                    let computed = std::mem::replace(
+                                        &mut prefix_hash_check,
+                                        PrefixHasher::new(),
+                                    )
+                                    .finalize_hex();
+                                    if !constant_time_str_eq(&computed, &rp.prefix_hash) {
+                                        hash_mismatch = true;
+                                        break;
+                                    }
+                                    crossed = true;
+                                }
+                                let mut line_nl = line;
+                                line_nl.push('\n');
+                                producer.push_line(line_nl.as_bytes(), &mut flush)?;
+                                prefix_hash_emit.update(line_nl.trim_end().as_bytes());
+                                row_count += 1;
+                            }
+                            if hash_mismatch {
+                                row_count = 0;
+                                stream_error = Some((
+                                    "prefix_hash_mismatch".to_string(),
+                                    "client prefix_hash does not match server re-execution"
+                                        .to_string(),
+                                ));
+                            } else if !crossed {
+                                // Whole result was inside the prefix —
+                                // validate hash anyway so a bogus
+                                // resume_after_rid past the end still
+                                // catches divergence.
+                                let computed = prefix_hash_check.finalize_hex();
+                                if !constant_time_str_eq(&computed, &rp.prefix_hash) {
+                                    row_count = 0;
+                                    stream_error = Some((
+                                        "prefix_hash_mismatch".to_string(),
+                                        "client prefix_hash does not match server re-execution"
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            // Fresh open — emit every row, hashing as
+                            // we go so the `end` envelope can carry
+                            // `prefix_hash` for future resume.
+                            for record in &records {
+                                if lease.snapshot_expired(clock.now_ms()) {
+                                    stream_error = Some((
+                                        "snapshot_expired".to_string(),
+                                        "stream snapshot pin TTL elapsed".to_string(),
+                                    ));
+                                    break;
+                                }
+                                let values =
+                                    crate::presentation::query_result_json::unified_record_json(
+                                        record, columns,
+                                    );
+                                let mut wrapper = crate::json::Map::new();
+                                wrapper.insert("row".to_string(), values);
+                                let line = crate::json::Value::Object(wrapper).to_string_compact();
+                                prefix_hash_emit.update(line.as_bytes());
+                                let mut line_nl = line;
+                                line_nl.push('\n');
+                                producer.push_line(line_nl.as_bytes(), &mut flush)?;
+                                row_count += 1;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let (_status, message) = map_runtime_error(&err);
+                        stream_error = Some((ndjson_error_code(&err).to_string(), message));
+                    }
                 }
             }
 
@@ -511,9 +649,9 @@ impl RedDBServer {
                 producer.push_line(line.as_bytes(), &mut flush)?;
             }
 
-            // Terminal envelope. Always emitted — including after an
-            // error — so the client can stop reading on `{"end":…}`
-            // rather than on EOF.
+            // Terminal envelope. `prefix_hash` covers the rows actually
+            // emitted in this stream (so a fresh open ships the hash of
+            // its full result; a resume ships the hash of its suffix).
             let mut envelope = crate::json::Map::new();
             let mut payload = crate::json::Map::new();
             payload.insert(
@@ -527,6 +665,10 @@ impl RedDBServer {
             payload.insert(
                 "snapshot_lsn".to_string(),
                 crate::json::Value::Number(lease.snapshot_lsn as f64),
+            );
+            payload.insert(
+                "prefix_hash".to_string(),
+                crate::json::Value::String(prefix_hash_emit.finalize_hex()),
             );
             envelope.insert("end".to_string(), crate::json::Value::Object(payload));
             let mut line = crate::json::Value::Object(envelope).to_string_compact();
@@ -828,6 +970,65 @@ impl RedDBServer {
         }
         Ok(())
     }
+}
+
+/// Issue #766 / S7 — resume parameters parsed off the optional
+/// `resume` block on the request body.
+#[derive(Debug, Clone)]
+pub(crate) struct ResumeParams {
+    pub snapshot_lsn: u64,
+    pub resume_after_rid: u64,
+    pub prefix_hash: String,
+}
+
+/// Re-parse the request body to surface the optional `resume` block.
+/// Returns `None` for any shape that is not a JSON object with a
+/// well-formed `resume` field — the resume contract is opt-in and a
+/// missing/invalid block must not break the legacy non-resuming open.
+pub(crate) fn parse_resume_params(body: &[u8]) -> Option<ResumeParams> {
+    let text = std::str::from_utf8(body).ok()?;
+    let parsed = crate::json::parse_json(text.trim()).ok()?;
+    let json = crate::json::Value::from(parsed);
+    let resume = json.get("resume")?;
+    let snapshot_lsn = resume.get("snapshot_lsn").and_then(|v| v.as_u64())?;
+    let resume_after_rid = resume.get("resume_after_rid").and_then(|v| v.as_u64())?;
+    let prefix_hash = resume
+        .get("prefix_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)?;
+    Some(ResumeParams {
+        snapshot_lsn,
+        resume_after_rid,
+        prefix_hash,
+    })
+}
+
+/// Extract a record's internal `rid` value as `u64`, if present.
+/// Returns `None` for records without a `rid` field (the resume path
+/// treats these as ineligible — the resumable assessor refuses queries
+/// where this would happen).
+pub(crate) fn record_rid(record: &crate::storage::query::unified::UnifiedRecord) -> Option<u64> {
+    use crate::storage::schema::types::Value;
+    match record.get("rid")? {
+        Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        Value::UnsignedInteger(v) => Some(*v),
+        _ => None,
+    }
+}
+
+/// Constant-time string equality for the prefix-hash compare. Both
+/// inputs are user-controlled hex digests so a timing side-channel is
+/// of limited cryptographic interest, but consistency with the rest
+/// of the auth-adjacent code path is the cheaper default.
+pub(crate) fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.as_bytes().iter().zip(b.as_bytes().iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Issue #760 — map a runtime error to a stable NDJSON error code so
