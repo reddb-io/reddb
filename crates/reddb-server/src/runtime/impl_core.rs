@@ -2711,6 +2711,8 @@ impl RedDBRuntime {
                 kv_tag_index: crate::runtime::KvTagIndex::default(),
                 chain_tip_cache: parking_lot::Mutex::new(HashMap::new()),
                 chain_integrity_broken: parking_lot::Mutex::new(HashMap::new()),
+                integrity_tombstones: parking_lot::Mutex::new(Vec::new()),
+                integrity_tombstones_state: std::sync::atomic::AtomicU8::new(0),
             }),
         };
 
@@ -5504,7 +5506,16 @@ impl RedDBRuntime {
     /// cost on below-threshold paths is one relaxed atomic load.
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
-        let result = self.execute_query_inner(query);
+        let mut result = self.execute_query_inner(query);
+        // Issue #765 / S6 — filter integrity-tombstoned rows out of SELECT
+        // results before they reach any consumer. Fast no-op (one relaxed
+        // atomic load) unless an input-stream digest mismatch has tombstoned
+        // a RID range on this store.
+        if let Ok(ref mut query_result) = result {
+            if query_result.statement_type == "select" {
+                self.filter_integrity_tombstoned(&mut query_result.result);
+            }
+        }
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         // Build EffectiveScope from the same thread-locals frame-build
