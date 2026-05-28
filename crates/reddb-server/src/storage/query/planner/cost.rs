@@ -316,6 +316,7 @@ impl CostEstimator {
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::CreateMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)
@@ -403,6 +404,7 @@ impl CostEstimator {
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::CreateMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)

@@ -2,18 +2,18 @@ use crate::catalog::CollectionModel;
 use crate::storage::query::ast::{
     AlterQueueQuery, AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp,
     CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateCollectionQuery,
-    CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery, CreatePolicyQuery,
-    CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery, CreateTableQuery,
-    CreateTimeSeriesQuery, CreateTreeQuery, CreateVectorQuery, CreateViewQuery, DeleteQuery,
-    DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery,
-    DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
-    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery,
-    DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef,
-    Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
-    JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand,
-    QueryExpr, QueueCommand, QueueSelectQuery, RefreshMaterializedViewQuery, RevokeStmt,
-    RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery,
-    TxnControl, UpdateQuery, VectorQuery,
+    CreateForeignTableQuery, CreateIndexQuery, CreateMetricQuery, CreateMigrationQuery,
+    CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
+    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateVectorQuery, CreateViewQuery,
+    DeleteQuery, DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery, DropGraphQuery,
+    DropIndexQuery, DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
+    DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery,
+    DropVectorQuery, DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery,
+    Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery,
+    InsertQuery, JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction,
+    ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RefreshMaterializedViewQuery,
+    RevokeStmt, RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand,
+    TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::sql_lowering::filter_to_expr;
@@ -75,6 +75,7 @@ pub enum SqlCommand {
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
     CreateTimeSeries(CreateTimeSeriesQuery),
+    CreateMetric(CreateMetricQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     AlterQueue(AlterQueueQuery),
@@ -192,6 +193,7 @@ pub enum SqlSchemaCommand {
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
     CreateTimeSeries(CreateTimeSeriesQuery),
+    CreateMetric(CreateMetricQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     AlterQueue(AlterQueueQuery),
@@ -285,6 +287,9 @@ impl SqlStatement {
             }
             SqlStatement::Schema(SqlSchemaCommand::CreateTimeSeries(query)) => {
                 SqlCommand::CreateTimeSeries(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateMetric(query)) => {
+                SqlCommand::CreateMetric(query)
             }
             SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query)) => {
                 SqlCommand::DropTimeSeries(query)
@@ -438,6 +443,7 @@ impl SqlCommand {
             SqlCommand::CreateIndex(query) => QueryExpr::CreateIndex(query),
             SqlCommand::DropIndex(query) => QueryExpr::DropIndex(query),
             SqlCommand::CreateTimeSeries(query) => QueryExpr::CreateTimeSeries(query),
+            SqlCommand::CreateMetric(query) => QueryExpr::CreateMetric(query),
             SqlCommand::DropTimeSeries(query) => QueryExpr::DropTimeSeries(query),
             SqlCommand::CreateQueue(query) => QueryExpr::CreateQueue(query),
             SqlCommand::AlterQueue(query) => QueryExpr::AlterQueue(query),
@@ -526,6 +532,9 @@ impl SqlCommand {
             }
             SqlCommand::CreateTimeSeries(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::CreateTimeSeries(query))
+            }
+            SqlCommand::CreateMetric(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateMetric(query))
             }
             SqlCommand::DropTimeSeries(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query))
@@ -1393,6 +1402,15 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             }
+        } else if self.check(&Token::Metric) {
+            self.advance()?;
+            match self.parse_create_metric_body()? {
+                QueryExpr::CreateMetric(query) => Ok(SqlCommand::CreateMetric(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE METRIC produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
         } else if self.consume_ident_ci("METRICS")? {
             match self.parse_create_metrics_body()? {
                 QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
@@ -1655,6 +1673,7 @@ impl<'a> Parser<'a> {
                     "COLLECTION",
                     "INDEX",
                     "UNIQUE",
+                    "METRIC",
                     "TIMESERIES",
                     "QUEUE",
                     "TREE",
