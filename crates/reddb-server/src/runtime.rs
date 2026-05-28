@@ -1276,6 +1276,7 @@ pub mod lease_loop;
 pub mod lease_timer_wheel;
 pub mod lifecycle;
 pub mod locking;
+pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
