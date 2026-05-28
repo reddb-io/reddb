@@ -6,6 +6,7 @@ In the Analytics v0 ontology, probabilistic structures are approximate
 execution sidecars. They can help implement metrics such as unique users,
 frequency estimates, or membership checks, but they are not source-of-truth
 metric storage and they do not replace the metric catalog.
+They are execution primitives and sidecars, not the Analytics product API.
 
 ## Overview
 
