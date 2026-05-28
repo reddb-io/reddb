@@ -112,7 +112,7 @@ pub fn legacy_rbac_decision(role: Role, action: &str) -> bool {
 fn required_role_for_action(action: &str) -> Role {
     // The two distinct reads in the DML category. Everything else in
     // the DML category mutates data and demands Write.
-    if action == "select" {
+    if action == "select" || action == "queue:peek" || action == "queue:presence:read" {
         return Role::Read;
     }
     match lookup(action) {
@@ -122,6 +122,7 @@ fn required_role_for_action(action: &str) -> Role {
             ActionCategory::Ai => Role::Read,
             ActionCategory::Notification => Role::Write,
             ActionCategory::Stream => Role::Write,
+            ActionCategory::Queue => Role::Write,
             ActionCategory::Ddl
             | ActionCategory::Function
             | ActionCategory::Mgmt
