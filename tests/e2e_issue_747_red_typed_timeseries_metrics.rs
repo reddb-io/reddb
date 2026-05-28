@@ -29,7 +29,11 @@ use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::RedDBOptions;
 
-const TIMESERIES_COLUMNS: [&str; 16] = [
+// Issue #748 extends the #747 column set with four maintenance
+// indicators (downsample_policies, continuous_aggregate_count,
+// continuous_aggregate_names, last_sweep_ms). Asserting them here
+// keeps the chart-toolbar contract aligned with the schema.
+const TIMESERIES_COLUMNS: [&str; 20] = [
     "name",
     "schema_mode",
     "is_hypertable",
@@ -46,6 +50,10 @@ const TIMESERIES_COLUMNS: [&str; 16] = [
     "on_disk_bytes",
     "tenant_id",
     "internal",
+    "downsample_policies",
+    "continuous_aggregate_count",
+    "continuous_aggregate_names",
+    "last_sweep_ms",
 ];
 
 const METRICS_COLUMNS: [&str; 8] = [
