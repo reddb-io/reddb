@@ -179,6 +179,26 @@ impl RedDBRuntime {
             "create",
         ))
     }
+
+    fn execute_create_analytics_source(
+        &self,
+        raw_query: &str,
+        query: super::analytics_source_catalog::CreateAnalyticsSourceProfile,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let store = self.inner.db.store();
+        let profile = super::analytics_source_catalog::create(
+            store.as_ref(),
+            &self.inner.db.collection_contracts(),
+            query,
+        )?;
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("analytics source '{}' created", profile.name),
+            "create",
+        ))
+    }
 }
 
 fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
@@ -5538,6 +5558,11 @@ impl RedDBRuntime {
             return Err(RedDBError::Query(
                 super::red_schema::READ_ONLY_ERROR.to_string(),
             ));
+        }
+
+        if let Some(create_source) = super::analytics_source_catalog::parse_create_statement(query)?
+        {
+            return self.execute_create_analytics_source(query, create_source);
         }
 
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
