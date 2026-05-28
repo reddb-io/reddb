@@ -1185,6 +1185,13 @@ struct RuntimeInner {
     /// lifecycle (delivered/acked/nacked) rendered onto `/metrics`.
     /// Process-local; counters reset on restart by design.
     queue_telemetry: std::sync::Arc<queue_telemetry::QueueTelemetryCounters>,
+    /// Issue #742 — consumer presence (heartbeat / lease / lifecycle
+    /// state per (queue, group, consumer)). Process-local in this
+    /// slice; durability across restart lands in the follow-up that
+    /// mirrors the registry into `red_queue_meta` rows. Independent
+    /// of pending-delivery state by design — see
+    /// `storage::queue::presence` for the contract.
+    queue_presence: std::sync::Arc<crate::storage::queue::presence::ConsumerPresenceRegistry>,
     /// Slice C of PRD #718 — local wait registry for `QUEUE READ … WAIT`.
     /// Producer commits notify; readers park here until wake-or-timeout
     /// or until `cancel_all` is invoked at shutdown.

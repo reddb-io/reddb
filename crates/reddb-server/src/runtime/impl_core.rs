@@ -2591,6 +2591,9 @@ impl RedDBRuntime {
                 queue_telemetry: Arc::new(
                     crate::runtime::queue_telemetry::QueueTelemetryCounters::default(),
                 ),
+                queue_presence: Arc::new(
+                    crate::storage::queue::presence::ConsumerPresenceRegistry::new(),
+                ),
                 kv_tag_index: crate::runtime::KvTagIndex::default(),
                 chain_tip_cache: parking_lot::Mutex::new(HashMap::new()),
                 chain_integrity_broken: parking_lot::Mutex::new(HashMap::new()),
@@ -3715,6 +3718,47 @@ impl RedDBRuntime {
             wait_cancelled: self.inner.queue_telemetry.wait_cancelled_snapshot(),
             wait_duration: self.inner.queue_telemetry.wait_duration_snapshot(),
         }
+    }
+
+    /// Issue #742 — consumer presence registry. Heartbeats land here
+    /// from `QUEUE READ` (and, in a follow-up slice, an explicit
+    /// `QUEUE HEARTBEAT` command); Red UI and `red.queue_consumers`
+    /// read snapshots through `queue_consumer_presence_snapshot`.
+    pub(crate) fn queue_presence(
+        &self,
+    ) -> &std::sync::Arc<crate::storage::queue::presence::ConsumerPresenceRegistry> {
+        &self.inner.queue_presence
+    }
+
+    /// Issue #742 — point-in-time presence snapshot, classifying each
+    /// `(queue, group, consumer)` as active/stale/expired against the
+    /// supplied TTL. Wall-clock is read once here so the lifecycle
+    /// flags inside the snapshot are internally consistent.
+    pub fn queue_consumer_presence_snapshot(
+        &self,
+        ttl_ms: u64,
+    ) -> Vec<crate::storage::queue::presence::ConsumerPresence> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        self.inner.queue_presence.snapshot(now_ns, ttl_ms)
+    }
+
+    /// Issue #742 — active-consumer count per `(queue, group)` for the
+    /// queue-metadata surface. Stale/expired entries are excluded by
+    /// definition; they are still visible in the per-row snapshot.
+    pub fn queue_active_consumer_counts(
+        &self,
+        ttl_ms: u64,
+    ) -> std::collections::HashMap<(String, String), u32> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        self.inner
+            .queue_presence
+            .count_active_by_group(now_ns, ttl_ms)
     }
 
     /// Slice 10 of issue #527 — render-time scan of pending entries
