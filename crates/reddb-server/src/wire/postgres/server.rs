@@ -61,6 +61,33 @@ impl Default for PgWireConfig {
     }
 }
 
+/// Run a synchronous, possibly long-parking runtime call without
+/// monopolising the async worker thread.
+///
+/// `QUEUE READ … WAIT <budget>` parks the calling thread on a condvar
+/// for up to the wait budget. Doing that directly on a tokio worker
+/// holds the worker for the whole budget, which serialises every other
+/// connection's query behind the parked waiter — a producer's
+/// `QUEUE PUSH` could not run to notify the waiter, so an enqueue during
+/// a WAIT would never be delivered — and it stalls the runtime's timer
+/// driver. `block_in_place` hands the remaining tasks on this worker to
+/// a sibling worker for the duration while keeping the current OS thread
+/// — and therefore the per-connection thread-locals `execute_query`
+/// relies on (current tenant, connection id, transaction context) —
+/// intact, which `spawn_blocking` would not.
+///
+/// `block_in_place` panics on a current-thread runtime, so we fall back
+/// to a direct call there: a single-threaded runtime has no sibling
+/// worker to hand work to and nothing else to starve (e.g. the
+/// `#[tokio::test]` harnesses that drive one connection at a time).
+fn run_runtime_blocking<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 /// Spawn the PG wire listener. Blocks until the listener errors out.
 /// Each connection is handled in its own tokio task.
 pub async fn start_pg_wire_listener(
@@ -465,7 +492,9 @@ fn execute_pg_query_result(
                 affected_rows: 0,
                 statement_type: "select",
             }),
-            Ok(None) => runtime.execute_query(sql).map_err(|err| err.to_string()),
+            Ok(None) => {
+                run_runtime_blocking(|| runtime.execute_query(sql)).map_err(|err| err.to_string())
+            }
             Err(err) => Err(err.to_string()),
         };
     }
@@ -473,9 +502,7 @@ fn execute_pg_query_result(
     let parsed = crate::storage::query::modes::parse_multi(sql).map_err(|err| err.to_string())?;
     let bound =
         crate::storage::query::user_params::bind(&parsed, params).map_err(|err| err.to_string())?;
-    runtime
-        .execute_query_expr(bound)
-        .map_err(|err| err.to_string())
+    run_runtime_blocking(|| runtime.execute_query_expr(bound)).map_err(|err| err.to_string())
 }
 
 fn try_execute_pg_scalar_select(
@@ -731,7 +758,7 @@ where
             affected_rows: 0,
             statement_type: "select",
         }),
-        Ok(None) => runtime.execute_query(sql),
+        Ok(None) => run_runtime_blocking(|| runtime.execute_query(sql)),
         Err(err) => Err(err),
     };
 
