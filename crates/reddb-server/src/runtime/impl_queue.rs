@@ -960,6 +960,24 @@ impl RedDBRuntime {
                 let delivered = self
                     .group_read_with_optional_wait(queue, group_ref, consumer, *count, *wait_ms)?;
 
+                // Issue #742 — record consumer presence on every read,
+                // including empty returns. Heartbeat-driven aliveness
+                // is the contract; pending deliveries don't define it.
+                {
+                    let lease_count = u32::try_from(delivered.len()).unwrap_or(u32::MAX);
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    self.queue_presence().heartbeat(
+                        queue,
+                        group_ref,
+                        consumer,
+                        lease_count,
+                        now_ns,
+                    );
+                }
+
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
                     "payload".into(),
@@ -2843,5 +2861,67 @@ fn estimate_payload_bytes(payload: &Value) -> u64 {
         Value::Json(v) => v.len() as u64,
         Value::Text(s) => s.len() as u64,
         _ => 64,
+    }
+}
+
+#[cfg(test)]
+mod presence_integration_tests {
+    use super::*;
+    use crate::storage::queue::presence::{PresenceState, DEFAULT_PRESENCE_TTL_MS};
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    /// Issue #742 acceptance: `QUEUE READ` must register and refresh
+    /// consumer presence. The snapshot exposes the same `(queue, group,
+    /// consumer)` triple the read named, with `state = Active`.
+    #[test]
+    fn queue_read_emits_consumer_presence_heartbeat() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE QUEUE tasks").unwrap();
+        rt.execute_query("QUEUE GROUP CREATE tasks workers")
+            .unwrap();
+        rt.execute_query("QUEUE PUSH tasks {'job':'a'}").unwrap();
+        rt.execute_query("QUEUE READ tasks GROUP workers CONSUMER w1")
+            .unwrap();
+
+        let snap = rt.queue_consumer_presence_snapshot(DEFAULT_PRESENCE_TTL_MS);
+        assert_eq!(snap.len(), 1, "exactly one heartbeat recorded");
+        let row = &snap[0];
+        assert_eq!(row.queue, "tasks");
+        assert_eq!(row.group, "workers");
+        assert_eq!(row.consumer, "w1");
+        assert_eq!(row.state, PresenceState::Active);
+
+        let counts = rt.queue_active_consumer_counts(DEFAULT_PRESENCE_TTL_MS);
+        assert_eq!(
+            counts[&("tasks".to_string(), "workers".to_string())],
+            1,
+            "active count reflects the live consumer"
+        );
+    }
+
+    /// Issue #742 acceptance: a read that returns no messages must
+    /// still heartbeat — aliveness is independent of pending
+    /// deliveries.
+    #[test]
+    fn empty_queue_read_still_heartbeats() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE QUEUE empty_q").unwrap();
+        rt.execute_query("QUEUE GROUP CREATE empty_q workers")
+            .unwrap();
+        // No PUSH — the queue is empty.
+        rt.execute_query("QUEUE READ empty_q GROUP workers CONSUMER w1")
+            .unwrap();
+
+        let snap = rt.queue_consumer_presence_snapshot(DEFAULT_PRESENCE_TTL_MS);
+        assert_eq!(
+            snap.len(),
+            1,
+            "empty read still registers consumer presence"
+        );
+        assert_eq!(snap[0].state, PresenceState::Active);
+        assert_eq!(
+            snap[0].lease_count, 0,
+            "no messages delivered → zero leases"
+        );
     }
 }
