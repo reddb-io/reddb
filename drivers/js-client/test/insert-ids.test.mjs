@@ -20,6 +20,7 @@ test('insert returns required id and preserves remote affected shim', async () =
   assert.deepEqual(await db.insert('users', { name: 'Ada' }), {
     affected: 1,
     id: 42,
+    rid: 42,
     entity: { id: 42 },
   })
   assert.deepEqual(calls[0], {
@@ -31,7 +32,7 @@ test('insert returns required id and preserves remote affected shim', async () =
 test('bulkInsert returns ordered ids', async () => {
   const { db } = fakeDb(() => ({ affected: 2, ids: [101, 102] }))
   const result = await db.bulkInsert('users', [{ name: 'Ada' }, { name: 'Grace' }])
-  assert.deepEqual(result, { affected: 2, ids: [101, 102] })
+  assert.deepEqual(result, { affected: 2, ids: [101, 102], rids: [101, 102] })
 })
 
 test('missing insert ids surface ENGINE_TOO_OLD', async () => {
