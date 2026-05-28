@@ -752,6 +752,19 @@ pub enum RedDBError {
     /// (507 for storage, 429 for rate, 504 for duration, 413 for
     /// payload).
     QuotaExceeded(String),
+    /// Issue #769 (PRD #759 / S10) — an aggregating executor
+    /// (`aggregation`, `sort`, `window`) exceeded
+    /// `stream.executor.max_materialized_rows` in its in-memory state.
+    /// Carries the executor that fired, the configured ceiling and the
+    /// live row count at the breach so the client can decide whether to
+    /// redesign the query, raise the limit, or pre-aggregate. Surfaces
+    /// as HTTP 507 with a structured `materialization_limit_exceeded`
+    /// envelope; NDJSON streams emit the same code mid-stream.
+    MaterializationLimitExceeded {
+        executor: &'static str,
+        limit: usize,
+        current: usize,
+    },
     Internal(String),
 }
 
@@ -776,6 +789,14 @@ impl fmt::Display for RedDBError {
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::VersionUnavailable => write!(f, "version information unavailable"),
             Self::QuotaExceeded(msg) => write!(f, "quota exceeded: {msg}"),
+            Self::MaterializationLimitExceeded {
+                executor,
+                limit,
+                current,
+            } => write!(
+                f,
+                "materialization limit exceeded: executor={executor} current={current} limit={limit}"
+            ),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }

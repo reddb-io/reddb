@@ -99,6 +99,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 // path. Expression-shaped sort keys run through
                 // expr_eval, bare columns through resolve_field.
                 if !query.order_by.is_empty() {
+                    // Issue #769 — the ORDER BY buffer is materialized in
+                    // full before sorting; cap it.
+                    crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
                     super::super::join_filter::sort_or_top_k_records_with_db(
                         Some(db),
                         &mut records,
@@ -941,6 +944,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Apply ORDER BY — Schwartzian transform extracts keys once (O(n))
         // instead of per-comparison (O(n log n) HashMap lookups).
         if !query.order_by.is_empty() {
+            // Issue #769 — cap the materialized sort buffer.
+            crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
             super::super::join_filter::sort_records_by_order_by_with_db(
                 Some(db),
                 &mut records,
@@ -1005,6 +1010,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
 
         if !query.order_by.is_empty() {
+            // Issue #769 — cap the materialized sort buffer.
+            crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
             super::super::join_filter::sort_or_top_k_records_with_db(
                 Some(db),
                 &mut records,
@@ -1293,6 +1300,8 @@ pub(crate) fn execute_runtime_canonical_table_node(
         "sort" | "entity_sort" | "document_sort" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if !context.query.order_by.is_empty() {
+                // Issue #769 — cap the materialized sort buffer.
+                crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
                 super::super::join_filter::sort_records_by_order_by_with_db(
                     Some(db),
                     &mut records,
@@ -1345,6 +1354,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // `project_runtime_record_with_db` then reads that column
             // back like any other field.
             crate::runtime::window_phase::apply(
+                Some(db),
                 &mut records,
                 &effective_projections,
                 Some(context.table_name),

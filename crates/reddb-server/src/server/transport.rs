@@ -279,6 +279,12 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
                 429
             }
         }
+        // Issue #769 — an aggregating executor blew its in-memory row
+        // ceiling. 507 Insufficient Storage matches the storage-quota
+        // class: the server ran out of room to hold the result, and the
+        // client's recourse (redesign / raise the limit / pre-aggregate)
+        // is the same shape as a storage cap.
+        MaterializationLimitExceeded { .. } => 507,
         Engine(_) | Catalog(_) | Io(_) | VersionUnavailable | Internal(_) => 500,
     };
     (status, msg)
@@ -366,6 +372,16 @@ mod transport_tests {
         assert_eq!(map_runtime_error(&RedDBError::Engine("x".into())).0, 500);
         assert_eq!(map_runtime_error(&RedDBError::Catalog("x".into())).0, 500);
         assert_eq!(map_runtime_error(&RedDBError::VersionUnavailable).0, 500);
+        // Issue #769 — materialization ceiling maps to 507.
+        assert_eq!(
+            map_runtime_error(&RedDBError::MaterializationLimitExceeded {
+                executor: "aggregation",
+                limit: 1_000_000,
+                current: 1_000_001,
+            })
+            .0,
+            507
+        );
     }
 
     #[test]
