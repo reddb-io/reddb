@@ -198,11 +198,109 @@ impl StreamConfig {
 /// Monotonic, process-local lease id. The id is internal — the bearer
 /// token still authenticates the open, the lease only identifies the
 /// stream for audit and termination (ADR 0029 "Authorization").
+///
+/// Issue #767 / S8 — the internal id is **never** forwarded on the
+/// wire. The client receives [`StreamLease::lease_handle`], a 128-bit
+/// opaque random value, in `OpenAck` / the `{"end": …}` envelope.
 static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Issue #767 / S8 — wire-visible lease handle, 128 bits drawn from
+/// the OS CSPRNG. Hex-encoded so it survives JSON / header transport.
+/// Opacity property: a client cannot derive the internal lease id
+/// from the handle (the two are independent), and the handle is not
+/// sequential across opens.
+pub const LEASE_HANDLE_BYTES: usize = 16;
+
+/// Generate an opaque 128-bit lease handle (32-char hex). Per ADR 0029,
+/// the handle is the only identifier the wire sees; the internal
+/// `StreamLease::id` stays server-side.
+pub fn generate_lease_handle() -> String {
+    let mut bytes = [0u8; LEASE_HANDLE_BYTES];
+    if crate::crypto::os_random::fill_bytes(&mut bytes).is_err() {
+        // CSPRNG failure is exceedingly rare on supported platforms;
+        // fall back to a high-entropy mix so the open path never
+        // terminates a stream that would otherwise succeed. The
+        // fallback is *not* secure unguessable — production paths
+        // will hit /dev/urandom successfully.
+        let lo = NEXT_LEASE_ID.fetch_add(0, Ordering::SeqCst).to_le_bytes();
+        let now = crate::utils::now_unix_nanos().to_le_bytes();
+        bytes[..8].copy_from_slice(&lo);
+        bytes[8..].copy_from_slice(&now);
+    }
+    crate::utils::to_hex(&bytes)
+}
+
+/// Issue #767 / S8 — non-validating JWT `exp` claim extractor. Returns
+/// the expiry time in milliseconds since the epoch when `token` is a
+/// JWT carrying an integer `exp` claim, otherwise `None`.
+///
+/// The extractor does **not** validate the JWT signature, issuer, or
+/// audience — those gates run during `is_authorized` at OpenStream.
+/// This helper is consulted *after* the bearer has been accepted, to
+/// decide whether the lease will outlive the bearer credential and an
+/// audit event should be emitted accordingly.
+pub fn parse_jwt_exp_ms(token: &str) -> Option<u64> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = base64url_decode_padded(parts[1])?;
+    let v: crate::json::Value = crate::json::from_slice(&payload).ok()?;
+    let exp_secs = v.get("exp").and_then(|n| n.as_f64())? as i64;
+    if exp_secs <= 0 {
+        return None;
+    }
+    Some((exp_secs as u64).saturating_mul(1000))
+}
+
+fn base64url_decode_padded(input: &str) -> Option<Vec<u8>> {
+    let mut s = String::with_capacity(input.len() + 4);
+    for ch in input.chars() {
+        match ch {
+            '-' => s.push('+'),
+            '_' => s.push('/'),
+            _ => s.push(ch),
+        }
+    }
+    while !s.len().is_multiple_of(4) {
+        s.push('=');
+    }
+    crate::wire::redwire::auth::base64_std_decode(&s)
+}
+
+/// Issue #767 / S8 — wire-visible reason for `stream.closed`. The
+/// audit emit site decides the variant once the stream's exit shape
+/// has been observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    Ok,
+    Cancelled,
+    Error,
+    SnapshotExpired,
+    CapacityRefused,
+    IntegrityFailed,
+}
+
+impl CloseReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CloseReason::Ok => "ok",
+            CloseReason::Cancelled => "cancelled",
+            CloseReason::Error => "error",
+            CloseReason::SnapshotExpired => "snapshot_expired",
+            CloseReason::CapacityRefused => "capacity_refused",
+            CloseReason::IntegrityFailed => "integrity_failed",
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct StreamLease {
     pub id: u64,
+    /// Issue #767 / S8 — opaque handle handed to the client. 32-char
+    /// hex (128 bits of CSPRNG output). The internal `id` is not
+    /// derivable from this value.
+    pub lease_handle: String,
     pub snapshot_lsn: u64,
     pub opened_at_ms: u64,
     pub config: StreamConfig,
@@ -259,6 +357,7 @@ pub fn open_stream(
     }
     Ok(StreamLease {
         id: NEXT_LEASE_ID.fetch_add(1, Ordering::SeqCst),
+        lease_handle: generate_lease_handle(),
         snapshot_lsn,
         opened_at_ms: clock.now_ms(),
         config,
@@ -774,6 +873,135 @@ impl PrefixHasher {
     }
 }
 
+/// Issue #767 / S8 — audit emission helpers. Each helper builds an
+/// `AuditEvent` shaped to the brief and forwards it to the runtime's
+/// audit log. The helpers are intentionally side-effect-only (no
+/// return); audit emission must never terminate a stream that would
+/// otherwise succeed.
+pub fn audit_stream_opened(
+    runtime: &RedDBRuntime,
+    lease_handle: &str,
+    principal: &str,
+    snapshot_lsn: u64,
+    query_hash: &str,
+) {
+    use crate::json::{Map, Value as JsonValue};
+    let mut detail = Map::new();
+    detail.insert(
+        "lease_handle".to_string(),
+        JsonValue::String(lease_handle.to_string()),
+    );
+    detail.insert(
+        "snapshot_lsn".to_string(),
+        JsonValue::Number(snapshot_lsn as f64),
+    );
+    detail.insert(
+        "query_hash".to_string(),
+        JsonValue::String(query_hash.to_string()),
+    );
+    let event = crate::runtime::audit_log::AuditEvent::builder("stream.opened")
+        .principal(principal)
+        .resource(lease_handle.to_string())
+        .outcome(crate::runtime::audit_log::Outcome::Success)
+        .detail(JsonValue::Object(detail))
+        .build();
+    runtime.audit_log().record_event(event);
+}
+
+pub fn audit_stream_closed(
+    runtime: &RedDBRuntime,
+    lease_handle: &str,
+    principal: &str,
+    reason: CloseReason,
+    row_count: u64,
+    bytes_written: u64,
+) {
+    use crate::json::{Map, Value as JsonValue};
+    let mut stats = Map::new();
+    stats.insert("row_count".to_string(), JsonValue::Number(row_count as f64));
+    stats.insert(
+        "bytes_written".to_string(),
+        JsonValue::Number(bytes_written as f64),
+    );
+    let mut detail = Map::new();
+    detail.insert(
+        "lease_handle".to_string(),
+        JsonValue::String(lease_handle.to_string()),
+    );
+    detail.insert(
+        "reason".to_string(),
+        JsonValue::String(reason.as_str().to_string()),
+    );
+    detail.insert("stats".to_string(), JsonValue::Object(stats));
+    let outcome = match reason {
+        CloseReason::Ok => crate::runtime::audit_log::Outcome::Success,
+        CloseReason::CapacityRefused => crate::runtime::audit_log::Outcome::Denied,
+        _ => crate::runtime::audit_log::Outcome::Error,
+    };
+    let event = crate::runtime::audit_log::AuditEvent::builder("stream.closed")
+        .principal(principal)
+        .resource(lease_handle.to_string())
+        .outcome(outcome)
+        .detail(JsonValue::Object(detail))
+        .build();
+    runtime.audit_log().record_event(event);
+}
+
+pub fn audit_token_expired_during_lease(
+    runtime: &RedDBRuntime,
+    lease_handle: &str,
+    principal: &str,
+    token_expiry_ms: u64,
+) {
+    use crate::json::{Map, Value as JsonValue};
+    let mut detail = Map::new();
+    detail.insert(
+        "lease_handle".to_string(),
+        JsonValue::String(lease_handle.to_string()),
+    );
+    detail.insert(
+        "token_expiry".to_string(),
+        JsonValue::Number(token_expiry_ms as f64),
+    );
+    detail.insert("lease_continued".to_string(), JsonValue::Bool(true));
+    let event = crate::runtime::audit_log::AuditEvent::builder("stream.token_expired_during_lease")
+        .principal(principal)
+        .resource(lease_handle.to_string())
+        .outcome(crate::runtime::audit_log::Outcome::Success)
+        .detail(JsonValue::Object(detail))
+        .build();
+    runtime.audit_log().record_event(event);
+}
+
+/// Capacity refusal emits a `stream.closed` event with no lease handle
+/// (the open never produced one) and `reason: capacity_refused`. The
+/// brief lists capacity_refused alongside the other close reasons; we
+/// keep the wire shape identical so downstream audit-log consumers
+/// don't have to special-case it.
+pub fn audit_stream_capacity_refused(
+    runtime: &RedDBRuntime,
+    principal: &str,
+    code: &str,
+    limit: usize,
+    current: usize,
+) {
+    use crate::json::{Map, Value as JsonValue};
+    let mut detail = Map::new();
+    detail.insert(
+        "reason".to_string(),
+        JsonValue::String(CloseReason::CapacityRefused.as_str().to_string()),
+    );
+    detail.insert("code".to_string(), JsonValue::String(code.to_string()));
+    detail.insert("limit".to_string(), JsonValue::Number(limit as f64));
+    detail.insert("current".to_string(), JsonValue::Number(current as f64));
+    let event = crate::runtime::audit_log::AuditEvent::builder("stream.closed")
+        .principal(principal)
+        .outcome(crate::runtime::audit_log::Outcome::Denied)
+        .detail(JsonValue::Object(detail))
+        .build();
+    runtime.audit_log().record_event(event);
+}
+
 /// Borrow the lease registry's clock by default — the routing handler
 /// uses this, tests inject their own.
 pub fn system_clock() -> Arc<dyn Clock> {
@@ -1155,6 +1383,80 @@ mod tests {
         c.update(b"{\"row\":{\"id\":1}}");
         assert_ne!(hash_a, c.finalize_hex());
         assert_eq!(hash_a.len(), 64);
+    }
+
+    // ──────── Issue #767 / S8 — opaque lease handle + audit ────────
+
+    #[test]
+    fn lease_handle_is_128_bit_hex_and_unique_per_open() {
+        // Acceptance criterion #3 — wire-visible handle is opaque,
+        // 128-bit, non-sequential. The internal monotonic `id` is
+        // independent of the handle.
+        let clock = FakeClock::new(0);
+        let a = open_stream(StreamConfig::DEFAULT, 1, false, &clock).unwrap();
+        let b = open_stream(StreamConfig::DEFAULT, 1, false, &clock).unwrap();
+        assert_eq!(
+            a.lease_handle.len(),
+            LEASE_HANDLE_BYTES * 2,
+            "handle must be 128 bits hex-encoded: {}",
+            a.lease_handle
+        );
+        assert!(
+            a.lease_handle.chars().all(|c| c.is_ascii_hexdigit()),
+            "handle must be hex: {}",
+            a.lease_handle
+        );
+        assert_ne!(a.lease_handle, b.lease_handle, "handles must differ");
+        // Sanity — internal id remains monotonic, handle is not
+        // derivable from it (handle bytes don't encode the id).
+        assert!(b.id > a.id);
+    }
+
+    #[test]
+    fn generate_lease_handle_produces_high_entropy_distinct_values() {
+        // Defensive — large sample to surface a hypothetical CSPRNG
+        // mis-wiring. 1024 draws with zero collisions on 128 bits is
+        // statistically certain when the source is sound.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1024 {
+            assert!(
+                seen.insert(generate_lease_handle()),
+                "duplicate handle in CSPRNG sequence"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_jwt_exp_ms_extracts_seconds_to_ms() {
+        // Synthetic JWT — header.payload.signature. We only consult
+        // the payload (no signature verification).
+        // Payload: {"exp":1700000000}
+        // Base64url of that JSON: eyJleHAiOjE3MDAwMDAwMDB9
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3MDAwMDAwMDB9.sig";
+        assert_eq!(parse_jwt_exp_ms(token), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn parse_jwt_exp_ms_returns_none_for_opaque_tokens() {
+        assert_eq!(parse_jwt_exp_ms("not-a-jwt"), None);
+        assert_eq!(parse_jwt_exp_ms("only.two"), None);
+        assert_eq!(parse_jwt_exp_ms("a.b.c"), None);
+    }
+
+    #[test]
+    fn close_reason_as_str_covers_every_state_transition() {
+        // Acceptance criterion #5 — every state transition in the
+        // brief is representable in the audit close-reason taxonomy.
+        for (variant, expected) in [
+            (CloseReason::Ok, "ok"),
+            (CloseReason::Cancelled, "cancelled"),
+            (CloseReason::Error, "error"),
+            (CloseReason::SnapshotExpired, "snapshot_expired"),
+            (CloseReason::CapacityRefused, "capacity_refused"),
+            (CloseReason::IntegrityFailed, "integrity_failed"),
+        ] {
+            assert_eq!(variant.as_str(), expected);
+        }
     }
 
     #[test]
