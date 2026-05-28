@@ -218,6 +218,62 @@ state isolated per connection:
 - `SET TENANT 'acme'` binds only this session
 - `SAVEPOINT` stacks are per-connection
 
+## Event workflow primitives
+
+RedDB's event-workflow primitives — live queue wait, delayed queue messages,
+queue retry policy, ephemeral notifications, and durable streams — all reach
+through PG-wire. The wire surfaces are split deliberately:
+[ADR 0028](../../.red/adr/0028-live-queue-notification-stream-boundaries.md)
+keeps queue delivery state separate from ephemeral pub/sub, and PG-wire
+honours that split. See [Event Workflow](../data-models/event-workflow.md)
+for the full transport matrix and the Honker migration boundary.
+
+### `QUEUE READ ... WAIT <duration>`
+
+The RedDB queue primitive — including `QUEUE PUSH`, `QUEUE READ`, `QUEUE ACK`,
+`QUEUE NACK`, delayed messages, and `RETRY_DELAY` — works over PG-wire with
+the same semantic result shape as HTTP, RedWire, and gRPC. The live wait form
+is autocommit-only and rejected inside an explicit `BEGIN` / `COMMIT`
+transaction:
+
+```sql
+-- Block up to 30 s waiting for a job
+QUEUE READ jobs GROUP workers CONSUMER w1 COUNT 1 WAIT 30s
+-- Returns the job rows on wake, or zero rows on timeout.
+```
+
+A wait that exceeds the server's `red.config.queue.max_wait_ms` cap is
+rejected immediately. Shutdown or connection cancellation returns an
+explicit cancellation error, not an empty result. See
+[Queue configuration](../data-models/queues.md#configuration) for the cap and
+[Queue telemetry](../data-models/queues.md#telemetry--metrics) for the wait
+counters.
+
+### `LISTEN` / `NOTIFY` — ephemeral notifications, not queue wait
+
+PG-wire `LISTEN <channel>` and `NOTIFY <channel> [, '<payload>']` translate
+onto the [ephemeral notification primitive](../data-models/notifications.md),
+not the queue primitive. The PG-wire handler resolves the session's tenant
+binding, derives a `NotificationScope`, and calls the notification registry's
+`subscribe_authorized` / `publish_authorized` entry points.
+
+This split is deliberate:
+
+- `LISTEN` / `NOTIFY` is **ephemeral**: no replay, no ACK, no DLQ, no
+  consumer offsets. A notification published while no one is listening is
+  gone. If your use case needs durability, use `QUEUE READ ... WAIT`
+  against a real queue, not `LISTEN`.
+- `QUEUE READ ... WAIT` is **queue delivery**: it produces normal pending
+  delivery state and preserves ACK/NACK/DLQ semantics. It is not a
+  re-skinning of `LISTEN`.
+- The two surfaces share no state. A `NOTIFY` does not wake a queue
+  waiter, and a queue commit does not fan out to `LISTEN` subscribers.
+
+The canonical RedDB-native contract for notifications is the runtime API in
+`reddb_server::notifications`. PG-wire `LISTEN` / `NOTIFY` is an
+interoperability layer for existing client libraries, not the source of
+truth.
+
 ## Limitations
 
 - Binary format output is not yet emitted — everything returns in

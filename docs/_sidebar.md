@@ -55,6 +55,9 @@
   - [Partition TTL](/data-models/partition-ttl.md)
   - [Queues & Deques](/data-models/queues.md)
   - [Events](/data-models/events.md)
+  - [Event Workflow](/data-models/event-workflow.md)
+  - [Notifications (Ephemeral)](/data-models/notifications.md)
+  - [Streams (Durable)](/data-models/streams.md)
   - [Probabilistic Structures](/data-models/probabilistic.md)
 
 - **APIs**

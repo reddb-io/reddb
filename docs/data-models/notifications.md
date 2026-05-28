@@ -90,6 +90,17 @@ The canonical RedDB-native contract is the runtime API in
 interoperability layer for existing client libraries, not the
 source of truth.
 
+## Transport availability
+
+The RedDB-native notification API (`subscribe_authorized` /
+`publish_authorized`) is reachable from HTTP, RedWire, gRPC, and Postgres-wire
+within a single process. PG-wire additionally translates `LISTEN <channel>`
+and `NOTIFY <channel> [, '<payload>']` onto the same registry — that
+compatibility surface is PG-wire-only by design. See
+[Event Workflow](event-workflow.md#transport-availability) for the matrix and
+[Postgres-wire reference](../api/postgres-wire.md#event-workflow-primitives)
+for the `LISTEN` / `NOTIFY` mapping.
+
 ## What this primitive is NOT
 
 - **Not a replacement for `QUEUE READ … WAIT`** — that primitive
