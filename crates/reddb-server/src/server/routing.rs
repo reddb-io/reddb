@@ -177,7 +177,14 @@ impl RedDBServer {
             ("GET", "/grpc") => self.handle_grpc_discovery(),
 
             // Eventual Consistency endpoints
-            ("GET", "/ec/status") => handlers_ec::handle_ec_global_status(&self.runtime),
+            ("GET", "/ec/status") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "eventual-consistency")
+                {
+                    return deny;
+                }
+                handlers_ec::handle_ec_global_status(&self.runtime)
+            }
 
             // Geo endpoints
             ("POST", "/geo/distance") => handlers_geo::handle_geo_distance(body),
@@ -195,12 +202,26 @@ impl RedDBServer {
 
             // CDC & Backup endpoints
             ("GET", "/changes") => self.handle_cdc_poll(&query),
-            ("GET", "/backup/status") => self.handle_backup_status(),
+            ("GET", "/backup/status") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "backup-status")
+                {
+                    return deny;
+                }
+                self.handle_backup_status()
+            }
             ("POST", "/backup/trigger") => self.handle_backup_trigger(),
             ("GET", "/recovery/restore-points") => self.handle_restore_points(),
 
             // Replication endpoints
-            ("GET", "/replication/status") => self.handle_replication_status(),
+            ("GET", "/replication/status") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "replication-status")
+                {
+                    return deny;
+                }
+                self.handle_replication_status()
+            }
             ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),
 
             // PLAN.md Phase 1 — universal lifecycle/health contract.
@@ -225,11 +246,25 @@ impl RedDBServer {
                 self.handle_admin_blob_cache_compare_and_set(body)
             }
             // Issue #198 — blob cache stats endpoint.
-            ("GET", "/admin/blob_cache/stats") => self.handle_admin_blob_cache_stats(&query),
+            ("GET", "/admin/blob_cache/stats") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "blob-cache-stats")
+                {
+                    return deny;
+                }
+                self.handle_admin_blob_cache_stats(&query)
+            }
             // PLAN.md Phase 11.6 — manual replica → primary promotion.
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
-            ("GET", "/metrics") => self.handle_metrics(),
+            ("GET", "/metrics") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "metrics")
+                {
+                    return deny;
+                }
+                self.handle_metrics()
+            }
             ("GET", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, None),
             ("POST", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, Some(body)),
             ("GET", "/api/v1/query_range") => {
@@ -241,14 +276,33 @@ impl RedDBServer {
             ("POST", "/api/v1/write") => {
                 self.handle_prometheus_remote_write(&query, &headers, body)
             }
-            ("GET", "/admin/status") => self.handle_admin_status(),
+            ("GET", "/admin/status") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "admin-status")
+                {
+                    return deny;
+                }
+                self.handle_admin_status()
+            }
             // Red UI cluster status snapshot (#738) — single aggregated
             // contract so the UI doesn't need to stitch /admin/status,
             // /replication/status, /backup/status, /ready/* together.
-            ("GET", "/cluster/status") => self.handle_cluster_status(),
+            ("GET", "/cluster/status") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "cluster-status")
+                {
+                    return deny;
+                }
+                self.handle_cluster_status()
+            }
             // SOC 2 / HIPAA structured audit query — JSONL/JSON over
             // the active `.audit.log` plus rotated archives.
-            ("GET", "/admin/audit") => self.handle_admin_audit_query(&query),
+            ("GET", "/admin/audit") => {
+                if let Some(deny) = self.check_ops_http_policy(&headers, "ops:admin", "audit") {
+                    return deny;
+                }
+                self.handle_admin_audit_query(&query)
+            }
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();

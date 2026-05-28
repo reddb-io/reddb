@@ -66,6 +66,14 @@ pub enum ActionCategory {
     /// producer / consumer / ack-lifecycle / DLQ / destructive-admin
     /// surface so Red UI can grant toolbar actions independently.
     Queue,
+    /// Operational read verbs (`ops:read:self`, `ops:read:tenant`,
+    /// `ops:read:cluster`, `ops:admin`). Scoped read levels for the
+    /// admin / metrics / cluster / security HTTP surfaces so Red UI
+    /// can expose tenant-aggregate observability without leaking
+    /// cluster topology, collection names, or per-tenant load to
+    /// principals that should not see them. See `crate::server::
+    /// handlers_ops_policy`.
+    Ops,
     /// Catch-all for actions that don't fit a tighter category yet
     /// (`evidence:export`, `red.registry:register`, `kv:invalidate`).
     Other,
@@ -91,6 +99,7 @@ impl ActionCategory {
             ActionCategory::Notification => "notification",
             ActionCategory::Stream => "stream",
             ActionCategory::Queue => "queue",
+            ActionCategory::Ops => "ops",
             ActionCategory::Other => "other",
         }
     }
@@ -591,6 +600,52 @@ pub const ACTIONS: &[ActionEntry] = &[
         category: ActionCategory::Wildcard,
         lifecycle_state: LifecycleState::Active,
         gates_description: "any queue verb",
+    },
+    // -- Operational reads (#758 / PRD #735) -----------------------------
+    // Scoped read levels so Red UI's cluster, security, and observability
+    // pages expose only the operational state the current principal is
+    // allowed to inspect. The scope tokens (`self`, `tenant`, `cluster`,
+    // `admin`) deliberately mirror the visibility radius of the read:
+    //   * `ops:read:self`    — single-instance health / lifecycle for the
+    //     principal's own surface (no cross-tenant or cross-node data).
+    //   * `ops:read:tenant`  — tenant-aggregate observability (metrics
+    //     scoped to caller's tenant, not the platform).
+    //   * `ops:read:cluster` — full cluster topology / replication /
+    //     backup / metrics exposition.
+    //   * `ops:admin`        — security-sensitive operational reads
+    //     (audit log, vault posture, IAM-config snapshots).
+    // Wired at the HTTP layer in `crate::server::handlers_ops_policy`.
+    ActionEntry {
+        name: "ops:read:self",
+        category: ActionCategory::Ops,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read single-instance health / lifecycle state",
+    },
+    ActionEntry {
+        name: "ops:read:tenant",
+        category: ActionCategory::Ops,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read tenant-scoped operational metrics / aggregates",
+    },
+    ActionEntry {
+        name: "ops:read:cluster",
+        category: ActionCategory::Ops,
+        lifecycle_state: LifecycleState::Active,
+        gates_description:
+            "read cluster topology / replication / backup / full metrics exposition",
+    },
+    ActionEntry {
+        name: "ops:admin",
+        category: ActionCategory::Ops,
+        lifecycle_state: LifecycleState::Active,
+        gates_description:
+            "read security-sensitive operational state (audit log, vault posture)",
+    },
+    ActionEntry {
+        name: "ops:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any operational read verb",
     },
     // -- Wildcards (kept last for legacy ordering) -----------------------
     ActionEntry {

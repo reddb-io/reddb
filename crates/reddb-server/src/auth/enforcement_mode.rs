@@ -123,6 +123,14 @@ fn required_role_for_action(action: &str) -> Role {
             ActionCategory::Notification => Role::Write,
             ActionCategory::Stream => Role::Write,
             ActionCategory::Queue => Role::Write,
+            // Operational reads default to `Read` under legacy RBAC —
+            // the HTTP surface is already gated by the `RED_ADMIN_TOKEN`
+            // env path or by the role middleware's read-gate, so
+            // demanding `Admin` here would lock out existing dashboards
+            // on installs that haven't adopted IAM. The fine-grained
+            // scope is enforced by `check_ops_http_policy` when IAM is
+            // active.
+            ActionCategory::Ops => Role::Read,
             ActionCategory::Ddl
             | ActionCategory::Function
             | ActionCategory::Mgmt
