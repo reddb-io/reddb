@@ -119,8 +119,9 @@ Deprecated granular catalog endpoints return `Deprecation: 2026-08-08` and `Suns
 | `POST` | `/collections/{name}/bulk/documents` | Bulk create documents |
 | `GET` | `/collections/{name}/kvs/{key}` | Read a key-value pair by key |
 | `PUT` | `/collections/{name}/kvs/{key}` | Create or update a key-value pair |
+| `PATCH` | `/collections/{name}/kvs/{key}` | Apply JSON Patch operations to a JSON KV value |
 | `DELETE` | `/collections/{name}/kvs/{key}` | Delete a key-value pair by key |
-| `PATCH` | `/collections/{name}/entities/{rid}` | Update an item by RedDB ID |
+| `PATCH` | `/collections/{name}/entities/{rid}` | Update an item by RedDB ID (supports JSON Patch operations) |
 | `DELETE` | `/collections/{name}/entities/{rid}` | Delete an item by RedDB ID |
 
 HTTP item results use the public envelope: `rid` is the RedDB ID, `collection`
@@ -208,6 +209,69 @@ Delete a key-value pair by key:
 ```bash
 curl -X DELETE http://127.0.0.1:8080/collections/settings/kvs/theme
 ```
+
+### JSON Patch & path helpers
+
+`PATCH /collections/{name}/entities/{rid}` and
+`PATCH /collections/{name}/kvs/{key}` accept a JSON Patch-shaped body so a UI
+can apply nested edits without re-sending the whole document or value:
+
+```json
+{
+  "dry_run": false,
+  "operations": [
+    { "op": "set",   "path": "/body/prefs/lang", "value": "en" },
+    { "op": "unset", "path": "/body/meta/ip" }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|:--|:--|:--|
+| `operations` | `array` | List of operations applied in order. Empty / omitted = no-op. |
+| `operations[].op` | `string` | `set` (alias `add`), `replace`, or `unset` (aliases `remove`, `delete`). |
+| `operations[].path` | `string` | JSON Pointer (RFC 6901). `~1` escapes `/`, `~0` escapes `~`. |
+| `operations[].value` | any | Required for `set` / `replace`. Must be omitted for `unset`. |
+| `dry_run` | `bool` | When `true`, validate operations and return `{ok, dry_run:true, operations:N}` without mutating. |
+
+Document patch (`/entities/{rid}`) targets the row fields and the document
+body (`/body/...`); intermediate objects are created on missing nested paths,
+and `unset` of a missing path is a no-op success.
+
+KV patch (`/kvs/{key}`) requires the stored value to be a JSON object or array
+(or a `Value::Json` blob produced by `PUT /kvs/{key}` with an object/array
+`value`). Scalar KV values (integer, boolean, text, null) reject nested
+patches with a `KV_VALUE_NOT_JSON` error so Red UI can route to the
+replace-whole-value workflow.
+
+#### Structured error envelope
+
+Validation and apply failures surface a UI-safe envelope rather than a plain
+string error:
+
+```json
+{
+  "ok": false,
+  "code": "PATCH_PATH_INVALID",
+  "error": "patch path contains empty segment",
+  "message": "patch path contains empty segment",
+  "op_index": 0,
+  "pointer": "/body//ip"
+}
+```
+
+| Code | When raised |
+|:--|:--|
+| `PATCH_BODY_INVALID` | `operations` / `dry_run` is the wrong JSON type. |
+| `PATCH_OP_INVALID` | Unknown `op`, missing `value` on `set`, `value` present on `unset`. |
+| `PATCH_PATH_INVALID` | Empty path, empty segment, or otherwise un-pointer-able. |
+| `PATCH_APPLY_FAILED` | Engine refused the patch (type conflict, validation, etc.). |
+| `KV_KEY_NOT_FOUND` | KV patch target key does not exist. `pointer` omitted. |
+| `KV_VALUE_NOT_JSON` | Stored KV value is not a JSON object / array. |
+| `NOT_FOUND` | Document patch target row does not exist. |
+
+`op_index` and `pointer` are present whenever the failure can be tied back to
+a specific operation, so an editor can highlight the offending field.
 
 ### TTL over HTTP
 

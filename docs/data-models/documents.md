@@ -183,6 +183,12 @@ curl -X PATCH http://127.0.0.1:8080/collections/events/entities/102 \
 Array positional paths such as `/body/tags/0` are not supported; replace the array or the full
 document body instead.
 
+Add `"dry_run": true` to the body to validate operations without mutating; the
+response is `{ok:true, dry_run:true, operations:N}`. Validation failures
+return a structured envelope with `code`, `op_index`, and a JSON Pointer
+`pointer` so an editor UI can highlight the failing field. See
+[HTTP API › JSON Patch & path helpers](../api/http.md#json-patch--path-helpers).
+
 ### SQL UPDATE on documents
 
 Document updates use the explicit `DOCUMENTS` target. Compound assignment,
