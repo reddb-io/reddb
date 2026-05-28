@@ -386,8 +386,14 @@ impl RedDBServer {
     /// the chunk producer flushes its N × 16 KiB production buffer.
     ///
     /// Wire shape (per row):  `{"row": {…projected values…}}\n`
-    /// Terminal envelope:     `{"end":  {row_count, lease_id, snapshot_lsn}}\n`
+    /// Terminal envelope:     `{"end":  {row_count, lease_handle, snapshot_lsn}}\n`
     /// Mid-stream errors:     `{"error":{code, message}}\n` followed by `{"end": …}`.
+    ///
+    /// Issue #767 / S8 — the terminal envelope carries `lease_handle`
+    /// (opaque 128-bit hex) rather than the internal monotonic id.
+    /// Audit events `stream.opened` and `stream.closed` are emitted
+    /// around the body so operators can answer "did this stream
+    /// outlive its bearer token" without parsing the body.
     ///
     /// Failure modes are differentiated:
     ///   * `OpenStream` time refusals (`stream_in_transaction_unsupported`)
@@ -401,6 +407,7 @@ impl RedDBServer {
     pub(crate) fn handle_query_ndjson_stream<W: std::io::Write>(
         &self,
         body: Vec<u8>,
+        ctx: &crate::server::routing::StreamAuditCtx,
         writer: &mut W,
     ) -> io::Result<()> {
         use crate::server::output_stream::{
@@ -446,15 +453,37 @@ impl RedDBServer {
         let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
             .expect("OpenStream succeeds once the in-transaction gate has passed");
 
+        // Issue #767 / S8 — emit `stream.opened` audit event with the
+        // opaque handle, principal, snapshot lsn, and query hash. The
+        // emit is non-blocking; audit failures never terminate a
+        // stream that would otherwise succeed.
+        let query_hash = query_hash_prefix(&query);
+        crate::server::output_stream::audit_stream_opened(
+            &self.runtime,
+            &lease.lease_handle,
+            ctx.principal,
+            snapshot_lsn,
+            &query_hash,
+        );
+        // Issue #767 / S8 — if the bearer token is a JWT whose `exp`
+        // falls before the lease's snapshot-TTL deadline, the stream
+        // *will* outlive the credential. Emit the dedicated audit
+        // event so compliance reviewers can answer "did we serve
+        // reads after the token expired" without log archaeology.
+        let token_expiry_emitted =
+            maybe_audit_token_expired_during_lease(&self.runtime, ctx, &lease, clock.now_ms());
+
         output_stream::write_chunked_response_header(writer, 200, "application/x-ndjson")?;
 
         let mut producer = ChunkProducer::new(&config, &clock);
         let mut row_count: u64 = 0;
         let mut stream_error: Option<(String, String)> = None;
+        let mut close_reason = crate::server::output_stream::CloseReason::Ok;
 
         let exec = self.query_use_cases().execute(ExecuteQueryInput {
             query: query.clone(),
         });
+        let _ = token_expiry_emitted;
 
         {
             // `flush` owns the writer mutably for the duration of this
@@ -478,6 +507,8 @@ impl RedDBServer {
                                 "snapshot_expired".to_string(),
                                 "stream snapshot pin TTL elapsed".to_string(),
                             ));
+                            close_reason =
+                                crate::server::output_stream::CloseReason::SnapshotExpired;
                             break;
                         }
                         let values = crate::presentation::query_result_json::unified_record_json(
@@ -494,6 +525,7 @@ impl RedDBServer {
                 Err(err) => {
                     let (_status, message) = map_runtime_error(&err);
                     stream_error = Some((ndjson_error_code(&err).to_string(), message));
+                    close_reason = crate::server::output_stream::CloseReason::Error;
                 }
             }
 
@@ -521,8 +553,8 @@ impl RedDBServer {
                 crate::json::Value::Number(row_count as f64),
             );
             payload.insert(
-                "lease_id".to_string(),
-                crate::json::Value::Number(lease.id as f64),
+                "lease_handle".to_string(),
+                crate::json::Value::String(lease.lease_handle.clone()),
             );
             payload.insert(
                 "snapshot_lsn".to_string(),
@@ -535,6 +567,16 @@ impl RedDBServer {
             producer.finish(&mut flush)?;
         }
 
+        let bytes_written = producer.total_bytes();
+        crate::server::output_stream::audit_stream_closed(
+            &self.runtime,
+            &lease.lease_handle,
+            ctx.principal,
+            close_reason,
+            row_count,
+            bytes_written,
+        );
+
         crate::server::output_stream::write_chunked_terminator(writer)
     }
 
@@ -546,9 +588,14 @@ impl RedDBServer {
     ///
     /// Wire shape (response, `application/x-ndjson` chunked):
     ///   success → silent during ingest, single terminal
-    ///     `{"end":{"row_count":N,"committed_rid":L,"lease_id":I,"snapshot_lsn":S}}`
+    ///     `{"end":{"row_count":N,"committed_rid":L,"lease_handle":H,"snapshot_lsn":S}}`
     ///   error   → single `{"error":{"code":...,"message":...,
     ///                                 "chunk_seq":K,"recoverable_rid":L}}` then close.
+    ///
+    /// Issue #767 / S8 — the terminal envelope carries `lease_handle`
+    /// (opaque 128-bit hex) rather than the internal monotonic id.
+    /// `stream.opened` / `stream.closed` audit events bracket the
+    /// body for compliance reporting.
     ///
     /// Auto-commit per chunk: rows from a successful chunk are durable
     /// and visible before the next chunk arrives. A mid-stream failure
@@ -557,6 +604,7 @@ impl RedDBServer {
     pub(crate) fn handle_query_ndjson_input_stream<W: std::io::Write>(
         &self,
         body: Vec<u8>,
+        ctx: &crate::server::routing::StreamAuditCtx,
         writer: &mut W,
     ) -> io::Result<()> {
         use crate::server::output_stream::{
@@ -602,6 +650,18 @@ impl RedDBServer {
         let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
             .expect("OpenStream succeeds once the in-transaction gate has passed");
 
+        // Issue #767 / S8 — open audit + token-expiry hint.
+        let open_query_repr = format!("INSERT INTO {target}");
+        let query_hash = query_hash_prefix(&open_query_repr);
+        crate::server::output_stream::audit_stream_opened(
+            &self.runtime,
+            &lease.lease_handle,
+            ctx.principal,
+            snapshot_lsn,
+            &query_hash,
+        );
+        let _ = maybe_audit_token_expired_during_lease(&self.runtime, ctx, &lease, clock.now_ms());
+
         output_stream::write_chunked_response_header(writer, 200, "application/x-ndjson")?;
 
         let mut row_count: u64 = 0;
@@ -610,6 +670,7 @@ impl RedDBServer {
         let mut pending: Vec<Vec<crate::json::Value>> = Vec::new();
         let chunk_size = config.chunk_max_rows.max(1);
         let mut stream_error: Option<(String, String)> = None;
+        let mut close_reason = crate::server::output_stream::CloseReason::Ok;
 
         let mut producer = ChunkProducer::new(&config, &clock);
         {
@@ -654,6 +715,7 @@ impl RedDBServer {
                         "snapshot_expired".to_string(),
                         "stream snapshot pin TTL elapsed".to_string(),
                     ));
+                    close_reason = crate::server::output_stream::CloseReason::SnapshotExpired;
                     break;
                 }
                 match parse_row_frame(raw, &columns) {
@@ -663,6 +725,7 @@ impl RedDBServer {
                             "invalid_row".to_string(),
                             format!("line {}: {}", idx + 1, message),
                         ));
+                        close_reason = crate::server::output_stream::CloseReason::Error;
                         break;
                     }
                 }
@@ -675,6 +738,7 @@ impl RedDBServer {
                         &mut chunk_seq,
                     ) {
                         stream_error = Some(err);
+                        close_reason = crate::server::output_stream::CloseReason::Error;
                         break;
                     }
                 }
@@ -689,6 +753,7 @@ impl RedDBServer {
                     &mut chunk_seq,
                 ) {
                     stream_error = Some(err);
+                    close_reason = crate::server::output_stream::CloseReason::Error;
                 }
             }
 
@@ -728,8 +793,8 @@ impl RedDBServer {
                     crate::json::Value::Number(chunk_seq as f64),
                 );
                 payload.insert(
-                    "lease_id".to_string(),
-                    crate::json::Value::Number(lease.id as f64),
+                    "lease_handle".to_string(),
+                    crate::json::Value::String(lease.lease_handle.clone()),
                 );
                 payload.insert(
                     "snapshot_lsn".to_string(),
@@ -742,6 +807,15 @@ impl RedDBServer {
             }
             producer.finish(&mut flush)?;
         }
+
+        crate::server::output_stream::audit_stream_closed(
+            &self.runtime,
+            &lease.lease_handle,
+            ctx.principal,
+            close_reason,
+            row_count,
+            0,
+        );
 
         crate::server::output_stream::write_chunked_terminator(writer)
     }
@@ -1016,6 +1090,51 @@ pub(crate) fn build_insert_sql(
         sql.push(')');
     }
     Ok(sql)
+}
+
+/// Issue #767 / S8 — sha-256 prefix of the query text. Used as the
+/// `query_hash` field on `stream.opened` audit events so operators can
+/// correlate events to query templates without leaking parameter
+/// values into the audit log.
+pub(crate) fn query_hash_prefix(query: &str) -> String {
+    let digest = crate::crypto::sha256(query.as_bytes());
+    crate::utils::to_hex_prefix(&digest, 8)
+}
+
+/// Issue #767 / S8 — when the lease will outlive the bearer credential
+/// (JWT `exp` lands inside the snapshot-TTL window), emit the
+/// dedicated `stream.token_expired_during_lease` audit event exactly
+/// once per open. Returns `true` if the event was emitted.
+pub(crate) fn maybe_audit_token_expired_during_lease(
+    runtime: &crate::runtime::RedDBRuntime,
+    ctx: &crate::server::routing::StreamAuditCtx,
+    lease: &crate::server::output_stream::StreamLease,
+    now_ms: u64,
+) -> bool {
+    let Some(token) = ctx.token else {
+        return false;
+    };
+    let Some(exp_ms) = crate::server::output_stream::parse_jwt_exp_ms(token) else {
+        return false;
+    };
+    let deadline = lease
+        .opened_at_ms
+        .saturating_add(lease.config.snapshot_ttl_ms);
+    // Token already expired by the time we cleared the auth gate, or
+    // will expire before the lease's snapshot TTL would. Either way,
+    // the lease — not the bearer — is what governs subsequent chunks,
+    // so flag the event for compliance review.
+    if exp_ms <= now_ms || exp_ms < deadline {
+        crate::server::output_stream::audit_token_expired_during_lease(
+            runtime,
+            &lease.lease_handle,
+            ctx.principal,
+            exp_ms,
+        );
+        true
+    } else {
+        false
+    }
 }
 
 pub(crate) fn is_stream_ask_query_body(body: &[u8]) -> bool {
