@@ -119,6 +119,18 @@ pub(super) const VECTORS: &str = "red.vectors";
 pub(super) const VECTORS_INTERNAL: &str = "__red_schema_vectors";
 pub(super) const GRAPHS: &str = "red.graphs";
 pub(super) const GRAPHS_INTERNAL: &str = "__red_schema_graphs";
+// Issue #747 — typed `red.timeseries` / `red.metrics` projections for
+// chart and KPI controls. `red.timeseries` is one row per `model =
+// time_series` collection (with hypertable-derived chunk metadata when
+// the collection was created via `CREATE HYPERTABLE`); `red.metrics`
+// is one row per descriptor registered through `CREATE METRIC`,
+// enriched with stable capability + retention columns the UI can lean
+// on without parsing the generic catalog or the analytics descriptor
+// surface.
+pub(super) const TIMESERIES: &str = "red.timeseries";
+pub(super) const TIMESERIES_INTERNAL: &str = "__red_schema_timeseries";
+pub(super) const METRICS: &str = "red.metrics";
+pub(super) const METRICS_INTERNAL: &str = "__red_schema_metrics";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -417,6 +429,34 @@ const VECTOR_COLUMNS: [&str; 10] = [
     "internal",
 ];
 
+// Issue #747 — typed `red.timeseries`. One row per `model =
+// time_series` collection. Hypertable-derived columns (`time_column`,
+// `chunk_interval_ms`, `chunk_count`, `oldest_ts_ms`, `newest_ts_ms`)
+// are populated from the live `HypertableRegistry` when the collection
+// was created via `CREATE HYPERTABLE`; standalone timeseries report
+// `is_hypertable = false` and `NULL` for the chunk-derived columns.
+// `retention_ms`, `session_key`, and `session_gap_ms` are sourced from
+// the collection descriptor so the UI can show TTL/sessionization
+// chips without a separate join.
+const TIMESERIES_COLUMNS: [&str; 16] = [
+    "name",
+    "schema_mode",
+    "is_hypertable",
+    "time_column",
+    "chunk_interval_ms",
+    "chunk_count",
+    "retention_ms",
+    "session_key",
+    "session_gap_ms",
+    "row_count",
+    "oldest_ts_ms",
+    "newest_ts_ms",
+    "in_memory_bytes",
+    "on_disk_bytes",
+    "tenant_id",
+    "internal",
+];
+
 // Issue #746 — typed `red.graphs`. `supports_viewport` is the stable
 // capability indicator the Red UI graph explorer keys on (graph
 // viewport contract #744 has landed). `supports_algorithms` is a
@@ -436,6 +476,25 @@ const GRAPH_COLUMNS: [&str; 10] = [
     "in_memory_bytes",
     "on_disk_bytes",
     "internal",
+];
+
+// Issue #747 — typed `red.metrics`. One row per metric descriptor
+// registered through `CREATE METRIC`. `labels` / `unit` / `retention_ms`
+// are columns the UI can render today but the descriptor catalog does
+// not yet store them — populated as `NULL` until the catalog grows
+// them, so the schema is stable. `supports_prometheus_query` is a
+// stable capability indicator (true — every registered metric is
+// queryable through the Prometheus adapter when written into a
+// metrics collection).
+const METRICS_COLUMNS: [&str; 8] = [
+    "path",
+    "kind",
+    "role",
+    "labels",
+    "unit",
+    "retention_ms",
+    "supports_prometheus_query",
+    "created_at_ms",
 ];
 
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
@@ -489,6 +548,8 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (KV, KV_INTERNAL),
         (VECTORS, VECTORS_INTERNAL),
         (GRAPHS, GRAPHS_INTERNAL),
+        (TIMESERIES, TIMESERIES_INTERNAL),
+        (METRICS, METRICS_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -572,6 +633,10 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(VECTORS)
         || table.eq_ignore_ascii_case(GRAPHS_INTERNAL)
         || table.eq_ignore_ascii_case(GRAPHS)
+        || table.eq_ignore_ascii_case(TIMESERIES_INTERNAL)
+        || table.eq_ignore_ascii_case(TIMESERIES)
+        || table.eq_ignore_ascii_case(METRICS_INTERNAL)
+        || table.eq_ignore_ascii_case(METRICS)
 }
 
 pub(super) fn red_query(
@@ -637,6 +702,8 @@ pub(super) fn red_query(
         VirtualTableKind::Kv => kv_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Vectors => vectors_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Graphs => graphs_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Timeseries => timeseries_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Metrics => metrics_snapshot(runtime, tenant, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -758,6 +825,8 @@ enum VirtualTableKind {
     Kv,
     Vectors,
     Graphs,
+    Timeseries,
+    Metrics,
 }
 
 impl VirtualTableKind {
@@ -792,6 +861,8 @@ impl VirtualTableKind {
             Self::Kv => &KV_COLUMNS,
             Self::Vectors => &VECTOR_COLUMNS,
             Self::Graphs => &GRAPH_COLUMNS,
+            Self::Timeseries => &TIMESERIES_COLUMNS,
+            Self::Metrics => &METRICS_COLUMNS,
         }
     }
 
@@ -826,6 +897,8 @@ impl VirtualTableKind {
             Self::Kv => KV,
             Self::Vectors => VECTORS,
             Self::Graphs => GRAPHS,
+            Self::Timeseries => TIMESERIES,
+            Self::Metrics => METRICS,
         }
     }
 }
@@ -939,6 +1012,12 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(GRAPHS_INTERNAL) || name.eq_ignore_ascii_case(GRAPHS) {
         return Ok(VirtualTableKind::Graphs);
+    }
+    if name.eq_ignore_ascii_case(TIMESERIES_INTERNAL) || name.eq_ignore_ascii_case(TIMESERIES) {
+        return Ok(VirtualTableKind::Timeseries);
+    }
+    if name.eq_ignore_ascii_case(METRICS_INTERNAL) || name.eq_ignore_ascii_case(METRICS) {
+        return Ok(VirtualTableKind::Metrics);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -2627,6 +2706,142 @@ fn vectors_snapshot(
         .collect()
 }
 
+/// Issue #747 — typed `red.timeseries` projection. Filtered to
+/// `model = time_series`. When the underlying collection was created
+/// via `CREATE HYPERTABLE`, chunk-derived columns are populated from
+/// the live `HypertableRegistry`; standalone timeseries report
+/// `is_hypertable = false` and `NULL` for those columns.
+fn timeseries_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        TIMESERIES_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let db = runtime.db();
+    let registry = db.hypertables();
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|c| {
+            // `model = time_series` covers plain `CREATE TIMESERIES`;
+            // `CREATE HYPERTABLE` declares a Table contract but
+            // registers a hypertable spec — pick those up too so the
+            // chart UI doesn't have to query two surfaces.
+            c.model == CollectionModel::TimeSeries || registry.get(&c.name).is_some()
+        })
+        .filter(|c| collection_is_visible(&c.name, visible_collections))
+        .filter(|c| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store.as_ref(), &c.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
+        .map(|collection| {
+            let spec = registry.get(&collection.name);
+            let chunks = if spec.is_some() {
+                registry.show_chunks(&collection.name)
+            } else {
+                Vec::new()
+            };
+            let is_hypertable = spec.is_some();
+            let time_column = spec.as_ref().map(|s| s.time_column.clone());
+            // Chunk widths are nanoseconds in the registry; expose
+            // milliseconds so the UI doesn't have to convert.
+            let chunk_interval_ms = spec.as_ref().map(|s| s.chunk_interval_ns / 1_000_000);
+            let chunk_count = chunks.len() as u64;
+            let (oldest_ns, newest_ns) =
+                chunks
+                    .iter()
+                    .fold((None::<u64>, None::<u64>), |(oldest, newest), chunk| {
+                        // Empty chunks have `min_ts_ns = u64::MAX`;
+                        // skip those when computing the overall min so
+                        // an empty hypertable shows `NULL` rather than
+                        // `u64::MAX`.
+                        let next_oldest = if chunk.row_count == 0 {
+                            oldest
+                        } else {
+                            Some(match oldest {
+                                Some(prev) => prev.min(chunk.min_ts_ns),
+                                None => chunk.min_ts_ns,
+                            })
+                        };
+                        let next_newest = if chunk.row_count == 0 {
+                            newest
+                        } else {
+                            Some(match newest {
+                                Some(prev) => prev.max(chunk.max_ts_ns),
+                                None => chunk.max_ts_ns,
+                            })
+                        };
+                        (next_oldest, next_newest)
+                    });
+            let oldest_ts_ms = oldest_ns.map(|ns| ns / 1_000_000);
+            let newest_ts_ms = newest_ns.map(|ns| ns / 1_000_000);
+            let in_memory_bytes = store
+                .get_collection(&collection.name)
+                .map(|manager| manager.stats().total_memory_bytes as u64)
+                .unwrap_or(0);
+            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
+                store.as_ref(),
+                &collection.name,
+            );
+            let owner_tenant = collection_tenant(store.as_ref(), &collection.name);
+            let visible_tenant = owner_tenant.as_deref().or(tenant);
+            let internal = internal_registry.is_internal(&collection.name);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name.clone()),
+                    Value::text(schema_mode_name(collection.schema_mode)),
+                    Value::Boolean(is_hypertable),
+                    time_column.map(Value::text).unwrap_or(Value::Null),
+                    chunk_interval_ms
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(Value::Null),
+                    Value::UnsignedInteger(chunk_count),
+                    // Retention is stored in the runtime's default-TTL
+                    // map, not on the catalog descriptor — read it
+                    // back the same way the retention sweeper does.
+                    db.collection_default_ttl_ms(&collection.name)
+                        .or(collection.retention_duration_ms)
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(Value::Null),
+                    collection
+                        .session_key
+                        .clone()
+                        .map(Value::text)
+                        .unwrap_or(Value::Null),
+                    collection
+                        .session_gap_ms
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(Value::Null),
+                    Value::UnsignedInteger(collection.entities as u64),
+                    oldest_ts_ms
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(Value::Null),
+                    newest_ts_ms
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(Value::Null),
+                    Value::UnsignedInteger(in_memory_bytes),
+                    Value::UnsignedInteger(on_disk_bytes),
+                    visible_tenant.map(Value::text).unwrap_or(Value::Null),
+                    Value::Boolean(internal),
+                ],
+            )
+        })
+        .collect()
+}
+
 /// Issue #746 — typed `red.graphs` projection. Filtered to
 /// `model = graph`. Per-collection node / edge counts are produced by
 /// a single scan over the collection's segment manager (the catalog
@@ -2729,6 +2944,48 @@ fn graph_counts(store: &UnifiedStore, collection: &str) -> (u64, u64, Vec<String
         node_labels.into_iter().collect(),
         edge_labels.into_iter().collect(),
     )
+}
+
+/// Issue #747 — typed `red.metrics` projection. One row per metric
+/// descriptor registered through `CREATE METRIC`. `labels` / `unit` /
+/// `retention_ms` columns exist for schema stability but are populated
+/// as `NULL` until the descriptor catalog tracks them. Descriptors
+/// are not tenant-owned today, so the visibility behavior matches
+/// `red.analytics.metrics`: cluster admins and tenant sessions both
+/// see the full catalog. `_tenant` and `_visible_collections` arguments
+/// are accepted for shape parity with the other typed-relation
+/// snapshots and to leave room for future tenant scoping without
+/// breaking callers.
+fn metrics_snapshot(
+    runtime: &RedDBRuntime,
+    _tenant: Option<&str>,
+    _visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let store = runtime.db().store();
+    let schema = Arc::new(
+        METRICS_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    super::metric_descriptor_catalog::list(store.as_ref())
+        .into_iter()
+        .map(|entry| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(entry.path),
+                    Value::text(entry.kind),
+                    Value::text(entry.role),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Boolean(true),
+                    timestamp_ms_value(entry.created_at_ms),
+                ],
+            )
+        })
+        .collect()
 }
 
 /// Issue #745 — count the rows that look like documents (have a JSON

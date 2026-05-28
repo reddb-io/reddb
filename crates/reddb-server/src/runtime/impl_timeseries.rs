@@ -57,6 +57,16 @@ impl RedDBRuntime {
             .db
             .save_collection_contract(contract)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // Issue #747 — record per-collection tenant ownership when an
+        // active tenant context exists, so typed surfaces like
+        // `red.timeseries` can scope rows to the creating tenant just
+        // like `red.tables` does for `CREATE TABLE`.
+        if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
+            store.set_config_tree(
+                &format!("red.collection_tenants.{}", query.name),
+                &crate::serde_json::Value::String(tenant_id),
+            );
+        }
         save_timeseries_metadata(store.as_ref(), query)?;
 
         // `CREATE HYPERTABLE` additionally registers a HypertableSpec
