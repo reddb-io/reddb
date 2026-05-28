@@ -1269,6 +1269,7 @@ impl RedDBServer {
                     return match method.as_str() {
                         "GET" => self.handle_get_kv(&collection, &key),
                         "PUT" => self.handle_put_kv(&collection, &key, body),
+                        "PATCH" => self.handle_patch_kv(&collection, &key, body),
                         "DELETE" => self.handle_delete_kv(&collection, &key),
                         _ => json_error(405, "method not allowed for KV endpoint"),
                     };

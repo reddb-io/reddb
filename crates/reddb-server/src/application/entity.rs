@@ -413,6 +413,17 @@ pub(crate) fn apply_patch_operations_to_storage_map(
     Ok(())
 }
 
+/// `pub` re-export of [`apply_patch_operations_to_json`] for the HTTP layer.
+/// The KV patch handler (issue #751) parses a JSON value, applies operations
+/// against the live JSON tree, and writes back — without reaching the
+/// entity-row patch core that this module otherwise owns.
+pub fn apply_patch_operations_to_json_public(
+    value: &mut JsonValue,
+    operations: &[PatchEntityOperation],
+) -> Result<(), String> {
+    apply_patch_operations_to_json(value, operations)
+}
+
 pub(crate) fn apply_patch_operations_to_json(
     value: &mut JsonValue,
     operations: &[PatchEntityOperation],

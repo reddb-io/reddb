@@ -423,21 +423,29 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
-        let patch_operations = match parse_patch_operations(&payload) {
-            Ok(operations) => operations,
-            Err(response) => return response,
+        let parsed = match parse_patch_payload(&payload) {
+            Ok(parsed) => parsed,
+            Err(err) => return patch_error_response(400, &err),
         };
 
-        let operations = patch_operations
-            .into_iter()
+        // Dry-run validates the request (well-formed operations + paths) and
+        // never reaches the engine; #751 needs Red UI to surface patch errors
+        // before sending a mutation.
+        if parsed.dry_run {
+            return patch_dry_run_response(parsed.operations.len());
+        }
+
+        let operations: Vec<PatchEntityOperation> = parsed
+            .operations
+            .iter()
             .map(|operation| PatchEntityOperation {
                 op: match operation.op {
                     PatchOperationType::Set => PatchEntityOperationType::Set,
                     PatchOperationType::Replace => PatchEntityOperationType::Replace,
                     PatchOperationType::Unset => PatchEntityOperationType::Unset,
                 },
-                path: operation.path,
-                value: operation.value,
+                path: operation.path.clone(),
+                value: operation.value.clone(),
             })
             .collect();
 
@@ -451,8 +459,92 @@ impl RedDBServer {
                 200,
                 crate::presentation::entity_json::created_entity_output_json(&output),
             ),
-            Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
-            Err(err) => json_error(400, err.to_string()),
+            Err(err @ RedDBError::NotFound(_)) => {
+                json_error_code(404, "NOT_FOUND", err.to_string())
+            }
+            Err(err) => patch_apply_error_response(400, &parsed.operations, err.to_string()),
+        }
+    }
+
+    /// `PATCH /collections/:name/kvs/:key` — issue #751. Apply structured
+    /// JSON Patch operations against a KV value when the stored value is
+    /// JSON-compatible (object/array, or a JSON-encoded value). Non-JSON
+    /// KV values produce a structured `KV_VALUE_NOT_JSON` error so Red UI
+    /// can surface the limitation instead of replacing the value blindly.
+    pub(crate) fn handle_patch_kv(
+        &self,
+        collection: &str,
+        key: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+
+        let parsed = match parse_patch_payload(&payload) {
+            Ok(parsed) => parsed,
+            Err(err) => return patch_error_response(400, &err),
+        };
+
+        let current = match self.entity_use_cases().get_kv(collection, key) {
+            Ok(Some((value, _id))) => value,
+            Ok(None) => {
+                let err =
+                    PatchValidationError::new("KV_KEY_NOT_FOUND", format!("key not found: {key}"));
+                return patch_error_response(404, &err);
+            }
+            Err(err) => {
+                return patch_apply_error_response(400, &parsed.operations, err.to_string());
+            }
+        };
+
+        let mut json_value = match kv_value_to_json_value(&current) {
+            Ok(value) => value,
+            Err(err) => return patch_error_response(400, &err),
+        };
+
+        let entity_operations: Vec<PatchEntityOperation> = parsed
+            .operations
+            .iter()
+            .map(|operation| PatchEntityOperation {
+                op: match operation.op {
+                    PatchOperationType::Set => PatchEntityOperationType::Set,
+                    PatchOperationType::Replace => PatchEntityOperationType::Replace,
+                    PatchOperationType::Unset => PatchEntityOperationType::Unset,
+                },
+                path: operation.path.clone(),
+                value: operation.value.clone(),
+            })
+            .collect();
+
+        if let Err(message) = crate::application::entity::apply_patch_operations_to_json_public(
+            &mut json_value,
+            &entity_operations,
+        ) {
+            return patch_apply_error_response(400, &parsed.operations, message);
+        }
+
+        if parsed.dry_run {
+            return patch_dry_run_response(parsed.operations.len());
+        }
+
+        let new_value = Value::Json(crate::json::to_vec(&json_value).unwrap_or_default());
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
+        match ops.set_with_tags(collection, key, new_value, None, &[], false) {
+            Ok((_created, id)) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "collection".to_string(),
+                    JsonValue::String(collection.to_string()),
+                );
+                object.insert("key".to_string(), JsonValue::String(key.to_string()));
+                object.insert("id".to_string(), JsonValue::Number(id.raw() as f64));
+                object.insert("value".to_string(), json_value);
+                json_response(200, JsonValue::Object(object))
+            }
+            Err(err) => patch_apply_error_response(400, &parsed.operations, err.to_string()),
         }
     }
 
