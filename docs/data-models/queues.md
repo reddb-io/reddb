@@ -204,7 +204,48 @@ QUEUE ACK  orders GROUP billing 'msg-id-abc'
 
 -- Failed — requeue for retry
 QUEUE NACK orders GROUP billing 'msg-id-abc'
+
+-- Failed with a per-failure retry delay override (issue #723).
+-- The worker knows the right retry timing for this error class
+-- (rate-limit downstream → defer ~30 s). The override wins over
+-- the queue's default RETRY_DELAY.
+QUEUE NACK orders GROUP billing 'msg-id-abc' WITH DELAY 30s
 ```
+
+## Retry policy
+
+Queue-level retry behavior is governed by three knobs (see
+`CREATE QUEUE`):
+
+- `MAX_ATTEMPTS <n>` — total deliveries allowed before the message
+  is routed to the DLQ (if configured) or dropped. Each delivery
+  attempt and each `NACK` counts.
+- `RETRY_DELAY <duration>` — default delay applied to a
+  `NACK`-requeued message before it becomes re-deliverable. Reuses
+  the delayed-message machinery so retries do not churn the queue.
+  Omitted ⇒ immediate requeue.
+- `WITH DLQ <name>` — destination for messages that exceed
+  `MAX_ATTEMPTS`. Without a DLQ, exhausted messages are dropped.
+
+```sql
+CREATE QUEUE jobs WITH DLQ failed_jobs MAX_ATTEMPTS 5 RETRY_DELAY 2s
+
+-- Update defaults at runtime.
+ALTER QUEUE jobs SET RETRY_DELAY 5s
+```
+
+`QUEUE NACK ... WITH DELAY <duration>` overrides the queue default
+for one failure. The override is treated as a write action:
+clients connected with `Role::Read` are refused; `Write` and
+`Admin` succeed. Embedded callers (no auth identity attached) are
+trusted.
+
+Routine retries are visible through the
+`queue_nacked_total{outcome=retry|dlq|drop}` metric — they do not
+write to the audit log. Significant overrides (≥ 60 s, or any
+override that lands on a DLQ promotion or drop) emit a
+`queue/nack/override` audit event so operators see decisions that
+re-shape operational risk.
 
 ### Pending messages
 

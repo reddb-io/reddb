@@ -23,6 +23,7 @@ impl<'a> Parser<'a> {
         let mut max_attempts = DEFAULT_QUEUE_MAX_ATTEMPTS;
         let mut lock_deadline_ms = DEFAULT_QUEUE_LOCK_DEADLINE_MS;
         let mut in_flight_cap_per_group = DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP;
+        let mut retry_delay_ms: Option<u64> = None;
 
         // Parse optional clauses in any order
         loop {
@@ -40,6 +41,10 @@ impl<'a> Parser<'a> {
                 lock_deadline_ms = self.parse_integer()?.max(1) as u64;
             } else if self.consume_ident_ci("IN_FLIGHT_CAP_PER_GROUP")? {
                 in_flight_cap_per_group = self.parse_integer()?.max(1) as u32;
+            } else if self.consume_ident_ci("RETRY_DELAY")? {
+                let value = self.parse_float()?;
+                let unit = self.parse_queue_duration_unit()?;
+                retry_delay_ms = Some((value * unit).max(0.0) as u64);
             } else if self.consume(&Token::With)? {
                 if self.consume_ident_ci("EVENTS")? {
                     return Err(ParseError::new(
@@ -69,6 +74,7 @@ impl<'a> Parser<'a> {
             lock_deadline_ms,
             in_flight_cap_per_group,
             if_not_exists,
+            retry_delay_ms,
         }))
     }
 
@@ -105,6 +111,10 @@ impl<'a> Parser<'a> {
             alter.in_flight_cap_per_group = Some(self.parse_integer()?.max(1) as u32);
         } else if self.consume_ident_ci("DLQ")? {
             alter.dlq = Some(self.expect_ident()?);
+        } else if self.consume_ident_ci("RETRY_DELAY")? {
+            let value = self.parse_float()?;
+            let unit = self.parse_queue_duration_unit()?;
+            alter.retry_delay_ms = Some((value * unit).max(0.0) as u64);
         } else {
             return Err(ParseError::expected(
                 vec![
@@ -113,6 +123,7 @@ impl<'a> Parser<'a> {
                     "LOCK_DEADLINE_MS",
                     "IN_FLIGHT_CAP_PER_GROUP",
                     "DLQ",
+                    "RETRY_DELAY",
                 ],
                 self.peek(),
                 self.position(),
@@ -343,7 +354,8 @@ impl<'a> Parser<'a> {
             Token::Ack => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                let (group, message_id, delivery_id) = self.parse_ack_nack_handle()?;
+                let (group, message_id, delivery_id, _delay_ms) =
+                    self.parse_ack_nack_handle(false)?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Ack {
                     queue,
                     group,
@@ -354,12 +366,14 @@ impl<'a> Parser<'a> {
             Token::Nack => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                let (group, message_id, delivery_id) = self.parse_ack_nack_handle()?;
+                let (group, message_id, delivery_id, delay_ms) =
+                    self.parse_ack_nack_handle(true)?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Nack {
                     queue,
                     group,
                     message_id,
                     delivery_id,
+                    delay_ms,
                 }))
             }
             _ => Err(ParseError::expected(
@@ -381,7 +395,10 @@ impl<'a> Parser<'a> {
     /// - `WITH delivery_id = '<base32>'`              → delivery_id only; group / message_id empty
     ///
     /// Refusing both is a parse error — at least one handle is required.
-    fn parse_ack_nack_handle(&mut self) -> Result<(String, String, Option<String>), ParseError> {
+    fn parse_ack_nack_handle(
+        &mut self,
+        allow_delay: bool,
+    ) -> Result<(String, String, Option<String>, Option<u64>), ParseError> {
         let (group, message_id) = if matches!(self.peek(), Token::Group) {
             self.advance()?;
             let group = self.expect_ident()?;
@@ -390,33 +407,55 @@ impl<'a> Parser<'a> {
         } else {
             (String::new(), String::new())
         };
-        let delivery_id = if self.consume(&Token::With)? {
-            if !self.consume_ident_ci("delivery_id")? {
-                return Err(ParseError::expected(
-                    vec!["delivery_id"],
-                    self.peek(),
-                    self.position(),
-                ));
+        // After the optional `GROUP <g> '<mid>'`, we can have any
+        // combination of `WITH delivery_id = '<id>'` and (for NACK only)
+        // `WITH DELAY <duration>` — in any order. Each clause may appear
+        // at most once. A bare `WITH` followed by neither keyword is a
+        // parse error.
+        let mut delivery_id: Option<String> = None;
+        let mut delay_ms: Option<u64> = None;
+        while self.consume(&Token::With)? {
+            if self.consume_ident_ci("delivery_id")? {
+                if delivery_id.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate WITH delivery_id clause".to_string(),
+                        self.position(),
+                    ));
+                }
+                if !self.consume(&Token::Eq)? {
+                    return Err(ParseError::expected(
+                        vec!["="],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                delivery_id = Some(self.parse_string()?);
+            } else if allow_delay && self.consume_ident_ci("DELAY")? {
+                if delay_ms.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate WITH DELAY clause".to_string(),
+                        self.position(),
+                    ));
+                }
+                let value = self.parse_float()?;
+                let unit = self.parse_queue_duration_unit()?;
+                delay_ms = Some((value * unit).max(0.0) as u64);
+            } else {
+                let mut expected = vec!["delivery_id"];
+                if allow_delay {
+                    expected.push("DELAY");
+                }
+                return Err(ParseError::expected(expected, self.peek(), self.position()));
             }
-            if !self.consume(&Token::Eq)? {
-                return Err(ParseError::expected(
-                    vec!["="],
-                    self.peek(),
-                    self.position(),
-                ));
-            }
-            Some(self.parse_string()?)
-        } else {
-            None
-        };
-        if group.is_empty() && delivery_id.is_none() {
-            return Err(ParseError::expected(
-                vec!["GROUP", "WITH delivery_id"],
-                self.peek(),
-                self.position(),
-            ));
         }
-        Ok((group, message_id, delivery_id))
+        if group.is_empty() && delivery_id.is_none() {
+            let mut expected = vec!["GROUP", "WITH delivery_id"];
+            if allow_delay {
+                expected.push("WITH DELAY");
+            }
+            return Err(ParseError::expected(expected, self.peek(), self.position()));
+        }
+        Ok((group, message_id, delivery_id, delay_ms))
     }
 
     /// Parse the optional `PRIORITY <int>`, `DELAY <duration>`, and
