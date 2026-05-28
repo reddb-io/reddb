@@ -94,6 +94,17 @@ pub(super) const CONTROL_CAPABILITIES_INTERNAL: &str = "__red_schema_control_cap
 // list of policy action verbs from SQL.
 pub(super) const POLICY_ACTIONS: &str = "red.policy.actions";
 pub(super) const POLICY_ACTIONS_INTERNAL: &str = "__red_schema_policy_actions";
+// Issue #745 — typed red.* model-shaped projections for Red UI toolbars.
+// These are read-only projections over `red.collections`, declared
+// column contracts, and the existing stat surfaces — *not* new sources
+// of truth. The UI gains stable, type-specific columns without having
+// to derive everything from the generic catalog.
+pub(super) const TABLES: &str = "red.tables";
+pub(super) const TABLES_INTERNAL: &str = "__red_schema_tables";
+pub(super) const DOCUMENTS: &str = "red.documents";
+pub(super) const DOCUMENTS_INTERNAL: &str = "__red_schema_documents";
+pub(super) const KV: &str = "red.kv";
+pub(super) const KV_INTERNAL: &str = "__red_schema_kv";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -317,6 +328,51 @@ const POLICY_ACTION_COLUMNS: [&str; 6] = [
     "gates_description",
 ];
 
+// Issue #745 — typed `red.tables`. `has_primary_key` is the edit
+// affordance the UI keys on: tables with a primary key support row-
+// level edits; the rest are append-mostly.
+const TABLE_COLUMNS: [&str; 10] = [
+    "name",
+    "schema_mode",
+    "row_count",
+    "column_count",
+    "index_count",
+    "has_primary_key",
+    "in_memory_bytes",
+    "on_disk_bytes",
+    "tenant_id",
+    "internal",
+];
+
+// Issue #745 — typed `red.documents`. `supports_json_path` is the
+// stable capability indicator the UI uses to decide whether to expose
+// JSON path edit affordances. Always true for the document model.
+const DOCUMENT_COLUMNS: [&str; 8] = [
+    "name",
+    "schema_mode",
+    "document_count",
+    "inferred_field_count",
+    "supports_json_path",
+    "in_memory_bytes",
+    "on_disk_bytes",
+    "internal",
+];
+
+// Issue #745 — typed `red.kv`. `key_type`/`value_type` are the
+// declared key/value shape hints. `supports_prefix_scan` is a stable
+// capability flag — true for the KV model, which always supports
+// prefix scans through `KEYS WITH PREFIX`.
+const KV_COLUMNS: [&str; 8] = [
+    "name",
+    "entries",
+    "key_type",
+    "value_type",
+    "supports_prefix_scan",
+    "in_memory_bytes",
+    "on_disk_bytes",
+    "internal",
+];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -362,6 +418,9 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (USERS, USERS_INTERNAL),
         (API_KEYS, API_KEYS_INTERNAL),
         (CONTROL_CAPABILITIES, CONTROL_CAPABILITIES_INTERNAL),
+        (TABLES, TABLES_INTERNAL),
+        (DOCUMENTS, DOCUMENTS_INTERNAL),
+        (KV, KV_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -433,6 +492,12 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(CONTROL_CAPABILITIES)
         || table.eq_ignore_ascii_case(POLICY_ACTIONS_INTERNAL)
         || table.eq_ignore_ascii_case(POLICY_ACTIONS)
+        || table.eq_ignore_ascii_case(TABLES_INTERNAL)
+        || table.eq_ignore_ascii_case(TABLES)
+        || table.eq_ignore_ascii_case(DOCUMENTS_INTERNAL)
+        || table.eq_ignore_ascii_case(DOCUMENTS)
+        || table.eq_ignore_ascii_case(KV_INTERNAL)
+        || table.eq_ignore_ascii_case(KV)
 }
 
 pub(super) fn red_query(
@@ -490,6 +555,9 @@ pub(super) fn red_query(
         VirtualTableKind::ApiKeys => api_keys_snapshot(runtime, tenant),
         VirtualTableKind::ControlCapabilities => control_capabilities_snapshot(),
         VirtualTableKind::PolicyActions => policy_actions_snapshot(),
+        VirtualTableKind::Tables => tables_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Documents => documents_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Kv => kv_snapshot(runtime, tenant, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -605,6 +673,9 @@ enum VirtualTableKind {
     ApiKeys,
     ControlCapabilities,
     PolicyActions,
+    Tables,
+    Documents,
+    Kv,
 }
 
 impl VirtualTableKind {
@@ -633,6 +704,9 @@ impl VirtualTableKind {
             Self::ApiKeys => &API_KEY_COLUMNS,
             Self::ControlCapabilities => &CONTROL_CAPABILITY_COLUMNS,
             Self::PolicyActions => &POLICY_ACTION_COLUMNS,
+            Self::Tables => &TABLE_COLUMNS,
+            Self::Documents => &DOCUMENT_COLUMNS,
+            Self::Kv => &KV_COLUMNS,
         }
     }
 
@@ -661,6 +735,9 @@ impl VirtualTableKind {
             Self::ApiKeys => API_KEYS,
             Self::ControlCapabilities => CONTROL_CAPABILITIES,
             Self::PolicyActions => POLICY_ACTIONS,
+            Self::Tables => TABLES,
+            Self::Documents => DOCUMENTS,
+            Self::Kv => KV,
         }
     }
 }
@@ -754,6 +831,15 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
         || name.eq_ignore_ascii_case(POLICY_ACTIONS)
     {
         return Ok(VirtualTableKind::PolicyActions);
+    }
+    if name.eq_ignore_ascii_case(TABLES_INTERNAL) || name.eq_ignore_ascii_case(TABLES) {
+        return Ok(VirtualTableKind::Tables);
+    }
+    if name.eq_ignore_ascii_case(DOCUMENTS_INTERNAL) || name.eq_ignore_ascii_case(DOCUMENTS) {
+        return Ok(VirtualTableKind::Documents);
+    }
+    if name.eq_ignore_ascii_case(KV_INTERNAL) || name.eq_ignore_ascii_case(KV) {
+        return Ok(VirtualTableKind::Kv);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -2101,6 +2187,257 @@ fn collections_snapshot(
         .collect()
 }
 
+/// Issue #745 — typed `red.tables` projection. Model-shaped view over
+/// `red.collections` filtered to `model = table`, joined with the
+/// declared column contract for `has_primary_key` and `column_count`.
+fn tables_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        TABLE_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let db = runtime.db();
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|c| c.model == CollectionModel::Table)
+        .filter(|c| collection_is_visible(&c.name, visible_collections))
+        .filter(|c| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store.as_ref(), &c.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
+        .map(|collection| {
+            let contract = db.collection_contract(&collection.name);
+            let column_count = contract
+                .as_ref()
+                .map(|c| c.declared_columns.len() as u64)
+                .unwrap_or(0);
+            let has_primary_key = contract
+                .as_ref()
+                .map(|c| c.declared_columns.iter().any(|col| col.primary_key))
+                .unwrap_or(false);
+            let in_memory_bytes = store
+                .get_collection(&collection.name)
+                .map(|manager| manager.stats().total_memory_bytes as u64)
+                .unwrap_or(0);
+            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
+                store.as_ref(),
+                &collection.name,
+            );
+            let owner_tenant = collection_tenant(store.as_ref(), &collection.name);
+            let visible_tenant = owner_tenant.as_deref().or(tenant);
+            let internal = internal_registry.is_internal(&collection.name);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name.clone()),
+                    Value::text(schema_mode_name(collection.schema_mode)),
+                    Value::UnsignedInteger(collection.entities as u64),
+                    Value::UnsignedInteger(column_count),
+                    Value::UnsignedInteger(collection.indices.len() as u64),
+                    Value::Boolean(has_primary_key),
+                    Value::UnsignedInteger(in_memory_bytes),
+                    Value::UnsignedInteger(on_disk_bytes),
+                    visible_tenant.map(Value::text).unwrap_or(Value::Null),
+                    Value::Boolean(internal),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Issue #745 — typed `red.documents` projection. Filtered to
+/// `model = document`. `inferred_field_count` reuses the same
+/// inference path that `red.columns` uses for document collections,
+/// so the two surfaces cannot drift.
+fn documents_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        DOCUMENT_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|c| c.model == CollectionModel::Document)
+        .filter(|c| collection_is_visible(&c.name, visible_collections))
+        .filter(|c| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store.as_ref(), &c.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
+        .map(|collection| {
+            let (document_count, inferred_field_count) = document_counts(runtime, &collection.name);
+            let in_memory_bytes = store
+                .get_collection(&collection.name)
+                .map(|manager| manager.stats().total_memory_bytes as u64)
+                .unwrap_or(0);
+            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
+                store.as_ref(),
+                &collection.name,
+            );
+            let internal = internal_registry.is_internal(&collection.name);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name),
+                    Value::text(schema_mode_name(collection.schema_mode)),
+                    Value::UnsignedInteger(document_count),
+                    Value::UnsignedInteger(inferred_field_count),
+                    Value::Boolean(true),
+                    Value::UnsignedInteger(in_memory_bytes),
+                    Value::UnsignedInteger(on_disk_bytes),
+                    Value::Boolean(internal),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Issue #745 — typed `red.kv` projection. Filtered to
+/// `model = kv`. `supports_prefix_scan` is a stable capability
+/// indicator (true — KV always supports `KEYS WITH PREFIX`). The
+/// declared key/value shape is reported as text-keyed with a
+/// mixed-value hint when no declared contract pins it down.
+fn kv_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        KV_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let db = runtime.db();
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|c| c.model == CollectionModel::Kv)
+        .filter(|c| collection_is_visible(&c.name, visible_collections))
+        .filter(|c| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store.as_ref(), &c.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
+        .map(|collection| {
+            let contract = db.collection_contract(&collection.name);
+            // KV defaults to text keys. Value shape can be pinned by a
+            // declared `value` column; otherwise it's `mixed` (any
+            // value type is accepted).
+            let key_type = contract
+                .as_ref()
+                .and_then(|c| {
+                    c.declared_columns
+                        .iter()
+                        .find(|col| col.name == "key")
+                        .map(|col| {
+                            col.sql_type
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| col.data_type.clone())
+                        })
+                })
+                .unwrap_or_else(|| "TEXT".to_string());
+            let value_type = contract
+                .as_ref()
+                .and_then(|c| {
+                    c.declared_columns
+                        .iter()
+                        .find(|col| col.name == "value")
+                        .map(|col| {
+                            col.sql_type
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| col.data_type.clone())
+                        })
+                })
+                .unwrap_or_else(|| "mixed".to_string());
+            let in_memory_bytes = store
+                .get_collection(&collection.name)
+                .map(|manager| manager.stats().total_memory_bytes as u64)
+                .unwrap_or(0);
+            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
+                store.as_ref(),
+                &collection.name,
+            );
+            let internal = internal_registry.is_internal(&collection.name);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name),
+                    Value::UnsignedInteger(collection.entities as u64),
+                    Value::text(key_type),
+                    Value::text(value_type),
+                    Value::Boolean(true),
+                    Value::UnsignedInteger(in_memory_bytes),
+                    Value::UnsignedInteger(on_disk_bytes),
+                    Value::Boolean(internal),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Issue #745 — count the rows that look like documents (have a JSON
+/// or text `body` field) and the distinct top-level field names seen
+/// across them. Mirrors `infer_document_columns` so the two surfaces
+/// cannot drift.
+fn document_counts(runtime: &RedDBRuntime, collection: &str) -> (u64, u64) {
+    let mut document_count: u64 = 0;
+    let mut field_names: HashSet<String> = HashSet::new();
+    for (_, entity) in runtime
+        .db()
+        .store()
+        .query_all(|entity| entity.kind.collection() == collection)
+    {
+        let EntityData::Row(row) = entity.data else {
+            continue;
+        };
+        if !row
+            .iter_fields()
+            .any(|(name, value)| name == "body" && matches!(value, Value::Json(_) | Value::Text(_)))
+        {
+            continue;
+        }
+        document_count = document_count.saturating_add(1);
+        for (name, _) in row.iter_fields() {
+            field_names.insert(name.to_string());
+        }
+    }
+    (document_count, field_names.len() as u64)
+}
+
 /// Issue #580 — DeclarativeRetention slice 1. Per-collection retention
 /// state: `(name, retention_duration, oldest_row_ts,
 /// expired_row_count_estimate)`. Materialised views are not subject to
@@ -2928,6 +3265,19 @@ mod tests {
             rewritten,
             "SELECT * FROM __red_schema_indices WHERE collection IN (SELECT name FROM __red_schema_collections)"
         );
+    }
+
+    // Issue #745 — typed `red.tables` / `red.documents` / `red.kv`
+    // each rewrite to their own dedicated internal identifier so the
+    // model-shaped projections do not collide with `red.collections`.
+    #[test]
+    fn rewrite_handles_typed_model_relations() {
+        let tables = rewrite_virtual_names("SELECT * FROM red.tables").expect("tables");
+        assert_eq!(tables, "SELECT * FROM __red_schema_tables");
+        let documents = rewrite_virtual_names("SELECT * FROM red.documents").expect("documents");
+        assert_eq!(documents, "SELECT * FROM __red_schema_documents");
+        let kv = rewrite_virtual_names("SELECT * FROM red.kv").expect("kv");
+        assert_eq!(kv, "SELECT * FROM __red_schema_kv");
     }
 
     #[test]
