@@ -119,6 +119,7 @@ mod handlers_keyed;
 mod handlers_log;
 mod handlers_metrics;
 mod handlers_ops;
+mod handlers_ops_policy;
 mod handlers_query;
 mod handlers_replication;
 mod handlers_vcs;
