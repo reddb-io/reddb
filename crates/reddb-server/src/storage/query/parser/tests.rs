@@ -4500,6 +4500,7 @@ fn test_parse_queue_control_and_group_command_forms() {
             group,
             message_id,
             delivery_id: None,
+            delay_ms: None,
         }) if queue == "tasks" && group == "workers" && message_id == "msg-2"
     ));
 
@@ -4656,6 +4657,7 @@ fn test_parse_queue_ack_nack_delivery_id_forms() {
             ref group,
             ref message_id,
             delivery_id: Some(ref did),
+            delay_ms: None,
         }) if queue == "tasks" && group.is_empty() && message_id.is_empty() && did == "xyz",
     ));
 

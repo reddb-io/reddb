@@ -2647,6 +2647,7 @@ pub const DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP: u32 = 10_000;
 
 /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration] [WITH DLQ name]
 /// [MAX_ATTEMPTS n] [LOCK_DEADLINE_MS n] [IN_FLIGHT_CAP_PER_GROUP n]
+/// [RETRY_DELAY duration]
 #[derive(Debug, Clone)]
 pub struct CreateQueueQuery {
     pub name: String,
@@ -2659,6 +2660,13 @@ pub struct CreateQueueQuery {
     pub lock_deadline_ms: u64,
     pub in_flight_cap_per_group: u32,
     pub if_not_exists: bool,
+    /// Default retry delay applied to NACK-requeued messages before they
+    /// become re-deliverable. `None` means no delay — the released
+    /// message is immediately available again (pre-#723 behaviour).
+    /// `Some(ms)` reuses the per-message availability machinery from
+    /// issue #722 to defer the next delivery attempt. An authorized
+    /// `NACK ... WITH DELAY <duration>` overrides this per-failure.
+    pub retry_delay_ms: Option<u64>,
 }
 
 /// ALTER QUEUE name SET <clause>
@@ -2667,6 +2675,7 @@ pub struct CreateQueueQuery {
 ///   LOCK_DEADLINE_MS n
 ///   IN_FLIGHT_CAP_PER_GROUP n
 ///   DLQ name
+///   RETRY_DELAY duration
 #[derive(Debug, Clone, Default)]
 pub struct AlterQueueQuery {
     pub name: String,
@@ -2675,6 +2684,9 @@ pub struct AlterQueueQuery {
     pub lock_deadline_ms: Option<u64>,
     pub in_flight_cap_per_group: Option<u32>,
     pub dlq: Option<String>,
+    /// Update the queue's default retry delay (issue #723). `Some(0)`
+    /// clears the delay back to immediate requeue.
+    pub retry_delay_ms: Option<u64>,
 }
 
 /// DROP QUEUE [IF EXISTS] name
@@ -2790,6 +2802,13 @@ pub enum QueueCommand {
         group: String,
         message_id: String,
         delivery_id: Option<String>,
+        /// Per-failure retry delay override (issue #723). `Some(ms)`
+        /// requests that the failed message become re-deliverable only
+        /// after `ms` milliseconds; takes precedence over the queue's
+        /// default `retry_delay_ms`. Authorization is enforced at the
+        /// runtime layer: requests from a read-only identity are
+        /// rejected.
+        delay_ms: Option<u64>,
     },
     Move {
         source: String,
