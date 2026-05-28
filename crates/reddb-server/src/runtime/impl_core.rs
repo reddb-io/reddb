@@ -10072,53 +10072,383 @@ impl RedDBRuntime {
                     &q.name,
                 );
             }
-            // Remaining DDL — gate on Write role. Fine-grained grants TBD.
-            QueryExpr::CreateTable(_)
-            | QueryExpr::CreateCollection(_)
-            | QueryExpr::CreateVector(_)
-            | QueryExpr::AlterTable(_)
-            | QueryExpr::CreateIndex(_)
-            | QueryExpr::DropIndex(_)
-            | QueryExpr::CreateSchema(_)
-            | QueryExpr::DropSchema(_)
-            | QueryExpr::CreateSequence(_)
-            | QueryExpr::DropSequence(_)
-            | QueryExpr::CreateView(_)
-            | QueryExpr::DropView(_)
-            | QueryExpr::RefreshMaterializedView(_)
-            | QueryExpr::CreatePolicy(_)
-            | QueryExpr::DropPolicy(_)
-            | QueryExpr::CreateServer(_)
-            | QueryExpr::DropServer(_)
-            | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_)
-            | QueryExpr::CreateTimeSeries(_)
-            | QueryExpr::CreateMetric(_)
-            | QueryExpr::DropTimeSeries(_)
-            | QueryExpr::CreateQueue(_)
-            | QueryExpr::AlterQueue(_)
-            | QueryExpr::DropQueue(_)
-            | QueryExpr::CreateTree(_)
-            | QueryExpr::DropTree(_) => {
-                return if role >= crate::auth::Role::Write {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "principal=`{}` role=`{:?}` cannot issue DDL",
-                        username, role
-                    ))
-                };
+            // Remaining DDL (#753) — hybrid policy-aware gate. Specific
+            // create/alter/drop verbs gate operations with a clear
+            // per-collection target so Red UI can author fine-grained
+            // policies (`create on collection:users`). Namespace-level
+            // and grouped DDL fall back to broader `schema:admin` /
+            // `schema:write` verbs against a `schema:<name>` resource.
+            // All branches share the [`check_ddl_object_privilege`]
+            // helper so allows / denies produce the same structured
+            // "principal=… action=… resource=<kind>:<name> denied by
+            // IAM policy" reason the Red UI security read contracts
+            // (#740) already render.
+            QueryExpr::CreateTable(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
             }
-            // Migration DDL — CREATE MIGRATION requires Write role (schema author).
-            QueryExpr::CreateMigration(_) => {
-                return if role >= crate::auth::Role::Write {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "principal=`{}` role=`{:?}` cannot issue CREATE MIGRATION",
-                        username, role
-                    ))
-                };
+            QueryExpr::CreateCollection(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateVector(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::AlterTable(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "alter",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateIndex(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.table,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropIndex(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    "collection",
+                    &q.table,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateSchema(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "schema:admin",
+                    "schema",
+                    &q.name,
+                    crate::auth::Role::Admin,
+                );
+            }
+            QueryExpr::DropSchema(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "schema:admin",
+                    "schema",
+                    &q.name,
+                    crate::auth::Role::Admin,
+                );
+            }
+            QueryExpr::CreateSequence(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropSequence(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateView(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropView(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::RefreshMaterializedView(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "alter",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreatePolicy(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.table,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropPolicy(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    "collection",
+                    &q.table,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateServer(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "schema:admin",
+                    "schema",
+                    &q.name,
+                    crate::auth::Role::Admin,
+                );
+            }
+            QueryExpr::DropServer(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "schema:admin",
+                    "schema",
+                    &q.name,
+                    crate::auth::Role::Admin,
+                );
+            }
+            QueryExpr::CreateForeignTable(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "schema:write",
+                    "schema",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropForeignTable(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "schema:write",
+                    "schema",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateTimeSeries(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateMetric(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.path,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropTimeSeries(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateQueue(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::AlterQueue(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "alter",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropQueue(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    "collection",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::CreateTree(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "create",
+                    "collection",
+                    &q.collection,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::DropTree(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    "collection",
+                    &q.collection,
+                    crate::auth::Role::Write,
+                );
+            }
+            // Migration DDL — CREATE MIGRATION is grouped DDL on the
+            // schema namespace; uses the `schema:write` fallback verb
+            // (no obvious per-collection target).
+            QueryExpr::CreateMigration(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "schema:write",
+                    "schema",
+                    &q.name,
+                    crate::auth::Role::Write,
+                );
             }
             // APPLY / ROLLBACK change data and schema — require Admin.
             QueryExpr::ApplyMigration(_) | QueryExpr::RollbackMigration(_) => {
@@ -10429,11 +10759,9 @@ impl RedDBRuntime {
 
     /// IAM privilege check for DROP / TRUNCATE on a named collection.
     ///
-    /// In legacy mode (IAM not enabled): requires Write role.
-    /// In IAM mode: requires an explicit `drop` / `truncate` policy on
-    /// `collection:<name>`; admin authority allows the action only when no
-    /// explicit Deny matches.
-    /// Records an audit log entry for both allow and deny outcomes.
+    /// Delegates to [`check_ddl_object_privilege`] with `resource_kind =
+    /// "collection"`. Kept as a thin wrapper so the existing DROP/TRUNCATE
+    /// callsites stay readable.
     fn check_ddl_collection_privilege(
         &self,
         auth_store: &Arc<crate::auth::store::AuthStore>,
@@ -10444,15 +10772,58 @@ impl RedDBRuntime {
         action: &str,
         collection: &str,
     ) -> Result<(), String> {
-        if role < crate::auth::Role::Write {
+        self.check_ddl_object_privilege(
+            auth_store,
+            principal,
+            role,
+            tenant,
+            username,
+            action,
+            "collection",
+            collection,
+            crate::auth::Role::Write,
+        )
+    }
+
+    /// Generalised IAM privilege check for DDL on a named object.
+    ///
+    /// `action` is the stable verb advertised through the action catalog
+    /// (`create`, `alter`, `drop`, `truncate`, `schema:write`,
+    /// `schema:admin`). `resource_kind` / `resource_name` form the policy
+    /// resource (`collection:<name>`, `schema:<name>`). `min_role` is the
+    /// legacy gate when IAM is not yet enabled.
+    ///
+    /// Behaviour:
+    /// * Role below `min_role` → structured "principal=… role=… cannot
+    ///   issue DDL" denial, audit recorded.
+    /// * IAM disabled → audit-record success and allow (legacy path).
+    /// * IAM enabled → call `check_policy_authz_with_role`. Explicit Deny
+    ///   and DefaultDeny in PolicyOnly mode both produce a UI-safe
+    ///   "principal=… action=… resource=<kind>:<name> denied by IAM
+    ///   policy" string. Explicit Allow and the LegacyRbac fallback
+    ///   allow the action.
+    #[allow(clippy::too_many_arguments)]
+    fn check_ddl_object_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        username: &str,
+        action: &str,
+        resource_kind: &str,
+        resource_name: &str,
+        min_role: crate::auth::Role,
+    ) -> Result<(), String> {
+        if role < min_role {
             let msg = format!(
-                "principal=`{}` role=`{:?}` cannot issue DDL",
-                username, role
+                "principal=`{}` role=`{:?}` cannot issue DDL action=`{}` resource=`{}:{}`",
+                username, role, action, resource_kind, resource_name
             );
             self.inner.audit_log.record(
                 action,
                 username,
-                collection,
+                resource_name,
                 "denied",
                 crate::json::Value::Null,
             );
@@ -10463,17 +10834,16 @@ impl RedDBRuntime {
             self.inner.audit_log.record(
                 action,
                 username,
-                collection,
+                resource_name,
                 "ok",
                 crate::json::Value::Null,
             );
             return Ok(());
         }
 
-        let resource_name = collection.to_string();
         let mut resource = crate::auth::policies::ResourceRef::new(
-            "collection".to_string(),
-            resource_name.clone(),
+            resource_kind.to_string(),
+            resource_name.to_string(),
         );
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
@@ -10487,7 +10857,7 @@ impl RedDBRuntime {
             self.inner.audit_log.record(
                 action,
                 username,
-                &resource_name,
+                resource_name,
                 "ok",
                 crate::json::Value::Null,
             );
@@ -10496,13 +10866,13 @@ impl RedDBRuntime {
             self.inner.audit_log.record(
                 action,
                 username,
-                &resource_name,
+                resource_name,
                 "denied",
                 crate::json::Value::Null,
             );
             Err(format!(
-                "principal=`{}` action=`{}` resource=`collection:{}` denied by IAM policy",
-                username, action, resource_name
+                "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
+                username, action, resource_kind, resource_name
             ))
         }
     }

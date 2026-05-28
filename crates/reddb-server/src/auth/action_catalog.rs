@@ -217,6 +217,26 @@ pub const ACTIONS: &[ActionEntry] = &[
         lifecycle_state: LifecycleState::Active,
         gates_description: "alter a database object",
     },
+    // Hybrid DDL fallback verbs (#753). The specific `create`/`drop`/
+    // `alter` entries above remain the preferred targets for fine-grained
+    // policies; `schema:write` covers grouped DDL that does not have an
+    // obvious per-collection target (foreign tables, migration steps),
+    // and `schema:admin` covers namespace-level operations (CREATE
+    // SCHEMA, CREATE SERVER). Both surface stable action names through
+    // `red.policy.actions` so Red UI can gate toolbar visibility without
+    // waiting on a perfect DDL taxonomy.
+    ActionEntry {
+        name: "schema:write",
+        category: ActionCategory::Schema,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "grouped DDL on the current schema namespace (foreign table, migration)",
+    },
+    ActionEntry {
+        name: "schema:admin",
+        category: ActionCategory::Admin,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "namespace-level DDL (CREATE SCHEMA, CREATE SERVER)",
+    },
     // -- Policy lifecycle ------------------------------------------------
     ActionEntry {
         name: "policy:put",
