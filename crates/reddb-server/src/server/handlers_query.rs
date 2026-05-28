@@ -1212,6 +1212,235 @@ impl RedDBServer {
         }
         Ok(())
     }
+
+    /// Issue #805 / #750 — read-only SELECT streaming transport.
+    ///
+    /// **Wire format (FROZEN for the #750 family): newline-delimited
+    /// JSON (NDJSON, `application/x-ndjson`) over HTTP/1.1 chunked
+    /// transfer encoding.** NDJSON — not SSE — is the chosen format:
+    /// it matches the existing output-stream surface (#760), needs no
+    /// `data:`/`event:` envelope around each row, and a UI parses one
+    /// frame per line. Frames are emitted strictly in this order:
+    ///
+    ///   1. **descriptor** — `{"descriptor":{result_kind, columns:
+    ///      [{name,type,nullable}], schema_fingerprint, models_present,
+    ///      counts_by_kind, has_*}}`. Emitted FIRST, before any row, so
+    ///      a client can initialise its columns/renderer before rows
+    ///      arrive (acceptance #2). Reuses the #737 descriptor and adds
+    ///      `schema_fingerprint`.
+    ///   2. **rows** — `{"row":{…projected values…}}`, one per record.
+    ///   3. **terminal** — `{"end":{"row_count":N}}`.
+    ///
+    /// **Read-only gate (acceptance #3):** the query is parsed and
+    /// classified BEFORE any wire framing. Only `SELECT … FROM …` (table
+    /// scan) is accepted. Mutations, DDL, graph algorithms, vector/
+    /// hybrid search, ASK, queue, KV, config, and CDC/backfill
+    /// statements are refused with a non-streaming structured error
+    /// (`{"ok":false,"code":"stream_unsupported_statement","error":…,
+    /// "statement_kind":…}`) that names the rejected kind and points at
+    /// the contract to use instead. Returning a non-streaming error
+    /// (no chunked body) lets the client distinguish "never accepted"
+    /// from "accepted then failed midway".
+    ///
+    /// **Backpressure (acceptance #4):** rows flush through a bounded
+    /// [`ChunkProducer`] buffer and chunked socket writes block on a
+    /// slow client, so a slow consumer throttles production rather than
+    /// forcing the whole serialised body to be buffered. This slice
+    /// reuses the materialising executor (the shim per ADR 0029): the
+    /// bounded-memory executor refactor, cursor registry, and
+    /// cancellation are deferred to subsequent #750 siblings, so
+    /// server-side memory here is bounded by the result size plus one
+    /// producer buffer — never the full serialised output.
+    pub(crate) fn handle_query_select_stream<W: std::io::Write>(
+        &self,
+        body: Vec<u8>,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        use crate::server::output_stream::{self, ChunkProducer, StreamConfig, SystemClock};
+
+        let request = match extract_query_request(&body) {
+            Ok(req) => req,
+            Err(response) => {
+                writer.write_all(&response.to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+        let ParsedQueryRequest {
+            query,
+            entity_types,
+            capabilities,
+            ..
+        } = request;
+
+        // Read-only gate — parse and classify before any wire framing.
+        match crate::storage::query::modes::parse_multi(&query) {
+            Ok(expr) => {
+                if let Err((kind, hint)) = classify_stream_read_only(&expr) {
+                    let response = with_statement_kind(
+                        json_error_code(
+                            400,
+                            "stream_unsupported_statement",
+                            format!(
+                                "/query/stream accepts only read-only SELECT queries; \
+                                 '{kind}' statements are not supported on this transport — \
+                                 use {hint}"
+                            ),
+                        ),
+                        kind,
+                    );
+                    writer.write_all(&response.to_http_bytes())?;
+                    return writer.flush();
+                }
+            }
+            Err(err) => {
+                let response = json_error_code(400, "query_error", err.to_string());
+                writer.write_all(&response.to_http_bytes())?;
+                return writer.flush();
+            }
+        }
+
+        let clock = SystemClock;
+        let config = StreamConfig::load(&self.runtime);
+
+        // Execute before sending headers so an execution failure surfaces
+        // as a non-streaming error (client can tell "never accepted").
+        let result = match self.query_use_cases().execute(ExecuteQueryInput { query }) {
+            Ok(result) => result,
+            Err(err) => {
+                if let crate::api::RedDBError::Validation {
+                    message,
+                    validation,
+                } = &err
+                {
+                    let mut object = crate::json::Map::new();
+                    object.insert("ok".to_string(), crate::json::Value::Bool(false));
+                    object.insert(
+                        "error".to_string(),
+                        crate::json_field::SerializedJsonField::tainted(message),
+                    );
+                    object.insert("validation".to_string(), validation.clone());
+                    let response = json_response(422, crate::json::Value::Object(object));
+                    writer.write_all(&response.to_http_bytes())?;
+                    return writer.flush();
+                }
+                let (status, msg) = map_runtime_error(&err);
+                let response = json_error(status, msg);
+                writer.write_all(&response.to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+
+        let records = crate::presentation::query_view::filter_query_records(
+            &result.result.records,
+            &entity_types,
+            &capabilities,
+        );
+        let columns = &result.result.columns;
+
+        output_stream::write_chunked_response_header(writer, 200, "application/x-ndjson")?;
+
+        let mut producer = ChunkProducer::new(&config, &clock);
+        let mut row_count: u64 = 0;
+        {
+            let mut flush = |bytes: &[u8]| -> io::Result<()> {
+                crate::server::output_stream::write_chunk(writer, bytes)
+            };
+
+            // 1. descriptor frame — first, before any row.
+            {
+                let descriptor =
+                    crate::presentation::query_result_json::stream_query_descriptor_json(
+                        &result.result,
+                        &records,
+                    );
+                let mut envelope = crate::json::Map::new();
+                envelope.insert("descriptor".to_string(), descriptor);
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            }
+
+            // 2. row frames.
+            for record in &records {
+                let values =
+                    crate::presentation::query_result_json::unified_record_json(record, columns);
+                let mut wrapper = crate::json::Map::new();
+                wrapper.insert("row".to_string(), values);
+                let mut line = crate::json::Value::Object(wrapper).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+                row_count += 1;
+            }
+
+            // 3. terminal envelope.
+            {
+                let mut envelope = crate::json::Map::new();
+                let mut payload = crate::json::Map::new();
+                payload.insert(
+                    "row_count".to_string(),
+                    crate::json::Value::Number(row_count as f64),
+                );
+                envelope.insert("end".to_string(), crate::json::Value::Object(payload));
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            }
+
+            producer.finish(&mut flush)?;
+        }
+
+        output_stream::write_chunked_terminator(writer)
+    }
+}
+
+/// Issue #805 — read-only gate for `/query/stream`. Returns `Ok(())`
+/// for an accepted read-only SELECT/scan, or `Err((kind, hint))`
+/// naming the rejected statement kind and the contract a client should
+/// use instead. Only a pure table `SELECT … FROM …` is accepted in this
+/// tracer-bullet slice; widening the allowlist (queue projections,
+/// graph reads) is left to subsequent #750 siblings, so the default is
+/// a clear refusal rather than silent acceptance of a shape whose
+/// streaming descriptor is not yet specified.
+fn classify_stream_read_only(
+    expr: &crate::storage::query::ast::QueryExpr,
+) -> Result<(), (&'static str, &'static str)> {
+    use crate::storage::query::ast::QueryExpr::*;
+    match expr {
+        Table(_) => Ok(()),
+        Insert(_) | Update(_) | Delete(_) | Truncate(_) | CopyFrom(_) => {
+            Err(("mutation", "POST /query"))
+        }
+        Ask(_) => Err(("ask", "POST /query with an `ASK … STREAM` body (SSE)")),
+        Graph(_) | Path(_) | GraphCommand(_) | Join(_) => Err(("graph", "the /graph/* endpoints")),
+        Vector(_) | Hybrid(_) | SearchCommand(_) => Err(("vector_search", "POST /search")),
+        QueueSelect(_) | QueueCommand(_) => Err(("queue", "the queue endpoints")),
+        KvCommand(_) => Err(("kv", "the KV endpoints")),
+        EventsBackfill(_) | EventsBackfillStatus { .. } => Err(("cdc", "GET /changes")),
+        _ => Err(("unsupported_statement", "POST /query")),
+    }
+}
+
+/// Insert a `statement_kind` field into the structured rejection so a
+/// client can branch on the rejected kind without parsing the message.
+/// The body is server-produced JSON so the round-trip never fails; if
+/// it somehow does, the original response is returned unchanged.
+fn with_statement_kind(response: HttpResponse, kind: &str) -> HttpResponse {
+    let Ok(text) = std::str::from_utf8(&response.body) else {
+        return response;
+    };
+    let Ok(parsed) = crate::json::parse_json(text) else {
+        return response;
+    };
+    let mut value = crate::json::Value::from(parsed);
+    if let crate::json::Value::Object(map) = &mut value {
+        map.insert(
+            "statement_kind".to_string(),
+            crate::json::Value::String(kind.to_string()),
+        );
+    }
+    let mut updated = response;
+    updated.body = value.to_string_compact().into_bytes();
+    updated
 }
 
 /// Issue #766 / S7 — resume parameters parsed off the optional
