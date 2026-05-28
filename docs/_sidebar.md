@@ -47,6 +47,7 @@
   - [Cache](/data-models/cache.md)
   - [Graphs](/data-models/graphs.md)
   - [Vectors & Embeddings](/data-models/vectors.md)
+  - [Analytics v0](/data-models/analytics.md)
   - [Metrics](/data-models/metrics.md)
   - [Time-Series](/data-models/timeseries.md)
   - [Hypertables](/data-models/hypertables.md)
