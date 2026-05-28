@@ -459,10 +459,24 @@ impl RedDBRuntime {
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
+        // Slice G (#675) — register `vector.turbo` as the built-in
+        // baseline for every newly-created vector collection. The
+        // marker is the durable signal `RedDB::turbo_state` reads to
+        // materialise the TurboQuantIndex + TurboExtent on first
+        // INSERT/SEARCH. Pre-existing vector collections were created
+        // without the marker and stay on the brute-force fallback path
+        // until they are explicitly migrated — there is no implicit
+        // backfill in this slice.
+        crate::runtime::vector_turbo_kind::mark_as_turbo(&store, &query.name);
         self.inner
             .db
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // Eagerly materialise the per-collection turbo state so the
+        // TurboExtent (when the store is paged) is reserved at CREATE
+        // time rather than on the first INSERT. Failures are swallowed
+        // — the lazy path in `turbo_state` retries on next access.
+        let _ = self.inner.db.turbo_state(&query.name);
         self.invalidate_result_cache();
 
         Ok(RuntimeQueryResult::ok_message(
@@ -3002,5 +3016,54 @@ mod tests {
             contract.subscriptions.iter().any(|s| s.enabled),
             "subscription should remain enabled"
         );
+    }
+
+    /// Slice G (#675) — every newly-created `CollectionModel::Vector`
+    /// collection is marked `vector.turbo` and gains a materialised
+    /// `TurboCollectionState`. The marker is what the SEARCH/INSERT
+    /// hot paths read to branch between TurboQuant and the legacy
+    /// brute-force fallback.
+    #[test]
+    fn create_vector_marks_collection_as_turbo_baseline() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE VECTOR embeddings DIM 4").unwrap();
+        let store = rt.db().store();
+        assert!(
+            crate::runtime::vector_turbo_kind::is_turbo(&store, "embeddings"),
+            "new vector collections must be turbo-marked baseline"
+        );
+        assert!(
+            rt.db().turbo_state("embeddings").is_some(),
+            "turbo_state must materialise after CREATE VECTOR"
+        );
+    }
+
+    /// Non-vector collections must NOT be turbo-marked. Guards against
+    /// the always-baseline change accidentally leaking the marker onto
+    /// CREATE TABLE / CREATE DOCUMENT / etc.
+    #[test]
+    fn create_table_does_not_mark_turbo() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE plain (id INT)").unwrap();
+        let store = rt.db().store();
+        assert!(
+            !crate::runtime::vector_turbo_kind::is_turbo(&store, "plain"),
+            "non-vector collections must not gain the turbo marker"
+        );
+        assert!(rt.db().turbo_state("plain").is_none());
+    }
+
+    /// `CREATE COLLECTION KIND vector.turbo` continues to mark the
+    /// collection (idempotent with the new always-baseline path).
+    #[test]
+    fn create_collection_kind_vector_turbo_still_marked() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE COLLECTION turbo_v KIND vector.turbo DIM 4")
+            .unwrap();
+        let store = rt.db().store();
+        assert!(crate::runtime::vector_turbo_kind::is_turbo(
+            &store, "turbo_v"
+        ));
+        assert!(rt.db().turbo_state("turbo_v").is_some());
     }
 }
