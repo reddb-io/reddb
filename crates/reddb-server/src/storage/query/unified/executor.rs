@@ -202,6 +202,7 @@ impl UnifiedExecutor {
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::CreateMetric(_)
+            | QueryExpr::AlterMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)
@@ -439,6 +440,7 @@ impl UnifiedExecutor {
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::CreateMetric(_)
+            | QueryExpr::AlterMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)

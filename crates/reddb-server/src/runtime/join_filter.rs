@@ -2043,6 +2043,7 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::ShowTenant => "show_tenant",
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
         QueryExpr::CreateMetric(_) => "create_metric",
+        QueryExpr::AlterMetric(_) => "alter_metric",
         QueryExpr::DropTimeSeries(_) => "drop_timeseries",
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::AlterQueue(_) => "alter_queue",

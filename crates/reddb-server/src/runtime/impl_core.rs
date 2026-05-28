@@ -180,6 +180,28 @@ impl RedDBRuntime {
         ))
     }
 
+    fn execute_alter_metric(
+        &self,
+        raw_query: &str,
+        query: &crate::storage::query::ast::AlterMetricQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let store = self.inner.db.store();
+        super::metric_descriptor_catalog::update(
+            store.as_ref(),
+            &query.path,
+            query.set_role.as_deref(),
+            query.attempted_kind.as_deref(),
+            query.attempted_path.as_deref(),
+        )?;
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("metric descriptor '{}' updated", query.path),
+            "alter",
+        ))
+    }
+
     fn execute_create_analytics_source(
         &self,
         raw_query: &str,
@@ -294,6 +316,9 @@ fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
         }
         QueryExpr::CreateMetric(q) => {
             schema("create_metric", Some(format!("metric:{}", q.path)));
+        }
+        QueryExpr::AlterMetric(q) => {
+            schema("alter_metric", Some(format!("metric:{}", q.path)));
         }
         QueryExpr::DropTimeSeries(q) => {
             schema("drop_timeseries", Some(format!("timeseries:{}", q.name)));
@@ -1297,6 +1322,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::DropIndex(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::CreateTimeSeries(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::CreateMetric(query) => cache_scope_insert(scopes, &query.path),
+        QueryExpr::AlterMetric(query) => cache_scope_insert(scopes, &query.path),
         QueryExpr::DropTimeSeries(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::CreateQueue(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::AlterQueue(query) => cache_scope_insert(scopes, &query.name),
@@ -2287,6 +2313,7 @@ pub(super) fn intent_lock_modes_for(
         | QueryExpr::DropIndex(_)
         | QueryExpr::CreateTimeSeries(_)
         | QueryExpr::CreateMetric(_)
+        | QueryExpr::AlterMetric(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
         | QueryExpr::AlterQueue(_)
@@ -2359,6 +2386,7 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         QueryExpr::DropIndex(q) => out.push(q.table.clone()),
         QueryExpr::CreateTimeSeries(q) => out.push(q.name.clone()),
         QueryExpr::CreateMetric(q) => out.push(q.path.clone()),
+        QueryExpr::AlterMetric(q) => out.push(q.path.clone()),
         QueryExpr::DropTimeSeries(q) => out.push(q.name.clone()),
         QueryExpr::CreateQueue(q) => out.push(q.name.clone()),
         QueryExpr::AlterQueue(q) => out.push(q.name.clone()),
@@ -5877,6 +5905,7 @@ impl RedDBRuntime {
             // Time-series DDL
             QueryExpr::CreateTimeSeries(ref ts) => self.execute_create_timeseries(query, ts),
             QueryExpr::CreateMetric(ref metric) => self.execute_create_metric(query, metric),
+            QueryExpr::AlterMetric(ref alter) => self.execute_alter_metric(query, alter),
             QueryExpr::DropTimeSeries(ref ts) => self.execute_drop_timeseries(query, ts),
             // Queue DDL and commands
             QueryExpr::CreateQueue(ref q) => self.execute_create_queue(query, q),
@@ -10409,6 +10438,19 @@ impl RedDBRuntime {
                     tenant.as_deref(),
                     &username,
                     "create",
+                    "collection",
+                    &q.path,
+                    crate::auth::Role::Write,
+                );
+            }
+            QueryExpr::AlterMetric(q) => {
+                return self.check_ddl_object_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "alter",
                     "collection",
                     &q.path,
                     crate::auth::Role::Write,

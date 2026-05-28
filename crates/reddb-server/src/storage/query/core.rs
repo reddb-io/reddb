@@ -67,6 +67,8 @@ pub enum QueryExpr {
     CreateTimeSeries(CreateTimeSeriesQuery),
     /// CREATE METRIC path TYPE kind ROLE role
     CreateMetric(CreateMetricQuery),
+    /// ALTER METRIC path SET <ROLE|KIND|TYPE|PATH> <value>
+    AlterMetric(AlterMetricQuery),
     /// DROP TIMESERIES name
     DropTimeSeries(DropTimeSeriesQuery),
     /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
@@ -1872,6 +1874,23 @@ pub struct CreateMetricQuery {
     pub path: String,
     pub kind: String,
     pub role: String,
+}
+
+/// ALTER METRIC path SET <field> <value>
+///
+/// v0 mutability:
+/// - `set_role`: mutable — role is a semantic label (operational/kpi/sli).
+/// - `attempted_kind`: parser captured a `SET KIND`/`SET TYPE` clause; the
+///   runtime rejects with a clear error because kind changes alter the
+///   metric's mathematical meaning (counter vs gauge vs histogram, etc.).
+/// - `attempted_path`: parser captured a `SET PATH` clause; the runtime
+///   rejects because path is the descriptor's identity.
+#[derive(Debug, Clone)]
+pub struct AlterMetricQuery {
+    pub path: String,
+    pub set_role: Option<String>,
+    pub attempted_kind: Option<String>,
+    pub attempted_path: Option<String>,
 }
 
 /// CREATE COLLECTION name KIND kind [SIGNED_BY ('pubkey_hex', ...)]

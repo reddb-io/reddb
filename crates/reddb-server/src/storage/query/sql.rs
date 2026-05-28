@@ -1,7 +1,7 @@
 use crate::catalog::CollectionModel;
 use crate::storage::query::ast::{
-    AlterQueueQuery, AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp,
-    CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateCollectionQuery,
+    AlterMetricQuery, AlterQueueQuery, AlterTableQuery, AlterUserStmt, ApplyMigrationQuery,
+    AskQuery, BinOp, CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateCollectionQuery,
     CreateForeignTableQuery, CreateIndexQuery, CreateMetricQuery, CreateMigrationQuery,
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
     CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateVectorQuery, CreateViewQuery,
@@ -76,6 +76,7 @@ pub enum SqlCommand {
     DropIndex(DropIndexQuery),
     CreateTimeSeries(CreateTimeSeriesQuery),
     CreateMetric(CreateMetricQuery),
+    AlterMetric(AlterMetricQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     AlterQueue(AlterQueueQuery),
@@ -242,6 +243,7 @@ pub enum SqlSchemaCommand {
     DropIndex(DropIndexQuery),
     CreateTimeSeries(CreateTimeSeriesQuery),
     CreateMetric(CreateMetricQuery),
+    AlterMetric(AlterMetricQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     AlterQueue(AlterQueueQuery),
@@ -338,6 +340,9 @@ impl SqlStatement {
             }
             SqlStatement::Schema(SqlSchemaCommand::CreateMetric(query)) => {
                 SqlCommand::CreateMetric(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::AlterMetric(query)) => {
+                SqlCommand::AlterMetric(query)
             }
             SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query)) => {
                 SqlCommand::DropTimeSeries(query)
@@ -492,6 +497,7 @@ impl SqlCommand {
             SqlCommand::DropIndex(query) => QueryExpr::DropIndex(query),
             SqlCommand::CreateTimeSeries(query) => QueryExpr::CreateTimeSeries(query),
             SqlCommand::CreateMetric(query) => QueryExpr::CreateMetric(query),
+            SqlCommand::AlterMetric(query) => QueryExpr::AlterMetric(query),
             SqlCommand::DropTimeSeries(query) => QueryExpr::DropTimeSeries(query),
             SqlCommand::CreateQueue(query) => QueryExpr::CreateQueue(query),
             SqlCommand::AlterQueue(query) => QueryExpr::AlterQueue(query),
@@ -583,6 +589,9 @@ impl SqlCommand {
             }
             SqlCommand::CreateMetric(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::CreateMetric(query))
+            }
+            SqlCommand::AlterMetric(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::AlterMetric(query))
             }
             SqlCommand::DropTimeSeries(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query))
@@ -2132,6 +2141,16 @@ impl<'a> Parser<'a> {
                         QueryExpr::AlterQueue(query) => Ok(SqlCommand::AlterQueue(query)),
                         other => Err(ParseError::new(
                             format!("internal: ALTER QUEUE produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if matches!(next, Token::Metric) {
+                    self.advance()?; // consume ALTER
+                    self.advance()?; // consume METRIC
+                    match self.parse_alter_metric_body()? {
+                        QueryExpr::AlterMetric(query) => Ok(SqlCommand::AlterMetric(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: ALTER METRIC produced unexpected kind {other:?}"),
                             self.position(),
                         )),
                     }

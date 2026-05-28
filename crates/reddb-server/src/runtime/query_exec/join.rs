@@ -293,6 +293,7 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::ShowTenant
         | QueryExpr::CreateTimeSeries(_)
         | QueryExpr::CreateMetric(_)
+        | QueryExpr::AlterMetric(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
         | QueryExpr::AlterQueue(_)

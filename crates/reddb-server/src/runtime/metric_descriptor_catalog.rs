@@ -59,6 +59,55 @@ pub fn list(store: &UnifiedStore) -> Vec<MetricDescriptor> {
     load(store)
 }
 
+/// Update mutable fields of an existing metric descriptor.
+///
+/// v0 mutability rules:
+/// - `set_role`: mutable. Role is a semantic label (operational/kpi/sli)
+///   that does not change how stored samples are interpreted.
+/// - `attempted_kind`: rejected. Changing kind (counter ⇄ gauge ⇄
+///   histogram, etc.) silently changes the mathematical meaning of any
+///   already-stored or future samples; the safe path is DROP + CREATE.
+/// - `attempted_path`: rejected. Path is the descriptor's identity; an
+///   "in-place" rename would invalidate every consumer that addresses
+///   the metric by dotted path.
+pub fn update(
+    store: &UnifiedStore,
+    path: &str,
+    set_role: Option<&str>,
+    attempted_kind: Option<&str>,
+    attempted_path: Option<&str>,
+) -> RedDBResult<MetricDescriptor> {
+    if let Some(kind) = attempted_kind {
+        return Err(RedDBError::Query(format!(
+            "metric descriptor field 'kind' cannot be changed (attempted '{kind}'): \
+             changing the metric kind alters the mathematical meaning of \
+             stored samples; drop and recreate the descriptor instead"
+        )));
+    }
+    if let Some(new_path) = attempted_path {
+        return Err(RedDBError::Query(format!(
+            "metric descriptor field 'path' cannot be changed (attempted '{new_path}'): \
+             the dotted path is the descriptor's identity; create a new \
+             descriptor at the desired path instead"
+        )));
+    }
+
+    let mut entries = load(store);
+    let idx = entries
+        .iter()
+        .position(|entry| entry.path == path)
+        .ok_or_else(|| RedDBError::Query(format!("metric descriptor '{path}' does not exist")))?;
+
+    if let Some(role) = set_role {
+        validate_role(role)?;
+        entries[idx].role = role.to_string();
+    }
+
+    let updated = entries[idx].clone();
+    save(store, &entries);
+    Ok(updated)
+}
+
 fn validate_path(path: &str) -> RedDBResult<()> {
     let segments: Vec<_> = path.split('.').collect();
     if segments.len() < 2

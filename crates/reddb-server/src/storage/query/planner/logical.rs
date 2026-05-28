@@ -665,6 +665,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::Revoke(_)
         | QueryExpr::AlterUser(_)
         | QueryExpr::CreateMetric(_)
+        | QueryExpr::AlterMetric(_)
         | QueryExpr::CreateIamPolicy { .. }
         | QueryExpr::DropIamPolicy { .. }
         | QueryExpr::AttachPolicy { .. }
