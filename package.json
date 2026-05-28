@@ -17,7 +17,7 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "postinstall": "node drivers/js/cli-postinstall.js",
-    "test": "node drivers/js/test/smoke.test.mjs",
+    "test": "node scripts/docs-analytics-boundaries.test.mjs && node drivers/js/test/smoke.test.mjs",
     "typecheck": "cargo check --workspace --locked",
     "lint": "cargo fmt --all -- --check && cargo clippy --workspace --locked -- -D warnings",
     "build": "cargo build --workspace --locked",
