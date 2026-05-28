@@ -9805,7 +9805,57 @@ impl RedDBRuntime {
         // Map QueryExpr → (Action, Resource).
         let (action, resource) = match expr {
             QueryExpr::Table(t) => (Action::Select, Resource::table_from_name(&t.table)),
-            QueryExpr::QueueSelect(q) => (Action::Select, Resource::table_from_name(&q.queue)),
+            QueryExpr::QueueSelect(q) => {
+                return self.check_queue_op_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "queue:peek",
+                    &q.queue,
+                );
+            }
+            QueryExpr::QueueCommand(cmd) => {
+                use crate::storage::query::ast::QueueCommand;
+                let (queue, action_verb) = match cmd {
+                    QueueCommand::Push { queue, .. } => (queue.as_str(), "queue:enqueue"),
+                    QueueCommand::Pop { queue, .. }
+                    | QueueCommand::GroupRead { queue, .. }
+                    | QueueCommand::Claim { queue, .. } => (queue.as_str(), "queue:read"),
+                    QueueCommand::Peek { queue, .. }
+                    | QueueCommand::Len { queue }
+                    | QueueCommand::Pending { queue, .. } => (queue.as_str(), "queue:peek"),
+                    QueueCommand::Ack { queue, .. } => (queue.as_str(), "queue:ack"),
+                    QueueCommand::Nack {
+                        queue, delay_ms, ..
+                    } => {
+                        // Per-failure retry overrides re-shape retry
+                        // behaviour for everyone draining the queue and
+                        // gate on the dedicated `queue:retry` verb so
+                        // operators can grant base NACK without granting
+                        // the override capability.
+                        let verb = if delay_ms.is_some() {
+                            "queue:retry"
+                        } else {
+                            "queue:nack"
+                        };
+                        (queue.as_str(), verb)
+                    }
+                    QueueCommand::Purge { queue } => (queue.as_str(), "queue:purge"),
+                    // `GroupCreate` is part of the consumer-setup
+                    // surface — read-side, never destructive.
+                    QueueCommand::GroupCreate { queue, .. } => (queue.as_str(), "queue:read"),
+                    QueueCommand::Move { source, .. } => (source.as_str(), "queue:dlq:move"),
+                };
+                return self.check_queue_op_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    action_verb,
+                    queue,
+                );
+            }
             QueryExpr::Graph(g) => {
                 if auth_store.iam_authorization_enabled() {
                     self.check_graph_property_projection_privilege(
@@ -10327,6 +10377,53 @@ impl RedDBRuntime {
                     "permission denied: managed config mutation blocked for `{key}`: {reason}"
                 )))
             }
+        }
+    }
+
+    /// IAM privilege check for a granular queue operation (issue #755 /
+    /// PRD #735).
+    ///
+    /// Each queue operation maps to a stable verb in
+    /// [`crate::auth::action_catalog`] (`queue:enqueue`, `queue:read`,
+    /// `queue:peek`, `queue:ack`, `queue:nack`, `queue:retry`,
+    /// `queue:dlq:move`, `queue:purge`, `queue:presence:read`). The
+    /// resource is `queue:<name>` scoped to the current tenant. In
+    /// legacy mode (no IAM authorization configured) the check is a
+    /// no-op — the role gates in `execute_queue_command` still apply
+    /// and the legacy `select` / `write` grant table continues to
+    /// govern queue access. In IAM-enabled mode a missing granular
+    /// grant yields a structured, UI-safe error of the form
+    /// `principal=… action=queue:… resource=queue:… denied by IAM
+    /// policy` so Red UI can surface the failing toolbar action.
+    fn check_queue_op_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        action: &str,
+        queue: &str,
+    ) -> Result<(), String> {
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("queue".to_string(), queue.to_string());
+        if let Some(t) = tenant {
+            resource = resource.with_tenant(t.to_string());
+        }
+        let ctx = runtime_iam_context(
+            role,
+            tenant,
+            auth_store.principal_is_system_owned(principal),
+        );
+        if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
+            Ok(())
+        } else {
+            Err(format!(
+                "principal=`{}` action=`{}` resource=`queue:{}` denied by IAM policy",
+                principal, action, queue
+            ))
         }
     }
 
