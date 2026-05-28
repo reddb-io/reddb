@@ -158,6 +158,29 @@ fn push_query_audit_collection(collections: &mut Vec<String>, name: &str) {
     }
 }
 
+impl RedDBRuntime {
+    fn execute_create_metric(
+        &self,
+        raw_query: &str,
+        query: &crate::storage::query::ast::CreateMetricQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let store = self.inner.db.store();
+        super::metric_descriptor_catalog::create(
+            store.as_ref(),
+            &query.path,
+            &query.kind,
+            &query.role,
+        )?;
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("metric descriptor '{}' created", query.path),
+            "create",
+        ))
+    }
+}
+
 fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
     use crate::runtime::control_events::{EventKind, Sensitivity};
 
@@ -248,6 +271,9 @@ fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
         }
         QueryExpr::CreateTimeSeries(q) => {
             schema("create_timeseries", Some(format!("timeseries:{}", q.name)));
+        }
+        QueryExpr::CreateMetric(q) => {
+            schema("create_metric", Some(format!("metric:{}", q.path)));
         }
         QueryExpr::DropTimeSeries(q) => {
             schema("drop_timeseries", Some(format!("timeseries:{}", q.name)));
@@ -1250,6 +1276,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::CreateIndex(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::DropIndex(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::CreateTimeSeries(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::CreateMetric(query) => cache_scope_insert(scopes, &query.path),
         QueryExpr::DropTimeSeries(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::CreateQueue(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::AlterQueue(query) => cache_scope_insert(scopes, &query.name),
@@ -2239,6 +2266,7 @@ pub(super) fn intent_lock_modes_for(
         | QueryExpr::CreateIndex(_)
         | QueryExpr::DropIndex(_)
         | QueryExpr::CreateTimeSeries(_)
+        | QueryExpr::CreateMetric(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
         | QueryExpr::AlterQueue(_)
@@ -2310,6 +2338,7 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         QueryExpr::CreateIndex(q) => out.push(q.table.clone()),
         QueryExpr::DropIndex(q) => out.push(q.table.clone()),
         QueryExpr::CreateTimeSeries(q) => out.push(q.name.clone()),
+        QueryExpr::CreateMetric(q) => out.push(q.path.clone()),
         QueryExpr::DropTimeSeries(q) => out.push(q.name.clone()),
         QueryExpr::CreateQueue(q) => out.push(q.name.clone()),
         QueryExpr::AlterQueue(q) => out.push(q.name.clone()),
@@ -5788,6 +5817,7 @@ impl RedDBRuntime {
             }
             // Time-series DDL
             QueryExpr::CreateTimeSeries(ref ts) => self.execute_create_timeseries(query, ts),
+            QueryExpr::CreateMetric(ref metric) => self.execute_create_metric(query, metric),
             QueryExpr::DropTimeSeries(ref ts) => self.execute_drop_timeseries(query, ts),
             // Queue DDL and commands
             QueryExpr::CreateQueue(ref q) => self.execute_create_queue(query, q),
@@ -9954,6 +9984,7 @@ impl RedDBRuntime {
             | QueryExpr::CreateForeignTable(_)
             | QueryExpr::DropForeignTable(_)
             | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::CreateMetric(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)
