@@ -652,6 +652,10 @@ fn vector_search_blocks_denied_content_projection() {
     )
     .unwrap();
 
+    // Issue #756 added a granular `vector:search` gate on the
+    // `vector:<collection>` resource. Grant it so the test continues
+    // to exercise the column-level deny that this case pins, rather
+    // than failing at the new search gate.
     attach_platform_policy(
         &store,
         r#"{
@@ -659,6 +663,7 @@ fn vector_search_blocks_denied_content_projection() {
             "version":1,
             "statements":[
                 {"effect":"allow","actions":["select"],"resources":["table:embeddings"]},
+                {"effect":"allow","actions":["vector:search"],"resources":["vector:embeddings"]},
                 {"effect":"deny","actions":["select"],"resources":["column:embeddings.content"]}
             ]
         }"#,

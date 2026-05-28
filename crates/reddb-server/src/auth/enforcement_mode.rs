@@ -112,7 +112,13 @@ pub fn legacy_rbac_decision(role: Role, action: &str) -> bool {
 fn required_role_for_action(action: &str) -> Role {
     // The two distinct reads in the DML category. Everything else in
     // the DML category mutates data and demands Write.
-    if action == "select" || action == "queue:peek" || action == "queue:presence:read" {
+    if action == "select"
+        || action == "queue:peek"
+        || action == "queue:presence:read"
+        || action == "vector:read"
+        || action == "vector:search"
+        || action == "vector:artifact:read"
+    {
         return Role::Read;
     }
     match lookup(action) {
@@ -124,7 +130,7 @@ fn required_role_for_action(action: &str) -> Role {
             ActionCategory::Stream => Role::Write,
             ActionCategory::Queue => Role::Write,
             ActionCategory::Graph => Role::Read,
-            // Operational reads default to `Read` under legacy RBAC —
+            // Operational reads default to `Role::Read` under legacy RBAC —
             // the HTTP surface is already gated by the `RED_ADMIN_TOKEN`
             // env path or by the role middleware's read-gate, so
             // demanding `Admin` here would lock out existing dashboards
@@ -132,6 +138,7 @@ fn required_role_for_action(action: &str) -> Role {
             // scope is enforced by `check_ops_http_policy` when IAM is
             // active.
             ActionCategory::Ops => Role::Read,
+            ActionCategory::Vector => Role::Write,
             ActionCategory::Ddl
             | ActionCategory::Function
             | ActionCategory::Mgmt
