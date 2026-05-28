@@ -857,6 +857,11 @@ impl RedDBServer {
                     if let Some(rest) = path.strip_prefix("/catalog/collections/") {
                         let name = rest.trim_matches('/');
                         if !name.is_empty() && !name.contains('/') {
+                            if let Some(deny) =
+                                self.check_collection_http_policy(&headers, "select", name)
+                            {
+                                return deny;
+                            }
                             return self.handle_collection_ui_metadata(name, &headers);
                         }
                     }
@@ -1165,12 +1170,27 @@ impl RedDBServer {
                         }
                     }
                     if let Some(collection) = collection_from_schema_path(&path) {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "select", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_describe_collection(collection);
                     }
                     if let Some(collection) = collection_from_scan_path(&path) {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "select", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_scan(collection, &query);
                     }
                     if let Some((collection, id)) = collection_entity_path(&path) {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "select", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_get_entity(collection, id);
                     }
                     if let Some(collection) = collection_from_native_vector_artifact_path(&path) {
@@ -1266,6 +1286,17 @@ impl RedDBServer {
                     };
                 }
                 if let Some((collection, key)) = collection_kv_path(&path) {
+                    let policy_action = match method.as_str() {
+                        "GET" => "select",
+                        "PUT" => "insert",
+                        "DELETE" => "delete",
+                        _ => return json_error(405, "method not allowed for KV endpoint"),
+                    };
+                    if let Some(deny) =
+                        self.check_collection_http_policy(&headers, policy_action, &collection)
+                    {
+                        return deny;
+                    }
                     return match method.as_str() {
                         "GET" => self.handle_get_kv(&collection, &key),
                         "PUT" => self.handle_put_kv(&collection, &key, body),
@@ -1333,6 +1364,11 @@ impl RedDBServer {
                         return self.handle_tree_rebalance(collection, tree_name, body);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/documents") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_bulk_create(
                             collection,
                             body,
@@ -1340,15 +1376,35 @@ impl RedDBServer {
                         );
                     }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/rows") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_bulk_create_rows_fast(collection, body);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/nodes") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_bulk_create(collection, body, Self::handle_create_node);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/edges") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_bulk_create(collection, body, Self::handle_create_edge);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/vectors") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_bulk_create(
                             collection,
                             body,
@@ -1356,6 +1412,11 @@ impl RedDBServer {
                         );
                     }
                     if let Some(collection) = collection_from_action_path(&path, "rows") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_create_row(collection, body);
                     }
                     // Issue #582 — Analytics slice 4. BatchInsertEndpoint
@@ -1363,20 +1424,45 @@ impl RedDBServer {
                     // commit + AnalyticsSchemaRegistry validation, and
                     // dedups by `Idempotency-Key` header.
                     if let Some(collection) = collection_from_action_path(&path, "batch") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         let idempotency_key =
                             headers.get("idempotency-key").map(|value| value.as_str());
                         return self.handle_batch_insert(collection, body, idempotency_key);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "nodes") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_create_node(collection, body);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "edges") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_create_edge(collection, body);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "vectors") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_create_vector(collection, body);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "documents") {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "insert", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_create_document(collection, body);
                     }
                     if let Some(name) = index_named_action_path(&path, "enable") {
@@ -1503,6 +1589,11 @@ impl RedDBServer {
                 }
                 if method == "PATCH" {
                     if let Some((collection, id)) = collection_entity_path(&path) {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "update", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_patch_entity(collection, id, body);
                     }
                 }
@@ -1550,6 +1641,11 @@ impl RedDBServer {
                         }
                     }
                     if let Some((collection, id)) = collection_entity_path(&path) {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "delete", collection)
+                        {
+                            return deny;
+                        }
                         return self.handle_delete_entity(collection, id);
                     }
                 }

@@ -110,6 +110,7 @@ mod handlers_ai;
 mod handlers_ai_model_cache;
 mod handlers_auth;
 mod handlers_backup;
+mod handlers_collection_policy;
 mod handlers_ec;
 pub(crate) mod handlers_entity;
 mod handlers_geo;
