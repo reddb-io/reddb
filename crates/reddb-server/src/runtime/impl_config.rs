@@ -241,6 +241,23 @@ impl RedDBRuntime {
 
         match self.resolve_vault_secret_value(&secret_ref.collection, &secret_ref.key) {
             Ok(value) => {
+                if value_looks_like_secret_ref(&value) {
+                    let err = secret_ref_chain_error(
+                        collection,
+                        key,
+                        &secret_ref.collection,
+                        &secret_ref.key,
+                    );
+                    let reason = err.to_string();
+                    self.audit_config_resolve(
+                        collection,
+                        key,
+                        Some(&secret_ref),
+                        crate::runtime::audit_log::Outcome::Error,
+                        &reason,
+                    );
+                    return Err(err);
+                }
                 self.audit_config_resolve(
                     collection,
                     key,
@@ -390,6 +407,18 @@ impl RedDBRuntime {
             }
         }
         evidence.payload = Some(value.clone());
+        if let Some(reason) = self.secret_ref_guard_write_check(collection, key, &value) {
+            let _ = self.emit_config_mutation_event(
+                crate::runtime::control_events::EventKind::ConfigWrite,
+                crate::runtime::control_events::Outcome::Denied,
+                "config:write",
+                collection,
+                key,
+                Some(reason.to_string()),
+                &evidence,
+            );
+            return Err(reason);
+        }
         let before = latest.as_ref().and_then(|version| {
             if version.tombstone {
                 None
@@ -1372,6 +1401,39 @@ impl RedDBRuntime {
         event
     }
 
+    /// `SecretRefGuard` write-side enforcement. When the inbound config
+    /// value is a `secret_ref`, peek the vault target without auditing and
+    /// reject the write if the target already resolves to another
+    /// `secret_ref` (depth ≥ 2 or a self/mutual cycle). Returns `Some(err)`
+    /// when the write must be refused; `None` otherwise.
+    fn secret_ref_guard_write_check(
+        &self,
+        collection: &str,
+        key: &str,
+        value: &Value,
+    ) -> Option<RedDBError> {
+        if !value_looks_like_secret_ref(value) {
+            return None;
+        }
+        let Ok(secret_ref) = parse_config_secret_ref(value) else {
+            return None;
+        };
+        let unsealed = match self.peek_vault_unsealed(&secret_ref.collection, &secret_ref.key) {
+            Ok(Some(value)) => value,
+            Ok(None) => return None,
+            Err(_) => return None,
+        };
+        if value_looks_like_secret_ref(&unsealed) {
+            return Some(secret_ref_chain_error(
+                collection,
+                key,
+                &secret_ref.collection,
+                &secret_ref.key,
+            ));
+        }
+        None
+    }
+
     fn audit_config_resolve(
         &self,
         collection: &str,
@@ -1433,6 +1495,34 @@ impl RedDBRuntime {
         }
         self.audit_log().record_event(builder.build());
     }
+}
+
+/// `SecretRefGuard` — returns `true` when the storage value carries the
+/// canonical `secret_ref` JSON shape (`{"type":"secret_ref", …}`). Drives
+/// the depth-1 invariant: a value that looks like a secret_ref is treated
+/// as indirection, never as terminal plaintext.
+fn value_looks_like_secret_ref(value: &Value) -> bool {
+    let Value::Json(bytes) = value else {
+        return false;
+    };
+    let Ok(json) = crate::json::from_slice::<crate::json::Value>(bytes) else {
+        return false;
+    };
+    let Some(object) = json.as_object() else {
+        return false;
+    };
+    object.get("type").and_then(|value| value.as_str()) == Some("secret_ref")
+}
+
+fn secret_ref_chain_error(
+    source_collection: &str,
+    source_key: &str,
+    target_collection: &str,
+    target_key: &str,
+) -> RedDBError {
+    RedDBError::InvalidConfig(format!(
+        "secret_ref chain rejected: config `{source_collection}.{source_key}` points at vault `{target_collection}.{target_key}` which is itself a secret_ref; depth-1 invariant requires the target to resolve to a non-secret_ref value"
+    ))
 }
 
 fn parse_config_secret_ref(value: &Value) -> RedDBResult<ConfigSecretRef> {

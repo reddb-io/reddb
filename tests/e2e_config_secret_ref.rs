@@ -195,3 +195,143 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
 
     cleanup_related(&path);
 }
+
+/// `SecretRefGuard` — depth-2 chains must be rejected at config write time
+/// with a structured error naming both the offending config key and the
+/// vault target it pointed at. Issue #708 acceptance: depth-2 rejected at
+/// write + error message includes both keys.
+#[test]
+fn secret_ref_guard_rejects_depth_two_chain_at_write() {
+    let path = temp_db_path("secret_ref_guard_708_depth2");
+    cleanup_related(&path);
+
+    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-d2");
+
+    rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("create vault");
+
+    // Plant a vault entry whose unsealed value is itself a secret_ref
+    // JSON object. This is the "legacy / hostile" precondition the guard
+    // exists to catch — a chain link in the store.
+    rt.execute_query(
+        r#"VAULT PUT secrets.chain = {"type":"secret_ref","store":"vault","collection":"secrets","key":"api_key"}"#,
+    )
+    .expect("put chained vault entry");
+
+    let err = rt
+        .execute_query("PUT CONFIG app api_key = SECRET_REF(vault, secrets.chain)")
+        .expect_err("depth-2 chain must be rejected at write");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("secret_ref chain rejected"),
+        "missing rejection marker: {msg}"
+    );
+    assert!(msg.contains("app.api_key"), "missing source key: {msg}");
+    assert!(msg.contains("secrets.chain"), "missing target key: {msg}");
+
+    cleanup_related(&path);
+}
+
+/// `SecretRefGuard` — a cyclic write (vault target points back into a
+/// `secret_ref`) is rejected with the same structured error. Cycle
+/// detection becomes trivial because depth is capped at 1.
+#[test]
+fn secret_ref_guard_rejects_cycle_at_write() {
+    let path = temp_db_path("secret_ref_guard_708_cycle");
+    cleanup_related(&path);
+
+    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-cyc");
+
+    rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("create vault");
+
+    // A vault entry whose unsealed value claims to be a secret_ref
+    // pointing back at itself. The write guard treats any secret_ref-shaped
+    // target as a chain — depth-1 cap collapses cycles into the same case.
+    rt.execute_query(
+        r#"VAULT PUT secrets.loop = {"type":"secret_ref","store":"vault","collection":"secrets","key":"loop"}"#,
+    )
+    .expect("put cyclic vault entry");
+
+    let err = rt
+        .execute_query("PUT CONFIG app loop_key = SECRET_REF(vault, secrets.loop)")
+        .expect_err("cyclic ref must be rejected at write");
+    let msg = err.to_string();
+    assert!(msg.contains("secret_ref chain rejected"), "{msg}");
+    assert!(msg.contains("app.loop_key"), "missing source key: {msg}");
+    assert!(msg.contains("secrets.loop"), "missing target key: {msg}");
+
+    cleanup_related(&path);
+}
+
+/// `SecretRefGuard` — defence-in-depth at read. If a chain somehow exists
+/// in the store (e.g. vault rotated to a secret_ref shape after the config
+/// write was accepted), the resolver returns the structured error instead
+/// of recursing. Issue #708 acceptance: resolver backstop + integration
+/// coverage through the AI/credential resolution path.
+#[test]
+fn secret_ref_guard_read_backstop_when_store_contains_chain() {
+    let path = temp_db_path("secret_ref_guard_708_read");
+    cleanup_related(&path);
+
+    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-r");
+
+    rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("create vault");
+
+    // Seed a healthy, depth-1 secret. Config write succeeds because the
+    // target is plaintext at this point.
+    rt.execute_query("VAULT PUT secrets.api_key = 'sk-original-708'")
+        .expect("seed plaintext vault");
+    rt.execute_query("PUT CONFIG app api_key = SECRET_REF(vault, secrets.api_key)")
+        .expect("put depth-1 config secret_ref");
+
+    // Mutate vault out from under the config ref so the store contains a
+    // chain. The write-time guard cannot intervene because the config
+    // write predates the rotation; the resolver-side backstop must catch
+    // it. The resolve query has not run yet, so the result cache cannot
+    // mask the outcome.
+    rt.execute_query(
+        r#"VAULT ROTATE secrets.api_key = {"type":"secret_ref","store":"vault","collection":"secrets","key":"deeper"}"#,
+    )
+    .expect("rotate vault to a secret_ref shape");
+
+    let err = rt
+        .execute_query("RESOLVE CONFIG app api_key")
+        .expect_err("resolver must refuse to follow a chain");
+    let msg = err.to_string();
+    assert!(msg.contains("secret_ref chain rejected"), "{msg}");
+    assert!(msg.contains("app.api_key"), "missing source key: {msg}");
+    assert!(msg.contains("secrets.api_key"), "missing target key: {msg}");
+
+    cleanup_related(&path);
+}
+
+/// `SecretRefGuard` — depth-1 references resolve normally and are not
+/// flagged by the new write or read checks. Regression guard against the
+/// guard tripping on healthy inputs.
+#[test]
+fn secret_ref_guard_allows_depth_one_reference() {
+    let path = temp_db_path("secret_ref_guard_708_ok");
+    cleanup_related(&path);
+
+    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-ok");
+
+    rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("create vault");
+    rt.execute_query("VAULT PUT secrets.api_key = 'sk-flat-708'")
+        .expect("seed plaintext vault");
+
+    rt.execute_query("PUT CONFIG app api_key = SECRET_REF(vault, secrets.api_key)")
+        .expect("depth-1 config write must succeed");
+
+    let resolved = rt
+        .execute_query("RESOLVE CONFIG app api_key")
+        .expect("depth-1 resolve must succeed");
+    assert_eq!(
+        resolved.result.records[0].get("value"),
+        Some(&Value::text("sk-flat-708".to_string()))
+    );
+
+    cleanup_related(&path);
+}
