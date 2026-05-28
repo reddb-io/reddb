@@ -16,6 +16,7 @@ pub mod auth;
 pub mod codec;
 pub mod frame;
 pub mod listener;
+pub mod output_stream;
 pub mod session;
 
 pub use codec::{decode_frame, encode_frame, FrameError};
