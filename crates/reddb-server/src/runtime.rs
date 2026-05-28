@@ -1226,6 +1226,15 @@ struct RuntimeInner {
     /// `ChainIntegrityBroken`.  Loaded lazily from `red_config` on first
     /// access so the flag survives restart.
     chain_integrity_broken: parking_lot::Mutex<HashMap<String, bool>>,
+    /// Issue #765 / S6 — in-memory cache of input-stream integrity tombstone
+    /// RID ranges. Loaded lazily from `red_config` on first read so the set
+    /// survives restart (the durable list lives under
+    /// `stream.integrity.tombstones`). `integrity_tombstones_state` is the
+    /// hot-path gate: `0` = unloaded, `1` = loaded-empty (reads skip
+    /// filtering after a single relaxed load), `2` = loaded-with-tombstones.
+    integrity_tombstones:
+        parking_lot::Mutex<Vec<crate::runtime::integrity_tombstone::TombstoneRange>>,
+    integrity_tombstones_state: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Clone)]
@@ -1279,6 +1288,7 @@ mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
 mod index_store;
+pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
 pub mod kv_watch;
