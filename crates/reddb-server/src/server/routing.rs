@@ -3151,6 +3151,16 @@ mod tests {
             end_line.starts_with("{\"end\":"),
             "last line must be end envelope: {end_line}"
         );
+        // Issue #766 — first line is the open_ack envelope.
+        let open_ack = lines.remove(0);
+        assert!(
+            open_ack.starts_with("{\"open_ack\":"),
+            "first line must be open_ack: {open_ack}"
+        );
+        assert!(
+            open_ack.contains("\"resumable\":"),
+            "open_ack must carry resumable flag: {open_ack}"
+        );
         assert!(
             !lines.is_empty(),
             "expected at least one row line before end: {text}"
@@ -3593,6 +3603,312 @@ mod tests {
         assert!(
             text.lines().last().unwrap_or("").starts_with("{\"end\":"),
             "stream must still close with an end envelope: {text}"
+        );
+    }
+
+    // ───────────── Issue #766 / S7 — resume coordinator ─────────────
+
+    fn ndjson_query_body(server: &RedDBServer, body: Vec<u8>) -> Vec<u8> {
+        let mut request = request_with("POST", "/query", body);
+        request
+            .headers
+            .insert("accept".to_string(), "application/x-ndjson".to_string());
+        let mut buf: Vec<u8> = Vec::new();
+        let handled = server
+            .try_route_streaming(&request, &mut buf)
+            .expect("streaming dispatch");
+        assert!(handled);
+        buf
+    }
+
+    fn decode_ndjson(raw: &[u8]) -> Vec<String> {
+        let (_head, body) = split_response(raw);
+        let decoded = decode_chunked_body(&body);
+        String::from_utf8(decoded)
+            .expect("ndjson utf8")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn extract_json_field(line: &str, key: &str) -> Option<String> {
+        // Crude extractor sufficient for tests; finds `"key":`<value> up
+        // to the next `,` or `}` boundary at the same depth (no nesting).
+        let needle = format!("\"{key}\":");
+        let start = line.find(&needle)? + needle.len();
+        let tail = &line[start..];
+        let mut depth_obj = 0;
+        let mut depth_arr = 0;
+        let mut in_str = false;
+        let mut escape = false;
+        let mut end = tail.len();
+        for (i, ch) in tail.char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_str => escape = true,
+                '"' => in_str = !in_str,
+                '{' if !in_str => depth_obj += 1,
+                '}' if !in_str => {
+                    if depth_obj == 0 {
+                        end = i;
+                        break;
+                    }
+                    depth_obj -= 1;
+                }
+                '[' if !in_str => depth_arr += 1,
+                ']' if !in_str => depth_arr -= 1,
+                ',' if !in_str && depth_obj == 0 && depth_arr == 0 => {
+                    end = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Some(tail[..end].trim().trim_matches('"').to_string())
+    }
+
+    #[test]
+    fn ndjson_open_ack_marks_resumable_for_plain_select() {
+        // Acceptance criterion #1 — OpenAck signals resumable: true
+        // for an RID-ordered SELECT.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows766 (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        ddl(
+            &server,
+            "INSERT INTO rows766 (id, name) VALUES (1, 'a'), (2, 'b')",
+        );
+
+        let raw = ndjson_query(&server, "SELECT id, name FROM rows766");
+        let lines = decode_ndjson(&raw);
+        let open_ack = &lines[0];
+        assert!(
+            open_ack.starts_with("{\"open_ack\":"),
+            "first line must be open_ack: {open_ack}"
+        );
+        assert!(
+            open_ack.contains("\"resumable\":true"),
+            "plain SELECT should be resumable: {open_ack}"
+        );
+    }
+
+    #[test]
+    fn ndjson_open_ack_marks_non_resumable_for_aggregation() {
+        // Acceptance criterion #1 — aggregations are not resumable.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows766_agg (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        ddl(
+            &server,
+            "INSERT INTO rows766_agg (id, name) VALUES (1, 'a')",
+        );
+
+        let raw = ndjson_query(&server, "SELECT COUNT(*) FROM rows766_agg");
+        let lines = decode_ndjson(&raw);
+        let open_ack = &lines[0];
+        assert!(
+            open_ack.contains("\"resumable\":false"),
+            "aggregation must not be resumable: {open_ack}"
+        );
+    }
+
+    #[test]
+    fn ndjson_resume_continues_from_resume_after_rid_when_hash_matches() {
+        // Acceptance criterion #2 — happy-path resume. Open a stream,
+        // record the row hash for the prefix, then re-open with
+        // `resume_after_rid` + matching `prefix_hash` and observe only
+        // the suffix rows being delivered.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows766_res (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        ddl(
+            &server,
+            "INSERT INTO rows766_res (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')",
+        );
+
+        // Open #1 — full stream, capture snapshot_lsn and per-row rids.
+        let raw = ndjson_query(&server, "SELECT id, name FROM rows766_res");
+        let lines = decode_ndjson(&raw);
+        let open_ack = lines.first().expect("open_ack");
+        let snapshot_lsn: u64 = extract_json_field(open_ack, "snapshot_lsn")
+            .expect("snapshot_lsn")
+            .parse()
+            .expect("snapshot_lsn integer");
+
+        // Extract row lines (excluding open_ack and end).
+        let row_lines: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.starts_with("{\"row\":"))
+            .map(String::as_str)
+            .collect();
+        assert!(row_lines.len() >= 2, "need ≥2 rows: {lines:?}");
+
+        // Pick the rid of the first row as the resume boundary —
+        // resume should deliver rows with rid > that value.
+        let first_row = row_lines[0];
+        let rid_str = extract_json_field(first_row, "rid").expect("rid present in row metadata");
+        let resume_after_rid: u64 = rid_str.parse().expect("rid integer");
+
+        // Compute prefix_hash by hashing the first row's exact bytes.
+        use crate::server::output_stream::PrefixHasher;
+        let mut hasher = PrefixHasher::new();
+        hasher.update(first_row.as_bytes());
+        let prefix_hash = hasher.finalize_hex();
+
+        // Resume.
+        let body = format!(
+            "{{\"query\":\"SELECT id, name FROM rows766_res\",\"resume\":{{\"snapshot_lsn\":{snapshot_lsn},\"resume_after_rid\":{resume_after_rid},\"prefix_hash\":\"{prefix_hash}\"}}}}"
+        );
+        let raw = ndjson_query_body(&server, body.into_bytes());
+        let lines = decode_ndjson(&raw);
+        let row_count_in_resume = lines.iter().filter(|l| l.starts_with("{\"row\":")).count();
+        let suffix_expected = row_lines.len() - 1;
+        assert_eq!(
+            row_count_in_resume, suffix_expected,
+            "resume delivered wrong row count: lines={lines:?}"
+        );
+        let end_line = lines.last().expect("end envelope");
+        assert!(
+            end_line.contains(&format!("\"row_count\":{suffix_expected}")),
+            "end row_count must match suffix length: {end_line}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("{\"error\":")),
+            "happy-path resume must not emit an error envelope: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn ndjson_resume_refuses_on_prefix_hash_mismatch() {
+        // Acceptance criterion #4 — wrong prefix_hash returns
+        // `prefix_hash_mismatch` and delivers zero rows.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows766_mis (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        ddl(
+            &server,
+            "INSERT INTO rows766_mis (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+        );
+
+        let raw = ndjson_query(&server, "SELECT id, name FROM rows766_mis");
+        let lines = decode_ndjson(&raw);
+        let open_ack = lines.first().expect("open_ack");
+        let snapshot_lsn: u64 = extract_json_field(open_ack, "snapshot_lsn")
+            .expect("snapshot_lsn")
+            .parse()
+            .expect("integer");
+        let first_row = lines
+            .iter()
+            .find(|l| l.starts_with("{\"row\":"))
+            .expect("first row");
+        let resume_after_rid: u64 = extract_json_field(first_row, "rid")
+            .expect("rid")
+            .parse()
+            .expect("u64");
+
+        let body = format!(
+            "{{\"query\":\"SELECT id, name FROM rows766_mis\",\"resume\":{{\"snapshot_lsn\":{snapshot_lsn},\"resume_after_rid\":{resume_after_rid},\"prefix_hash\":\"{}\"}}}}",
+            "deadbeef".repeat(8)
+        );
+        let raw = ndjson_query_body(&server, body.into_bytes());
+        let lines = decode_ndjson(&raw);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("{\"error\":") && l.contains("prefix_hash_mismatch")),
+            "expected prefix_hash_mismatch envelope: {lines:?}"
+        );
+        let rows_emitted = lines.iter().filter(|l| l.starts_with("{\"row\":")).count();
+        assert_eq!(
+            rows_emitted, 0,
+            "no rows must be delivered on hash mismatch: {lines:?}"
+        );
+        let end_line = lines.last().expect("end");
+        assert!(
+            end_line.contains("\"row_count\":0"),
+            "end must show 0 rows: {end_line}"
+        );
+    }
+
+    #[test]
+    fn ndjson_resume_refuses_on_expired_snapshot() {
+        // Acceptance criterion #3 — an expired snapshot lease (no
+        // entry / past TTL) refuses with `snapshot_expired`. We seed
+        // the registry with a stale opened_at_ms so the TTL has
+        // already elapsed.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows766_exp (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        ddl(
+            &server,
+            "INSERT INTO rows766_exp (id, name) VALUES (1, 'a'), (2, 'b')",
+        );
+
+        // Seed a snapshot LSN we'll claim to resume from, with
+        // opened_at_ms = 0 (way in the past) and ttl = 1ms so any
+        // wall-clock check expires it.
+        let bogus_snapshot_lsn: u64 = 1;
+        server.lease_registry().record(bogus_snapshot_lsn, 0, 1);
+
+        let body = format!(
+            "{{\"query\":\"SELECT id, name FROM rows766_exp\",\"resume\":{{\"snapshot_lsn\":{bogus_snapshot_lsn},\"resume_after_rid\":0,\"prefix_hash\":\"{}\"}}}}",
+            "0".repeat(64)
+        );
+        let raw = ndjson_query_body(&server, body.into_bytes());
+        let lines = decode_ndjson(&raw);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("{\"error\":") && l.contains("snapshot_expired")),
+            "expected snapshot_expired envelope: {lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("{\"row\":")).count(),
+            0,
+            "no rows must be delivered on snapshot expiry: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn ndjson_resume_refuses_on_non_resumable_query() {
+        // Acceptance criterion #5 — attempting resume on a
+        // non-resumable plan returns `not_resumable`. The check fires
+        // before the lease lookup, so a bogus snapshot_lsn does not
+        // shadow the not_resumable code.
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE rows766_nores (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        ddl(
+            &server,
+            "INSERT INTO rows766_nores (id, name) VALUES (1, 'a')",
+        );
+
+        let body = format!(
+            "{{\"query\":\"SELECT COUNT(*) FROM rows766_nores\",\"resume\":{{\"snapshot_lsn\":1,\"resume_after_rid\":0,\"prefix_hash\":\"{}\"}}}}",
+            "0".repeat(64)
+        );
+        let raw = ndjson_query_body(&server, body.into_bytes());
+        let lines = decode_ndjson(&raw);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("{\"error\":") && l.contains("not_resumable")),
+            "expected not_resumable envelope: {lines:?}"
         );
     }
 }

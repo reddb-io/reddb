@@ -566,6 +566,177 @@ impl Drop for StreamCapacityGuard {
     }
 }
 
+// ──────── Issue #766 / S7 — resume coordinator ────────
+
+/// Resumability assessment of a query plan. The shim slice runs a
+/// textual classifier over the SQL string: a query is resumable iff
+/// it has a stable total order over a unique key. By default we
+/// promise RID ASC; an explicit `ORDER BY rid` (or `ORDER BY rid ASC`)
+/// is also resumable. Anything that aggregates / groups / windows or
+/// orders on a non-unique column is not.
+pub fn assess_resumability(query: &str) -> bool {
+    let upper = query.to_uppercase();
+    let trimmed = upper.trim_start();
+    if !trimmed.starts_with("SELECT ") && !trimmed.starts_with("SELECT\n") {
+        return false;
+    }
+    const FORBIDDEN: &[&str] = &[
+        " GROUP BY ",
+        " HAVING ",
+        " DISTINCT ",
+        "DISTINCT ",
+        "COUNT(",
+        "SUM(",
+        "AVG(",
+        "MIN(",
+        "MAX(",
+        "ARRAY_AGG(",
+        "JSON_AGG(",
+        "OVER(",
+        " OVER (",
+        " JOIN ",
+    ];
+    for kw in FORBIDDEN {
+        if upper.contains(kw) {
+            return false;
+        }
+    }
+    if let Some(idx) = upper.find("ORDER BY") {
+        let tail = &upper[idx + "ORDER BY".len()..];
+        // Strip trailing LIMIT and statement terminator.
+        let mut clause = tail.to_string();
+        if let Some(lim) = clause.find(" LIMIT ") {
+            clause.truncate(lim);
+        }
+        if let Some(semi) = clause.find(';') {
+            clause.truncate(semi);
+        }
+        let clause = clause.trim();
+        if !matches!(clause, "RID" | "RID ASC") {
+            return false;
+        }
+    }
+    true
+}
+
+/// Resume-eligibility ledger. Holds `(snapshot_lsn → opened_at_ms,
+/// ttl_ms)` so a resume request can be checked against TTL without
+/// trusting the wall clock on the client. The shim slice does not
+/// implement true MVCC pinning — the registry's role is to make
+/// `snapshot_expired` deterministic and testable.
+#[derive(Debug, Default)]
+pub struct LeaseRegistry {
+    inner: Mutex<HashMap<u64, LeaseEntry>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LeaseEntry {
+    opened_at_ms: u64,
+    ttl_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseLookup {
+    /// No lease ever recorded for this snapshot LSN.
+    Unknown,
+    /// Lease exists but its TTL has elapsed.
+    Expired,
+    /// Lease exists and is still within TTL.
+    Live,
+}
+
+impl LeaseRegistry {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Record a freshly-opened lease. Idempotent — re-inserting the
+    /// same snapshot_lsn refreshes the timestamp (the client cannot
+    /// observe lease identity through the snapshot LSN alone, so this
+    /// matches "the latest open wins" semantics).
+    pub fn record(&self, snapshot_lsn: u64, opened_at_ms: u64, ttl_ms: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.insert(
+            snapshot_lsn,
+            LeaseEntry {
+                opened_at_ms,
+                ttl_ms,
+            },
+        );
+    }
+
+    /// Resume-time lookup. Returns whether the lease is unknown,
+    /// expired, or still live as of `now_ms`.
+    pub fn lookup(&self, snapshot_lsn: u64, now_ms: u64) -> LeaseLookup {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match inner.get(&snapshot_lsn) {
+            None => LeaseLookup::Unknown,
+            Some(entry) => {
+                if now_ms.saturating_sub(entry.opened_at_ms) >= entry.ttl_ms {
+                    LeaseLookup::Expired
+                } else {
+                    LeaseLookup::Live
+                }
+            }
+        }
+    }
+
+    /// Visible for tests / audit.
+    #[doc(hidden)]
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// Incremental SHA-256 hasher over emitted row lines, hex-encoded on
+/// finalize. The wire contract is that the server hashes the exact
+/// byte sequence of each row line (without trailing newline) in the
+/// order the rows are emitted; the client stores the resulting digest
+/// from the `end` envelope and replays it on resume.
+#[derive(Debug, Default)]
+pub struct PrefixHasher {
+    inner: Option<sha2::Sha256>,
+    rows: u64,
+}
+
+impl PrefixHasher {
+    pub fn new() -> Self {
+        use sha2::Digest;
+        Self {
+            inner: Some(sha2::Sha256::new()),
+            rows: 0,
+        }
+    }
+
+    pub fn update(&mut self, line: &[u8]) {
+        use sha2::Digest;
+        if let Some(h) = self.inner.as_mut() {
+            h.update(line);
+        }
+        self.rows += 1;
+    }
+
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    /// Hex-encoded digest of everything fed so far. Consumes the
+    /// hasher (a `PrefixHasher` is single-use).
+    pub fn finalize_hex(mut self) -> String {
+        use sha2::Digest;
+        let hasher = self
+            .inner
+            .take()
+            .expect("PrefixHasher::finalize_hex called twice");
+        let digest = hasher.finalize();
+        let mut out = String::with_capacity(64);
+        for b in digest.iter() {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    }
+}
+
 /// Borrow the lease registry's clock by default — the routing handler
 /// uses this, tests inject their own.
 pub fn system_clock() -> Arc<dyn Clock> {
@@ -889,6 +1060,64 @@ mod tests {
             observed_max.load(Ordering::SeqCst),
             CAP_GLOBAL
         );
+    }
+
+    // ──────── Issue #766 / S7 — resume coordinator ────────
+
+    #[test]
+    fn assess_resumability_accepts_plain_select() {
+        assert!(assess_resumability("SELECT id, name FROM t"));
+        assert!(assess_resumability("select * from t where id > 5"));
+        assert!(assess_resumability("SELECT a, b FROM t ORDER BY rid"));
+        assert!(assess_resumability("SELECT a, b FROM t ORDER BY rid ASC"));
+        assert!(assess_resumability(
+            "SELECT a FROM t ORDER BY rid ASC LIMIT 10"
+        ));
+    }
+
+    #[test]
+    fn assess_resumability_rejects_aggregates_and_unordered() {
+        assert!(!assess_resumability("SELECT COUNT(*) FROM t"));
+        assert!(!assess_resumability("SELECT SUM(x) FROM t"));
+        assert!(!assess_resumability("SELECT a, COUNT(b) FROM t GROUP BY a"));
+        assert!(!assess_resumability("SELECT DISTINCT a FROM t"));
+        assert!(!assess_resumability("SELECT a FROM t ORDER BY name"));
+        assert!(!assess_resumability("SELECT a FROM t ORDER BY rid DESC"));
+        assert!(!assess_resumability("SELECT a FROM t ORDER BY a, b"));
+        assert!(!assess_resumability("INSERT INTO t (a) VALUES (1)"));
+        assert!(!assess_resumability(
+            "SELECT a FROM t JOIN u ON t.id = u.id"
+        ));
+    }
+
+    #[test]
+    fn lease_registry_records_and_expires_against_ttl() {
+        let reg = LeaseRegistry::new();
+        reg.record(42, 1_000, 5_000);
+        assert_eq!(reg.lookup(42, 1_000), LeaseLookup::Live);
+        assert_eq!(reg.lookup(42, 5_999), LeaseLookup::Live);
+        assert_eq!(reg.lookup(42, 6_000), LeaseLookup::Expired);
+        assert_eq!(reg.lookup(99, 1_000), LeaseLookup::Unknown);
+    }
+
+    #[test]
+    fn prefix_hasher_is_order_sensitive_and_deterministic() {
+        let mut a = PrefixHasher::new();
+        a.update(b"{\"row\":{\"id\":1}}");
+        a.update(b"{\"row\":{\"id\":2}}");
+        let hash_a = a.finalize_hex();
+
+        let mut b = PrefixHasher::new();
+        b.update(b"{\"row\":{\"id\":1}}");
+        b.update(b"{\"row\":{\"id\":2}}");
+        let hash_b = b.finalize_hex();
+        assert_eq!(hash_a, hash_b);
+
+        let mut c = PrefixHasher::new();
+        c.update(b"{\"row\":{\"id\":2}}");
+        c.update(b"{\"row\":{\"id\":1}}");
+        assert_ne!(hash_a, c.finalize_hex());
+        assert_eq!(hash_a.len(), 64);
     }
 
     #[test]
