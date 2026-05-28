@@ -217,6 +217,51 @@ pub(crate) fn descriptor_json(result: &UnifiedResult, records: &[UnifiedRecord])
     JsonValue::Object(object)
 }
 
+/// Issue #805 / #750 — the descriptor frame emitted FIRST on the
+/// `/query/stream` transport. Builds on the additive #737
+/// [`descriptor_json`] (so the column/type/renderer metadata is
+/// identical to the non-streaming `/query` response a UI already
+/// knows) and adds a `schema_fingerprint`: a stable digest over the
+/// ordered `(name,type)` column pairs. The fingerprint lets a client
+/// detect when a resumed or re-issued stream's column shape diverges
+/// from what it initialised its renderer against, without diffing the
+/// whole column list. Computed from the already-inferred descriptor
+/// columns so it never re-scans records.
+pub(crate) fn stream_query_descriptor_json(
+    result: &UnifiedResult,
+    records: &[UnifiedRecord],
+) -> JsonValue {
+    let mut descriptor = descriptor_json(result, records);
+    if let JsonValue::Object(map) = &mut descriptor {
+        let fingerprint = schema_fingerprint(map.get("columns"));
+        map.insert(
+            "schema_fingerprint".to_string(),
+            JsonValue::String(fingerprint),
+        );
+    }
+    descriptor
+}
+
+/// Stable digest over the descriptor's ordered `(name,type)` column
+/// pairs. Order-sensitive on purpose — two queries projecting the same
+/// columns in a different order are different shapes for a column-bound
+/// renderer. Returns a 16-byte (32 hex char) SHA-256 prefix.
+fn schema_fingerprint(columns: Option<&JsonValue>) -> String {
+    let mut material = String::new();
+    if let Some(JsonValue::Array(entries)) = columns {
+        for entry in entries {
+            let name = entry.get("name").and_then(JsonValue::as_str).unwrap_or("");
+            let ty = entry.get("type").and_then(JsonValue::as_str).unwrap_or("");
+            material.push_str(name);
+            material.push('\u{1f}');
+            material.push_str(ty);
+            material.push('\u{1e}');
+        }
+    }
+    let digest = crate::crypto::sha256::sha256(material.as_bytes());
+    crate::utils::to_hex_prefix(&digest, 16)
+}
+
 fn descriptor_columns_json(columns: &[String], records: &[UnifiedRecord]) -> Vec<JsonValue> {
     columns
         .iter()
