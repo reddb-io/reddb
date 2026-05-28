@@ -2594,6 +2594,9 @@ impl RedDBRuntime {
                 queue_presence: Arc::new(
                     crate::storage::queue::presence::ConsumerPresenceRegistry::new(),
                 ),
+                vector_introspection: Arc::new(
+                    crate::storage::vector::introspection::VectorIntrospectionRegistry::new(),
+                ),
                 kv_tag_index: crate::runtime::KvTagIndex::default(),
                 chain_tip_cache: parking_lot::Mutex::new(HashMap::new()),
                 chain_integrity_broken: parking_lot::Mutex::new(HashMap::new()),
@@ -3759,6 +3762,37 @@ impl RedDBRuntime {
         self.inner
             .queue_presence
             .count_active_by_group(now_ns, ttl_ms)
+    }
+
+    /// Issue #743 — vector + TurboQuant introspection registry. Engine
+    /// publish points (collection create, artifact build start /
+    /// finish, fallback toggle, drop) update this; Red UI and
+    /// `red.*` vector virtual tables read snapshots through
+    /// `vector_introspection_snapshot` / `vector_introspection_get`.
+    pub(crate) fn vector_introspection_registry(
+        &self,
+    ) -> &std::sync::Arc<crate::storage::vector::introspection::VectorIntrospectionRegistry> {
+        &self.inner.vector_introspection
+    }
+
+    /// Issue #743 — full snapshot of every tracked vector collection's
+    /// `(VectorMetadata, ArtifactMetadata)`. Deterministically ordered
+    /// by collection name so Red UI tables and tests both see a
+    /// stable shape.
+    pub fn vector_introspection_snapshot(
+        &self,
+    ) -> Vec<crate::storage::vector::introspection::VectorIntrospection> {
+        self.inner.vector_introspection.snapshot()
+    }
+
+    /// Issue #743 — single-collection lookup, for the per-collection
+    /// metadata endpoint Red UI hits when an operator opens one
+    /// vector's toolbar.
+    pub fn vector_introspection_get(
+        &self,
+        collection: &str,
+    ) -> Option<crate::storage::vector::introspection::VectorIntrospection> {
+        self.inner.vector_introspection.get(collection)
     }
 
     /// Slice 10 of issue #527 — render-time scan of pending entries
