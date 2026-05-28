@@ -53,6 +53,9 @@ pub mod queue;
 // Vector storage stable contract surface (introspection, etc.) — issue #743.
 pub mod vector;
 
+// Graph storage stable contract surface (viewport, etc.) — issue #744.
+pub mod graph;
+
 // Machine Learning registry + async job queue (ML Sprint 1 — scaffold).
 // Feature 5 (classifier), Feature 6 (symbolic regression), and the other
 // five ML capabilities all publish models/versions and submit training
