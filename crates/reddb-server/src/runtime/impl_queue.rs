@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
+use crate::runtime::impl_core::current_auth_identity;
 use crate::storage::queue::QueueMode;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
@@ -131,6 +132,11 @@ pub(super) struct QueueRuntimeConfig {
     pub(super) max_attempts: u32,
     pub(super) lock_deadline_ms: u64,
     pub(super) in_flight_cap_per_group: u32,
+    /// Default retry delay (issue #723) applied to NACK-requeued
+    /// messages before they become re-deliverable. `None` keeps the
+    /// pre-#723 immediate-requeue behaviour. Overridden per-failure by
+    /// an authorized `NACK ... WITH DELAY <duration>`.
+    pub(super) retry_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -484,6 +490,7 @@ impl RedDBRuntime {
                 max_attempts: query.max_attempts,
                 lock_deadline_ms: query.lock_deadline_ms,
                 in_flight_cap_per_group: query.in_flight_cap_per_group,
+                retry_delay_ms: query.retry_delay_ms,
             },
         )?;
 
@@ -595,6 +602,14 @@ impl RedDBRuntime {
             }
             config.dlq = Some(dlq.clone());
             summary.push(format!("dlq={dlq}"));
+        }
+        if let Some(retry_delay_ms) = query.retry_delay_ms {
+            config.retry_delay_ms = if retry_delay_ms == 0 {
+                None
+            } else {
+                Some(retry_delay_ms)
+            };
+            summary.push(format!("retry_delay_ms={retry_delay_ms}"));
         }
 
         save_queue_config(store.as_ref(), &query.name, &config)?;
@@ -1129,9 +1144,25 @@ impl RedDBRuntime {
                 group,
                 message_id,
                 delivery_id,
+                delay_ms,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
+                let config = load_queue_config(store.as_ref(), queue);
+                // Issue #723: a per-failure DELAY override is a write
+                // operation that re-shapes retry behavior; readers must
+                // not be able to silently re-schedule another worker's
+                // work. Embedded callers (no auth identity attached)
+                // are trusted and bypass the check.
+                if delay_ms.is_some() {
+                    if let Some((_, role)) = current_auth_identity() {
+                        if !role.can_write() {
+                            return Err(RedDBError::InvalidOperation(format!(
+                                "role '{role}' is not authorized to override NACK retry delay on queue '{queue}'"
+                            )));
+                        }
+                    }
+                }
                 let (group_owned, message_entity) = resolve_ack_nack_handle(
                     store.as_ref(),
                     queue,
@@ -1155,8 +1186,47 @@ impl RedDBRuntime {
                             ))
                         })?,
                 };
-                let message = match lifecycle.nack(&txn, &did).map_err(map_qse)? {
-                    RetirementOutcome::Requeued => "message requeued".to_string(),
+                // Resolve the effective retry delay: per-failure
+                // override wins, then queue default, then zero
+                // (immediate requeue — pre-#723 behavior).
+                let effective_delay_ms = delay_ms.or(config.retry_delay_ms).unwrap_or(0);
+                let outcome = lifecycle.nack(&txn, &did).map_err(map_qse)?;
+                // Apply delay only when the message was actually
+                // requeued — DLQ promotion / drop terminate the
+                // retry cycle and a delay would be meaningless.
+                if matches!(outcome, RetirementOutcome::Requeued) && effective_delay_ms > 0 {
+                    let at_ns =
+                        now_ns().saturating_add(effective_delay_ms.saturating_mul(1_000_000));
+                    set_message_available_at_ns(
+                        store.as_ref(),
+                        queue,
+                        message_entity,
+                        Some(at_ns),
+                        config.ttl_ms,
+                    )?;
+                }
+                // Issue #723: routine retries do not flood audit
+                // channels (telemetry already covers them via
+                // `queue_nacked_total{outcome=...}`). Significant
+                // overrides — large delays, destination changes,
+                // drops — are audited so operators see the events
+                // that re-shape operational risk.
+                self.maybe_emit_nack_audit(
+                    queue,
+                    group_ref,
+                    &did,
+                    *delay_ms,
+                    config.retry_delay_ms,
+                    &outcome,
+                );
+                let message = match outcome {
+                    RetirementOutcome::Requeued => {
+                        if effective_delay_ms > 0 {
+                            format!("message requeued (delay={effective_delay_ms}ms)")
+                        } else {
+                            "message requeued".to_string()
+                        }
+                    }
                     RetirementOutcome::MovedToDlq(dlq) => {
                         format!("message moved to dead-letter queue '{}'", dlq)
                     }
@@ -1357,6 +1427,59 @@ impl RedDBRuntime {
             statement_type: "update",
         })
     }
+
+    /// Issue #723: routine retries are observable through metrics
+    /// (`queue_nacked_total{outcome=...}`) so this is the audit
+    /// shoulder for the *non-routine* cases: explicit NACK delay
+    /// overrides whose magnitude or destination-changing impact would
+    /// be invisible in metrics alone. Specifically:
+    ///
+    /// - Explicit override ≥ 60s (a worker decided to defer well past
+    ///   the queue's default cadence — operators care).
+    /// - Override that lands on a DLQ promotion or drop (destination
+    ///   changed; the override may have influenced retire-vs-requeue
+    ///   accounting on the caller's side and the audit trail needs to
+    ///   show who asked).
+    ///
+    /// Calls with no override are intentionally silent here.
+    fn maybe_emit_nack_audit(
+        &self,
+        queue: &str,
+        group: &str,
+        delivery_id: &str,
+        override_ms: Option<u64>,
+        default_ms: Option<u64>,
+        outcome: &RetirementOutcome,
+    ) {
+        let Some(override_ms) = override_ms else {
+            return;
+        };
+        let outcome_label = match outcome {
+            RetirementOutcome::Requeued => "requeued",
+            RetirementOutcome::MovedToDlq(_) => "dlq",
+            RetirementOutcome::Dropped => "dropped",
+        };
+        const SIGNIFICANT_DELAY_MS: u64 = 60_000;
+        let destination_changed = !matches!(outcome, RetirementOutcome::Requeued);
+        if override_ms < SIGNIFICANT_DELAY_MS && !destination_changed {
+            return;
+        }
+        self.audit_log().record_event(
+            AuditEvent::builder("queue/nack/override")
+                .source(AuditAuthSource::System)
+                .outcome(Outcome::Success)
+                .resource(format!("queue:{queue}"))
+                .fields([
+                    AuditFieldEscaper::field("queue", queue),
+                    AuditFieldEscaper::field("group", group),
+                    AuditFieldEscaper::field("delivery_id", delivery_id),
+                    AuditFieldEscaper::field("override_delay_ms", override_ms),
+                    AuditFieldEscaper::field("default_delay_ms", default_ms.unwrap_or(0)),
+                    AuditFieldEscaper::field("outcome", outcome_label),
+                ])
+                .build(),
+        );
+    }
 }
 
 fn ensure_queue_exists(store: &UnifiedStore, queue: &str) -> RedDBResult<()> {
@@ -1377,6 +1500,7 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
         max_attempts: crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS,
         lock_deadline_ms: crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS,
         in_flight_cap_per_group: crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
+        retry_delay_ms: None,
     };
 
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
@@ -1409,6 +1533,7 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
                 in_flight_cap_per_group: row_u64(row, "in_flight_cap_per_group")
                     .map(|value| value as u32)
                     .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
+                retry_delay_ms: row_u64(row, "retry_delay_ms").filter(|v| *v > 0),
             })
         })
         .unwrap_or(default)
@@ -1465,6 +1590,13 @@ fn save_queue_config(
     fields.insert(
         "in_flight_cap_per_group".to_string(),
         Value::UnsignedInteger(u64::from(config.in_flight_cap_per_group)),
+    );
+    fields.insert(
+        "retry_delay_ms".to_string(),
+        config
+            .retry_delay_ms
+            .map(Value::UnsignedInteger)
+            .unwrap_or(Value::Null),
     );
     insert_meta_row(store, fields)
 }
@@ -2654,6 +2786,39 @@ pub(super) fn earliest_future_available_at(store: &UnifiedStore, queue: &str) ->
         .filter_map(|v| v.available_at_ns)
         .filter(|at| *at > now_ns)
         .min()
+}
+
+/// Update the `_available_at_ns` metadata for a queue message in place
+/// without dropping any `_ttl_ms` already present (issue #723 — used by
+/// NACK retry delay). `available_at_ns = None` clears the field. The
+/// `fallback_ttl_ms` argument is consulted only when the existing
+/// metadata row carries no `_ttl_ms` — keeps the per-message TTL in
+/// sync with the queue default in the common case where no per-message
+/// TTL was set explicitly. Tolerant of missing collections / entities:
+/// returns `Ok(())` rather than failing the surrounding NACK if the
+/// underlying message has gone away between resolution and metadata
+/// update (a benign race; the next delivery cycle reflects truth).
+pub(super) fn set_message_available_at_ns(
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: EntityId,
+    available_at_ns: Option<u64>,
+    fallback_ttl_ms: Option<u64>,
+) -> RedDBResult<()> {
+    let existing_ttl_ms = store
+        .get_metadata(queue, message_id)
+        .and_then(|md| match md.get("_ttl_ms")? {
+            MetadataValue::Int(i) if *i >= 0 => Some(*i as u64),
+            MetadataValue::Timestamp(t) => Some(*t),
+            _ => None,
+        })
+        .or(fallback_ttl_ms);
+    let metadata = queue_message_metadata(existing_ttl_ms, available_at_ns);
+    match store.set_metadata(queue, message_id, metadata) {
+        Ok(()) => Ok(()),
+        Err(crate::storage::StoreError::CollectionNotFound(_)) => Ok(()),
+        Err(err) => Err(RedDBError::Internal(err.to_string())),
+    }
 }
 
 /// Read the `_available_at_ns` metadata for a queue message. Returns
