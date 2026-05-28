@@ -86,6 +86,44 @@ impl RedDBServer {
                     object.insert("validation".to_string(), validation.clone());
                     return json_response(422, crate::json::Value::Object(object));
                 }
+                // Issue #769 — an aggregating executor blew its
+                // materialization ceiling. Emit a structured envelope so
+                // the client can branch on the code and read which limit
+                // fired without parsing the (operator-controlled)
+                // message: `{ ok, error: { code, executor, limit,
+                // current, message } }`.
+                if let crate::api::RedDBError::MaterializationLimitExceeded {
+                    executor,
+                    limit,
+                    current,
+                } = &err
+                {
+                    let mut error_obj = crate::json::Map::new();
+                    error_obj.insert(
+                        "code".to_string(),
+                        crate::json::Value::String("materialization_limit_exceeded".to_string()),
+                    );
+                    error_obj.insert(
+                        "executor".to_string(),
+                        crate::json::Value::String((*executor).to_string()),
+                    );
+                    error_obj.insert(
+                        "limit".to_string(),
+                        crate::json::Value::Number(*limit as f64),
+                    );
+                    error_obj.insert(
+                        "current".to_string(),
+                        crate::json::Value::Number(*current as f64),
+                    );
+                    error_obj.insert(
+                        "message".to_string(),
+                        crate::json_field::SerializedJsonField::tainted(&err.to_string()),
+                    );
+                    let mut object = crate::json::Map::new();
+                    object.insert("ok".to_string(), crate::json::Value::Bool(false));
+                    object.insert("error".to_string(), crate::json::Value::Object(error_obj));
+                    return json_response(507, crate::json::Value::Object(object));
+                }
                 let (status, msg) = map_runtime_error(&err);
                 json_error(status, msg)
             }
@@ -1129,6 +1167,7 @@ pub(crate) fn ndjson_error_code(err: &crate::api::RedDBError) -> &'static str {
         FeatureNotEnabled(_) => "feature_not_enabled",
         SchemaVersionMismatch { .. } => "schema_version_mismatch",
         QuotaExceeded(_) => "quota_exceeded",
+        MaterializationLimitExceeded { .. } => "materialization_limit_exceeded",
         Engine(_) | Catalog(_) | Io(_) | VersionUnavailable | Internal(_) => "internal_error",
     }
 }
