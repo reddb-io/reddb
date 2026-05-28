@@ -52,6 +52,23 @@ impl<'a> Parser<'a> {
     pub fn parse_insert_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Insert)?;
         self.expect(Token::Into)?;
+        // Issue #789 — Analytics v0 explicitly excludes `INSERT INTO
+        // METRIC <path>` as a raw write path (PRD #782 non-goal). Raw
+        // samples land in ordinary RedDB collections; the metric
+        // descriptor catalog is reached through `CREATE METRIC` and
+        // `red.analytics.metrics`. Reject the form here before the
+        // identifier slot so the error names the actual reason, not a
+        // generic "expected identifier".
+        if matches!(self.peek(), Token::Metric) {
+            return Err(ParseError::new(
+                "INSERT INTO METRIC is not supported in Analytics v0 — \
+                 write raw samples into an ordinary TABLE/DOCUMENT \
+                 collection; the metric descriptor catalog is reached \
+                 via CREATE METRIC and red.analytics.metrics \
+                 (PRD #782 non-goal)",
+                self.position(),
+            ));
+        }
         let table = self.expect_ident()?;
 
         // Check for entity type keyword
