@@ -337,6 +337,52 @@ curl -X POST http://127.0.0.1:8080/query \
   }'
 ```
 
+### Streaming reads with resumable cursors (`POST /query/stream`)
+
+`POST /query/stream` streams a read-only `SELECT` as newline-delimited JSON
+(`application/x-ndjson`) over chunked transfer encoding. Frames arrive in a
+fixed order: a `descriptor` frame first, then a `cursor` control frame, then
+one `row` frame per record, then a terminal `end` frame.
+
+The `cursor` frame carries an **opaque resume token** scoped to the calling
+tenant and principal and pinned to the read snapshot:
+
+```json
+{"cursor":{"token":"<48-hex>","snapshot_lsn":42,"ttl_ms":60000,"expires_at_ms":1750000060000,"resumable":true}}
+```
+
+Treat `token` as opaque — it encodes nothing the client should parse.
+
+**Resuming.** To re-stream the pinned view, POST the token back. No `query`
+field is needed — the pinned query and snapshot live server-side:
+
+```bash
+curl -X POST http://127.0.0.1:8080/query/stream \
+  -H 'content-type: application/json' \
+  -H 'x-reddb-tenant: acme' \
+  -H 'authorization: Bearer <principal-token>' \
+  -d '{"cursor": "<token from the cursor frame>"}'
+```
+
+A resume replays the same descriptor-first stream.
+
+**Scope and expiry semantics.**
+
+- The cursor is bound to the `(tenant, principal)` that opened it. The tenant
+  comes from the `x-reddb-tenant` header (or the bearer credential); the
+  principal comes from the bearer credential.
+- A token that is unknown — **or** presented by a different tenant or
+  principal — is refused with `404 cursor_not_found`. The response is
+  identical in both cases, so an unauthorized caller cannot tell a foreign
+  cursor from one that never existed (no existence leak).
+- A token whose TTL has elapsed is refused to its rightful owner with
+  `410 cursor_expired`. Open a new stream to obtain a fresh cursor.
+- The TTL defaults to `stream.snapshot.ttl_ms` (60s); tune it via
+  `PUT /config/stream.snapshot.ttl_ms`.
+
+Refusals are non-streaming JSON responses (no chunked body), so a client can
+distinguish "the stream was never accepted" from a mid-stream failure.
+
 ### Context Search
 
 `POST /context` performs a unified context search across all data structures (tables, graphs, vectors, documents, key-value pairs). It follows cross-references and optionally expands graph neighborhoods in a single request.
