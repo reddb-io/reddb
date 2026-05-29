@@ -254,6 +254,170 @@ QUEUE PENDING orders GROUP billing
 QUEUE CLAIM   orders GROUP billing CONSUMER invoice-svc-2 MIN_IDLE 60000
 ```
 
+## Blocking reads — `QUEUE READ … WAIT`
+
+By default `QUEUE READ` is non-blocking: it returns whatever is immediately
+available (possibly nothing) and the caller polls again. `WAIT <duration>`
+turns a read into a **blocking long-poll** — the caller parks until a message
+arrives, the wait budget elapses, or the wait is cancelled — so a worker can
+follow new work without a busy-poll loop. This is the live queue-wait primitive
+from [PRD #718](https://github.com/reddb-io/reddb/issues/718).
+
+### Syntax
+
+```
+QUEUE READ <queue> [GROUP <group>] CONSUMER <consumer> [COUNT <n>] [WAIT <duration>]
+```
+
+`WAIT` is the optional trailing clause of `QUEUE READ`. It is **only** valid on
+`QUEUE READ`; attaching it to `QUEUE POP` or `QUEUE PEEK` is a parse error that
+names the offending command (`QUEUE POP does not support WAIT; use QUEUE READ …
+WAIT <duration>`). A bare `WAIT` with no duration is also a parse error.
+
+```sql
+-- Block up to 30 seconds for one message on a WORK queue
+QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s
+
+-- Block up to 500 ms for up to 5 FANOUT messages
+QUEUE READ notifications CONSUMER mobile_push COUNT 5 WAIT 500ms
+```
+
+#### Duration grammar
+
+A `WAIT` duration is a number followed by an optional unit:
+
+| Unit suffix        | Meaning      |
+|--------------------|--------------|
+| `ms`               | milliseconds |
+| `s`, `sec`, `secs` | seconds      |
+| `m`, `min`, `mins` | minutes      |
+| `h`, `hr`, `hrs`   | hours        |
+| `d`, `day`, `days` | days         |
+
+The number may be fractional (`WAIT 1.5s`). A bare number with **no unit is
+interpreted as seconds** — `WAIT 5` means five seconds, and `WAIT 0` is an
+immediate, effectively non-blocking read. This is the same duration grammar used
+by `DELAY`, `RETRY_DELAY`, and `WITH TTL`.
+
+### Timeout & outcomes
+
+A blocking read resolves in exactly one of three ways:
+
+| Outcome       | What happened | What the caller sees |
+|---------------|---------------|----------------------|
+| **delivered** | Work was available on the first probe, or a producer woke the parked waiter before the budget elapsed. | The matching messages — same shape as a non-blocking `QUEUE READ`. |
+| **timeout**   | The wait budget elapsed with no delivery (*natural expiry*). | An **empty result** — not an error. The worker simply loops and reads again. |
+| **cancelled** | The wait was cancelled out from under the caller (server shutdown drain, or a client cancel where the transport wires it). | An **explicit error** (`QUEUE READ WAIT cancelled`) — never a fake empty timeout. |
+
+The distinction between *timeout* (empty result) and *cancellation* (error) is
+load-bearing: a worker that gets an empty result knows the queue is simply idle
+and re-reads; a worker that gets a cancellation error knows the server is going
+away and should stop, not retry. `WAIT` always runs a non-blocking probe first,
+so an immediately-available read returns instantly and never parks.
+
+### Maximum wait cap
+
+`WAIT` budgets are capped by `red.config.queue.max_wait_ms` (default **60000**,
+i.e. 60 s). A request whose `WAIT` exceeds the active cap is **rejected
+immediately**, before any waiter is registered, with an error that names both the
+config key and the active cap value. Tighten or relax the cap at runtime — see
+[Configuration](#configuration).
+
+```sql
+SET CONFIG red.config.queue.max_wait_ms = 5000
+QUEUE READ tasks GROUP workers CONSUMER w1 WAIT 999h
+-- error: WAIT 999h exceeds red.config.queue.max_wait_ms (5000); no waiter registered
+```
+
+### Autocommit only — no `WAIT` inside a transaction
+
+`QUEUE READ … WAIT` is **rejected inside an explicit `BEGIN`/`COMMIT`
+transaction**. A parked reader inside a transaction would hold its
+transaction-local state hostage to a producer that cannot make progress until
+the reader commits or rolls back — a self-inflicted deadlock. The wait is
+therefore autocommit-only.
+
+```sql
+BEGIN
+QUEUE READ tasks GROUP workers CONSUMER w1 WAIT 10s
+-- error: QUEUE READ WAIT is autocommit-only (not allowed in an explicit transaction)
+ROLLBACK
+
+-- A non-blocking QUEUE READ (no WAIT) inside a transaction is still fine.
+BEGIN
+QUEUE READ tasks GROUP workers CONSUMER w1 COUNT 1
+COMMIT
+```
+
+### Cancellation semantics per transport
+
+Cancellation always surfaces as an **explicit error** carrying the message
+`QUEUE READ WAIT cancelled` — the wire framing differs, the outcome does not.
+Today the cancellation primitive that reaches a parked waiter is the
+**server-side registry drain** (`cancel_all`, fired on shutdown). The runtime
+executes a `WAIT` synchronously inside the connection's task, so a client-driven
+disconnect/cancel is not yet observed until the read returns; per-connection
+disconnect→cancel wiring is a documented follow-up on every transport. The
+*outcome contract* below is what each transport guarantees regardless of how the
+cancel is triggered:
+
+| Transport         | timeout (natural expiry)        | over-cap rejection             | cancellation                                  |
+|-------------------|---------------------------------|--------------------------------|-----------------------------------------------|
+| **HTTP**          | `200 OK`, empty `records`       | `400` naming the cap key/value | `400` with `QUEUE READ WAIT cancelled`        |
+| **RedWire**       | empty `Result` frame            | error frame                    | error frame (`Cancelled` outcome)             |
+| **gRPC**          | reply with `record_count = 0`   | `Status` error naming the cap  | `Status` error `QUEUE READ WAIT cancelled`    |
+| **Postgres-wire** | `SELECT 0`, zero `DataRow`s     | `ErrorResponse` naming the cap | `ErrorResponse` `QUEUE READ WAIT cancelled`   |
+
+> Postgres-wire carries the RedDB queue-wait behaviour directly — it does **not**
+> map `QUEUE READ … WAIT` onto PG `LISTEN`/`NOTIFY`, which is the separate
+> [ephemeral notification primitive](notifications.md).
+
+### Transport consistency promise
+
+`QUEUE READ … WAIT` ships over all four transports — HTTP, RedWire, gRPC, and
+Postgres-wire — with the **same semantic result shape**. Switching wires does
+not change worker behaviour: an empty result on timeout, an explicit error on
+cancellation, and an explicit error above the wait cap are identical guarantees
+on every transport (only the framing differs, per the table above). See the
+[Event Workflow transport matrix](event-workflow.md#transport-availability).
+
+### Examples across transports
+
+The same blocking read — *wait up to 30 s for one task* — on each transport:
+
+```sql
+-- RedWire / embedded / SQL (CLI, drivers): issue the statement directly
+QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s
+```
+
+```bash
+# HTTP
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s"}'
+```
+
+```bash
+# gRPC (grpcurl)
+grpcurl -plaintext \
+  -d '{"query":"QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s"}' \
+  127.0.0.1:5055 reddb.v1.RedDb/Query
+```
+
+```sql
+-- Postgres-wire (psql): run the statement as a simple query
+-- psql -h 127.0.0.1 -p 5432 -U reddb reddb
+QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s;
+```
+
+> These are documentation snippets, not a runnable harness. The behaviour they
+> illustrate is pinned end-to-end by the per-transport WAIT smokes
+> (`queue_read_wait_http_smoke`, `redwire_queue_read_wait_smoke`,
+> `queue_read_wait_grpc_smoke`, `queue_read_wait_pg_wire_smoke`).
+
+Wait-path observability — the park/wake/timeout/cancel counters and the duration
+histogram — is documented in the **Telemetry — `/metrics`** section below.
+
 ## Priority Queues
 
 ```sql
