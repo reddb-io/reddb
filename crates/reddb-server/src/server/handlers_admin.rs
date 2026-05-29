@@ -1799,6 +1799,30 @@ impl RedDBServer {
         // AI provider and embedding metrics — issue #280.
         crate::runtime::ai::metrics::render_ai_metrics(&mut body);
 
+        // Result / graph-analytics cache counters — issue #802. Stable
+        // names match the METRIC_RESULT_CACHE_* constants in `runtime`.
+        {
+            let (hits, misses, evicts) = self.runtime.result_cache_metrics();
+            let _ = writeln!(
+                body,
+                "# HELP reddb_result_cache_hit_total Result cache hits (incl. graph-analytics TVFs)."
+            );
+            let _ = writeln!(body, "# TYPE reddb_result_cache_hit_total counter");
+            let _ = writeln!(body, "reddb_result_cache_hit_total {hits}");
+            let _ = writeln!(
+                body,
+                "# HELP reddb_result_cache_miss_total Result cache misses (cold computes)."
+            );
+            let _ = writeln!(body, "# TYPE reddb_result_cache_miss_total counter");
+            let _ = writeln!(body, "reddb_result_cache_miss_total {misses}");
+            let _ = writeln!(
+                body,
+                "# HELP reddb_result_cache_evict_total Result cache entries evicted by capacity."
+            );
+            let _ = writeln!(body, "# TYPE reddb_result_cache_evict_total counter");
+            let _ = writeln!(body, "reddb_result_cache_evict_total {evicts}");
+        }
+
         // HTTP handler-thread pool metrics — issue #573 slice 4.
         // Renders four series (`http_active_handler_threads`,
         // `http_handler_cap`, `http_handler_rejected_total`,
