@@ -138,6 +138,7 @@ impl<'a> Parser<'a> {
             tenant_by,
             append_only: true,
             subscriptions: Vec::new(),
+            analytics_config: Vec::new(),
             vault_own_master_key: false,
         }))
     }
