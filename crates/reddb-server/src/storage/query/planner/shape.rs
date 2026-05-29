@@ -89,6 +89,9 @@ fn parameterize_table_query(query: &TableQuery, next_index: &mut usize) -> Optio
         Some(TableSource::Subquery(inner)) => Some(TableSource::Subquery(Box::new(
             parameterize_query_expr_inner(inner, next_index)?,
         ))),
+        // Table-valued functions have no parameterizable subexpressions
+        // (identifier args only); preserve them verbatim (issue #795).
+        Some(other @ TableSource::Function { .. }) => Some(other.clone()),
         None => None,
     };
 
