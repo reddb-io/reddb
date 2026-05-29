@@ -2810,6 +2810,76 @@ fn test_parse_create_graph_with_analytics_rejects_duplicate_output() {
 }
 
 #[test]
+fn test_parse_alter_graph_add_analytics() {
+    use crate::catalog::AnalyticsOutput;
+    use crate::storage::query::ast::AlterOperation;
+
+    let query = parse(
+        "ALTER GRAPH g ADD ANALYTICS (communities (using = louvain, resolution = 1.5), centrality)",
+    )
+    .unwrap();
+    let QueryExpr::AlterTable(alter) = query else {
+        panic!("Expected AlterTableQuery for ALTER GRAPH");
+    };
+    assert_eq!(alter.name, "g");
+    assert_eq!(alter.operations.len(), 1);
+    match &alter.operations[0] {
+        AlterOperation::AddAnalytics(views) => {
+            assert_eq!(views.len(), 2);
+            assert_eq!(views[0].output, AnalyticsOutput::Communities);
+            assert_eq!(views[0].algorithm.as_deref(), Some("louvain"));
+            assert_eq!(views[0].resolution, Some(1.5));
+            assert_eq!(views[1].output, AnalyticsOutput::Centrality);
+            assert_eq!(views[1].algorithm, None);
+        }
+        other => panic!("expected AddAnalytics, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_alter_graph_drop_analytics() {
+    use crate::catalog::AnalyticsOutput;
+    use crate::storage::query::ast::AlterOperation;
+
+    let query = parse("ALTER GRAPH g DROP ANALYTICS communities").unwrap();
+    let QueryExpr::AlterTable(alter) = query else {
+        panic!("Expected AlterTableQuery for ALTER GRAPH");
+    };
+    assert_eq!(alter.name, "g");
+    assert_eq!(alter.operations.len(), 1);
+    assert!(matches!(
+        alter.operations[0],
+        AlterOperation::DropAnalytics(AnalyticsOutput::Communities)
+    ));
+}
+
+#[test]
+fn test_parse_alter_graph_drop_analytics_keyword_output() {
+    use crate::catalog::AnalyticsOutput;
+    use crate::storage::query::ast::AlterOperation;
+
+    // `components` / `centrality` lex as keyword tokens, not idents — the
+    // DROP grammar normalises them the same way the CREATE clause does.
+    let query = parse("ALTER GRAPH g DROP ANALYTICS components").unwrap();
+    let QueryExpr::AlterTable(alter) = query else {
+        panic!("Expected AlterTableQuery");
+    };
+    assert!(matches!(
+        alter.operations[0],
+        AlterOperation::DropAnalytics(AnalyticsOutput::Components)
+    ));
+}
+
+#[test]
+fn test_parse_alter_graph_drop_analytics_rejects_unknown_output() {
+    let err = parse("ALTER GRAPH g DROP ANALYTICS pagerank").unwrap_err();
+    assert!(
+        err.to_string().contains("unknown analytics output"),
+        "expected unknown-output error, got: {err}"
+    );
+}
+
+#[test]
 fn test_parse_select_from_dotted_analytics_view() {
     // `<graph>.<output>` keeps its dotted name verbatim in `table`, including
     // the keyword-lexed outputs `components` / `centrality`.

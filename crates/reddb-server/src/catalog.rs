@@ -88,7 +88,7 @@ pub struct SubscriptionDescriptor {
 /// native row shape. The `using` option selects the concrete algorithm inside
 /// the family (e.g. `centrality (using = pagerank)`); the remaining options are
 /// algorithm parameters carried verbatim into the executor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AnalyticsOutput {
     Communities,
     Components,
