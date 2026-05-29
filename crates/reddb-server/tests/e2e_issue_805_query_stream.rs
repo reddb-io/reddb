@@ -205,7 +205,8 @@ fn query_stream_emits_descriptor_first_then_rows_then_end() {
         "expected 200 streaming response, head=\n{head}"
     );
     assert!(
-        head.to_ascii_lowercase().contains("transfer-encoding: chunked"),
+        head.to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
         "stream must use chunked encoding, head=\n{head}"
     );
     assert!(
@@ -276,7 +277,9 @@ fn query_stream_refuses_non_read_only_with_named_kind() {
         "mutation must be refused with 400, head=\n{head}"
     );
     assert!(
-        !head.to_ascii_lowercase().contains("transfer-encoding: chunked"),
+        !head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
         "refusal must be a non-streaming response, head=\n{head}"
     );
     let body = String::from_utf8_lossy(&body);
