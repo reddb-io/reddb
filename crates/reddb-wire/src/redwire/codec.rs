@@ -345,6 +345,68 @@ mod tests {
     }
 
     #[test]
+    fn input_stream_envelopes_round_trip() {
+        // Golden encode/decode for the input-direction envelopes
+        // added in issue #764 / PRD #759 S5. The envelope *vocabulary*
+        // is reused from S3 — only the payload shapes and the
+        // direction of `StreamChunk` differ — so the byte values are
+        // pinned to the same kinds (no new MessageKind bytes).
+
+        // OpenStream with `direction:"in"` + target/columns instead of
+        // a `sql` field. Still kind 0x29, still multiplex via stream_id.
+        let open_in = Frame::new(
+            MessageKind::OpenStream,
+            20,
+            br#"{"direction":"in","target":"t","columns":["id","name"]}"#.to_vec(),
+        )
+        .with_stream(5);
+        round_trip(open_in.clone());
+        assert_eq!(encode_frame(&open_in)[4], 0x29);
+
+        // Client-originated chunk of rows on the input stream. Same
+        // 0x2B kind the server uses on output streams; the rows are
+        // JSON objects keyed by column.
+        let chunk_in = Frame::new(
+            MessageKind::StreamChunk,
+            20,
+            br#"{"seq":0,"rows":[{"id":1,"name":"a"}],"terminal":false}"#.to_vec(),
+        )
+        .with_stream(5);
+        round_trip(chunk_in.clone());
+        assert_eq!(encode_frame(&chunk_in)[4], 0x2B);
+
+        // Terminal chunk closes the input stream.
+        let chunk_terminal = Frame::new(
+            MessageKind::StreamChunk,
+            20,
+            br#"{"seq":2,"rows":[],"terminal":true}"#.to_vec(),
+        )
+        .with_stream(5);
+        round_trip(chunk_terminal.clone());
+        assert_eq!(encode_frame(&chunk_terminal)[4], 0x2B);
+
+        // Server StreamEnd carries the committed RID range + stats.
+        let end = Frame::new(
+            MessageKind::StreamEnd,
+            20,
+            br#"{"stats":{"row_count":3,"chunk_count":2,"committed_rid":42,"snapshot_lsn":40,"cancelled":false}}"#.to_vec(),
+        )
+        .with_stream(5);
+        round_trip(end.clone());
+        assert_eq!(encode_frame(&end)[4], 0x25);
+
+        // Server StreamError carries the recoverable_rid prefix.
+        let serr = Frame::new(
+            MessageKind::StreamError,
+            20,
+            br#"{"code":"invalid_row","message":"x","chunk_seq":1,"recoverable_rid":41}"#.to_vec(),
+        )
+        .with_stream(5);
+        round_trip(serr.clone());
+        assert_eq!(encode_frame(&serr)[4], 0x2C);
+    }
+
+    #[test]
     fn uncompressed_frame_decodes_unchanged_when_flag_unset() {
         let payload = b"hello world".to_vec();
         let frame = Frame::new(MessageKind::Result, 1, payload.clone());
