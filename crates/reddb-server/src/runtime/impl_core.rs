@@ -3337,6 +3337,11 @@ impl RedDBRuntime {
             }
         }
 
+        // Topology graph (#803) — ensure the built-in `red.topology.cluster`
+        // graph collection (declared WITH ANALYTICS) and its metadata sidecar
+        // exist. Idempotent and survives restarts via the WAL-backed contract.
+        let _ = crate::application::topology_collections::ensure(&runtime);
+
         // Start background maintenance thread (context index refresh +
         // session purge). Held by a WEAK reference to `RuntimeInner`
         // so dropping the last `RedDBRuntime` handle actually releases
