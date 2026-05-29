@@ -443,6 +443,160 @@ pub fn modularity<N: Clone + Ord>(
     )
 }
 
+/// Single-source single-target shortest path over an abstract undirected
+/// weighted graph.
+///
+/// Inputs mirror [`connected_components`] / [`louvain`]:
+/// - `nodes`: the declared node universe.
+/// - `edges`: weighted edges `(src, dst, weight)`, treated as UNDIRECTED.
+///   Endpoints not present in `nodes` are still included in the universe.
+///   Parallel edges between the same pair collapse to their MINIMUM weight;
+///   self-loops are ignored (they never shorten a path). Edge weights are
+///   assumed NON-NEGATIVE (the storage layer's `f32` weights are); the
+///   shortest-path / triangle-inequality guarantees below hold under that
+///   assumption.
+/// - `src`, `dst`: the path endpoints. Either absent from the universe yields
+///   `None`.
+/// - `max_hops`: an optional cap on the number of EDGES in the path. `None`
+///   means unbounded. The result is the minimum-weight path using at most
+///   `max_hops` edges; if no such path exists, `None`.
+///
+/// Output: `Some(path)` where `path` is the ordered sequence of
+/// `(node, cumulative_weight)` from `src` to `dst` (the first entry is
+/// `(src, 0.0)`, the hop index is the position in the vector, and the last
+/// entry's weight is the total path weight). `None` when `dst` is unreachable
+/// from `src` (within the hop budget) — the executor maps this to an EMPTY
+/// result set, never an error. A zero-length path (`src == dst`) returns the
+/// single entry `(src, 0.0)`.
+///
+/// Algorithm: a hop-limited Bellman-Ford relaxation. Each round relaxes every
+/// (undirected) edge against the previous round's distances, so after `k`
+/// rounds `dist[v]` is the shortest distance to `v` using at most `k` edges.
+/// With `max_hops = None` we run `n - 1` rounds, which suffices for the true
+/// shortest path because — with non-negative weights — a shortest path is
+/// simple and therefore uses at most `n - 1` edges. O(rounds · E).
+///
+/// Determinism (guaranteed and tested): the node universe is a sorted, deduped
+/// `BTreeSet` giving stable indices; relaxation sweeps nodes in index order and
+/// neighbours in ascending index order; ties keep the lower-index predecessor.
+/// Identical `(nodes, edges, src, dst, max_hops)` always produces identical
+/// output. On an undirected graph the distance is symmetric:
+/// `shortest_path(.., a, b, ..)` and `shortest_path(.., b, a, ..)` have equal
+/// total weight.
+pub fn shortest_path<N: Clone + Ord>(
+    nodes: &[N],
+    edges: &[(N, N, Weight)],
+    src: &N,
+    dst: &N,
+    max_hops: Option<usize>,
+) -> Option<Vec<(N, f64)>> {
+    let ordered = node_universe(nodes, edges);
+    let n = ordered.len();
+    if n == 0 {
+        return None;
+    }
+    let mut index_of: BTreeMap<&N, usize> = BTreeMap::new();
+    for (i, node) in ordered.iter().enumerate() {
+        index_of.insert(node, i);
+    }
+    let si = match index_of.get(src) {
+        Some(&i) => i,
+        None => return None,
+    };
+    let di = match index_of.get(dst) {
+        Some(&i) => i,
+        None => return None,
+    };
+
+    // Undirected adjacency keeping the minimum weight between each pair, so
+    // parallel edges collapse deterministically and self-loops are dropped.
+    let mut adj: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
+    for (a, b, w) in edges {
+        let ia = index_of[a];
+        let ib = index_of[b];
+        if ia == ib {
+            continue; // self-loop: never part of a shortest simple path.
+        }
+        let w = *w as f64;
+        let e = adj[ia].entry(ib).or_insert(f64::INFINITY);
+        if w < *e {
+            *e = w;
+        }
+        let e = adj[ib].entry(ia).or_insert(f64::INFINITY);
+        if w < *e {
+            *e = w;
+        }
+    }
+
+    // Hop-limited Bellman-Ford. `rounds` bounds the path length in edges:
+    // `max_hops` when provided, else `n - 1` (enough for any simple path).
+    let rounds = max_hops.unwrap_or(n.saturating_sub(1));
+    let mut dist = vec![f64::INFINITY; n];
+    dist[si] = 0.0;
+    let mut pred: Vec<Option<usize>> = vec![None; n];
+    for _ in 0..rounds {
+        // Relax against the previous round's distances (the clone) so each
+        // round extends every path by at most one edge.
+        let mut next = dist.clone();
+        let mut changed = false;
+        for u in 0..n {
+            if !dist[u].is_finite() {
+                continue;
+            }
+            for (&v, &w) in &adj[u] {
+                let cand = dist[u] + w;
+                if cand < next[v] {
+                    next[v] = cand;
+                    pred[v] = Some(u);
+                    changed = true;
+                }
+            }
+        }
+        dist = next;
+        if !changed {
+            break; // converged early — fewer hops than the budget sufficed.
+        }
+    }
+
+    if !dist[di].is_finite() {
+        return None; // unreachable within the hop budget.
+    }
+
+    // Reconstruct the path dst -> src via predecessors. The cycle guard is
+    // defensive: with non-negative weights each predecessor step is to a
+    // strictly-or-equally smaller distance and the chain terminates at src.
+    let mut path_idx = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut cur = di;
+    loop {
+        if !seen.insert(cur) {
+            return None; // unexpected cycle — bail rather than loop forever.
+        }
+        path_idx.push(cur);
+        if cur == si {
+            break;
+        }
+        match pred[cur] {
+            Some(p) => cur = p,
+            None => return None, // no predecessor yet not src: unreachable.
+        }
+    }
+    path_idx.reverse();
+
+    // Cumulative weight along the reconstructed path (per-hop running sum of
+    // the min pair weights), so the final entry equals `dist[dst]`.
+    let mut result = Vec::with_capacity(path_idx.len());
+    let mut cum = 0.0;
+    for (i, &idx) in path_idx.iter().enumerate() {
+        if i > 0 {
+            let prev = path_idx[i - 1];
+            cum += adj[prev][&idx];
+        }
+        result.push((ordered[idx].clone(), cum));
+    }
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,6 +1051,201 @@ mod tests {
             let a = louvain(&nodes, &edges, 1.0);
             let b = louvain(&nodes, &edges, 1.0);
             prop_assert_eq!(a, b);
+        }
+    }
+
+    // ── shortest_path (issue #798) ──
+
+    /// Total weight of a path (the last entry's cumulative weight), or `None`
+    /// when no path exists.
+    fn path_weight(path: &Option<Vec<(String, f64)>>) -> Option<f64> {
+        path.as_ref().map(|p| p.last().map(|(_, w)| *w).unwrap_or(0.0))
+    }
+
+    #[test]
+    fn shortest_path_golden_known_path() {
+        // Diamond: a-b (1), a-c (4), b-c (1), c-d (1), b-d (5).
+        // a -> d shortest is a-b-c-d with weight 3 (beats a-c-d=5, a-b-d=6).
+        let nodes: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![
+            ("a".to_string(), "b".to_string(), 1.0f32),
+            ("a".to_string(), "c".to_string(), 4.0),
+            ("b".to_string(), "c".to_string(), 1.0),
+            ("c".to_string(), "d".to_string(), 1.0),
+            ("b".to_string(), "d".to_string(), 5.0),
+        ];
+        let path = shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), None)
+            .expect("a reaches d");
+        let route: Vec<String> = path.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(route, vec!["a", "b", "c", "d"], "min-weight route");
+        // Hop ordering: first entry is the source at weight 0, cumulative weight
+        // is monotonically non-decreasing, last entry is the total.
+        assert_eq!(path[0], ("a".to_string(), 0.0));
+        assert_eq!(path[1].1, 1.0); // a-b
+        assert_eq!(path[2].1, 2.0); // +b-c
+        assert_eq!(path[3].1, 3.0); // +c-d (total)
+    }
+
+    #[test]
+    fn shortest_path_self_is_zero_length() {
+        let nodes: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![("a".to_string(), "b".to_string(), 1.0f32)];
+        let path = shortest_path(&nodes, &edges, &"a".to_string(), &"a".to_string(), None)
+            .expect("self path exists");
+        assert_eq!(path, vec![("a".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn shortest_path_unreachable_is_none() {
+        // Two disconnected edges: {a-b} and {c-d}. a cannot reach d.
+        let nodes: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![
+            ("a".to_string(), "b".to_string(), 1.0f32),
+            ("c".to_string(), "d".to_string(), 1.0),
+        ];
+        assert!(shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), None).is_none());
+    }
+
+    #[test]
+    fn shortest_path_missing_endpoint_is_none() {
+        let nodes: Vec<String> = vec!["a".to_string()];
+        let edges: Vec<(String, String, Weight)> = vec![];
+        // dst not in the universe.
+        assert!(shortest_path(&nodes, &edges, &"a".to_string(), &"z".to_string(), None).is_none());
+    }
+
+    #[test]
+    fn shortest_path_max_hops_caps_edge_count() {
+        // Path a-b-c-d needs 3 edges. A direct shortcut a-d (weight 10) needs 1.
+        let nodes: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![
+            ("a".to_string(), "b".to_string(), 1.0f32),
+            ("b".to_string(), "c".to_string(), 1.0),
+            ("c".to_string(), "d".to_string(), 1.0),
+            ("a".to_string(), "d".to_string(), 10.0),
+        ];
+        // Unbounded: the cheap 3-hop route wins (weight 3).
+        let unbounded = shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), None);
+        assert_eq!(path_weight(&unbounded), Some(3.0));
+        // max_hops = 1: only the direct shortcut fits the budget (weight 10).
+        let capped = shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), Some(1));
+        assert_eq!(path_weight(&capped), Some(10.0));
+        // max_hops = 0: no edges allowed, so distinct endpoints are unreachable.
+        assert!(shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), Some(0)).is_none());
+    }
+
+    #[test]
+    fn shortest_path_parallel_edges_take_minimum() {
+        // Two parallel a-b edges (weight 5 and weight 2): the min wins.
+        let nodes: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![
+            ("a".to_string(), "b".to_string(), 5.0f32),
+            ("a".to_string(), "b".to_string(), 2.0),
+        ];
+        let path = shortest_path(&nodes, &edges, &"a".to_string(), &"b".to_string(), None);
+        assert_eq!(path_weight(&path), Some(2.0));
+    }
+
+    /// A small id universe plus random POSITIVE-weight edges between those ids.
+    /// Weights are integers in 1..=9 (as f32) so distance comparisons are exact
+    /// and the non-negative-weight precondition holds.
+    fn weighted_graph_strategy(
+    ) -> impl Strategy<Value = (Vec<String>, Vec<(String, String, Weight)>)> {
+        (2usize..7usize).prop_flat_map(|n| {
+            let nodes: Vec<String> = (0..n).map(|i| format!("n{i:02}")).collect();
+            let ids = nodes.clone();
+            let edge = (0..n, 0..n, 1u32..10u32)
+                .prop_map(move |(a, b, w)| (format!("n{a:02}"), format!("n{b:02}"), w as f32));
+            let edges = prop::collection::vec(edge, 0..14);
+            (Just(ids), edges)
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        // (a) symmetric distance on undirected graphs:
+        //     weight(src -> dst) == weight(dst -> src), and reachability agrees.
+        #[test]
+        fn shortest_path_is_symmetric((nodes, edges) in weighted_graph_strategy()) {
+            let universe = node_universe(&nodes, &edges);
+            for a in &universe {
+                for b in &universe {
+                    let fwd = shortest_path(&nodes, &edges, a, b, None);
+                    let rev = shortest_path(&nodes, &edges, b, a, None);
+                    prop_assert_eq!(
+                        path_weight(&fwd), path_weight(&rev),
+                        "distance {} <-> {} must be symmetric", a, b
+                    );
+                }
+            }
+        }
+
+        // (b) triangle inequality: for reachable a,b,c,
+        //     dist(a, c) <= dist(a, b) + dist(b, c).
+        #[test]
+        fn shortest_path_triangle_inequality((nodes, edges) in weighted_graph_strategy()) {
+            let universe = node_universe(&nodes, &edges);
+            for a in &universe {
+                for b in &universe {
+                    for c in &universe {
+                        let ab = path_weight(&shortest_path(&nodes, &edges, a, b, None));
+                        let bc = path_weight(&shortest_path(&nodes, &edges, b, c, None));
+                        let ac = path_weight(&shortest_path(&nodes, &edges, a, c, None));
+                        if let (Some(ab), Some(bc), Some(ac)) = (ab, bc, ac) {
+                            prop_assert!(
+                                ac <= ab + bc + 1e-9,
+                                "triangle: d({},{})={} > d({},{})={} + d({},{})={}",
+                                a, c, ac, a, b, ab, b, c, bc
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // (c) unreachable pairs across distinct connected components yield None.
+        //     Build two disjoint cliques and assert no cross-component path.
+        #[test]
+        fn shortest_path_unreachable_across_components(
+            (left, right) in (1usize..4usize, 1usize..4usize)
+        ) {
+            // Left clique uses ids l0.., right clique uses r0.. — disjoint id
+            // spaces guarantee no shared node and thus no connecting edge.
+            let mut nodes = Vec::new();
+            let mut edges: Vec<(String, String, Weight)> = Vec::new();
+            for i in 0..left { nodes.push(format!("l{i}")); }
+            for i in 0..right { nodes.push(format!("r{i}")); }
+            for i in 0..left {
+                for j in (i + 1)..left {
+                    edges.push((format!("l{i}"), format!("l{j}"), 1.0));
+                }
+            }
+            for i in 0..right {
+                for j in (i + 1)..right {
+                    edges.push((format!("r{i}"), format!("r{j}"), 1.0));
+                }
+            }
+            // Every left node is unreachable from every right node.
+            prop_assert!(
+                shortest_path(&nodes, &edges, &"l0".to_string(), &"r0".to_string(), None).is_none()
+            );
+            prop_assert!(
+                shortest_path(&nodes, &edges, &"r0".to_string(), &"l0".to_string(), None).is_none()
+            );
+        }
+
+        // determinism: identical input -> identical output.
+        #[test]
+        fn shortest_path_determinism((nodes, edges) in weighted_graph_strategy()) {
+            let universe = node_universe(&nodes, &edges);
+            if universe.len() >= 2 {
+                let a = &universe[0];
+                let b = &universe[universe.len() - 1];
+                let p1 = shortest_path(&nodes, &edges, a, b, None);
+                let p2 = shortest_path(&nodes, &edges, a, b, None);
+                prop_assert_eq!(p1, p2);
+            }
         }
     }
 }
