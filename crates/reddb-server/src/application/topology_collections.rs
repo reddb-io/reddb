@@ -60,6 +60,14 @@ pub const OUTPUTS: &[AnalyticsOutput] = &[
 /// Edge label for the primary → replica replication link.
 const EDGE_KIND: &str = "replicates_to";
 
+/// Power-iteration cap for the Tier-3 spectral layout hint (#804). The topology
+/// graph is tiny (cluster cardinality), so convergence is fast; this is a safety
+/// bound, not a tuning knob.
+const SPECTRAL_MAX_ITERATIONS: usize = 200;
+
+/// L1 convergence threshold for the spectral layout hint power iteration.
+const SPECTRAL_TOLERANCE: f64 = 1e-9;
+
 /// Role of a cluster member in the topology graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRole {
@@ -117,6 +125,18 @@ impl RefreshOutcome {
 // Aggregated document (PRD #794 schema)
 // ---------------------------------------------------------------
 
+/// Non-authoritative 2D positional hint for a node (issue #804). Both
+/// coordinates are normalised to `[0, 1]`. The contract is advisory: a client
+/// may seed its own force-directed layout from this hint for faster, stable
+/// convergence, or ignore it entirely. Derived deterministically from the graph
+/// Laplacian via [`graph_algorithms::spectral_embedding`], so identical
+/// topology across reloads yields identical hints.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NodeHint {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopologyNode {
     pub id: String,
@@ -126,6 +146,9 @@ pub struct TopologyNode {
     pub lsn: u64,
     pub island_id: u64,
     pub community_id: u64,
+    /// Optional layout seed. `Some` when the spectral-embedding hint is enabled
+    /// for this document; serialised as `hint: { x, y }` and omitted otherwise.
+    pub hint: Option<NodeHint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,7 +192,7 @@ impl TopologyGraphDoc {
             .nodes
             .iter()
             .map(|n| {
-                crate::json!({
+                let mut node = crate::json!({
                     "id": n.id,
                     "kind": n.kind,
                     "region": n.region,
@@ -177,7 +200,17 @@ impl TopologyGraphDoc {
                     "lsn": n.lsn,
                     "island_id": n.island_id,
                     "community_id": n.community_id,
-                })
+                });
+                // The hint is optional and non-authoritative (issue #804): emit
+                // `hint: { x, y }` only when the embedding is enabled, so a
+                // client that ignores it sees no shape change.
+                if let (Some(hint), crate::json::Value::Object(map)) = (n.hint, &mut node) {
+                    map.insert(
+                        "hint".to_string(),
+                        crate::json!({ "x": hint.x, "y": hint.y }),
+                    );
+                }
+                node
             })
             .collect();
         let edges: Vec<crate::json::Value> = self
@@ -384,7 +417,15 @@ pub fn refresh_from_runtime(rt: &RedDBRuntime) -> RedDBResult<RefreshOutcome> {
 /// Read the materialised graph and assemble the PRD #794 document, computing
 /// communities + connected components scoped to this collection's own subgraph.
 /// `cache_status` is supplied by the caller from the preceding [`refresh`].
-pub fn build_graph_doc(rt: &RedDBRuntime, cache_status: &str) -> RedDBResult<TopologyGraphDoc> {
+///
+/// When `include_hint` is set (the Tier-3 enhancement, issue #804), each node
+/// also carries a deterministic `hint: { x, y }` spectral-layout seed; when
+/// clear, nodes carry no hint and the JSON field is omitted entirely.
+pub fn build_graph_doc(
+    rt: &RedDBRuntime,
+    cache_status: &str,
+    include_hint: bool,
+) -> RedDBResult<TopologyGraphDoc> {
     let store = rt.db().store();
     let manager = store
         .get_collection(CLUSTER)
@@ -458,11 +499,28 @@ pub fn build_graph_doc(rt: &RedDBRuntime, cache_status: &str) -> RedDBResult<Top
             .map(|(addr, community)| (addr, community as u64))
             .collect();
 
+    // Tier-3 (issue #804): a deterministic 2D layout seed per node from the
+    // graph Laplacian. Non-authoritative — only attached when requested.
+    let hints: HashMap<String, NodeHint> = if include_hint {
+        graph_algorithms::spectral_embedding(
+            &node_addrs,
+            &algo_edges,
+            SPECTRAL_MAX_ITERATIONS,
+            SPECTRAL_TOLERANCE,
+        )
+        .into_iter()
+        .map(|(addr, (x, y))| (addr, NodeHint { x, y }))
+        .collect()
+    } else {
+        HashMap::new()
+    };
+
     let mut nodes: Vec<TopologyNode> = raw_nodes
         .into_iter()
         .map(|(_, addr, kind, region, healthy, lsn)| {
             let island_id = islands.get(&addr).copied().unwrap_or(0);
             let community_id = communities.get(&addr).copied().unwrap_or(0);
+            let hint = hints.get(&addr).copied();
             TopologyNode {
                 id: addr,
                 kind,
@@ -471,6 +529,7 @@ pub fn build_graph_doc(rt: &RedDBRuntime, cache_status: &str) -> RedDBResult<Top
                 lsn,
                 island_id,
                 community_id,
+                hint,
             }
         })
         .collect();

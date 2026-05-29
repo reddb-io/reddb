@@ -103,7 +103,7 @@ fn unreachable_replica_lands_on_its_own_island() {
     let outcome = topo::refresh(&rt, &three_node_cluster()).expect("refresh topology");
     assert!(outcome.changed, "first materialisation is a change");
 
-    let doc = topo::build_graph_doc(&rt, outcome.cache_status()).expect("build graph doc");
+    let doc = topo::build_graph_doc(&rt, outcome.cache_status(), false).expect("build graph doc");
 
     // Three members → three nodes.
     assert_eq!(doc.nodes.len(), 3, "one node per cluster member");
@@ -153,7 +153,9 @@ fn aggregated_document_matches_prd_794_schema() {
     let db = PersistentDbPath::new("issue_803_schema");
     let rt = db.open_runtime();
     let outcome = topo::refresh(&rt, &three_node_cluster()).expect("refresh topology");
-    let doc = topo::build_graph_doc(&rt, outcome.cache_status()).expect("build graph doc");
+    // Build with the Tier-3 spectral hint enabled (#804) so the snapshot pins
+    // the optional `hint` field alongside the PRD #794 base shape.
+    let doc = topo::build_graph_doc(&rt, outcome.cache_status(), true).expect("build graph doc");
     let json = doc.to_json();
 
     let obj = json.as_object().expect("document is a JSON object");
@@ -171,6 +173,7 @@ fn aggregated_document_matches_prd_794_schema() {
         vec![
             "community_id",
             "healthy",
+            "hint",
             "id",
             "island_id",
             "kind",
@@ -178,6 +181,19 @@ fn aggregated_document_matches_prd_794_schema() {
             "region"
         ]
     );
+
+    // The optional hint (#804) is a normalised 2D `{ x, y }` seed.
+    let hint = node["hint"].as_object().expect("hint object");
+    let mut hint_keys: Vec<&str> = hint.keys().map(|k| k.as_str()).collect();
+    hint_keys.sort();
+    assert_eq!(hint_keys, vec!["x", "y"]);
+    for axis in ["x", "y"] {
+        let v = hint[axis].as_f64().expect("hint coord is a number");
+        assert!(
+            (0.0..=1.0).contains(&v),
+            "hint.{axis} = {v} normalised to [0,1]"
+        );
+    }
 
     let edge = json["edges"].as_array().expect("edges array")[0]
         .as_object()
@@ -249,7 +265,7 @@ fn mutation_advances_version_and_no_op_is_a_cache_hit() {
     assert_eq!(third.cache_status(), "cold");
 
     // The lag now reflects the mutation: 100 - 70 = 30.
-    let doc = topo::build_graph_doc(&rt, third.cache_status()).expect("doc after mutation");
+    let doc = topo::build_graph_doc(&rt, third.cache_status(), false).expect("doc after mutation");
     let edge = doc
         .edges
         .iter()

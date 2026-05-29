@@ -16,7 +16,9 @@ impl RedDBServer {
             Ok(outcome) => outcome,
             Err(err) => return json_error(500, err.to_string()),
         };
-        match topo::build_graph_doc(&self.runtime, outcome.cache_status()) {
+        // Tier-3 spectral layout hint enabled (#804): clients may seed their
+        // force-directed layout from `hint.{x,y}` or ignore it entirely.
+        match topo::build_graph_doc(&self.runtime, outcome.cache_status(), true) {
             Ok(doc) => json_response(200, doc.to_json()),
             Err(err) => json_error(500, err.to_string()),
         }

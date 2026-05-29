@@ -818,6 +818,164 @@ pub fn pagerank<N: Clone + Ord>(
     ordered.into_iter().zip(rank).collect()
 }
 
+/// Deterministic 2D spectral layout over an abstract undirected, unweighted
+/// graph. Returns one `(node, (x, y))` pair per distinct node with both
+/// coordinates min–max normalised to `[0, 1]`.
+///
+/// The coordinates are the two smallest non-trivial eigenvectors of the graph
+/// Laplacian `L = D − A` (the Fiedler vector and the next one) — the classic
+/// spectral-drawing layout: graph-adjacent nodes land near each other and
+/// disconnected components separate cleanly, so a client force-directed layout
+/// seeded from these hints converges faster and to a stable arrangement. The
+/// hint is purely advisory; callers may seed their own layout with it or ignore
+/// it entirely.
+///
+/// Method: shifted, deflated power iteration. We iterate on `M = cI − L` (whose
+/// DOMINANT eigenvectors are `L`'s SMALLEST), deflating the trivial constant
+/// mode (`L`-eigenvalue 0) and then each found coordinate via Gram–Schmidt, so
+/// successive sweeps recover the next Laplacian eigenvector. `max_iterations`
+/// caps the sweeps per coordinate; `tolerance` is the L1 convergence threshold
+/// on successive normalised iterates.
+///
+/// Determinism (guaranteed and tested): the node universe is a sorted, deduped
+/// `BTreeSet`; the start vectors are fixed index-polynomial seeds (no random
+/// initialisation); sweeps run in ascending index order with a fixed cap. The
+/// eigenvector sign — mathematically arbitrary — is pinned by the fixed seed,
+/// so identical input always produces identical coordinates. An isolated node
+/// or an edgeless / single-node graph still yields finite, deterministic hints
+/// (a degenerate coordinate collapses to `0.5`).
+pub fn spectral_embedding<N: Clone + Ord>(
+    nodes: &[N],
+    edges: &[(N, N, Weight)],
+    max_iterations: usize,
+    tolerance: f64,
+) -> Vec<(N, (f64, f64))> {
+    let (ordered, adj) = undirected_adjacency(nodes, edges);
+    let n = ordered.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        // A single point has no spread; place it at the centre.
+        return ordered.into_iter().map(|node| (node, (0.5, 0.5))).collect();
+    }
+
+    let degree: Vec<f64> = adj.iter().map(|row| row.len() as f64).collect();
+    // The largest Laplacian eigenvalue is bounded by 2·max_degree (Gershgorin),
+    // so shifting by c just above that makes M = cI − L positive definite and
+    // its dominant eigenvectors L's smallest. +1 guarantees a strict spectral
+    // gap and a valid shift even for an edgeless graph (max_degree = 0).
+    let max_degree = degree.iter().cloned().fold(0.0_f64, f64::max);
+    let c = 2.0 * max_degree + 1.0;
+
+    // (M·v)[i] = (c − deg[i])·v[i] + Σ_{j ~ i} v[j].
+    let apply_m = |v: &[f64]| -> Vec<f64> {
+        let mut out = vec![0.0f64; n];
+        for i in 0..n {
+            let mut acc = (c - degree[i]) * v[i];
+            for &j in &adj[i] {
+                acc += v[j];
+            }
+            out[i] = acc;
+        }
+        out
+    };
+
+    // v0: the constant (L-eigenvalue-0) mode we deflate away so the layout
+    // captures structure rather than the trivial all-equal solution. Unit norm
+    // keeps the Gram–Schmidt basis orthonormal.
+    let inv_sqrt_n = 1.0 / (n as f64).sqrt();
+    let v0 = vec![inv_sqrt_n; n];
+
+    // Distinct non-constant seeds for the two coordinates. Their differing
+    // index-polynomial shapes keep a component along the next eigenvector after
+    // deflation, and being fixed they make the result fully reproducible.
+    let seed_x: Vec<f64> = (0..n).map(|i| (i as f64) + 1.0).collect();
+    let seed_y: Vec<f64> = (0..n).map(|i| ((i as f64) + 1.0).powi(2)).collect();
+
+    let mut basis: Vec<Vec<f64>> = vec![v0];
+    let vx = dominant_orthogonal(&apply_m, &seed_x, &basis, max_iterations, tolerance);
+    basis.push(vx.clone());
+    let vy = dominant_orthogonal(&apply_m, &seed_y, &basis, max_iterations, tolerance);
+
+    let x = normalize_unit_interval(&vx);
+    let y = normalize_unit_interval(&vy);
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(i, node)| (node, (x[i], y[i])))
+        .collect()
+}
+
+/// L2 norm of a vector.
+fn l2_norm(v: &[f64]) -> f64 {
+    v.iter().map(|x| x * x).sum::<f64>().sqrt()
+}
+
+/// Subtract the projection of `v` onto each (orthonormal) basis vector,
+/// leaving `v` in the orthogonal complement of the span. Assumes `basis`
+/// vectors are unit-norm and mutually orthogonal.
+fn project_out(v: &mut [f64], basis: &[Vec<f64>]) {
+    for b in basis {
+        let dot: f64 = v.iter().zip(b).map(|(x, y)| x * y).sum();
+        for (x, &bi) in v.iter_mut().zip(b) {
+            *x -= dot * bi;
+        }
+    }
+}
+
+/// Deflated power iteration: the dominant eigenvector of `apply` within the
+/// orthogonal complement of `basis`, started from `seed`. Re-orthogonalises
+/// against `basis` every sweep so the iterate cannot drift back toward an
+/// already-found mode. Returns a unit (or zero, if `seed` lies entirely in the
+/// span of `basis`) vector.
+fn dominant_orthogonal(
+    apply: &impl Fn(&[f64]) -> Vec<f64>,
+    seed: &[f64],
+    basis: &[Vec<f64>],
+    max_iterations: usize,
+    tolerance: f64,
+) -> Vec<f64> {
+    let mut v = seed.to_vec();
+    project_out(&mut v, basis);
+    let norm = l2_norm(&v);
+    if norm == 0.0 {
+        return v; // seed fully explained by the existing basis.
+    }
+    for x in v.iter_mut() {
+        *x /= norm;
+    }
+    for _ in 0..max_iterations {
+        let mut next = apply(&v);
+        project_out(&mut next, basis);
+        let norm = l2_norm(&next);
+        if norm == 0.0 {
+            break;
+        }
+        for x in next.iter_mut() {
+            *x /= norm;
+        }
+        let diff: f64 = v.iter().zip(&next).map(|(a, b)| (a - b).abs()).sum();
+        v = next;
+        if diff < tolerance {
+            break;
+        }
+    }
+    v
+}
+
+/// Min–max normalise a vector into `[0, 1]`. A degenerate (zero-span or
+/// non-finite) vector collapses to the centre `0.5` so a hint is always finite.
+fn normalize_unit_interval(v: &[f64]) -> Vec<f64> {
+    let min = v.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let span = max - min;
+    if !span.is_finite() || span <= 0.0 {
+        return vec![0.5; v.len()];
+    }
+    v.iter().map(|x| (x - min) / span).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1591,6 +1749,127 @@ mod tests {
         assert!(pagerank(&empty, &[], PR_DAMPING, PR_ITERS).is_empty());
     }
 
+    // ── spectral_embedding (issue #804) ──
+
+    const SPECTRAL_ITERS: usize = 200;
+    const SPECTRAL_TOL: f64 = 1e-9;
+
+    fn hint_map(rows: Vec<(String, (f64, f64))>) -> BTreeMap<String, (f64, f64)> {
+        rows.into_iter().collect()
+    }
+
+    #[test]
+    fn spectral_embedding_coords_in_unit_interval() {
+        // Two triangles bridged: every coordinate must land in [0, 1].
+        let (nodes, edges) = two_cliques_bridge();
+        let rows = spectral_embedding(&nodes, &edges, SPECTRAL_ITERS, SPECTRAL_TOL);
+        for (node, (x, y)) in &rows {
+            assert!(
+                (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y),
+                "node {node} hint ({x}, {y}) must be normalised to [0, 1]²"
+            );
+        }
+        // Min–max normalisation pins the extremes of the spread to 0 and 1.
+        let xs: Vec<f64> = rows.iter().map(|(_, (x, _))| *x).collect();
+        let min_x = xs.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_x = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(min_x.abs() < 1e-9, "x min anchored at 0, got {min_x}");
+        assert!(
+            (max_x - 1.0).abs() < 1e-9,
+            "x max anchored at 1, got {max_x}"
+        );
+    }
+
+    #[test]
+    fn spectral_embedding_determinism_100_runs_identical() {
+        // AC: identical input must produce identical hints (no random init).
+        let (nodes, edges) = karate_club();
+        let first = spectral_embedding(&nodes, &edges, SPECTRAL_ITERS, SPECTRAL_TOL);
+        for _ in 0..100 {
+            assert_eq!(
+                spectral_embedding(&nodes, &edges, SPECTRAL_ITERS, SPECTRAL_TOL),
+                first,
+                "spectral embedding must be bit-for-bit reproducible"
+            );
+        }
+    }
+
+    #[test]
+    fn spectral_embedding_node_order_independent() {
+        // Shuffling the input node/edge order must not change the per-node hint:
+        // the embedding sorts the universe internally before laying out.
+        let (nodes, edges) = two_cliques_bridge();
+        let mut shuffled_nodes = nodes.clone();
+        shuffled_nodes.reverse();
+        let mut shuffled_edges = edges.clone();
+        shuffled_edges.reverse();
+
+        let a = hint_map(spectral_embedding(
+            &nodes,
+            &edges,
+            SPECTRAL_ITERS,
+            SPECTRAL_TOL,
+        ));
+        let b = hint_map(spectral_embedding(
+            &shuffled_nodes,
+            &shuffled_edges,
+            SPECTRAL_ITERS,
+            SPECTRAL_TOL,
+        ));
+        assert_eq!(a, b, "hint is keyed on node identity, not input order");
+    }
+
+    #[test]
+    fn spectral_embedding_separates_disconnected_components() {
+        // Two disjoint triangles: the Fiedler coordinate should place the two
+        // components in distinct regions of the x axis (graph-distance shows up
+        // as layout distance), so the means differ noticeably.
+        let nodes: Vec<String> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let edges = vec![
+            w("a", "b"),
+            w("b", "c"),
+            w("c", "a"),
+            w("d", "e"),
+            w("e", "f"),
+            w("f", "d"),
+        ];
+        let map = hint_map(spectral_embedding(
+            &nodes,
+            &edges,
+            SPECTRAL_ITERS,
+            SPECTRAL_TOL,
+        ));
+        let left = (map["a"].0 + map["b"].0 + map["c"].0) / 3.0;
+        let right = (map["d"].0 + map["e"].0 + map["f"].0) / 3.0;
+        assert!(
+            (left - right).abs() > 0.25,
+            "disconnected components should separate on the layout (Δx = {})",
+            (left - right).abs()
+        );
+    }
+
+    #[test]
+    fn spectral_embedding_degenerate_graphs() {
+        // Empty graph -> empty result.
+        let empty: Vec<String> = Vec::new();
+        assert!(spectral_embedding(&empty, &[], SPECTRAL_ITERS, SPECTRAL_TOL).is_empty());
+
+        // Single node -> centred, finite hint.
+        let one = vec!["solo".to_string()];
+        let rows = spectral_embedding(&one, &[], SPECTRAL_ITERS, SPECTRAL_TOL);
+        assert_eq!(rows, vec![("solo".to_string(), (0.5, 0.5))]);
+
+        // Edgeless multi-node graph -> still finite and in range.
+        let nodes: Vec<String> = ["x", "y", "z"].iter().map(|s| s.to_string()).collect();
+        for (_, (x, y)) in spectral_embedding(&nodes, &[], SPECTRAL_ITERS, SPECTRAL_TOL) {
+            assert!(x.is_finite() && y.is_finite(), "edgeless hint stays finite");
+            assert!((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y));
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -1753,6 +2032,28 @@ mod tests {
             }
 
             prop_assert_eq!(pagerank(&nodes, &edges, PR_DAMPING, PR_ITERS), rows);
+        }
+
+        // spectral_embedding: one hint per node, every coordinate finite and in
+        // [0, 1], and the result is deterministic across runs.
+        #[test]
+        fn spectral_embedding_range_coverage_and_determinism((nodes, edges) in graph_strategy()) {
+            let rows = spectral_embedding(&nodes, &edges, SPECTRAL_ITERS, SPECTRAL_TOL);
+
+            let mut universe: BTreeSet<String> = BTreeSet::new();
+            for n in &nodes { universe.insert(n.clone()); }
+            for (a, b, _) in &edges { universe.insert(a.clone()); universe.insert(b.clone()); }
+            prop_assert_eq!(rows.len(), universe.len());
+
+            for (node, (x, y)) in &rows {
+                prop_assert!(x.is_finite() && y.is_finite(), "node {} hint is finite", node);
+                prop_assert!(
+                    *x >= -1e-9 && *x <= 1.0 + 1e-9 && *y >= -1e-9 && *y <= 1.0 + 1e-9,
+                    "node {} hint ({}, {}) in [0,1]^2", node, x, y
+                );
+            }
+
+            prop_assert_eq!(spectral_embedding(&nodes, &edges, SPECTRAL_ITERS, SPECTRAL_TOL), rows);
         }
     }
 }
