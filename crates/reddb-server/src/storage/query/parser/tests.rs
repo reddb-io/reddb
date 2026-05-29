@@ -599,9 +599,14 @@ fn test_parse_table_function_single_arg() {
     };
     assert_eq!(tq.table, "components");
     match tq.source {
-        Some(TableSource::Function { name, args }) => {
+        Some(TableSource::Function {
+            name,
+            args,
+            named_args,
+        }) => {
             assert_eq!(name, "components");
             assert_eq!(args, vec!["g".to_string()]);
+            assert!(named_args.is_empty());
         }
         other => panic!("expected TableSource::Function, got {other:?}"),
     }
@@ -615,9 +620,14 @@ fn test_parse_table_function_multiple_args() {
         panic!("Expected TableQuery");
     };
     match tq.source {
-        Some(TableSource::Function { name, args }) => {
+        Some(TableSource::Function {
+            name,
+            args,
+            named_args,
+        }) => {
             assert_eq!(name, "components");
             assert_eq!(args, vec!["g".to_string(), "h".to_string()]);
+            assert!(named_args.is_empty());
         }
         other => panic!("expected TableSource::Function, got {other:?}"),
     }
