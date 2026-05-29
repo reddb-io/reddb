@@ -42,6 +42,7 @@ fn probabilistic_collection_contract(
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
