@@ -383,6 +383,43 @@ A resume replays the same descriptor-first stream.
 Refusals are non-streaming JSON responses (no chunked body), so a client can
 distinguish "the stream was never accepted" from a mid-stream failure.
 
+**Cancellation.** A long-running read can be cancelled two ways; both signal
+the executor to stop producing rows and tombstone the cursor.
+
+- *Explicit cancel.* POST the cursor token to `POST /query/stream/cancel`:
+
+  ```bash
+  curl -X POST http://127.0.0.1:8080/query/stream/cancel \
+    -H 'content-type: application/json' \
+    -H 'x-reddb-tenant: acme' \
+    -H 'authorization: Bearer <principal-token>' \
+    -d '{"cursor": "<token from the cursor frame>"}'
+  ```
+
+  A matched cursor returns `200 {"ok":true,"status":"cancelled"}`. Cancel is
+  scoped exactly like resume: an unknown or foreign token is masked as
+  `404 cursor_not_found`, so cancellation cannot be used to probe for cursors.
+  Cancel is idempotent — cancelling an already-cancelled cursor still
+  returns `200`.
+
+- *Client disconnect.* If the client closes the TCP connection mid-stream,
+  the server detects the broken pipe, raises the same executor cancel signal,
+  and tombstones the cursor — it does not keep computing rows for a dead
+  client.
+
+When a cancel is observed while the stream is still draining, the stream
+terminates with a documented terminal frame in place of `end`:
+
+```json
+{"cancelled":{"row_count":<rows emitted so far>,"reason":"cancelled"}}
+```
+
+**Resuming a cancelled cursor is refused** with `409 cursor_cancelled` to its
+owner — distinct from `410 cursor_expired` (aged out) and `404
+cursor_not_found` (unknown/foreign) — so the client learns the stream was
+cancelled rather than retrying a snapshot it abandoned. Open a new stream to
+start over.
+
 ### Context Search
 
 `POST /context` performs a unified context search across all data structures (tables, graphs, vectors, documents, key-value pairs). It follows cross-references and optionally expands graph neighborhoods in a single request.

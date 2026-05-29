@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::runtime::RedDBRuntime;
+use crate::storage::query::engine::cancel::CancelToken;
 use crate::storage::schema::types::Value;
 
 const RED_CONFIG_COLLECTION: &str = "red_config";
@@ -876,6 +877,15 @@ struct CursorEntry {
     capabilities: Option<Vec<String>>,
     opened_at_ms: u64,
     ttl_ms: u64,
+    /// Issue #808 / 750d — shared cancel token observed by the executor for
+    /// this stream. The cancel endpoint and client-disconnect detection
+    /// raise it; the engine iterators poll it. Cloned out to the handler at
+    /// open so the live stream and a later cancel request share one flag.
+    cancel_token: CancelToken,
+    /// Issue #808 / 750d — tombstone marker. Set once the stream is
+    /// cancelled (explicitly or by disconnect); a tombstoned cursor can
+    /// never be resumed, only reported as cleanly cancelled to its owner.
+    cancelled: bool,
 }
 
 /// Pinned read state returned to the handler when a resume token resolves
@@ -901,6 +911,11 @@ pub enum CursorReject {
     NotFound,
     /// Token owned by this caller but its TTL has elapsed.
     Expired,
+    /// Issue #808 / 750d — token owned by this caller but the stream was
+    /// cancelled (explicitly or by client disconnect) and tombstoned. A
+    /// resume is refused with a clean, structured error rather than
+    /// replaying a stream the client already abandoned.
+    Cancelled,
 }
 
 /// Issue #807 / PRD #750 — process-wide cursor registry for `/query/stream`.
@@ -951,9 +966,46 @@ impl CursorRegistry {
                 capabilities,
                 opened_at_ms,
                 ttl_ms,
+                cancel_token: CancelToken::new(),
+                cancelled: false,
             },
         );
         token
+    }
+
+    /// Issue #808 / 750d — clone out the shared cancel token for a cursor
+    /// the caller just minted, so the live streaming handler can poll the
+    /// same flag a later cancel request raises. No scope check: the only
+    /// caller is the handler that owns the freshly-registered token.
+    pub fn cancel_token_for(&self, token: &str) -> Option<CancelToken> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.get(token).map(|e| e.cancel_token.clone())
+    }
+
+    /// Issue #808 / 750d — cancel + tombstone a cursor on behalf of
+    /// `(tenant, principal)`. Raises the shared cancel token (so an
+    /// in-flight stream observing it stops) and marks the entry cancelled
+    /// so a later resume is refused with [`CursorReject::Cancelled`].
+    ///
+    /// Scope is checked exactly as in [`resolve`](CursorRegistry::resolve):
+    /// a token owned by a different tenant/principal — or one that never
+    /// existed — returns [`CursorReject::NotFound`] so an unauthorized
+    /// caller cannot cancel, or even confirm the existence of, a foreign
+    /// stream. Cancelling an already-cancelled cursor is idempotent.
+    pub fn cancel(
+        &self,
+        token: &str,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<CancelToken, CursorReject> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = inner.get_mut(token).ok_or(CursorReject::NotFound)?;
+        if entry.tenant != tenant || entry.principal != principal {
+            return Err(CursorReject::NotFound);
+        }
+        entry.cancelled = true;
+        entry.cancel_token.cancel();
+        Ok(entry.cancel_token.clone())
     }
 
     /// Resolve a resume token for `(tenant, principal)` as of `now_ms`.
@@ -977,6 +1029,12 @@ impl CursorRegistry {
         // the token exists.
         if entry.tenant != tenant || entry.principal != principal {
             return Err(CursorReject::NotFound);
+        }
+        // Issue #808 / 750d — a tombstoned (cancelled) cursor is refused
+        // with a dedicated reason before the TTL check, so the owner learns
+        // the stream was cancelled rather than seeing a generic expiry.
+        if entry.cancelled {
+            return Err(CursorReject::Cancelled);
         }
         if now_ms.saturating_sub(entry.opened_at_ms) >= entry.ttl_ms {
             return Err(CursorReject::Expired);
@@ -1737,6 +1795,97 @@ mod tests {
             Err(CursorReject::NotFound),
             "expired + wrong scope must mask as NotFound, not Expired"
         );
+    }
+
+    // ──────── Issue #808 / 750d — cancel + tombstone ────────
+
+    #[test]
+    fn cancel_tombstones_cursor_and_raises_token() {
+        // Cancelling a live cursor raises its shared token (so an in-flight
+        // executor observing it stops) and tombstones the entry.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        let live = reg
+            .cancel_token_for(&token)
+            .expect("freshly-minted cursor exposes its token");
+        assert!(!live.is_cancelled(), "token starts un-cancelled");
+
+        let returned = reg
+            .cancel(&token, "acme", "bearer:abc")
+            .expect("owner cancels its own cursor");
+        assert!(returned.is_cancelled(), "cancel raises the returned token");
+        assert!(
+            live.is_cancelled(),
+            "the handler-held clone observes the cancel"
+        );
+    }
+
+    #[test]
+    fn cancelled_cursor_rejects_resume_with_cancelled_reason() {
+        // A tombstoned cursor refuses resume with a dedicated `Cancelled`
+        // reason for its owner — distinct from Expired so the client learns
+        // the stream was cancelled, not aged out.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        reg.cancel(&token, "acme", "bearer:abc")
+            .expect("owner cancels");
+        assert_eq!(
+            reg.resolve(&token, "acme", "bearer:abc", 100),
+            Err(CursorReject::Cancelled),
+            "owner resuming a cancelled cursor sees Cancelled"
+        );
+    }
+
+    #[test]
+    fn cancel_is_idempotent() {
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        assert!(reg.cancel(&token, "acme", "bearer:abc").is_ok());
+        // Second cancel still succeeds (already tombstoned) and stays cancelled.
+        let second = reg
+            .cancel(&token, "acme", "bearer:abc")
+            .expect("re-cancel is a no-op success");
+        assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_cross_tenant_is_masked_as_not_found() {
+        // An unauthorized caller cannot cancel — or confirm the existence
+        // of — a foreign cursor.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        assert!(
+            matches!(
+                reg.cancel(&token, "evil-corp", "bearer:abc"),
+                Err(CursorReject::NotFound)
+            ),
+            "cross-tenant cancel must mask existence as NotFound"
+        );
+        // The rightful owner's cursor is untouched — still resumable.
+        assert!(reg.resolve(&token, "acme", "bearer:abc", 100).is_ok());
+    }
+
+    #[test]
+    fn cancel_cross_principal_is_masked_as_not_found() {
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        assert!(
+            matches!(
+                reg.cancel(&token, "acme", "bearer:other"),
+                Err(CursorReject::NotFound)
+            ),
+            "cross-principal cancel must mask existence as NotFound"
+        );
+        assert!(reg.resolve(&token, "acme", "bearer:abc", 100).is_ok());
+    }
+
+    #[test]
+    fn cancel_unknown_token_is_not_found() {
+        let reg = CursorRegistry::default();
+        assert!(matches!(
+            reg.cancel("deadbeef", "acme", "bearer:abc"),
+            Err(CursorReject::NotFound)
+        ));
     }
 
     #[test]
