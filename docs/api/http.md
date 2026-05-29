@@ -344,6 +344,13 @@ curl -X POST http://127.0.0.1:8080/query \
 fixed order: a `descriptor` frame first, then a `cursor` control frame, then
 one `row` frame per record, then a terminal `end` frame.
 
+> The full normative contract — descriptor-first emission, chunk format,
+> cursor lifecycle, cancellation, disconnect semantics, snapshot
+> consistency, ordering guarantees, tenant/authorization scope, TTL,
+> expiry, and the read-only limit — lives in one place:
+> [Query Streaming Contract](query-streaming.md). The examples below
+> illustrate it.
+
 The `cursor` frame carries an **opaque resume token** scoped to the calling
 tenant and principal and pinned to the read snapshot:
 
