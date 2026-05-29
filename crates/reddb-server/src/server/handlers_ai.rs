@@ -1686,7 +1686,7 @@ impl RedDBServer {
         }
     }
 
-    fn collect_ai_model_entries(&self) -> Vec<(String, JsonValue)> {
+    pub(crate) fn collect_ai_model_entries(&self) -> Vec<(String, JsonValue)> {
         let store = self.runtime.db().store();
         let Some(manager) = store.get_collection(RED_CONFIG_COLLECTION) else {
             return Vec::new();
