@@ -836,6 +836,172 @@ impl LeaseRegistry {
     }
 }
 
+/// Issue #807 / PRD #750 — opaque cursor token. 192 bits drawn from the
+/// OS CSPRNG, hex-encoded so it survives JSON transport. The token is the
+/// only cursor identifier the wire sees; the pinned snapshot, scope, and
+/// query stay server-side in the [`CursorRegistry`]. Opacity property: a
+/// client cannot derive the pinned snapshot LSN or another principal's
+/// token from the value, and tokens are not sequential across opens.
+pub const CURSOR_TOKEN_BYTES: usize = 24;
+
+static NEXT_CURSOR_SALT: AtomicU64 = AtomicU64::new(1);
+
+/// Generate an opaque 192-bit cursor token (48-char hex). Falls back to a
+/// high-entropy time/counter mix if the CSPRNG is unavailable so a fresh
+/// open never fails to mint a token (the fallback is not unguessable, but
+/// production paths reach `/dev/urandom` successfully).
+pub fn generate_cursor_token() -> String {
+    let mut bytes = [0u8; CURSOR_TOKEN_BYTES];
+    if crate::crypto::os_random::fill_bytes(&mut bytes).is_err() {
+        let salt = NEXT_CURSOR_SALT
+            .fetch_add(1, Ordering::SeqCst)
+            .to_le_bytes();
+        let now = crate::utils::now_unix_nanos().to_le_bytes();
+        bytes[..8].copy_from_slice(&salt);
+        bytes[8..16].copy_from_slice(&now);
+    }
+    crate::utils::to_hex(&bytes)
+}
+
+/// Server-side cursor record. Pins the read snapshot and the query so a
+/// resume replays the same point-in-time view, and binds the entry to the
+/// `(tenant, principal)` that opened it for authorization scoping.
+#[derive(Debug, Clone)]
+struct CursorEntry {
+    snapshot_lsn: u64,
+    tenant: String,
+    principal: String,
+    query: String,
+    entity_types: Option<Vec<String>>,
+    capabilities: Option<Vec<String>>,
+    opened_at_ms: u64,
+    ttl_ms: u64,
+}
+
+/// Pinned read state returned to the handler when a resume token resolves
+/// cleanly. The handler re-executes `query` against `snapshot_lsn` to
+/// re-stream the same view the original cursor referenced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorResume {
+    pub snapshot_lsn: u64,
+    pub query: String,
+    pub entity_types: Option<Vec<String>>,
+    pub capabilities: Option<Vec<String>>,
+    pub expires_at_ms: u64,
+}
+
+/// Why a resume token was refused. The handler maps every variant to a
+/// structured wire error. [`CursorReject::NotFound`] deliberately covers
+/// both "never issued" and "owned by a different tenant/principal" so an
+/// unauthorized caller cannot tell a foreign cursor from a nonexistent one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorReject {
+    /// Token unknown, or known to a different tenant/principal (masked so
+    /// existence never leaks to an unauthorized caller).
+    NotFound,
+    /// Token owned by this caller but its TTL has elapsed.
+    Expired,
+}
+
+/// Issue #807 / PRD #750 — process-wide cursor registry for `/query/stream`.
+///
+/// On a fresh stream the server mints an opaque token, pins the read
+/// snapshot LSN, and records it here scoped to the requesting
+/// `(tenant, principal)` with a TTL. A later resume request presents the
+/// token; [`resolve`](CursorRegistry::resolve) returns the pinned query +
+/// snapshot only when the token is live AND the caller's scope matches.
+///
+/// In-memory is acceptable for this first cut (per the issue): the registry
+/// is shared via `Arc` so cloned server handles enforce against one map.
+#[derive(Debug, Default)]
+pub struct CursorRegistry {
+    inner: Mutex<HashMap<String, CursorEntry>>,
+}
+
+impl CursorRegistry {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Mint + record a cursor for a freshly-opened stream, returning the
+    /// opaque token handed to the client. The entry expires at
+    /// `opened_at_ms + ttl_ms` (saturating).
+    #[allow(clippy::too_many_arguments)]
+    pub fn register(
+        &self,
+        snapshot_lsn: u64,
+        tenant: &str,
+        principal: &str,
+        query: &str,
+        entity_types: Option<Vec<String>>,
+        capabilities: Option<Vec<String>>,
+        opened_at_ms: u64,
+        ttl_ms: u64,
+    ) -> String {
+        let token = generate_cursor_token();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.insert(
+            token.clone(),
+            CursorEntry {
+                snapshot_lsn,
+                tenant: tenant.to_string(),
+                principal: principal.to_string(),
+                query: query.to_string(),
+                entity_types,
+                capabilities,
+                opened_at_ms,
+                ttl_ms,
+            },
+        );
+        token
+    }
+
+    /// Resolve a resume token for `(tenant, principal)` as of `now_ms`.
+    ///
+    /// Scope is checked **before** expiry: a token owned by a different
+    /// tenant or principal resolves to [`CursorReject::NotFound`] —
+    /// identical to a token that was never issued — so an unauthorized
+    /// caller learns nothing about its existence. Only the rightful owner
+    /// can observe [`CursorReject::Expired`].
+    pub fn resolve(
+        &self,
+        token: &str,
+        tenant: &str,
+        principal: &str,
+        now_ms: u64,
+    ) -> Result<CursorResume, CursorReject> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = inner.get(token).ok_or(CursorReject::NotFound)?;
+        // Scope gate first — a mismatch must be indistinguishable from
+        // absence so a cross-tenant/cross-principal probe cannot confirm
+        // the token exists.
+        if entry.tenant != tenant || entry.principal != principal {
+            return Err(CursorReject::NotFound);
+        }
+        if now_ms.saturating_sub(entry.opened_at_ms) >= entry.ttl_ms {
+            return Err(CursorReject::Expired);
+        }
+        Ok(CursorResume {
+            snapshot_lsn: entry.snapshot_lsn,
+            query: entry.query.clone(),
+            entity_types: entry.entity_types.clone(),
+            capabilities: entry.capabilities.clone(),
+            expires_at_ms: entry.opened_at_ms.saturating_add(entry.ttl_ms),
+        })
+    }
+
+    /// Visible for tests / audit.
+    #[doc(hidden)]
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    #[doc(hidden)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Incremental SHA-256 hasher over emitted row lines, hex-encoded on
 /// finalize. The wire contract is that the server hashes the exact
 /// byte sequence of each row line (without trailing newline) in the
@@ -1454,6 +1620,134 @@ mod tests {
         assert_eq!(parse_jwt_exp_ms("not-a-jwt"), None);
         assert_eq!(parse_jwt_exp_ms("only.two"), None);
         assert_eq!(parse_jwt_exp_ms("a.b.c"), None);
+    }
+
+    // ──────── Issue #807 / 750c — cursor registry ────────
+
+    fn register_default_cursor(reg: &CursorRegistry, now_ms: u64) -> String {
+        reg.register(
+            42,
+            "acme",
+            "bearer:abc",
+            "SELECT id FROM users ORDER BY rid",
+            None,
+            None,
+            now_ms,
+            1_000,
+        )
+    }
+
+    #[test]
+    fn cursor_token_is_192_bit_hex_and_unique_per_register() {
+        let reg = CursorRegistry::default();
+        let a = register_default_cursor(&reg, 0);
+        let b = register_default_cursor(&reg, 0);
+        assert_eq!(
+            a.len(),
+            CURSOR_TOKEN_BYTES * 2,
+            "token must be 192 bits hex-encoded: {a}"
+        );
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit()),
+            "token must be hex: {a}"
+        );
+        assert_ne!(a, b, "tokens must differ across registrations");
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn cursor_resolves_for_owner_within_ttl() {
+        // Happy-path resume — same tenant + principal, before TTL.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 1_000);
+        let resume = reg
+            .resolve(&token, "acme", "bearer:abc", 1_500)
+            .expect("live cursor resolves for its owner");
+        assert_eq!(resume.snapshot_lsn, 42, "resume re-pins the same snapshot");
+        assert_eq!(resume.query, "SELECT id FROM users ORDER BY rid");
+        assert_eq!(resume.expires_at_ms, 2_000);
+    }
+
+    #[test]
+    fn cursor_rejects_after_ttl_for_owner() {
+        // TTL expiry — owner sees a distinct `Expired` so they can
+        // re-issue, but the cursor no longer resolves.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        assert_eq!(
+            reg.resolve(&token, "acme", "bearer:abc", 1_000),
+            Err(CursorReject::Expired),
+            "TTL boundary is inclusive — cursor is dead at opened_at + ttl"
+        );
+        assert_eq!(
+            reg.resolve(&token, "acme", "bearer:abc", 5_000),
+            Err(CursorReject::Expired)
+        );
+    }
+
+    #[test]
+    fn cursor_cross_tenant_is_masked_as_not_found() {
+        // Tenant isolation — a different tenant cannot tell the token
+        // from one that never existed (no existence leak), even while the
+        // cursor is still live for its real owner.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        assert_eq!(
+            reg.resolve(&token, "evil-corp", "bearer:abc", 100),
+            Err(CursorReject::NotFound),
+            "cross-tenant resume must mask existence as NotFound"
+        );
+        // Still live for the rightful tenant.
+        assert!(reg.resolve(&token, "acme", "bearer:abc", 100).is_ok());
+    }
+
+    #[test]
+    fn cursor_cross_principal_is_masked_as_not_found() {
+        // Principal isolation — same tenant, different principal is also
+        // masked as NotFound rather than leaking a permission error.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        assert_eq!(
+            reg.resolve(&token, "acme", "bearer:other", 100),
+            Err(CursorReject::NotFound),
+            "cross-principal resume must mask existence as NotFound"
+        );
+        assert!(reg.resolve(&token, "acme", "bearer:abc", 100).is_ok());
+    }
+
+    #[test]
+    fn cursor_unknown_token_is_not_found() {
+        let reg = CursorRegistry::default();
+        assert!(reg.is_empty());
+        assert_eq!(
+            reg.resolve("deadbeef", "acme", "bearer:abc", 0),
+            Err(CursorReject::NotFound)
+        );
+    }
+
+    #[test]
+    fn cursor_scope_is_checked_before_expiry() {
+        // An unauthorized caller hitting an *expired* token must still see
+        // NotFound, never Expired — Expired would confirm the token once
+        // existed. Scope precedes expiry in `resolve`.
+        let reg = CursorRegistry::default();
+        let token = register_default_cursor(&reg, 0);
+        assert_eq!(
+            reg.resolve(&token, "evil-corp", "bearer:abc", 10_000),
+            Err(CursorReject::NotFound),
+            "expired + wrong scope must mask as NotFound, not Expired"
+        );
+    }
+
+    #[test]
+    fn generate_cursor_token_produces_high_entropy_distinct_values() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1024 {
+            assert!(
+                seen.insert(generate_cursor_token()),
+                "duplicate cursor token in CSPRNG sequence"
+            );
+        }
     }
 
     #[test]

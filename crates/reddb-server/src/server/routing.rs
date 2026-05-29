@@ -159,7 +159,19 @@ impl RedDBServer {
                     // framing, and chunked NDJSON body. Lease/audit/
                     // capacity plumbing is deferred to #750 siblings, so
                     // this branch does not acquire a capacity guard.
-                    self.handle_query_select_stream(request.body.clone(), writer)?;
+                    //
+                    // Issue #807 / 750c — the cursor registry scopes each
+                    // entry to the requesting `(tenant, principal)`, so the
+                    // handler needs both here. `principal` is the same label
+                    // the quota gate used above; `tenant` is resolved from
+                    // the request headers.
+                    let tenant = self.stream_tenant_for(&request.headers);
+                    self.handle_query_select_stream(
+                        request.body.clone(),
+                        &principal,
+                        &tenant,
+                        writer,
+                    )?;
                 } else if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
                 } else if is_input_stream_post {
@@ -215,6 +227,40 @@ impl RedDBServer {
                 Ok(true)
             }
         }
+    }
+
+    /// Issue #807 / 750c — resolve the tenant a `/query/stream` request runs
+    /// under so a minted cursor can be scoped to it. Precedence mirrors the
+    /// metrics surface: explicit `x-reddb-tenant` header, then the tenant
+    /// carried by the bearer credential (validated JWT or auth-store token),
+    /// then the ambient connection tenant, falling back to `"default"`.
+    pub(crate) fn stream_tenant_for(&self, headers: &BTreeMap<String, String>) -> String {
+        headers
+            .get("x-reddb-tenant")
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_string())
+            .or_else(|| self.stream_tenant_from_bearer(headers))
+            .or_else(crate::runtime::impl_core::current_tenant)
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    fn stream_tenant_from_bearer(&self, headers: &BTreeMap<String, String>) -> Option<String> {
+        let token = headers
+            .get("authorization")
+            .and_then(|value| value.strip_prefix("Bearer "))?;
+        if looks_like_jwt(token) {
+            if let Some(validator) = self.runtime.oauth_validator() {
+                if let Ok((tenant, _username, _role)) =
+                    crate::wire::redwire::auth::validate_oauth_jwt_full(&validator, token)
+                {
+                    return tenant;
+                }
+            }
+        }
+        let auth_store = self.auth_store.as_ref()?;
+        auth_store
+            .validate_token_full(token)
+            .and_then(|(id, _role)| id.tenant)
     }
 
     pub(crate) fn route(&self, request: HttpRequest) -> HttpResponse {
