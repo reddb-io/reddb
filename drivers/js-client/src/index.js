@@ -44,8 +44,10 @@ import { DocumentClient } from './documents.js'
 import { ConfigClient } from './config.js'
 import { VaultClient } from './vault.js'
 import { TypedQueryBuilder, collectionExists, listCollections } from './db-helpers.js'
+import { createSelectStream, createInputStream } from './streaming.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
+export { splitNdjson, RowReadable, RowWritable } from './streaming.js'
 export { CacheClient } from './cache.js'
 export { KvClient } from './kv.js'
 export { QueueClient } from './queue.js'
@@ -382,6 +384,38 @@ class TransactionHandle {
   }
 }
 
+/**
+ * A streaming-capable collection/table handle (PRD #759 S11). `query()`
+ * stays a one-shot Promise so callers never accidentally pay streaming
+ * overhead for small reads; `stream()` / `inputStream()` are the explicit
+ * streaming surfaces. The bound `name` is the default ingest target.
+ */
+export class Collection {
+  /** @param {RedDB} db @param {string} name */
+  constructor(db, name) {
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new RedDBError('INVALID_COLLECTION', 'collection(name) requires a non-empty name')
+    }
+    this.db = db
+    this.name = name
+  }
+
+  /** One-shot Promise query — no streaming surface leakage. */
+  query(sql, ...params) {
+    return this.db.query(sql, ...params)
+  }
+
+  /** Stream a read-only SELECT as a Readable/AsyncIterable. */
+  stream(sql, opts = {}) {
+    return this.db.stream(sql, opts)
+  }
+
+  /** Open a streaming write into this collection. */
+  inputStream(opts = {}) {
+    return this.db.inputStream(this.name, opts)
+  }
+}
+
 export class RedDB {
   /** @param {HttpRpcClient | import('./redwire.js').RedWireClient} client */
   constructor(client) {
@@ -478,6 +512,35 @@ export class RedDB {
   /** Return a caller-typed query builder for a collection. */
   from(collection) {
     return new TypedQueryBuilder(this, collection)
+  }
+
+  /**
+   * Return a streaming-capable handle for a collection/table. Exposes the
+   * explicit method separation of PRD #759: `.query()` is a one-shot
+   * Promise, `.stream()` is a streaming Readable, `.inputStream()` is a
+   * streaming Writable. The collection name binds the ingest target.
+   */
+  collection(name) {
+    return new Collection(this, name)
+  }
+
+  /**
+   * Stream a read-only SELECT. Returns a Node `Readable` in object mode
+   * that also conforms to `AsyncIterable<Row>`. Uses RedWire when the
+   * connection is RedWire, HTTP NDJSON when it is HTTP — identical surface
+   * either way. Call `.cancel(reason?)` to terminate mid-stream.
+   */
+  stream(sql, opts = {}) {
+    return createSelectStream(this.client, sql, opts)
+  }
+
+  /**
+   * Open a streaming write into `target`. Returns a Node `Writable` in
+   * object mode whose `.completion()` resolves with the server's terminal
+   * envelope. Call `.cancel(reason?)` to abandon the ingest.
+   */
+  inputStream(target, opts = {}) {
+    return createInputStream(this.client, target, opts)
   }
 
   /** Get an entity by id. Returns `{ entity }` (entity is `null` if not found). */
