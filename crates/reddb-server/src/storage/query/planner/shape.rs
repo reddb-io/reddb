@@ -90,8 +90,12 @@ fn parameterize_table_query(query: &TableQuery, next_index: &mut usize) -> Optio
             parameterize_query_expr_inner(inner, next_index)?,
         ))),
         // Table-valued functions have no parameterizable subexpressions
-        // (identifier args only); preserve them verbatim (issue #795).
-        Some(other @ TableSource::Function { .. }) => Some(other.clone()),
+        // (identifier args only); preserve them verbatim (issue #795). The
+        // inline-graph form (issue #799) is likewise preserved verbatim — its
+        // subquery literals are not lifted into plan parameters.
+        Some(other @ (TableSource::Function { .. } | TableSource::InlineGraphFunction { .. })) => {
+            Some(other.clone())
+        }
         None => None,
     };
 
@@ -1150,8 +1154,11 @@ fn bind_table_query(query: &TableQuery, binds: &[Value]) -> Option<TableQuery> {
             bind_query_expr_inner(inner, binds)?,
         ))),
         // Table-valued functions take identifier args only — nothing to bind;
-        // preserve them verbatim (issue #795).
-        Some(other @ TableSource::Function { .. }) => Some(other.clone()),
+        // preserve them verbatim (issue #795). The inline-graph form (issue
+        // #799) is preserved verbatim for the same reason (no plan params).
+        Some(other @ (TableSource::Function { .. } | TableSource::InlineGraphFunction { .. })) => {
+            Some(other.clone())
+        }
         None => None,
     };
 
