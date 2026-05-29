@@ -613,6 +613,8 @@ fn rewrite(expr: &mut QueryExpr, ctes: &HashMap<String, QueryExpr>) {
             let lookup_name = match &tq.source {
                 Some(TableSource::Subquery(_)) => None,
                 Some(TableSource::Name(n)) => Some(n.clone()),
+                // Table-valued functions are not CTE references (issue #795).
+                Some(TableSource::Function { .. }) => None,
                 None => Some(tq.table.clone()),
             };
 
