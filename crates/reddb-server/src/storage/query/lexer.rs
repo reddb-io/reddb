@@ -274,6 +274,9 @@ pub enum Token {
     Dollar,   // $
     Question, // ?
 
+    // Named-argument syntax (e.g. `louvain(g, resolution => 0.5)`)
+    FatArrow, // =>
+
     // Graph syntax
     Arrow,      // ->
     ArrowLeft,  // <-
@@ -497,6 +500,7 @@ impl fmt::Display for Token {
             Token::Semi => write!(f, ";"),
             Token::Dollar => write!(f, "$"),
             Token::Question => write!(f, "?"),
+            Token::FatArrow => write!(f, "=>"),
             Token::Arrow => write!(f, "->"),
             Token::ArrowLeft => write!(f, "<-"),
             Token::Dash => write!(f, "-"),
@@ -787,7 +791,14 @@ impl<'a> Lexer<'a> {
             // Operators and delimiters
             '=' => {
                 self.advance();
-                Token::Eq
+                // `=>` is the named-argument arrow (e.g. `resolution => 0.5`);
+                // a bare `=` stays the equality operator.
+                if self.peek() == Some('>') {
+                    self.advance();
+                    Token::FatArrow
+                } else {
+                    Token::Eq
+                }
             }
             '<' => self.scan_less_than()?,
             '>' => self.scan_greater_than()?,
@@ -2262,6 +2273,7 @@ mod tests {
             (Token::Colon, ":"),
             (Token::Semi, ";"),
             (Token::Dollar, "$"),
+            (Token::FatArrow, "=>"),
             (Token::Arrow, "->"),
             (Token::ArrowLeft, "<-"),
             (Token::Dash, "-"),
@@ -2274,6 +2286,29 @@ mod tests {
         for (token, expected) in cases {
             assert_eq!(token.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn fat_arrow_lexes_distinctly_from_eq() {
+        // `=>` is the named-argument arrow; a bare `=` stays equality.
+        assert_eq!(
+            tokenize("resolution => 0.5"),
+            vec![
+                Token::Ident("resolution".into()),
+                Token::FatArrow,
+                Token::Float(0.5),
+                Token::Eof,
+            ]
+        );
+        assert_eq!(
+            tokenize("x = 1"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::Integer(1),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
