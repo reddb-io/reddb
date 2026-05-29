@@ -1059,7 +1059,8 @@ mod tests {
     /// Total weight of a path (the last entry's cumulative weight), or `None`
     /// when no path exists.
     fn path_weight(path: &Option<Vec<(String, f64)>>) -> Option<f64> {
-        path.as_ref().map(|p| p.last().map(|(_, w)| *w).unwrap_or(0.0))
+        path.as_ref()
+            .map(|p| p.last().map(|(_, w)| *w).unwrap_or(0.0))
     }
 
     #[test]
@@ -1131,7 +1132,9 @@ mod tests {
         let capped = shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), Some(1));
         assert_eq!(path_weight(&capped), Some(10.0));
         // max_hops = 0: no edges allowed, so distinct endpoints are unreachable.
-        assert!(shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), Some(0)).is_none());
+        assert!(
+            shortest_path(&nodes, &edges, &"a".to_string(), &"d".to_string(), Some(0)).is_none()
+        );
     }
 
     #[test]
