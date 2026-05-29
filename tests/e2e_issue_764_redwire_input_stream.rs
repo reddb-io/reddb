@@ -93,7 +93,13 @@ fn open_input_frame(corr: u64, stream_id: u16) -> Frame {
     .with_stream(stream_id)
 }
 
-fn chunk_frame(corr: u64, stream_id: u16, seq: u64, rows: serde_json::Value, terminal: bool) -> Frame {
+fn chunk_frame(
+    corr: u64,
+    stream_id: u16,
+    seq: u64,
+    rows: serde_json::Value,
+    terminal: bool,
+) -> Frame {
     let payload = serde_json::json!({ "seq": seq, "rows": rows, "terminal": terminal });
     Frame::new(
         MessageKind::StreamChunk,
@@ -181,16 +187,22 @@ async fn ac2_input_and_output_stream_coexist() {
     // Seed a few rows so the output stream has something to emit.
     for i in 1..=3 {
         runtime
-            .execute_query(&format!("INSERT INTO sink (id, name) VALUES ({i}, 'seed-{i}')"))
+            .execute_query(&format!(
+                "INSERT INTO sink (id, name) VALUES ({i}, 'seed-{i}')"
+            ))
             .unwrap();
     }
     let mut sock = TcpStream::connect(addr).await.unwrap();
     handshake_anonymous(&mut sock).await;
 
     // Open an output stream (sid 9) and an input stream (sid 7).
-    sock.write_all(&encode_frame(&open_output_frame(20, 9, "SELECT * FROM sink")))
-        .await
-        .unwrap();
+    sock.write_all(&encode_frame(&open_output_frame(
+        20,
+        9,
+        "SELECT * FROM sink",
+    )))
+    .await
+    .unwrap();
     sock.write_all(&encode_frame(&open_input_frame(21, 7)))
         .await
         .unwrap();
