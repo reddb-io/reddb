@@ -979,6 +979,23 @@ pub enum TableSource {
         args: Vec<String>,
         named_args: Vec<(String, f64)>,
     },
+    /// A graph-analytics table-valued function whose graph is supplied
+    /// inline as two subqueries instead of a graph-collection reference
+    /// (issue #799), e.g.
+    /// `components(nodes => (SELECT id FROM hosts), edges => (SELECT src, dst FROM links))`.
+    ///
+    /// Structurally distinct from `Function` so the executor can tell the
+    /// inline form from the graph-collection form. `nodes`/`edges` are the
+    /// two materialization subqueries (the first column of `nodes` is the
+    /// node id; the first two-or-three columns of `edges` are
+    /// `(source, target [, weight])`). `named_args` carries any remaining
+    /// numeric named arguments (e.g. `resolution => 0.5`).
+    InlineGraphFunction {
+        name: String,
+        nodes: Box<QueryExpr>,
+        edges: Box<QueryExpr>,
+        named_args: Vec<(String, f64)>,
+    },
 }
 
 /// Options for WITH EXPAND clause on SELECT queries.
