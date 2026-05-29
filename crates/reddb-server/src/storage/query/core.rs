@@ -970,8 +970,15 @@ pub enum TableSource {
     Subquery(Box<QueryExpr>),
     /// A table-valued function call in FROM position, e.g.
     /// `FROM components(g)` (issue #795). `name` is the function
-    /// identifier; `args` are its identifier arguments.
-    Function { name: String, args: Vec<String> },
+    /// identifier; `args` are its positional identifier arguments;
+    /// `named_args` are `key => <f64>` named arguments such as
+    /// `louvain(g, resolution => 0.5)` (issue #796), preserved in source
+    /// order. Positional args always precede named args.
+    Function {
+        name: String,
+        args: Vec<String>,
+        named_args: Vec<(String, f64)>,
+    },
 }
 
 /// Options for WITH EXPAND clause on SELECT queries.
