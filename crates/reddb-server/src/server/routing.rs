@@ -96,12 +96,21 @@ impl RedDBServer {
             (request.method.as_str(), request.path.as_str()),
             ("POST", "/streams/input")
         ) && content_type_is_ndjson(&request.headers);
-        if !is_query_post && !is_input_stream_post {
+        // Issue #805 / #750 — the dedicated read-only SELECT streaming
+        // route. Unlike `/query` (which only streams when the client
+        // opts in via an NDJSON Accept header or an ASK STREAM body),
+        // `/query/stream` is inherently a streaming endpoint: any POST
+        // to it streams NDJSON, so no content negotiation is needed.
+        let is_select_stream_post = matches!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/query/stream")
+        );
+        if !is_query_post && !is_input_stream_post && !is_select_stream_post {
             return Ok(false);
         }
         let is_sse = is_query_post && is_stream_ask_query_body(&request.body);
         let is_ndjson = is_query_post && wants_ndjson_response(&request.headers);
-        if !is_sse && !is_ndjson && !is_input_stream_post {
+        if !is_sse && !is_ndjson && !is_input_stream_post && !is_select_stream_post {
             return Ok(false);
         }
 
@@ -143,7 +152,15 @@ impl RedDBServer {
                     principal: &principal,
                     token: bearer,
                 };
-                if is_sse {
+                if is_select_stream_post {
+                    // Issue #805 / #750 — read-only SELECT streaming.
+                    // Rides the same auth + quota gate above; the
+                    // handler owns the read-only gate, descriptor-first
+                    // framing, and chunked NDJSON body. Lease/audit/
+                    // capacity plumbing is deferred to #750 siblings, so
+                    // this branch does not acquire a capacity guard.
+                    self.handle_query_select_stream(request.body.clone(), writer)?;
+                } else if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
                 } else if is_input_stream_post {
                     let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
