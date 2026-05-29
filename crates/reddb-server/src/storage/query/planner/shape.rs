@@ -1149,6 +1149,9 @@ fn bind_table_query(query: &TableQuery, binds: &[Value]) -> Option<TableQuery> {
         Some(TableSource::Subquery(inner)) => Some(TableSource::Subquery(Box::new(
             bind_query_expr_inner(inner, binds)?,
         ))),
+        // Table-valued functions take identifier args only — nothing to bind;
+        // preserve them verbatim (issue #795).
+        Some(other @ TableSource::Function { .. }) => Some(other.clone()),
         None => None,
     };
 
