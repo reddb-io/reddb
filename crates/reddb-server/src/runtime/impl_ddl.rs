@@ -290,6 +290,53 @@ impl RedDBRuntime {
         ))
     }
 
+    /// Bootstrap a system-owned graph collection declared `WITH ANALYTICS`
+    /// (issue #803). The SQL DDL path refuses `red.*` names via
+    /// [`is_system_schema_name`], so built-ins like `red.topology.cluster`
+    /// cannot be created through `CREATE GRAPH`; this method drives the same
+    /// contract-build / save / persist path directly, bypassing only that
+    /// guard. Idempotent: a no-op when the collection already exists (its
+    /// analytics contract is recovered from the WAL on restart), so it is safe
+    /// to call unconditionally on every boot.
+    pub fn ensure_system_graph_with_analytics(
+        &self,
+        name: &str,
+        outputs: &[crate::catalog::AnalyticsOutput],
+    ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        if store.get_collection(name).is_some() {
+            return Ok(());
+        }
+        let analytics_config = outputs
+            .iter()
+            .map(|output| crate::catalog::AnalyticsViewDescriptor {
+                output: *output,
+                algorithm: None,
+                resolution: None,
+                max_iterations: None,
+                tolerance: None,
+            })
+            .collect();
+        store
+            .create_collection(name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let contract = keyed_collection_contract(
+            name,
+            crate::catalog::CollectionModel::Graph,
+            analytics_config,
+        );
+        self.inner
+            .db
+            .save_collection_contract(contract)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.invalidate_result_cache();
+        Ok(())
+    }
+
     pub fn execute_create_collection(
         &self,
         raw_query: &str,
