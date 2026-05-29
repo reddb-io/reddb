@@ -278,7 +278,7 @@ impl Level {
                 };
                 let mut best_comm = ci;
                 let mut best_gain = gain(ci);
-                for (&c, _) in &w_to {
+                for &c in w_to.keys() {
                     let g = gain(c);
                     if g > best_gain {
                         best_gain = g;
