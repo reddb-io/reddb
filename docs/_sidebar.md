@@ -63,6 +63,7 @@
 - **APIs**
   - [gRPC API](/api/grpc.md)
   - [HTTP API](/api/http.md)
+  - [Query Streaming Contract](/api/query-streaming.md)
   - [Ingest API (JSON / NDJSON / WS)](/api/ingest.md)
   - [PostgreSQL Wire](/api/postgres-wire.md)
   - [MCP (AI Agents)](/api/mcp.md)
