@@ -204,6 +204,21 @@ impl<'a> Parser<'a> {
                 "*".to_string()
             } else if self.consume(&Token::All)? {
                 "all".to_string()
+            } else if matches!(self.peek(), Token::Components) {
+                // `components` lexes as the graph-analytics keyword
+                // `Token::Components`, so it never reaches `expect_ident`.
+                // In FROM position it is the connected-components
+                // table-valued function: `FROM components(g)` (issue #795).
+                self.advance()?; // consume COMPONENTS
+                let name = "components".to_string();
+                self.expect(Token::LParen)?;
+                let args = self.parse_table_function_args(&name)?;
+                self.expect(Token::RParen)?;
+                table_source = Some(crate::storage::query::ast::TableSource::Function {
+                    name: name.clone(),
+                    args,
+                });
+                name
             } else {
                 let ident = self.expect_ident()?;
                 // Table-valued function call: `ident(arg, ...)` (issue #795).
