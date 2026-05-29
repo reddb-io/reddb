@@ -1278,6 +1278,7 @@ fn is_graph_tvf_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("components")
         || name.eq_ignore_ascii_case("louvain")
         || name.eq_ignore_ascii_case("degree_centrality")
+        || name.eq_ignore_ascii_case("shortest_path")
 }
 
 /// Reject any named arguments for a TVF that accepts none.
@@ -8724,12 +8725,6 @@ impl RedDBRuntime {
         }
 
         if name.eq_ignore_ascii_case("shortest_path") {
-            if args.len() != 1 {
-                return Err(RedDBError::Query(format!(
-                    "table function 'shortest_path' takes exactly 1 graph argument, got {}",
-                    args.len()
-                )));
-            }
             // Scalar named arguments: `src` and `dst` are required node ids,
             // `max_hops` is an optional non-negative edge-count cap. Node ids
             // in the graph store are integer entity ids rendered as strings, so
@@ -8774,7 +8769,30 @@ impl RedDBRuntime {
                     "table function 'shortest_path' requires named argument 'dst'".to_string(),
                 )
             })?;
-            return self.execute_shortest_path_tvf(&args[0], &src, &dst, max_hops);
+
+            // Columns are always present; an unreachable pair (within the
+            // optional `max_hops` budget) simply yields zero rows — never an
+            // error. `hop` is the 0-based index from the source;
+            // `cumulative_weight` is the running path weight (0 at the source,
+            // the total at the destination). Edges are treated as undirected,
+            // consistent with `components` / `louvain`.
+            let mut result = UnifiedResult::with_columns(vec![
+                "hop".into(),
+                "node_id".into(),
+                "cumulative_weight".into(),
+            ]);
+            if let Some(path) =
+                graph_algorithms::shortest_path(&nodes, &edges, &src, &dst, max_hops)
+            {
+                for (hop, (node_id, cumulative_weight)) in path.into_iter().enumerate() {
+                    let mut record = UnifiedRecord::new();
+                    record.set("hop", Value::Integer(hop as i64));
+                    record.set("node_id", Value::text(node_id));
+                    record.set("cumulative_weight", Value::Float(cumulative_weight));
+                    result.push(record);
+                }
+            }
+            return Ok(result);
         }
 
         Err(RedDBError::Query(format!("unknown table function: {name}")))
@@ -8864,67 +8882,6 @@ impl RedDBRuntime {
             record.set("node_id", Value::text(node_id));
             record.set("community_id", Value::Integer(community_id as i64));
             result.push(record);
-        }
-        Ok(result)
-    }
-
-    /// `shortest_path(<graph>, src => <node_id>, dst => <node_id> [, max_hops => <i64>])`
-    /// — returns the path as ordered rows `(hop, node_id, cumulative_weight)`
-    /// (issue #798).
-    ///
-    /// Materializes the active graph (nodes + weighted edges) read-only and
-    /// runs the pure, deterministic `graph_algorithms::shortest_path`. Edges are
-    /// treated as undirected (consistent with `components` / `louvain`). The
-    /// path is projected one row per node in order: `hop` is the 0-based index
-    /// from the source, `cumulative_weight` is the running path weight (0 at the
-    /// source, the total at the destination). An unreachable pair (within the
-    /// optional `max_hops` budget) yields an EMPTY result set — never an error.
-    /// Like the other graph TVFs, this v0 form runs over the whole graph store
-    /// regardless of the collection argument value.
-    fn execute_shortest_path_tvf(
-        &self,
-        _collection: &str,
-        src: &str,
-        dst: &str,
-        max_hops: Option<usize>,
-    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
-        use crate::storage::engine::graph_algorithms;
-        use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
-
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
-
-        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
-        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
-            .iter_all_edges()
-            .into_iter()
-            .map(|e| (e.source_id, e.target_id, e.weight))
-            .collect();
-
-        // Columns are always present; an unreachable pair simply yields zero
-        // rows (the pure function returns `None`).
-        let mut result = UnifiedResult::with_columns(vec![
-            "hop".into(),
-            "node_id".into(),
-            "cumulative_weight".into(),
-        ]);
-        if let Some(path) = graph_algorithms::shortest_path(
-            &nodes,
-            &edges,
-            &src.to_string(),
-            &dst.to_string(),
-            max_hops,
-        ) {
-            for (hop, (node_id, cumulative_weight)) in path.into_iter().enumerate() {
-                let mut record = UnifiedRecord::new();
-                record.set("hop", Value::Integer(hop as i64));
-                record.set("node_id", Value::text(node_id));
-                record.set("cumulative_weight", Value::Float(cumulative_weight));
-                result.push(record);
-            }
         }
         Ok(result)
     }
