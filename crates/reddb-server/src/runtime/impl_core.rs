@@ -7900,9 +7900,18 @@ impl RedDBRuntime {
         mut table: TableQuery,
         frame: &dyn super::statement_frame::ReadFrame,
     ) -> RedDBResult<TableQuery> {
-        if let Some(TableSource::Subquery(inner)) = table.source.take() {
-            let inner = self.resolve_select_expr_subqueries(*inner, frame)?;
-            table.source = Some(TableSource::Subquery(Box::new(inner)));
+        // Only a `Subquery` source needs recursive resolution. `.take()`
+        // would otherwise drop a `Name` / `Function` source on the floor
+        // (the `if let` skips the body but the take already cleared it),
+        // which silently broke `SELECT * FROM components(g)` — the TVF
+        // dispatch downstream keys off `TableSource::Function` and never
+        // fired. Restore any non-subquery source unchanged (issue #795).
+        match table.source.take() {
+            Some(TableSource::Subquery(inner)) => {
+                let inner = self.resolve_select_expr_subqueries(*inner, frame)?;
+                table.source = Some(TableSource::Subquery(Box::new(inner)));
+            }
+            other => table.source = other,
         }
 
         let outer_scopes = relation_scopes_for_query(&QueryExpr::Table(table.clone()));
