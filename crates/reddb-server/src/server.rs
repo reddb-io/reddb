@@ -275,6 +275,11 @@ pub struct RedDBServer {
     /// checks. Shared via `Arc` so cloned server handles see one
     /// ledger.
     pub(crate) lease_registry: Arc<output_stream::LeaseRegistry>,
+    /// Issue #807 / PRD #750 — `/query/stream` cursor registry. Holds the
+    /// opaque token → (snapshot pin, TTL, tenant, principal, query) entries
+    /// that let a client resume or reference a streamed read. Shared via
+    /// `Arc` so cloned server handles see one registry.
+    pub(crate) cursor_registry: Arc<output_stream::CursorRegistry>,
 }
 
 /// Default per-handler total-time budget (issue #571 slice 2).
@@ -383,6 +388,7 @@ impl RedDBServer {
             reject_503_bytes: Arc::new(build_reject_503_bytes(DEFAULT_RETRY_AFTER_SECS)),
             stream_capacity: output_stream::StreamCapacityRegistry::new(),
             lease_registry: output_stream::LeaseRegistry::new(),
+            cursor_registry: output_stream::CursorRegistry::new(),
         }
     }
 
@@ -394,6 +400,11 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn lease_registry(&self) -> &Arc<output_stream::LeaseRegistry> {
         &self.lease_registry
+    }
+
+    #[doc(hidden)]
+    pub fn cursor_registry(&self) -> &Arc<output_stream::CursorRegistry> {
+        &self.cursor_registry
     }
 
     #[doc(hidden)]
