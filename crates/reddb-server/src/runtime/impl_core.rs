@@ -1286,6 +1286,9 @@ fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery)
         Some(crate::storage::query::ast::TableSource::Subquery(subquery)) => {
             collect_query_expr_result_cache_scopes(scopes, subquery);
         }
+        // Table-valued functions (e.g. components(g)) read the graph store
+        // read-only and are not cacheable by collection scope (issue #795).
+        Some(crate::storage::query::ast::TableSource::Function { .. }) => {}
         None => cache_scope_insert(scopes, &query.table),
     }
 }
@@ -5746,6 +5749,20 @@ impl RedDBRuntime {
                     table,
                     &frame as &dyn super::statement_frame::ReadFrame,
                 )?;
+                // Table-valued functions (e.g. components(g)) dispatch to a
+                // read-only executor before any catalog/virtual-table routing
+                // (issue #795).
+                if let Some(TableSource::Function { name, args }) = table.source.clone() {
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-tvf",
+                        result: self.execute_table_function(&name, &args)?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query.to_string(),
@@ -8108,6 +8125,20 @@ impl RedDBRuntime {
                     table,
                     &scope as &dyn super::statement_frame::ReadFrame,
                 )?;
+                // Table-valued functions (e.g. components(g)) dispatch to a
+                // read-only executor before any catalog/virtual-table routing
+                // (issue #795).
+                if let Some(TableSource::Function { name, args }) = table.source.clone() {
+                    return Ok(RuntimeQueryResult {
+                        query: query_str.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-tvf",
+                        result: self.execute_table_function(&name, &args)?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query_str.to_string(),
