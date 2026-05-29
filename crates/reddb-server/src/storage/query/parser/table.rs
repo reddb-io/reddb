@@ -365,13 +365,14 @@ impl<'a> Parser<'a> {
                 self.advance()?; // consume SHORTEST_PATH
                 let name = "shortest_path".to_string();
                 self.expect(Token::LParen)?;
-                let (args, named_args) = self.parse_table_function_args(&name)?;
+                let (args, named_args, subquery_args) = self.parse_table_function_args(&name)?;
                 self.expect(Token::RParen)?;
-                table_source = Some(crate::storage::query::ast::TableSource::Function {
-                    name: name.clone(),
+                table_source = Some(self.build_table_function_source(
+                    name.clone(),
                     args,
                     named_args,
-                });
+                    subquery_args,
+                )?);
                 name
             } else {
                 let ident = self.expect_ident()?;
