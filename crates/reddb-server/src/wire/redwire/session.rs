@@ -92,6 +92,15 @@ where
     // does not disturb the rest of the connection.
     let stream_registry = Arc::new(super::output_stream::StreamRegistry::new());
 
+    // Per-connection input-stream registry (issue #764 / S5). Input
+    // streams are driven inline from this reader loop — each
+    // `StreamChunk` commits synchronously — so the registry is a plain
+    // owned map rather than the `Arc<Mutex<…>>` the spawned output
+    // workers share. Output and input streams are keyed by `stream_id`
+    // in separate registries, so the two multiplex on one connection
+    // without colliding (AC #2).
+    let mut input_registry = super::input_stream::InputStreamRegistry::new();
+
     let mut buf = vec![0u8; FRAME_HEADER_SIZE];
     loop {
         // Read header.
@@ -261,6 +270,74 @@ where
                 use super::output_stream as os;
                 let frame_id = frame.correlation_id;
                 let sid = frame.stream_id;
+
+                // Input-stream open (issue #764 / S5). Distinguished by
+                // `direction: "in"` in the payload; the output path
+                // below (the default) keeps owning `sql`-bearing opens.
+                // Input streams commit chunks inline in this loop, so
+                // they are registered in the owned `input_registry`
+                // rather than spawning a worker.
+                if super::input_stream::open_stream_is_input(&frame.payload) {
+                    use super::input_stream as is;
+                    let req = match is::parse_open_input(&frame.payload) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let err = is::build_input_stream_error_frame(
+                                frame_id,
+                                sid,
+                                e.code(),
+                                e.message(),
+                                0,
+                                0,
+                            )?;
+                            queue_send(&out_tx, encode_frame(&err))?;
+                            continue;
+                        }
+                    };
+                    let in_tx = runtime.connection_in_transaction(0);
+                    let config = crate::server::output_stream::StreamConfig::load(&runtime);
+                    let snapshot_lsn = runtime.cdc_current_lsn();
+                    let clock = crate::server::output_stream::SystemClock;
+                    let lease = match is::open_input_lease(config, snapshot_lsn, in_tx, &clock) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            let err = is::build_input_stream_error_frame(
+                                frame_id,
+                                sid,
+                                e.code(),
+                                e.message(),
+                                0,
+                                snapshot_lsn,
+                            )?;
+                            queue_send(&out_tx, encode_frame(&err))?;
+                            continue;
+                        }
+                    };
+                    let lease_id = lease.id;
+                    let lease_snapshot = lease.snapshot_lsn;
+                    let state = is::InputStreamState::new(lease, req.target, req.columns);
+                    if let Err(e) = input_registry.register(sid, state) {
+                        let err = is::build_input_stream_error_frame(
+                            frame_id,
+                            sid,
+                            e.code(),
+                            e.message(),
+                            0,
+                            snapshot_lsn,
+                        )?;
+                        queue_send(&out_tx, encode_frame(&err))?;
+                        continue;
+                    }
+                    let ack = FrameBuilder::reply_to(frame_id)
+                        .kind(MessageKind::OpenAck)
+                        .stream_id(sid)
+                        .payload(os::build_open_ack_payload(lease_id, lease_snapshot, false))
+                        .build()
+                        .map_err(|e| io::Error::other(format!("build OpenAck: {e}")))?;
+                    queue_send(&out_tx, encode_frame(&ack))?;
+                    continue;
+                }
+
                 let req = match os::parse_open_stream(&frame.payload) {
                     Ok(r) => r,
                     Err(e) => {
@@ -294,15 +371,127 @@ where
                     registry_ref.unregister(sid).await;
                 });
             }
+            // Input-stream chunk (issue #764 / S5). A `StreamChunk`
+            // from the client carries a chunk of rows for an open
+            // input stream. Each chunk commits synchronously and
+            // atomically; success is silent (await the next chunk), a
+            // `terminal: true` chunk closes the stream with a
+            // `StreamEnd`, and a commit failure emits one `StreamError`
+            // (carrying `recoverable_rid`) after which no further
+            // frames are produced for this `stream_id` (AC #3).
+            MessageKind::StreamChunk => {
+                use super::input_stream as is;
+                use crate::server::output_stream::{Clock, SystemClock};
+                let frame_id = frame.correlation_id;
+                let sid = frame.stream_id;
+                if !input_registry.contains(sid) {
+                    // No input stream for this id — protocol violation,
+                    // surfaced as StreamError rather than a drop.
+                    let err = is::build_input_stream_error_frame(
+                        frame_id,
+                        sid,
+                        "unknown_stream",
+                        "no active input stream for this stream_id",
+                        0,
+                        0,
+                    )?;
+                    queue_send(&out_tx, encode_frame(&err))?;
+                    continue;
+                }
+                let chunk = match is::parse_input_chunk(&frame.payload) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let state = input_registry
+                            .remove(sid)
+                            .expect("stream presence checked above");
+                        let err = is::build_input_stream_error_frame(
+                            frame_id,
+                            sid,
+                            e.code(),
+                            e.message(),
+                            state.chunk_count,
+                            state.committed_rid,
+                        )?;
+                        queue_send(&out_tx, encode_frame(&err))?;
+                        continue;
+                    }
+                };
+                let commit_result = {
+                    let state = input_registry
+                        .get_mut(sid)
+                        .expect("stream presence checked above");
+                    if state.lease.snapshot_expired(SystemClock.now_ms()) {
+                        Err((
+                            "snapshot_expired".to_string(),
+                            "stream snapshot pin TTL elapsed".to_string(),
+                        ))
+                    } else {
+                        state.commit_chunk(&runtime, &chunk.rows)
+                    }
+                };
+                match commit_result {
+                    Err((code, message)) => {
+                        let state = input_registry
+                            .remove(sid)
+                            .expect("stream presence checked above");
+                        let err = is::build_input_stream_error_frame(
+                            frame_id,
+                            sid,
+                            &code,
+                            &message,
+                            state.chunk_count,
+                            state.committed_rid,
+                        )?;
+                        queue_send(&out_tx, encode_frame(&err))?;
+                    }
+                    Ok(()) => {
+                        if chunk.terminal {
+                            let state = input_registry
+                                .remove(sid)
+                                .expect("stream presence checked above");
+                            let end = is::build_input_stream_end_frame(
+                                frame_id,
+                                sid,
+                                state.row_count,
+                                state.chunk_count,
+                                state.committed_rid,
+                                state.snapshot_lsn,
+                                false,
+                            )?;
+                            queue_send(&out_tx, encode_frame(&end))?;
+                        }
+                    }
+                }
+            }
             MessageKind::StreamCancel => {
+                use super::input_stream as is;
                 use super::output_stream as os;
-                let cancelled = stream_registry.cancel(frame.stream_id).await;
-                if !cancelled {
+                let sid = frame.stream_id;
+                if stream_registry.cancel(sid).await {
+                    // Output stream cancelled — its worker emits the
+                    // terminal StreamEnd(cancelled=true) itself.
+                } else if let Some(state) = input_registry.remove(sid) {
+                    // AC #4 — input-stream cancel: the in-flight (not
+                    // yet committed) chunk is discarded by dropping the
+                    // state; prior per-chunk commits stay durable. Emit
+                    // a terminal StreamEnd with cancelled=true so the
+                    // client can drop its bookkeeping.
+                    let end = is::build_input_stream_end_frame(
+                        frame.correlation_id,
+                        sid,
+                        state.row_count,
+                        state.chunk_count,
+                        state.committed_rid,
+                        state.snapshot_lsn,
+                        true,
+                    )?;
+                    queue_send(&out_tx, encode_frame(&end))?;
+                } else {
                     // AC #6: protocol violation surfaces as a
                     // StreamError envelope, not a connection drop.
                     let err = os::build_stream_error_frame(
                         frame.correlation_id,
-                        frame.stream_id,
+                        sid,
                         "unknown_stream",
                         "no active stream for this stream_id",
                     )?;
