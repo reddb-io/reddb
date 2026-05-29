@@ -120,11 +120,23 @@ impl<'a> Parser<'a> {
         result
     }
 
-    /// Parse the comma-separated identifier argument list of a table-valued
-    /// function call. The opening `(` has already been consumed; the caller
-    /// consumes the closing `)`. Requires at least one identifier argument and
-    /// rejects non-identifier tokens (issue #795).
-    fn parse_table_function_args(&mut self, name: &str) -> Result<Vec<String>, ParseError> {
+    /// Parse the comma-separated argument list of a table-valued function
+    /// call. The opening `(` has already been consumed; the caller consumes
+    /// the closing `)`. Requires at least one argument and rejects malformed
+    /// forms (issue #795).
+    ///
+    /// Two argument shapes are accepted (issue #796):
+    /// - positional identifiers, e.g. the graph collection `g`;
+    /// - named numeric arguments `key => <number>`, e.g. `resolution => 0.5`.
+    ///
+    /// Positional arguments must precede named arguments; a positional
+    /// argument after a named one is a clear error. Returns the positional
+    /// identifiers and the named `(key, value)` pairs in source order.
+    #[allow(clippy::type_complexity)]
+    fn parse_table_function_args(
+        &mut self,
+        name: &str,
+    ) -> Result<(Vec<String>, Vec<(String, f64)>), ParseError> {
         // Zero-argument form `name()` is rejected with a clear message.
         if matches!(self.peek(), Token::RParen) {
             return Err(ParseError::new(
@@ -134,10 +146,12 @@ impl<'a> Parser<'a> {
         }
 
         let mut args = Vec::new();
+        let mut named_args = Vec::new();
         loop {
-            // Each argument must be a plain identifier.
-            match self.advance()? {
-                Token::Ident(arg) => args.push(arg),
+            // Each argument starts with an identifier (the positional value or
+            // the named-argument key).
+            let ident = match self.advance()? {
+                Token::Ident(arg) => arg,
                 other => {
                     return Err(ParseError::expected(
                         vec!["table function argument identifier"],
@@ -145,6 +159,23 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
+            };
+
+            // `ident => <number>` is a named argument; otherwise it is a bare
+            // positional identifier.
+            if matches!(self.peek(), Token::FatArrow) {
+                self.advance()?; // consume '=>'
+                let value = self.parse_float()?;
+                named_args.push((ident, value));
+            } else if named_args.is_empty() {
+                args.push(ident);
+            } else {
+                return Err(ParseError::new(
+                    format!(
+                        "table function '{name}' positional argument '{ident}' cannot follow a named argument"
+                    ),
+                    self.position(),
+                ));
             }
 
             // A comma continues the list; a `)` ends it (consumed by caller).
@@ -165,7 +196,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok(args)
+        Ok((args, named_args))
     }
 
     fn parse_select_query_inner(&mut self) -> Result<QueryExpr, ParseError> {
@@ -212,11 +243,12 @@ impl<'a> Parser<'a> {
                 self.advance()?; // consume COMPONENTS
                 let name = "components".to_string();
                 self.expect(Token::LParen)?;
-                let args = self.parse_table_function_args(&name)?;
+                let (args, named_args) = self.parse_table_function_args(&name)?;
                 self.expect(Token::RParen)?;
                 table_source = Some(crate::storage::query::ast::TableSource::Function {
                     name: name.clone(),
                     args,
+                    named_args,
                 });
                 name
             } else {
@@ -224,11 +256,12 @@ impl<'a> Parser<'a> {
                 // Table-valued function call: `ident(arg, ...)` (issue #795).
                 if matches!(self.peek(), Token::LParen) {
                     self.advance()?; // consume '('
-                    let args = self.parse_table_function_args(&ident)?;
+                    let (args, named_args) = self.parse_table_function_args(&ident)?;
                     self.expect(Token::RParen)?;
                     table_source = Some(crate::storage::query::ast::TableSource::Function {
                         name: ident.clone(),
                         args,
+                        named_args,
                     });
                 }
                 ident
@@ -1350,6 +1383,62 @@ mod tests {
         assert_eq!(table.select_items.len(), 1);
 
         assert!(super::super::parse("FROM (MATCH (n) RETURN n) AS g").is_err());
+    }
+
+    // ── Table-valued function arguments (issues #795 / #796) ──
+
+    #[test]
+    fn louvain_tvf_parses_positional_and_named_args() {
+        // Bare positional form: louvain(<graph>).
+        let table = parse_table("SELECT * FROM louvain(g)");
+        match table.source {
+            Some(TableSource::Function {
+                ref name,
+                ref args,
+                ref named_args,
+            }) => {
+                assert_eq!(name, "louvain");
+                assert_eq!(args, &vec!["g".to_string()]);
+                assert!(named_args.is_empty());
+            }
+            other => panic!("expected louvain TVF source, got {other:?}"),
+        }
+
+        // Named-argument form: louvain(<graph>, resolution => <f64>).
+        let table = parse_table("SELECT * FROM louvain(g, resolution => 0.5)");
+        match table.source {
+            Some(TableSource::Function {
+                ref name,
+                ref args,
+                ref named_args,
+            }) => {
+                assert_eq!(name, "louvain");
+                assert_eq!(args, &vec!["g".to_string()]);
+                assert_eq!(named_args.len(), 1);
+                assert_eq!(named_args[0].0, "resolution");
+                assert!((named_args[0].1 - 0.5).abs() < f64::EPSILON);
+            }
+            other => panic!("expected louvain TVF source, got {other:?}"),
+        }
+
+        // Integer resolution is accepted and coerced to f64.
+        let table = parse_table("SELECT * FROM louvain(g, resolution => 2)");
+        match table.source {
+            Some(TableSource::Function { ref named_args, .. }) => {
+                assert!((named_args[0].1 - 2.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected louvain TVF source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tvf_named_arg_grammar_rejects_malformed_forms() {
+        // A positional argument after a named argument is rejected.
+        assert!(super::super::parse("SELECT * FROM louvain(g, resolution => 0.5, h)").is_err());
+        // `=>` must be followed by a number.
+        assert!(super::super::parse("SELECT * FROM louvain(g, resolution => foo)").is_err());
+        // Zero-argument form is still rejected (issue #795 invariant).
+        assert!(super::super::parse("SELECT * FROM louvain()").is_err());
     }
 
     // ── SESSIONIZE operator (issue #585 slice 8) ──
