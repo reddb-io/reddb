@@ -81,6 +81,65 @@ pub struct SubscriptionDescriptor {
     pub all_tenants: bool,
 }
 
+/// A graph-analytics output declared by `CREATE GRAPH ... WITH ANALYTICS (...)`.
+///
+/// Each variant maps to a family of pure graph algorithms (issues #795-#797)
+/// and resolves as a virtual `<graph>.<output>` view returning that family's
+/// native row shape. The `using` option selects the concrete algorithm inside
+/// the family (e.g. `centrality (using = pagerank)`); the remaining options are
+/// algorithm parameters carried verbatim into the executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyticsOutput {
+    Communities,
+    Components,
+    Centrality,
+}
+
+impl AnalyticsOutput {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Communities => "communities",
+            Self::Components => "components",
+            Self::Centrality => "centrality",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "communities" => Some(Self::Communities),
+            "components" => Some(Self::Components),
+            "centrality" => Some(Self::Centrality),
+            _ => None,
+        }
+    }
+}
+
+/// One enabled analytics output plus its declared options. Persisted in the
+/// parent graph's `CollectionContract` (WAL-backed) and surfaced on the
+/// `CollectionDescriptor` so the resolver can recognise `<graph>.<output>`.
+///
+/// `SHOW COLLECTIONS` behaviour (issue #800 HITL decision): analytics outputs
+/// resolve as virtual `<graph>.<output>` views and are deliberately **not**
+/// registered as top-level collections. They therefore never appear in
+/// `SHOW COLLECTIONS` — not by default and not under `SHOW COLLECTIONS
+/// INCLUDING INTERNAL` — keeping the parent graph's listing clean. Only the
+/// parent graph collection is listed; its enabled outputs are introspectable
+/// through this `analytics_config` on the parent's descriptor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnalyticsViewDescriptor {
+    pub output: AnalyticsOutput,
+    /// `using = <algorithm>` — concrete algorithm within the output family.
+    /// `None` resolves to the family default (louvain / connected-components /
+    /// pagerank).
+    pub algorithm: Option<String>,
+    /// `resolution = <f64>` — Louvain resolution (γ) for `communities`.
+    pub resolution: Option<f64>,
+    /// `max_iterations = <i64>` — iteration cap for iterative centralities.
+    pub max_iterations: Option<i64>,
+    /// `tolerance = <f64>` — convergence tolerance for iterative centralities.
+    pub tolerance: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CollectionDescriptor {
     pub name: String,
@@ -132,6 +191,10 @@ pub struct CollectionDescriptor {
     pub executable_analytics_job_count: usize,
     pub analytics_jobs_requiring_rerun_count: usize,
     pub subscriptions: Vec<SubscriptionDescriptor>,
+    /// Analytics views declared by `WITH ANALYTICS (...)`. Empty for
+    /// collections without the clause. Sourced from the persisted
+    /// `CollectionContract` so it survives restarts (issue #800).
+    pub analytics_config: Vec<AnalyticsViewDescriptor>,
     pub resources_in_sync: bool,
     pub attention_required: bool,
     pub attention_score: usize,
@@ -448,6 +511,9 @@ pub fn snapshot_store_with_declarations(
             analytics_jobs_requiring_rerun_count,
             subscriptions: contract
                 .map(|contract| contract.subscriptions.clone())
+                .unwrap_or_default(),
+            analytics_config: contract
+                .map(|contract| contract.analytics_config.clone())
                 .unwrap_or_default(),
             resources_in_sync,
             attention_required,
