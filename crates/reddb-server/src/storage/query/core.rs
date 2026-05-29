@@ -1893,6 +1893,11 @@ pub struct CreateTableQuery {
     /// Declarative event subscriptions for this table. #291 stores
     /// metadata only; event emission is intentionally out of scope.
     pub subscriptions: Vec<crate::catalog::SubscriptionDescriptor>,
+    /// Analytics views declared by `CREATE GRAPH ... WITH ANALYTICS (...)`
+    /// (issue #800). Empty for every collection model except graphs that
+    /// opt in. Threaded into the persisted `CollectionContract` at execution
+    /// time so each `<graph>.<output>` view is durable.
+    pub analytics_config: Vec<crate::catalog::AnalyticsViewDescriptor>,
     /// `CREATE VAULT ... WITH OWN MASTER KEY`: provision per-vault
     /// key material instead of using the cluster vault key.
     pub vault_own_master_key: bool,
