@@ -88,6 +88,40 @@ when the callback or a `tx.query()` / `tx.insert()` call throws. Nested
 transactions on the same connection are rejected with `NESTED_TX_NOT_SUPPORTED`;
 open another `connect()` handle for independent concurrent transactions.
 
+## Streaming
+
+`db.query()` stays a one-shot Promise — ideal for small reads. For large
+result sets or continuous ingest, use the explicit streaming surface so you
+never accidentally buffer a huge result or OOM. The surface is identical
+whether the connection is RedWire (`red://`) or HTTP (`http://`): RedWire is
+used when available, HTTP NDJSON otherwise.
+
+```js
+// Read: a Node Readable that is also an AsyncIterable<Row>.
+const users = db.collection('users')
+for await (const row of users.stream('SELECT id, name FROM users')) {
+  console.log(row.id, row.name)
+}
+
+// Write: a Node Writable; the server's terminal envelope resolves completion().
+import { splitNdjson } from '@reddb-io/client'
+import { createReadStream } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
+
+const sink = users.inputStream() // columns inferred from the first row's keys
+await pipeline(createReadStream('rows.ndjson'), splitNdjson(), sink)
+const { row_count } = await sink.completion()
+```
+
+Backpressure flows naturally: the Readable via `read()` / `pause()` /
+`resume()`, the Writable via `write()`'s return value and the `'drain'` event.
+Both expose `.cancel(reason?)` — a `StreamCancel` over RedWire, an
+`AbortController.abort()` over HTTP — which terminates the underlying transport
+stream and rejects any pending iteration (or `.completion()`) with a
+`STREAM_CANCELLED` error. A mid-stream server error surfaces as an `'error'`
+event and as a rejected iteration. `db.stream(sql)` / `db.inputStream(target)`
+are also available directly on the connection without a `collection()` handle.
+
 ## Rich Helpers
 
 The client follows the SDK Helper Spec for the shared JS/TS surface:
