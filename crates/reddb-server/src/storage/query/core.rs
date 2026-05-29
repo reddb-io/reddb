@@ -968,6 +968,10 @@ pub enum TableSource {
     Name(String),
     /// A subquery in FROM position: `FROM (SELECT …) AS alias`.
     Subquery(Box<QueryExpr>),
+    /// A table-valued function call in FROM position, e.g.
+    /// `FROM components(g)` (issue #795). `name` is the function
+    /// identifier; `args` are its identifier arguments.
+    Function { name: String, args: Vec<String> },
 }
 
 /// Options for WITH EXPAND clause on SELECT queries.
