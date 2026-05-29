@@ -408,6 +408,16 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
         ),
     );
     object.insert(
+        "analytics_config".to_string(),
+        JsonValue::Array(
+            contract
+                .analytics_config
+                .iter()
+                .map(analytics_view_descriptor_to_json)
+                .collect(),
+        ),
+    );
+    object.insert(
         "session_key".to_string(),
         contract
             .session_key
@@ -560,6 +570,19 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             })
             .transpose()?
             .unwrap_or_default(),
+        // Legacy sidecars written before the analytics opt-in lack this
+        // key — default to an empty config (no analytics views). Issue #800.
+        analytics_config: object
+            .get("analytics_config")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(analytics_view_descriptor_from_json)
+                    .collect::<io::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default(),
         // Legacy sidecars lack the session_key / session_gap_ms keys —
         // default None preserves pre-feature behaviour (no SESSIONIZE
         // defaults). Issue #576 slice 1.
@@ -694,6 +717,62 @@ fn subscription_descriptor_from_json(
             .get("all_tenants")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false),
+    })
+}
+
+fn analytics_view_descriptor_to_json(view: &crate::catalog::AnalyticsViewDescriptor) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "output".to_string(),
+        JsonValue::String(view.output.as_str().to_string()),
+    );
+    object.insert(
+        "algorithm".to_string(),
+        view.algorithm
+            .clone()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "resolution".to_string(),
+        view.resolution
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "max_iterations".to_string(),
+        view.max_iterations
+            .map(|n| JsonValue::Number(n as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "tolerance".to_string(),
+        view.tolerance
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
+}
+
+fn analytics_view_descriptor_from_json(
+    value: &JsonValue,
+) -> io::Result<crate::catalog::AnalyticsViewDescriptor> {
+    let object = expect_object(value, "analytics_view_descriptor")?;
+    let output_str = json_string_required(object, "output")?;
+    let output = crate::catalog::AnalyticsOutput::from_str(&output_str).ok_or_else(|| {
+        invalid_data(format!(
+            "analytics_view_descriptor.output has unsupported value: {output_str}"
+        ))
+    })?;
+    Ok(crate::catalog::AnalyticsViewDescriptor {
+        output,
+        algorithm: object
+            .get("algorithm")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+        resolution: object.get("resolution").and_then(JsonValue::as_f64),
+        max_iterations: object.get("max_iterations").and_then(JsonValue::as_i64),
+        tolerance: object.get("tolerance").and_then(JsonValue::as_f64),
     })
 }
 
