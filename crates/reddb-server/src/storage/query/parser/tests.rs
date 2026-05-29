@@ -588,6 +588,57 @@ fn test_parse_select_star() {
     }
 }
 
+// --- Issue #795: table-valued function (TVF) parsing ---
+
+#[test]
+fn test_parse_table_function_single_arg() {
+    use crate::storage::query::ast::TableSource;
+    let query = parse("SELECT * FROM components(g)").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    assert_eq!(tq.table, "components");
+    match tq.source {
+        Some(TableSource::Function { name, args }) => {
+            assert_eq!(name, "components");
+            assert_eq!(args, vec!["g".to_string()]);
+        }
+        other => panic!("expected TableSource::Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_table_function_multiple_args() {
+    use crate::storage::query::ast::TableSource;
+    let query = parse("SELECT * FROM components(g, h)").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    match tq.source {
+        Some(TableSource::Function { name, args }) => {
+            assert_eq!(name, "components");
+            assert_eq!(args, vec!["g".to_string(), "h".to_string()]);
+        }
+        other => panic!("expected TableSource::Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_table_function_rejects_zero_args() {
+    let err = parse("SELECT * FROM components()").unwrap_err();
+    assert!(
+        err.message.contains("requires at least one argument"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn test_parse_table_function_rejects_unclosed_paren() {
+    assert!(parse("SELECT * FROM components(g").is_err());
+    assert!(parse("SELECT * FROM components(g,").is_err());
+}
+
 #[test]
 fn test_parse_select_star_from_asterisk_defaults_to_any() {
     let query = parse("SELECT * FROM *").unwrap();
