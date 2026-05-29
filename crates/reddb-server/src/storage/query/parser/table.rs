@@ -305,6 +305,25 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Read one segment of a dotted table name. The graph analytics outputs
+    /// `components` and `centrality` lex as reserved keywords, so they are
+    /// normalised back to their lowercase spelling here; every other segment
+    /// (e.g. `communities`, or virtual-schema suffixes like `collections`) is
+    /// an ordinary identifier. Issue #800.
+    fn parse_table_name_segment(&mut self) -> Result<String, ParseError> {
+        match self.peek() {
+            Token::Components => {
+                self.advance()?;
+                Ok("components".to_string())
+            }
+            Token::Centrality => {
+                self.advance()?;
+                Ok("centrality".to_string())
+            }
+            _ => self.expect_ident(),
+        }
+    }
+
     fn parse_select_query_inner(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Select)?;
 
@@ -392,8 +411,23 @@ impl<'a> Parser<'a> {
                         named_args,
                         subquery_args,
                     )?);
+                    ident
+                } else {
+                    // Dotted table name, e.g. the `<graph>.<output>` analytics
+                    // virtual view `g.communities` (issue #800) or a schema-
+                    // qualified virtual table such as `red.collections`. The
+                    // dotted form is kept verbatim in `table`; the runtime
+                    // resolves a real collection of that exact name first, then
+                    // falls back to analytics-view resolution.
+                    let mut name = ident;
+                    while matches!(self.peek(), Token::Dot) {
+                        self.advance()?; // consume '.'
+                        let segment = self.parse_table_name_segment()?;
+                        name.push('.');
+                        name.push_str(&segment);
+                    }
+                    name
                 }
-                ident
             }
         } else {
             "any".to_string()
