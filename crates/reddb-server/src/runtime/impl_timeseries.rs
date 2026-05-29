@@ -309,6 +309,7 @@ fn hypertable_collection_contract(
         // operator a clear message instead of silent coalescing.
         append_only: true,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
@@ -344,6 +345,7 @@ fn timeseries_collection_contract(
         // makes the catalog honest rather than changing semantics.
         append_only: true,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         // `WITH SESSION_KEY <col> SESSION_GAP <duration>` from the
         // CREATE TIMESERIES DDL becomes the default partition/gap
         // pairing for the SESSIONIZE operator (slice 2+). Stored on

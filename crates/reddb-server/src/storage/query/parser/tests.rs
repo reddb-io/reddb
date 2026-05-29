@@ -2729,6 +2729,104 @@ fn test_parse_events_backfill_status_stub() {
 }
 
 #[test]
+fn test_parse_create_graph_with_analytics_full_grammar() {
+    use crate::catalog::{AnalyticsOutput, CollectionModel};
+
+    let query = parse(
+        "CREATE GRAPH g WITH ANALYTICS (communities (using = louvain, resolution = 1.5), components, centrality (using = pagerank, max_iterations = 100))",
+    )
+    .unwrap();
+    let QueryExpr::CreateTable(ct) = query else {
+        panic!("Expected CreateTableQuery for CREATE GRAPH");
+    };
+    assert_eq!(ct.collection_model, CollectionModel::Graph);
+    assert_eq!(ct.analytics_config.len(), 3);
+
+    let communities = &ct.analytics_config[0];
+    assert_eq!(communities.output, AnalyticsOutput::Communities);
+    assert_eq!(communities.algorithm.as_deref(), Some("louvain"));
+    assert_eq!(communities.resolution, Some(1.5));
+
+    let components = &ct.analytics_config[1];
+    assert_eq!(components.output, AnalyticsOutput::Components);
+    assert_eq!(components.algorithm, None);
+    assert_eq!(components.resolution, None);
+
+    let centrality = &ct.analytics_config[2];
+    assert_eq!(centrality.output, AnalyticsOutput::Centrality);
+    assert_eq!(centrality.algorithm.as_deref(), Some("pagerank"));
+    assert_eq!(centrality.max_iterations, Some(100));
+}
+
+#[test]
+fn test_parse_create_graph_with_analytics_centrality_tolerance() {
+    let query = parse(
+        "CREATE GRAPH g WITH ANALYTICS (centrality (using = eigenvector, tolerance = 0.0001))",
+    )
+    .unwrap();
+    let QueryExpr::CreateTable(ct) = query else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert_eq!(ct.analytics_config.len(), 1);
+    let centrality = &ct.analytics_config[0];
+    assert_eq!(centrality.algorithm.as_deref(), Some("eigenvector"));
+    assert_eq!(centrality.tolerance, Some(0.0001));
+}
+
+#[test]
+fn test_parse_create_graph_without_analytics_has_empty_config() {
+    let query = parse("CREATE GRAPH g").unwrap();
+    let QueryExpr::CreateTable(ct) = query else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert!(ct.analytics_config.is_empty());
+}
+
+#[test]
+fn test_parse_create_graph_with_analytics_rejects_unknown_output() {
+    let err = parse("CREATE GRAPH g WITH ANALYTICS (pagerank)").unwrap_err();
+    assert!(
+        err.to_string().contains("unknown analytics output"),
+        "expected unknown-output error, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_create_graph_with_analytics_rejects_unknown_option() {
+    let err = parse("CREATE GRAPH g WITH ANALYTICS (communities (damping = 0.85))").unwrap_err();
+    assert!(
+        err.to_string().contains("unknown analytics option"),
+        "expected unknown-option error, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_create_graph_with_analytics_rejects_duplicate_output() {
+    let err = parse("CREATE GRAPH g WITH ANALYTICS (components, components)").unwrap_err();
+    assert!(
+        err.to_string().contains("duplicate analytics output"),
+        "expected duplicate-output error, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_select_from_dotted_analytics_view() {
+    // `<graph>.<output>` keeps its dotted name verbatim in `table`, including
+    // the keyword-lexed outputs `components` / `centrality`.
+    for (sql, expected) in [
+        ("SELECT * FROM g.communities", "g.communities"),
+        ("SELECT * FROM g.components", "g.components"),
+        ("SELECT * FROM g.centrality", "g.centrality"),
+    ] {
+        let query = parse(sql).unwrap();
+        let QueryExpr::Table(table) = query else {
+            panic!("Expected Table query for {sql}");
+        };
+        assert_eq!(table.table, expected);
+    }
+}
+
+#[test]
 fn test_parse_drop_table() {
     let query = parse("DROP TABLE hosts").unwrap();
     if let QueryExpr::DropTable(dt) = query {
