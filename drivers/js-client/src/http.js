@@ -37,6 +37,7 @@
  */
 
 import { RedDBError } from './protocol.js'
+import { classifyNdjsonFrame } from './streaming.js'
 
 export class HttpRpcClient {
   /**
@@ -87,6 +88,197 @@ export class HttpRpcClient {
     }
     return { ...init, headers }
   }
+
+  authHeaders(extra = {}) {
+    const headers = new Headers(extra)
+    if (this.token && !headers.has('authorization')) {
+      headers.set('authorization', `Bearer ${this.token}`)
+    }
+    return headers
+  }
+
+  /**
+   * Open a streaming read against `POST /query/stream`. Returns an async
+   * iterable of typed frames (see streaming.js) plus a `cancel(reason)`
+   * that aborts the underlying fetch. A non-streaming refusal (e.g. a
+   * non-read-only statement) is surfaced as a rejected `RedDBError`
+   * before any frame is yielded, so callers can tell "never accepted"
+   * from a mid-stream failure.
+   *
+   * @param {{ sql?: string, cursor?: string, signal?: AbortSignal }} opts
+   */
+  async streamSelect({ sql, cursor, signal } = {}) {
+    const controller = new AbortController()
+    linkSignal(signal, controller)
+    const body = cursor != null ? { cursor } : { query: sql }
+    const response = await fetch(`${this.baseUrl}/query/stream`, {
+      method: 'POST',
+      headers: this.authHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      await throwHttpStreamRefusal(response)
+    }
+    const reader = response.body?.getReader()
+    if (!reader) {
+      throw new RedDBError('STREAM_PROTOCOL', 'streaming response had no body')
+    }
+    return {
+      [Symbol.asyncIterator]() {
+        return ndjsonFrameIterator(reader, controller)
+      },
+      async cancel() {
+        controller.abort()
+        try {
+          await reader.cancel()
+        } catch {
+          // best-effort
+        }
+      },
+    }
+  }
+
+  /**
+   * Open a streaming write against `POST /streams/input`. The request
+   * body is an NDJSON stream: an `open` frame (target + columns), then
+   * one `row` frame per record. Backpressure flows through the request
+   * body's writer. The terminal envelope is returned by `close()`.
+   *
+   * @param {{ target: string, columns?: string[], signal?: AbortSignal }} opts
+   */
+  async streamInput({ target, columns, signal } = {}) {
+    const controller = new AbortController()
+    linkSignal(signal, controller)
+    const transform = new TransformStream()
+    const writer = transform.writable.getWriter()
+    const fetchPromise = fetch(`${this.baseUrl}/streams/input`, {
+      method: 'POST',
+      headers: this.authHeaders({ 'content-type': 'application/x-ndjson' }),
+      body: transform.readable,
+      duplex: 'half',
+      signal: controller.signal,
+    })
+    // Surface a connection/refusal failure on the write path too, rather
+    // than leaving the promise unhandled if the caller never calls close().
+    fetchPromise.catch(() => {})
+
+    let opened = false
+    let cols = Array.isArray(columns) && columns.length > 0 ? columns.slice() : null
+    const encodeLine = (obj) => writer.write(`${JSON.stringify(obj)}\n`)
+    const ensureOpen = async (row) => {
+      if (opened) return
+      if (!cols) {
+        cols = row && typeof row === 'object' ? Object.keys(row) : null
+      }
+      if (!cols || cols.length === 0) {
+        throw new RedDBError(
+          'INVALID_STREAM_COLUMNS',
+          'inputStream() needs a non-empty column set — pass { columns } or write at least one object row',
+        )
+      }
+      await writer.write(`${JSON.stringify({ open: { target, columns: cols } })}\n`)
+      opened = true
+    }
+
+    return {
+      async write(row) {
+        await ensureOpen(row)
+        await writer.ready
+        await encodeLine({ row })
+      },
+      async close() {
+        await ensureOpen(null)
+        await writer.close()
+        const response = await fetchPromise
+        return await readInputTerminal(response)
+      },
+      async cancel(reason) {
+        controller.abort()
+        try {
+          await writer.abort(reason)
+        } catch {
+          // best-effort — the abort above already tore the request down.
+        }
+      },
+    }
+  }
+}
+
+function linkSignal(signal, controller) {
+  if (!signal) return
+  if (signal.aborted) {
+    controller.abort(signal.reason)
+    return
+  }
+  signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+}
+
+async function throwHttpStreamRefusal(response) {
+  const text = await response.text().catch(() => '')
+  let body = null
+  if (text) {
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = { raw: text }
+    }
+  }
+  const code = body?.code || body?.error_code || `HTTP_${response.status}`
+  const message =
+    body?.error || body?.message || `stream refused with status ${response.status}`
+  throw new RedDBError(code, message, body)
+}
+
+/** Async iterator over NDJSON frames from a web ReadableStream reader. */
+async function* ndjsonFrameIterator(reader, controller) {
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let nl
+      while ((nl = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nl)
+        buffer = buffer.slice(nl + 1)
+        const frame = classifyNdjsonFrame(line)
+        if (frame) yield frame
+      }
+    }
+    const tail = buffer + decoder.decode()
+    const frame = classifyNdjsonFrame(tail)
+    if (frame) yield frame
+  } finally {
+    controller.abort()
+  }
+}
+
+/** Read the input-stream response body and return its terminal envelope. */
+async function readInputTerminal(response) {
+  const text = await response.text()
+  if (!response.ok) {
+    let body = null
+    try {
+      body = text ? JSON.parse(text) : null
+    } catch {
+      body = { raw: text }
+    }
+    const code = body?.code || body?.error_code || `HTTP_${response.status}`
+    const message = body?.error || body?.message || `input stream failed (${response.status})`
+    throw new RedDBError(code, message, body)
+  }
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0)
+  let end = null
+  for (const line of lines) {
+    const frame = classifyNdjsonFrame(line) // throws RedDBError on an {error} frame
+    if (frame && frame.type === 'end') end = frame.value
+  }
+  if (!end) {
+    throw new RedDBError('STREAM_PROTOCOL', 'input stream closed without a terminal end envelope')
+  }
+  return end
 }
 
 async function parseResponse(response) {
