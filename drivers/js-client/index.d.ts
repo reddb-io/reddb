@@ -3,6 +3,8 @@
  * RedDB driver. Hand-written, kept in sync with src/index.js.
  */
 
+import type { Readable, Writable, Transform } from 'node:stream'
+
 export type AuthOptions =
   | { token: string }
   | { apiKey: string }
@@ -210,6 +212,98 @@ export class TypedQueryBuilder<T extends Record<string, unknown> = Record<string
   run(): Promise<T[]>
 }
 
+// ---------------------------------------------------------------------------
+// Streaming API (PRD #759 / S11)
+// ---------------------------------------------------------------------------
+
+export type Row = Record<string, unknown>
+
+export interface StreamDescriptor {
+  result_kind?: string
+  columns?: Array<{ name: string; type?: string; nullable?: boolean }>
+  schema_fingerprint?: string
+  [key: string]: unknown
+}
+
+export interface StreamCursor {
+  token: string
+  snapshot_lsn?: number
+  ttl_ms?: number
+  expires_at_ms?: number
+  resumable?: boolean
+}
+
+export interface StreamEndEnvelope {
+  row_count?: number
+  committed_rid?: number
+  chunk_count?: number
+  lease_handle?: string
+  snapshot_lsn?: number
+  [key: string]: unknown
+}
+
+export interface StreamOptions {
+  /** Abort the stream when this signal fires. */
+  signal?: AbortSignal
+  /** Resume a prior stream from an opaque cursor token (HTTP only). */
+  cursor?: string
+}
+
+export interface InputStreamOptions {
+  signal?: AbortSignal
+  /** Ingest column set; inferred from the first row's keys when omitted. */
+  columns?: string[]
+}
+
+/**
+ * A streaming read. A Node `Readable` in object mode that also conforms
+ * to `AsyncIterable<Row>` — `for await (const row of stream)` yields rows
+ * as they arrive. `'descriptor'` / `'cursor'` events fire when the
+ * transport surfaces them.
+ */
+export class RowReadable extends Readable implements AsyncIterable<Row> {
+  /** Schema descriptor (HTTP NDJSON) once seen, else null. */
+  readonly descriptor: StreamDescriptor | null
+  /** Resumable cursor control frame once seen, else null. */
+  readonly cursor: StreamCursor | null
+  /** Terminal `end` envelope once the stream completes, else null. */
+  readonly endInfo: StreamEndEnvelope | null
+  /** Terminate the stream; rejects pending iterations with a cancellation error. */
+  cancel(reason?: string): Promise<void>
+  [Symbol.asyncIterator](): AsyncIterableIterator<Row>
+}
+
+/**
+ * A streaming write. A Node `Writable` in object mode; `end()` signals
+ * end-of-stream and the server's terminal envelope resolves
+ * `.completion()`.
+ */
+export class RowWritable extends Writable {
+  /** Resolves with the server's terminal envelope; rejects on error/cancel. */
+  completion(): Promise<StreamEndEnvelope>
+  /** Abandon the ingest; rejects `.completion()` with a cancellation error. */
+  cancel(reason?: string): Promise<void>
+}
+
+/**
+ * A `Transform` that splits an NDJSON byte stream into row objects, ready
+ * to pipe into `table.inputStream()`.
+ */
+export function splitNdjson(): Transform
+
+/**
+ * A streaming-capable collection/table handle. `query()` is a one-shot
+ * Promise; `stream()` / `inputStream()` are the streaming surfaces.
+ */
+export class Collection {
+  readonly name: string
+  query(sql: string): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  stream(sql: string, opts?: StreamOptions): RowReadable
+  inputStream(opts?: InputStreamOptions): RowWritable
+}
+
 export class ConfigClient {
   put(
     key: string,
@@ -299,6 +393,19 @@ export class RedDB {
   from<T extends Record<string, unknown> = Record<string, unknown>>(
     collection: string,
   ): TypedQueryBuilder<T>
+  /** Streaming-capable handle for a collection/table (PRD #759 S11). */
+  collection(name: string): Collection
+  /**
+   * Stream a read-only SELECT as a `Readable` / `AsyncIterable<Row>`.
+   * Uses RedWire when the connection is RedWire, HTTP NDJSON when it is
+   * HTTP — identical surface either way.
+   */
+  stream(sql: string, opts?: StreamOptions): RowReadable
+  /**
+   * Open a streaming write into `target`; `.completion()` resolves with
+   * the server's terminal envelope.
+   */
+  inputStream(target: string, opts?: InputStreamOptions): RowWritable
   get(collection: string, id: string | number): Promise<GetResult>
   delete(collection: string, id: string | number): Promise<DeleteResult>
   health(): Promise<HealthResult>
