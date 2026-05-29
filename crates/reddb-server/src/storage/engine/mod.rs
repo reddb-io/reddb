@@ -33,6 +33,7 @@ pub mod crc32;
 pub mod database;
 pub mod distance;
 pub mod freelist;
+pub mod graph_algorithms;
 pub mod graph_store;
 pub mod graph_table_index;
 pub mod hnsw;

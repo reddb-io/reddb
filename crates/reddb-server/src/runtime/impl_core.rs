@@ -1286,6 +1286,9 @@ fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery)
         Some(crate::storage::query::ast::TableSource::Subquery(subquery)) => {
             collect_query_expr_result_cache_scopes(scopes, subquery);
         }
+        // Table-valued functions (e.g. components(g)) read the graph store
+        // read-only and are not cacheable by collection scope (issue #795).
+        Some(crate::storage::query::ast::TableSource::Function { .. }) => {}
         None => cache_scope_insert(scopes, &query.table),
     }
 }
@@ -5746,6 +5749,20 @@ impl RedDBRuntime {
                     table,
                     &frame as &dyn super::statement_frame::ReadFrame,
                 )?;
+                // Table-valued functions (e.g. components(g)) dispatch to a
+                // read-only executor before any catalog/virtual-table routing
+                // (issue #795).
+                if let Some(TableSource::Function { name, args }) = table.source.clone() {
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-tvf",
+                        result: self.execute_table_function(&name, &args)?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query.to_string(),
@@ -8108,6 +8125,20 @@ impl RedDBRuntime {
                     table,
                     &scope as &dyn super::statement_frame::ReadFrame,
                 )?;
+                // Table-valued functions (e.g. components(g)) dispatch to a
+                // read-only executor before any catalog/virtual-table routing
+                // (issue #795).
+                if let Some(TableSource::Function { name, args }) = table.source.clone() {
+                    return Ok(RuntimeQueryResult {
+                        query: query_str.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-tvf",
+                        result: self.execute_table_function(&name, &args)?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query_str.to_string(),
@@ -8231,6 +8262,73 @@ impl RedDBRuntime {
                 "prepared-statement execution does not support {statement} statements"
             ))),
         }
+    }
+
+    /// Dispatch a table-valued function call in FROM position
+    /// (e.g. `SELECT * FROM components(g)`).
+    ///
+    /// Validates the function name and arity here; the concrete
+    /// implementation is read-only and never mutates the catalog or store.
+    fn execute_table_function(
+        &self,
+        name: &str,
+        args: &[String],
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        if name.eq_ignore_ascii_case("components") {
+            if args.len() != 1 {
+                return Err(RedDBError::Query(format!(
+                    "table function 'components' takes exactly 1 argument, got {}",
+                    args.len()
+                )));
+            }
+            return self.execute_components_tvf(&args[0]);
+        }
+        Err(RedDBError::Query(format!("unknown table function: {name}")))
+    }
+
+    /// `components(<graph_collection>)` — returns rows `(node_id, island_id)`.
+    ///
+    /// Materializes the active graph (nodes + weighted edges) read-only and
+    /// runs the pure `graph_algorithms::connected_components`. Edges are
+    /// treated as undirected; island ids are deterministic (ascending order of
+    /// each component's smallest node).
+    fn execute_components_tvf(
+        &self,
+        _collection: &str,
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        use crate::storage::engine::graph_algorithms;
+        use crate::storage::query::unified::UnifiedResult;
+        use crate::storage::schema::Value;
+
+        // Read-only materialization of the full active graph. The named
+        // collection identifies the active graph scope; passing `None` for the
+        // projection uses the full graph store (the same result
+        // `active_graph_projection` yields when no projection is registered).
+        // Materialization never mutates any store.
+        let graph = super::graph_dsl::materialize_graph_with_projection(
+            self.inner.db.store().as_ref(),
+            None,
+        )?;
+
+        // Materialize abstract inputs for the pure algorithm.
+        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
+        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
+            .iter_all_edges()
+            .into_iter()
+            .map(|e| (e.source_id, e.target_id, e.weight))
+            .collect();
+
+        let assignment = graph_algorithms::connected_components(&nodes, &edges);
+
+        // Project into a UnifiedResult with columns ["node_id", "island_id"].
+        let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "island_id".into()]);
+        for (node_id, island_id) in assignment {
+            let mut record = UnifiedRecord::new();
+            record.set("node_id", Value::text(node_id));
+            record.set("island_id", Value::Integer(island_id as i64));
+            result.push(record);
+        }
+        Ok(result)
     }
 
     /// Ultra-fast path: detect `SELECT * FROM table WHERE _entity_id = N` by string pattern
