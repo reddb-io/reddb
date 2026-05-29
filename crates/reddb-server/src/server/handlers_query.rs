@@ -1410,11 +1410,23 @@ impl RedDBServer {
         );
         let columns = &result.result.columns;
 
+        // Issue #808 / 750d — clone out the stream's shared cancel token so
+        // the row loop can observe a cancel raised by the cancel endpoint
+        // (or by client-disconnect detection below) and terminate with a
+        // structured frame instead of running to `end`.
+        let cancel = self.cursor_registry.cancel_token_for(&cursor_token);
+
         output_stream::write_chunked_response_header(writer, 200, "application/x-ndjson")?;
 
         let mut producer = ChunkProducer::new(&config, &clock);
         let mut row_count: u64 = 0;
-        {
+        let mut cancelled_midstream = false;
+
+        // Emission is wrapped so a write failure (client TCP disconnect) or
+        // an observed cancel can be handled after the borrow of `writer`
+        // ends, rather than bubbling straight out of the function — we must
+        // tombstone the cursor + raise the executor's cancel token first.
+        let emit: io::Result<()> = (|| -> io::Result<()> {
             let mut flush = |bytes: &[u8]| -> io::Result<()> {
                 crate::server::output_stream::write_chunk(writer, bytes)
             };
@@ -1464,8 +1476,15 @@ impl RedDBServer {
                 producer.push_line(line.as_bytes(), &mut flush)?;
             }
 
-            // 3. row frames.
+            // 3. row frames. The cancel token is polled before each row so a
+            //    cancel raised mid-stream stops production promptly rather
+            //    than draining the remaining rows to a client that asked to
+            //    stop (or has gone away).
             for record in &records {
+                if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                    cancelled_midstream = true;
+                    break;
+                }
                 let values =
                     crate::presentation::query_result_json::unified_record_json(record, columns);
                 let mut wrapper = crate::json::Map::new();
@@ -1476,7 +1495,8 @@ impl RedDBServer {
                 row_count += 1;
             }
 
-            // 4. terminal envelope.
+            // 4. terminal envelope — a documented `cancelled` frame when the
+            //    stream was cut short, otherwise the normal `end` frame.
             {
                 let mut envelope = crate::json::Map::new();
                 let mut payload = crate::json::Map::new();
@@ -1484,17 +1504,104 @@ impl RedDBServer {
                     "row_count".to_string(),
                     crate::json::Value::Number(row_count as f64),
                 );
-                envelope.insert("end".to_string(), crate::json::Value::Object(payload));
+                if cancelled_midstream {
+                    payload.insert(
+                        "reason".to_string(),
+                        crate::json::Value::String(
+                            crate::server::output_stream::CloseReason::Cancelled
+                                .as_str()
+                                .to_string(),
+                        ),
+                    );
+                    envelope.insert("cancelled".to_string(), crate::json::Value::Object(payload));
+                } else {
+                    envelope.insert("end".to_string(), crate::json::Value::Object(payload));
+                }
                 let mut line = crate::json::Value::Object(envelope).to_string_compact();
                 line.push('\n');
                 producer.push_line(line.as_bytes(), &mut flush)?;
             }
 
             producer.finish(&mut flush)?;
-        }
+            Ok(())
+        })();
 
-        output_stream::write_chunked_terminator(writer)
+        match emit {
+            Ok(()) => {
+                // A cancel observed mid-stream tombstones the cursor so the
+                // abandoned snapshot cannot be resumed; the structured
+                // `cancelled` frame was already written above.
+                if cancelled_midstream {
+                    let _ = self
+                        .cursor_registry
+                        .cancel(&cursor_token, tenant, principal);
+                }
+                output_stream::write_chunked_terminator(writer)
+            }
+            Err(err) if is_client_disconnect(&err) => {
+                // Issue #808 / 750d — the client closed the connection
+                // mid-stream. Raise the executor's cancel token and
+                // tombstone the cursor so the server stops producing rows
+                // for a dead client and the abandoned snapshot is not
+                // resumable. The socket is gone, so there is nothing to
+                // flush — swallow the write error and return cleanly.
+                let _ = self
+                    .cursor_registry
+                    .cancel(&cursor_token, tenant, principal);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
+
+    /// Issue #808 / 750d — out-of-band cancel for a live `/query/stream`.
+    /// The body carries `{"cursor":"<token>"}`; the cursor is resolved and
+    /// cancelled under the caller's `(tenant, principal)` scope. A matched
+    /// cursor is tombstoned and its executor cancel token raised (so an
+    /// in-flight stream stops producing rows) and the call returns a
+    /// structured `200 {"ok":true,"status":"cancelled"}`. An unknown or
+    /// foreign token is masked as `404 cursor_not_found` — identical to the
+    /// resume path — so cancellation cannot be used to probe for cursors.
+    pub(crate) fn handle_query_stream_cancel(
+        &self,
+        body: &[u8],
+        principal: &str,
+        tenant: &str,
+    ) -> HttpResponse {
+        let Some(token) = parse_cursor_token(body) else {
+            return json_error_code(
+                400,
+                "cursor_required",
+                "POST /query/stream/cancel requires a {\"cursor\":\"<token>\"} body",
+            );
+        };
+        match self.cursor_registry.cancel(&token, tenant, principal) {
+            Ok(_token) => {
+                let mut object = crate::json::Map::new();
+                object.insert("ok".to_string(), crate::json::Value::Bool(true));
+                object.insert(
+                    "status".to_string(),
+                    crate::json::Value::String("cancelled".to_string()),
+                );
+                json_response(200, crate::json::Value::Object(object))
+            }
+            Err(reject) => cursor_reject_response(&reject),
+        }
+    }
+}
+
+/// Issue #808 / 750d — does this write error mean the client went away
+/// mid-stream? A disconnected peer surfaces as a broken pipe or a reset /
+/// aborted connection; those are the signals that the rows we are
+/// producing have nowhere to go, so the stream should be cancelled rather
+/// than retried.
+fn is_client_disconnect(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    )
 }
 
 /// Issue #805 — read-only gate for `/query/stream`. Returns `Ok(())`
@@ -1609,6 +1716,14 @@ fn cursor_reject_response(reject: &crate::server::output_stream::CursorReject) -
             410,
             "cursor_expired",
             "cursor TTL has elapsed; open a new stream to obtain a fresh cursor",
+        ),
+        // Issue #808 / 750d — a cancelled (tombstoned) cursor is gone for
+        // good; 409 Conflict distinguishes "you cancelled this" from a
+        // never-issued token (404) or an aged-out one (410).
+        CursorReject::Cancelled => json_error_code(
+            409,
+            "cursor_cancelled",
+            "cursor was cancelled and cannot be resumed; open a new stream",
         ),
     }
 }
