@@ -10,8 +10,25 @@
 //! - Early termination support
 
 use super::binding::{Binding, Value, Var};
+use super::cancel::CancelToken;
 use std::collections::HashSet;
 use std::fmt::Debug;
+
+/// Issue #808 / 750d — cooperative cancellation check shared by every
+/// pull-based operator. Returns [`IterError::Cancelled`] the moment the
+/// stream layer raises the token, so a long-running scan / filter / join
+/// loop stops within one row of the cancel signal rather than running to
+/// completion. A `None` token (the default) never cancels, so operators
+/// built without a token behave exactly as before.
+#[inline]
+fn check_shared_cancel(token: &Option<CancelToken>) -> Result<(), IterError> {
+    if let Some(token) = token {
+        if token.is_cancelled() {
+            return Err(IterError::Cancelled);
+        }
+    }
+    Ok(())
+}
 
 /// Result from iterator operations
 pub type IterResult = Result<Option<Binding>, IterError>;
@@ -71,6 +88,10 @@ pub struct QueryIterBase {
     index: usize,
     vars: Vec<Var>,
     cancelled: bool,
+    /// Issue #808 / 750d — shared cancel token observed on every pull so a
+    /// scan over a large binding set stops promptly when the stream is
+    /// cancelled. `None` (the default) preserves the legacy behaviour.
+    cancel: Option<CancelToken>,
 }
 
 impl QueryIterBase {
@@ -87,6 +108,7 @@ impl QueryIterBase {
             index: 0,
             vars,
             cancelled: false,
+            cancel: None,
         }
     }
 
@@ -97,6 +119,7 @@ impl QueryIterBase {
             index: 0,
             vars: Vec::new(),
             cancelled: false,
+            cancel: None,
         }
     }
 
@@ -108,7 +131,17 @@ impl QueryIterBase {
             index: 0,
             vars,
             cancelled: false,
+            cancel: None,
         }
+    }
+
+    /// Issue #808 / 750d — attach a shared cancel token. The scan checks it
+    /// on every `next_binding`, so cancelling the token (from the stream
+    /// layer on disconnect or explicit cancel) halts production within one
+    /// row regardless of how many bindings remain.
+    pub fn with_cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 }
 
@@ -117,6 +150,7 @@ impl BindingIterator for QueryIterBase {
         if self.cancelled {
             return Err(IterError::Cancelled);
         }
+        check_shared_cancel(&self.cancel)?;
 
         if self.index < self.bindings.len() {
             let binding = self.bindings[self.index].clone();
@@ -151,6 +185,11 @@ pub struct QueryIterFilter {
     upstream: Box<dyn BindingIterator>,
     predicate: Box<dyn Fn(&Binding) -> bool + Send + Sync>,
     cancelled: bool,
+    /// Issue #808 / 750d — shared cancel token. A highly selective filter
+    /// can pull many upstream rows before yielding one; the token is
+    /// re-checked on every upstream pull so the rejection loop cannot
+    /// outrun the cancel signal.
+    cancel: Option<CancelToken>,
 }
 
 impl std::fmt::Debug for QueryIterFilter {
@@ -173,7 +212,14 @@ impl QueryIterFilter {
             upstream,
             predicate: Box::new(predicate),
             cancelled: false,
+            cancel: None,
         }
+    }
+
+    /// Issue #808 / 750d — attach a shared cancel token (see [`QueryIterBase::with_cancel`]).
+    pub fn with_cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 }
 
@@ -184,6 +230,7 @@ impl BindingIterator for QueryIterFilter {
         }
 
         loop {
+            check_shared_cancel(&self.cancel)?;
             match self.upstream.next_binding()? {
                 Some(binding) => {
                     if (self.predicate)(&binding) {
@@ -214,6 +261,11 @@ pub struct QueryIterJoin {
     current_right: Option<Box<dyn BindingIterator>>,
     vars: Vec<Var>,
     cancelled: bool,
+    /// Issue #808 / 750d — shared cancel token. A nested-loop join is the
+    /// worst case for unbounded work (|left| × |right|); the token is
+    /// re-checked on every iteration of the merge loop so a cancel stops
+    /// the join without draining the cross product.
+    cancel: Option<CancelToken>,
 }
 
 impl std::fmt::Debug for QueryIterJoin {
@@ -249,7 +301,14 @@ impl QueryIterJoin {
             current_right: None,
             vars,
             cancelled: false,
+            cancel: None,
         }
+    }
+
+    /// Issue #808 / 750d — attach a shared cancel token (see [`QueryIterBase::with_cancel`]).
+    pub fn with_cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 }
 
@@ -260,6 +319,7 @@ impl BindingIterator for QueryIterJoin {
         }
 
         loop {
+            check_shared_cancel(&self.cancel)?;
             // Try to get next from current right
             if let Some(ref mut right) = self.current_right {
                 if let Some(right_binding) = right.next_binding()? {
@@ -880,5 +940,133 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.is_ok()));
+    }
+
+    // ---- Issue #808 / 750d — cooperative shared-token cancellation. ----
+
+    /// An upstream that yields rows forever, so a downstream operator's
+    /// loop only terminates when it observes the shared cancel token. Used
+    /// to pin the latency budget for the cancel signal without depending on
+    /// a finite (and slow-to-build) materialised input.
+    #[derive(Debug)]
+    struct InfiniteScan {
+        n: i64,
+    }
+
+    impl BindingIterator for InfiniteScan {
+        fn next_binding(&mut self) -> IterResult {
+            self.n += 1;
+            Ok(Some(make_binding(self.n)))
+        }
+
+        fn vars(&self) -> Vec<Var> {
+            vec![Var::new("x")]
+        }
+
+        fn cancel(&mut self) {}
+    }
+
+    #[test]
+    fn shared_token_cancels_scan() {
+        let token = CancelToken::new();
+        let bindings: Vec<_> = (1..=1000).map(make_binding).collect();
+        let mut scan = QueryIterBase::new(bindings).with_cancel(token.clone());
+
+        assert!(scan.next_binding().unwrap().is_some());
+        token.cancel();
+        // The scan still has hundreds of rows buffered, but the shared
+        // token short-circuits the next pull.
+        assert!(matches!(scan.next_binding(), Err(IterError::Cancelled)));
+    }
+
+    #[test]
+    fn shared_token_cancels_filter_within_budget() {
+        use std::time::{Duration, Instant};
+
+        let token = CancelToken::new();
+        // Always-false predicate: the filter pulls from an infinite scan
+        // forever, never yielding. Only the shared token can stop it.
+        let upstream = Box::new(InfiniteScan { n: 0 });
+        let mut filter = QueryIterFilter::new(upstream, |_| false).with_cancel(token.clone());
+
+        let canceller = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            canceller.cancel();
+        });
+
+        let start = Instant::now();
+        let result = filter.next_binding();
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(IterError::Cancelled)));
+        // Soft latency budget: the cancel must take effect well within a
+        // second even though the filter would otherwise loop forever.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancel took too long to take effect: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn shared_token_cancels_join_within_budget() {
+        use std::time::{Duration, Instant};
+
+        let token = CancelToken::new();
+        // Left side never yields a mergeable row (always-false filter over
+        // an infinite scan), so the join's merge loop spins until the
+        // shared token stops it.
+        let left = Box::new(
+            QueryIterFilter::new(Box::new(InfiniteScan { n: 0 }), |_| false)
+                .with_cancel(token.clone()),
+        );
+        let mut join = QueryIterJoin::new(
+            left,
+            || Box::new(QueryIterBase::empty()),
+            vec![Var::new("y")],
+        )
+        .with_cancel(token.clone());
+
+        let canceller = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            canceller.cancel();
+        });
+
+        let start = Instant::now();
+        let result = join.next_binding();
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(IterError::Cancelled)));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "join cancel took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn cancellation_propagates_through_aggregate_consumer() {
+        // An aggregate (e.g. COUNT) drains its upstream to completion. When
+        // the upstream is cancel-aware, the aggregate's own pull surfaces
+        // the Cancelled error rather than looping forever — i.e. the cancel
+        // signal propagates *through* the aggregate without the aggregate
+        // needing its own token.
+        let token = CancelToken::new();
+        let upstream: Box<dyn BindingIterator> = Box::new(
+            QueryIterFilter::new(Box::new(InfiniteScan { n: 0 }), |_| false)
+                .with_cancel(token.clone()),
+        );
+
+        // Simulate an aggregate's drain loop.
+        fn count_all(mut it: Box<dyn BindingIterator>) -> Result<u64, IterError> {
+            let mut n = 0;
+            while it.next_binding()?.is_some() {
+                n += 1;
+            }
+            Ok(n)
+        }
+
+        token.cancel();
+        assert!(matches!(count_all(upstream), Err(IterError::Cancelled)));
     }
 }
