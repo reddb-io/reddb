@@ -555,6 +555,7 @@ fn system_keyed_collection_contract(
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
@@ -1282,6 +1283,77 @@ fn is_graph_tvf_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case("betweenness")
         || name.eq_ignore_ascii_case("eigenvector")
         || name.eq_ignore_ascii_case("pagerank")
+}
+
+/// Map a declared `WITH ANALYTICS` view to the concrete graph algorithm name
+/// and named-argument list that [`RedDBRuntime::dispatch_graph_algorithm`]
+/// consumes (issue #800). The `using` option selects the algorithm inside the
+/// output family; unsupported algorithms and the options that do not apply to
+/// the chosen algorithm are rejected so a view never silently ignores a
+/// declared parameter.
+fn analytics_view_algorithm(
+    graph: &str,
+    view: &crate::catalog::AnalyticsViewDescriptor,
+) -> RedDBResult<(String, Vec<(String, f64)>)> {
+    use crate::catalog::AnalyticsOutput;
+
+    let mut named_args: Vec<(String, f64)> = Vec::new();
+    let algorithm = match view.output {
+        AnalyticsOutput::Communities => {
+            let algo = view.algorithm.as_deref().unwrap_or("louvain");
+            if !algo.eq_ignore_ascii_case("louvain") {
+                return Err(RedDBError::Query(format!(
+                    "analytics output 'communities' on graph '{graph}' has unsupported algorithm '{algo}' (expected louvain)"
+                )));
+            }
+            if let Some(resolution) = view.resolution {
+                named_args.push(("resolution".to_string(), resolution));
+            }
+            "louvain".to_string()
+        }
+        AnalyticsOutput::Components => {
+            if let Some(algo) = view.algorithm.as_deref() {
+                if !algo.eq_ignore_ascii_case("components")
+                    && !algo.eq_ignore_ascii_case("connected_components")
+                {
+                    return Err(RedDBError::Query(format!(
+                        "analytics output 'components' on graph '{graph}' has unsupported algorithm '{algo}' (expected connected_components)"
+                    )));
+                }
+            }
+            "components".to_string()
+        }
+        AnalyticsOutput::Centrality => {
+            let algo = view
+                .algorithm
+                .as_deref()
+                .unwrap_or("pagerank")
+                .to_ascii_lowercase();
+            match algo.as_str() {
+                "pagerank" => {
+                    if let Some(max_iterations) = view.max_iterations {
+                        named_args.push(("max_iterations".to_string(), max_iterations as f64));
+                    }
+                }
+                "eigenvector" => {
+                    if let Some(max_iterations) = view.max_iterations {
+                        named_args.push(("max_iterations".to_string(), max_iterations as f64));
+                    }
+                    if let Some(tolerance) = view.tolerance {
+                        named_args.push(("tolerance".to_string(), tolerance));
+                    }
+                }
+                "betweenness" => {}
+                other => {
+                    return Err(RedDBError::Query(format!(
+                        "analytics output 'centrality' on graph '{graph}' has unsupported algorithm '{other}' (expected pagerank, betweenness, or eigenvector)"
+                    )));
+                }
+            }
+            algo
+        }
+    };
+    Ok((algorithm, named_args))
 }
 
 /// Reject any named arguments for a TVF that accepts none.
@@ -6051,6 +6123,24 @@ impl RedDBRuntime {
                     });
                 }
 
+                // `<graph>.<output>` analytics virtual view (issue #800).
+                // Recomputed on demand — intentionally not result-cached, so it
+                // always reflects the current graph data.
+                if let Some(view_result) = self.try_resolve_analytics_view(
+                    &table,
+                    &frame as &dyn super::statement_frame::ReadFrame,
+                )? {
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-analytics-view",
+                        result: view_result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
+
                 if let Some(result) = self.execute_probabilistic_select(&table)? {
                     return Ok(RuntimeQueryResult {
                         query: query.to_string(),
@@ -8465,6 +8555,21 @@ impl RedDBRuntime {
                         statement_type: "select",
                     });
                 }
+                // `<graph>.<output>` analytics virtual view (issue #800).
+                if let Some(view_result) = self.try_resolve_analytics_view(
+                    &table,
+                    &scope as &dyn super::statement_frame::ReadFrame,
+                )? {
+                    return Ok(RuntimeQueryResult {
+                        query: query_str.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-analytics-view",
+                        result: view_result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
                 let Some(table_with_rls) = self.authorize_relational_table_select(
                     table,
                     &scope as &dyn super::statement_frame::ReadFrame,
@@ -8659,6 +8764,77 @@ impl RedDBRuntime {
             .map(|e| (e.source_id, e.target_id, e.weight))
             .collect();
         Ok((nodes, edges))
+    }
+
+    /// Resolve a `<graph>.<output>` analytics virtual view (issue #800).
+    ///
+    /// Returns `Ok(None)` when `table` is not an analytics view — either the
+    /// name is not dotted, a real collection of that exact name exists (a real
+    /// collection always wins; no shadowing), the suffix is not a recognised
+    /// analytics output, or the parent is not a graph. Returns `Ok(Some(_))`
+    /// with the freshly computed result when it does resolve, and an error when
+    /// the parent graph exists but the output is not enabled, a declared
+    /// algorithm is unsupported, or the parent collection's policy denies the
+    /// read.
+    ///
+    /// The view is recomputed on every call (no result-cache write) so it
+    /// always reflects the current graph data, satisfying the on-demand
+    /// recompute contract for this slice.
+    fn try_resolve_analytics_view(
+        &self,
+        table: &TableQuery,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<Option<crate::storage::query::unified::UnifiedResult>> {
+        let full = table.table.as_str();
+        let Some(dot) = full.rfind('.') else {
+            return Ok(None);
+        };
+        // A real collection literally named `g.communities` always wins.
+        if self.inner.db.store().get_collection(full).is_some() {
+            return Ok(None);
+        }
+        let graph_name = &full[..dot];
+        let output_name = &full[dot + 1..];
+        let Some(output) = crate::catalog::AnalyticsOutput::from_str(output_name) else {
+            return Ok(None);
+        };
+
+        let contracts = self.inner.db.collection_contracts();
+        let Some(contract) = contracts.iter().find(|c| c.name == graph_name) else {
+            return Ok(None);
+        };
+        if contract.declared_model != crate::catalog::CollectionModel::Graph {
+            return Ok(None);
+        }
+        let Some(view) = contract
+            .analytics_config
+            .iter()
+            .find(|view| view.output == output)
+        else {
+            // The parent graph exists but this output was not declared — a
+            // clear error beats the misleading "collection not found".
+            return Err(RedDBError::Query(format!(
+                "analytics output '{output_name}' is not enabled on graph '{graph_name}'; declare it with WITH ANALYTICS (...)"
+            )));
+        };
+
+        // Policy inheritance (AC5): route through the parent graph collection's
+        // read authorization. A policy or RLS rule that denies the parent
+        // denies its analytics views transitively.
+        let parent_query = TableQuery::new(graph_name);
+        if self
+            .authorize_relational_table_select(parent_query, frame)?
+            .is_none()
+        {
+            return Err(RedDBError::Query(format!(
+                "permission denied: policy on graph '{graph_name}' denies analytics view '{output_name}'"
+            )));
+        }
+
+        let (algorithm, named_args) = analytics_view_algorithm(graph_name, view)?;
+        let (nodes, edges) = self.materialize_whole_graph_abstract()?;
+        let result = self.dispatch_graph_algorithm(&algorithm, nodes, edges, &named_args)?;
+        Ok(Some(result))
     }
 
     /// Shared algorithm dispatch over abstract `(nodes, edges)` inputs.
