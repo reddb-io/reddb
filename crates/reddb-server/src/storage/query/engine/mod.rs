@@ -31,12 +31,14 @@
 
 pub mod aggregates_extra;
 pub mod binding;
+pub mod cancel;
 pub mod iterator;
 pub mod op;
 pub mod registry;
 pub mod transform;
 
 pub use binding::{Binding, BindingBuilder, Var};
+pub use cancel::CancelToken;
 pub use iterator::{
     BindingIterator, QueryIter, QueryIterBase, QueryIterFilter, QueryIterJoin, QueryIterProject,
     QueryIterSlice, QueryIterSort, QueryIterUnion,

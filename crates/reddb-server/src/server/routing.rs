@@ -1026,6 +1026,16 @@ impl RedDBServer {
                 Err(err) => json_error(500, err.to_string()),
             },
             ("POST", "/query/explain") => self.handle_query_explain(body),
+            // Issue #808 / 750d — explicit out-of-band cancel for a live
+            // `/query/stream`. Accepts `{"cursor":"<token>"}`, scoped to the
+            // caller, and tombstones the cursor + raises its executor cancel
+            // token. Not a streaming route, so it rides the standard
+            // request/response path here rather than `try_route_streaming`.
+            ("POST", "/query/stream/cancel") => {
+                let principal = principal_for(&headers);
+                let tenant = self.stream_tenant_for(&headers);
+                self.handle_query_stream_cancel(&body, &principal, &tenant)
+            }
             ("POST", "/query") => self.handle_query(body),
             ("POST", "/search") => self.handle_universal_search(body),
             ("POST", "/context") => self.handle_context_search(body),
