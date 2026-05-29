@@ -1271,6 +1271,191 @@ fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolSt
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The graph-analytics table-valued functions recognized in FROM position.
+/// Both the graph-collection form and the inline `nodes => / edges =>` form
+/// (issue #799) accept these names.
+fn is_graph_tvf_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("components")
+        || name.eq_ignore_ascii_case("louvain")
+        || name.eq_ignore_ascii_case("degree_centrality")
+}
+
+/// Reject any named arguments for a TVF that accepts none.
+fn reject_named_args(name: &str, named_args: &[(String, f64)]) -> RedDBResult<()> {
+    if let Some((key, _)) = named_args.first() {
+        return Err(RedDBError::Query(format!(
+            "table function '{name}' has no named argument '{key}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve louvain's optional `resolution` named arg (γ, default 1.0). Any
+/// other named key, or a non-finite / non-positive resolution, is rejected.
+fn louvain_resolution(named_args: &[(String, f64)]) -> RedDBResult<f64> {
+    let mut resolution = 1.0_f64;
+    for (key, value) in named_args {
+        if key.eq_ignore_ascii_case("resolution") {
+            if !value.is_finite() || *value <= 0.0 {
+                return Err(RedDBError::Query(format!(
+                    "table function 'louvain' resolution must be > 0, got {value}"
+                )));
+            }
+            resolution = *value;
+        } else {
+            return Err(RedDBError::Query(format!(
+                "table function 'louvain' has no named argument '{key}' (expected 'resolution')"
+            )));
+        }
+    }
+    Ok(resolution)
+}
+
+/// Undirected degree centrality over abstract inputs: each edge contributes
+/// 1 to both of its endpoints. Returns `(node_id, degree)` deterministically
+/// in ascending node-id order, so identical input always yields identical
+/// rows.
+fn abstract_degree_centrality(
+    nodes: &[String],
+    edges: &[(
+        String,
+        String,
+        crate::storage::engine::graph_algorithms::Weight,
+    )],
+) -> Vec<(String, usize)> {
+    let mut degree: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for n in nodes {
+        degree.entry(n.clone()).or_insert(0);
+    }
+    for (a, b, _w) in edges {
+        *degree.entry(a.clone()).or_insert(0) += 1;
+        *degree.entry(b.clone()).or_insert(0) += 1;
+    }
+    degree.into_iter().collect()
+}
+
+/// Ordered column names for a materialized subquery result: the projection
+/// columns when present, else the first record's field order.
+fn ordered_result_columns(result: &crate::storage::query::unified::UnifiedResult) -> Vec<String> {
+    if !result.columns.is_empty() {
+        return result.columns.clone();
+    }
+    result
+        .records
+        .first()
+        .map(|record| {
+            record
+                .column_names()
+                .iter()
+                .map(|column| column.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Canonical node-id string for a cell value, so the node universe (from the
+/// `nodes` subquery) and the edge endpoints (from the `edges` subquery)
+/// compare equal regardless of integer-vs-text typing. `Null` is not a node.
+fn value_to_node_id(value: &crate::storage::schema::Value) -> Option<String> {
+    use crate::storage::schema::Value;
+    match value {
+        Value::Null => None,
+        Value::Text(s) => Some(s.to_string()),
+        Value::Integer(n) => Some(n.to_string()),
+        Value::UnsignedInteger(n) => Some(n.to_string()),
+        Value::NodeRef(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+/// Numeric edge weight from a cell value (the optional third `edges` column).
+fn value_to_weight(value: &crate::storage::schema::Value) -> Option<f32> {
+    use crate::storage::schema::Value;
+    match value {
+        Value::Float(f) => Some(*f as f32),
+        Value::Integer(n) => Some(*n as f32),
+        Value::UnsignedInteger(n) => Some(*n as f32),
+        _ => None,
+    }
+}
+
+/// Build the node universe from a materialized `nodes` subquery result: the
+/// first projected column of each row is the node id (issue #799). Zero rows
+/// is a valid empty node set; a row set with no columns is a shape error.
+fn inline_node_ids(
+    name: &str,
+    result: &crate::storage::query::unified::UnifiedResult,
+) -> RedDBResult<Vec<String>> {
+    if result.records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let columns = ordered_result_columns(result);
+    let Some(first_col) = columns.first() else {
+        return Err(RedDBError::Query(format!(
+            "table function '{name}' inline form: `nodes` subquery must project at least one column (the node id)"
+        )));
+    };
+    let mut ids = Vec::with_capacity(result.records.len());
+    for record in &result.records {
+        if let Some(id) = record.get(first_col).and_then(value_to_node_id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Build the edge list from a materialized `edges` subquery result: the first
+/// two projected columns are `(source, target)` and an optional third column
+/// is the numeric weight (defaulting to 1.0). Fewer than two columns is a
+/// shape error (issue #799).
+fn inline_edges(
+    name: &str,
+    result: &crate::storage::query::unified::UnifiedResult,
+) -> RedDBResult<
+    Vec<(
+        String,
+        String,
+        crate::storage::engine::graph_algorithms::Weight,
+    )>,
+> {
+    if result.records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let columns = ordered_result_columns(result);
+    if columns.len() < 2 {
+        return Err(RedDBError::Query(format!(
+            "table function '{name}' inline form: `edges` subquery must project at least two columns (source, target), got {}",
+            columns.len()
+        )));
+    }
+    let src_col = &columns[0];
+    let dst_col = &columns[1];
+    let weight_col = columns.get(2);
+    let mut edges = Vec::with_capacity(result.records.len());
+    for record in &result.records {
+        let (Some(src), Some(dst)) = (
+            record.get(src_col).and_then(value_to_node_id),
+            record.get(dst_col).and_then(value_to_node_id),
+        ) else {
+            // A null/absent endpoint is not a valid edge; skip it.
+            continue;
+        };
+        let weight = match weight_col {
+            Some(col) => match record.get(col) {
+                None | Some(crate::storage::schema::Value::Null) => 1.0,
+                Some(value) => value_to_weight(value).ok_or_else(|| {
+                    RedDBError::Query(format!(
+                        "table function '{name}' inline form: `edges` weight column must be numeric"
+                    ))
+                })?,
+            },
+            None => 1.0,
+        };
+        edges.push((src, dst, weight));
+    }
+    Ok(edges)
+}
+
 fn cache_scope_insert(scopes: &mut HashSet<String>, name: &str) {
     if name.is_empty() || name.starts_with("__subq_") || is_universal_query_source(name) {
         return;
@@ -1289,6 +1474,16 @@ fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery)
         // Table-valued functions (e.g. components(g)) read the graph store
         // read-only and are not cacheable by collection scope (issue #795).
         Some(crate::storage::query::ast::TableSource::Function { .. }) => {}
+        // The inline-graph form reads ordinary tables/docs through its
+        // `nodes`/`edges` subqueries, so its result cache must be scoped to
+        // those source collections — mutating any of them invalidates the
+        // cached result (issue #799).
+        Some(crate::storage::query::ast::TableSource::InlineGraphFunction {
+            nodes, edges, ..
+        }) => {
+            collect_query_expr_result_cache_scopes(scopes, nodes);
+            collect_query_expr_result_cache_scopes(scopes, edges);
+        }
         None => cache_scope_insert(scopes, &query.table),
     }
 }
@@ -5768,6 +5963,37 @@ impl RedDBRuntime {
                         statement_type: "select",
                     });
                 }
+                // Inline-graph TVF (issue #799): the graph is supplied by two
+                // subqueries instead of a collection reference. Unlike the
+                // graph-collection form, the result IS cacheable — its cache
+                // key is the query string (the result-cache read at the top of
+                // `execute_query_inner` keys on it) and `result_cache_scopes`
+                // already carries the `nodes`/`edges` source collections, so a
+                // write to any of them invalidates the entry.
+                if let Some(TableSource::InlineGraphFunction {
+                    name,
+                    nodes,
+                    edges,
+                    named_args,
+                }) = table.source.clone()
+                {
+                    let inline_result = RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-tvf-inline",
+                        result: self.execute_inline_graph_function(
+                            &name,
+                            &nodes,
+                            &edges,
+                            &named_args,
+                        )?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    };
+                    frame.write_result_cache(self, &inline_result, result_cache_scopes);
+                    return Ok(inline_result);
+                }
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query.to_string(),
@@ -8158,6 +8384,31 @@ impl RedDBRuntime {
                         statement_type: "select",
                     });
                 }
+                // Inline-graph TVF (issue #799) on the prepared-statement /
+                // direct-expr path. Result caching is wired on the
+                // `execute_query_inner` path; here we just compute and return.
+                if let Some(TableSource::InlineGraphFunction {
+                    name,
+                    nodes,
+                    edges,
+                    named_args,
+                }) = table.source.clone()
+                {
+                    return Ok(RuntimeQueryResult {
+                        query: query_str.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-graph-tvf-inline",
+                        result: self.execute_inline_graph_function(
+                            &name,
+                            &nodes,
+                            &edges,
+                            &named_args,
+                        )?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query_str.to_string(),
@@ -8283,148 +8534,160 @@ impl RedDBRuntime {
         }
     }
 
-    /// Dispatch a table-valued function call in FROM position
-    /// (e.g. `SELECT * FROM components(g)`).
+    /// Dispatch a graph-collection table-valued function call in FROM
+    /// position (e.g. `SELECT * FROM components(g)`).
     ///
-    /// Validates the function name and arity here; the concrete
-    /// implementation is read-only and never mutates the catalog or store.
+    /// Validates the function name and arity here, materializes the whole
+    /// active graph read-only, then runs the algorithm via the shared
+    /// `dispatch_graph_algorithm` path. Never mutates the catalog or store.
     fn execute_table_function(
         &self,
         name: &str,
         args: &[String],
         named_args: &[(String, f64)],
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
-        if name.eq_ignore_ascii_case("components") {
-            if args.len() != 1 {
-                return Err(RedDBError::Query(format!(
-                    "table function 'components' takes exactly 1 argument, got {}",
-                    args.len()
-                )));
-            }
-            if !named_args.is_empty() {
-                return Err(RedDBError::Query(
-                    "table function 'components' takes no named arguments".to_string(),
-                ));
-            }
-            return self.execute_components_tvf(&args[0]);
+        if !is_graph_tvf_name(name) {
+            return Err(RedDBError::Query(format!("unknown table function: {name}")));
         }
-        if name.eq_ignore_ascii_case("louvain") {
-            if args.len() != 1 {
-                return Err(RedDBError::Query(format!(
-                    "table function 'louvain' takes exactly 1 graph argument, got {}",
-                    args.len()
-                )));
+        // Every graph-collection TVF takes exactly one graph argument.
+        if args.len() != 1 {
+            return Err(RedDBError::Query(format!(
+                "table function '{name}' takes exactly 1 graph argument, got {}",
+                args.len()
+            )));
+        }
+
+        // Read-only materialization of the full active graph. Passing `None`
+        // for the projection uses the full graph store. Like #795/#796, the
+        // v0 form runs over the whole graph store regardless of the collection
+        // argument value. Materialization never mutates any store.
+        let (nodes, edges) = self.materialize_whole_graph_abstract()?;
+        self.dispatch_graph_algorithm(name, nodes, edges, named_args)
+    }
+
+    /// Dispatch an inline-graph table-valued function call in FROM position
+    /// (e.g. `SELECT * FROM components(nodes => (…), edges => (…))`, issue
+    /// #799).
+    ///
+    /// Materializes the two subqueries through the normal read path (so RLS,
+    /// column authz, and MVCC visibility all apply), constructs the abstract
+    /// graph — the first column of `nodes` is the node id; the first two-or-
+    /// three columns of `edges` are `(source, target [, weight])` — then runs
+    /// the same algorithm path used by the graph-collection form. Read-only.
+    fn execute_inline_graph_function(
+        &self,
+        name: &str,
+        nodes_query: &QueryExpr,
+        edges_query: &QueryExpr,
+        named_args: &[(String, f64)],
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        if !is_graph_tvf_name(name) {
+            return Err(RedDBError::Query(format!("unknown table function: {name}")));
+        }
+
+        let node_result = self.execute_query_expr(nodes_query.clone())?.result;
+        let nodes = inline_node_ids(name, &node_result)?;
+
+        let edge_result = self.execute_query_expr(edges_query.clone())?.result;
+        let edges = inline_edges(name, &edge_result)?;
+
+        self.dispatch_graph_algorithm(name, nodes, edges, named_args)
+    }
+
+    /// Materialize the whole active graph read-only into the abstract
+    /// `(nodes, edges)` inputs the pure graph algorithms consume.
+    fn materialize_whole_graph_abstract(
+        &self,
+    ) -> RedDBResult<(
+        Vec<String>,
+        Vec<(
+            String,
+            String,
+            crate::storage::engine::graph_algorithms::Weight,
+        )>,
+    )> {
+        use crate::storage::engine::graph_algorithms;
+
+        let graph = super::graph_dsl::materialize_graph_with_projection(
+            self.inner.db.store().as_ref(),
+            None,
+        )?;
+        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
+        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
+            .iter_all_edges()
+            .into_iter()
+            .map(|e| (e.source_id, e.target_id, e.weight))
+            .collect();
+        Ok((nodes, edges))
+    }
+
+    /// Shared algorithm dispatch over abstract `(nodes, edges)` inputs.
+    ///
+    /// Both the graph-collection form and the inline-graph form route here so
+    /// named-argument validation and the projected row shape stay identical
+    /// across the two signatures (issue #799). Projects each algorithm's
+    /// native output shape.
+    fn dispatch_graph_algorithm(
+        &self,
+        name: &str,
+        nodes: Vec<String>,
+        edges: Vec<(
+            String,
+            String,
+            crate::storage::engine::graph_algorithms::Weight,
+        )>,
+        named_args: &[(String, f64)],
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        use crate::storage::engine::graph_algorithms;
+        use crate::storage::query::unified::UnifiedResult;
+        use crate::storage::schema::Value;
+
+        if name.eq_ignore_ascii_case("components") {
+            reject_named_args(name, named_args)?;
+            let assignment = graph_algorithms::connected_components(&nodes, &edges);
+            let mut result =
+                UnifiedResult::with_columns(vec!["node_id".into(), "island_id".into()]);
+            for (node_id, island_id) in assignment {
+                let mut record = UnifiedRecord::new();
+                record.set("node_id", Value::text(node_id));
+                record.set("island_id", Value::Integer(island_id as i64));
+                result.push(record);
             }
+            return Ok(result);
+        }
+
+        if name.eq_ignore_ascii_case("louvain") {
             // The only supported named argument is `resolution` (γ). It
             // defaults to 1.0 (classic modularity) and must be a finite,
             // strictly positive number — a non-positive (or NaN/inf)
             // resolution has no sensible meaning.
-            let mut resolution = 1.0_f64;
-            for (key, value) in named_args {
-                if key.eq_ignore_ascii_case("resolution") {
-                    if !value.is_finite() || *value <= 0.0 {
-                        return Err(RedDBError::Query(format!(
-                            "table function 'louvain' resolution must be > 0, got {value}"
-                        )));
-                    }
-                    resolution = *value;
-                } else {
-                    return Err(RedDBError::Query(format!(
-                        "table function 'louvain' has no named argument '{key}' (expected 'resolution')"
-                    )));
-                }
+            let resolution = louvain_resolution(named_args)?;
+            let assignment = graph_algorithms::louvain(&nodes, &edges, resolution);
+            let mut result =
+                UnifiedResult::with_columns(vec!["node_id".into(), "community_id".into()]);
+            for (node_id, community_id) in assignment {
+                let mut record = UnifiedRecord::new();
+                record.set("node_id", Value::text(node_id));
+                record.set("community_id", Value::Integer(community_id as i64));
+                result.push(record);
             }
-            return self.execute_louvain_tvf(&args[0], resolution);
+            return Ok(result);
         }
+
+        if name.eq_ignore_ascii_case("degree_centrality") {
+            reject_named_args(name, named_args)?;
+            let assignment = abstract_degree_centrality(&nodes, &edges);
+            let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "degree".into()]);
+            for (node_id, degree) in assignment {
+                let mut record = UnifiedRecord::new();
+                record.set("node_id", Value::text(node_id));
+                record.set("degree", Value::Integer(degree as i64));
+                result.push(record);
+            }
+            return Ok(result);
+        }
+
         Err(RedDBError::Query(format!("unknown table function: {name}")))
-    }
-
-    /// `components(<graph_collection>)` — returns rows `(node_id, island_id)`.
-    ///
-    /// Materializes the active graph (nodes + weighted edges) read-only and
-    /// runs the pure `graph_algorithms::connected_components`. Edges are
-    /// treated as undirected; island ids are deterministic (ascending order of
-    /// each component's smallest node).
-    fn execute_components_tvf(
-        &self,
-        _collection: &str,
-    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
-        use crate::storage::engine::graph_algorithms;
-        use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
-
-        // Read-only materialization of the full active graph. The named
-        // collection identifies the active graph scope; passing `None` for the
-        // projection uses the full graph store (the same result
-        // `active_graph_projection` yields when no projection is registered).
-        // Materialization never mutates any store.
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
-
-        // Materialize abstract inputs for the pure algorithm.
-        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
-        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
-            .iter_all_edges()
-            .into_iter()
-            .map(|e| (e.source_id, e.target_id, e.weight))
-            .collect();
-
-        let assignment = graph_algorithms::connected_components(&nodes, &edges);
-
-        // Project into a UnifiedResult with columns ["node_id", "island_id"].
-        let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "island_id".into()]);
-        for (node_id, island_id) in assignment {
-            let mut record = UnifiedRecord::new();
-            record.set("node_id", Value::text(node_id));
-            record.set("island_id", Value::Integer(island_id as i64));
-            result.push(record);
-        }
-        Ok(result)
-    }
-
-    /// `louvain(<graph> [, resolution => <f64>])` — returns rows
-    /// `(node_id, community_id)` (issue #796).
-    ///
-    /// Materializes the active graph (nodes + weighted edges) read-only and
-    /// runs the pure, deterministic `graph_algorithms::louvain`. Edges are
-    /// treated as undirected; community ids are assigned in ascending order of
-    /// each community's smallest node, so identical input + resolution always
-    /// yields identical rows. Like `components`, the v0 form runs over the
-    /// whole graph store regardless of the collection argument value.
-    fn execute_louvain_tvf(
-        &self,
-        _collection: &str,
-        resolution: f64,
-    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
-        use crate::storage::engine::graph_algorithms;
-        use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
-
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
-
-        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
-        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
-            .iter_all_edges()
-            .into_iter()
-            .map(|e| (e.source_id, e.target_id, e.weight))
-            .collect();
-
-        let assignment = graph_algorithms::louvain(&nodes, &edges, resolution);
-
-        // Project into a UnifiedResult with columns ["node_id", "community_id"].
-        let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "community_id".into()]);
-        for (node_id, community_id) in assignment {
-            let mut record = UnifiedRecord::new();
-            record.set("node_id", Value::text(node_id));
-            record.set("community_id", Value::Integer(community_id as i64));
-            result.push(record);
-        }
-        Ok(result)
     }
 
     /// Ultra-fast path: detect `SELECT * FROM table WHERE _entity_id = N` by string pattern
@@ -13518,5 +13781,55 @@ fn walk_plan_node(
     out.push(rec);
     for child in &node.children {
         walk_plan_node(child, depth + 1, out);
+    }
+}
+
+#[cfg(test)]
+mod inline_graph_tvf_tests {
+    use super::*;
+
+    fn scopes_for(sql: &str) -> HashSet<String> {
+        let expr = crate::storage::query::parser::parse(sql)
+            .expect("parse")
+            .query;
+        query_expr_result_cache_scopes(&expr)
+    }
+
+    #[test]
+    fn inline_tvf_cache_scopes_include_source_collections() {
+        // The result-cache key for the inline form must derive from the
+        // `nodes`/`edges` source collections so a write to either invalidates
+        // the cached result (issue #799).
+        let scopes = scopes_for(
+            "SELECT * FROM components(nodes => (SELECT id FROM hosts), edges => (SELECT src, dst FROM links))",
+        );
+        assert!(scopes.contains("hosts"), "nodes source scoped: {scopes:?}");
+        assert!(scopes.contains("links"), "edges source scoped: {scopes:?}");
+    }
+
+    #[test]
+    fn graph_collection_tvf_has_no_cache_scope() {
+        // The graph-collection form reads the whole graph store and is not
+        // scoped to any named collection (issue #795 behaviour preserved).
+        let scopes = scopes_for("SELECT * FROM components(g)");
+        assert!(scopes.is_empty(), "collection form unscoped: {scopes:?}");
+    }
+
+    #[test]
+    fn abstract_degree_centrality_counts_undirected_endpoints() {
+        let nodes = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let edges = vec![
+            ("a".to_string(), "b".to_string(), 1.0_f32),
+            ("b".to_string(), "c".to_string(), 1.0_f32),
+        ];
+        let degrees = abstract_degree_centrality(&nodes, &edges);
+        assert_eq!(
+            degrees,
+            vec![
+                ("a".to_string(), 1),
+                ("b".to_string(), 2),
+                ("c".to_string(), 1),
+            ]
+        );
     }
 }
