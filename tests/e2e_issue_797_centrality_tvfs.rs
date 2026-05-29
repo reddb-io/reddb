@@ -84,7 +84,10 @@ fn betweenness_tvf_ranks_hub_highest() {
     // The hub bridges leaf3 to the rest, so it must carry strictly positive
     // betweenness while leaf3 (a pure spoke) carries none.
     assert!(map[&hub] > 0.0, "hub has positive betweenness");
-    assert!(map[&leaves[2]].abs() < 1e-9, "pure-spoke leaf3 has zero betweenness");
+    assert!(
+        map[&leaves[2]].abs() < 1e-9,
+        "pure-spoke leaf3 has zero betweenness"
+    );
 
     // Determinism across reruns.
     assert_eq!(map, run_centrality(&rt, "SELECT * FROM betweenness(g)"));
