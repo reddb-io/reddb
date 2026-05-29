@@ -237,6 +237,7 @@ mod tests {
             metrics_namespace: None,
             append_only: false,
             subscriptions: Vec::new(),
+            analytics_config: Vec::new(),
             session_key: Some("user_id".to_string()),
             session_gap_ms: Some(30_000),
             retention_duration_ms: None,
