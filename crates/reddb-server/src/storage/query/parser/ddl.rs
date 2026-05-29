@@ -83,6 +83,7 @@ impl<'a> Parser<'a> {
             tenant_by: None,
             append_only: false,
             subscriptions,
+            analytics_config: Vec::new(),
             vault_own_master_key: false,
         }))
     }
@@ -261,6 +262,7 @@ impl<'a> Parser<'a> {
             tenant_by,
             append_only,
             subscriptions,
+            analytics_config: Vec::new(),
             vault_own_master_key: false,
         }))
     }
@@ -372,6 +374,21 @@ impl<'a> Parser<'a> {
             } else {
                 false
             };
+        // `CREATE GRAPH <name> WITH ANALYTICS (...)` — the analytics opt-in
+        // is graph-only (issue #800). Other keyed models reject the clause so
+        // a misplaced `WITH ANALYTICS` fails loudly instead of being ignored.
+        let analytics_config = if model == CollectionModel::Graph && self.consume(&Token::With)? {
+            if !self.consume_ident_ci("ANALYTICS")? {
+                return Err(ParseError::expected(
+                    vec!["ANALYTICS"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            self.parse_analytics_clause()?
+        } else {
+            Vec::new()
+        };
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             collection_model: model,
             name,
@@ -386,8 +403,119 @@ impl<'a> Parser<'a> {
             tenant_by: None,
             append_only: false,
             subscriptions: Vec::new(),
+            analytics_config,
             vault_own_master_key,
         }))
+    }
+
+    /// Parse the `( <output> [ ( <key> = <value> [, ...] ) ] [, ...] )` body of
+    /// a `WITH ANALYTICS` clause (issue #800). Recognised outputs are
+    /// `communities`, `components`, `centrality`; recognised options are
+    /// `using`, `resolution`, `max_iterations`, `tolerance`. Unknown output
+    /// names and option keys are rejected with a clear, structured error.
+    fn parse_analytics_clause(
+        &mut self,
+    ) -> Result<Vec<crate::catalog::AnalyticsViewDescriptor>, ParseError> {
+        use crate::catalog::{AnalyticsOutput, AnalyticsViewDescriptor};
+
+        self.expect(Token::LParen)?;
+        let mut views: Vec<AnalyticsViewDescriptor> = Vec::new();
+        loop {
+            let output_name = self.parse_analytics_output_name()?;
+            let output = AnalyticsOutput::from_str(&output_name).ok_or_else(|| {
+                ParseError::new(
+                    format!(
+                        "unknown analytics output '{output_name}': expected communities, components, or centrality"
+                    ),
+                    self.position(),
+                )
+            })?;
+            if views.iter().any(|view| view.output == output) {
+                return Err(ParseError::new(
+                    format!("duplicate analytics output '{output_name}'"),
+                    self.position(),
+                ));
+            }
+            let mut view = AnalyticsViewDescriptor {
+                output,
+                algorithm: None,
+                resolution: None,
+                max_iterations: None,
+                tolerance: None,
+            };
+            if self.consume(&Token::LParen)? {
+                loop {
+                    let key = self.parse_analytics_option_key()?;
+                    self.expect(Token::Eq)?;
+                    match key.as_str() {
+                        "using" => {
+                            view.algorithm =
+                                Some(self.expect_ident_or_keyword()?.to_ascii_lowercase());
+                        }
+                        "resolution" => view.resolution = Some(self.parse_float()?),
+                        "max_iterations" => view.max_iterations = Some(self.parse_integer()?),
+                        "tolerance" => view.tolerance = Some(self.parse_float()?),
+                        other => {
+                            return Err(ParseError::new(
+                                format!(
+                                    "unknown analytics option '{other}': expected using, resolution, max_iterations, or tolerance"
+                                ),
+                                self.position(),
+                            ))
+                        }
+                    }
+                    if !self.consume(&Token::Comma)? {
+                        break;
+                    }
+                }
+                self.expect(Token::RParen)?;
+            }
+            views.push(view);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        if views.is_empty() {
+            return Err(ParseError::new(
+                "WITH ANALYTICS requires at least one output".to_string(),
+                self.position(),
+            ));
+        }
+        Ok(views)
+    }
+
+    /// Read one analytics output name, normalising the keyword-lexed outputs
+    /// (`components`, `centrality`) back to their lowercase spelling so they
+    /// compare uniformly with the ident-lexed `communities`.
+    fn parse_analytics_output_name(&mut self) -> Result<String, ParseError> {
+        match self.peek() {
+            Token::Components => {
+                self.advance()?;
+                Ok("components".to_string())
+            }
+            Token::Centrality => {
+                self.advance()?;
+                Ok("centrality".to_string())
+            }
+            _ => Ok(self.expect_ident()?.to_ascii_lowercase()),
+        }
+    }
+
+    /// Read one analytics option key, normalising the keyword-lexed keys
+    /// (`using`, `max_iterations`) back to their lowercase spelling.
+    fn parse_analytics_option_key(&mut self) -> Result<String, ParseError> {
+        match self.peek() {
+            Token::Using => {
+                self.advance()?;
+                Ok("using".to_string())
+            }
+            Token::MaxIterations => {
+                self.advance()?;
+                Ok("max_iterations".to_string())
+            }
+            _ => Ok(self.expect_ident()?.to_ascii_lowercase()),
+        }
     }
 
     pub fn parse_create_collection_model_body(
