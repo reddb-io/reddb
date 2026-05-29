@@ -5752,13 +5752,18 @@ impl RedDBRuntime {
                 // Table-valued functions (e.g. components(g)) dispatch to a
                 // read-only executor before any catalog/virtual-table routing
                 // (issue #795).
-                if let Some(TableSource::Function { name, args }) = table.source.clone() {
+                if let Some(TableSource::Function {
+                    name,
+                    args,
+                    named_args,
+                }) = table.source.clone()
+                {
                     return Ok(RuntimeQueryResult {
                         query: query.to_string(),
                         mode,
                         statement,
                         engine: "runtime-graph-tvf",
-                        result: self.execute_table_function(&name, &args)?,
+                        result: self.execute_table_function(&name, &args, &named_args)?,
                         affected_rows: 0,
                         statement_type: "select",
                     });
@@ -8137,13 +8142,18 @@ impl RedDBRuntime {
                 // Table-valued functions (e.g. components(g)) dispatch to a
                 // read-only executor before any catalog/virtual-table routing
                 // (issue #795).
-                if let Some(TableSource::Function { name, args }) = table.source.clone() {
+                if let Some(TableSource::Function {
+                    name,
+                    args,
+                    named_args,
+                }) = table.source.clone()
+                {
                     return Ok(RuntimeQueryResult {
                         query: query_str.to_string(),
                         mode,
                         statement,
                         engine: "runtime-graph-tvf",
-                        result: self.execute_table_function(&name, &args)?,
+                        result: self.execute_table_function(&name, &args, &named_args)?,
                         affected_rows: 0,
                         statement_type: "select",
                     });
@@ -8282,6 +8292,7 @@ impl RedDBRuntime {
         &self,
         name: &str,
         args: &[String],
+        named_args: &[(String, f64)],
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         if name.eq_ignore_ascii_case("components") {
             if args.len() != 1 {
@@ -8290,7 +8301,39 @@ impl RedDBRuntime {
                     args.len()
                 )));
             }
+            if !named_args.is_empty() {
+                return Err(RedDBError::Query(
+                    "table function 'components' takes no named arguments".to_string(),
+                ));
+            }
             return self.execute_components_tvf(&args[0]);
+        }
+        if name.eq_ignore_ascii_case("louvain") {
+            if args.len() != 1 {
+                return Err(RedDBError::Query(format!(
+                    "table function 'louvain' takes exactly 1 graph argument, got {}",
+                    args.len()
+                )));
+            }
+            // The only supported named argument is `resolution` (γ). It
+            // defaults to 1.0 (classic modularity) and must be strictly
+            // positive — a non-positive resolution has no sensible meaning.
+            let mut resolution = 1.0_f64;
+            for (key, value) in named_args {
+                if key.eq_ignore_ascii_case("resolution") {
+                    if !(*value > 0.0) {
+                        return Err(RedDBError::Query(format!(
+                            "table function 'louvain' resolution must be > 0, got {value}"
+                        )));
+                    }
+                    resolution = *value;
+                } else {
+                    return Err(RedDBError::Query(format!(
+                        "table function 'louvain' has no named argument '{key}' (expected 'resolution')"
+                    )));
+                }
+            }
+            return self.execute_louvain_tvf(&args[0], resolution);
         }
         Err(RedDBError::Query(format!("unknown table function: {name}")))
     }
@@ -8335,6 +8378,49 @@ impl RedDBRuntime {
             let mut record = UnifiedRecord::new();
             record.set("node_id", Value::text(node_id));
             record.set("island_id", Value::Integer(island_id as i64));
+            result.push(record);
+        }
+        Ok(result)
+    }
+
+    /// `louvain(<graph> [, resolution => <f64>])` — returns rows
+    /// `(node_id, community_id)` (issue #796).
+    ///
+    /// Materializes the active graph (nodes + weighted edges) read-only and
+    /// runs the pure, deterministic `graph_algorithms::louvain`. Edges are
+    /// treated as undirected; community ids are assigned in ascending order of
+    /// each community's smallest node, so identical input + resolution always
+    /// yields identical rows. Like `components`, the v0 form runs over the
+    /// whole graph store regardless of the collection argument value.
+    fn execute_louvain_tvf(
+        &self,
+        _collection: &str,
+        resolution: f64,
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        use crate::storage::engine::graph_algorithms;
+        use crate::storage::query::unified::UnifiedResult;
+        use crate::storage::schema::Value;
+
+        let graph = super::graph_dsl::materialize_graph_with_projection(
+            self.inner.db.store().as_ref(),
+            None,
+        )?;
+
+        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
+        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
+            .iter_all_edges()
+            .into_iter()
+            .map(|e| (e.source_id, e.target_id, e.weight))
+            .collect();
+
+        let assignment = graph_algorithms::louvain(&nodes, &edges, resolution);
+
+        // Project into a UnifiedResult with columns ["node_id", "community_id"].
+        let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "community_id".into()]);
+        for (node_id, community_id) in assignment {
+            let mut record = UnifiedRecord::new();
+            record.set("node_id", Value::text(node_id));
+            record.set("community_id", Value::Integer(community_id as i64));
             result.push(record);
         }
         Ok(result)
