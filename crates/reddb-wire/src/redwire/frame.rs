@@ -279,6 +279,13 @@ impl MessageKind {
             | Self::OpenStream
             | Self::StreamCancel => MessageDirection::ClientToServer,
 
+            // `StreamChunk` is symmetric (issue #764 / PRD #759 S5):
+            // the server emits chunks on an *output* stream, and the
+            // client emits chunks of rows on an *input* stream. Both
+            // are routed by the frame's `stream_id`, so the kind has
+            // to be legal in either direction.
+            Self::StreamChunk => MessageDirection::Both,
+
             // Server-originated replies / push frames.
             Self::HelloAck
             | Self::AuthRequest
@@ -294,10 +301,11 @@ impl MessageKind {
             | Self::RowDescription
             | Self::StreamEnd
             | Self::OpenAck
-            | Self::StreamChunk
             | Self::StreamError => MessageDirection::ServerToClient,
 
-            // Symmetric — either peer may initiate.
+            // Symmetric — either peer may initiate. (`StreamChunk` is
+            // also symmetric but has its own arm above — see issue
+            // #764.)
             Self::Bye | Self::Ping | Self::Pong => MessageDirection::Both,
         }
     }
@@ -633,7 +641,6 @@ mod catalog_tests {
             MessageKind::RowDescription,
             MessageKind::StreamEnd,
             MessageKind::OpenAck,
-            MessageKind::StreamChunk,
             MessageKind::StreamError,
         ] {
             assert_eq!(
@@ -643,8 +650,15 @@ mod catalog_tests {
             );
         }
 
-        // Symmetric.
-        for k in [MessageKind::Bye, MessageKind::Ping, MessageKind::Pong] {
+        // Symmetric. `StreamChunk` (issue #764) is symmetric: the
+        // server emits it on output streams, the client emits it on
+        // input streams.
+        for k in [
+            MessageKind::Bye,
+            MessageKind::Ping,
+            MessageKind::Pong,
+            MessageKind::StreamChunk,
+        ] {
             assert_eq!(
                 k.direction(),
                 MessageDirection::Both,
