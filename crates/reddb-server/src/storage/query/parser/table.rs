@@ -354,6 +354,25 @@ impl<'a> Parser<'a> {
                     subquery_args,
                 )?);
                 name
+            } else if matches!(self.peek(), Token::ShortestPath) {
+                // `shortest_path` lexes as the graph-analytics keyword
+                // `Token::ShortestPath`, so it never reaches `expect_ident`.
+                // In FROM position it is the shortest-path table-valued
+                // function: `FROM shortest_path(g, src => .., dst => ..)`
+                // (issue #798). The bare `SHORTEST_PATH ... FROM ... TO ...`
+                // graph-command form is dispatched separately at statement
+                // start, so the two grammars never collide.
+                self.advance()?; // consume SHORTEST_PATH
+                let name = "shortest_path".to_string();
+                self.expect(Token::LParen)?;
+                let (args, named_args) = self.parse_table_function_args(&name)?;
+                self.expect(Token::RParen)?;
+                table_source = Some(crate::storage::query::ast::TableSource::Function {
+                    name: name.clone(),
+                    args,
+                    named_args,
+                });
+                name
             } else {
                 let ident = self.expect_ident()?;
                 // Table-valued function call: `ident(arg, ...)` (issue #795).
@@ -1606,6 +1625,40 @@ mod tests {
             "SELECT * FROM components(nodes => (1 + 2), edges => (SELECT a, b FROM e))"
         )
         .is_err());
+    }
+
+    #[test]
+    fn shortest_path_tvf_parses_graph_ref_with_scalar_named_args() {
+        // Required src/dst only.
+        let table = parse_table("SELECT * FROM shortest_path(g, src => 1, dst => 4)");
+        match table.source {
+            Some(TableSource::Function {
+                ref name,
+                ref args,
+                ref named_args,
+            }) => {
+                assert_eq!(name, "shortest_path");
+                assert_eq!(args, &vec!["g".to_string()]);
+                assert_eq!(named_args.len(), 2);
+                assert_eq!(named_args[0].0, "src");
+                assert!((named_args[0].1 - 1.0).abs() < f64::EPSILON);
+                assert_eq!(named_args[1].0, "dst");
+                assert!((named_args[1].1 - 4.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected shortest_path TVF source, got {other:?}"),
+        }
+
+        // Optional max_hops named argument is accepted alongside src/dst.
+        let table =
+            parse_table("SELECT * FROM shortest_path(g, src => 1, dst => 4, max_hops => 3)");
+        match table.source {
+            Some(TableSource::Function { ref named_args, .. }) => {
+                assert_eq!(named_args.len(), 3);
+                assert_eq!(named_args[2].0, "max_hops");
+                assert!((named_args[2].1 - 3.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected shortest_path TVF source, got {other:?}"),
+        }
     }
 
     #[test]
