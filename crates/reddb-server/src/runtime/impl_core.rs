@@ -1279,6 +1279,9 @@ fn is_graph_tvf_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case("louvain")
         || name.eq_ignore_ascii_case("degree_centrality")
         || name.eq_ignore_ascii_case("shortest_path")
+        || name.eq_ignore_ascii_case("betweenness")
+        || name.eq_ignore_ascii_case("eigenvector")
+        || name.eq_ignore_ascii_case("pagerank")
 }
 
 /// Reject any named arguments for a TVF that accepts none.
@@ -8794,7 +8797,72 @@ impl RedDBRuntime {
             }
             return Ok(result);
         }
-
+        // ── Centrality family (issue #797): each returns rows `(node_id,
+        // score)` over the abstract `(nodes, edges)` graph. Like the other
+        // graph TVFs the graph is treated as undirected and scores are
+        // deterministic; the inline-graph form shares this dispatch. ──
+        if name.eq_ignore_ascii_case("betweenness") {
+            reject_named_args(name, named_args)?;
+            return Ok(Self::centrality_result(graph_algorithms::betweenness(
+                &nodes, &edges,
+            )));
+        }
+        if name.eq_ignore_ascii_case("eigenvector") {
+            // Optional `max_iterations` (positive integer, default 100) and
+            // `tolerance` (finite, strictly positive, default 1e-6).
+            let mut max_iterations = 100_usize;
+            let mut tolerance = 1e-6_f64;
+            for (key, value) in named_args {
+                if key.eq_ignore_ascii_case("max_iterations") {
+                    max_iterations = parse_positive_iterations("eigenvector", value)?;
+                } else if key.eq_ignore_ascii_case("tolerance") {
+                    if !value.is_finite() || *value <= 0.0 {
+                        return Err(RedDBError::Query(format!(
+                            "table function 'eigenvector' tolerance must be > 0, got {value}"
+                        )));
+                    }
+                    tolerance = *value;
+                } else {
+                    return Err(RedDBError::Query(format!(
+                        "table function 'eigenvector' has no named argument '{key}' (expected 'max_iterations' or 'tolerance')"
+                    )));
+                }
+            }
+            return Ok(Self::centrality_result(graph_algorithms::eigenvector(
+                &nodes,
+                &edges,
+                max_iterations,
+                tolerance,
+            )));
+        }
+        if name.eq_ignore_ascii_case("pagerank") {
+            // Optional `damping` (in (0, 1), default 0.85) and `max_iterations`
+            // (positive integer, default 100).
+            let mut damping = 0.85_f64;
+            let mut max_iterations = 100_usize;
+            for (key, value) in named_args {
+                if key.eq_ignore_ascii_case("damping") {
+                    if !value.is_finite() || *value <= 0.0 || *value >= 1.0 {
+                        return Err(RedDBError::Query(format!(
+                            "table function 'pagerank' damping must be in (0, 1), got {value}"
+                        )));
+                    }
+                    damping = *value;
+                } else if key.eq_ignore_ascii_case("max_iterations") {
+                    max_iterations = parse_positive_iterations("pagerank", value)?;
+                } else {
+                    return Err(RedDBError::Query(format!(
+                        "table function 'pagerank' has no named argument '{key}' (expected 'damping' or 'max_iterations')"
+                    )));
+                }
+            }
+            return Ok(Self::centrality_result(graph_algorithms::pagerank(
+                &nodes,
+                &edges,
+                damping,
+                max_iterations,
+            )));
+        }
         Err(RedDBError::Query(format!("unknown table function: {name}")))
     }
 
@@ -8884,6 +8952,23 @@ impl RedDBRuntime {
             result.push(record);
         }
         Ok(result)
+    }
+
+    /// Project `(node_id, score)` centrality rows into a `UnifiedResult` with
+    /// columns `["node_id", "score"]`; scores are `Value::Float`.
+    fn centrality_result(
+        rows: Vec<(String, f64)>,
+    ) -> crate::storage::query::unified::UnifiedResult {
+        use crate::storage::query::unified::UnifiedResult;
+        use crate::storage::schema::Value;
+        let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "score".into()]);
+        for (node_id, score) in rows {
+            let mut record = UnifiedRecord::new();
+            record.set("node_id", Value::text(node_id));
+            record.set("score", Value::Float(score));
+            result.push(record);
+        }
+        result
     }
 
     /// Ultra-fast path: detect `SELECT * FROM table WHERE _entity_id = N` by string pattern
@@ -13056,6 +13141,20 @@ fn grant_to_iam_policy(
         return None;
     }
     Some(policy)
+}
+
+/// Coerce a `key => <number>` table-function named argument into a positive
+/// iteration count for the centrality TVFs (issue #797). The parser lexes all
+/// named values as `f64`, so an integral, finite, strictly-positive value is
+/// required here; anything else (fractional, zero, negative, NaN/inf) is a
+/// clear query error. `func` names the function for the message.
+fn parse_positive_iterations(func: &str, value: &f64) -> RedDBResult<usize> {
+    if !value.is_finite() || *value < 1.0 || value.fract() != 0.0 {
+        return Err(RedDBError::Query(format!(
+            "table function '{func}' max_iterations must be a positive integer, got {value}"
+        )));
+    }
+    Ok(*value as usize)
 }
 
 fn legacy_action_to_iam(action: crate::auth::privileges::Action) -> &'static str {

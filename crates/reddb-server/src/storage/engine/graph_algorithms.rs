@@ -597,6 +597,227 @@ pub fn shortest_path<N: Clone + Ord>(
     Some(result)
 }
 
+/// Build an undirected adjacency list indexed by the ascending node universe.
+///
+/// `adj[i]` lists each neighbour index of node `i`, sorted ascending and
+/// deduplicated (parallel edges collapse; self-loops are dropped — they never
+/// affect betweenness shortest paths and would distort degree counts). Edge
+/// weights are ignored: the centrality family below treats the graph as
+/// unweighted and undirected, matching `connected_components`. Returns the node
+/// universe alongside the adjacency so callers share one index assignment.
+fn undirected_adjacency<N: Clone + Ord>(
+    nodes: &[N],
+    edges: &[(N, N, Weight)],
+) -> (Vec<N>, Vec<Vec<usize>>) {
+    let ordered = node_universe(nodes, edges);
+    let n = ordered.len();
+    let mut index_of: BTreeMap<&N, usize> = BTreeMap::new();
+    for (i, node) in ordered.iter().enumerate() {
+        index_of.insert(node, i);
+    }
+    // BTreeSet per node keeps neighbours ascending and deduplicated, so BFS /
+    // matrix sweeps visit them in a fully reproducible order.
+    let mut sets: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for (a, b, _w) in edges {
+        let ia = index_of[a];
+        let ib = index_of[b];
+        if ia == ib {
+            continue; // self-loop: irrelevant to undirected centrality.
+        }
+        sets[ia].insert(ib);
+        sets[ib].insert(ia);
+    }
+    let adj: Vec<Vec<usize>> = sets.into_iter().map(|s| s.into_iter().collect()).collect();
+    (ordered, adj)
+}
+
+/// Betweenness centrality over an abstract undirected, unweighted graph using
+/// Brandes' algorithm.
+///
+/// Inputs mirror [`connected_components`]: `nodes` declares the universe and
+/// `edges` are treated as UNDIRECTED (weights ignored; endpoints absent from
+/// `nodes` still join the universe). The score of node `v` is the number of
+/// shortest paths between all other unordered pairs `{s, t}` that pass through
+/// `v`. Each unordered pair is counted once (the raw directed accumulation is
+/// halved), so an isolated node and both endpoints of a bridge score `0.0`.
+///
+/// Output: one `(node, score)` pair per distinct node, ordered by node
+/// ascending.
+///
+/// Determinism (guaranteed and tested): the node universe is a sorted, deduped
+/// `BTreeSet`; BFS explores neighbours in ascending index order; the
+/// accumulation visits vertices in reverse-BFS-distance order with stable
+/// per-level ordering. Identical input always produces identical output.
+pub fn betweenness<N: Clone + Ord>(nodes: &[N], edges: &[(N, N, Weight)]) -> Vec<(N, f64)> {
+    let (ordered, adj) = undirected_adjacency(nodes, edges);
+    let n = ordered.len();
+    let mut cb = vec![0.0f64; n];
+
+    for s in 0..n {
+        // Single-source shortest-path counting (unweighted -> BFS).
+        let mut stack: Vec<usize> = Vec::with_capacity(n);
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut sigma = vec![0.0f64; n]; // # shortest s->v paths.
+        let mut dist = vec![-1i64; n];
+        sigma[s] = 1.0;
+        dist[s] = 0;
+        let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        queue.push_back(s);
+        while let Some(v) = queue.pop_front() {
+            stack.push(v);
+            for &w in &adj[v] {
+                // First time we reach w: record its distance and enqueue.
+                if dist[w] < 0 {
+                    dist[w] = dist[v] + 1;
+                    queue.push_back(w);
+                }
+                // w found on a shortest path via v.
+                if dist[w] == dist[v] + 1 {
+                    sigma[w] += sigma[v];
+                    preds[w].push(v);
+                }
+            }
+        }
+        // Back-propagation of dependencies (Brandes accumulation).
+        let mut delta = vec![0.0f64; n];
+        while let Some(w) = stack.pop() {
+            for &v in &preds[w] {
+                delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
+            }
+            if w != s {
+                cb[w] += delta[w];
+            }
+        }
+    }
+
+    // Undirected graphs count every unordered pair twice in the directed
+    // accumulation above, so halve to recover the conventional score.
+    let mut result: Vec<(N, f64)> = Vec::with_capacity(n);
+    for (i, node) in ordered.iter().enumerate() {
+        result.push((node.clone(), cb[i] / 2.0));
+    }
+    result
+}
+
+/// Eigenvector centrality over an abstract undirected, unweighted graph via
+/// power iteration on the adjacency matrix.
+///
+/// `max_iterations` caps the power-iteration sweeps; `tolerance` is the L1
+/// convergence threshold on successive (normalised) iterates. The returned
+/// vector is L2-normalised, so every score lies in `[0, 1]` and the
+/// Perron–Frobenius principal eigenvector is non-negative. An isolated node
+/// (no incident edges) scores `0.0` whenever the graph has any edges; an
+/// edgeless graph has no well-defined dominant eigenvector, so every node gets
+/// the uniform value `1/√n` (still L2-normalised).
+///
+/// Output: one `(node, score)` pair per distinct node, ordered by node
+/// ascending. Deterministic: fixed uniform start vector, ascending sweep order,
+/// sign fixed non-negative by construction.
+pub fn eigenvector<N: Clone + Ord>(
+    nodes: &[N],
+    edges: &[(N, N, Weight)],
+    max_iterations: usize,
+    tolerance: f64,
+) -> Vec<(N, f64)> {
+    let (ordered, adj) = undirected_adjacency(nodes, edges);
+    let n = ordered.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let has_edges = adj.iter().any(|row| !row.is_empty());
+    let mut x = vec![1.0f64 / (n as f64).sqrt(); n];
+    if !has_edges {
+        // No dominant eigenvector: fall back to the uniform unit vector.
+        return ordered.into_iter().zip(x).collect();
+    }
+
+    for _ in 0..max_iterations {
+        // y = (I + A)·x. The identity shift keeps the same principal
+        // eigenvector as A while making every eigenvalue positive, so power
+        // iteration converges on BIPARTITE graphs too (plain A·x oscillates
+        // there because its spectrum is symmetric about zero). Connected nodes
+        // grow by the dominant factor each sweep while isolated nodes grow by
+        // 1, so after normalisation isolated nodes still decay to 0.
+        let mut y = vec![0.0f64; n];
+        for i in 0..n {
+            let mut acc = x[i];
+            for &j in &adj[i] {
+                acc += x[j];
+            }
+            y[i] = acc;
+        }
+        // Normalise to unit L2 norm; non-negative start keeps the sign fixed.
+        let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm == 0.0 {
+            break;
+        }
+        for v in y.iter_mut() {
+            *v /= norm;
+        }
+        let diff: f64 = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).sum();
+        x = y;
+        if diff < tolerance {
+            break;
+        }
+    }
+
+    ordered.into_iter().zip(x).collect()
+}
+
+/// PageRank over an abstract undirected, unweighted graph.
+///
+/// Edges are treated as UNDIRECTED — each edge contributes an out-link in both
+/// directions. `damping` is the classic teleport factor (0.85 at the call
+/// site); `max_iterations` caps the sweeps. Rank mass from dangling nodes
+/// (degree 0) is redistributed uniformly each iteration, so the returned scores
+/// always sum to `1.0`. Every score is strictly positive (≥ the teleport floor
+/// `(1−damping)/n`), so an isolated node receives exactly that boundary share.
+///
+/// Output: one `(node, score)` pair per distinct node, ordered by node
+/// ascending. Deterministic: fixed uniform start, ascending sweep order, fixed
+/// iteration cap. Identical input always produces identical output.
+pub fn pagerank<N: Clone + Ord>(
+    nodes: &[N],
+    edges: &[(N, N, Weight)],
+    damping: f64,
+    max_iterations: usize,
+) -> Vec<(N, f64)> {
+    let (ordered, adj) = undirected_adjacency(nodes, edges);
+    let n = ordered.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let nf = n as f64;
+    let degree: Vec<f64> = adj.iter().map(|row| row.len() as f64).collect();
+    let mut rank = vec![1.0f64 / nf; n];
+    let teleport = (1.0 - damping) / nf;
+
+    for _ in 0..max_iterations {
+        // Mass held by dangling (degree-0) nodes is spread uniformly.
+        let dangling: f64 = (0..n).filter(|&i| degree[i] == 0.0).map(|i| rank[i]).sum();
+        let mut next = vec![teleport + damping * dangling / nf; n];
+        for i in 0..n {
+            if degree[i] == 0.0 {
+                continue;
+            }
+            let share = damping * rank[i] / degree[i];
+            for &j in &adj[i] {
+                next[j] += share;
+            }
+        }
+        rank = next;
+    }
+
+    // Renormalise to defend against floating-point drift so scores sum to 1.0.
+    let total: f64 = rank.iter().sum();
+    if total > 0.0 {
+        for r in rank.iter_mut() {
+            *r /= total;
+        }
+    }
+    ordered.into_iter().zip(rank).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1137,6 +1358,146 @@ mod tests {
         );
     }
 
+    // ── Centrality family: betweenness / eigenvector / pagerank (issue #797) ──
+
+    /// Default power-iteration cap and tolerance for eigenvector tests.
+    const EIG_ITERS: usize = 200;
+    const EIG_TOL: f64 = 1e-10;
+    /// Classic PageRank damping and a generous iteration cap for convergence.
+    const PR_DAMPING: f64 = 0.85;
+    const PR_ITERS: usize = 200;
+
+    fn map_of(rows: Vec<(String, f64)>) -> BTreeMap<String, f64> {
+        rows.into_iter().collect()
+    }
+
+    /// An undirected star K1,3: centre "c" joined to leaves "l1","l2","l3".
+    fn star() -> (Vec<String>, Vec<(String, String, Weight)>) {
+        let nodes: Vec<String> = ["c", "l1", "l2", "l3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let edges = vec![w("c", "l1"), w("c", "l2"), w("c", "l3")];
+        (nodes, edges)
+    }
+
+    /// An undirected path P3: a - b - c.
+    fn path3() -> (Vec<String>, Vec<(String, String, Weight)>) {
+        let nodes: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![w("a", "b"), w("b", "c")];
+        (nodes, edges)
+    }
+
+    /// A triangle K3 over a,b,c — fully symmetric.
+    fn triangle() -> (Vec<String>, Vec<(String, String, Weight)>) {
+        let nodes: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![w("a", "b"), w("b", "c"), w("c", "a")];
+        (nodes, edges)
+    }
+
+    // ── betweenness golden + properties ──
+
+    #[test]
+    fn betweenness_golden_star_centre_carries_all_pairs() {
+        // In K1,3 every shortest path between two leaves passes through the
+        // centre. There are C(3,2) = 3 leaf pairs, so centre = 3.0 and each
+        // leaf = 0.0 (no pair routes through a leaf).
+        let (nodes, edges) = star();
+        let got = map_of(betweenness(&nodes, &edges));
+        assert!(
+            (got["c"] - 3.0).abs() < 1e-9,
+            "centre = 3.0, got {}",
+            got["c"]
+        );
+        for leaf in ["l1", "l2", "l3"] {
+            assert!(got[leaf].abs() < 1e-9, "{leaf} = 0.0, got {}", got[leaf]);
+        }
+    }
+
+    #[test]
+    fn betweenness_golden_path_middle_is_one() {
+        // On a - b - c only the pair {a, c} routes through b, so b = 1.0 and
+        // the two endpoints score 0.0.
+        let (nodes, edges) = path3();
+        let got = map_of(betweenness(&nodes, &edges));
+        assert!(
+            (got["b"] - 1.0).abs() < 1e-9,
+            "middle = 1.0, got {}",
+            got["b"]
+        );
+        assert!(got["a"].abs() < 1e-9);
+        assert!(got["c"].abs() < 1e-9);
+    }
+
+    #[test]
+    fn betweenness_isolated_node_scores_zero() {
+        let nodes: Vec<String> = ["a", "b", "iso"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![w("a", "b")];
+        let got = map_of(betweenness(&nodes, &edges));
+        assert!(got["iso"].abs() < 1e-9, "isolated node scores 0.0");
+        // A single edge contributes no intermediary, so its endpoints are 0 too.
+        assert!(got["a"].abs() < 1e-9);
+        assert!(got["b"].abs() < 1e-9);
+    }
+
+    #[test]
+    fn betweenness_empty_graph_is_empty() {
+        let empty: Vec<String> = Vec::new();
+        assert!(betweenness(&empty, &[]).is_empty());
+    }
+
+    // ── eigenvector golden + properties ──
+
+    #[test]
+    fn eigenvector_golden_path3_known_vector() {
+        // The path P3 adjacency has principal eigenvector (1, √2, 1); L2
+        // normalised that is (0.5, 1/√2, 0.5).
+        let (nodes, edges) = path3();
+        let got = map_of(eigenvector(&nodes, &edges, EIG_ITERS, EIG_TOL));
+        let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
+        assert!(
+            (got["b"] - inv_sqrt2).abs() < 1e-6,
+            "centre {} ~ {inv_sqrt2}",
+            got["b"]
+        );
+        assert!(
+            (got["a"] - 0.5).abs() < 1e-6,
+            "endpoint a {} ~ 0.5",
+            got["a"]
+        );
+        assert!(
+            (got["c"] - 0.5).abs() < 1e-6,
+            "endpoint c {} ~ 0.5",
+            got["c"]
+        );
+        // L2-normalised: Σ x² = 1.
+        let sumsq: f64 = got.values().map(|v| v * v).sum();
+        assert!((sumsq - 1.0).abs() < 1e-6, "unit L2 norm, got {sumsq}");
+    }
+
+    #[test]
+    fn eigenvector_golden_triangle_all_equal() {
+        // K3 is vertex-transitive, so all three scores equal 1/√3.
+        let (nodes, edges) = triangle();
+        let got = map_of(eigenvector(&nodes, &edges, EIG_ITERS, EIG_TOL));
+        let expect = 1.0 / 3.0_f64.sqrt();
+        for k in ["a", "b", "c"] {
+            assert!((got[k] - expect).abs() < 1e-6, "{k} = 1/√3, got {}", got[k]);
+        }
+    }
+
+    #[test]
+    fn eigenvector_isolated_node_scores_zero() {
+        let nodes: Vec<String> = ["a", "b", "iso"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![w("a", "b")];
+        let got = map_of(eigenvector(&nodes, &edges, EIG_ITERS, EIG_TOL));
+        assert!(
+            got["iso"].abs() < 1e-9,
+            "isolated node scores 0.0, got {}",
+            got["iso"]
+        );
+    }
+
     #[test]
     fn shortest_path_parallel_edges_take_minimum() {
         // Two parallel a-b edges (weight 5 and weight 2): the min wins.
@@ -1162,6 +1523,72 @@ mod tests {
             let edges = prop::collection::vec(edge, 0..14);
             (Just(ids), edges)
         })
+    }
+
+    #[test]
+    fn eigenvector_edgeless_graph_is_uniform_unit() {
+        let nodes: Vec<String> = ["x", "y", "z", "q"].iter().map(|s| s.to_string()).collect();
+        let got = map_of(eigenvector(&nodes, &[], EIG_ITERS, EIG_TOL));
+        let expect = 1.0 / 4.0_f64.sqrt();
+        for k in ["x", "y", "z", "q"] {
+            assert!((got[k] - expect).abs() < 1e-9, "uniform 1/√n");
+        }
+    }
+
+    // ── pagerank golden + properties ──
+
+    #[test]
+    fn pagerank_golden_triangle_all_equal() {
+        // K3 is symmetric, so PageRank is uniform 1/3 regardless of damping.
+        let (nodes, edges) = triangle();
+        let got = map_of(pagerank(&nodes, &edges, PR_DAMPING, PR_ITERS));
+        for k in ["a", "b", "c"] {
+            assert!(
+                (got[k] - 1.0 / 3.0).abs() < 1e-9,
+                "{k} = 1/3, got {}",
+                got[k]
+            );
+        }
+        let sum: f64 = got.values().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "sums to 1");
+    }
+
+    #[test]
+    fn pagerank_golden_star_centre_ranks_highest() {
+        // In K1,3 the centre collects rank from all three leaves and outranks
+        // every (symmetric) leaf; the leaves share one rank.
+        let (nodes, edges) = star();
+        let got = map_of(pagerank(&nodes, &edges, PR_DAMPING, PR_ITERS));
+        for leaf in ["l1", "l2", "l3"] {
+            assert!(got["c"] > got[leaf], "centre outranks {leaf}");
+            assert!((got[leaf] - got["l1"]).abs() < 1e-9, "leaves share rank");
+        }
+        let sum: f64 = got.values().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "sums to 1");
+    }
+
+    #[test]
+    fn pagerank_isolated_node_gets_teleport_floor() {
+        let nodes: Vec<String> = ["a", "b", "iso"].iter().map(|s| s.to_string()).collect();
+        let edges = vec![w("a", "b")];
+        let got = map_of(pagerank(&nodes, &edges, PR_DAMPING, PR_ITERS));
+        let sum: f64 = got.values().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "sums to 1");
+        // Every node clears the teleport floor (1-d)/n.
+        let floor = (1.0 - PR_DAMPING) / 3.0;
+        for v in got.values() {
+            assert!(*v + 1e-12 >= floor, "score {v} >= floor {floor}");
+        }
+        // The isolated node ranks below both connected nodes.
+        assert!(got["iso"] < got["a"]);
+        assert!(got["iso"] < got["b"]);
+    }
+
+    #[test]
+    fn centrality_empty_graph_all_empty() {
+        let empty: Vec<String> = Vec::new();
+        assert!(eigenvector(&empty, &[], EIG_ITERS, EIG_TOL).is_empty());
+        assert!(pagerank(&empty, &[], PR_DAMPING, PR_ITERS).is_empty());
     }
 
     proptest! {
@@ -1249,6 +1676,83 @@ mod tests {
                 let p2 = shortest_path(&nodes, &edges, a, b, None);
                 prop_assert_eq!(p1, p2);
             }
+        }
+
+        // betweenness: one row per node; all scores >= 0; isolated nodes (no
+        // incident edge) score exactly 0; deterministic across runs.
+        #[test]
+        fn betweenness_range_isolation_and_determinism((nodes, edges) in graph_strategy()) {
+            let rows = betweenness(&nodes, &edges);
+
+            let mut universe: BTreeSet<String> = BTreeSet::new();
+            for n in &nodes { universe.insert(n.clone()); }
+            for (a, b, _) in &edges { universe.insert(a.clone()); universe.insert(b.clone()); }
+            prop_assert_eq!(rows.len(), universe.len());
+
+            // Degrees (undirected, self-loops excluded).
+            let mut deg: BTreeMap<String, usize> = BTreeMap::new();
+            for n in &universe { deg.insert(n.clone(), 0); }
+            for (a, b, _) in &edges {
+                if a != b {
+                    *deg.get_mut(a).unwrap() += 1;
+                    *deg.get_mut(b).unwrap() += 1;
+                }
+            }
+            for (node, score) in &rows {
+                prop_assert!(*score >= -1e-9, "score {} >= 0", score);
+                if deg[node] == 0 {
+                    prop_assert!(score.abs() < 1e-9, "isolated {} scores 0", node);
+                }
+            }
+
+            prop_assert_eq!(betweenness(&nodes, &edges), rows);
+        }
+
+        // eigenvector: L2-normalised (Σx² ≈ 1), every score in [0, 1], and an
+        // isolated node scores 0 whenever the graph has any edge. Deterministic.
+        #[test]
+        fn eigenvector_unit_norm_range_and_isolation((nodes, edges) in graph_strategy()) {
+            let rows = eigenvector(&nodes, &edges, EIG_ITERS, EIG_TOL);
+            prop_assume!(!rows.is_empty());
+
+            let sumsq: f64 = rows.iter().map(|(_, v)| v * v).sum();
+            prop_assert!((sumsq - 1.0).abs() < 1e-6, "unit L2 norm, got {}", sumsq);
+
+            let mut deg: BTreeMap<String, usize> = BTreeMap::new();
+            for (n, _) in &rows { deg.insert(n.clone(), 0); }
+            for (a, b, _) in &edges {
+                if a != b {
+                    *deg.get_mut(a).unwrap() += 1;
+                    *deg.get_mut(b).unwrap() += 1;
+                }
+            }
+            let has_edges = deg.values().any(|d| *d > 0);
+            for (node, score) in &rows {
+                prop_assert!(*score >= -1e-9 && *score <= 1.0 + 1e-9, "score {} in [0,1]", score);
+                if has_edges && deg[node] == 0 {
+                    prop_assert!(score.abs() < 1e-6, "isolated {} ~ 0", node);
+                }
+            }
+
+            prop_assert_eq!(eigenvector(&nodes, &edges, EIG_ITERS, EIG_TOL), rows);
+        }
+
+        // pagerank: scores sum to ~1, every score >= the teleport floor
+        // (1-d)/n (so strictly positive), and the result is deterministic.
+        #[test]
+        fn pagerank_sums_to_one_floor_and_determinism((nodes, edges) in graph_strategy()) {
+            let rows = pagerank(&nodes, &edges, PR_DAMPING, PR_ITERS);
+            prop_assume!(!rows.is_empty());
+
+            let sum: f64 = rows.iter().map(|(_, v)| v).sum();
+            prop_assert!((sum - 1.0).abs() < 1e-9, "PageRank sums to 1, got {}", sum);
+
+            let floor = (1.0 - PR_DAMPING) / rows.len() as f64;
+            for (_, score) in &rows {
+                prop_assert!(*score + 1e-12 >= floor, "score {} >= floor {}", score, floor);
+            }
+
+            prop_assert_eq!(pagerank(&nodes, &edges, PR_DAMPING, PR_ITERS), rows);
         }
     }
 }

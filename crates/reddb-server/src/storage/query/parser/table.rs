@@ -153,9 +153,13 @@ impl<'a> Parser<'a> {
         let mut subquery_args: Vec<(String, QueryExpr)> = Vec::new();
         loop {
             // Each argument starts with an identifier (the positional value or
-            // the named-argument key).
+            // the named-argument key). A handful of named-argument keys lex as
+            // reserved keywords (e.g. `max_iterations`); accept those here so
+            // the centrality TVFs (issue #797) can name them, mapping the token
+            // back to its lowercase identifier spelling.
             let ident = match self.advance()? {
                 Token::Ident(arg) => arg,
+                Token::MaxIterations => "max_iterations".to_string(),
                 other => {
                     return Err(ParseError::expected(
                         vec!["table function argument identifier"],
@@ -1659,6 +1663,61 @@ mod tests {
                 assert!((named_args[2].1 - 3.0).abs() < f64::EPSILON);
             }
             other => panic!("expected shortest_path TVF source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn centrality_tvfs_parse_positional_and_named_args() {
+        // Bare positional form for each centrality TVF (issue #797). These flow
+        // through the generic `ident(args)` path (not a dedicated keyword), so
+        // the parser records them as a `TableSource::Function`.
+        for name in ["betweenness", "eigenvector", "pagerank"] {
+            let table = parse_table(&format!("SELECT * FROM {name}(g)"));
+            match table.source {
+                Some(TableSource::Function {
+                    name: ref got,
+                    ref args,
+                    ref named_args,
+                }) => {
+                    assert_eq!(got, name);
+                    assert_eq!(args, &vec!["g".to_string()]);
+                    assert!(named_args.is_empty());
+                }
+                other => panic!("expected {name} TVF source, got {other:?}"),
+            }
+        }
+
+        // eigenvector(<graph>, max_iterations => <i64>, tolerance => <f64>).
+        let table =
+            parse_table("SELECT * FROM eigenvector(g, max_iterations => 50, tolerance => 0.0001)");
+        match table.source {
+            Some(TableSource::Function { ref named_args, .. }) => {
+                assert_eq!(named_args.len(), 2);
+                assert_eq!(named_args[0].0, "max_iterations");
+                assert!((named_args[0].1 - 50.0).abs() < f64::EPSILON);
+                assert_eq!(named_args[1].0, "tolerance");
+                assert!((named_args[1].1 - 0.0001).abs() < f64::EPSILON);
+            }
+            other => panic!("expected eigenvector TVF source, got {other:?}"),
+        }
+
+        // pagerank(<graph>, damping => <f64>, max_iterations => <i64>).
+        let table =
+            parse_table("SELECT * FROM pagerank(g, damping => 0.85, max_iterations => 100)");
+        match table.source {
+            Some(TableSource::Function {
+                ref args,
+                ref named_args,
+                ..
+            }) => {
+                assert_eq!(args, &vec!["g".to_string()]);
+                assert_eq!(named_args.len(), 2);
+                assert_eq!(named_args[0].0, "damping");
+                assert!((named_args[0].1 - 0.85).abs() < f64::EPSILON);
+                assert_eq!(named_args[1].0, "max_iterations");
+                assert!((named_args[1].1 - 100.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected pagerank TVF source, got {other:?}"),
         }
     }
 
