@@ -17,6 +17,7 @@ pub mod query;
 pub(crate) mod query_payload;
 pub mod schema;
 pub(crate) mod serverless_payload;
+pub mod topology_collections;
 pub mod tree;
 pub(crate) mod ttl_payload;
 pub mod vcs;
