@@ -261,7 +261,11 @@ impl RedDBRuntime {
         let contract = if query.collection_model == CollectionModel::Metrics {
             metrics_collection_contract(query)
         } else {
-            keyed_collection_contract(&query.name, query.collection_model)
+            keyed_collection_contract(
+                &query.name,
+                query.collection_model,
+                query.analytics_config.clone(),
+            )
         };
         self.inner
             .db
@@ -354,6 +358,7 @@ impl RedDBRuntime {
             tenant_by: None,
             append_only: false,
             subscriptions: Vec::new(),
+            analytics_config: Vec::new(),
             vault_own_master_key: false,
         };
         let result = self.execute_create_table(raw_query, &create)?;
@@ -1649,6 +1654,7 @@ fn collection_contract_from_create_table(
         metrics_namespace: None,
         append_only: query.append_only,
         subscriptions: query.subscriptions.clone(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
@@ -1681,6 +1687,7 @@ fn default_collection_contract_for_existing_table(
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
@@ -1690,6 +1697,7 @@ fn default_collection_contract_for_existing_table(
 fn keyed_collection_contract(
     name: &str,
     model: crate::catalog::CollectionModel,
+    analytics_config: Vec<crate::catalog::AnalyticsViewDescriptor>,
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
@@ -1714,6 +1722,7 @@ fn keyed_collection_contract(
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        analytics_config,
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
@@ -1749,6 +1758,7 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
         metrics_namespace: Some("default".to_string()),
         append_only: true,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
@@ -1779,6 +1789,7 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
@@ -2339,6 +2350,7 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         metrics_namespace: None,
         append_only: true,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
