@@ -219,6 +219,21 @@ pub(super) fn scan_runtime_table_source_records_limited(
         return Ok(records);
     }
 
+    // Issue #806 — the unbounded sequential scan flows through the
+    // bounded-memory streaming channel. Collecting the stream reproduces
+    // the previous `Vec` exactly (same materializer, same scan order)
+    // while giving streaming consumers an O(chunk) resident set. The
+    // limited path below keeps its early-stop loop so `SELECT * … LIMIT N`
+    // still stops scanning as soon as it has N rows.
+    if limit.is_none() {
+        return stream_runtime_table_source_scan(
+            db,
+            table,
+            crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK,
+        )?
+        .collect_records();
+    }
+
     // Sequential path — short-circuits at `limit` rows so an unfiltered
     // SELECT * LIMIT 100 on a 1M-row table doesn't build the whole set
     // before truncating.
@@ -246,6 +261,75 @@ pub(super) fn scan_runtime_table_source_records_limited(
         true
     });
     Ok(records)
+}
+
+/// Issue #806 — bounded-memory streaming scan for the unfiltered
+/// full-table `SELECT *`.
+///
+/// Collects the visible entity *handles* once (the same cheap working
+/// set the parallel scan path already builds), then converts each to a
+/// [`UnifiedRecord`] lazily, so a streaming consumer holds only one
+/// chunk at a time rather than the whole table. The rows are produced by
+/// the same materializer and in the same scan order as the sequential
+/// [`scan_runtime_table_source_records_limited`] path, so collecting the
+/// stream reproduces the previous materialized result byte-for-byte.
+/// Non-row entities that the materializer cannot render are skipped,
+/// matching the sequential path's `if let Some(record)` filter.
+pub(crate) fn stream_runtime_table_source_scan(
+    db: &RedDB,
+    table: &str,
+    high_water_mark: usize,
+) -> RedDBResult<super::query_exec::RowStream> {
+    use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
+
+    let manager = db
+        .store()
+        .get_collection(table)
+        .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
+    let schema = manager.column_schema();
+    let table_name = table.to_string();
+
+    let table_row_resolver = TableRowMvccReadResolver::current_statement();
+    let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> = Vec::new();
+    manager.for_each_entity(|entity| {
+        if table_row_resolver.resolve_read_candidate(entity).is_some() {
+            entities.push(entity.clone());
+        }
+        true
+    });
+
+    // Columns mirror `collect_visible_columns`'s uniform-schema fast path:
+    // sample the first materialized row's column set.
+    let columns: Vec<String> = entities
+        .first()
+        .and_then(|entity| {
+            runtime_table_record_from_entity_ref_with_schema(entity, schema.as_ref())
+        })
+        .map(|mut record| {
+            set_source_collection(&mut record, &table_name);
+            record
+                .column_names()
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let map_schema = schema.clone();
+    let map_table = table_name.clone();
+    let source = entities.into_iter().filter_map(move |entity| {
+        let mut record =
+            runtime_table_record_from_entity_ref_with_schema(&entity, map_schema.as_ref())?;
+        set_source_collection(&mut record, &map_table);
+        Some(Ok(record))
+    });
+
+    Ok(super::query_exec::RowStream::from_lazy(
+        columns,
+        crate::storage::query::unified::QueryStats::default(),
+        high_water_mark,
+        Box::new(source),
+    ))
 }
 
 /// Scan with bloom filter optimization: when we know the exact key we're looking for,
