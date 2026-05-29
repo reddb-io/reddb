@@ -383,6 +383,17 @@ impl RedDBServer {
                 }
                 self.handle_replication_status()
             }
+
+            // Topology graph (#803) — built-in `red.topology.cluster` analytics,
+            // aggregated into the PRD #794 nodes/edges/groups/metadata document.
+            ("GET", "/v1/topology/graph") => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(&headers, "ops:read:cluster", "topology-graph")
+                {
+                    return deny;
+                }
+                self.handle_topology_graph()
+            }
             ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),
 
             // PLAN.md Phase 1 — universal lifecycle/health contract.
