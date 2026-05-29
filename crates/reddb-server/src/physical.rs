@@ -399,6 +399,10 @@ pub struct CollectionContract {
     /// Declarative subscriptions created by `WITH EVENTS`. This is
     /// metadata only in #291; event emission is wired by the outbox slice.
     pub subscriptions: Vec<crate::catalog::SubscriptionDescriptor>,
+    /// Analytics views declared by `CREATE GRAPH ... WITH ANALYTICS (...)`.
+    /// Persisted as part of the contract so each enabled `<graph>.<output>`
+    /// virtual view survives restarts and crash recovery (issue #800).
+    pub analytics_config: Vec<crate::catalog::AnalyticsViewDescriptor>,
     /// `CREATE TIMESERIES ... WITH SESSION_KEY <col>` — the column the
     /// `SESSIONIZE` operator partitions by when no key is supplied at
     /// query-time. `None` for non-timeseries collections and for
