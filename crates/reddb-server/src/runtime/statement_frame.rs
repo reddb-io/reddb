@@ -373,7 +373,10 @@ impl StatementExecutionFrame {
             // result would hide it. Skip caching entirely.
             && result.statement != "queue_group_read"
             && result.result.pre_serialized_json.is_none()
-            && result.result.records.len() <= 5
+            // Graph-analytics TVF output (issue #802) is deterministic and
+            // expensive to recompute, so it is cached at any row count. The
+            // ≤5-row heuristic only bounds payload size for ordinary SELECTs.
+            && (is_graph_tvf_engine(result.engine) || result.result.records.len() <= 5)
     }
 
     pub(super) fn read_result_cache(&self, runtime: &RedDBRuntime) -> Option<RuntimeQueryResult> {
@@ -910,6 +913,14 @@ impl RedDBRuntime {
         let in_own_tx = self.inner.tx_contexts.read().contains_key(&conn_id);
         !has_active_xids && !in_own_tx
     }
+}
+
+/// Whether a result's `engine` tag is one of the graph-analytics TVF
+/// executors (issue #802). Graph-collection (`louvain(g)`) and inline
+/// (`louvain(nodes => …, edges => …)`) forms both produce deterministic
+/// algorithm output that is cached regardless of row count.
+fn is_graph_tvf_engine(engine: &str) -> bool {
+    matches!(engine, "runtime-graph-tvf" | "runtime-graph-tvf-inline")
 }
 
 fn result_cache_key(query: &str) -> String {
