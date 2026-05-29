@@ -40,9 +40,9 @@ use crate::runtime::RedDBRuntime;
 use crate::serde_json::{self, Value as JsonValue};
 use reddb_wire::redwire::frame::{Frame, MessageKind};
 
-use crate::server::output_stream::{Clock, OpenStreamError, StreamConfig, StreamLease};
 use super::output_stream::RegisterError;
 use super::FrameBuilder;
+use crate::server::output_stream::{Clock, OpenStreamError, StreamConfig, StreamLease};
 
 /// `true` when an `OpenStream` payload requests the input direction
 /// (`{"direction":"in", ...}`). Any other value — including a missing
@@ -107,8 +107,7 @@ impl OpenInputParseError {
 
 pub fn parse_open_input(payload: &[u8]) -> Result<OpenInputRequest, OpenInputParseError> {
     use crate::server::handlers_query::is_safe_sql_identifier;
-    let v: JsonValue =
-        serde_json::from_slice(payload).map_err(|_| OpenInputParseError::NotJson)?;
+    let v: JsonValue = serde_json::from_slice(payload).map_err(|_| OpenInputParseError::NotJson)?;
     let obj = v.as_object().ok_or(OpenInputParseError::NotObject)?;
     let target = obj
         .get("target")
@@ -241,9 +240,12 @@ impl InputStreamState {
         // keys become NULL), matching the S4 `parse_row_frame` shape.
         let mut positional: Vec<Vec<JsonValue>> = Vec::with_capacity(rows.len());
         for row in rows {
-            let obj = row
-                .as_object()
-                .ok_or_else(|| ("invalid_row".to_string(), "row must be a JSON object".to_string()))?;
+            let obj = row.as_object().ok_or_else(|| {
+                (
+                    "invalid_row".to_string(),
+                    "row must be a JSON object".to_string(),
+                )
+            })?;
             let mut values = Vec::with_capacity(self.columns.len());
             for col in &self.columns {
                 values.push(obj.get(col).cloned().unwrap_or(JsonValue::Null));
@@ -365,10 +367,7 @@ pub fn build_input_stream_error_payload(
         "message".to_string(),
         JsonValue::String(message.to_string()),
     );
-    obj.insert(
-        "chunk_seq".to_string(),
-        JsonValue::Number(chunk_seq as f64),
-    );
+    obj.insert("chunk_seq".to_string(), JsonValue::Number(chunk_seq as f64));
     obj.insert(
         "recoverable_rid".to_string(),
         JsonValue::Number(recoverable_rid as f64),
@@ -583,9 +582,15 @@ mod tests {
         let stats = v.as_object().unwrap().get("stats").unwrap();
         assert_eq!(stats.get("row_count").and_then(|x| x.as_u64()), Some(3));
         assert_eq!(stats.get("chunk_count").and_then(|x| x.as_u64()), Some(2));
-        assert_eq!(stats.get("committed_rid").and_then(|x| x.as_u64()), Some(42));
+        assert_eq!(
+            stats.get("committed_rid").and_then(|x| x.as_u64()),
+            Some(42)
+        );
         assert_eq!(stats.get("snapshot_lsn").and_then(|x| x.as_u64()), Some(40));
-        assert_eq!(stats.get("cancelled").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(
+            stats.get("cancelled").and_then(|x| x.as_bool()),
+            Some(false)
+        );
     }
 
     #[test]
@@ -593,7 +598,10 @@ mod tests {
         let bytes = build_input_stream_error_payload("invalid_row", "bad", 2, 41);
         let v: JsonValue = serde_json::from_slice(&bytes).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.get("code").and_then(|x| x.as_str()), Some("invalid_row"));
+        assert_eq!(
+            obj.get("code").and_then(|x| x.as_str()),
+            Some("invalid_row")
+        );
         assert_eq!(obj.get("chunk_seq").and_then(|x| x.as_u64()), Some(2));
         assert_eq!(
             obj.get("recoverable_rid").and_then(|x| x.as_u64()),
