@@ -15,6 +15,7 @@ mod hybrid;
 mod indexed_scan;
 mod join;
 mod json_writers;
+mod row_stream;
 mod table;
 mod vector;
 
@@ -44,7 +45,26 @@ use table::{
     RuntimeTableExecutionContext,
 };
 
+pub(crate) use row_stream::{RowStream, DEFAULT_HIGH_WATER_MARK};
+
+/// Public table-query entry. Produces its result through the #806
+/// bounded-memory streaming channel ([`RowStream`]) and collects the
+/// chunks internally, so the existing `/query` route consumes the new
+/// streaming path with no observable change. Ordering / snapshot /
+/// error semantics are unchanged: the underlying execution still runs
+/// under the statement snapshot, and a failure surfaces as the same
+/// `Err` it always did (the stream's terminal error frame maps back to
+/// it in `collect_unified`).
 pub(super) fn execute_runtime_table_query(
+    db: &RedDB,
+    query: &TableQuery,
+    index_store: Option<&super::index_store::IndexStore>,
+) -> RedDBResult<UnifiedResult> {
+    let materialized = execute_runtime_table_query_materialized(db, query, index_store)?;
+    RowStream::from_unified(materialized, DEFAULT_HIGH_WATER_MARK).collect_unified()
+}
+
+fn execute_runtime_table_query_materialized(
     db: &RedDB,
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
