@@ -1,112 +1,83 @@
-//! End-to-end test for the `components(<graph>)` table-valued function (#795).
+//! End-to-end test for issue #795: graph analytics `components(...)` TVF.
 //!
-//! Creates a graph with two disconnected subgraphs, runs
-//! `SELECT * FROM components(g)`, and asserts correct island assignment plus
-//! deterministic results across repeated runs.
+//! This test drives the full stack: it creates two disconnected subgraphs in
+//! the graph store via the real supported INSERT path (the same
+//! `create_graph_node` / `create_graph_edge` helpers used by
+//! `integration_graph_ops.rs`), runs `SELECT * FROM components(g)` through the
+//! runtime query path, and asserts the result groups nodes into exactly two
+//! islands with the correct membership.
+//!
+//! Known v0 limitation: the `components(<collection>)` argument is NOT resolved
+//! to a named collection. The TVF runs over the WHOLE graph store regardless of
+//! the argument value. Scoping the algorithm to a named collection is a
+//! follow-up. This test therefore puts both subgraphs in the single in-memory
+//! graph store and expects them to be discovered as two components.
 
 mod support;
 
-use reddb::storage::schema::Value;
-use reddb::RedDBRuntime;
-use std::collections::{BTreeMap, BTreeSet};
-use support::PersistentDbPath;
+use serde_json::Value;
+use std::collections::BTreeSet;
+use support::{create_graph_edge, create_graph_node, TestContext};
 
-/// Run the components TVF and return a map of node_id -> island_id.
-fn run_components(rt: &RedDBRuntime, graph: &str) -> BTreeMap<String, i64> {
-    let sql = format!("SELECT * FROM components({graph})");
-    let result = rt.execute_query(&sql).expect("components query");
-    let unified = result.result;
+/// Collect the distinct `island_id` values from a components result.
+fn distinct_islands(result: &reddb_io::storage::query::UnifiedResult) -> BTreeSet<i64> {
+    result
+        .rows()
+        .iter()
+        .filter_map(|row| row.get("island_id").and_then(Value::as_i64))
+        .collect()
+}
 
-    // SELECT * must return both columns.
-    assert_eq!(
-        unified.columns,
-        vec!["node_id".to_string(), "island_id".to_string()],
-        "columns must be node_id, island_id"
-    );
-
-    let mut map = BTreeMap::new();
-    for rec in &unified.records {
-        let node = match rec.get("node_id").expect("node_id present") {
-            Value::Text(s) => s.to_string(),
-            other => panic!("node_id should be Text, got {other:?}"),
-        };
-        let island = match rec.get("island_id").expect("island_id present") {
-            Value::Integer(n) => *n,
-            other => panic!("island_id should be Integer, got {other:?}"),
-        };
-        map.insert(node, island);
-    }
-    map
+/// Map node_id -> island_id for membership assertions.
+fn membership(
+    result: &reddb_io::storage::query::UnifiedResult,
+) -> std::collections::BTreeMap<String, i64> {
+    result
+        .rows()
+        .iter()
+        .filter_map(|row| {
+            let node = row.get("node_id").and_then(Value::as_str)?;
+            let island = row.get("island_id").and_then(Value::as_i64)?;
+            Some((node.to_string(), island))
+        })
+        .collect()
 }
 
 #[test]
-fn components_tvf_two_disconnected_subgraphs() {
-    let db = PersistentDbPath::new("issue_795_components_tvf");
-    let rt = db.open_runtime();
+fn components_tvf_groups_two_disconnected_subgraphs() {
+    let ctx = TestContext::new();
 
-    // Two disconnected subgraphs in one graph collection:
-    //   subgraph A: 1 - 2 - 3 connected
-    //   subgraph B: 4 - 5 connected
-    let n1 = make_node(&rt, "g", "1");
-    let n2 = make_node(&rt, "g", "2");
-    let n3 = make_node(&rt, "g", "3");
-    let n4 = make_node(&rt, "g", "4");
-    let n5 = make_node(&rt, "g", "5");
+    // Subgraph A: 1-2-3 mutually connected.
+    create_graph_node(&ctx, "1", "n");
+    create_graph_node(&ctx, "2", "n");
+    create_graph_node(&ctx, "3", "n");
+    create_graph_edge(&ctx, "1", "2");
+    create_graph_edge(&ctx, "2", "3");
 
-    make_edge(&rt, "g", &n1, &n2);
-    make_edge(&rt, "g", &n2, &n3);
-    make_edge(&rt, "g", &n4, &n5);
+    // Subgraph B: 4-5 connected.
+    create_graph_node(&ctx, "4", "n");
+    create_graph_node(&ctx, "5", "n");
+    create_graph_edge(&ctx, "4", "5");
 
-    let map = run_components(&rt, "g");
+    // Run the TVF.
+    let result = ctx.query("SELECT * FROM components(g)");
+    assert_eq!(result.engine, "runtime-graph-tvf");
+    assert_eq!(result.result.columns, vec!["node_id", "island_id"]);
+    assert_eq!(result.result.row_count(), 5);
 
-    // Exactly 5 nodes assigned.
-    assert_eq!(map.len(), 5, "all nodes assigned: {map:?}");
+    // Exactly two distinct island_ids.
+    let islands = distinct_islands(&result.result);
+    assert_eq!(islands.len(), 2, "expected two connected components");
 
-    // Exactly two distinct island ids.
-    let islands: BTreeSet<i64> = map.values().copied().collect();
-    assert_eq!(islands.len(), 2, "expected two islands, got {islands:?}");
+    // Correct membership grouping: {1,2,3} share an island; {4,5} share the
+    // other island; the two islands differ.
+    let m = membership(&result.result);
+    assert_eq!(m["1"], m["2"]);
+    assert_eq!(m["2"], m["3"]);
+    assert_eq!(m["4"], m["5"]);
+    assert_ne!(m["1"], m["4"]);
 
-    // Membership grouping: {1,2,3} share an island; {4,5} share another;
-    // the two islands differ.
-    assert_eq!(map[&n1], map[&n2]);
-    assert_eq!(map[&n2], map[&n3]);
-    assert_eq!(map[&n4], map[&n5]);
-    assert_ne!(map[&n1], map[&n4]);
-
-    // Determinism: a second run yields identical results.
-    let map2 = run_components(&rt, "g");
-    assert_eq!(map, map2, "components must be deterministic across runs");
-}
-
-/// Insert a graph node via SQL and return its assigned graph node id.
-fn make_node(rt: &RedDBRuntime, collection: &str, label: &str) -> String {
-    rt.execute_query(&format!(
-        "INSERT INTO {collection} NODE (label, node_type) VALUES ('{label}', 'Host')"
-    ))
-    .unwrap_or_else(|err| panic!("insert node {label}: {err:?}"));
-    graph_node_id(rt, collection, label)
-}
-
-/// Insert a directed edge between two graph nodes via SQL.
-fn make_edge(rt: &RedDBRuntime, collection: &str, from: &str, to: &str) {
-    rt.execute_query(&format!(
-        "INSERT INTO {collection} EDGE (label, from, to, weight) VALUES ('connects', {from}, {to}, 1.0)"
-    ))
-    .unwrap_or_else(|err| panic!("insert edge {from}->{to}: {err:?}"));
-}
-
-/// Resolve a graph node's storage id by its label.
-fn graph_node_id(rt: &RedDBRuntime, collection: &str, label: &str) -> String {
-    use reddb::storage::EntityKind;
-    rt.db()
-        .store()
-        .get_collection(collection)
-        .unwrap_or_else(|| panic!("collection '{collection}' should exist"))
-        .query_all(|_| true)
-        .into_iter()
-        .find_map(|entity| match &entity.kind {
-            EntityKind::GraphNode(node) if node.label == label => Some(entity.id.raw().to_string()),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("graph node '{label}' not found in '{collection}'"))
+    // Determinism: a second run yields identical rows.
+    let result2 = ctx.query("SELECT * FROM components(g)");
+    assert_eq!(result.result.rows(), result2.result.rows());
 }
