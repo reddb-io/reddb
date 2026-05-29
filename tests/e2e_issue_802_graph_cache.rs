@@ -79,7 +79,10 @@ fn louvain_cache_hits_then_misses_after_mutation() {
     let (h2, m2, _) = rt.result_cache_metrics();
     assert_eq!(h2, h1 + 1, "identical repeated call is a cache hit");
     assert_eq!(m2, m1, "the hit records no additional miss");
-    assert_eq!(first, repeat, "cached result is identical to the cold result");
+    assert_eq!(
+        first, repeat,
+        "cached result is identical to the cold result"
+    );
 
     // Mutate the source graph collection `g` (add a ninth node + edge). The
     // INSERTs invalidate every cache entry scoped to `g`, so the next call
@@ -105,10 +108,9 @@ fn result_cache_kill_switch_disables_cache_cleanly() {
     seed_two_communities(&rt);
 
     // Flip the kill-switch off.
-    rt.db().store().set_config_tree(
-        "runtime.result_cache.enabled",
-        &reddb::json!(false),
-    );
+    rt.db()
+        .store()
+        .set_config_tree("runtime.result_cache.enabled", &reddb::json!(false));
 
     let sql = "SELECT * FROM louvain(g)";
     let (h0, m0, e0) = rt.result_cache_metrics();
@@ -118,8 +120,15 @@ fn result_cache_kill_switch_disables_cache_cleanly() {
 
     // With caching disabled, neither read is counted as a hit or a miss —
     // the cache is bypassed entirely — yet results stay correct.
-    assert_eq!((h1, m1, e1), (h0, m0, e0), "disabled cache is fully bypassed");
-    assert_eq!(first, second, "results remain deterministic without caching");
+    assert_eq!(
+        (h1, m1, e1),
+        (h0, m0, e0),
+        "disabled cache is fully bypassed"
+    );
+    assert_eq!(
+        first, second,
+        "results remain deterministic without caching"
+    );
     assert_eq!(first.len(), 8);
 }
 
@@ -157,10 +166,9 @@ fn result_cache_capacity_evicts_and_counts() {
 
     // Capacity of one entry: caching a second distinct graph-TVF query evicts
     // the first.
-    rt.db().store().set_config_tree(
-        "runtime.result_cache.capacity_entries",
-        &reddb::json!(1),
-    );
+    rt.db()
+        .store()
+        .set_config_tree("runtime.result_cache.capacity_entries", &reddb::json!(1));
 
     let (_, _, e0) = rt.result_cache_metrics();
     // Two distinct cacheable graph-TVF queries over the same graph.
