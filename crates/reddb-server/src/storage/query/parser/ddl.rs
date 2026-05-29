@@ -769,6 +769,72 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::AlterTable(AlterTableQuery { name, operations }))
     }
 
+    /// Parse: `ALTER GRAPH <name> ADD ANALYTICS ( <output> [, ...] )`
+    /// and `ALTER GRAPH <name> DROP ANALYTICS <output>` (issue #801).
+    ///
+    /// Lifecycle management of the `WITH ANALYTICS` configuration declared at
+    /// `CREATE GRAPH` time (#800), without recreating the collection. Shares
+    /// the `AlterTable` AST so the existing executor dispatch path picks the
+    /// mutations up; the executor validates the target is a graph and that the
+    /// dropped output is actually enabled.
+    pub fn parse_alter_graph_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect(Token::Alter)?;
+        self.expect(Token::Graph)?;
+        let name = self.expect_ident()?;
+
+        let mut operations = Vec::new();
+        loop {
+            operations.push(self.parse_alter_graph_operation()?);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+
+        Ok(QueryExpr::AlterTable(AlterTableQuery { name, operations }))
+    }
+
+    /// Parse a single `ALTER GRAPH` analytics operation: either
+    /// `ADD ANALYTICS ( ... )` or `DROP ANALYTICS <output>`.
+    fn parse_alter_graph_operation(&mut self) -> Result<AlterOperation, ParseError> {
+        if self.consume(&Token::Add)? {
+            if !self.consume_ident_ci("ANALYTICS")? {
+                return Err(ParseError::expected(
+                    vec!["ANALYTICS"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            // Reuse the `WITH ANALYTICS (...)` body grammar verbatim so the
+            // ADD form accepts the exact same outputs and options as CREATE.
+            let views = self.parse_analytics_clause()?;
+            Ok(AlterOperation::AddAnalytics(views))
+        } else if self.consume(&Token::Drop)? {
+            if !self.consume_ident_ci("ANALYTICS")? {
+                return Err(ParseError::expected(
+                    vec!["ANALYTICS"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            let output_name = self.parse_analytics_output_name()?;
+            let output = crate::catalog::AnalyticsOutput::from_str(&output_name).ok_or_else(|| {
+                ParseError::new(
+                    format!(
+                        "unknown analytics output '{output_name}': expected communities, components, or centrality"
+                    ),
+                    self.position(),
+                )
+            })?;
+            Ok(AlterOperation::DropAnalytics(output))
+        } else {
+            Err(ParseError::expected(
+                vec!["ADD", "DROP"],
+                self.peek(),
+                self.position(),
+            ))
+        }
+    }
+
     /// Parse a single ALTER TABLE operation
     fn parse_alter_operation(&mut self, table_name: &str) -> Result<AlterOperation, ParseError> {
         if self.consume(&Token::Add)? {
