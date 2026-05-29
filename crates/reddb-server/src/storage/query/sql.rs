@@ -2171,6 +2171,19 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if matches!(next, Token::Graph) {
+                    // Issue #801 — `ALTER GRAPH name ADD|DROP ANALYTICS ...`
+                    // shares the AlterTable AST so analytics-config lifecycle
+                    // mutations dispatch through the existing executor path.
+                    match self.parse_alter_graph_query()? {
+                        QueryExpr::AlterTable(query) => Ok(SqlCommand::AlterTable(query)),
+                        other => Err(ParseError::new(
+                            format!(
+                                "internal: ALTER GRAPH produced unexpected query kind {other:?}"
+                            ),
+                            self.position(),
+                        )),
+                    }
                 } else if matches!(next, Token::Table)
                     || matches!(next, Token::Collection)
                     || matches!(next, Token::Ident(ref s) if s.eq_ignore_ascii_case("COLLECTION"))
