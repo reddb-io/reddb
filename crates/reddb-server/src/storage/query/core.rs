@@ -2168,6 +2168,17 @@ pub enum AlterOperation {
     /// Removes the policy. Previously-hidden expired rows become
     /// readable again — the slice never physically dropped them.
     UnsetRetention,
+    /// Issue #801 — `ALTER GRAPH name ADD ANALYTICS (<output> [opts] [, ...])`.
+    /// Idempotently enables analytics outputs on an existing graph's
+    /// `analytics_config` without recreating the collection. Adding an
+    /// already-enabled output is a no-op (no error, no duplicate state);
+    /// the next read of `<graph>.<output>` materializes on demand.
+    AddAnalytics(Vec<crate::catalog::AnalyticsViewDescriptor>),
+    /// Issue #801 — `ALTER GRAPH name DROP ANALYTICS <output>`.
+    /// Removes the output from `analytics_config`; the next read of
+    /// `<graph>.<output>` no longer resolves. Dropping an output that is
+    /// not currently enabled is a clean error (handled in the executor).
+    DropAnalytics(crate::catalog::AnalyticsOutput),
 }
 
 // ============================================================================
