@@ -1279,6 +1279,9 @@ fn is_graph_tvf_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case("louvain")
         || name.eq_ignore_ascii_case("degree_centrality")
         || name.eq_ignore_ascii_case("shortest_path")
+        || name.eq_ignore_ascii_case("betweenness")
+        || name.eq_ignore_ascii_case("eigenvector")
+        || name.eq_ignore_ascii_case("pagerank")
 }
 
 /// Reject any named arguments for a TVF that accepts none.
@@ -8794,29 +8797,17 @@ impl RedDBRuntime {
             }
             return Ok(result);
         }
-        // ── Centrality family (issue #797): each takes exactly one graph
-        // argument and returns rows `(node_id, score)`. ──
+        // ── Centrality family (issue #797): each returns rows `(node_id,
+        // score)` over the abstract `(nodes, edges)` graph. Like the other
+        // graph TVFs the graph is treated as undirected and scores are
+        // deterministic; the inline-graph form shares this dispatch. ──
         if name.eq_ignore_ascii_case("betweenness") {
-            if args.len() != 1 {
-                return Err(RedDBError::Query(format!(
-                    "table function 'betweenness' takes exactly 1 graph argument, got {}",
-                    args.len()
-                )));
-            }
-            if !named_args.is_empty() {
-                return Err(RedDBError::Query(
-                    "table function 'betweenness' takes no named arguments".to_string(),
-                ));
-            }
-            return self.execute_betweenness_tvf(&args[0]);
+            reject_named_args(name, named_args)?;
+            return Ok(Self::centrality_result(graph_algorithms::betweenness(
+                &nodes, &edges,
+            )));
         }
         if name.eq_ignore_ascii_case("eigenvector") {
-            if args.len() != 1 {
-                return Err(RedDBError::Query(format!(
-                    "table function 'eigenvector' takes exactly 1 graph argument, got {}",
-                    args.len()
-                )));
-            }
             // Optional `max_iterations` (positive integer, default 100) and
             // `tolerance` (finite, strictly positive, default 1e-6).
             let mut max_iterations = 100_usize;
@@ -8837,15 +8828,14 @@ impl RedDBRuntime {
                     )));
                 }
             }
-            return self.execute_eigenvector_tvf(&args[0], max_iterations, tolerance);
+            return Ok(Self::centrality_result(graph_algorithms::eigenvector(
+                &nodes,
+                &edges,
+                max_iterations,
+                tolerance,
+            )));
         }
         if name.eq_ignore_ascii_case("pagerank") {
-            if args.len() != 1 {
-                return Err(RedDBError::Query(format!(
-                    "table function 'pagerank' takes exactly 1 graph argument, got {}",
-                    args.len()
-                )));
-            }
             // Optional `damping` (in (0, 1), default 0.85) and `max_iterations`
             // (positive integer, default 100).
             let mut damping = 0.85_f64;
@@ -8866,7 +8856,12 @@ impl RedDBRuntime {
                     )));
                 }
             }
-            return self.execute_pagerank_tvf(&args[0], damping, max_iterations);
+            return Ok(Self::centrality_result(graph_algorithms::pagerank(
+                &nodes,
+                &edges,
+                damping,
+                max_iterations,
+            )));
         }
         Err(RedDBError::Query(format!("unknown table function: {name}")))
     }
@@ -8959,36 +8954,6 @@ impl RedDBRuntime {
         Ok(result)
     }
 
-    /// Materialize the whole active graph store read-only as abstract
-    /// `(nodes, edges)` for the pure centrality algorithms. Shared by the
-    /// `betweenness` / `eigenvector` / `pagerank` TVFs (issue #797). Like
-    /// `components` / `louvain`, the v0 form ignores the collection argument and
-    /// runs over the entire graph store; materialization never mutates anything.
-    #[allow(clippy::type_complexity)]
-    fn materialize_centrality_inputs(
-        &self,
-    ) -> RedDBResult<(
-        Vec<String>,
-        Vec<(
-            String,
-            String,
-            crate::storage::engine::graph_algorithms::Weight,
-        )>,
-    )> {
-        use crate::storage::engine::graph_algorithms;
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
-        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
-        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
-            .iter_all_edges()
-            .into_iter()
-            .map(|e| (e.source_id, e.target_id, e.weight))
-            .collect();
-        Ok((nodes, edges))
-    }
-
     /// Project `(node_id, score)` centrality rows into a `UnifiedResult` with
     /// columns `["node_id", "score"]`; scores are `Value::Float`.
     fn centrality_result(
@@ -9004,66 +8969,6 @@ impl RedDBRuntime {
             result.push(record);
         }
         result
-    }
-
-    /// `betweenness(<graph>)` — returns rows `(node_id, score)` (issue #797).
-    ///
-    /// Runs the pure, deterministic `graph_algorithms::betweenness` (Brandes'
-    /// algorithm) over the read-only materialized graph. Edges are treated as
-    /// undirected; scores are unordered-pair shortest-path counts.
-    fn execute_betweenness_tvf(
-        &self,
-        _collection: &str,
-    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
-        use crate::storage::engine::graph_algorithms;
-        let (nodes, edges) = self.materialize_centrality_inputs()?;
-        Ok(Self::centrality_result(graph_algorithms::betweenness(
-            &nodes, &edges,
-        )))
-    }
-
-    /// `eigenvector(<graph> [, max_iterations => <i64>, tolerance => <f64>])` —
-    /// returns rows `(node_id, score)` (issue #797).
-    ///
-    /// Runs the pure, deterministic `graph_algorithms::eigenvector` (power
-    /// iteration on the adjacency matrix) over the read-only materialized
-    /// graph. Scores are L2-normalised into `[0, 1]`.
-    fn execute_eigenvector_tvf(
-        &self,
-        _collection: &str,
-        max_iterations: usize,
-        tolerance: f64,
-    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
-        use crate::storage::engine::graph_algorithms;
-        let (nodes, edges) = self.materialize_centrality_inputs()?;
-        Ok(Self::centrality_result(graph_algorithms::eigenvector(
-            &nodes,
-            &edges,
-            max_iterations,
-            tolerance,
-        )))
-    }
-
-    /// `pagerank(<graph> [, damping => <f64>, max_iterations => <i64>])` —
-    /// returns rows `(node_id, score)` (issue #797).
-    ///
-    /// Runs the pure, deterministic `graph_algorithms::pagerank` over the
-    /// read-only materialized graph. Edges are treated as undirected; scores
-    /// sum to ~1.0.
-    fn execute_pagerank_tvf(
-        &self,
-        _collection: &str,
-        damping: f64,
-        max_iterations: usize,
-    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
-        use crate::storage::engine::graph_algorithms;
-        let (nodes, edges) = self.materialize_centrality_inputs()?;
-        Ok(Self::centrality_result(graph_algorithms::pagerank(
-            &nodes,
-            &edges,
-            damping,
-            max_iterations,
-        )))
     }
 
     /// Ultra-fast path: detect `SELECT * FROM table WHERE _entity_id = N` by string pattern
