@@ -8316,12 +8316,13 @@ impl RedDBRuntime {
                 )));
             }
             // The only supported named argument is `resolution` (γ). It
-            // defaults to 1.0 (classic modularity) and must be strictly
-            // positive — a non-positive resolution has no sensible meaning.
+            // defaults to 1.0 (classic modularity) and must be a finite,
+            // strictly positive number — a non-positive (or NaN/inf)
+            // resolution has no sensible meaning.
             let mut resolution = 1.0_f64;
             for (key, value) in named_args {
                 if key.eq_ignore_ascii_case("resolution") {
-                    if !(*value > 0.0) {
+                    if !value.is_finite() || *value <= 0.0 {
                         return Err(RedDBError::Query(format!(
                             "table function 'louvain' resolution must be > 0, got {value}"
                         )));
