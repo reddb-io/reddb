@@ -1278,6 +1278,7 @@ fn is_graph_tvf_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("components")
         || name.eq_ignore_ascii_case("louvain")
         || name.eq_ignore_ascii_case("degree_centrality")
+        || name.eq_ignore_ascii_case("shortest_path")
 }
 
 /// Reject any named arguments for a TVF that accepts none.
@@ -8723,7 +8724,166 @@ impl RedDBRuntime {
             return Ok(result);
         }
 
+        if name.eq_ignore_ascii_case("shortest_path") {
+            // Scalar named arguments: `src` and `dst` are required node ids,
+            // `max_hops` is an optional non-negative edge-count cap. Node ids
+            // in the graph store are integer entity ids rendered as strings, so
+            // each id arg must be a non-negative whole number; reject anything
+            // else (fractional, negative, NaN/inf) with a clear message.
+            let mut src: Option<String> = None;
+            let mut dst: Option<String> = None;
+            let mut max_hops: Option<usize> = None;
+            let as_node_id = |key: &str, value: f64| -> RedDBResult<String> {
+                if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+                    return Err(RedDBError::Query(format!(
+                        "table function 'shortest_path' argument '{key}' must be a non-negative integer node id, got {value}"
+                    )));
+                }
+                Ok((value as i64).to_string())
+            };
+            for (key, value) in named_args {
+                if key.eq_ignore_ascii_case("src") {
+                    src = Some(as_node_id("src", *value)?);
+                } else if key.eq_ignore_ascii_case("dst") {
+                    dst = Some(as_node_id("dst", *value)?);
+                } else if key.eq_ignore_ascii_case("max_hops") {
+                    if !value.is_finite() || *value < 0.0 || value.fract() != 0.0 {
+                        return Err(RedDBError::Query(format!(
+                            "table function 'shortest_path' max_hops must be a non-negative integer, got {value}"
+                        )));
+                    }
+                    max_hops = Some(*value as usize);
+                } else {
+                    return Err(RedDBError::Query(format!(
+                        "table function 'shortest_path' has no named argument '{key}' (expected 'src', 'dst', 'max_hops')"
+                    )));
+                }
+            }
+            let src = src.ok_or_else(|| {
+                RedDBError::Query(
+                    "table function 'shortest_path' requires named argument 'src'".to_string(),
+                )
+            })?;
+            let dst = dst.ok_or_else(|| {
+                RedDBError::Query(
+                    "table function 'shortest_path' requires named argument 'dst'".to_string(),
+                )
+            })?;
+
+            // Columns are always present; an unreachable pair (within the
+            // optional `max_hops` budget) simply yields zero rows — never an
+            // error. `hop` is the 0-based index from the source;
+            // `cumulative_weight` is the running path weight (0 at the source,
+            // the total at the destination). Edges are treated as undirected,
+            // consistent with `components` / `louvain`.
+            let mut result = UnifiedResult::with_columns(vec![
+                "hop".into(),
+                "node_id".into(),
+                "cumulative_weight".into(),
+            ]);
+            if let Some(path) =
+                graph_algorithms::shortest_path(&nodes, &edges, &src, &dst, max_hops)
+            {
+                for (hop, (node_id, cumulative_weight)) in path.into_iter().enumerate() {
+                    let mut record = UnifiedRecord::new();
+                    record.set("hop", Value::Integer(hop as i64));
+                    record.set("node_id", Value::text(node_id));
+                    record.set("cumulative_weight", Value::Float(cumulative_weight));
+                    result.push(record);
+                }
+            }
+            return Ok(result);
+        }
+
         Err(RedDBError::Query(format!("unknown table function: {name}")))
+    }
+
+    /// `components(<graph_collection>)` — returns rows `(node_id, island_id)`.
+    ///
+    /// Materializes the active graph (nodes + weighted edges) read-only and
+    /// runs the pure `graph_algorithms::connected_components`. Edges are
+    /// treated as undirected; island ids are deterministic (ascending order of
+    /// each component's smallest node).
+    fn execute_components_tvf(
+        &self,
+        _collection: &str,
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        use crate::storage::engine::graph_algorithms;
+        use crate::storage::query::unified::UnifiedResult;
+        use crate::storage::schema::Value;
+
+        // Read-only materialization of the full active graph. The named
+        // collection identifies the active graph scope; passing `None` for the
+        // projection uses the full graph store (the same result
+        // `active_graph_projection` yields when no projection is registered).
+        // Materialization never mutates any store.
+        let graph = super::graph_dsl::materialize_graph_with_projection(
+            self.inner.db.store().as_ref(),
+            None,
+        )?;
+
+        // Materialize abstract inputs for the pure algorithm.
+        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
+        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
+            .iter_all_edges()
+            .into_iter()
+            .map(|e| (e.source_id, e.target_id, e.weight))
+            .collect();
+
+        let assignment = graph_algorithms::connected_components(&nodes, &edges);
+
+        // Project into a UnifiedResult with columns ["node_id", "island_id"].
+        let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "island_id".into()]);
+        for (node_id, island_id) in assignment {
+            let mut record = UnifiedRecord::new();
+            record.set("node_id", Value::text(node_id));
+            record.set("island_id", Value::Integer(island_id as i64));
+            result.push(record);
+        }
+        Ok(result)
+    }
+
+    /// `louvain(<graph> [, resolution => <f64>])` — returns rows
+    /// `(node_id, community_id)` (issue #796).
+    ///
+    /// Materializes the active graph (nodes + weighted edges) read-only and
+    /// runs the pure, deterministic `graph_algorithms::louvain`. Edges are
+    /// treated as undirected; community ids are assigned in ascending order of
+    /// each community's smallest node, so identical input + resolution always
+    /// yields identical rows. Like `components`, the v0 form runs over the
+    /// whole graph store regardless of the collection argument value.
+    fn execute_louvain_tvf(
+        &self,
+        _collection: &str,
+        resolution: f64,
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        use crate::storage::engine::graph_algorithms;
+        use crate::storage::query::unified::UnifiedResult;
+        use crate::storage::schema::Value;
+
+        let graph = super::graph_dsl::materialize_graph_with_projection(
+            self.inner.db.store().as_ref(),
+            None,
+        )?;
+
+        let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
+        let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
+            .iter_all_edges()
+            .into_iter()
+            .map(|e| (e.source_id, e.target_id, e.weight))
+            .collect();
+
+        let assignment = graph_algorithms::louvain(&nodes, &edges, resolution);
+
+        // Project into a UnifiedResult with columns ["node_id", "community_id"].
+        let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "community_id".into()]);
+        for (node_id, community_id) in assignment {
+            let mut record = UnifiedRecord::new();
+            record.set("node_id", Value::text(node_id));
+            record.set("community_id", Value::Integer(community_id as i64));
+            result.push(record);
+        }
+        Ok(result)
     }
 
     /// Ultra-fast path: detect `SELECT * FROM table WHERE _entity_id = N` by string pattern
