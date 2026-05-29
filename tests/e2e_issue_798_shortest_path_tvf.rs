@@ -102,7 +102,11 @@ fn shortest_path_tvf_returns_ordered_path_rows() {
     let route: Vec<String> = rows.iter().map(|r| r.node_id.clone()).collect();
     assert_eq!(route, vec![a.clone(), b.clone(), c.clone(), d.clone()]);
     let hops: Vec<i64> = rows.iter().map(|r| r.hop).collect();
-    assert_eq!(hops, vec![0, 1, 2, 3], "hop indices are 0-based and ordered");
+    assert_eq!(
+        hops,
+        vec![0, 1, 2, 3],
+        "hop indices are 0-based and ordered"
+    );
 
     // Cumulative weight: 0 at source, +1 (a-b), +1 (b-c), +1 (c-d) = 3 total.
     assert_eq!(rows[0].cumulative_weight, 0.0);
@@ -115,7 +119,10 @@ fn shortest_path_tvf_returns_ordered_path_rows() {
         &rt,
         &format!("SELECT * FROM shortest_path(g, src => {a}, dst => {d})"),
     );
-    assert_eq!(rows, rows2, "shortest_path must be deterministic across runs");
+    assert_eq!(
+        rows, rows2,
+        "shortest_path must be deterministic across runs"
+    );
 }
 
 #[test]
