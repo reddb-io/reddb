@@ -1228,8 +1228,23 @@ impl RedDBServer {
     ///      a client can initialise its columns/renderer before rows
     ///      arrive (acceptance #2). Reuses the #737 descriptor and adds
     ///      `schema_fingerprint`.
-    ///   2. **rows** — `{"row":{…projected values…}}`, one per record.
-    ///   3. **terminal** — `{"end":{"row_count":N}}`.
+    ///   2. **cursor** (#807 / 750c) — `{"cursor":{token, snapshot_lsn,
+    ///      ttl_ms, expires_at_ms, resumable}}`. An early control frame
+    ///      carrying the opaque resume token. Emitted right after the
+    ///      descriptor so the client learns the cursor before any row.
+    ///   3. **rows** — `{"row":{…projected values…}}`, one per record.
+    ///   4. **terminal** — `{"end":{"row_count":N}}`.
+    ///
+    /// **Cursor resume (#807 / 750c):** the prelude returns an opaque
+    /// `token` scoped to the requesting `(tenant, principal)` and pinned
+    /// to the read snapshot, valid for `ttl_ms`. To resume, POST
+    /// `{"cursor":"<token>"}` (no `query` needed — the pinned query and
+    /// snapshot are server-side). A resume re-streams the same view. A
+    /// token that is unknown, or presented by a different tenant or
+    /// principal, is refused with `404 cursor_not_found` — a uniform shape
+    /// that never confirms the token's existence to an unauthorized caller.
+    /// A token whose TTL has elapsed is refused to its rightful owner with
+    /// `410 cursor_expired`.
     ///
     /// **Read-only gate (acceptance #3):** the query is parsed and
     /// classified BEFORE any wire framing. Only `SELECT … FROM …` (table
@@ -1254,23 +1269,84 @@ impl RedDBServer {
     pub(crate) fn handle_query_select_stream<W: std::io::Write>(
         &self,
         body: Vec<u8>,
+        principal: &str,
+        tenant: &str,
         writer: &mut W,
     ) -> io::Result<()> {
-        use crate::server::output_stream::{self, ChunkProducer, StreamConfig, SystemClock};
+        use crate::server::output_stream::{self, ChunkProducer, Clock, StreamConfig, SystemClock};
 
-        let request = match extract_query_request(&body) {
-            Ok(req) => req,
-            Err(response) => {
-                writer.write_all(&response.to_http_bytes())?;
-                return writer.flush();
-            }
-        };
-        let ParsedQueryRequest {
-            query,
-            entity_types,
-            capabilities,
-            ..
-        } = request;
+        let clock = SystemClock;
+        let config = StreamConfig::load(&self.runtime);
+
+        // Issue #807 / 750c — resume vs fresh open. A body carrying
+        // `{"cursor":"<token>"}` resumes a prior stream: the pinned query
+        // and snapshot come from the registry (scoped to this caller), not
+        // the body. A query-only body opens a fresh stream and mints a new
+        // cursor in the prelude.
+        let resume_token = parse_cursor_token(&body);
+        let (query, entity_types, capabilities, snapshot_lsn, cursor_token, expires_at_ms) =
+            if let Some(token) = resume_token {
+                match self
+                    .cursor_registry
+                    .resolve(&token, tenant, principal, clock.now_ms())
+                {
+                    Ok(resume) => (
+                        resume.query,
+                        resume.entity_types,
+                        resume.capabilities,
+                        resume.snapshot_lsn,
+                        token,
+                        resume.expires_at_ms,
+                    ),
+                    Err(reject) => {
+                        // Structured, non-streaming refusal — the client
+                        // can tell "stream never accepted" from a mid-stream
+                        // failure, and an unauthorized caller cannot learn
+                        // the cursor exists.
+                        let response = cursor_reject_response(&reject);
+                        writer.write_all(&response.to_http_bytes())?;
+                        return writer.flush();
+                    }
+                }
+            } else {
+                let request = match extract_query_request(&body) {
+                    Ok(req) => req,
+                    Err(response) => {
+                        writer.write_all(&response.to_http_bytes())?;
+                        return writer.flush();
+                    }
+                };
+                let ParsedQueryRequest {
+                    query,
+                    entity_types,
+                    capabilities,
+                    ..
+                } = request;
+                // Pin the read snapshot at open. Per the sibling lease
+                // ledger's shim semantics (#766), the pin is the recorded
+                // `cdc_current_lsn()`; a resume replays the pinned query.
+                let snapshot_lsn = self.runtime.cdc_current_lsn();
+                let opened_at_ms = clock.now_ms();
+                let ttl_ms = config.snapshot_ttl_ms;
+                let token = self.cursor_registry.register(
+                    snapshot_lsn,
+                    tenant,
+                    principal,
+                    &query,
+                    entity_types.clone(),
+                    capabilities.clone(),
+                    opened_at_ms,
+                    ttl_ms,
+                );
+                (
+                    query,
+                    entity_types,
+                    capabilities,
+                    snapshot_lsn,
+                    token,
+                    opened_at_ms.saturating_add(ttl_ms),
+                )
+            };
 
         // Read-only gate — parse and classify before any wire framing.
         match crate::storage::query::modes::parse_multi(&query) {
@@ -1298,9 +1374,6 @@ impl RedDBServer {
                 return writer.flush();
             }
         }
-
-        let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
 
         // Execute before sending headers so an execution failure surfaces
         // as a non-streaming error (client can tell "never accepted").
@@ -1360,7 +1433,38 @@ impl RedDBServer {
                 producer.push_line(line.as_bytes(), &mut flush)?;
             }
 
-            // 2. row frames.
+            // 2. cursor control frame (#807 / 750c) — the opaque resume
+            //    token, emitted as an early control frame right after the
+            //    descriptor so a client learns its cursor before any row.
+            //    Kept as its own frame (not folded into the descriptor)
+            //    so the descriptor wire shape stays frozen for #750.
+            {
+                let mut cursor = crate::json::Map::new();
+                cursor.insert(
+                    "token".to_string(),
+                    crate::json::Value::String(cursor_token.clone()),
+                );
+                cursor.insert(
+                    "snapshot_lsn".to_string(),
+                    crate::json::Value::Number(snapshot_lsn as f64),
+                );
+                cursor.insert(
+                    "ttl_ms".to_string(),
+                    crate::json::Value::Number(config.snapshot_ttl_ms as f64),
+                );
+                cursor.insert(
+                    "expires_at_ms".to_string(),
+                    crate::json::Value::Number(expires_at_ms as f64),
+                );
+                cursor.insert("resumable".to_string(), crate::json::Value::Bool(true));
+                let mut envelope = crate::json::Map::new();
+                envelope.insert("cursor".to_string(), crate::json::Value::Object(cursor));
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            }
+
+            // 3. row frames.
             for record in &records {
                 let values =
                     crate::presentation::query_result_json::unified_record_json(record, columns);
@@ -1372,7 +1476,7 @@ impl RedDBServer {
                 row_count += 1;
             }
 
-            // 3. terminal envelope.
+            // 4. terminal envelope.
             {
                 let mut envelope = crate::json::Map::new();
                 let mut payload = crate::json::Map::new();
@@ -1472,6 +1576,41 @@ pub(crate) fn parse_resume_params(body: &[u8]) -> Option<ResumeParams> {
         resume_after_rid,
         prefix_hash,
     })
+}
+
+/// Issue #807 / 750c — extract the optional opaque resume token from a
+/// `/query/stream` request body (`{"cursor":"<token>"}`). Returns `None`
+/// for any body that is not a JSON object with a non-empty string `cursor`
+/// field, so a fresh open (query-only body) is unaffected.
+pub(crate) fn parse_cursor_token(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let parsed = crate::json::parse_json(text.trim()).ok()?;
+    let json = crate::json::Value::from(parsed);
+    let token = json.get("cursor").and_then(|v| v.as_str())?.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+/// Issue #807 / 750c — structured, non-streaming refusal for a resume
+/// token that did not resolve. `NotFound` (unknown OR cross-tenant/
+/// cross-principal, masked by the registry) returns `404 cursor_not_found`
+/// with a message that never confirms the token existed, so an
+/// unauthorized caller learns nothing. Only the rightful owner of an
+/// aged-out cursor sees `410 cursor_expired`.
+fn cursor_reject_response(reject: &crate::server::output_stream::CursorReject) -> HttpResponse {
+    use crate::server::output_stream::CursorReject;
+    match reject {
+        CursorReject::NotFound => {
+            json_error_code(404, "cursor_not_found", "no live cursor for this token")
+        }
+        CursorReject::Expired => json_error_code(
+            410,
+            "cursor_expired",
+            "cursor TTL has elapsed; open a new stream to obtain a fresh cursor",
+        ),
+    }
 }
 
 /// Extract a record's internal `rid` value as `u64`, if present.
