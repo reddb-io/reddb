@@ -46,6 +46,16 @@ export const MessageKind = Object.freeze({
   QueryBinary: 0x07,
   BulkInsertPrevalidated: 0x08,
   QueryWithParams: 0x28,
+  // Output/input streaming lifecycle (PRD #759). Mirrors
+  // `reddb_wire::redwire::frame::MessageKind` so the JS streaming surface
+  // talks the same multiplexed-stream vocabulary as the Rust server.
+  RowDescription: 0x24,
+  StreamEnd: 0x25,
+  OpenStream: 0x29,
+  OpenAck: 0x2A,
+  StreamChunk: 0x2B,
+  StreamError: 0x2C,
+  StreamCancel: 0x2D,
 })
 
 export const Features = Object.freeze({ PARAMS: 0x0000_0001 })
@@ -231,6 +241,7 @@ export class RedWireClient {
     this.session = session
     this.serverFeatures = serverFeatures >>> 0
     this.nextCorr = 1n
+    this.nextStream = 1
     this.closed = false
   }
 
@@ -382,6 +393,174 @@ export class RedWireClient {
     return { ok: true }
   }
 
+  /**
+   * Open a streaming read over RedWire. Sends `OpenStream` and returns an
+   * async iterable of typed frames (see streaming.js) plus a
+   * `cancel(reason)` that emits a `StreamCancel` for this stream_id. The
+   * `OpenAck` is consumed internally; rows arrive as `StreamChunk`s and
+   * the stream closes on `StreamEnd`. A `StreamError` rejects iteration.
+   *
+   * @param {{ sql?: string, cursor?: string }} opts
+   */
+  async streamSelect({ sql, cursor } = {}) {
+    if (cursor != null) {
+      throw new RedDBError(
+        'STREAM_CURSOR_UNSUPPORTED',
+        'resumable cursors are only available over the HTTP transport in this release',
+      )
+    }
+    const streamId = this.#stream()
+    const corr = this.#corr()
+    await this.#writeStreamFrame(MessageKind.OpenStream, corr, jsonBytes({ sql }), streamId)
+
+    const reader = this.reader
+    const client = this
+    return {
+      async *[Symbol.asyncIterator]() {
+        for (;;) {
+          const resp = await reader.next()
+          if (resp.streamId !== 0 && resp.streamId !== streamId) {
+            continue
+          }
+          if (resp.kind === MessageKind.OpenAck) {
+            continue
+          }
+          if (resp.kind === MessageKind.StreamChunk) {
+            const chunk = jsonOf(resp.payload) ?? {}
+            const rows = Array.isArray(chunk.rows) ? chunk.rows : []
+            for (const row of rows) {
+              yield { type: 'row', value: row }
+            }
+            continue
+          }
+          if (resp.kind === MessageKind.StreamEnd) {
+            const end = jsonOf(resp.payload) ?? {}
+            yield { type: 'end', value: end.stats ?? end }
+            return
+          }
+          if (resp.kind === MessageKind.StreamError || resp.kind === MessageKind.Error) {
+            const err = jsonOf(resp.payload) ?? {}
+            throw new RedDBError(
+              err.code || 'STREAM_ERROR',
+              err.message || new TextDecoder().decode(resp.payload),
+              err,
+            )
+          }
+          throw new RedDBError(
+            'STREAM_PROTOCOL',
+            `unexpected frame in stream: ${KIND_NAME[resp.kind] ?? resp.kind}`,
+          )
+        }
+      },
+      async cancel(reason) {
+        await client.#cancelStream(streamId, reason)
+      },
+    }
+  }
+
+  /**
+   * Open a streaming write over RedWire. The `OpenStream {direction:"in"}`
+   * frame is sent on the first `write()` (so columns can be inferred from
+   * the first row); each row is shipped as a one-row `StreamChunk` and the
+   * terminal chunk closes the input phase. `close()` resolves with the
+   * server's `StreamEnd` stats.
+   *
+   * @param {{ target: string, columns?: string[] }} opts
+   */
+  async streamInput({ target, columns } = {}) {
+    const streamId = this.#stream()
+    const corr = this.#corr()
+    const client = this
+    let opened = false
+    let seq = 0
+    let cols = Array.isArray(columns) && columns.length > 0 ? columns.slice() : null
+
+    const ensureOpen = async (row) => {
+      if (opened) return
+      if (!cols) {
+        cols = row && typeof row === 'object' ? Object.keys(row) : null
+      }
+      if (!cols || cols.length === 0) {
+        throw new RedDBError(
+          'INVALID_STREAM_COLUMNS',
+          'inputStream() needs a non-empty column set — pass { columns } or write at least one object row',
+        )
+      }
+      await client.#writeStreamFrame(
+        MessageKind.OpenStream,
+        corr,
+        jsonBytes({ direction: 'in', target, columns: cols }),
+        streamId,
+      )
+      const ack = await client.reader.next()
+      if (ack.kind === MessageKind.StreamError || ack.kind === MessageKind.Error) {
+        const err = jsonOf(ack.payload) ?? {}
+        throw new RedDBError(err.code || 'STREAM_ERROR', err.message || 'input stream refused', err)
+      }
+      if (ack.kind !== MessageKind.OpenAck) {
+        throw new RedDBError(
+          'STREAM_PROTOCOL',
+          `expected OpenAck, got ${KIND_NAME[ack.kind] ?? ack.kind}`,
+        )
+      }
+      opened = true
+    }
+
+    return {
+      async write(row) {
+        await ensureOpen(row)
+        await client.#writeStreamFrame(
+          MessageKind.StreamChunk,
+          corr,
+          jsonBytes({ seq: seq++, rows: [row], terminal: false }),
+          streamId,
+        )
+      },
+      async close() {
+        await ensureOpen(null)
+        await client.#writeStreamFrame(
+          MessageKind.StreamChunk,
+          corr,
+          jsonBytes({ seq: seq++, rows: [], terminal: true }),
+          streamId,
+        )
+        const end = await client.reader.next()
+        if (end.kind === MessageKind.StreamError || end.kind === MessageKind.Error) {
+          const err = jsonOf(end.payload) ?? {}
+          throw new RedDBError(err.code || 'STREAM_ERROR', err.message || 'input stream failed', err)
+        }
+        if (end.kind !== MessageKind.StreamEnd) {
+          throw new RedDBError(
+            'STREAM_PROTOCOL',
+            `expected StreamEnd, got ${KIND_NAME[end.kind] ?? end.kind}`,
+          )
+        }
+        const parsed = jsonOf(end.payload) ?? {}
+        return parsed.stats ?? parsed
+      },
+      async cancel(reason) {
+        await client.#cancelStream(streamId, reason)
+      },
+    }
+  }
+
+  async #cancelStream(streamId, reason) {
+    if (this.closed) return
+    const payload = typeof reason === 'string' && reason.length > 0
+      ? jsonBytes({ reason })
+      : new Uint8Array()
+    try {
+      await this.#writeStreamFrame(MessageKind.StreamCancel, this.#corr(), payload, streamId)
+    } catch {
+      // best-effort — the socket may already be torn down.
+    }
+  }
+
+  #writeStreamFrame(kind, corr, payload, streamId) {
+    const buf = encodeFrame(kind, corr, payload, 0, streamId)
+    return writeAll(this.socket, buf)
+  }
+
   async close() {
     if (this.closed) return
     this.closed = true
@@ -398,6 +577,13 @@ export class RedWireClient {
     const c = this.nextCorr
     this.nextCorr = this.nextCorr + 1n
     return c
+  }
+
+  #stream() {
+    const id = this.nextStream
+    // stream_id 0 is reserved for handshake/lifecycle frames; wrap past it.
+    this.nextStream = this.nextStream >= 0xffff ? 1 : this.nextStream + 1
+    return id
   }
 }
 
