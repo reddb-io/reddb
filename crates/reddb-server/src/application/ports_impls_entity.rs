@@ -124,6 +124,7 @@ fn ensure_collection_model_contract(
         // is the default until the operator runs explicit DDL.
         append_only: false,
         subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
