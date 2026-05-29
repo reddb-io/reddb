@@ -1471,9 +1471,19 @@ fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery)
         Some(crate::storage::query::ast::TableSource::Subquery(subquery)) => {
             collect_query_expr_result_cache_scopes(scopes, subquery);
         }
-        // Table-valued functions (e.g. components(g)) read the graph store
-        // read-only and are not cacheable by collection scope (issue #795).
-        Some(crate::storage::query::ast::TableSource::Function { .. }) => {}
+        // Graph-collection TVFs (e.g. `louvain(g)`) read the graph store
+        // read-only. The result is now cached (issue #802) and scoped to the
+        // graph collection named in the first argument, so any mutation on
+        // that collection (`INSERT INTO g NODE/EDGE …`) invalidates the
+        // entry via `invalidate_result_cache_for_table`. Non-graph or
+        // zero-arg functions contribute no scope.
+        Some(crate::storage::query::ast::TableSource::Function { name, args, .. }) => {
+            if is_graph_tvf_name(name) {
+                if let Some(graph) = args.first() {
+                    cache_scope_insert(scopes, graph);
+                }
+            }
+        }
         // The inline-graph form reads ordinary tables/docs through its
         // `nodes`/`edges` subqueries, so its result cache must be scoped to
         // those source collections — mutating any of them invalidates the
@@ -2083,8 +2093,14 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
 const RESULT_CACHE_BACKEND_KEY: &str = "runtime.result_cache.backend";
 const RESULT_CACHE_DEFAULT_BACKEND: &str = "legacy";
 const RESULT_CACHE_BLOB_NAMESPACE: &str = "runtime.result_cache";
+// Issue #802: TTL / capacity are now read from config at call time; these
+// constants are the defaults the config falls back to (and match the
+// `runtime.result_cache.*` matrix entries).
 const RESULT_CACHE_TTL_SECS: u64 = 30;
 const RESULT_CACHE_MAX_ENTRIES: usize = 1000;
+const RESULT_CACHE_ENABLED_KEY: &str = "runtime.result_cache.enabled";
+const RESULT_CACHE_TTL_KEY: &str = "runtime.result_cache.ttl_seconds";
+const RESULT_CACHE_CAPACITY_KEY: &str = "runtime.result_cache.capacity_entries";
 const RESULT_CACHE_PAYLOAD_MAGIC: &[u8; 8] = b"RDRC0001";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2094,17 +2110,25 @@ enum RuntimeResultCacheBackend {
     Shadow,
 }
 
+/// Evict oldest entries until `map` fits in `max_entries`. Returns the
+/// number of entries evicted so callers can bump the eviction metric
+/// (issue #802).
 fn trim_result_cache(
     map: &mut HashMap<String, RuntimeResultCacheEntry>,
     order: &mut std::collections::VecDeque<String>,
-) {
-    while map.len() > RESULT_CACHE_MAX_ENTRIES {
+    max_entries: usize,
+) -> u64 {
+    let mut evicted = 0u64;
+    while map.len() > max_entries {
         if let Some(oldest) = order.pop_front() {
-            map.remove(&oldest);
+            if map.remove(&oldest).is_some() {
+                evicted += 1;
+            }
         } else {
             break;
         }
     }
+    evicted
 }
 
 fn result_cache_fingerprint(result: &RuntimeQueryResult) -> String {
@@ -2762,6 +2786,9 @@ impl RedDBRuntime {
                     std::collections::VecDeque::new(),
                 )),
                 result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
+                result_cache_hits: std::sync::atomic::AtomicU64::new(0),
+                result_cache_misses: std::sync::atomic::AtomicU64::new(0),
+                result_cache_evictions: std::sync::atomic::AtomicU64::new(0),
                 ask_daily_spend: parking_lot::RwLock::new(HashMap::new()),
                 queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
                 rmw_locks: RmwLockTable::new(),
@@ -5953,7 +5980,14 @@ impl RedDBRuntime {
                     named_args,
                 }) = table.source.clone()
                 {
-                    return Ok(RuntimeQueryResult {
+                    // The graph-collection form is cacheable (issue #802): the
+                    // result-cache read at the top of this function keys on the
+                    // query string, and `result_cache_scopes` carries the graph
+                    // collection (see `collect_table_source_scopes`) so a write
+                    // to it invalidates the entry. Deterministic algorithm
+                    // output is worth caching at any row count, so the write
+                    // bypasses the generic ≤5-row payload heuristic.
+                    let tvf_result = RuntimeQueryResult {
                         query: query.to_string(),
                         mode,
                         statement,
@@ -5961,7 +5995,9 @@ impl RedDBRuntime {
                         result: self.execute_table_function(&name, &args, &named_args)?,
                         affected_rows: 0,
                         statement_type: "select",
-                    });
+                    };
+                    frame.write_result_cache(self, &tvf_result, result_cache_scopes.clone());
+                    return Ok(tvf_result);
                 }
                 // Inline-graph TVF (issue #799): the graph is supplied by two
                 // subqueries instead of a collection reference. Unlike the
@@ -8783,7 +8819,60 @@ impl RedDBRuntime {
         }
     }
 
+    /// Result-cache kill-switch (issue #802). When `false`, reads and
+    /// writes are short-circuited so every query recomputes — used for
+    /// debugging and to bound staleness without a restart.
+    fn result_cache_enabled(&self) -> bool {
+        self.config_bool(RESULT_CACHE_ENABLED_KEY, true)
+    }
+
+    /// Configurable per-entry TTL in seconds (issue #802), defaulting to
+    /// the former `RESULT_CACHE_TTL_SECS` constant.
+    fn result_cache_ttl_secs(&self) -> u64 {
+        self.config_u64(RESULT_CACHE_TTL_KEY, RESULT_CACHE_TTL_SECS)
+    }
+
+    /// Configurable LRU capacity in entries (issue #802), defaulting to
+    /// the former `RESULT_CACHE_MAX_ENTRIES` constant. Zero is treated as
+    /// "no cached entries retained".
+    fn result_cache_capacity(&self) -> usize {
+        self.config_u64(RESULT_CACHE_CAPACITY_KEY, RESULT_CACHE_MAX_ENTRIES as u64) as usize
+    }
+
+    /// Snapshot of the result-cache observability counters (issue #802):
+    /// `(hits, misses, evictions)`. Surfaced under `red.metrics`.
+    pub fn result_cache_metrics(&self) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.inner.result_cache_hits.load(Relaxed),
+            self.inner.result_cache_misses.load(Relaxed),
+            self.inner.result_cache_evictions.load(Relaxed),
+        )
+    }
+
+    fn record_result_cache_evictions(&self, evicted: u64) {
+        if evicted > 0 {
+            self.inner
+                .result_cache_evictions
+                .fetch_add(evicted, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn get_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+        if !self.result_cache_enabled() {
+            return None;
+        }
+        let hit = self.get_result_cache_entry_inner(key);
+        let counter = if hit.is_some() {
+            &self.inner.result_cache_hits
+        } else {
+            &self.inner.result_cache_misses
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        hit
+    }
+
+    fn get_result_cache_entry_inner(&self, key: &str) -> Option<RuntimeQueryResult> {
         match self.result_cache_backend() {
             RuntimeResultCacheBackend::Legacy => self.get_legacy_result_cache_entry(key),
             RuntimeResultCacheBackend::BlobCache => self.get_blob_result_cache_entry(key),
@@ -8808,9 +8897,10 @@ impl RedDBRuntime {
     }
 
     fn get_legacy_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+        let ttl = self.result_cache_ttl_secs();
         let cache = self.inner.result_cache.read();
         cache.0.get(key).and_then(|entry| {
-            if entry.cached_at.elapsed().as_secs() < RESULT_CACHE_TTL_SECS {
+            if entry.cached_at.elapsed().as_secs() < ttl {
                 Some(entry.result.clone())
             } else {
                 None
@@ -8844,11 +8934,16 @@ impl RedDBRuntime {
                 scopes,
             },
         );
-        trim_result_cache(map, order);
+        let evicted = trim_result_cache(map, order, self.result_cache_capacity());
+        drop(cache);
+        self.record_result_cache_evictions(evicted);
         Some(result)
     }
 
     pub(super) fn put_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+        if !self.result_cache_enabled() {
+            return;
+        }
         match self.result_cache_backend() {
             RuntimeResultCacheBackend::Legacy => self.put_legacy_result_cache_entry(key, entry),
             RuntimeResultCacheBackend::BlobCache => self.put_blob_result_cache_entry(key, entry),
@@ -8860,18 +8955,21 @@ impl RedDBRuntime {
     }
 
     fn put_legacy_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+        let capacity = self.result_cache_capacity();
         let mut cache = self.inner.result_cache.write();
         let (ref mut map, ref mut order) = *cache;
         if !map.contains_key(key) {
             order.push_back(key.to_string());
         }
         map.insert(key.to_string(), entry);
-        trim_result_cache(map, order);
+        let evicted = trim_result_cache(map, order, capacity);
+        drop(cache);
+        self.record_result_cache_evictions(evicted);
     }
 
     fn put_blob_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
         let policy = crate::storage::cache::BlobCachePolicy::default()
-            .ttl_ms(RESULT_CACHE_TTL_SECS * 1000)
+            .ttl_ms(self.result_cache_ttl_secs() * 1000)
             .priority(200);
         let dependencies = entry.scopes.iter().cloned().collect::<Vec<_>>();
         let bytes = encode_result_cache_payload(&entry)
@@ -8888,13 +8986,16 @@ impl RedDBRuntime {
             return;
         }
 
+        let capacity = self.result_cache_capacity();
         let mut cache = self.inner.result_blob_entries.write();
         let (ref mut map, ref mut order) = *cache;
         if !map.contains_key(key) {
             order.push_back(key.to_string());
         }
         map.insert(key.to_string(), entry);
-        trim_result_cache(map, order);
+        let evicted = trim_result_cache(map, order, capacity);
+        drop(cache);
+        self.record_result_cache_evictions(evicted);
     }
 
     pub fn result_cache_shadow_divergences(&self) -> u64 {

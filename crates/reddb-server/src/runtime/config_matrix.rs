@@ -130,6 +130,28 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Critical,
         default: || text("legacy"),
     },
+    // Kill-switch (issue #802). Critical so it self-heals to `true` on
+    // boot and is always visible in SHOW CONFIG — operators flip it to
+    // `false` to disable result caching wholesale for debugging.
+    ConfigDefault {
+        key: "runtime.result_cache.enabled",
+        tier: Tier::Critical,
+        default: || JsonValue::Bool(true),
+    },
+    // Per-entry freshness window in seconds (issue #802). Mirrors the
+    // former `RESULT_CACHE_TTL_SECS` constant.
+    ConfigDefault {
+        key: "runtime.result_cache.ttl_seconds",
+        tier: Tier::Optional,
+        default: || num(30.0),
+    },
+    // LRU capacity in entries (issue #802). Mirrors the former
+    // `RESULT_CACHE_MAX_ENTRIES` constant.
+    ConfigDefault {
+        key: "runtime.result_cache.capacity_entries",
+        tier: Tier::Optional,
+        default: || num(1000.0),
+    },
     // concurrency.*
     ConfigDefault {
         key: "concurrency.locking.enabled",

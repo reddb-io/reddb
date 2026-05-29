@@ -904,6 +904,13 @@ struct RuntimeResultCacheEntry {
 }
 
 pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
+/// Stable metric names for the query/graph-analytics result cache
+/// (issue #802). Exposed under the `red.metrics` surface as
+/// `reddb_result_cache_{hit,miss,evict}_total` and readable in-process
+/// via `RedDBRuntime::result_cache_metrics`.
+pub const METRIC_RESULT_CACHE_HIT_TOTAL: &str = "result_cache_hit_total";
+pub const METRIC_RESULT_CACHE_MISS_TOTAL: &str = "result_cache_miss_total";
+pub const METRIC_RESULT_CACHE_EVICT_TOTAL: &str = "result_cache_evict_total";
 pub(crate) const ASK_ANSWER_CACHE_NAMESPACE: &str = "runtime.ask_answer_cache";
 const RMW_LOCK_SHARDS: usize = 64;
 
@@ -959,6 +966,11 @@ struct RuntimeInner {
     ask_answer_cache_entries:
         parking_lot::RwLock<(HashSet<String>, std::collections::VecDeque<String>)>,
     result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
+    /// Result-cache observability counters (issue #802). Process-cumulative
+    /// hit/miss/eviction tallies surfaced under `red.metrics`.
+    result_cache_hits: std::sync::atomic::AtomicU64,
+    result_cache_misses: std::sync::atomic::AtomicU64,
+    result_cache_evictions: std::sync::atomic::AtomicU64,
     ask_daily_spend:
         parking_lot::RwLock<HashMap<String, crate::runtime::ai::cost_guard::DailyState>>,
     /// Process-local queue message locks used to emulate `SKIP LOCKED`-style
