@@ -120,6 +120,54 @@ impl<'a> Parser<'a> {
         result
     }
 
+    /// Parse the comma-separated identifier argument list of a table-valued
+    /// function call. The opening `(` has already been consumed; the caller
+    /// consumes the closing `)`. Requires at least one identifier argument and
+    /// rejects non-identifier tokens (issue #795).
+    fn parse_table_function_args(&mut self, name: &str) -> Result<Vec<String>, ParseError> {
+        // Zero-argument form `name()` is rejected with a clear message.
+        if matches!(self.peek(), Token::RParen) {
+            return Err(ParseError::new(
+                format!("table function '{name}' requires at least one argument"),
+                self.position(),
+            ));
+        }
+
+        let mut args = Vec::new();
+        loop {
+            // Each argument must be a plain identifier.
+            match self.advance()? {
+                Token::Ident(arg) => args.push(arg),
+                other => {
+                    return Err(ParseError::expected(
+                        vec!["table function argument identifier"],
+                        &other,
+                        self.position(),
+                    ));
+                }
+            }
+
+            // A comma continues the list; a `)` ends it (consumed by caller).
+            // Anything else is a clear error (e.g. a missing closing paren).
+            match self.peek() {
+                Token::Comma => {
+                    self.advance()?;
+                    continue;
+                }
+                Token::RParen => break,
+                _ => {
+                    let found = self.peek().clone();
+                    return Err(ParseError::expected(
+                        vec!["','", "')'"],
+                        &found,
+                        self.position(),
+                    ));
+                }
+            }
+        }
+        Ok(args)
+    }
+
     fn parse_select_query_inner(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Select)?;
 
@@ -129,6 +177,10 @@ impl<'a> Parser<'a> {
         // Parse optional table source. If omitted, default to `ANY` so the query
         // can return mixed entities (table, document, graph, and vector) by default.
         let has_from = self.consume(&Token::From)?;
+        // Optional structured FROM source. Currently populated only for
+        // table-valued function calls such as `components(g)` (issue #795);
+        // plain tables leave this `None` and rely on the legacy `table` slot.
+        let mut table_source: Option<crate::storage::query::ast::TableSource> = None;
         let table = if has_from {
             if self.consume(&Token::Queue)? {
                 let queue = self.expect_ident()?;
@@ -153,7 +205,18 @@ impl<'a> Parser<'a> {
             } else if self.consume(&Token::All)? {
                 "all".to_string()
             } else {
-                self.expect_ident()?
+                let ident = self.expect_ident()?;
+                // Table-valued function call: `ident(arg, ...)` (issue #795).
+                if matches!(self.peek(), Token::LParen) {
+                    self.advance()?; // consume '('
+                    let args = self.parse_table_function_args(&ident)?;
+                    self.expect(Token::RParen)?;
+                    table_source = Some(crate::storage::query::ast::TableSource::Function {
+                        name: ident.clone(),
+                        args,
+                    });
+                }
+                ident
             }
         } else {
             "any".to_string()
@@ -175,7 +238,7 @@ impl<'a> Parser<'a> {
 
         let mut query = TableQuery {
             table,
-            source: None,
+            source: table_source,
             alias,
             select_items,
             columns,
