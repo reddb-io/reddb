@@ -125,18 +125,21 @@ impl<'a> Parser<'a> {
     /// the closing `)`. Requires at least one argument and rejects malformed
     /// forms (issue #795).
     ///
-    /// Two argument shapes are accepted (issue #796):
+    /// Three argument shapes are accepted (issues #796 / #799):
     /// - positional identifiers, e.g. the graph collection `g`;
-    /// - named numeric arguments `key => <number>`, e.g. `resolution => 0.5`.
+    /// - named numeric arguments `key => <number>`, e.g. `resolution => 0.5`;
+    /// - named subquery arguments `key => (<SELECT …>)`, e.g.
+    ///   `nodes => (SELECT id FROM hosts)` (the inline-graph form).
     ///
     /// Positional arguments must precede named arguments; a positional
-    /// argument after a named one is a clear error. Returns the positional
-    /// identifiers and the named `(key, value)` pairs in source order.
+    /// argument after any named one is a clear error. Returns the positional
+    /// identifiers, the named numeric `(key, value)` pairs, and the named
+    /// subquery `(key, query)` pairs, each in source order.
     #[allow(clippy::type_complexity)]
     fn parse_table_function_args(
         &mut self,
         name: &str,
-    ) -> Result<(Vec<String>, Vec<(String, f64)>), ParseError> {
+    ) -> Result<(Vec<String>, Vec<(String, f64)>, Vec<(String, QueryExpr)>), ParseError> {
         // Zero-argument form `name()` is rejected with a clear message.
         if matches!(self.peek(), Token::RParen) {
             return Err(ParseError::new(
@@ -147,6 +150,7 @@ impl<'a> Parser<'a> {
 
         let mut args = Vec::new();
         let mut named_args = Vec::new();
+        let mut subquery_args: Vec<(String, QueryExpr)> = Vec::new();
         loop {
             // Each argument starts with an identifier (the positional value or
             // the named-argument key).
@@ -161,13 +165,29 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            // `ident => <number>` is a named argument; otherwise it is a bare
-            // positional identifier.
+            // `ident => (SELECT …)` is a named subquery argument;
+            // `ident => <number>` is a named numeric argument; otherwise it is
+            // a bare positional identifier.
             if matches!(self.peek(), Token::FatArrow) {
                 self.advance()?; // consume '=>'
-                let value = self.parse_float()?;
-                named_args.push((ident, value));
-            } else if named_args.is_empty() {
+                if matches!(self.peek(), Token::LParen) {
+                    self.advance()?; // consume '('
+                    if !self.check(&Token::Select) {
+                        let found = self.peek().clone();
+                        return Err(ParseError::expected(
+                            vec!["SELECT subquery"],
+                            &found,
+                            self.position(),
+                        ));
+                    }
+                    let query = self.parse_select_query()?;
+                    self.expect(Token::RParen)?;
+                    subquery_args.push((ident, query));
+                } else {
+                    let value = self.parse_float()?;
+                    named_args.push((ident, value));
+                }
+            } else if named_args.is_empty() && subquery_args.is_empty() {
                 args.push(ident);
             } else {
                 return Err(ParseError::new(
@@ -196,7 +216,89 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok((args, named_args))
+        Ok((args, named_args, subquery_args))
+    }
+
+    /// Build the `TableSource` for a table-valued function call from its
+    /// parsed argument lists. When `subquery_args` is non-empty the call uses
+    /// the inline-graph form (`nodes => / edges =>`); otherwise it is the
+    /// graph-collection form (issue #799).
+    fn build_table_function_source(
+        &self,
+        name: String,
+        args: Vec<String>,
+        named_args: Vec<(String, f64)>,
+        subquery_args: Vec<(String, QueryExpr)>,
+    ) -> Result<crate::storage::query::ast::TableSource, ParseError> {
+        use crate::storage::query::ast::TableSource;
+
+        if subquery_args.is_empty() {
+            return Ok(TableSource::Function {
+                name,
+                args,
+                named_args,
+            });
+        }
+
+        // Inline-graph form: exactly one `nodes` and one `edges` subquery, no
+        // positional graph-collection argument.
+        if !args.is_empty() {
+            return Err(ParseError::new(
+                format!(
+                    "table function '{name}' inline form takes no positional graph argument; pass `nodes => (…), edges => (…)`"
+                ),
+                self.position(),
+            ));
+        }
+
+        let mut nodes: Option<QueryExpr> = None;
+        let mut edges: Option<QueryExpr> = None;
+        for (key, query) in subquery_args {
+            if key.eq_ignore_ascii_case("nodes") {
+                if nodes.is_some() {
+                    return Err(ParseError::new(
+                        format!(
+                            "table function '{name}' has a duplicate 'nodes' subquery argument"
+                        ),
+                        self.position(),
+                    ));
+                }
+                nodes = Some(query);
+            } else if key.eq_ignore_ascii_case("edges") {
+                if edges.is_some() {
+                    return Err(ParseError::new(
+                        format!(
+                            "table function '{name}' has a duplicate 'edges' subquery argument"
+                        ),
+                        self.position(),
+                    ));
+                }
+                edges = Some(query);
+            } else {
+                return Err(ParseError::new(
+                    format!(
+                        "table function '{name}' has no subquery argument '{key}' (expected 'nodes' or 'edges')"
+                    ),
+                    self.position(),
+                ));
+            }
+        }
+
+        let (Some(nodes), Some(edges)) = (nodes, edges) else {
+            return Err(ParseError::new(
+                format!(
+                    "table function '{name}' inline form requires both `nodes => (…)` and `edges => (…)` subqueries"
+                ),
+                self.position(),
+            ));
+        };
+
+        Ok(TableSource::InlineGraphFunction {
+            name,
+            nodes: Box::new(nodes),
+            edges: Box::new(edges),
+            named_args,
+        })
     }
 
     fn parse_select_query_inner(&mut self) -> Result<QueryExpr, ParseError> {
@@ -243,26 +345,29 @@ impl<'a> Parser<'a> {
                 self.advance()?; // consume COMPONENTS
                 let name = "components".to_string();
                 self.expect(Token::LParen)?;
-                let (args, named_args) = self.parse_table_function_args(&name)?;
+                let (args, named_args, subquery_args) = self.parse_table_function_args(&name)?;
                 self.expect(Token::RParen)?;
-                table_source = Some(crate::storage::query::ast::TableSource::Function {
-                    name: name.clone(),
+                table_source = Some(self.build_table_function_source(
+                    name.clone(),
                     args,
                     named_args,
-                });
+                    subquery_args,
+                )?);
                 name
             } else {
                 let ident = self.expect_ident()?;
                 // Table-valued function call: `ident(arg, ...)` (issue #795).
                 if matches!(self.peek(), Token::LParen) {
                     self.advance()?; // consume '('
-                    let (args, named_args) = self.parse_table_function_args(&ident)?;
+                    let (args, named_args, subquery_args) =
+                        self.parse_table_function_args(&ident)?;
                     self.expect(Token::RParen)?;
-                    table_source = Some(crate::storage::query::ast::TableSource::Function {
-                        name: ident.clone(),
+                    table_source = Some(self.build_table_function_source(
+                        ident.clone(),
                         args,
                         named_args,
-                    });
+                        subquery_args,
+                    )?);
                 }
                 ident
             }
@@ -1429,6 +1534,78 @@ mod tests {
             }
             other => panic!("expected louvain TVF source, got {other:?}"),
         }
+    }
+
+    // ── Inline graph TVF: `nodes => / edges =>` subqueries (issue #799) ──
+
+    #[test]
+    fn tvf_inline_form_parses_nodes_and_edges_subqueries() {
+        // The inline form must produce a structurally distinct AST node
+        // (InlineGraphFunction) from the graph-collection Function form.
+        let table = parse_table(
+            "SELECT * FROM components(nodes => (SELECT id FROM hosts), edges => (SELECT src, dst FROM links))",
+        );
+        match table.source {
+            Some(TableSource::InlineGraphFunction {
+                ref name,
+                ref nodes,
+                ref edges,
+                ref named_args,
+            }) => {
+                assert_eq!(name, "components");
+                assert!(named_args.is_empty());
+                assert!(matches!(**nodes, QueryExpr::Table(_)));
+                assert!(matches!(**edges, QueryExpr::Table(_)));
+            }
+            other => panic!("expected inline graph TVF source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tvf_inline_form_carries_numeric_named_args() {
+        // `resolution => <f64>` coexists with the inline subqueries.
+        let table = parse_table(
+            "SELECT * FROM louvain(nodes => (SELECT id FROM n), edges => (SELECT a, b FROM e), resolution => 0.5)",
+        );
+        match table.source {
+            Some(TableSource::InlineGraphFunction {
+                ref name,
+                ref named_args,
+                ..
+            }) => {
+                assert_eq!(name, "louvain");
+                assert_eq!(named_args.len(), 1);
+                assert_eq!(named_args[0].0, "resolution");
+                assert!((named_args[0].1 - 0.5).abs() < f64::EPSILON);
+            }
+            other => panic!("expected inline graph TVF source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tvf_inline_form_rejects_malformed_shapes() {
+        // A positional graph argument cannot mix with inline subqueries.
+        assert!(super::super::parse(
+            "SELECT * FROM components(g, nodes => (SELECT id FROM n), edges => (SELECT a, b FROM e))"
+        )
+        .is_err());
+        // The inline form requires both `nodes` and `edges`.
+        assert!(
+            super::super::parse("SELECT * FROM components(nodes => (SELECT id FROM n))").is_err()
+        );
+        assert!(
+            super::super::parse("SELECT * FROM components(edges => (SELECT a, b FROM e))").is_err()
+        );
+        // An unknown subquery key is rejected.
+        assert!(super::super::parse(
+            "SELECT * FROM components(nodes => (SELECT id FROM n), verts => (SELECT a, b FROM e))"
+        )
+        .is_err());
+        // A `=>` followed by a non-SELECT parenthesised group is rejected.
+        assert!(super::super::parse(
+            "SELECT * FROM components(nodes => (1 + 2), edges => (SELECT a, b FROM e))"
+        )
+        .is_err());
     }
 
     #[test]
