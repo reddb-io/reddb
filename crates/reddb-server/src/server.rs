@@ -120,7 +120,11 @@ mod handlers_log;
 mod handlers_metrics;
 mod handlers_ops;
 mod handlers_ops_policy;
-mod handlers_query;
+// `pub(crate)` so the RedWire input-stream path (issue #764 / S5)
+// can reuse the canonical S4 INSERT builders / identifier checks
+// (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
+// the SQL-escaping logic.
+pub(crate) mod handlers_query;
 mod handlers_replication;
 mod handlers_vcs;
 mod handlers_vector;
