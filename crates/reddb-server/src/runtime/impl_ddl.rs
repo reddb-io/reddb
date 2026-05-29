@@ -809,6 +809,26 @@ impl RedDBRuntime {
         }
     }
 
+    /// Issue #801 — guard `ALTER GRAPH ... ADD|DROP ANALYTICS` so analytics
+    /// lifecycle mutations only land on a collection declared as a graph. The
+    /// `<graph>.<output>` resolver only consults `analytics_config` on
+    /// graph-model contracts, so allowing the op on any other model would write
+    /// dead config the reader can never surface.
+    fn require_graph_for_analytics(&self, name: &str) -> RedDBResult<()> {
+        let is_graph = self
+            .inner
+            .db
+            .collection_contract(name)
+            .map(|c| c.declared_model == crate::catalog::CollectionModel::Graph)
+            .unwrap_or(false);
+        if !is_graph {
+            return Err(RedDBError::Query(format!(
+                "ALTER GRAPH ... ANALYTICS: '{name}' is not a graph collection"
+            )));
+        }
+        Ok(())
+    }
+
     /// Execute ALTER TABLE
     ///
     /// In RedDB's schema-on-read model, ALTER TABLE operations are advisory.
@@ -1074,6 +1094,59 @@ impl RedDBRuntime {
                 }
                 AlterOperation::UnsetRetention => {
                     messages.push(format!("retention cleared on '{}'", query.name));
+                }
+                AlterOperation::AddAnalytics(views) => {
+                    // Issue #801 — analytics lifecycle is graph-only. Reject the
+                    // op on a non-graph collection so a misrouted ALTER fails
+                    // loudly instead of silently writing analytics_config onto a
+                    // model whose reader never resolves `<name>.<output>`.
+                    self.require_graph_for_analytics(&query.name)?;
+                    let existing = self.inner.db.collection_contract(&query.name);
+                    let enabled: std::collections::BTreeSet<crate::catalog::AnalyticsOutput> =
+                        existing
+                            .as_ref()
+                            .map(|c| c.analytics_config.iter().map(|v| v.output).collect())
+                            .unwrap_or_default();
+                    for view in views {
+                        if enabled.contains(&view.output) {
+                            // Idempotent: adding an already-enabled output is a
+                            // no-op — no error, no duplicate state.
+                            messages.push(format!(
+                                "analytics '{}' already enabled on '{}'",
+                                view.output.as_str(),
+                                query.name
+                            ));
+                        } else {
+                            messages.push(format!(
+                                "analytics '{}' enabled on '{}'",
+                                view.output.as_str(),
+                                query.name
+                            ));
+                        }
+                    }
+                }
+                AlterOperation::DropAnalytics(output) => {
+                    self.require_graph_for_analytics(&query.name)?;
+                    let enabled = self
+                        .inner
+                        .db
+                        .collection_contract(&query.name)
+                        .map(|c| c.analytics_config.iter().any(|v| v.output == *output))
+                        .unwrap_or(false);
+                    if !enabled {
+                        // Dropping an output that was never enabled is a clean,
+                        // explicit error (AC4) rather than a silent no-op.
+                        return Err(RedDBError::Query(format!(
+                            "ALTER GRAPH DROP ANALYTICS: analytics output '{}' is not enabled on graph '{}'",
+                            output.as_str(),
+                            query.name
+                        )));
+                    }
+                    messages.push(format!(
+                        "analytics '{}' disabled on '{}'",
+                        output.as_str(),
+                        query.name
+                    ));
                 }
             }
         }
@@ -1997,6 +2070,28 @@ fn apply_alter_operations_to_contract(
             }
             AlterOperation::UnsetRetention => {
                 contract.retention_duration_ms = None;
+            }
+            // Issue #801 — fold analytics lifecycle into the WAL-backed
+            // `analytics_config` so the change is durable and the
+            // `<graph>.<output>` resolver picks it up on the next read.
+            AlterOperation::AddAnalytics(views) => {
+                for view in views {
+                    // Idempotent: skip outputs already enabled so a repeated
+                    // ADD never duplicates state. The first declaration wins —
+                    // re-declaring options requires DROP then ADD.
+                    if !contract
+                        .analytics_config
+                        .iter()
+                        .any(|existing| existing.output == view.output)
+                    {
+                        contract.analytics_config.push(view.clone());
+                    }
+                }
+            }
+            AlterOperation::DropAnalytics(output) => {
+                contract
+                    .analytics_config
+                    .retain(|view| view.output != *output);
             }
         }
     }
