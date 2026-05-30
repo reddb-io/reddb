@@ -30,6 +30,10 @@ impl RedDBServer {
                         .map(|spool| spool.current_lsn())
                         .unwrap_or_else(|| primary.wal_buffer.current_lsn());
                     object.insert("wal_lsn".to_string(), JsonValue::Number(wal_lsn as f64));
+                    object.insert(
+                        "commit_watermark".to_string(),
+                        JsonValue::Number(self.runtime.commit_watermark() as f64),
+                    );
                     if let Some(oldest_lsn) = primary
                         .logical_wal_spool
                         .as_ref()

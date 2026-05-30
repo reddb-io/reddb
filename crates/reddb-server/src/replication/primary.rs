@@ -767,6 +767,7 @@ impl PrimaryReplication {
         let removed = replicas.len() != before;
         drop(replicas);
         if removed {
+            self.commit_waiter.drop_replica(id);
             self.bump_topology_epoch();
         }
         removed
@@ -796,8 +797,11 @@ impl PrimaryReplication {
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_acked_lsn = r.last_acked_lsn.max(lsn);
+            r.last_durable_lsn = r.last_durable_lsn.max(lsn);
             r.last_seen_at_unix_ms = now_ms;
         }
+        drop(replicas);
+        self.commit_waiter.record_replica_ack(id, lsn);
     }
 
     /// PLAN.md Phase 11.4 — replica reports applied + durable LSN

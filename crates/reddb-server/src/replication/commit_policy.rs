@@ -13,16 +13,11 @@
 //! `Local`. The primary blocks the commit response until the count
 //! is met or `RED_REPLICATION_ACK_TIMEOUT_MS` elapses.
 //!
-//! `Quorum` — future policy backed by `QuorumConfig` once quorum
-//! coordination is wired into the commit path. For now this is a
-//! marker enum value; the runtime falls back to `Local` semantics
-//! and emits a warning at boot when set.
+//! `Quorum` — commit returns after the configured `QuorumConfig`
+//! reaches its durable commit watermark.
 //!
-//! In this sprint only the enum + parsing + observability are wired.
-//! Actually blocking commits on `RemoteWal` / `AckN` / `Quorum` is
-//! out of scope; the write path still returns after local durability
-//! regardless of the configured policy. See PLAN.md 11.4 "default v1
-//! behavior remains `local`".
+//! `RemoteWal` is parsed for observability but does not block the
+//! write path yet. The default remains `Local`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommitPolicy {
