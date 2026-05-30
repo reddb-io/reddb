@@ -3484,7 +3484,7 @@ impl RedDBRuntime {
         // there is no half-finished mutation state to clean up). The
         // tick interval is intentionally longer than the MV scheduler
         // (500ms) because retention is order-of-seconds at minimum.
-        {
+        if !runtime.write_gate().is_read_only() {
             let weak_inner = Arc::downgrade(&runtime.inner);
             std::thread::Builder::new()
                 .name("reddb-retention-sweeper".into())
@@ -9285,7 +9285,12 @@ impl RedDBRuntime {
                 table_name,
                 crate::storage::unified::EntityId::new(entity_id),
             )
-            .filter(entity_visible_under_current_snapshot);
+            .filter(entity_visible_under_current_snapshot)
+            .filter(|entity| {
+                self.inner
+                    .db
+                    .replica_allows_entity_at_read(table_name, entity)
+            });
 
         let count = if entity.is_some() { 1u64 } else { 0 };
 

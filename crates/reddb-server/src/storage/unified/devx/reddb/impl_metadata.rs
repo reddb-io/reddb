@@ -2,8 +2,15 @@ use super::*;
 use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
 
 impl RedDB {
+    pub fn is_replica_role(&self) -> bool {
+        matches!(
+            self.options.replication.role,
+            crate::replication::ReplicationRole::Replica { .. }
+        )
+    }
+
     pub fn enforce_retention_policy(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.options.read_only {
+        if self.options.read_only || self.is_replica_role() {
             return Ok(());
         }
 
@@ -27,23 +34,25 @@ impl RedDB {
         Ok(())
     }
 
+    pub(crate) fn ttl_expired_entities_now(
+        &self,
+    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
+        self.ttl_expired_entities_at(current_unix_ms())
+    }
+
+    pub fn replica_allows_entity_at_read(
+        &self,
+        collection: &str,
+        entity: &crate::storage::UnifiedEntity,
+    ) -> bool {
+        if !self.is_replica_role() {
+            return true;
+        }
+        !self.entity_expired_at(collection, entity, current_unix_ms())
+    }
+
     fn sweep_ttl_expired_entities(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
-
-        let mut to_delete = Vec::<(String, EntityId)>::new();
-
-        let mut absolute_expired = self.expired_entities_by_expires_at(now_ms)?;
-        to_delete.append(&mut absolute_expired);
-
-        let mut relative_expired = self.expired_entities_by_ttl(now_ms)?;
-        to_delete.append(&mut relative_expired);
-
-        to_delete.sort_unstable();
-        to_delete.dedup();
+        let to_delete = self.ttl_expired_entities_now()?;
 
         let mut deleted = 0usize;
         for (collection, id) in to_delete {
@@ -60,6 +69,61 @@ impl RedDB {
         }
 
         Ok(deleted)
+    }
+
+    fn ttl_expired_entities_at(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
+        let mut to_delete = Vec::<(String, EntityId)>::new();
+
+        let mut absolute_expired = self.expired_entities_by_expires_at(now_ms)?;
+        to_delete.append(&mut absolute_expired);
+
+        let mut relative_expired = self.expired_entities_by_ttl(now_ms)?;
+        to_delete.append(&mut relative_expired);
+
+        to_delete.sort_unstable();
+        to_delete.dedup();
+
+        Ok(to_delete)
+    }
+
+    fn entity_expired_at(
+        &self,
+        collection: &str,
+        entity: &crate::storage::UnifiedEntity,
+        now_ms: u64,
+    ) -> bool {
+        let Some(metadata) = self.store.get_metadata(collection, entity.id) else {
+            return false;
+        };
+
+        if metadata
+            .get("_expires_at")
+            .and_then(Self::metadata_u64)
+            .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
+        {
+            return true;
+        }
+
+        let ttl_ms = metadata.get("_ttl_ms").and_then(Self::metadata_u64);
+        let ttl_secs = if ttl_ms.is_none() {
+            metadata.get("_ttl").and_then(|value| {
+                Self::metadata_u64(value).and_then(|value_secs| value_secs.checked_mul(1000))
+            })
+        } else {
+            None
+        };
+
+        let Some(ttl_ms) = ttl_ms.or(ttl_secs) else {
+            return false;
+        };
+        entity
+            .created_at
+            .saturating_mul(1000)
+            .saturating_add(ttl_ms)
+            <= now_ms
     }
 
     fn expired_entities_by_expires_at(
@@ -1288,4 +1352,12 @@ impl RedDB {
             let _ = self.store.delete(QUEUE_META_COLLECTION, row.id);
         }
     }
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
