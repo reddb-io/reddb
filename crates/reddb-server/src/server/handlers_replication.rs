@@ -10,6 +10,10 @@ impl RedDBServer {
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
         let db = self.runtime.db();
+        object.insert(
+            "current_term".to_string(),
+            JsonValue::Number(db.options().replication.term as f64),
+        );
         match &db.options().replication.role {
             crate::replication::ReplicationRole::Standalone => {
                 object.insert(

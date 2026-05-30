@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 /// User-space buffer size for the WAL writer.
 ///
-/// Chosen so that ~5 000 small records (Begin/Commit ≈ 13 bytes,
-/// small PageWrite ≈ 26 bytes) coalesce into a single `write` syscall
+/// Chosen so that ~5 000 small records (Begin/Commit ≈ 21 bytes,
+/// small PageWrite ≈ 34 bytes) coalesce into a single `write` syscall
 /// before the next `sync()` drains the buffer. Tunable; reflects the
 /// postgres XLOG block size (8 KiB) scaled up because we batch
 /// record-level rather than page-level.
@@ -309,8 +309,8 @@ mod tests {
         assert_eq!(lsn, 8);
 
         // Next record should start after encoded size
-        // Begin record: 1 (type) + 8 (tx_id) + 4 (checksum) = 13 bytes
-        assert_eq!(writer.current_lsn(), 8 + 13);
+        // Begin record: 1 (type) + 8 (term) + 8 (tx_id) + 4 (checksum) = 21 bytes
+        assert_eq!(writer.current_lsn(), 8 + 21);
     }
 
     #[test]
@@ -323,8 +323,8 @@ mod tests {
         let lsn3 = writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
 
         assert_eq!(lsn1, 8);
-        assert_eq!(lsn2, 8 + 13);
-        assert_eq!(lsn3, 8 + 13 + 13);
+        assert_eq!(lsn2, 8 + 21);
+        assert_eq!(lsn3, 8 + 21 + 21);
     }
 
     #[test]
@@ -346,10 +346,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(lsn2, 8 + 13); // after Begin
+        assert_eq!(lsn2, 8 + 21); // after Begin
 
-        // Next LSN = lsn2 + (1 + 8 + 4 + 4 + 5 + 4) = lsn2 + 26
-        assert_eq!(writer.current_lsn(), 8 + 13 + 26);
+        // Next LSN = lsn2 + (1 + 8 + 8 + 4 + 4 + 5 + 4) = lsn2 + 34
+        assert_eq!(writer.current_lsn(), 8 + 21 + 34);
     }
 
     #[test]
@@ -420,12 +420,12 @@ mod tests {
         let (_guard, path) = temp_wal("checkpoint");
         let mut writer = WalWriter::open(&path).unwrap();
 
-        // Checkpoint is same size as Begin (1 + 8 + 4 = 13)
+        // Checkpoint is same size as Begin (1 + 8 + 8 + 4 = 21)
         let lsn = writer
             .append(&WalRecord::Checkpoint { lsn: 12345 })
             .unwrap();
         assert_eq!(lsn, 8);
-        assert_eq!(writer.current_lsn(), 8 + 13);
+        assert_eq!(writer.current_lsn(), 8 + 21);
     }
 
     // -----------------------------------------------------------------
@@ -533,7 +533,7 @@ mod tests {
             writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
         }
         // current_lsn reflects the in-buffer position.
-        assert_eq!(writer.current_lsn(), 8 + 100 * 13);
+        assert_eq!(writer.current_lsn(), 8 + 100 * 21);
         // But the file on disk only has the header.
         let on_disk = std::fs::metadata(&path).unwrap().len();
         assert_eq!(on_disk, 8, "BufWriter leaked bytes to disk before sync");
@@ -597,7 +597,7 @@ mod tests {
         // And we can append again successfully.
         writer.append(&WalRecord::Begin { tx_id: 99 }).unwrap();
         writer.sync().unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 + 13);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 + 21);
     }
 
     #[test]

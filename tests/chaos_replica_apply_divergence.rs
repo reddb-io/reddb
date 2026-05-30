@@ -49,7 +49,9 @@ fn replica_applier_fails_closed_on_lsn_collision_diff_payload() {
         .apply(&db, &record(7, b"forged"), ApplyMode::Replica)
         .expect_err("divergence must fail closed");
     match err {
-        LogicalApplyError::Divergence { lsn, expected, got } => {
+        LogicalApplyError::Divergence {
+            lsn, expected, got, ..
+        } => {
             assert_eq!(lsn, 7);
             assert_ne!(expected, got, "hashes must differ");
         }
