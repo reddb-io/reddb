@@ -1276,6 +1276,53 @@ impl RedDBServer {
             }
         }
 
+        // Issue #826 — write-admission flow control on in-quorum replica
+        // lag. Refresh from the live registry so the scrape reflects the
+        // current throttle decision, then export the gate state, the soft
+        // target, and the observed in-quorum lag. Emitted on every primary
+        // scrape (even when disabled) so dashboards can chart engage/release.
+        self.runtime.refresh_replication_flow_control();
+        let flow = self.runtime.write_gate().flow_control();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_flow_control_throttled 1 when write admission is throttled by in-quorum replica lag."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_replication_flow_control_throttled gauge"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_replication_flow_control_throttled {}",
+            u8::from(flow.is_throttled())
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_flow_control_soft_target_lsn Soft target lag (LSN records) above which writes throttle; 0 disables."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_replication_flow_control_soft_target_lsn gauge"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_replication_flow_control_soft_target_lsn {}",
+            flow.soft_target_lsn()
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_flow_control_in_quorum_lag_lsn Most recent max lag (LSN records) across in-quorum replicas; excludes async read-replicas."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_replication_flow_control_in_quorum_lag_lsn gauge"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_replication_flow_control_in_quorum_lag_lsn {}",
+            flow.observed_lag_lsn()
+        );
+
         // PLAN.md Phase 11.5 — replica apply error counters and
         // current health label. Counters are global across the
         // instance lifetime; the health label reflects whatever the
