@@ -4437,6 +4437,7 @@ impl RedDBRuntime {
                 store.get(collection, EntityId::new(entity_id))
             };
             let record = ChangeRecord {
+                term: self.current_replication_term(),
                 lsn,
                 timestamp: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -4524,6 +4525,7 @@ impl RedDBRuntime {
                 store.get(collection, EntityId::new(entity_id))
             };
             let record = ChangeRecord {
+                term: self.current_replication_term(),
                 lsn,
                 timestamp: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -4651,6 +4653,7 @@ impl RedDBRuntime {
         if let Some(ref primary) = self.inner.db.replication {
             let store = self.inner.db.store();
             let record = ChangeRecord {
+                term: self.current_replication_term(),
                 lsn,
                 timestamp: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -4677,6 +4680,10 @@ impl RedDBRuntime {
         }
 
         lsn
+    }
+
+    pub(crate) fn current_replication_term(&self) -> u64 {
+        self.inner.db.options().replication.term
     }
 
     pub(crate) fn cdc_emit_prebuilt_batch<'a, I>(
@@ -4852,7 +4859,7 @@ impl RedDBRuntime {
                                         // diverged" conditions an operator must act
                                         // on out-of-band.
                                         match &err {
-                                            crate::replication::logical::LogicalApplyError::Divergence { lsn, expected: _, got: _ } => {
+                                            crate::replication::logical::LogicalApplyError::Divergence { lsn, expected: _, got: _, .. } => {
                                                 crate::telemetry::operator_event::OperatorEvent::Divergence {
                                                     peer: "primary".to_string(),
                                                     leader_lsn: *lsn,
@@ -7216,7 +7223,8 @@ impl RedDBRuntime {
                                 timestamp,
                                 q.name.clone(),
                                 serialized_records,
-                            );
+                            )
+                            .with_term(self.current_replication_term());
                             let encoded = record.encode();
                             primary.wal_buffer.append(record.lsn, encoded.clone());
                             if let Some(spool) = &primary.logical_wal_spool {
