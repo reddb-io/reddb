@@ -24,7 +24,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
+use crate::replication::flow_control::{Admission, FlowController};
 use crate::replication::ReplicationRole;
+
+/// Env var that sets the flow-control soft target (in LSN records).
+/// `0` / unset disables write-admission throttling (the default).
+pub const FLOW_CONTROL_SOFT_TARGET_ENV: &str = "RED_REPLICATION_FLOW_CONTROL_SOFT_TARGET_LSN";
 
 /// Categorises the write so the rejection error can name a sensible
 /// surface in operator-facing logs without leaking internal call sites.
@@ -123,10 +128,20 @@ pub struct WriteGate {
     /// disabled — `evaluate_archive_lag` short-circuits without
     /// touching `auto_paused`.
     pause_threshold_secs: AtomicU64,
+    /// Issue #826 — write-admission flow control keyed on in-quorum
+    /// replica lag. Independent of `read_only` / `auto_paused`: the
+    /// throttle engages and releases automatically as a quorum member
+    /// lags and recovers, and an operator read-only pin never clears it.
+    /// Disabled by default (soft target `0`).
+    flow: FlowController,
 }
 
 impl WriteGate {
     pub fn from_options(options: &RedDBOptions) -> Self {
+        let soft_target = std::env::var(FLOW_CONTROL_SOFT_TARGET_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(0);
         Self {
             read_only: AtomicBool::new(options.read_only),
             role: options.replication.role.clone(),
@@ -134,6 +149,7 @@ impl WriteGate {
             auto_paused: AtomicBool::new(false),
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
+            flow: FlowController::new(soft_target, options.replication.quorum.clone()),
         }
     }
 
@@ -184,6 +200,17 @@ impl WriteGate {
                 kind.label()
             )));
         }
+        // Issue #826 — write-admission flow control. Lowest-precedence
+        // gate: only consulted once the structural / operator / archive
+        // checks pass. Throttles when an in-quorum replica's lag exceeds
+        // the soft target; releases automatically as it catches up.
+        if matches!(self.flow.try_admit(), Admission::Throttled) {
+            return Err(RedDBError::ReadOnly(format!(
+                "write admission throttled — in-quorum replica lag exceeded soft target ({} records) — {} rejected",
+                self.flow.soft_target_lsn(),
+                kind.label()
+            )));
+        }
         Ok(crate::application::WriteConsent {
             kind,
             _seal: crate::application::WriteConsentSeal::new(),
@@ -214,6 +241,20 @@ impl WriteGate {
 
     pub fn role(&self) -> &ReplicationRole {
         &self.role
+    }
+
+    /// Issue #826 — borrow the write-admission flow controller. Callers
+    /// drive `observe()` from the primary's replica registry and read
+    /// throttle state for `/metrics`.
+    pub fn flow_control(&self) -> &FlowController {
+        &self.flow
+    }
+
+    /// Whether write admission is currently throttled by in-quorum
+    /// replica lag (issue #826). Distinct from [`is_read_only`] — a
+    /// throttle is transient back-pressure, not a read-only posture.
+    pub fn is_flow_throttled(&self) -> bool {
+        self.flow.is_throttled()
     }
 
     /// PLAN.md Phase 4.3 — dynamic read-only toggle. Flipping a
@@ -321,6 +362,7 @@ mod tests {
             auto_paused: AtomicBool::new(false),
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
+            flow: FlowController::disabled(),
         }
     }
 
@@ -529,6 +571,92 @@ mod tests {
         g.set_read_only(false);
         assert!(g.is_auto_paused());
         assert!(g.check(WriteKind::Dml).is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #826 — write-admission flow control on in-quorum replica lag.
+    // ---------------------------------------------------------------
+
+    fn gate_with_flow(soft_target: u64, quorum: crate::replication::QuorumConfig) -> WriteGate {
+        WriteGate {
+            read_only: AtomicBool::new(false),
+            role: ReplicationRole::Primary,
+            lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
+            auto_paused: AtomicBool::new(false),
+            last_archive_at_ms: AtomicU64::new(0),
+            pause_threshold_secs: AtomicU64::new(0),
+            flow: FlowController::new(soft_target, quorum),
+        }
+    }
+
+    fn flow_replica(
+        id: &str,
+        region: Option<&str>,
+        last_acked_lsn: u64,
+    ) -> crate::replication::primary::ReplicaState {
+        crate::replication::primary::ReplicaState {
+            id: id.to_string(),
+            last_acked_lsn,
+            last_sent_lsn: last_acked_lsn,
+            last_durable_lsn: last_acked_lsn,
+            apply_error_count: 0,
+            divergence_count: 0,
+            connected_at_unix_ms: 0,
+            last_seen_at_unix_ms: 0,
+            region: region.map(String::from),
+        }
+    }
+
+    #[test]
+    fn flow_throttle_rejects_writes_when_in_quorum_replica_lags_and_releases() {
+        let g = gate_with_flow(100, crate::replication::QuorumConfig::sync(1));
+        // Healthy: no observation yet → writes admitted.
+        assert!(g.check(WriteKind::Dml).is_ok());
+        assert!(!g.is_flow_throttled());
+
+        // In-quorum replica lags 150 > soft target 100 → throttle engages.
+        g.flow_control()
+            .observe(&[flow_replica("r1", Some("us"), 350)], 500);
+        assert!(g.is_flow_throttled());
+        let err = g.check(WriteKind::Dml).unwrap_err();
+        match err {
+            RedDBError::ReadOnly(msg) => assert!(msg.contains("throttled"), "{msg}"),
+            other => panic!("expected ReadOnly throttle, got {other:?}"),
+        }
+        // Throttle is not the read-only posture.
+        assert!(!g.is_read_only());
+
+        // Replica catches up (lag 50 <= 100) → throttle releases.
+        g.flow_control()
+            .observe(&[flow_replica("r1", Some("us"), 450)], 500);
+        assert!(!g.is_flow_throttled());
+        assert!(g.check(WriteKind::Dml).is_ok());
+    }
+
+    #[test]
+    fn flow_throttle_excludes_async_read_replica() {
+        // Regions quorum requires "us"; an async read-replica in "ap"
+        // lags hugely but must never engage throttling.
+        let g = gate_with_flow(100, crate::replication::QuorumConfig::regions(["us"]));
+        g.flow_control().observe(
+            &[
+                flow_replica("in-quorum-us", Some("us"), 500),
+                flow_replica("async-ap", Some("ap"), 0),
+            ],
+            500,
+        );
+        assert!(!g.is_flow_throttled());
+        assert!(g.check(WriteKind::Dml).is_ok());
+    }
+
+    #[test]
+    fn flow_throttle_disabled_by_default() {
+        let g = gate(false, ReplicationRole::Primary);
+        // Even a huge lag observation cannot throttle a disabled controller.
+        g.flow_control()
+            .observe(&[flow_replica("r1", Some("us"), 0)], 1_000_000);
+        assert!(!g.is_flow_throttled());
+        assert!(g.check(WriteKind::Dml).is_ok());
     }
 
     #[test]
