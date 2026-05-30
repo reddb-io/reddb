@@ -40,6 +40,8 @@ pub use topology_advertiser::{
     TOPOLOGY_READ_CAPABILITY,
 };
 
+pub const DEFAULT_REPLICATION_TERM: u64 = 1;
+
 /// Role of this RedDB instance in a replication cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReplicationRole {
@@ -59,6 +61,8 @@ pub enum ReplicationRole {
 #[derive(Debug, Clone)]
 pub struct ReplicationConfig {
     pub role: ReplicationRole,
+    /// Current replication term/epoch stamped into WAL-derived records.
+    pub term: u64,
     /// How often replica polls for new WAL records (milliseconds).
     pub poll_interval_ms: u64,
     /// Maximum batch size for WAL record transfer.
@@ -78,6 +82,7 @@ impl ReplicationConfig {
     pub fn standalone() -> Self {
         Self {
             role: ReplicationRole::Standalone,
+            term: DEFAULT_REPLICATION_TERM,
             poll_interval_ms: 100,
             max_batch_size: 1000,
             region: "local".to_string(),
@@ -88,6 +93,7 @@ impl ReplicationConfig {
     pub fn primary() -> Self {
         Self {
             role: ReplicationRole::Primary,
+            term: DEFAULT_REPLICATION_TERM,
             poll_interval_ms: 100,
             max_batch_size: 1000,
             region: "local".to_string(),
@@ -100,6 +106,7 @@ impl ReplicationConfig {
             role: ReplicationRole::Replica {
                 primary_addr: primary_addr.into(),
             },
+            term: DEFAULT_REPLICATION_TERM,
             poll_interval_ms: 100,
             max_batch_size: 1000,
             region: "local".to_string(),
@@ -116,6 +123,12 @@ impl ReplicationConfig {
     /// Set the region identifier (fluent setter).
     pub fn with_region(mut self, region: impl Into<String>) -> Self {
         self.region = region.into();
+        self
+    }
+
+    /// Set the replication term stamped into newly produced records.
+    pub fn with_term(mut self, term: u64) -> Self {
+        self.term = term;
         self
     }
 }
