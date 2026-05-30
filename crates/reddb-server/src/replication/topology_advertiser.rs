@@ -285,6 +285,8 @@ mod tests {
             last_acked_lsn: 100,
             last_sent_lsn: 100,
             last_durable_lsn: 100,
+            apply_error_count: 0,
+            divergence_count: 0,
             connected_at_unix_ms: now,
             last_seen_at_unix_ms: last_seen,
             region: region.map(String::from),
