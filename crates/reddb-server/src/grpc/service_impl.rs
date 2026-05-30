@@ -3093,6 +3093,10 @@ impl RedDb for GrpcRuntime {
             apply_errors_total,
             divergence_total,
         );
+        // Issue #826 — an ack moves a replica forward; re-evaluate flow
+        // control so the throttle releases as soon as an in-quorum
+        // member catches up below the soft target.
+        self.runtime.refresh_replication_flow_control();
 
         let mut reply = crate::json::Map::new();
         reply.insert("ok".into(), JsonValue::Bool(true));
@@ -3727,6 +3731,7 @@ mod tests {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         }
     }
 

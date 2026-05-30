@@ -5097,6 +5097,29 @@ impl RedDBRuntime {
             .unwrap_or_default()
     }
 
+    /// Issue #826 — re-evaluate write-admission flow control from the
+    /// live primary replica registry and return the resulting throttle
+    /// state. Computes the max lag across in-quorum replicas (async
+    /// read-replicas excluded) against the primary's current LSN and
+    /// engages/releases the `WriteGate` throttle accordingly.
+    ///
+    /// No-op (returns `false`) on non-primary instances or when flow
+    /// control is disabled (soft target `0`). Cheap enough to call on
+    /// the replica-ack path and from `/metrics` scrapes so the throttle
+    /// tracks lag without a dedicated background loop.
+    pub fn refresh_replication_flow_control(&self) -> bool {
+        let flow = self.inner.write_gate.flow_control();
+        if !flow.is_enabled() {
+            return false;
+        }
+        let Some(repl) = self.inner.db.replication.as_ref() else {
+            return false;
+        };
+        let primary_lsn = repl.current_logical_lsn();
+        let replicas = repl.replica_snapshots();
+        flow.observe(&replicas, primary_lsn)
+    }
+
     /// PLAN.md Phase 11.4 — active commit policy. Reads
     /// `RED_PRIMARY_COMMIT_POLICY` once at runtime construction;
     /// future env reloads will need a reload endpoint. Default is
