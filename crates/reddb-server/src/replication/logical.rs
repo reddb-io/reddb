@@ -25,6 +25,12 @@ pub struct ReplicaApplyMetrics {
     pub divergence_total: std::sync::atomic::AtomicU64,
     pub apply_error_total: std::sync::atomic::AtomicU64,
     pub decode_error_total: std::sync::atomic::AtomicU64,
+    /// Issue #814 — a delete (or other apply) that found no target on the
+    /// replica: a missing collection or a missing entity. Non-fatal (the
+    /// LSN chain still advances so idempotent re-pull converges, see
+    /// #813), but recorded so a missed delete that drives collection-count
+    /// drift leaves a trail instead of being swallowed by `let _ =`.
+    pub apply_miss_total: std::sync::atomic::AtomicU64,
 }
 
 impl ReplicaApplyMetrics {
@@ -43,10 +49,13 @@ impl ReplicaApplyMetrics {
             ApplyErrorKind::Decode => {
                 self.decode_error_total.fetch_add(1, Relaxed);
             }
+            ApplyErrorKind::Miss => {
+                self.apply_miss_total.fetch_add(1, Relaxed);
+            }
         }
     }
 
-    pub fn snapshot(&self) -> [(ApplyErrorKind, u64); 4] {
+    pub fn snapshot(&self) -> [(ApplyErrorKind, u64); 5] {
         use std::sync::atomic::Ordering::Relaxed;
         [
             (ApplyErrorKind::Gap, self.gap_total.load(Relaxed)),
@@ -59,6 +68,7 @@ impl ReplicaApplyMetrics {
                 ApplyErrorKind::Decode,
                 self.decode_error_total.load(Relaxed),
             ),
+            (ApplyErrorKind::Miss, self.apply_miss_total.load(Relaxed)),
         ]
     }
 }
@@ -69,6 +79,9 @@ pub enum ApplyErrorKind {
     Divergence,
     Apply,
     Decode,
+    /// Issue #814 — apply ran against a missing target (delete on an
+    /// absent collection/entity). Non-fatal divergence signal.
+    Miss,
 }
 
 impl ApplyErrorKind {
@@ -78,6 +91,7 @@ impl ApplyErrorKind {
             Self::Divergence => "divergence",
             Self::Apply => "apply",
             Self::Decode => "decode",
+            Self::Miss => "apply_miss",
         }
     }
 }
@@ -146,6 +160,11 @@ impl std::error::Error for LogicalApplyError {}
 pub struct LogicalChangeApplier {
     last_applied_lsn: AtomicU64,
     last_payload_hash: Mutex<Option<[u8; 32]>>,
+    /// Issue #814 — metrics the apply path bumps when a record runs
+    /// against a missing target. The production replica loop shares the
+    /// runtime's `ReplicaApplyMetrics` here so `/metrics` surfaces misses;
+    /// other callers (PITR, tests) get a private default that no one reads.
+    metrics: std::sync::Arc<ReplicaApplyMetrics>,
 }
 
 impl LogicalChangeApplier {
@@ -154,10 +173,27 @@ impl LogicalChangeApplier {
     /// next acceptable record is any positive LSN; from there the
     /// chain advances by 1.
     pub fn new(starting_lsn: u64) -> Self {
+        Self::with_metrics(
+            starting_lsn,
+            std::sync::Arc::new(ReplicaApplyMetrics::default()),
+        )
+    }
+
+    /// Build an applier that records apply misses / errors into a shared
+    /// `ReplicaApplyMetrics` (issue #814). The production replica loop
+    /// passes the runtime's metrics so a swallowed delete leaves a trail
+    /// on `reddb_replica_apply_errors_total{kind="apply_miss"}`.
+    pub fn with_metrics(starting_lsn: u64, metrics: std::sync::Arc<ReplicaApplyMetrics>) -> Self {
         Self {
             last_applied_lsn: AtomicU64::new(starting_lsn),
             last_payload_hash: Mutex::new(None),
+            metrics,
         }
+    }
+
+    /// The metrics handle this applier records misses/errors into.
+    pub fn metrics(&self) -> &std::sync::Arc<ReplicaApplyMetrics> {
+        &self.metrics
     }
 
     pub fn last_applied_lsn(&self) -> u64 {
@@ -221,21 +257,74 @@ impl LogicalChangeApplier {
         record: &ChangeRecord,
         mode: ApplyMode,
     ) -> Result<(), LogicalApplyError> {
-        Self::apply_record(db, record, mode).map_err(|err| LogicalApplyError::Apply {
-            lsn: record.lsn,
-            source: err,
+        Self::apply_record_with_metrics(db, record, mode, &self.metrics).map_err(|err| {
+            LogicalApplyError::Apply {
+                lsn: record.lsn,
+                source: err,
+            }
         })
     }
 
     /// Stateless apply — applies the record without monotonicity
     /// checks. Kept for callers that don't yet thread the stateful
     /// applier through. New code should prefer
-    /// `LogicalChangeApplier::new()` + `apply()`.
-    pub fn apply_record(db: &RedDB, record: &ChangeRecord, _mode: ApplyMode) -> RedDBResult<()> {
+    /// `LogicalChangeApplier::new()` + `apply()`. Apply misses (delete
+    /// against a missing target) are recorded into a throwaway metrics
+    /// handle; use [`apply_record_with_metrics`] to surface them.
+    pub fn apply_record(db: &RedDB, record: &ChangeRecord, mode: ApplyMode) -> RedDBResult<()> {
+        Self::apply_record_with_metrics(db, record, mode, &ReplicaApplyMetrics::default())
+    }
+
+    /// Stateless apply that records apply misses (issue #814) into
+    /// `metrics`. A delete against a missing collection or a missing
+    /// entity is a non-fatal divergence signal: it bumps
+    /// `ApplyErrorKind::Miss` and emits a structured warn line, but still
+    /// returns `Ok(())` so the LSN chain advances and idempotent re-pull
+    /// (#813) converges. A genuine (non-missing-target) store error on a
+    /// delete propagates as a real apply error — counted, fail-closed —
+    /// rather than being swallowed by the old `let _ =`.
+    pub fn apply_record_with_metrics(
+        db: &RedDB,
+        record: &ChangeRecord,
+        _mode: ApplyMode,
+        metrics: &ReplicaApplyMetrics,
+    ) -> RedDBResult<()> {
         let store = db.store();
         match record.operation {
             ChangeOperation::Delete => {
-                let _ = store.delete(&record.collection, EntityId::new(record.entity_id));
+                match store.delete(&record.collection, EntityId::new(record.entity_id)) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // Target collection existed but no such entity —
+                        // the delete found nothing to remove.
+                        metrics.record(ApplyErrorKind::Miss);
+                        tracing::warn!(
+                            target: "reddb::replication::apply",
+                            lsn = record.lsn,
+                            collection = %record.collection,
+                            entity_id = record.entity_id,
+                            "replica delete found no matching entity; recorded apply miss (non-fatal divergence signal)"
+                        );
+                    }
+                    Err(crate::storage::StoreError::CollectionNotFound(name)) => {
+                        // The whole collection is absent on the replica —
+                        // a missed delete that can drive count drift.
+                        metrics.record(ApplyErrorKind::Miss);
+                        tracing::warn!(
+                            target: "reddb::replication::apply",
+                            lsn = record.lsn,
+                            collection = %name,
+                            entity_id = record.entity_id,
+                            "replica delete against missing collection; recorded apply miss (non-fatal divergence signal)"
+                        );
+                    }
+                    Err(err) => {
+                        // A real store error is a genuine apply failure:
+                        // surface it instead of discarding it so the
+                        // caller counts it and the replica fails closed.
+                        return Err(RedDBError::Internal(err.to_string()));
+                    }
+                }
             }
             ChangeOperation::Refresh => {
                 // Issue #596 slice 9d — replica replay of
@@ -409,6 +498,144 @@ mod tests {
             crate::api::REDDB_FORMAT_VERSION,
             None,
         )
+    }
+
+    fn delete_record(lsn: u64, collection: &str, entity_id: u64) -> ChangeRecord {
+        ChangeRecord {
+            lsn,
+            timestamp: 100 + lsn,
+            operation: ChangeOperation::Delete,
+            collection: collection.to_string(),
+            entity_id,
+            entity_kind: "row".to_string(),
+            entity_bytes: None,
+            metadata: None,
+            refresh_records: None,
+        }
+    }
+
+    fn table_row_entity(id: u64) -> UnifiedEntity {
+        let mut entity = UnifiedEntity::new(
+            EntityId::new(id),
+            EntityKind::TableRow {
+                table: Arc::from("users"),
+                row_id: id,
+            },
+            EntityData::Row(RowData::with_names(
+                vec![Value::UnsignedInteger(id)],
+                vec!["id".to_string()],
+            )),
+        );
+        entity.created_at = 100 + id;
+        entity.updated_at = 100 + id;
+        entity.sequence_id = id;
+        entity
+    }
+
+    // Issue #814 — a delete against a missing collection must record an
+    // apply miss (not a silent no-op) and still return Ok so the LSN
+    // chain advances (idempotent re-pull, #813).
+    #[test]
+    fn delete_against_missing_collection_records_apply_miss() {
+        let (db, path) = open_db();
+        let metrics = ReplicaApplyMetrics::default();
+        let before = metrics.apply_miss_total.load(Ordering::Relaxed);
+
+        LogicalChangeApplier::apply_record_with_metrics(
+            &db,
+            &delete_record(1, "no_such_collection", 42),
+            ApplyMode::Replica,
+            &metrics,
+        )
+        .expect("missing-target delete is non-fatal");
+
+        assert_eq!(
+            metrics.apply_miss_total.load(Ordering::Relaxed),
+            before + 1,
+            "delete against a missing collection must bump the apply-miss signal"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #814 — a delete against an existing collection but absent
+    // entity is likewise a recorded miss, not a swallowed no-op.
+    #[test]
+    fn delete_against_missing_entity_records_apply_miss() {
+        let (db, path) = open_db();
+        let _ = db.store().get_or_create_collection("users");
+        let metrics = ReplicaApplyMetrics::default();
+
+        LogicalChangeApplier::apply_record_with_metrics(
+            &db,
+            &delete_record(1, "users", 9999),
+            ApplyMode::Replica,
+            &metrics,
+        )
+        .expect("missing-entity delete is non-fatal");
+
+        assert_eq!(
+            metrics.apply_miss_total.load(Ordering::Relaxed),
+            1,
+            "delete of an absent entity must bump the apply-miss signal"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #814 — the normal path (target present) deletes without
+    // firing the miss signal. No behavioral regression.
+    #[test]
+    fn delete_of_present_target_records_no_apply_miss() {
+        let (db, path) = open_db();
+        let store = db.store();
+        let _ = store.get_or_create_collection("users");
+        let id = store
+            .insert_auto("users", table_row_entity(1))
+            .expect("insert entity");
+        let metrics = ReplicaApplyMetrics::default();
+
+        LogicalChangeApplier::apply_record_with_metrics(
+            &db,
+            &delete_record(1, "users", id.raw()),
+            ApplyMode::Replica,
+            &metrics,
+        )
+        .expect("present-target delete applies");
+
+        assert_eq!(
+            metrics.apply_miss_total.load(Ordering::Relaxed),
+            0,
+            "deleting a present target must not fire the apply-miss signal"
+        );
+        assert!(
+            store.get("users", id).is_none(),
+            "the entity must actually be removed on the normal path"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #814 — the shared-metrics handle on the stateful applier
+    // surfaces the miss so `/metrics` (which reads the same Arc) sees it.
+    #[test]
+    fn stateful_apply_surfaces_delete_miss_via_metrics_handle() {
+        let (db, path) = open_db();
+        let applier =
+            LogicalChangeApplier::with_metrics(0, Arc::new(ReplicaApplyMetrics::default()));
+
+        applier
+            .apply(&db, &delete_record(1, "ghost", 7), ApplyMode::Replica)
+            .expect("missing-target delete advances the chain");
+
+        assert_eq!(
+            applier.metrics().apply_miss_total.load(Ordering::Relaxed),
+            1,
+            "the applier's shared metrics handle must record the miss"
+        );
+        assert_eq!(
+            applier.last_applied_lsn(),
+            1,
+            "a non-fatal miss still advances the LSN chain"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
