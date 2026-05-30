@@ -2990,28 +2990,34 @@ impl RedDb for GrpcRuntime {
             .and_then(JsonValue::as_str)
             .map(|s| s.to_string());
 
+        // A replica that fell behind within the retention window resumes
+        // via a partial resync from its slot position; one past the
+        // retention cap is told to re-bootstrap (issue #832).
+        let mut partial_resync = false;
         if let Some(id) = &replica_id {
             repl.ensure_replica_registered(id);
-            if let Some(reason) = repl.slot_rebootstrap_reason(id, since_lsn, oldest_available_lsn)
-            {
-                let mut map = crate::json::Map::new();
-                map.insert("records".into(), JsonValue::Array(Vec::new()));
-                map.insert("current_lsn".into(), JsonValue::Number(current_lsn as f64));
-                if let Some(oldest) = oldest_available_lsn {
+            match repl.plan_replica_resume(id, since_lsn, oldest_available_lsn) {
+                crate::replication::primary::ResumeMode::FullRebootstrap { cause } => {
+                    let mut map = crate::json::Map::new();
+                    map.insert("records".into(), JsonValue::Array(Vec::new()));
+                    map.insert("current_lsn".into(), JsonValue::Number(current_lsn as f64));
+                    if let Some(oldest) = oldest_available_lsn {
+                        map.insert(
+                            "oldest_available_lsn".into(),
+                            JsonValue::Number(oldest as f64),
+                        );
+                    }
+                    map.insert("needs_rebootstrap".into(), JsonValue::Bool(true));
                     map.insert(
-                        "oldest_available_lsn".into(),
-                        JsonValue::Number(oldest as f64),
+                        "invalidation_reason".into(),
+                        JsonValue::String(cause.as_str().to_string()),
                     );
+                    return Ok(Response::new(json_payload_reply(JsonValue::Object(map))));
                 }
-                map.insert("needs_rebootstrap".into(), JsonValue::Bool(true));
-                map.insert(
-                    "invalidation_reason".into(),
-                    JsonValue::String(reason.as_str().to_string()),
-                );
-                return Ok(Response::new(json_payload_reply(JsonValue::Object(map))));
-            }
-            if let Some(slot) = repl.slot_snapshots().into_iter().find(|slot| slot.id == *id) {
-                since_lsn = since_lsn.max(slot.restart_lsn);
+                crate::replication::primary::ResumeMode::PartialResync { resume_lsn } => {
+                    since_lsn = resume_lsn;
+                    partial_resync = true;
+                }
             }
         }
 
@@ -3035,19 +3041,27 @@ impl RedDb for GrpcRuntime {
                 .or_else(|| repl.wal_buffer.oldest_lsn());
         }
 
-        let records = if let Some(spool) = &repl.logical_wal_spool {
+        // Fan-out reads share ref-counted payloads: the in-memory buffer
+        // path hands back `Arc<[u8]>` clones (no per-replica byte copy,
+        // issue #832); the spool path wraps each freshly-read record in an
+        // `Arc` so both branches feed the same encoding loop.
+        let records: Vec<(u64, std::sync::Arc<[u8]>)> = if let Some(spool) = &repl.logical_wal_spool
+        {
             spool
                 .read_since(since_lsn, max_count)
                 .map_err(|err| Status::internal(err.to_string()))?
+                .into_iter()
+                .map(|(lsn, data)| (lsn, std::sync::Arc::from(data.into_boxed_slice())))
+                .collect()
         } else {
-            repl.wal_buffer.read_since(since_lsn, max_count)
+            repl.wal_buffer.read_since_shared(since_lsn, max_count)
         };
         let mut entries = Vec::with_capacity(records.len());
         let mut max_sent_lsn = since_lsn;
         for (lsn, data) in &records {
             let mut entry = crate::json::Map::new();
             entry.insert("lsn".into(), JsonValue::Number(*lsn as f64));
-            entry.insert("data".into(), JsonValue::String(hex::encode(data)));
+            entry.insert("data".into(), JsonValue::String(hex::encode(data.as_ref())));
             entries.push(JsonValue::Object(entry));
             if *lsn > max_sent_lsn {
                 max_sent_lsn = *lsn;
@@ -3071,6 +3085,15 @@ impl RedDb for GrpcRuntime {
                 JsonValue::Number(oldest as f64),
             );
         }
+        // Issue #832 — surface that this pull was served as a partial
+        // resync (resumed from the slot, no full re-bootstrap) plus the
+        // cumulative count, so a brief disconnect's recovery is visible
+        // in replica status/metrics.
+        map.insert("partial_resync".into(), JsonValue::Bool(partial_resync));
+        map.insert(
+            "partial_resync_count".into(),
+            JsonValue::Number(repl.partial_resync_count() as f64),
+        );
 
         Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
     }
