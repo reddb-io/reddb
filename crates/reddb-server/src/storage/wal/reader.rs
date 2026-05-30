@@ -1,4 +1,4 @@
-use super::record::{WalRecord, WAL_MAGIC, WAL_VERSION};
+use super::record::{WalRecord, WAL_MAGIC, WAL_VERSION, WAL_VERSION_V2};
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
@@ -7,6 +7,7 @@ use std::path::Path;
 pub struct WalReader {
     reader: BufReader<File>,
     position: u64,
+    format_version: u8,
 }
 
 impl WalReader {
@@ -26,7 +27,7 @@ impl WalReader {
             ));
         }
 
-        if header[4] != WAL_VERSION {
+        if header[4] != WAL_VERSION && header[4] != WAL_VERSION_V2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unsupported WAL version: {}", header[4]),
@@ -36,6 +37,7 @@ impl WalReader {
         Ok(Self {
             reader,
             position: 8,
+            format_version: header[4],
         })
     }
 
@@ -45,6 +47,7 @@ impl WalReader {
         WalIterator {
             reader: self.reader,
             position: self.position,
+            format_version: self.format_version,
         }
     }
 
@@ -79,6 +82,7 @@ impl WalReader {
 pub struct WalIterator {
     reader: BufReader<File>,
     position: u64,
+    format_version: u8,
 }
 
 impl Iterator for WalIterator {
@@ -117,8 +121,8 @@ impl Iterator for WalIterator {
             count: 0,
         };
 
-        match WalRecord::read(&mut counter) {
-            Ok(Some(record)) => {
+        match WalRecord::read_with_format_version(&mut counter, self.format_version) {
+            Ok(Some((_, record))) => {
                 self.position += counter.count;
                 Some(Ok((start_pos, record)))
             }
