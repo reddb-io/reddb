@@ -34,6 +34,8 @@ impl ReplicaReplication {
 /// Resume point recovered from a previously checkpointed bootstrap intent.
 pub struct ResumePoint {
     pub last_applied_lsn: u64,
+    pub snapshot_token: Option<String>,
+    pub snapshot_offset: u64,
 }
 
 /// Manages bootstrap lifecycle using [`AdminIntentLog`] for crash-resumability.
@@ -86,9 +88,21 @@ impl ReplicaBootstrapper {
             .and_then(|v| v.as_f64())
             .map(|f| f as u64)
             .unwrap_or(0);
+        let snapshot_token = progress
+            .get("snapshot_cursor")
+            .or_else(|| progress.get("snapshot_token"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        let snapshot_offset = progress
+            .get("snapshot_offset")
+            .and_then(|v| v.as_f64())
+            .map(|f| f as u64)
+            .unwrap_or(0);
 
         Some(ResumePoint {
             last_applied_lsn: lsn,
+            snapshot_token,
+            snapshot_offset,
         })
     }
 
@@ -139,6 +153,35 @@ impl<'a> BootstrapHandle<'a> {
     ) -> Result<(), IntentLogError> {
         self.checkpoint_n += 1;
         let progress = IntentProgress::new()
+            .insert(
+                "last_applied_lsn",
+                JsonValue::Number(last_applied_lsn as f64),
+            )
+            .insert("batches_applied", JsonValue::Number(batches_applied as f64));
+        self.handle.checkpoint(self.checkpoint_n, Some(progress))?;
+        self.last_applied_lsn = last_applied_lsn;
+        Ok(())
+    }
+
+    /// Checkpoint an in-flight snapshot transfer so an interrupted bootstrap
+    /// can resume from the last persisted byte offset instead of restarting
+    /// from zero (issue #830).
+    ///
+    /// The snapshot token is stored under `snapshot_cursor` because
+    /// [`AdminIntentLog`] redacts progress keys containing `token`; the public
+    /// [`ResumePoint`] still surfaces it as `snapshot_token` to callers, which
+    /// also read the legacy `snapshot_token` key as a fallback.
+    pub fn checkpoint_snapshot_transfer(
+        &mut self,
+        snapshot_token: impl Into<String>,
+        snapshot_offset: u64,
+        last_applied_lsn: u64,
+        batches_applied: u64,
+    ) -> Result<(), IntentLogError> {
+        self.checkpoint_n += 1;
+        let progress = IntentProgress::new()
+            .insert("snapshot_cursor", JsonValue::String(snapshot_token.into()))
+            .insert("snapshot_offset", JsonValue::Number(snapshot_offset as f64))
             .insert(
                 "last_applied_lsn",
                 JsonValue::Number(last_applied_lsn as f64),
@@ -260,6 +303,31 @@ mod tests {
         assert_eq!(r1, Some(300), "replica-1 resumes at 300");
         assert_eq!(r2, Some(700), "replica-2 resumes at 700");
         assert!(r3.is_none(), "replica-3 has no intent");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resume_from_snapshot_transfer_checkpoint_after_crash() {
+        let path = tmp_path("snapshot-resume");
+        let bootstrapper = ReplicaBootstrapper::new("replica-snapshot");
+
+        {
+            let log = open_log(&path);
+            let mut handle = bootstrapper.begin(&log, 10, 1000).unwrap();
+            handle
+                .checkpoint_snapshot_transfer("snapshot-token-10", 4096, 10, 0)
+                .unwrap();
+            std::mem::forget(handle);
+        }
+
+        {
+            let log2 = open_log(&path);
+            let resume = bootstrapper.scan_for_resume(&log2).expect("should resume");
+            assert_eq!(resume.last_applied_lsn, 10);
+            assert_eq!(resume.snapshot_token.as_deref(), Some("snapshot-token-10"));
+            assert_eq!(resume.snapshot_offset, 4096);
+        }
 
         let _ = std::fs::remove_file(&path);
     }
