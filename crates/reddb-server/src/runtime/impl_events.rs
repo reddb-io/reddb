@@ -241,5 +241,6 @@ fn backfill_result(
         result,
         affected_rows: enqueued,
         statement_type: "insert",
+        bookmark: None,
     }
 }
