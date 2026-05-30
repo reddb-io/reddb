@@ -2996,7 +2996,8 @@ impl RedDb for GrpcRuntime {
 
     /// PLAN.md Phase 11.4 — replica reports applied + durable LSN to the
     /// primary after persisting a WAL batch. JSON payload:
-    /// `{"replica_id": "...", "applied_lsn": <u64>, "durable_lsn": <u64>}`.
+    /// `{"replica_id": "...", "applied_lsn": <u64>, "durable_lsn": <u64>,
+    ///   "apply_errors_total": <u64>, "divergence_total": <u64>}`.
     /// Idempotent — older LSN values are clamped to the existing maximum.
     async fn ack_replica_lsn(
         &self,
@@ -3027,8 +3028,22 @@ impl RedDb for GrpcRuntime {
             .get("durable_lsn")
             .and_then(JsonValue::as_u64)
             .unwrap_or(applied_lsn);
+        let apply_errors_total = payload
+            .get("apply_errors_total")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(0);
+        let divergence_total = payload
+            .get("divergence_total")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(0);
 
-        repl.ack_replica_lsn(&authenticated_replica_id, applied_lsn, durable_lsn);
+        repl.ack_replica_lsn_with_observability(
+            &authenticated_replica_id,
+            applied_lsn,
+            durable_lsn,
+            apply_errors_total,
+            divergence_total,
+        );
 
         let mut reply = crate::json::Map::new();
         reply.insert("ok".into(), JsonValue::Bool(true));
@@ -3038,6 +3053,14 @@ impl RedDb for GrpcRuntime {
         );
         reply.insert("applied_lsn".into(), JsonValue::Number(applied_lsn as f64));
         reply.insert("durable_lsn".into(), JsonValue::Number(durable_lsn as f64));
+        reply.insert(
+            "apply_errors_total".into(),
+            JsonValue::Number(apply_errors_total as f64),
+        );
+        reply.insert(
+            "divergence_total".into(),
+            JsonValue::Number(divergence_total as f64),
+        );
         Ok(Response::new(json_payload_reply(JsonValue::Object(reply))))
     }
 
