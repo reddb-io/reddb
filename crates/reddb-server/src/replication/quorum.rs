@@ -7,7 +7,8 @@
 //! after ack but before replication would drop the write.
 //!
 //! `QuorumCoordinator` sits between the write path and the client ack.
-//! It watches `ReplicaState::last_acked_lsn` on the underlying primary
+//! It watches durable replica ACKs on the underlying primary's
+//! `CommitWaiter`
 //! and blocks the caller until the configured quorum of replicas has
 //! durably received the record. Three quorum shapes are supported:
 //!
@@ -24,7 +25,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::primary::PrimaryReplication;
 
@@ -218,27 +219,27 @@ impl QuorumCoordinator {
         // Early validation: can we ever satisfy this quorum?
         self.validate_preconditions()?;
 
-        let start = Instant::now();
         let timeout = self.config.timeout;
-        loop {
-            if self.has_quorum(target_lsn) {
-                return Ok(());
-            }
-            if let Some(limit) = timeout {
-                if start.elapsed() >= limit {
-                    return Err(QuorumError::Timeout {
-                        target_lsn,
-                        elapsed_ms: start.elapsed().as_millis(),
-                        acked_regions: self.acked_regions(target_lsn),
-                    });
-                }
-            }
-            // Poll interval matches ReplicationConfig::poll_interval_ms
-            // default (100ms). The coordinator doesn't get woken by
-            // ack_replica directly today — a future revision adds a
-            // condvar on ReplicaState. For Phase 2.6 polling is fine.
-            std::thread::sleep(Duration::from_millis(25));
+        let start = std::time::Instant::now();
+        let reached = match &self.config.mode {
+            QuorumMode::Async => true,
+            QuorumMode::Sync { min_replicas } => self
+                .primary
+                .commit_waiter
+                .wait_for_commit_watermark(target_lsn, *min_replicas as u32, timeout),
+            QuorumMode::Regions { .. } => self
+                .primary
+                .commit_waiter
+                .wait_for_change_until(timeout, || self.has_quorum(target_lsn)),
+        };
+        if reached {
+            return Ok(());
         }
+        Err(QuorumError::Timeout {
+            target_lsn,
+            elapsed_ms: start.elapsed().as_millis(),
+            acked_regions: self.acked_regions(target_lsn),
+        })
     }
 
     /// Fast-check the quorum predicate without waiting. Returns true
@@ -247,7 +248,12 @@ impl QuorumCoordinator {
     pub fn has_quorum(&self, target_lsn: u64) -> bool {
         match &self.config.mode {
             QuorumMode::Async => true,
-            QuorumMode::Sync { min_replicas } => self.count_acked(target_lsn) >= *min_replicas,
+            QuorumMode::Sync { min_replicas } => {
+                self.primary
+                    .commit_waiter
+                    .commit_watermark(*min_replicas as u32)
+                    >= target_lsn
+            }
             QuorumMode::Regions { required } => {
                 let acked = self.acked_regions(target_lsn);
                 required.iter().all(|r| acked.contains(r))
@@ -284,18 +290,6 @@ impl QuorumCoordinator {
         }
     }
 
-    fn count_acked(&self, target_lsn: u64) -> usize {
-        let replicas = self
-            .primary
-            .replicas
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        replicas
-            .iter()
-            .filter(|r| r.last_acked_lsn >= target_lsn)
-            .count()
-    }
-
     fn acked_regions(&self, target_lsn: u64) -> HashSet<String> {
         let replicas = self
             .primary
@@ -305,9 +299,46 @@ impl QuorumCoordinator {
         let regions = self.regions.read();
         replicas
             .iter()
-            .filter(|r| r.last_acked_lsn >= target_lsn)
+            .filter(|r| r.last_durable_lsn >= target_lsn)
             .filter_map(|r| regions.get(&r.id).cloned())
             .collect()
+    }
+
+    /// Highest LSN durable on the configured quorum shape.
+    pub fn commit_watermark(&self) -> u64 {
+        match &self.config.mode {
+            QuorumMode::Async => 0,
+            QuorumMode::Sync { min_replicas } => self
+                .primary
+                .commit_waiter
+                .commit_watermark(*min_replicas as u32),
+            QuorumMode::Regions { required } => self.region_commit_watermark(required),
+        }
+    }
+
+    fn region_commit_watermark(&self, required: &HashSet<String>) -> u64 {
+        if required.is_empty() {
+            return 0;
+        }
+        let replicas = self
+            .primary
+            .replicas
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let regions = self.regions.read();
+        let mut watermark = u64::MAX;
+        for required_region in required {
+            let Some(region_lsn) = replicas
+                .iter()
+                .filter(|r| regions.get(&r.id) == Some(required_region))
+                .map(|r| r.last_durable_lsn)
+                .max()
+            else {
+                return 0;
+            };
+            watermark = watermark.min(region_lsn);
+        }
+        watermark
     }
 
     /// Minimum LSN across all connected replicas — the "safe replay"
@@ -320,7 +351,7 @@ impl QuorumCoordinator {
             .replicas
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        replicas.iter().map(|r| r.last_acked_lsn).min()
+        replicas.iter().map(|r| r.last_durable_lsn).min()
     }
 
     /// Config accessor.
@@ -394,6 +425,52 @@ mod tests {
         // Both acked → quorum satisfied.
         p.ack_replica("eu_a", 50);
         assert!(q.has_quorum(50));
+    }
+
+    #[test]
+    fn region_mode_requires_durable_lsn_for_watermark() {
+        let p = primary();
+        p.register_replica("us_a".to_string());
+        p.register_replica("eu_a".to_string());
+        let q = QuorumCoordinator::new(
+            Arc::clone(&p),
+            QuorumConfig::regions(["us", "eu"]).with_timeout(Duration::from_millis(50)),
+        );
+        q.bind_replica_region("us_a", "us");
+        q.bind_replica_region("eu_a", "eu");
+
+        p.ack_replica_lsn("us_a", 50, 50);
+        p.ack_replica_lsn("eu_a", 50, 40);
+        assert!(!q.has_quorum(50));
+        assert_eq!(q.commit_watermark(), 40);
+
+        p.ack_replica_lsn("eu_a", 50, 50);
+        assert!(q.has_quorum(50));
+        assert_eq!(q.commit_watermark(), 50);
+    }
+
+    #[test]
+    fn region_mode_wait_wakes_on_durable_ack() {
+        let p = primary();
+        p.register_replica("us_a".to_string());
+        p.register_replica("eu_a".to_string());
+        let q = Arc::new(QuorumCoordinator::new(
+            Arc::clone(&p),
+            QuorumConfig::regions(["us", "eu"]).with_timeout(Duration::from_secs(1)),
+        ));
+        q.bind_replica_region("us_a", "us");
+        q.bind_replica_region("eu_a", "eu");
+
+        let waiter = Arc::clone(&q);
+        let handle = std::thread::spawn(move || waiter.wait_for_quorum(75));
+        std::thread::sleep(Duration::from_millis(20));
+        p.ack_replica_lsn("us_a", 75, 75);
+        p.ack_replica_lsn("eu_a", 75, 75);
+
+        handle
+            .join()
+            .expect("waiter thread")
+            .expect("quorum should release after durable acks");
     }
 
     #[test]

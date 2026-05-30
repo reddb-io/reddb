@@ -1313,6 +1313,16 @@ impl RedDBServer {
             "reddb_commit_wait_last_seconds {}",
             (last_micros as f64) / 1_000_000.0
         );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_commit_watermark_lsn Highest LSN durable on the active synchronous commit quorum."
+        );
+        let _ = writeln!(body, "# TYPE reddb_commit_watermark_lsn gauge");
+        let _ = writeln!(
+            body,
+            "reddb_commit_watermark_lsn {}",
+            self.runtime.commit_watermark()
+        );
 
         // PLAN.md Phase 11.4 — declared commit policy as a labeled
         // gauge so dashboards can confirm what the operator pinned.

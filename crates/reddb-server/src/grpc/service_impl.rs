@@ -2816,6 +2816,10 @@ impl RedDb for GrpcRuntime {
                         .unwrap_or_else(|| repl.wal_buffer.current_lsn());
                     map.insert("current_lsn".into(), JsonValue::Number(lsn as f64));
                     map.insert(
+                        "commit_watermark".into(),
+                        JsonValue::Number(self.runtime.commit_watermark() as f64),
+                    );
+                    map.insert(
                         "replica_count".into(),
                         JsonValue::Number(repl.replica_count() as f64),
                     );
