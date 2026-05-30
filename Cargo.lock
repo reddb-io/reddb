@@ -2342,6 +2342,7 @@ dependencies = [
  "tracing-subscriber",
  "trybuild",
  "ureq",
+ "x509-parser",
  "zstd",
 ]
 
