@@ -48,6 +48,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod bookmark_routing;
 pub mod connect;
 pub mod connector;
 pub mod error;
