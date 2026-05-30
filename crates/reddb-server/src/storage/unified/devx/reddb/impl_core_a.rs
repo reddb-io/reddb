@@ -320,7 +320,10 @@ impl RedDB {
 
         // Initialize primary replication state if configured as primary.
         let replication = match &options.replication.role {
-            ReplicationRole::Primary => Some(Arc::new(PrimaryReplication::new(path.as_deref()))),
+            ReplicationRole::Primary => Some(Arc::new(PrimaryReplication::new_with_config(
+                path.as_deref(),
+                &options.replication,
+            ))),
             _ => None,
         };
 
