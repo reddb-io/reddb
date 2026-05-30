@@ -4788,13 +4788,31 @@ impl RedDBRuntime {
                         let oldest_available_lsn = value
                             .get("oldest_available_lsn")
                             .and_then(crate::json::Value::as_u64);
+                        if value
+                            .get("needs_rebootstrap")
+                            .and_then(crate::json::Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            let reason = value
+                                .get("invalidation_reason")
+                                .and_then(crate::json::Value::as_str)
+                                .unwrap_or("unknown");
+                            self.persist_replication_health(
+                                "rebootstrap_required",
+                                &format!("replication slot invalidated ({reason}); re-bootstrap required"),
+                                current_lsn,
+                                oldest_available_lsn,
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
+                            continue;
+                        }
                         if since_lsn > 0
                             && oldest_available_lsn
                                 .map(|oldest| oldest > since_lsn.saturating_add(1))
                                 .unwrap_or(false)
                         {
                             self.persist_replication_health(
-                                "stalled_gap",
+                                "rebootstrap_required",
                                 "replica is behind the oldest logical WAL available on primary; re-bootstrap required",
                                 current_lsn,
                                 oldest_available_lsn,
