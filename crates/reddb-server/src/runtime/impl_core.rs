@@ -2957,7 +2957,9 @@ impl RedDBRuntime {
                     options.query_audit.clone(),
                 )),
                 lease_lifecycle: std::sync::OnceLock::new(),
-                replica_apply_metrics: crate::replication::logical::ReplicaApplyMetrics::default(),
+                replica_apply_metrics: std::sync::Arc::new(
+                    crate::replication::logical::ReplicaApplyMetrics::default(),
+                ),
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
                 schema_vocabulary: parking_lot::RwLock::new(
                     crate::runtime::schema_vocabulary::SchemaVocabulary::new(),
@@ -4754,7 +4756,10 @@ impl RedDBRuntime {
             // monotonicity across pulls. Seed with the persisted
             // `last_applied_lsn` so reboots don't lose the chain
             // pointer.
-            let applier = crate::replication::logical::LogicalChangeApplier::new(since_lsn);
+            let applier = crate::replication::logical::LogicalChangeApplier::with_metrics(
+                since_lsn,
+                self.inner.replica_apply_metrics.clone(),
+            );
 
             loop {
                 let payload = crate::json!({
@@ -5041,12 +5046,13 @@ impl RedDBRuntime {
     }
 
     /// PLAN.md Phase 11.5 — accessor for replica-side apply error
-    /// counters (gap / divergence / apply / decode). Returned
-    /// snapshot is consistent across the four counters; the labels
-    /// match `reddb_replica_apply_errors_total{kind}`.
+    /// counters (gap / divergence / apply / decode / apply_miss). Returned
+    /// snapshot is consistent across the counters; the labels match
+    /// `reddb_replica_apply_errors_total{kind}`. Issue #814 adds the
+    /// `apply_miss` kind for deletes against a missing target.
     pub fn replica_apply_error_counts(
         &self,
-    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 4] {
+    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 5] {
         self.inner.replica_apply_metrics.snapshot()
     }
 
