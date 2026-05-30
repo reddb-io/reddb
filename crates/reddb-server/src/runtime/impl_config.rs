@@ -289,6 +289,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             Err(err) => {
@@ -720,6 +721,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -772,6 +774,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -833,6 +836,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -884,6 +888,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "stream",
+            bookmark: None,
         })
     }
 
@@ -1617,6 +1622,7 @@ fn config_write_output(
         } else {
             "update"
         },
+        bookmark: None,
     }
 }
 
