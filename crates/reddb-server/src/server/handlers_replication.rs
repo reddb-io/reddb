@@ -49,6 +49,16 @@ impl RedDBServer {
                         "replica_count".to_string(),
                         JsonValue::Number(primary.replica_count() as f64),
                     );
+                    if let Some(progress) = primary.replication_progress() {
+                        object.insert(
+                            "replication_lag_lsn".to_string(),
+                            JsonValue::Number(progress.lag_lsn as f64),
+                        );
+                        object.insert(
+                            "safe_replay_lsn".to_string(),
+                            JsonValue::Number(progress.safe_replay_lsn as f64),
+                        );
+                    }
                     if let Some(floor) = primary.retention_floor_lsn() {
                         object.insert(
                             "retention_floor_lsn".to_string(),
