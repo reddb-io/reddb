@@ -4805,6 +4805,8 @@ impl RedDBRuntime {
                         if let Some(records) =
                             value.get("records").and_then(crate::json::Value::as_array)
                         {
+                            let mut batch_applied_lsn = None;
+                            let mut ack_failed = false;
                             for record in records {
                                 let Some(data_hex) =
                                     record.get("data").and_then(crate::json::Value::as_str)
@@ -4844,6 +4846,7 @@ impl RedDBRuntime {
                                         self.invalidate_result_cache_for_table(&change.collection);
                                         since_lsn = since_lsn.max(change.lsn);
                                         self.persist_replica_lsn(since_lsn);
+                                        batch_applied_lsn = Some(since_lsn);
                                     }
                                     Ok(_) => {
                                         // Idempotent / Skipped: no advance, no error.
@@ -4900,6 +4903,30 @@ impl RedDBRuntime {
                                         break;
                                     }
                                 }
+                            }
+                            if let Some(applied_lsn) = batch_applied_lsn {
+                                let ack_payload = crate::json!({
+                                    "replica_id": replica_id.clone(),
+                                    "applied_lsn": applied_lsn,
+                                    "durable_lsn": applied_lsn
+                                });
+                                let ack_request = tonic::Request::new(JsonPayloadRequest {
+                                    payload_json: crate::json::to_string(&ack_payload)
+                                        .unwrap_or_else(|_| "{}".to_string()),
+                                });
+                                if client.ack_replica_lsn(ack_request).await.is_err() {
+                                    ack_failed = true;
+                                    self.persist_replication_health(
+                                        "ack_error",
+                                        "primary ack_replica_lsn request failed",
+                                        current_lsn,
+                                        oldest_available_lsn,
+                                    );
+                                }
+                            }
+                            if ack_failed {
+                                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+                                continue;
                             }
                         }
                         self.persist_replication_health(
