@@ -5085,15 +5085,37 @@ impl RedDBRuntime {
             .unwrap_or((0, 0, 0, 0))
     }
 
+    /// Named commit watermark: highest LSN durable on the active
+    /// synchronous commit quorum. Returns 0 when the active policy does
+    /// not require replica durability.
+    pub fn commit_watermark(&self) -> u64 {
+        match self.commit_policy() {
+            crate::replication::CommitPolicy::AckN(n) if n > 0 => self
+                .inner
+                .db
+                .replication
+                .as_ref()
+                .map(|repl| repl.commit_waiter.commit_watermark(n))
+                .unwrap_or(0),
+            crate::replication::CommitPolicy::Quorum => self
+                .inner
+                .db
+                .quorum
+                .as_ref()
+                .map(|q| q.commit_watermark())
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     /// PLAN.md Phase 11.4 — block until at least `count` replicas
     /// have durably applied through `target_lsn`, or `timeout`
     /// elapses. Returns the `AwaitOutcome` so the caller can decide
     /// whether to surface a timeout error to the client or continue
     /// (the policy mapping lives in the commit dispatcher).
     ///
-    /// Foundation only — the write commit path doesn't yet call
-    /// this. Wiring it is a per-surface task gated on the operator
-    /// flipping `RED_PRIMARY_COMMIT_POLICY` away from `local`.
+    /// Used by the `ack_n` commit policy once the operator flips
+    /// `RED_PRIMARY_COMMIT_POLICY` away from `local`.
     pub fn await_replica_acks(
         &self,
         target_lsn: u64,
@@ -5115,10 +5137,9 @@ impl RedDBRuntime {
     /// against `post_lsn` (the LSN of the just-completed write).
     /// Returns `Ok(AwaitOutcome)` on every successful enforcement
     /// (including `Reached` and `TimedOut` when fail-on-timeout is
-    /// off). Returns `Err(ReadOnly)` only when:
-    ///   * policy is `AckN(n)` with `n > 0`
-    ///   * the wait timed out
-    ///   * `RED_COMMIT_FAIL_ON_TIMEOUT=true` is set
+    /// off). Returns `Err(ReadOnly)` only when a synchronous policy
+    /// misses its threshold and `RED_COMMIT_FAIL_ON_TIMEOUT=true` is
+    /// set.
     ///
     /// The HTTP / gRPC / wire surfaces map the error to 504 / wire
     /// backoff. Default behaviour (env unset) logs warn and returns
@@ -5128,7 +5149,40 @@ impl RedDBRuntime {
         &self,
         post_lsn: u64,
     ) -> RedDBResult<crate::replication::AwaitOutcome> {
-        let n = match self.commit_policy() {
+        let policy = self.commit_policy();
+        if matches!(policy, crate::replication::CommitPolicy::Quorum) {
+            return match self.inner.db.wait_for_replication_quorum(post_lsn) {
+                Ok(()) => Ok(crate::replication::AwaitOutcome::Reached(0)),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "reddb::commit",
+                        post_lsn,
+                        error = %err,
+                        "quorum: timed out waiting for commit watermark"
+                    );
+                    let fail = std::env::var("RED_COMMIT_FAIL_ON_TIMEOUT")
+                        .ok()
+                        .map(|v| {
+                            let t = v.trim();
+                            t.eq_ignore_ascii_case("true")
+                                || t == "1"
+                                || t.eq_ignore_ascii_case("yes")
+                        })
+                        .unwrap_or(false);
+                    if fail {
+                        return Err(RedDBError::ReadOnly(format!(
+                            "commit policy timed out at lsn {post_lsn}: {err} (RED_COMMIT_FAIL_ON_TIMEOUT=true)"
+                        )));
+                    }
+                    Ok(crate::replication::AwaitOutcome::TimedOut {
+                        observed: 0,
+                        required: 1,
+                    })
+                }
+            };
+        }
+
+        let n = match policy {
             crate::replication::CommitPolicy::AckN(n) if n > 0 => n,
             _ => return Ok(crate::replication::AwaitOutcome::NotRequired),
         };
