@@ -2445,6 +2445,7 @@ fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, 
             },
             affected_rows,
             statement_type,
+            bookmark: None,
         },
         scopes,
     ))
@@ -5999,7 +6000,58 @@ impl RedDBRuntime {
             .slow_query_logger
             .record(kind, elapsed_ms, query.to_string(), &scope);
 
+        if let Ok(ref mut query_result) = result {
+            if matches!(query_result.statement_type, "insert" | "update" | "delete") {
+                let bookmark = crate::replication::CausalBookmark::new(
+                    self.current_replication_term(),
+                    self.cdc_current_lsn(),
+                );
+                query_result.bookmark = Some(bookmark.encode());
+            }
+        }
+
         result
+    }
+
+    pub fn causal_session(&self) -> crate::runtime::CausalSession {
+        crate::runtime::CausalSession {
+            runtime: self.clone(),
+            bookmark: None,
+            wait_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    pub fn wait_for_bookmark(
+        &self,
+        bookmark: &crate::replication::CausalBookmark,
+        timeout: std::time::Duration,
+    ) -> RedDBResult<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let applied_lsn = self.local_contiguous_applied_lsn();
+            if applied_lsn >= bookmark.commit_lsn() {
+                return Ok(());
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(RedDBError::InvalidOperation(format!(
+                    "timed out waiting for causal bookmark lsn {}; applied={}",
+                    bookmark.commit_lsn(),
+                    applied_lsn
+                )));
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            std::thread::sleep(remaining.min(std::time::Duration::from_millis(5)));
+        }
+    }
+
+    fn local_contiguous_applied_lsn(&self) -> u64 {
+        match self.inner.db.options().replication.role {
+            crate::replication::ReplicationRole::Replica { .. } => {
+                self.config_u64("red.replication.last_applied_lsn", 0)
+            }
+            _ => self.cdc_current_lsn(),
+        }
     }
 
     #[inline(never)]
@@ -6195,6 +6247,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueryExpr::Table(table) => {
@@ -6226,6 +6279,7 @@ impl RedDBRuntime {
                         result: self.execute_table_function(&name, &args, &named_args)?,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     };
                     frame.write_result_cache(self, &tvf_result, result_cache_scopes.clone());
                     return Ok(tvf_result);
@@ -6257,6 +6311,7 @@ impl RedDBRuntime {
                         )?,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     };
                     frame.write_result_cache(self, &inline_result, result_cache_scopes);
                     return Ok(inline_result);
@@ -6275,6 +6330,7 @@ impl RedDBRuntime {
                         )?,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
 
@@ -6293,6 +6349,7 @@ impl RedDBRuntime {
                         result: view_result,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
 
@@ -6305,6 +6362,7 @@ impl RedDBRuntime {
                         result,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
 
@@ -6330,6 +6388,7 @@ impl RedDBRuntime {
                         result,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
 
@@ -6363,6 +6422,7 @@ impl RedDBRuntime {
                         result: empty,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 };
                 Ok(RuntimeQueryResult {
@@ -6377,6 +6437,7 @@ impl RedDBRuntime {
                     )?,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueryExpr::Join(join) => {
@@ -6402,6 +6463,7 @@ impl RedDBRuntime {
                             result: crate::storage::query::unified::UnifiedResult::empty(),
                             affected_rows: 0,
                             statement_type: "select",
+                            bookmark: None,
                         });
                     }
                 };
@@ -6413,6 +6475,7 @@ impl RedDBRuntime {
                     result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
@@ -6423,6 +6486,7 @@ impl RedDBRuntime {
                 result: execute_runtime_vector_query(&self.inner.db, &vector)?,
                 affected_rows: 0,
                 statement_type: "select",
+                bookmark: None,
             }),
             QueryExpr::Hybrid(hybrid) => Ok(RuntimeQueryResult {
                 query: query.to_string(),
@@ -6432,6 +6496,7 @@ impl RedDBRuntime {
                 result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
                 affected_rows: 0,
                 statement_type: "select",
+                bookmark: None,
             }),
             // DML execution
             QueryExpr::Insert(ref insert) if super::red_schema::is_virtual_table(&insert.table) => {
@@ -6642,6 +6707,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             // SHOW CONFIG [prefix]
@@ -6658,6 +6724,7 @@ impl RedDBRuntime {
                         result,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
                 let manager = store
@@ -6704,6 +6771,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             // Session-local multi-tenancy handle (Phase 2.5.3).
@@ -6741,6 +6809,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             // Transaction control (Phase 2.3 PG parity).
@@ -8668,6 +8737,7 @@ impl RedDBRuntime {
                         result: self.execute_table_function(&name, &args, &named_args)?,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
                 // Inline-graph TVF (issue #799) on the prepared-statement /
@@ -8693,6 +8763,7 @@ impl RedDBRuntime {
                         )?,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
                 if super::red_schema::is_virtual_table(&table.table) {
@@ -8709,6 +8780,7 @@ impl RedDBRuntime {
                         )?,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
                 // `<graph>.<output>` analytics virtual view (issue #800).
@@ -8724,6 +8796,7 @@ impl RedDBRuntime {
                         result: view_result,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
                 let Some(table_with_rls) = self.authorize_relational_table_select(
@@ -8739,6 +8812,7 @@ impl RedDBRuntime {
                         result: crate::storage::query::unified::UnifiedResult::empty(),
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 };
                 Ok(RuntimeQueryResult {
@@ -8753,6 +8827,7 @@ impl RedDBRuntime {
                     )?,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueryExpr::Join(join) => {
@@ -8770,6 +8845,7 @@ impl RedDBRuntime {
                         result: crate::storage::query::unified::UnifiedResult::empty(),
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 };
                 Ok(RuntimeQueryResult {
@@ -8780,6 +8856,7 @@ impl RedDBRuntime {
                     result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
@@ -8790,6 +8867,7 @@ impl RedDBRuntime {
                 result: execute_runtime_vector_query(&self.inner.db, &vector)?,
                 affected_rows: 0,
                 statement_type: "select",
+                bookmark: None,
             }),
             QueryExpr::Hybrid(hybrid) => Ok(RuntimeQueryResult {
                 query: query_str.to_string(),
@@ -8799,6 +8877,7 @@ impl RedDBRuntime {
                 result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
                 affected_rows: 0,
                 statement_type: "select",
+                bookmark: None,
             }),
             QueryExpr::Insert(ref insert) if super::red_schema::is_virtual_table(&insert.table) => {
                 Err(RedDBError::Query(
@@ -9387,6 +9466,7 @@ impl RedDBRuntime {
             },
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         }))
     }
 
@@ -10993,6 +11073,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -12972,6 +13053,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -13046,6 +13128,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -13142,6 +13225,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -13312,6 +13396,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -13389,6 +13474,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 }
