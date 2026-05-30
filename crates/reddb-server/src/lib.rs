@@ -18,6 +18,7 @@ pub mod auth;
 pub mod backup_bootstrap;
 pub mod catalog;
 pub mod cli;
+pub mod cluster;
 pub mod config;
 pub mod crypto;
 pub mod ec;

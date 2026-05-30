@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::{RedDBOptions, RedDBResult};
-use crate::auth::middleware::{check_permission, AuthResult};
+use crate::auth::middleware::{check_permission, AuthResult, AuthSource};
 use crate::auth::store::AuthStore;
 use crate::auth::Role;
 use crate::health::{HealthProvider, HealthState};

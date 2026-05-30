@@ -132,26 +132,26 @@ impl GrpcRuntime {
         check_permission(&auth, false, true).map_err(Status::permission_denied)
     }
 
-    pub(crate) fn authorize_replication_stream(
+    pub(crate) fn authorize_replication_stream<T>(
         &self,
-        metadata: &MetadataMap,
+        request: &Request<T>,
     ) -> Result<String, Status> {
-        self.authorize_replication_capability(metadata, "cluster:replication:stream")
+        self.authorize_replication_capability(request, "cluster:replication:stream")
     }
 
-    pub(crate) fn authorize_replication_ack(
+    pub(crate) fn authorize_replication_ack<T>(
         &self,
-        metadata: &MetadataMap,
+        request: &Request<T>,
     ) -> Result<String, Status> {
-        self.authorize_replication_capability(metadata, "cluster:replication:ack")
+        self.authorize_replication_capability(request, "cluster:replication:ack")
     }
 
-    fn authorize_replication_capability(
+    fn authorize_replication_capability<T>(
         &self,
-        metadata: &MetadataMap,
+        request: &Request<T>,
         action: &str,
     ) -> Result<String, Status> {
-        let auth = self.resolve_auth(metadata);
+        let auth = self.resolve_replication_auth(request);
         let username = match auth {
             AuthResult::Authenticated { username, .. } => username,
             AuthResult::Denied(reason) => return Err(Status::unauthenticated(reason)),
@@ -175,6 +175,25 @@ impl GrpcRuntime {
                 "policy: principal '{username}' is not allowed to perform '{action}'"
             ))),
         }
+    }
+
+    fn resolve_replication_auth<T>(&self, request: &Request<T>) -> AuthResult {
+        if let Some(certs) = request.peer_certs() {
+            let Some(cert) = certs.first() else {
+                return AuthResult::Denied("mTLS peer certificate missing".into());
+            };
+            let identity = match crate::cluster::NodeIdentity::from_peer_certificate_der(cert) {
+                Ok(identity) => identity,
+                Err(err) => return AuthResult::Denied(format!("mTLS peer identity: {err}")),
+            };
+            return AuthResult::Authenticated {
+                username: identity.to_string(),
+                role: Role::Read,
+                source: AuthSource::ClientCert,
+            };
+        }
+
+        self.resolve_auth(request.metadata())
     }
 
     /// PLAN.md Phase 11.4 — call after a successful gRPC write to

@@ -2928,7 +2928,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_replication_stream(request.metadata())?;
+        self.authorize_replication_stream(&request)?;
         let db = self.runtime.db();
         let repl = db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -3052,7 +3052,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let authenticated_replica_id = self.authorize_replication_ack(request.metadata())?;
+        let authenticated_replica_id = self.authorize_replication_ack(&request)?;
         let db = self.runtime.db();
         let repl = db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -3117,7 +3117,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_replication_stream(request.metadata())?;
+        self.authorize_replication_stream(&request)?;
         let db = self.runtime.db();
 
         if db.replication.is_none() {
