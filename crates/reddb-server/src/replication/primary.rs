@@ -2,7 +2,22 @@
 //!
 //! ## Logical WAL spool wire format
 //!
-//! ### Version 2 (current — PLAN.md Phase 2 / W2)
+//! ### Version 3 (current — issue #821)
+//!
+//! ```text
+//! [magic     4 bytes  = b"RDLW"]
+//! [version   1 byte   = 0x03]
+//! [term      8 bytes  little-endian u64]
+//! [lsn       8 bytes  little-endian u64]
+//! [timestamp 8 bytes  little-endian u64 — wall-clock millis since UNIX epoch]
+//! [payload_len 4 bytes little-endian u32]
+//! [payload   payload_len bytes]
+//! [crc32     4 bytes  little-endian u32 — crc32fast of (version || term ||
+//!                                          lsn || timestamp || payload_len ||
+//!                                          payload)]
+//! ```
+//!
+//! ### Version 2 (legacy, read-only — PLAN.md Phase 2 / W2)
 //!
 //! ```text
 //! [magic     4 bytes  = b"RDLW"]
@@ -44,11 +59,12 @@ use tracing::warn;
 const LOGICAL_WAL_SPOOL_MAGIC: &[u8; 4] = b"RDLW";
 const LOGICAL_WAL_SPOOL_VERSION_V1: u8 = 1;
 const LOGICAL_WAL_SPOOL_VERSION_V2: u8 = 2;
-const LOGICAL_WAL_SPOOL_VERSION_CURRENT: u8 = LOGICAL_WAL_SPOOL_VERSION_V2;
-/// Header size in bytes for a v2 record before the payload starts:
-/// magic(4) + version(1) + lsn(8) + timestamp(8) + payload_len(4) = 25.
-const LOGICAL_WAL_V2_HEADER_LEN: u64 = 4 + 1 + 8 + 8 + 4;
-/// CRC32 trailer size in bytes for a v2 record.
+const LOGICAL_WAL_SPOOL_VERSION_V3: u8 = 3;
+const LOGICAL_WAL_SPOOL_VERSION_CURRENT: u8 = LOGICAL_WAL_SPOOL_VERSION_V3;
+/// Header size in bytes for a v3 record before the payload starts:
+/// magic(4) + version(1) + term(8) + lsn(8) + timestamp(8) + payload_len(4) = 33.
+const LOGICAL_WAL_V3_HEADER_LEN: u64 = 4 + 1 + 8 + 8 + 8 + 4;
+/// CRC32 trailer size in bytes for logical spool records.
 const LOGICAL_WAL_V2_CRC_LEN: u64 = 4;
 
 /// Compute CRC32 over the bytes that follow the magic — version,
@@ -67,6 +83,23 @@ fn compute_logical_v2_crc(version: u8, lsn: u64, timestamp: u64, payload: &[u8])
     crc = crc32_update(crc, &(payload.len() as u32).to_le_bytes());
     crc = crc32_update(crc, payload);
     crc
+}
+
+fn compute_logical_v3_crc(version: u8, term: u64, lsn: u64, timestamp: u64, payload: &[u8]) -> u32 {
+    use crate::storage::engine::crc32::crc32_update;
+    let mut crc = crc32_update(0, &[version]);
+    crc = crc32_update(crc, &term.to_le_bytes());
+    crc = crc32_update(crc, &lsn.to_le_bytes());
+    crc = crc32_update(crc, &timestamp.to_le_bytes());
+    crc = crc32_update(crc, &(payload.len() as u32).to_le_bytes());
+    crc = crc32_update(crc, payload);
+    crc
+}
+
+fn term_from_payload(payload: &[u8]) -> u64 {
+    crate::replication::cdc::ChangeRecord::decode(payload)
+        .map(|record| record.term)
+        .unwrap_or(crate::replication::DEFAULT_REPLICATION_TERM)
 }
 
 /// In-memory WAL buffer for replication.
@@ -131,11 +164,24 @@ impl WalBuffer {
 
 #[derive(Debug, Clone)]
 struct LogicalWalEntry {
+    term: u64,
     lsn: u64,
     /// Wall-clock millis at append time. `0` for legacy v1 records that
     /// did not carry a framing timestamp.
     timestamp_ms: u64,
     data: Vec<u8>,
+}
+
+impl LogicalWalEntry {
+    fn data_with_framing_term(&self) -> Vec<u8> {
+        match crate::replication::cdc::ChangeRecord::decode(&self.data) {
+            Ok(mut record) if record.term != self.term => {
+                record.term = self.term;
+                record.encode()
+            }
+            _ => self.data.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -201,6 +247,16 @@ impl LogicalWalSpool {
         timestamp_ms: u64,
         data: &[u8],
     ) -> io::Result<()> {
+        self.append_with_term_and_timestamp(term_from_payload(data), lsn, timestamp_ms, data)
+    }
+
+    pub fn append_with_term_and_timestamp(
+        &self,
+        term: u64,
+        lsn: u64,
+        timestamp_ms: u64,
+        data: &[u8],
+    ) -> io::Result<()> {
         if data.len() > u32::MAX as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -224,16 +280,22 @@ impl LogicalWalSpool {
         //       reader will checksum, with zero risk of header/payload
         //       drift from a partial flush.
         let mut frame = Vec::with_capacity(
-            LOGICAL_WAL_V2_HEADER_LEN as usize + data.len() + LOGICAL_WAL_V2_CRC_LEN as usize,
+            LOGICAL_WAL_V3_HEADER_LEN as usize + data.len() + LOGICAL_WAL_V2_CRC_LEN as usize,
         );
         frame.extend_from_slice(LOGICAL_WAL_SPOOL_MAGIC);
         frame.push(LOGICAL_WAL_SPOOL_VERSION_CURRENT);
+        frame.extend_from_slice(&term.to_le_bytes());
         frame.extend_from_slice(&lsn.to_le_bytes());
         frame.extend_from_slice(&timestamp_ms.to_le_bytes());
         frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
         frame.extend_from_slice(data);
-        let crc =
-            compute_logical_v2_crc(LOGICAL_WAL_SPOOL_VERSION_CURRENT, lsn, timestamp_ms, data);
+        let crc = compute_logical_v3_crc(
+            LOGICAL_WAL_SPOOL_VERSION_CURRENT,
+            term,
+            lsn,
+            timestamp_ms,
+            data,
+        );
         frame.extend_from_slice(&crc.to_le_bytes());
 
         file.write_all(&frame)?;
@@ -254,7 +316,7 @@ impl LogicalWalSpool {
             .into_iter()
             .filter(|entry| entry.lsn > since_lsn)
             .take(max_count)
-            .map(|entry| (entry.lsn, entry.data))
+            .map(|entry| (entry.lsn, entry.data_with_framing_term()))
             .collect())
     }
 
@@ -282,9 +344,9 @@ impl LogicalWalSpool {
         let mut temp = File::create(&temp_path)?;
         let mut current_lsn = 0;
         for entry in retained {
-            // Re-frame as v2 so the spool only ever contains v2 records
+            // Re-frame as v3 so the spool only ever contains current records
             // after a prune. Legacy v1 records are upgraded by carrying
-            // their original LSN forward; the framing timestamp is
+            // their original LSN and default term forward; the framing timestamp is
             // re-stamped to wall-clock-now because the original v1
             // record didn't carry one — downstream consumers that need
             // the operation's logical timestamp continue to use the
@@ -297,14 +359,16 @@ impl LogicalWalSpool {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0)
             };
-            let crc = compute_logical_v2_crc(
+            let crc = compute_logical_v3_crc(
                 LOGICAL_WAL_SPOOL_VERSION_CURRENT,
+                entry.term,
                 entry.lsn,
                 timestamp_ms,
                 &entry.data,
             );
             temp.write_all(LOGICAL_WAL_SPOOL_MAGIC)?;
             temp.write_all(&[LOGICAL_WAL_SPOOL_VERSION_CURRENT])?;
+            temp.write_all(&entry.term.to_le_bytes())?;
             temp.write_all(&entry.lsn.to_le_bytes())?;
             temp.write_all(&timestamp_ms.to_le_bytes())?;
             temp.write_all(&(entry.data.len() as u32).to_le_bytes())?;
@@ -381,6 +445,7 @@ fn read_and_repair_entries(path: &Path) -> io::Result<Vec<LogicalWalEntry>> {
         }
 
         let entry_result = match version[0] {
+            LOGICAL_WAL_SPOOL_VERSION_V3 => read_one_v3(&mut file, record_start),
             LOGICAL_WAL_SPOOL_VERSION_V2 => read_one_v2(&mut file, record_start),
             LOGICAL_WAL_SPOOL_VERSION_V1 => read_one_v1(&mut file, record_start),
             other => {
@@ -421,6 +486,63 @@ fn read_and_repair_entries(path: &Path) -> io::Result<Vec<LogicalWalEntry>> {
     }
 
     Ok(entries)
+}
+
+/// Read a v3 record assuming the magic + version byte have already
+/// been consumed and the file cursor sits at the term field.
+fn read_one_v3(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, String> {
+    let mut term = [0u8; 8];
+    if let Err(err) = file.read_exact(&mut term) {
+        return Err(format!("torn term at offset {record_start}: {err}"));
+    }
+    let mut lsn = [0u8; 8];
+    if let Err(err) = file.read_exact(&mut lsn) {
+        return Err(format!("torn lsn at offset {record_start}: {err}"));
+    }
+    let mut timestamp = [0u8; 8];
+    if let Err(err) = file.read_exact(&mut timestamp) {
+        return Err(format!("torn timestamp at offset {record_start}: {err}"));
+    }
+    let mut len_bytes = [0u8; 4];
+    if let Err(err) = file.read_exact(&mut len_bytes) {
+        return Err(format!(
+            "torn payload length at offset {record_start}: {err}"
+        ));
+    }
+    let payload_len = u32::from_le_bytes(len_bytes) as usize;
+    const MAX_PLAUSIBLE_PAYLOAD: usize = 256 * 1024 * 1024;
+    if payload_len > MAX_PLAUSIBLE_PAYLOAD {
+        return Err(format!(
+            "implausible payload_len {payload_len} at offset {record_start}"
+        ));
+    }
+    let mut payload = vec![0u8; payload_len];
+    if let Err(err) = file.read_exact(&mut payload) {
+        return Err(format!(
+            "torn payload at offset {record_start} (expected {payload_len} bytes): {err}"
+        ));
+    }
+    let mut crc_bytes = [0u8; 4];
+    if let Err(err) = file.read_exact(&mut crc_bytes) {
+        return Err(format!("torn crc at offset {record_start}: {err}"));
+    }
+    let stored_crc = u32::from_le_bytes(crc_bytes);
+    let term = u64::from_le_bytes(term);
+    let lsn = u64::from_le_bytes(lsn);
+    let timestamp = u64::from_le_bytes(timestamp);
+    let expected_crc =
+        compute_logical_v3_crc(LOGICAL_WAL_SPOOL_VERSION_V3, term, lsn, timestamp, &payload);
+    if stored_crc != expected_crc {
+        return Err(format!(
+            "crc mismatch at offset {record_start}: stored {stored_crc:#010x}, expected {expected_crc:#010x}"
+        ));
+    }
+    Ok(LogicalWalEntry {
+        term,
+        lsn,
+        timestamp_ms: timestamp,
+        data: payload,
+    })
 }
 
 /// Read a v2 record assuming the magic + version byte have already
@@ -474,7 +596,9 @@ fn read_one_v2(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
             "crc mismatch at offset {record_start}: stored {stored_crc:#010x}, expected {expected_crc:#010x}"
         ));
     }
+    let term = term_from_payload(&payload);
     Ok(LogicalWalEntry {
+        term,
         lsn: u64::from_le_bytes(lsn),
         timestamp_ms: u64::from_le_bytes(timestamp),
         data: payload,
@@ -506,7 +630,9 @@ fn read_one_v1(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     if let Err(err) = file.read_exact(&mut payload) {
         return Err(format!("v1 torn payload at offset {record_start}: {err}"));
     }
+    let term = term_from_payload(&payload);
     Ok(LogicalWalEntry {
+        term,
         lsn: u64::from_le_bytes(lsn),
         timestamp_ms: 0,
         data: payload,
@@ -746,6 +872,7 @@ mod tests {
         let spool = LogicalWalSpool::open(&data_path).expect("open spool");
 
         let record1 = ChangeRecord {
+            term: 2,
             lsn: 7,
             timestamp: 1,
             operation: ChangeOperation::Insert,
@@ -757,6 +884,7 @@ mod tests {
             refresh_records: None,
         };
         let record2 = ChangeRecord {
+            term: 2,
             lsn: 8,
             timestamp: 2,
             operation: ChangeOperation::Update,
@@ -769,21 +897,61 @@ mod tests {
         };
 
         spool
-            .append(record1.lsn, &record1.encode())
+            .append_with_term_and_timestamp(record1.term, record1.lsn, 11, &record1.encode())
             .expect("append 1");
         spool
-            .append(record2.lsn, &record2.encode())
+            .append_with_term_and_timestamp(record2.term, record2.lsn, 12, &record2.encode())
             .expect("append 2");
 
         let entries = spool.read_since(0, usize::MAX).expect("read");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, 7);
         assert_eq!(entries[1].0, 8);
+        assert_eq!(ChangeRecord::decode(&entries[0].1).unwrap().term, 2);
+
+        let framed = read_and_repair_entries(&spool_path).expect("read framed entries");
+        assert_eq!(framed[0].term, 2);
+        assert_eq!(framed[0].timestamp_ms, 11);
 
         spool.prune_through(7).expect("prune");
         let retained = spool.read_since(0, usize::MAX).expect("read retained");
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].0, 8);
+        assert_eq!(ChangeRecord::decode(&retained[0].1).unwrap().term, 2);
+
+        let _ = fs::remove_file(spool_path);
+    }
+
+    #[test]
+    fn logical_wal_spool_reads_v2_without_term() {
+        let data_path = temp_data_path("logical_spool_v2");
+        let spool_path = LogicalWalSpool::path_for(&data_path);
+        let payload = br#"{"lsn":3,"timestamp":44,"operation":"delete","collection":"users","rid":9,"kind":"row"}"#;
+        let lsn = 3u64;
+        let timestamp = 44u64;
+        let crc = compute_logical_v2_crc(LOGICAL_WAL_SPOOL_VERSION_V2, lsn, timestamp, payload);
+
+        let mut file = File::create(&spool_path).expect("create v2 spool");
+        file.write_all(LOGICAL_WAL_SPOOL_MAGIC).unwrap();
+        file.write_all(&[LOGICAL_WAL_SPOOL_VERSION_V2]).unwrap();
+        file.write_all(&lsn.to_le_bytes()).unwrap();
+        file.write_all(&timestamp.to_le_bytes()).unwrap();
+        file.write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        file.write_all(payload).unwrap();
+        file.write_all(&crc.to_le_bytes()).unwrap();
+        file.sync_all().unwrap();
+
+        let spool = LogicalWalSpool::open(&data_path).expect("open v2 spool");
+        let records = spool.read_since(0, usize::MAX).expect("read v2 spool");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, 3);
+        let decoded = ChangeRecord::decode(&records[0].1).expect("decode v2 payload");
+        assert_eq!(decoded.term, crate::replication::DEFAULT_REPLICATION_TERM);
+        assert_eq!(decoded.lsn, 3);
+
+        let framed = read_and_repair_entries(&spool_path).expect("read framed v2 entries");
+        assert_eq!(framed[0].term, crate::replication::DEFAULT_REPLICATION_TERM);
 
         let _ = fs::remove_file(spool_path);
     }

@@ -127,6 +127,7 @@ impl KvWatchEvent {
 /// archived segments.
 #[derive(Debug, Clone)]
 pub struct ChangeRecord {
+    pub term: u64,
     pub lsn: u64,
     pub timestamp: u64,
     pub operation: ChangeOperation,
@@ -162,6 +163,7 @@ impl ChangeRecord {
         };
 
         Self {
+            term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn,
             timestamp,
             operation,
@@ -184,6 +186,7 @@ impl ChangeRecord {
         records: Vec<Vec<u8>>,
     ) -> Self {
         Self {
+            term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn,
             timestamp,
             operation: ChangeOperation::Refresh,
@@ -198,6 +201,7 @@ impl ChangeRecord {
 
     pub fn to_json_value(&self) -> JsonValue {
         let mut object = Map::new();
+        object.insert("term".to_string(), JsonValue::Number(self.term as f64));
         object.insert("lsn".to_string(), JsonValue::Number(self.lsn as f64));
         object.insert(
             "timestamp".to_string(),
@@ -241,6 +245,11 @@ impl ChangeRecord {
             .into_bytes()
     }
 
+    pub fn with_term(mut self, term: u64) -> Self {
+        self.term = term;
+        self
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
         let value = crate::json::from_str::<JsonValue>(text).map_err(|err| err.to_string())?;
@@ -257,6 +266,10 @@ impl ChangeRecord {
             .map_err(|err| err.to_string())?;
 
         Ok(Self {
+            term: value
+                .get("term")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(crate::replication::DEFAULT_REPLICATION_TERM),
             lsn: value.get("lsn").and_then(JsonValue::as_u64).unwrap_or(0),
             timestamp: value
                 .get("timestamp")
@@ -690,6 +703,7 @@ mod tests {
     #[test]
     fn test_change_record_roundtrip() {
         let record = ChangeRecord {
+            term: 3,
             lsn: 7,
             timestamp: 1234,
             operation: ChangeOperation::Update,
@@ -702,6 +716,7 @@ mod tests {
         };
 
         let decoded = ChangeRecord::decode(&record.encode()).expect("decode");
+        assert_eq!(decoded.term, record.term);
         assert_eq!(decoded.lsn, record.lsn);
         assert_eq!(decoded.collection, record.collection);
         assert_eq!(decoded.entity_id, record.entity_id);
@@ -717,11 +732,21 @@ mod tests {
     #[test]
     fn test_change_record_refresh_roundtrip() {
         let records = vec![vec![0x10, 0x20, 0x30], vec![0xAA, 0xBB], Vec::new()];
-        let record = ChangeRecord::for_refresh(11, 99, "mv_orders_summary", records.clone());
+        let record =
+            ChangeRecord::for_refresh(11, 99, "mv_orders_summary", records.clone()).with_term(4);
 
         let decoded = ChangeRecord::decode(&record.encode()).expect("decode");
+        assert_eq!(decoded.term, 4);
         assert_eq!(decoded.operation, ChangeOperation::Refresh);
         assert_eq!(decoded.collection, "mv_orders_summary");
         assert_eq!(decoded.refresh_records.as_deref(), Some(&records[..]));
+    }
+
+    #[test]
+    fn test_change_record_legacy_payload_defaults_term() {
+        let legacy = br#"{"lsn":9,"timestamp":1,"operation":"delete","collection":"users","rid":5,"kind":"row"}"#;
+        let decoded = ChangeRecord::decode(legacy).expect("decode legacy record");
+        assert_eq!(decoded.term, crate::replication::DEFAULT_REPLICATION_TERM);
+        assert_eq!(decoded.lsn, 9);
     }
 }

@@ -351,7 +351,7 @@ mod tests {
 
         let final_durable = wal.lock().unwrap().durable_lsn();
         assert!(gc.flushed_lsn() >= final_durable);
-        // 20 commits worth of 13-byte Begin + 13-byte Commit
+        // 20 commits worth of 21-byte Begin + 21-byte Commit
         // records = 520 bytes minimum on top of the 8-byte header.
         assert!(final_durable >= 8 + 520);
     }
