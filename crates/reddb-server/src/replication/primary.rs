@@ -757,6 +757,8 @@ pub struct ReplicaState {
     pub last_acked_lsn: u64,
     pub last_sent_lsn: u64,
     pub last_durable_lsn: u64,
+    pub apply_error_count: u64,
+    pub divergence_count: u64,
     pub connected_at_unix_ms: u128,
     pub last_seen_at_unix_ms: u128,
     /// Region identifier declared by the replica at handshake time
@@ -877,6 +879,8 @@ impl PrimaryReplication {
             last_acked_lsn: resume_lsn,
             last_sent_lsn: resume_lsn,
             last_durable_lsn: resume_lsn,
+            apply_error_count: 0,
+            divergence_count: 0,
             connected_at_unix_ms: now_ms,
             last_seen_at_unix_ms: now_ms,
             region,
@@ -961,12 +965,25 @@ impl PrimaryReplication {
     /// Also signals `commit_waiter` so any thread blocked on
     /// `ack_n` / `quorum` can wake and re-check its threshold.
     pub fn ack_replica_lsn(&self, id: &str, applied_lsn: u64, durable_lsn: u64) {
+        self.ack_replica_lsn_with_observability(id, applied_lsn, durable_lsn, 0, 0);
+    }
+
+    pub fn ack_replica_lsn_with_observability(
+        &self,
+        id: &str,
+        applied_lsn: u64,
+        durable_lsn: u64,
+        apply_error_count: u64,
+        divergence_count: u64,
+    ) {
         let now_ms = crate::utils::now_unix_millis() as u128;
         self.advance_slot(id, applied_lsn, durable_lsn);
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_acked_lsn = r.last_acked_lsn.max(applied_lsn);
             r.last_durable_lsn = r.last_durable_lsn.max(durable_lsn);
+            r.apply_error_count = r.apply_error_count.max(apply_error_count);
+            r.divergence_count = r.divergence_count.max(divergence_count);
             r.last_seen_at_unix_ms = now_ms;
         }
         // Drop the write lock before signaling so a waiter that
@@ -1423,6 +1440,8 @@ mod tests {
                 last_acked_lsn: 90,
                 last_sent_lsn: 120,
                 last_durable_lsn: 80,
+                apply_error_count: 0,
+                divergence_count: 0,
                 connected_at_unix_ms: now,
                 last_seen_at_unix_ms: now,
                 region: None,
@@ -1432,6 +1451,8 @@ mod tests {
                 last_acked_lsn: 70,
                 last_sent_lsn: 100,
                 last_durable_lsn: 60,
+                apply_error_count: 0,
+                divergence_count: 0,
                 connected_at_unix_ms: now,
                 last_seen_at_unix_ms: now,
                 region: None,
