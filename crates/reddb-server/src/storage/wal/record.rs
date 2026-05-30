@@ -5,7 +5,9 @@ use std::io::{self, Read};
 pub const WAL_MAGIC: &[u8; 4] = b"RDBW";
 
 /// WAL file format version
-pub const WAL_VERSION: u8 = 2;
+pub const WAL_VERSION: u8 = 3;
+pub const WAL_VERSION_V2: u8 = 2;
+pub const WAL_DEFAULT_TERM: u64 = crate::replication::DEFAULT_REPLICATION_TERM;
 
 /// Minimum payload size (bytes) to attempt zstd compression.
 /// Smaller records pay more overhead than benefit from compression.
@@ -134,10 +136,17 @@ impl WalRecord {
     /// compressed with zstd level 3 and emitted as `PageWriteCompressed`.
     /// Smaller payloads use the plain `PageWrite` encoding (no overhead).
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_with_term(WAL_DEFAULT_TERM)
+    }
+
+    /// Serialize record to bytes with the replication term stamped into
+    /// the physical record envelope.
+    pub fn encode_with_term(&self, term: u64) -> Vec<u8> {
         let mut buf = Vec::new();
 
         // Layout (non-PageWrite):
         // [Type: 1]
+        // [Term: 8]
         // [TxID/LSN: 8]
         // [Checksum: 4]
         //
@@ -153,14 +162,17 @@ impl WalRecord {
         match self {
             WalRecord::Begin { tx_id } => {
                 buf.push(RecordType::Begin as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&tx_id.to_le_bytes());
             }
             WalRecord::Commit { tx_id } => {
                 buf.push(RecordType::Commit as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&tx_id.to_le_bytes());
             }
             WalRecord::Rollback { tx_id } => {
                 buf.push(RecordType::Rollback as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&tx_id.to_le_bytes());
             }
             WalRecord::PageWrite {
@@ -176,6 +188,7 @@ impl WalRecord {
                         if compressed.len() < data.len() {
                             // Compressed is smaller — use compressed format.
                             buf.push(RecordType::PageWriteCompressed as u8);
+                            buf.extend_from_slice(&term.to_le_bytes());
                             buf.extend_from_slice(&tx_id.to_le_bytes());
                             buf.extend_from_slice(&page_id.to_le_bytes());
                             buf.push(Compression::Zstd as u8);
@@ -190,6 +203,7 @@ impl WalRecord {
                 }
                 // Uncompressed path (small payload or compression expanded).
                 buf.push(RecordType::PageWrite as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&tx_id.to_le_bytes());
                 buf.extend_from_slice(&page_id.to_le_bytes());
                 buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -197,6 +211,7 @@ impl WalRecord {
             }
             WalRecord::TxCommitBatch { tx_id, actions } => {
                 buf.push(RecordType::TxCommitBatch as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&tx_id.to_le_bytes());
                 buf.extend_from_slice(&(actions.len() as u32).to_le_bytes());
                 for action in actions {
@@ -211,6 +226,7 @@ impl WalRecord {
                 data,
             } => {
                 buf.push(RecordType::FullPageImage as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&tx_id.to_le_bytes());
                 buf.extend_from_slice(&page_id.to_le_bytes());
                 buf.extend_from_slice(&ckpt_epoch.to_le_bytes());
@@ -223,6 +239,7 @@ impl WalRecord {
                 vector,
             } => {
                 buf.push(RecordType::VectorInsert as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&(collection.len() as u32).to_le_bytes());
                 buf.extend_from_slice(collection.as_bytes());
                 buf.extend_from_slice(&entity_id.to_le_bytes());
@@ -233,6 +250,7 @@ impl WalRecord {
             }
             WalRecord::Checkpoint { lsn } => {
                 buf.push(RecordType::Checkpoint as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&lsn.to_le_bytes());
             }
         }
@@ -249,6 +267,18 @@ impl WalRecord {
     /// Handles both v1 (`PageWrite`) and v2 (`PageWriteCompressed`) record
     /// formats transparently — callers always receive uncompressed data.
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Option<WalRecord>> {
+        Ok(Self::read_with_term(reader)?.map(|(_, record)| record))
+    }
+
+    /// Read a record and return the term stamped into its physical envelope.
+    pub fn read_with_term<R: Read>(reader: &mut R) -> io::Result<Option<(u64, WalRecord)>> {
+        Self::read_with_format_version(reader, WAL_VERSION)
+    }
+
+    pub(crate) fn read_with_format_version<R: Read>(
+        reader: &mut R,
+        format_version: u8,
+    ) -> io::Result<Option<(u64, WalRecord)>> {
         // Read type byte
         let mut type_buf = [0u8; 1];
         match reader.read_exact(&mut type_buf) {
@@ -262,6 +292,21 @@ impl WalRecord {
 
         // Start checksum calculation
         let mut running_crc = crc32_update(0, &type_buf);
+        let term = match format_version {
+            WAL_VERSION => {
+                let mut term_buf = [0u8; 8];
+                reader.read_exact(&mut term_buf)?;
+                running_crc = crc32_update(running_crc, &term_buf);
+                u64::from_le_bytes(term_buf)
+            }
+            WAL_VERSION_V2 => WAL_DEFAULT_TERM,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Unsupported WAL version: {format_version}"),
+                ));
+            }
+        };
 
         let record = match record_type {
             RecordType::Begin | RecordType::Commit | RecordType::Rollback => {
@@ -488,7 +533,7 @@ impl WalRecord {
             ));
         }
 
-        Ok(Some(record))
+        Ok(Some((term, record)))
     }
 }
 
@@ -512,12 +557,13 @@ mod tests {
         );
         assert_eq!(RecordType::from_u8(7), Some(RecordType::TxCommitBatch));
         assert_eq!(RecordType::from_u8(8), Some(RecordType::FullPageImage));
+        assert_eq!(RecordType::from_u8(9), Some(RecordType::VectorInsert));
     }
 
     #[test]
     fn test_record_type_invalid() {
         assert_eq!(RecordType::from_u8(0), None);
-        assert_eq!(RecordType::from_u8(9), None);
+        assert_eq!(RecordType::from_u8(10), None);
         assert_eq!(RecordType::from_u8(255), None);
     }
 
@@ -528,8 +574,8 @@ mod tests {
         let record = WalRecord::Begin { tx_id: 12345 };
         let encoded = record.encode();
 
-        // Type (1) + TxID (8) + Checksum (4) = 13 bytes
-        assert_eq!(encoded.len(), 13);
+        // Type (1) + Term (8) + TxID (8) + Checksum (4) = 21 bytes
+        assert_eq!(encoded.len(), 21);
         assert_eq!(encoded[0], RecordType::Begin as u8);
     }
 
@@ -538,7 +584,7 @@ mod tests {
         let record = WalRecord::Commit { tx_id: 99999 };
         let encoded = record.encode();
 
-        assert_eq!(encoded.len(), 13);
+        assert_eq!(encoded.len(), 21);
         assert_eq!(encoded[0], RecordType::Commit as u8);
     }
 
@@ -547,7 +593,7 @@ mod tests {
         let record = WalRecord::Rollback { tx_id: 54321 };
         let encoded = record.encode();
 
-        assert_eq!(encoded.len(), 13);
+        assert_eq!(encoded.len(), 21);
         assert_eq!(encoded[0], RecordType::Rollback as u8);
     }
 
@@ -556,7 +602,7 @@ mod tests {
         let record = WalRecord::Checkpoint { lsn: 1000000 };
         let encoded = record.encode();
 
-        assert_eq!(encoded.len(), 13);
+        assert_eq!(encoded.len(), 21);
         assert_eq!(encoded[0], RecordType::Checkpoint as u8);
     }
 
@@ -571,8 +617,8 @@ mod tests {
         };
         let encoded = record.encode();
 
-        // Type (1) + TxID (8) + PageID (4) + Len (4) + Data (5) + Checksum (4) = 26 bytes
-        assert_eq!(encoded.len(), 26);
+        // Type (1) + Term (8) + TxID (8) + PageID (4) + Len (4) + Data (5) + Checksum (4) = 34 bytes
+        assert_eq!(encoded.len(), 34);
         assert_eq!(encoded[0], RecordType::PageWrite as u8);
     }
 
@@ -585,8 +631,8 @@ mod tests {
         };
         let encoded = record.encode();
 
-        // Type (1) + TxID (8) + PageID (4) + Len (4) + Checksum (4) = 21 bytes
-        assert_eq!(encoded.len(), 21);
+        // Type (1) + Term (8) + TxID (8) + PageID (4) + Len (4) + Checksum (4) = 29 bytes
+        assert_eq!(encoded.len(), 29);
     }
 
     #[test]
@@ -611,6 +657,36 @@ mod tests {
         let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
 
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_read_begin_roundtrip_preserves_term() {
+        let original = WalRecord::Begin { tx_id: 42 };
+        let encoded = original.encode_with_term(9);
+
+        let mut cursor = Cursor::new(encoded);
+        let (term, decoded) = WalRecord::read_with_term(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(term, 9);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_read_v2_begin_defaults_term() {
+        let tx_id = 42u64;
+        let mut encoded = Vec::new();
+        encoded.push(RecordType::Begin as u8);
+        encoded.extend_from_slice(&tx_id.to_le_bytes());
+        let checksum = crc32(&encoded);
+        encoded.extend_from_slice(&checksum.to_le_bytes());
+
+        let mut cursor = Cursor::new(encoded);
+        let (term, decoded) = WalRecord::read_with_format_version(&mut cursor, WAL_VERSION_V2)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(term, WAL_DEFAULT_TERM);
+        assert_eq!(decoded, WalRecord::Begin { tx_id });
     }
 
     #[test]
@@ -859,6 +935,6 @@ mod tests {
 
     #[test]
     fn test_wal_version() {
-        assert_eq!(WAL_VERSION, 2);
+        assert_eq!(WAL_VERSION, 3);
     }
 }
