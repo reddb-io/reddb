@@ -589,7 +589,7 @@ mod tests {
         let target_a = coord.reserve_and_enqueue(blob_a);
 
         // Writer B: reserve only ("crash" before push).
-        let stuck_len = 13u64;
+        let stuck_len = 21u64;
         let _stuck_lsn = coord.next_lsn.fetch_add(stuck_len, Ordering::AcqRel);
 
         // Writer C: reserve + push.
