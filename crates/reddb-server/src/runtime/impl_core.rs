@@ -5389,9 +5389,7 @@ impl RedDBRuntime {
                     )
                     .map_err(|err| RedDBError::Internal(err.to_string()))?
                     {
-                        if let Some(spool) = &primary.logical_wal_spool {
-                            let _ = spool.prune_through(meta.lsn_end);
-                        }
+                        let _ = primary.prune_retained_wal_through(meta.lsn_end);
                         // Advance the chain head so the next archive call
                         // links to this segment's hash. If the segment has
                         // no sha256 (legacy / hashing failed) we leave the
