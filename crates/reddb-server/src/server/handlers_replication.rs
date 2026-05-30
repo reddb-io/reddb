@@ -79,6 +79,16 @@ impl RedDBServer {
                                 "confirmed_lsn".to_string(),
                                 JsonValue::Number(slot.confirmed_lsn as f64),
                             );
+                            slot_json.insert(
+                                "invalidated".to_string(),
+                                JsonValue::Bool(slot.invalidation_reason.is_some()),
+                            );
+                            if let Some(reason) = slot.invalidation_reason {
+                                slot_json.insert(
+                                    "invalidation_reason".to_string(),
+                                    JsonValue::String(reason.as_str().to_string()),
+                                );
+                            }
                             JsonValue::Object(slot_json)
                         })
                         .collect();
@@ -145,5 +155,46 @@ impl RedDBServer {
                 JsonValue::Object(object)
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::replication::ReplicationConfig;
+    use crate::runtime::RedDBRuntime;
+    use crate::RedDBOptions;
+
+    #[test]
+    fn replication_status_surfaces_slot_invalidation_reason() {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(ReplicationConfig::primary().with_slot_retention_max_lag_lsn(3)),
+        )
+        .expect("runtime");
+        let db = runtime.db();
+        let primary = db.replication.as_ref().expect("primary replication");
+        primary.register_replica("slow".to_string());
+        let spool = primary
+            .logical_wal_spool
+            .as_ref()
+            .expect("logical WAL spool");
+        for lsn in 1..=4 {
+            spool
+                .append_with_term_and_timestamp(1, lsn, lsn, &[lsn as u8])
+                .expect("append logical WAL");
+        }
+        primary.enforce_retention_limits(0);
+
+        let server = RedDBServer::new(runtime);
+        let response = server.handle_replication_status();
+        let body = String::from_utf8(response.body).expect("status body is utf8");
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains(r#""invalidated":true"#), "{body}");
+        assert!(
+            body.contains(r#""invalidation_reason":"horizon""#),
+            "{body}"
+        );
     }
 }
