@@ -126,6 +126,18 @@ impl CommitWaiter {
         v
     }
 
+    /// Highest LSN durable on `required` replicas.
+    ///
+    /// For `ack_n=2`, this is the second-highest durable LSN in the
+    /// ack table. If fewer than `required` replicas have acked, the
+    /// watermark is 0. `required == 0` is not a quorum requirement, so
+    /// observability reports 0 rather than fabricating an infinite
+    /// watermark.
+    pub fn commit_watermark(&self, required: u32) -> u64 {
+        let state = self.state.lock().expect("commit waiter mutex");
+        commit_watermark(&state.durable_lsn, required)
+    }
+
     /// Block until at least `required` replicas have durable LSN
     /// `>= target_lsn`, or `timeout` expires. `required == 0` is a
     /// no-op (returns `NotRequired` instantly).
@@ -145,17 +157,81 @@ impl CommitWaiter {
         let deadline = started + timeout;
         let mut state = self.state.lock().expect("commit waiter mutex");
         loop {
-            let observed = count_at_or_past(&state.durable_lsn, target_lsn);
-            if observed >= required {
+            let watermark = commit_watermark(&state.durable_lsn, required);
+            if watermark >= target_lsn {
                 self.record_outcome_metrics(true, started);
+                let observed = count_at_or_past(&state.durable_lsn, target_lsn);
                 return AwaitOutcome::Reached(observed);
             }
             let now = Instant::now();
             if now >= deadline {
                 self.record_outcome_metrics(false, started);
+                let observed = count_at_or_past(&state.durable_lsn, target_lsn);
                 return AwaitOutcome::TimedOut { observed, required };
             }
             let remaining = deadline - now;
+            let (next_state, _wait_result) = self
+                .cond
+                .wait_timeout(state, remaining)
+                .expect("commit waiter condvar");
+            state = next_state;
+        }
+    }
+
+    /// Wait until `is_satisfied` returns true, waking on replica ack
+    /// notifications instead of a caller-side polling sleep.
+    pub fn wait_for_change_until<F>(&self, timeout: Option<Duration>, mut is_satisfied: F) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let started = Instant::now();
+        let mut state = self.state.lock().expect("commit waiter mutex");
+        loop {
+            if is_satisfied() {
+                return true;
+            }
+            let Some(limit) = timeout else {
+                state = self.cond.wait(state).expect("commit waiter condvar");
+                continue;
+            };
+            let elapsed = started.elapsed();
+            if elapsed >= limit {
+                return false;
+            }
+            let remaining = limit - elapsed;
+            let (next_state, _wait_result) = self
+                .cond
+                .wait_timeout(state, remaining)
+                .expect("commit waiter condvar");
+            state = next_state;
+        }
+    }
+
+    /// Wait until the named commit watermark reaches `target_lsn`.
+    pub fn wait_for_commit_watermark(
+        &self,
+        target_lsn: u64,
+        required: u32,
+        timeout: Option<Duration>,
+    ) -> bool {
+        if required == 0 {
+            return true;
+        }
+        let started = Instant::now();
+        let mut state = self.state.lock().expect("commit waiter mutex");
+        loop {
+            if commit_watermark(&state.durable_lsn, required) >= target_lsn {
+                return true;
+            }
+            let Some(limit) = timeout else {
+                state = self.cond.wait(state).expect("commit waiter condvar");
+                continue;
+            };
+            let elapsed = started.elapsed();
+            if elapsed >= limit {
+                return false;
+            }
+            let remaining = limit - elapsed;
             let (next_state, _wait_result) = self
                 .cond
                 .wait_timeout(state, remaining)
@@ -191,6 +267,15 @@ fn count_at_or_past(map: &HashMap<String, u64>, target_lsn: u64) -> u32 {
     map.values().filter(|lsn| **lsn >= target_lsn).count() as u32
 }
 
+fn commit_watermark(map: &HashMap<String, u64>, required: u32) -> u64 {
+    if required == 0 || map.len() < required as usize {
+        return 0;
+    }
+    let mut durable: Vec<u64> = map.values().copied().collect();
+    durable.sort_unstable_by(|a, b| b.cmp(a));
+    durable[(required as usize) - 1]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +296,22 @@ mod tests {
         w.record_replica_ack("b", 200);
         let r = w.await_acks(150, 2, Duration::from_millis(10));
         assert_eq!(r, AwaitOutcome::Reached(2));
+    }
+
+    #[test]
+    fn commit_watermark_is_nth_highest_durable_lsn() {
+        let w = CommitWaiter::new();
+        w.record_replica_ack("a", 10);
+        w.record_replica_ack("b", 30);
+        w.record_replica_ack("c", 20);
+
+        assert_eq!(w.commit_watermark(1), 30);
+        assert_eq!(w.commit_watermark(2), 20);
+        assert_eq!(w.commit_watermark(3), 10);
+        assert_eq!(w.commit_watermark(4), 0);
+
+        w.record_replica_ack("b", 15);
+        assert_eq!(w.commit_watermark(2), 20);
     }
 
     #[test]
