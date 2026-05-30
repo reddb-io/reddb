@@ -1368,6 +1368,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 1,
                     statement_type: if created { "insert" } else { "update" },
+                    bookmark: None,
                 })
             }
             KvCommand::InvalidateTags { collection, tags } => {
@@ -1394,6 +1395,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: invalidated as u64,
                     statement_type: "delete",
+                    bookmark: None,
                 })
             }
 
@@ -1523,6 +1525,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
 
@@ -1564,6 +1567,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
 
@@ -1633,6 +1637,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: purged as u64,
                     statement_type: "delete",
+                    bookmark: None,
                 })
             }
 
@@ -1679,6 +1684,7 @@ impl RedDBRuntime {
                         result,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
 
@@ -1727,6 +1733,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             KvCommand::Watch {
@@ -1781,6 +1788,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "stream",
+                    bookmark: None,
                 })
             }
 
@@ -1909,6 +1917,7 @@ impl RedDBRuntime {
                             result,
                             affected_rows: 0,
                             statement_type: "select",
+                            bookmark: None,
                         })
                     }
                     Err(err) => {
@@ -1966,6 +1975,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 1,
                     statement_type: "update",
+                    bookmark: None,
                 })
             }
 
@@ -2011,6 +2021,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: if ok { 1 } else { 0 },
                     statement_type: "update",
+                    bookmark: None,
                 })
             }
 
@@ -2081,6 +2092,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: if deleted { 1 } else { 0 },
                     statement_type: "delete",
+                    bookmark: None,
                 })
             }
         }
@@ -2228,6 +2240,7 @@ fn vault_write_result(
         result,
         affected_rows,
         statement_type,
+        bookmark: None,
     }
 }
 

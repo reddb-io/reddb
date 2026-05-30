@@ -1,7 +1,7 @@
 //! Logical replication helpers shared by replica apply and point-in-time restore.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::application::entity::metadata_from_json;
@@ -161,6 +161,41 @@ impl std::fmt::Display for LogicalApplyError {
 
 impl std::error::Error for LogicalApplyError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BookmarkWaitError {
+    Timeout { target_lsn: u64, applied_lsn: u64 },
+    TermMismatch { target_term: u64, applied_term: u64 },
+}
+
+impl BookmarkWaitError {
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout { .. })
+    }
+}
+
+impl std::fmt::Display for BookmarkWaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout {
+                target_lsn,
+                applied_lsn,
+            } => write!(
+                f,
+                "timed out waiting for causal bookmark lsn {target_lsn}; applied={applied_lsn}"
+            ),
+            Self::TermMismatch {
+                target_term,
+                applied_term,
+            } => write!(
+                f,
+                "causal bookmark term mismatch: target={target_term} applied={applied_term}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BookmarkWaitError {}
+
 /// Shared logical change applier so replica replay and PITR converge on the
 /// same semantics. Stateful (PLAN.md Phase 11.5): tracks the last applied
 /// LSN + payload hash so duplicates / older LSNs / gaps / divergences are
@@ -168,7 +203,9 @@ impl std::error::Error for LogicalApplyError {}
 pub struct LogicalChangeApplier {
     last_applied_term: AtomicU64,
     last_applied_lsn: AtomicU64,
+    received_frontier_lsn: AtomicU64,
     last_payload_hash: Mutex<Option<[u8; 32]>>,
+    apply_wait: (Mutex<()>, Condvar),
     /// Issue #814 — metrics the apply path bumps when a record runs
     /// against a missing target. The production replica loop shares the
     /// runtime's `ReplicaApplyMetrics` here so `/metrics` surfaces misses;
@@ -196,7 +233,9 @@ impl LogicalChangeApplier {
         Self {
             last_applied_term: AtomicU64::new(crate::replication::DEFAULT_REPLICATION_TERM),
             last_applied_lsn: AtomicU64::new(starting_lsn),
+            received_frontier_lsn: AtomicU64::new(starting_lsn),
             last_payload_hash: Mutex::new(None),
+            apply_wait: (Mutex::new(()), Condvar::new()),
             metrics,
         }
     }
@@ -210,8 +249,58 @@ impl LogicalChangeApplier {
         self.last_applied_lsn.load(Ordering::Acquire)
     }
 
+    pub fn received_frontier_lsn(&self) -> u64 {
+        self.received_frontier_lsn.load(Ordering::Acquire)
+    }
+
     pub fn last_applied_term(&self) -> u64 {
         self.last_applied_term.load(Ordering::Acquire)
+    }
+
+    pub fn wait_for_bookmark(
+        &self,
+        bookmark: &crate::replication::CausalBookmark,
+        timeout: std::time::Duration,
+    ) -> Result<(), BookmarkWaitError> {
+        let deadline = std::time::Instant::now() + timeout;
+        let target_lsn = bookmark.commit_lsn();
+        let target_term = bookmark.term();
+
+        let mut guard = self.apply_wait.0.lock().expect("apply wait mutex");
+        loop {
+            let applied_lsn = self.last_applied_lsn();
+            let applied_term = self.last_applied_term();
+            if applied_lsn >= target_lsn {
+                if applied_term == target_term {
+                    return Ok(());
+                }
+                return Err(BookmarkWaitError::TermMismatch {
+                    target_term,
+                    applied_term,
+                });
+            }
+
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(BookmarkWaitError::Timeout {
+                    target_lsn,
+                    applied_lsn,
+                });
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next_guard, wait_result) = self
+                .apply_wait
+                .1
+                .wait_timeout(guard, remaining)
+                .expect("apply wait condvar");
+            guard = next_guard;
+            if wait_result.timed_out() {
+                return Err(BookmarkWaitError::Timeout {
+                    target_lsn,
+                    applied_lsn: self.last_applied_lsn(),
+                });
+            }
+        }
     }
 
     /// Apply one logical change record. The state machine:
@@ -230,12 +319,15 @@ impl LogicalChangeApplier {
         let last = self.last_applied_lsn.load(Ordering::Acquire);
         let last_term = self.last_applied_term.load(Ordering::Acquire);
         let payload_hash = record_payload_hash(record);
+        self.received_frontier_lsn
+            .fetch_max(record.lsn, Ordering::AcqRel);
 
         if last == 0 && record.lsn > 0 {
             self.do_apply(db, record, mode)?;
             self.last_applied_term.store(record.term, Ordering::Release);
             self.last_applied_lsn.store(record.lsn, Ordering::Release);
             *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
+            self.apply_wait.1.notify_all();
             return Ok(ApplyOutcome::Applied);
         }
 
@@ -267,6 +359,7 @@ impl LogicalChangeApplier {
         self.last_applied_term.store(record.term, Ordering::Release);
         self.last_applied_lsn.store(record.lsn, Ordering::Release);
         *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
+        self.apply_wait.1.notify_all();
         Ok(ApplyOutcome::Applied)
     }
 

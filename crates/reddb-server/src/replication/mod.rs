@@ -20,6 +20,7 @@
 //!     .with_replication(ReplicationConfig::replica("http://primary:50051"));
 //! ```
 
+pub mod bookmark;
 pub mod cdc;
 pub mod commit_policy;
 pub mod commit_waiter;
@@ -31,6 +32,7 @@ pub mod replica;
 pub mod scheduler;
 pub mod topology_advertiser;
 
+pub use bookmark::{BookmarkDecodeError, CausalBookmark};
 pub use commit_policy::CommitPolicy;
 pub use commit_waiter::{AwaitOutcome, CommitWaiter};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
