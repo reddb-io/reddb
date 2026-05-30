@@ -3886,6 +3886,27 @@ impl RedDBRuntime {
         );
     }
 
+    /// Resolve this replica's stable identity (issue #812). The primary keys
+    /// per-replica progress off this id, so it MUST be stable across reboots
+    /// — a changing id would make the primary treat every restart as a brand
+    /// new replica. Honours an operator-configured `red.replication.replica_id`
+    /// first; otherwise generates one once and persists it so the next boot
+    /// reuses the same value.
+    fn resolve_replica_id(&self) -> String {
+        let configured = self.config_string("red.replication.replica_id", "");
+        if !configured.is_empty() {
+            return configured;
+        }
+        let generated = crate::crypto::uuid::Uuid::new_v4().to_string();
+        self.inner.db.store().set_config_tree(
+            "red.replication",
+            &crate::json!({
+                "replica_id": generated.clone()
+            }),
+        );
+        generated
+    }
+
     fn persist_replication_health(
         &self,
         state: &str,
@@ -4695,6 +4716,9 @@ impl RedDBRuntime {
         let poll_ms = self.inner.db.options().replication.poll_interval_ms;
         let max_count = self.inner.db.options().replication.max_batch_size;
         let mut since_lsn = self.config_u64("red.replication.last_applied_lsn", 0);
+        // Issue #812 — stable identity sent on every WAL pull so the primary
+        // can self-register this replica and attribute pulls to it.
+        let replica_id = self.resolve_replica_id();
 
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4735,7 +4759,8 @@ impl RedDBRuntime {
             loop {
                 let payload = crate::json!({
                     "since_lsn": since_lsn,
-                    "max_count": max_count
+                    "max_count": max_count,
+                    "replica_id": replica_id
                 });
                 let request = tonic::Request::new(JsonPayloadRequest {
                     payload_json: crate::json::to_string(&payload)
