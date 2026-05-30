@@ -57,6 +57,38 @@ fn insert_snapshot_sidecar(
     Ok(())
 }
 
+/// Parse an optional unsigned-integer replication snapshot control header
+/// (issue #830 resumable transfer). Returns `Ok(None)` when the header is
+/// absent so callers can fall back to whole-snapshot behaviour.
+fn snapshot_metadata_usize(
+    metadata: &tonic::metadata::MetadataMap,
+    key: &str,
+) -> Result<Option<usize>, Status> {
+    let Some(value) = metadata.get(key) else {
+        return Ok(None);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| Status::invalid_argument(format!("{key} must be ascii")))?;
+    raw.parse::<usize>()
+        .map(Some)
+        .map_err(|_| Status::invalid_argument(format!("{key} must be an unsigned integer")))
+}
+
+/// Parse an optional ASCII replication snapshot control header (issue #830).
+fn snapshot_metadata_string(
+    metadata: &tonic::metadata::MetadataMap,
+    key: &str,
+) -> Result<Option<String>, Status> {
+    let Some(value) = metadata.get(key) else {
+        return Ok(None);
+    };
+    value
+        .to_str()
+        .map(|value| Some(value.to_string()))
+        .map_err(|_| Status::invalid_argument(format!("{key} must be ascii")))
+}
+
 fn ask_reply_from_runtime_result(result: &RuntimeQueryResult) -> Result<AskReply, Status> {
     let ask = ask_result_from_unified_result(&result.result)
         .ok_or_else(|| Status::internal("ASK runtime result did not contain an answer row"))?;
@@ -3121,67 +3153,129 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_replication_stream(&request)?;
+        // Issue #830 resumable transfer control headers (all optional — their
+        // absence preserves the legacy whole-snapshot envelope).
+        let snapshot_max_bytes =
+            snapshot_metadata_usize(request.metadata(), "x-reddb-snapshot-max-bytes")?;
+        let snapshot_offset =
+            snapshot_metadata_usize(request.metadata(), "x-reddb-snapshot-offset")?.unwrap_or(0);
+        let requested_snapshot_token =
+            snapshot_metadata_string(request.metadata(), "x-reddb-snapshot-token")?;
+        let replica_id = self.authorize_replication_stream(&request)?;
         let db = self.runtime.db();
 
-        if db.replication.is_none() {
-            return Err(Status::failed_precondition(
-                "this instance is not a replication primary",
-            ));
-        }
+        let repl = db.replication.as_ref().ok_or_else(|| {
+            Status::failed_precondition("this instance is not a replication primary")
+        })?;
+        // Pin a replication slot for this replica at bootstrap start so the WAL
+        // frontier it needs is retained until catch-up finishes (issue #830 —
+        // kills the initial-sync-vs-retention race that produces stalled_gap).
+        let slot_restart_lsn = repl.register_replica(replica_id.clone());
 
         // Trigger a checkpoint first to ensure data is flushed
         db.flush().map_err(|e| Status::internal(e.to_string()))?;
 
+        let snapshot_lsn = repl
+            .logical_wal_spool
+            .as_ref()
+            .map(|spool| spool.current_lsn())
+            .unwrap_or_else(|| repl.wal_buffer.current_lsn());
+
         let mut map = crate::json::Map::new();
         map.insert("snapshot_available".into(), JsonValue::Bool(true));
+        map.insert("replica_id".into(), JsonValue::String(replica_id.clone()));
+        map.insert(
+            "slot_restart_lsn".into(),
+            JsonValue::Number(slot_restart_lsn as f64),
+        );
         if let Some(path) = db.path() {
             let bytes = std::fs::read(path).map_err(|e| Status::internal(e.to_string()))?;
-            map.insert("snapshot_hex".into(), JsonValue::String(hex::encode(bytes)));
+            // A resumable snapshot token is keyed to the replica, the pinned
+            // snapshot LSN, and the total size so a resuming caller is matched
+            // to the same byte stream it started.
+            let snapshot_token = requested_snapshot_token.unwrap_or_else(|| {
+                format!("snapshot:{replica_id}:{snapshot_lsn}:{}", bytes.len())
+            });
+            map.insert(
+                "snapshot_token".into(),
+                JsonValue::String(snapshot_token.clone()),
+            );
+            map.insert(
+                "snapshot_total_bytes".into(),
+                JsonValue::Number(bytes.len() as f64),
+            );
             map.insert(
                 "snapshot_path".into(),
                 JsonValue::String(path.display().to_string()),
             );
 
-            insert_snapshot_sidecar(
-                &mut map,
-                "metadata_binary_hex",
-                &crate::physical::PhysicalMetadataFile::metadata_binary_path_for(path),
-            )?;
-            insert_snapshot_sidecar(
-                &mut map,
-                "metadata_json_hex",
-                &crate::physical::PhysicalMetadataFile::metadata_path_for(path),
-            )?;
+            if let Some(max_bytes) = snapshot_max_bytes {
+                // Chunked, resumable transfer: serve [offset, offset+max_bytes)
+                // and tell the caller where to resume from next.
+                let max_bytes = max_bytes.max(1);
+                if snapshot_offset > bytes.len() {
+                    return Err(Status::invalid_argument(
+                        "x-reddb-snapshot-offset is beyond snapshot size",
+                    ));
+                }
+                let next_offset = snapshot_offset.saturating_add(max_bytes).min(bytes.len());
+                map.insert(
+                    "snapshot_offset".into(),
+                    JsonValue::Number(snapshot_offset as f64),
+                );
+                map.insert(
+                    "snapshot_chunk_hex".into(),
+                    JsonValue::String(hex::encode(&bytes[snapshot_offset..next_offset])),
+                );
+                map.insert(
+                    "next_snapshot_offset".into(),
+                    JsonValue::Number(next_offset as f64),
+                );
+                map.insert(
+                    "snapshot_complete".into(),
+                    JsonValue::Bool(next_offset == bytes.len()),
+                );
+            } else {
+                // Legacy whole-snapshot envelope (plus sidecars) for callers
+                // that do not opt into chunked transfer.
+                let snapshot_total = JsonValue::Number(bytes.len() as f64);
+                map.insert("snapshot_hex".into(), JsonValue::String(hex::encode(bytes)));
+                map.insert("snapshot_offset".into(), JsonValue::Number(0.0));
+                map.insert("next_snapshot_offset".into(), snapshot_total);
+                map.insert("snapshot_complete".into(), JsonValue::Bool(true));
 
-            let mut header_shadow = path.to_path_buf().into_os_string();
-            header_shadow.push("-hdr");
-            insert_snapshot_sidecar(
-                &mut map,
-                "header_shadow_hex",
-                &std::path::PathBuf::from(header_shadow),
-            )?;
+                insert_snapshot_sidecar(
+                    &mut map,
+                    "metadata_binary_hex",
+                    &crate::physical::PhysicalMetadataFile::metadata_binary_path_for(path),
+                )?;
+                insert_snapshot_sidecar(
+                    &mut map,
+                    "metadata_json_hex",
+                    &crate::physical::PhysicalMetadataFile::metadata_path_for(path),
+                )?;
 
-            let mut metadata_shadow = path.to_path_buf().into_os_string();
-            metadata_shadow.push("-meta");
-            insert_snapshot_sidecar(
-                &mut map,
-                "metadata_shadow_hex",
-                &std::path::PathBuf::from(metadata_shadow),
-            )?;
+                let mut header_shadow = path.to_path_buf().into_os_string();
+                header_shadow.push("-hdr");
+                insert_snapshot_sidecar(
+                    &mut map,
+                    "header_shadow_hex",
+                    &std::path::PathBuf::from(header_shadow),
+                )?;
+
+                let mut metadata_shadow = path.to_path_buf().into_os_string();
+                metadata_shadow.push("-meta");
+                insert_snapshot_sidecar(
+                    &mut map,
+                    "metadata_shadow_hex",
+                    &std::path::PathBuf::from(metadata_shadow),
+                )?;
+            }
         }
-        if let Some(ref repl) = db.replication {
-            map.insert(
-                "snapshot_lsn".into(),
-                JsonValue::Number(
-                    repl.logical_wal_spool
-                        .as_ref()
-                        .map(|spool| spool.current_lsn())
-                        .unwrap_or_else(|| repl.wal_buffer.current_lsn())
-                        as f64,
-                ),
-            );
-        }
+        map.insert(
+            "snapshot_lsn".into(),
+            JsonValue::Number(snapshot_lsn as f64),
+        );
 
         Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
     }

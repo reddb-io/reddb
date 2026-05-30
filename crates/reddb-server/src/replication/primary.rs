@@ -1592,6 +1592,32 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_slot_pin_prevents_wal_removed_rebootstrap_after_prune() {
+        let primary = PrimaryReplication::new(None);
+        for lsn in 1..=5 {
+            primary.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+
+        let slot_lsn = primary.register_replica("bootstrapping".to_string());
+        assert_eq!(slot_lsn, 5, "bootstrap pins the current frontier");
+
+        for lsn in 6..=8 {
+            primary.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+
+        assert_eq!(
+            primary.prune_retained_wal_through(8).unwrap(),
+            5,
+            "bootstrap slot keeps the frontier retained"
+        );
+        assert_eq!(
+            primary.slot_rebootstrap_reason("bootstrapping", 0, primary.wal_buffer.oldest_lsn()),
+            None,
+            "a caller resuming from its slot must not see wal-removed after slot-aware pruning"
+        );
+    }
+
+    #[test]
     fn default_config_enables_finite_slot_retention_cap() {
         let config = crate::replication::ReplicationConfig::primary();
 
