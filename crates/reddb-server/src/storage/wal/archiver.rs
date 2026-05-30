@@ -1212,6 +1212,7 @@ mod tests {
         let backend = LocalBackend;
         let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
         let record = ChangeRecord {
+            term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn: 7,
             timestamp: 1234,
             operation: crate::replication::cdc::ChangeOperation::Insert,
@@ -1243,6 +1244,7 @@ mod tests {
         let backend = LocalBackend;
         let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
         let record = ChangeRecord {
+            term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn: 11,
             timestamp: 99,
             operation: crate::replication::cdc::ChangeOperation::Insert,
@@ -1350,6 +1352,7 @@ mod tests {
         let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
 
         let mk = |lsn: u64| ChangeRecord {
+            term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn,
             timestamp: lsn * 1000,
             operation: crate::replication::cdc::ChangeOperation::Insert,
