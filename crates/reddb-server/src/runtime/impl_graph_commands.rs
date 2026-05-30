@@ -52,6 +52,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::ShortestPath {
@@ -109,6 +110,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::Properties { source } => {
@@ -175,6 +177,7 @@ impl RedDBRuntime {
                         result,
                         affected_rows: 0,
                         statement_type: "select",
+                        bookmark: None,
                     });
                 }
                 let res = self.graph_properties(None)?;
@@ -202,6 +205,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::Traverse {
@@ -243,6 +247,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::Centrality {
@@ -297,6 +302,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::Community {
@@ -357,6 +363,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::Components {
@@ -388,6 +395,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::Cycles { max_length } => {
@@ -408,6 +416,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::Clustering => {
@@ -438,6 +447,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             GraphCommand::TopologicalSort => {
@@ -462,6 +472,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
         }
@@ -577,6 +588,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::Text {
@@ -634,6 +646,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::Hybrid {
@@ -678,6 +691,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::Multimodal {
@@ -711,6 +725,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::Index {
@@ -753,6 +768,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::Context {
@@ -830,6 +846,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::SpatialRadius {
@@ -884,6 +901,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::SpatialBbox {
@@ -933,6 +951,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             SearchCommand::SpatialNearest {
@@ -983,6 +1002,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
         }
