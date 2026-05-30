@@ -491,6 +491,7 @@ fn execute_pg_query_result(
                 result,
                 affected_rows: 0,
                 statement_type: "select",
+                bookmark: None,
             }),
             Ok(None) => {
                 run_runtime_blocking(|| runtime.execute_query(sql)).map_err(|err| err.to_string())
@@ -523,6 +524,7 @@ fn try_execute_pg_scalar_select(
         result,
         affected_rows: 0,
         statement_type: "select",
+        bookmark: None,
     })
 }
 
@@ -757,6 +759,7 @@ where
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         }),
         Ok(None) => run_runtime_blocking(|| runtime.execute_query(sql)),
         Err(err) => Err(err),
@@ -1358,6 +1361,7 @@ mod tests {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         };
 
         let mut out = Vec::new();
