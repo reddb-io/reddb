@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use crate::api::{RedDBError, RedDBResult};
 use crate::application::entity::metadata_from_json;
 use crate::replication::cdc::{ChangeOperation, ChangeRecord};
-use crate::storage::{EntityId, RedDB, UnifiedStore};
+use crate::storage::{EntityId, EntityKind, RedDB, UnifiedStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyMode {
@@ -263,6 +263,47 @@ impl LogicalChangeApplier {
                 };
                 let entity = UnifiedStore::deserialize_entity(bytes, store.format_version())
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+
+                // Issue #813 — MVCC table-row supersession on the replica.
+                //
+                // A table-row UPDATE on the primary installs a NEW physical
+                // version (fresh `EntityId`) that shares the row's stable
+                // `logical_id`, and marks the prior version superseded
+                // (`xmax != 0`) so snapshot reads skip it. Only the new
+                // version travels on the wire — the prior version's `xmax`
+                // bump is implicit. Without reproducing it here the replica
+                // leaves every prior version LIVE, so each update to a row
+                // accumulates a stale live duplicate and a full re-pull
+                // replays them all (the observed 22× inflation). Before
+                // upserting the incoming version, mark any *other* live
+                // version of the same logical id superseded — mirroring
+                // `install_versioned_table_row_update` on the primary. This
+                // is idempotent under re-pull: re-applying a record updates
+                // its version in place (resetting its `xmax` from the
+                // serialized bytes), and the last writer per logical id in
+                // LSN order wins, converging on the primary's live set.
+                if matches!(entity.kind, EntityKind::TableRow { .. }) {
+                    let logical = entity.logical_id();
+                    let new_id = entity.id;
+                    let superseding_xid = if entity.xmin != 0 { entity.xmin } else { 1 };
+                    let stale: Vec<_> = store
+                        .table_row_versions_by_logical_id(&record.collection, logical)
+                        .into_iter()
+                        .filter(|version| version.id != new_id && version.xmax == 0)
+                        .collect();
+                    if !stale.is_empty() {
+                        let manager = store
+                            .get_collection(&record.collection)
+                            .ok_or_else(|| RedDBError::NotFound(record.collection.clone()))?;
+                        for mut version in stale {
+                            version.set_xmax(superseding_xid);
+                            manager
+                                .update(version)
+                                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                        }
+                    }
+                }
+
                 let exists = store
                     .get(&record.collection, EntityId::new(record.entity_id))
                     .is_some();
