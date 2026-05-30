@@ -766,6 +766,32 @@ pub struct ReplicaState {
     pub region: Option<String>,
 }
 
+/// Primary-side replication progress derived from the replica registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicationProgress {
+    pub lag_lsn: u64,
+    pub safe_replay_lsn: u64,
+}
+
+impl ReplicationProgress {
+    pub fn from_replicas(replicas: &[ReplicaState]) -> Option<Self> {
+        let max_sent_lsn = replicas.iter().map(|replica| replica.last_sent_lsn).max()?;
+        let min_acked_lsn = replicas
+            .iter()
+            .map(|replica| replica.last_acked_lsn)
+            .min()?;
+        let safe_replay_lsn = replicas
+            .iter()
+            .map(|replica| replica.last_durable_lsn)
+            .min()?;
+
+        Some(Self {
+            lag_lsn: max_sent_lsn.saturating_sub(min_acked_lsn),
+            safe_replay_lsn,
+        })
+    }
+}
+
 /// Primary replication manager.
 pub struct PrimaryReplication {
     pub wal_buffer: Arc<WalBuffer>,
@@ -971,6 +997,11 @@ impl PrimaryReplication {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub fn replication_progress(&self) -> Option<ReplicationProgress> {
+        let replicas = self.replicas.read().unwrap_or_else(|e| e.into_inner());
+        ReplicationProgress::from_replicas(&replicas)
     }
 
     pub fn slot_snapshots(&self) -> Vec<ReplicationSlot> {
@@ -1381,5 +1412,35 @@ mod tests {
             Some(7),
             "no-op registration preserves progress"
         );
+    }
+
+    #[test]
+    fn replication_progress_uses_sent_applied_and_durable_registry_lsns() {
+        let now = crate::utils::now_unix_millis() as u128;
+        let replicas = vec![
+            ReplicaState {
+                id: "fast".to_string(),
+                last_acked_lsn: 90,
+                last_sent_lsn: 120,
+                last_durable_lsn: 80,
+                connected_at_unix_ms: now,
+                last_seen_at_unix_ms: now,
+                region: None,
+            },
+            ReplicaState {
+                id: "slow".to_string(),
+                last_acked_lsn: 70,
+                last_sent_lsn: 100,
+                last_durable_lsn: 60,
+                connected_at_unix_ms: now,
+                last_seen_at_unix_ms: now,
+                region: None,
+            },
+        ];
+
+        let progress = ReplicationProgress::from_replicas(&replicas).expect("registered replicas");
+
+        assert_eq!(progress.lag_lsn, 50);
+        assert_eq!(progress.safe_replay_lsn, 60);
     }
 }
