@@ -104,9 +104,14 @@ fn term_from_payload(payload: &[u8]) -> u64 {
 
 /// In-memory WAL buffer for replication.
 /// Primary appends records here; replicas consume from it.
+///
+/// Each record payload is stored behind an `Arc<[u8]>` so fan-out to
+/// multiple replicas shares a single heap allocation per record
+/// (issue #832): a pull clones the `Arc` handle, never the bytes, so
+/// adding replicas does not multiply the primary's send-buffer memory.
 pub struct WalBuffer {
-    /// Circular buffer of (lsn, serialized_record) pairs.
-    records: RwLock<VecDeque<(u64, Vec<u8>)>>,
+    /// Circular buffer of (lsn, ref-counted serialized record) pairs.
+    records: RwLock<VecDeque<(u64, Arc<[u8]>)>>,
     /// Current write LSN.
     current_lsn: RwLock<u64>,
 }
@@ -122,14 +127,29 @@ impl WalBuffer {
     /// Append a WAL record. Called by the storage engine after each write.
     pub fn append(&self, lsn: u64, data: Vec<u8>) {
         let mut records = self.records.write().unwrap_or_else(|e| e.into_inner());
-        records.push_back((lsn, data));
+        records.push_back((lsn, Arc::from(data.into_boxed_slice())));
 
         let mut current = self.current_lsn.write().unwrap_or_else(|e| e.into_inner());
         *current = (*current).max(lsn);
     }
 
-    /// Read records since the given LSN (exclusive).
+    /// Read records since the given LSN (exclusive), copying each
+    /// payload into an owned `Vec<u8>`. Kept for callers (WAL
+    /// archiving, retention bookkeeping) that need owned bytes; the
+    /// per-replica fan-out path should prefer [`Self::read_since_shared`]
+    /// to avoid copying.
     pub fn read_since(&self, since_lsn: u64, max_count: usize) -> Vec<(u64, Vec<u8>)> {
+        self.read_since_shared(since_lsn, max_count)
+            .into_iter()
+            .map(|(lsn, data)| (lsn, data.to_vec()))
+            .collect()
+    }
+
+    /// Read records since the given LSN (exclusive) sharing the stored
+    /// `Arc<[u8]>` payloads. Fan-out to N replicas clones only the
+    /// reference-counted handles, so the buffer's bytes are never
+    /// duplicated per replica (issue #832).
+    pub fn read_since_shared(&self, since_lsn: u64, max_count: usize) -> Vec<(u64, Arc<[u8]>)> {
         let records = self.records.read().unwrap_or_else(|e| e.into_inner());
         records
             .iter()
@@ -189,9 +209,60 @@ impl LogicalWalEntry {
     }
 }
 
+/// One in every `SEEK_INDEX_INTERVAL` records is checkpointed into the
+/// spool's in-memory seek index. A briefly-disconnected replica
+/// resuming from its slot LSN binary-searches this sparse index and
+/// seeks straight to the nearest preceding checkpoint, then scans
+/// forward at most `SEEK_INDEX_INTERVAL` records — turning resume from
+/// an O(n) full-file scan into a sub-linear seek (issue #832). The
+/// index is rebuilt on `open` and extended on every `append`.
+const SEEK_INDEX_INTERVAL: u64 = 64;
+
 #[derive(Debug, Default)]
 struct LogicalWalSpoolState {
     current_lsn: u64,
+    /// Sparse, strictly LSN-ascending `(lsn, byte_offset)` checkpoints
+    /// into the spool file. `byte_offset` is the start of the record
+    /// whose LSN is `lsn`.
+    seek_index: Vec<(u64, u64)>,
+    /// Byte length of the spool file (offset at which the next append
+    /// lands). Tracked so `append` can record a checkpoint's offset
+    /// without an extra `stat`.
+    write_offset: u64,
+    /// Total records appended/recovered, used to space checkpoints
+    /// `SEEK_INDEX_INTERVAL` records apart.
+    record_count: u64,
+}
+
+impl LogicalWalSpoolState {
+    /// Push a checkpoint for the record at `offset` if it falls on a
+    /// `SEEK_INDEX_INTERVAL` boundary. `ordinal` is the record's
+    /// zero-based position in the spool.
+    fn note_record(&mut self, ordinal: u64, lsn: u64, offset: u64) {
+        if ordinal.is_multiple_of(SEEK_INDEX_INTERVAL) {
+            // Keep the index strictly ascending even if LSNs repeat
+            // (they should not, but a defensive guard keeps the binary
+            // search total).
+            if self.seek_index.last().map(|(l, _)| *l) != Some(lsn) {
+                self.seek_index.push((lsn, offset));
+            }
+        }
+    }
+
+    /// Byte offset to start a forward scan from when resuming at
+    /// `since_lsn` (exclusive). Returns the offset of the latest
+    /// checkpoint whose LSN is `<= since_lsn`, or `0` when no such
+    /// checkpoint exists.
+    fn seek_floor_offset(&self, since_lsn: u64) -> u64 {
+        match self
+            .seek_index
+            .binary_search_by(|(lsn, _)| lsn.cmp(&since_lsn))
+        {
+            Ok(idx) => self.seek_index[idx].1,
+            Err(0) => 0,
+            Err(idx) => self.seek_index[idx - 1].1,
+        }
+    }
 }
 
 /// Durable append-only logical WAL spool kept beside the main `.rdb` file.
@@ -229,9 +300,17 @@ impl LogicalWalSpool {
         // operator log but the spool stays open.
         let entries = read_and_repair_entries(&path)?;
         let current_lsn = entries.last().map(|entry| entry.lsn).unwrap_or(0);
+        // Rebuild the sparse seek index from the (now repaired) file so
+        // a post-restart resume is sub-linear from the first pull.
+        let (seek_index, write_offset, record_count) = build_seek_index(&path)?;
         Ok(Self {
             path,
-            state: Mutex::new(LogicalWalSpoolState { current_lsn }),
+            state: Mutex::new(LogicalWalSpoolState {
+                current_lsn,
+                seek_index,
+                write_offset,
+                record_count,
+            }),
         })
     }
 
@@ -312,17 +391,45 @@ impl LogicalWalSpool {
 
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_lsn = state.current_lsn.max(lsn);
+        // The record we just wrote starts at the prior end-of-file.
+        // Checkpoint it into the seek index if it lands on an interval
+        // boundary, then advance the tracked write offset.
+        let record_start = state.write_offset;
+        let ordinal = state.record_count;
+        state.note_record(ordinal, lsn, record_start);
+        state.write_offset = record_start + frame.len() as u64;
+        state.record_count = ordinal + 1;
         Ok(())
     }
 
     pub fn read_since(&self, since_lsn: u64, max_count: usize) -> io::Result<Vec<(u64, Vec<u8>)>> {
-        let entries = read_and_repair_entries(&self.path)?;
+        // Seek straight to the nearest indexed checkpoint at or before
+        // `since_lsn` instead of scanning the whole spool from offset 0
+        // (issue #832). The file was already repaired on `open`, so the
+        // forward scan from the checkpoint is non-repairing and simply
+        // stops at the first torn tail (left for the next `open` to fix).
+        let start_offset = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.seek_floor_offset(since_lsn)
+        };
+        let entries = read_entries_from(&self.path, start_offset)?;
         Ok(entries
             .into_iter()
             .filter(|entry| entry.lsn > since_lsn)
             .take(max_count)
             .map(|entry| (entry.lsn, entry.data_with_framing_term()))
             .collect())
+    }
+
+    /// Byte offset a resume at `since_lsn` would seek to before
+    /// forward-scanning. Exposed for tests asserting the resume is
+    /// sub-linear (starts past offset 0 for a mid-spool LSN).
+    #[cfg(test)]
+    fn seek_floor_offset(&self, since_lsn: u64) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .seek_floor_offset(since_lsn)
     }
 
     pub fn current_lsn(&self) -> u64 {
@@ -384,8 +491,14 @@ impl LogicalWalSpool {
         temp.sync_all()?;
         fs::rename(&temp_path, &self.path)?;
 
+        // The rewrite shifted every record's byte offset, so the old
+        // seek index is stale — rebuild it from the compacted file.
+        let (seek_index, write_offset, record_count) = build_seek_index(&self.path)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_lsn = previous_lsn.max(current_lsn).max(upto_lsn);
+        state.seek_index = seek_index;
+        state.write_offset = write_offset;
+        state.record_count = record_count;
         Ok(())
     }
 }
@@ -491,6 +604,89 @@ fn read_and_repair_entries(path: &Path) -> io::Result<Vec<LogicalWalEntry>> {
     }
 
     Ok(entries)
+}
+
+/// Read the single record whose magic byte begins at the current file
+/// cursor. Returns `Ok(Some(entry))` on a valid record, `Ok(None)`
+/// when the cursor is at a clean EOF or a torn/corrupt frame (the
+/// caller stops scanning), and `Err` only on an unexpected I/O fault.
+///
+/// Unlike [`read_and_repair_entries`] this never truncates: it is the
+/// read-time forward-scan primitive used after a seek, where the file
+/// was already repaired at `open`.
+fn read_frame(file: &mut File, record_start: u64) -> io::Result<Option<LogicalWalEntry>> {
+    let mut magic = [0u8; 4];
+    match file.read_exact(&mut magic) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(err),
+    }
+    if &magic != LOGICAL_WAL_SPOOL_MAGIC {
+        return Ok(None);
+    }
+    let mut version = [0u8; 1];
+    match file.read_exact(&mut version) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(err),
+    }
+    let entry = match version[0] {
+        LOGICAL_WAL_SPOOL_VERSION_V3 => read_one_v3(file, record_start),
+        LOGICAL_WAL_SPOOL_VERSION_V2 => read_one_v2(file, record_start),
+        LOGICAL_WAL_SPOOL_VERSION_V1 => read_one_v1(file, record_start),
+        _ => return Ok(None),
+    };
+    Ok(entry.ok())
+}
+
+/// Forward-scan valid records starting at `start_offset`, stopping at
+/// the first clean EOF or torn/corrupt frame. Non-repairing — used by
+/// the seek-based [`LogicalWalSpool::read_since`] resume path.
+fn read_entries_from(path: &Path, start_offset: u64) -> io::Result<Vec<LogicalWalEntry>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut entries = Vec::new();
+    loop {
+        let record_start = file.stream_position()?;
+        match read_frame(&mut file, record_start)? {
+            Some(entry) => entries.push(entry),
+            None => break,
+        }
+    }
+    Ok(entries)
+}
+
+/// Build the sparse seek index by walking the (repaired) spool once,
+/// checkpointing every `SEEK_INDEX_INTERVAL`-th record. Returns the
+/// index, the byte offset just past the last valid record, and the
+/// total record count.
+fn build_seek_index(path: &Path) -> io::Result<(Vec<(u64, u64)>, u64, u64)> {
+    if !path.exists() {
+        return Ok((Vec::new(), 0, 0));
+    }
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let mut index = Vec::new();
+    let mut ordinal: u64 = 0;
+    let mut write_offset: u64 = 0;
+    loop {
+        let record_start = file.stream_position()?;
+        match read_frame(&mut file, record_start)? {
+            Some(entry) => {
+                if ordinal.is_multiple_of(SEEK_INDEX_INTERVAL)
+                    && index.last().map(|(l, _)| *l) != Some(entry.lsn)
+                {
+                    index.push((entry.lsn, record_start));
+                }
+                ordinal += 1;
+                write_offset = file.stream_position()?;
+            }
+            None => break,
+        }
+    }
+    Ok((index, write_offset, ordinal))
 }
 
 /// Read a v3 record assuming the magic + version byte have already
@@ -876,6 +1072,24 @@ pub struct PrimaryReplication {
     /// detect stale advertisements without comparing the full
     /// replica list element-wise.
     topology_epoch: std::sync::atomic::AtomicU64,
+    /// Count of pulls served as a partial resync — a replica resuming
+    /// incrementally from its retained slot position rather than
+    /// triggering a full re-bootstrap (issue #832). Surfaced as a
+    /// replication metric so a brief disconnect that recovers via
+    /// partial resync is observable.
+    partial_resync_count: std::sync::atomic::AtomicU64,
+}
+
+/// How a replica's pull should be served, decided from its slot state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeMode {
+    /// Resume incrementally from `resume_lsn` (the replica's slot
+    /// position, never behind it). The retained WAL still covers the
+    /// gap, so a brief disconnect costs only a partial resync.
+    PartialResync { resume_lsn: u64 },
+    /// The slot is past the retention cap (or otherwise invalidated);
+    /// the replica must discard and re-bootstrap from a fresh snapshot.
+    FullRebootstrap { cause: SlotInvalidationCause },
 }
 
 impl PrimaryReplication {
@@ -920,6 +1134,7 @@ impl PrimaryReplication {
             slot_idle_timeout_ms: config.slot_idle_timeout_ms,
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
             topology_epoch: std::sync::atomic::AtomicU64::new(0),
+            partial_resync_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1303,6 +1518,43 @@ impl PrimaryReplication {
             return Some(SlotInvalidationCause::WalRemoved);
         }
         None
+    }
+
+    /// Decide how a reconnecting replica's pull should be served
+    /// (issue #832). If the slot is invalidated or the requested
+    /// position has fallen behind the retained WAL floor, the replica
+    /// must re-bootstrap; otherwise it resumes via a partial resync
+    /// from its slot position (never rewound behind it). Every
+    /// partial-resync decision bumps the `partial_resync_count` metric
+    /// so a brief disconnect that recovers without a full re-bootstrap
+    /// is observable.
+    pub fn plan_replica_resume(
+        &self,
+        id: &str,
+        requested_since_lsn: u64,
+        oldest_available_lsn: Option<u64>,
+    ) -> ResumeMode {
+        if let Some(cause) =
+            self.slot_rebootstrap_reason(id, requested_since_lsn, oldest_available_lsn)
+        {
+            return ResumeMode::FullRebootstrap { cause };
+        }
+        let resume_lsn = self
+            .slot_snapshots()
+            .into_iter()
+            .find(|slot| slot.id == id)
+            .map(|slot| requested_since_lsn.max(slot.restart_lsn))
+            .unwrap_or(requested_since_lsn);
+        self.partial_resync_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ResumeMode::PartialResync { resume_lsn }
+    }
+
+    /// Number of pulls served as a partial resync since process start.
+    /// Surfaced in the replication metrics/status payload (issue #832).
+    pub fn partial_resync_count(&self) -> u64 {
+        self.partial_resync_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn persist_slots_locked(&self, slots: &BTreeMap<String, ReplicationSlot>) {
@@ -1710,6 +1962,127 @@ mod tests {
                 .find(|slot| slot.id == "idle")
                 .and_then(|slot| slot.invalidation_reason),
             Some(SlotInvalidationCause::IdleTimeout)
+        );
+    }
+
+    #[test]
+    fn wal_buffer_fan_out_shares_refcounted_payload() {
+        // Issue #832 acceptance: fan-out to multiple replicas must share
+        // one ref-counted buffer — a second reader gets the *same*
+        // allocation, not a per-replica byte copy.
+        let buffer = WalBuffer::new(8);
+        buffer.append(1, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let replica_a = buffer.read_since_shared(0, usize::MAX);
+        let replica_b = buffer.read_since_shared(0, usize::MAX);
+        assert_eq!(replica_a.len(), 1);
+        assert_eq!(replica_b.len(), 1);
+
+        assert!(
+            Arc::ptr_eq(&replica_a[0].1, &replica_b[0].1),
+            "two replicas must share one ref-counted payload allocation"
+        );
+        assert_eq!(&*replica_a[0].1, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(
+            Arc::strong_count(&replica_a[0].1) >= 3,
+            "buffer + both replica handles reference the same payload"
+        );
+
+        // The owned-bytes compatibility path still yields the payload.
+        let owned = buffer.read_since(0, usize::MAX);
+        assert_eq!(owned, vec![(1u64, vec![0xDE, 0xAD, 0xBE, 0xEF])]);
+    }
+
+    #[test]
+    fn spool_seek_index_resume_is_sublinear() {
+        // Issue #832 acceptance: a replica resuming from a mid-spool slot
+        // position seeks to the nearest checkpoint rather than scanning
+        // the whole spool from offset 0 (partial-resync seek).
+        let data_path = temp_data_path("seek_index");
+        let spool_path = LogicalWalSpool::path_for(&data_path);
+        let spool = LogicalWalSpool::open(&data_path).expect("open spool");
+
+        for lsn in 1..=200u64 {
+            spool
+                .append_with_term_and_timestamp(1, lsn, lsn, &[(lsn % 251) as u8, 0xAB])
+                .expect("append");
+        }
+
+        // Full scan from the start covers every record and seeks to 0.
+        assert_eq!(spool.read_since(0, usize::MAX).expect("full").len(), 200);
+        assert_eq!(spool.seek_floor_offset(0), 0);
+
+        // Resuming from a mid LSN returns exactly the tail and seeks past
+        // offset 0 — proof the scan started from a checkpoint, not byte 0.
+        let resumed = spool.read_since(130, usize::MAX).expect("resume");
+        assert_eq!(resumed.first().map(|(lsn, _)| *lsn), Some(131));
+        assert_eq!(resumed.last().map(|(lsn, _)| *lsn), Some(200));
+        assert_eq!(resumed.len(), 70);
+        assert!(
+            spool.seek_floor_offset(130) > 0,
+            "mid-spool resume must seek past offset 0"
+        );
+
+        // Reopening rebuilds the seek index from disk, so resume stays
+        // sub-linear across a restart.
+        drop(spool);
+        let reopened = LogicalWalSpool::open(&data_path).expect("reopen spool");
+        assert!(reopened.seek_floor_offset(130) > 0);
+        assert_eq!(
+            reopened
+                .read_since(130, usize::MAX)
+                .expect("resume reopen")
+                .len(),
+            70
+        );
+
+        let _ = fs::remove_file(spool_path);
+    }
+
+    #[test]
+    fn plan_replica_resume_partial_within_window_full_past_cap() {
+        // Issue #832 acceptance: within the retention window a brief blip
+        // resumes via partial resync (counted as a metric); only a slot
+        // past the retention cap forces a full re-bootstrap.
+        let within = PrimaryReplication::new(None);
+        within.register_replica("blip".to_string());
+        for lsn in 1..=5 {
+            within.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+        let before = within.partial_resync_count();
+        match within.plan_replica_resume("blip", 2, within.wal_buffer.oldest_lsn()) {
+            ResumeMode::PartialResync { resume_lsn } => assert_eq!(resume_lsn, 2),
+            other => panic!("brief blip must resume via partial resync, got {other:?}"),
+        }
+        assert_eq!(
+            within.partial_resync_count(),
+            before + 1,
+            "partial resync must be observable via the metric"
+        );
+
+        // A slot driven past the retention cap is invalidated and must
+        // re-bootstrap — and that decision must NOT count as a partial
+        // resync.
+        let past_cap = PrimaryReplication::new_with_config(
+            None,
+            &crate::replication::ReplicationConfig::primary().with_slot_retention_max_lag_lsn(3),
+        );
+        past_cap.register_replica("slow".to_string());
+        for lsn in 1..=6 {
+            past_cap.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+        past_cap.enforce_retention_limits(0);
+        let before_full = past_cap.partial_resync_count();
+        match past_cap.plan_replica_resume("slow", 0, past_cap.wal_buffer.oldest_lsn()) {
+            ResumeMode::FullRebootstrap { cause } => {
+                assert_eq!(cause, SlotInvalidationCause::Horizon)
+            }
+            other => panic!("slot past the cap must re-bootstrap, got {other:?}"),
+        }
+        assert_eq!(
+            past_cap.partial_resync_count(),
+            before_full,
+            "a full re-bootstrap must not be counted as a partial resync"
         );
     }
 
