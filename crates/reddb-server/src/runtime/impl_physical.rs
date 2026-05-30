@@ -273,6 +273,27 @@ impl RedDBRuntime {
     }
 
     pub fn apply_retention_policy(&self) -> RedDBResult<()> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Maintenance)?;
+        let expired = self
+            .inner
+            .db
+            .ttl_expired_entities_now()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let store = self.inner.db.store();
+        for (collection, id) in expired {
+            let deleted = store
+                .delete(&collection, id)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            if deleted {
+                store.context_index().remove_entity(id);
+                self.cdc_emit(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    &collection,
+                    id.raw(),
+                    "entity",
+                );
+            }
+        }
         self.inner
             .db
             .enforce_retention_policy()
@@ -309,9 +330,18 @@ impl RedDBRuntime {
                 _ => false,
             });
             for entity in expired {
-                store
+                let deleted = store
                     .delete(&contract.name, entity.id)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                if deleted {
+                    store.context_index().remove_entity(entity.id);
+                    self.cdc_emit(
+                        crate::replication::cdc::ChangeOperation::Delete,
+                        &contract.name,
+                        entity.id.raw(),
+                        "entity",
+                    );
+                }
             }
         }
 

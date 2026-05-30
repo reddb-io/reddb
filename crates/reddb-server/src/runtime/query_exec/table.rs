@@ -279,6 +279,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     if table_row_resolver.resolve_read_candidate(entity).is_none() {
                         return;
                     }
+                    if !db.replica_allows_entity_at_read(&query.table, entity) {
+                        return;
+                    }
                     if let Some(cf) = compiled_filter.as_ref() {
                         if !cf.evaluate(entity) {
                             return;
@@ -305,6 +308,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     .resolve_read_candidate(&entity_opt)
                     .is_none()
                 {
+                    continue;
+                }
+                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
                     continue;
                 }
                 if let Some(cf) = compiled_filter.as_ref() {
@@ -393,6 +399,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                     .resolve_read_candidate(&entity_opt)
                                     .is_none()
                                 {
+                                    continue;
+                                }
+                                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
                                     continue;
                                 }
                                 if compiled_filter
@@ -539,6 +548,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 {
                     continue;
                 }
+                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
+                    continue;
+                }
                 if compiled_filter.evaluate(&entity_opt) {
                     let record_opt = if lean {
                         super::super::record_search::runtime_table_record_lean_in_collection(
@@ -648,6 +660,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 .resolve_read_candidate(&entity_opt)
                                 .is_none()
                             {
+                                continue;
+                            }
+                            if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
                                 continue;
                             }
                             if compiled_filter
@@ -822,6 +837,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx);
             let matching = manager.query_all_zoned(&zone_preds, |entity| {
                 table_row_resolver.resolve_read_candidate(entity).is_some()
+                    && db.replica_allows_entity_at_read(&query.table, entity)
                     && compiled.evaluate(entity)
             });
             for entity in &matching {
@@ -883,6 +899,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 }
                 if table_row_resolver.resolve_read_candidate(entity).is_none() {
                     return true; // skip hidden tuple, keep scanning
+                }
+                if !db.replica_allows_entity_at_read(&query.table, entity) {
+                    return true;
                 }
                 if compiled.evaluate(entity) {
                     let record = if !select_cols.is_empty() {
@@ -1066,6 +1085,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
                     EntityId::new(entity_id),
                 );
                 if let Some(entity) = entity {
+                    if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
+                        return Ok(Vec::new());
+                    }
                     return Ok(
                         super::super::record_search::runtime_table_record_lean_in_collection(
                             entity,
@@ -1150,6 +1172,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
                         return false;
                     }
                     if table_row_resolver.resolve_read_candidate(entity).is_none() {
+                        return true;
+                    }
+                    if !db.replica_allows_entity_at_read(&context.query.table, entity) {
                         return true;
                     }
                     if compiled.evaluate(entity) {
