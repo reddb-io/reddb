@@ -128,6 +128,8 @@ pub enum LogicalApplyError {
         next: u64,
     },
     Divergence {
+        expected_term: u64,
+        got_term: u64,
         lsn: u64,
         expected: String,
         got: String,
@@ -142,9 +144,15 @@ impl std::fmt::Display for LogicalApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Gap { last, next } => write!(f, "LSN gap on apply: last={last} next={next}"),
-            Self::Divergence { lsn, expected, got } => write!(
+            Self::Divergence {
+                expected_term,
+                got_term,
+                lsn,
+                expected,
+                got,
+            } => write!(
                 f,
-                "LSN divergence on apply at lsn={lsn}: expected payload hash {expected}, got {got}"
+                "LSN divergence on apply at term/lsn=({got_term},{lsn}): expected term {expected_term} payload hash {expected}, got {got}"
             ),
             Self::Apply { lsn, source } => write!(f, "apply error at lsn={lsn}: {source}"),
         }
@@ -158,6 +166,7 @@ impl std::error::Error for LogicalApplyError {}
 /// LSN + payload hash so duplicates / older LSNs / gaps / divergences are
 /// detected explicitly.
 pub struct LogicalChangeApplier {
+    last_applied_term: AtomicU64,
     last_applied_lsn: AtomicU64,
     last_payload_hash: Mutex<Option<[u8; 32]>>,
     /// Issue #814 — metrics the apply path bumps when a record runs
@@ -185,6 +194,7 @@ impl LogicalChangeApplier {
     /// on `reddb_replica_apply_errors_total{kind="apply_miss"}`.
     pub fn with_metrics(starting_lsn: u64, metrics: std::sync::Arc<ReplicaApplyMetrics>) -> Self {
         Self {
+            last_applied_term: AtomicU64::new(crate::replication::DEFAULT_REPLICATION_TERM),
             last_applied_lsn: AtomicU64::new(starting_lsn),
             last_payload_hash: Mutex::new(None),
             metrics,
@@ -198,6 +208,10 @@ impl LogicalChangeApplier {
 
     pub fn last_applied_lsn(&self) -> u64 {
         self.last_applied_lsn.load(Ordering::Acquire)
+    }
+
+    pub fn last_applied_term(&self) -> u64 {
+        self.last_applied_term.load(Ordering::Acquire)
     }
 
     /// Apply one logical change record. The state machine:
@@ -214,10 +228,12 @@ impl LogicalChangeApplier {
         mode: ApplyMode,
     ) -> Result<ApplyOutcome, LogicalApplyError> {
         let last = self.last_applied_lsn.load(Ordering::Acquire);
+        let last_term = self.last_applied_term.load(Ordering::Acquire);
         let payload_hash = record_payload_hash(record);
 
         if last == 0 && record.lsn > 0 {
             self.do_apply(db, record, mode)?;
+            self.last_applied_term.store(record.term, Ordering::Release);
             self.last_applied_lsn.store(record.lsn, Ordering::Release);
             *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
             return Ok(ApplyOutcome::Applied);
@@ -228,6 +244,8 @@ impl LogicalChangeApplier {
             return match prior {
                 Some(p) if p == payload_hash => Ok(ApplyOutcome::Idempotent),
                 Some(p) => Err(LogicalApplyError::Divergence {
+                    expected_term: last_term,
+                    got_term: record.term,
                     lsn: record.lsn,
                     expected: hex_digest(&p),
                     got: hex_digest(&payload_hash),
@@ -246,6 +264,7 @@ impl LogicalChangeApplier {
         }
 
         self.do_apply(db, record, mode)?;
+        self.last_applied_term.store(record.term, Ordering::Release);
         self.last_applied_lsn.store(record.lsn, Ordering::Release);
         *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
         Ok(ApplyOutcome::Applied)
@@ -426,6 +445,7 @@ impl LogicalChangeApplier {
 
 fn record_payload_hash(record: &ChangeRecord) -> [u8; 32] {
     let mut hasher = crate::crypto::sha256::Sha256::new();
+    hasher.update(&record.term.to_le_bytes());
     hasher.update(&record.lsn.to_le_bytes());
     hasher.update(&[record.operation as u8]);
     hasher.update(record.collection.as_bytes());
@@ -502,6 +522,7 @@ mod tests {
 
     fn delete_record(lsn: u64, collection: &str, entity_id: u64) -> ChangeRecord {
         ChangeRecord {
+            term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn,
             timestamp: 100 + lsn,
             operation: ChangeOperation::Delete,
@@ -687,6 +708,33 @@ mod tests {
             matches!(err, LogicalApplyError::Divergence { lsn: 7, .. }),
             "got {err:?}"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_fails_closed_on_same_lsn_different_term() {
+        let (db, path) = open_db();
+        let applier = LogicalChangeApplier::new(0);
+        applier
+            .apply(&db, &record(7, b"same").with_term(1), ApplyMode::Replica)
+            .unwrap();
+        let err = applier
+            .apply(&db, &record(7, b"same").with_term(2), ApplyMode::Replica)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LogicalApplyError::Divergence {
+                    lsn: 7,
+                    expected_term: 1,
+                    got_term: 2,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(applier.last_applied_term(), 1);
+        assert_eq!(applier.last_applied_lsn(), 7);
         let _ = std::fs::remove_file(path);
     }
 
