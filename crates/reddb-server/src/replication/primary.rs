@@ -1178,7 +1178,10 @@ impl PrimaryReplication {
             .len()
     }
 
-    fn current_logical_lsn(&self) -> u64 {
+    /// Current primary write position (logical WAL LSN, falling back to
+    /// the in-memory WAL buffer). Used as the reference point for
+    /// per-replica lag — including issue #826 flow control.
+    pub fn current_logical_lsn(&self) -> u64 {
         self.logical_wal_spool
             .as_ref()
             .map(|spool| spool.current_lsn())
