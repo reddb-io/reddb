@@ -2876,7 +2876,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
+        self.authorize_replication_stream(request.metadata())?;
         let db = self.runtime.db();
         let repl = db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -2954,7 +2954,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
+        let authenticated_replica_id = self.authorize_replication_ack(request.metadata())?;
         let db = self.runtime.db();
         let repl = db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -2966,6 +2966,11 @@ impl RedDb for GrpcRuntime {
             .and_then(JsonValue::as_str)
             .ok_or_else(|| Status::invalid_argument("missing replica_id"))?
             .to_string();
+        if replica_id != authenticated_replica_id {
+            return Err(Status::permission_denied(
+                "replica_id does not match authenticated identity",
+            ));
+        }
         let applied_lsn = payload
             .get("applied_lsn")
             .and_then(JsonValue::as_u64)
@@ -2975,11 +2980,14 @@ impl RedDb for GrpcRuntime {
             .and_then(JsonValue::as_u64)
             .unwrap_or(applied_lsn);
 
-        repl.ack_replica_lsn(&replica_id, applied_lsn, durable_lsn);
+        repl.ack_replica_lsn(&authenticated_replica_id, applied_lsn, durable_lsn);
 
         let mut reply = crate::json::Map::new();
         reply.insert("ok".into(), JsonValue::Bool(true));
-        reply.insert("replica_id".into(), JsonValue::String(replica_id));
+        reply.insert(
+            "replica_id".into(),
+            JsonValue::String(authenticated_replica_id),
+        );
         reply.insert("applied_lsn".into(), JsonValue::Number(applied_lsn as f64));
         reply.insert("durable_lsn".into(), JsonValue::Number(durable_lsn as f64));
         Ok(Response::new(json_payload_reply(JsonValue::Object(reply))))
@@ -2989,7 +2997,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
+        self.authorize_replication_stream(request.metadata())?;
         let db = self.runtime.db();
 
         if db.replication.is_none() {
