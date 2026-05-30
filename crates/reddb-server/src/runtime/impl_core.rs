@@ -4905,10 +4905,25 @@ impl RedDBRuntime {
                                 }
                             }
                             if let Some(applied_lsn) = batch_applied_lsn {
+                                let apply_errors = self.replica_apply_error_counts();
+                                let apply_errors_total =
+                                    apply_errors.iter().map(|(_, count)| *count).sum::<u64>();
+                                let divergence_total = apply_errors
+                                    .iter()
+                                    .find(|(kind, _)| {
+                                        matches!(
+                                            kind,
+                                            crate::replication::logical::ApplyErrorKind::Divergence
+                                        )
+                                    })
+                                    .map(|(_, count)| *count)
+                                    .unwrap_or(0);
                                 let ack_payload = crate::json!({
                                     "replica_id": replica_id.clone(),
                                     "applied_lsn": applied_lsn,
-                                    "durable_lsn": applied_lsn
+                                    "durable_lsn": applied_lsn,
+                                    "apply_errors_total": apply_errors_total,
+                                    "divergence_total": divergence_total
                                 });
                                 let ack_request = tonic::Request::new(JsonPayloadRequest {
                                     payload_json: crate::json::to_string(&ack_payload)
