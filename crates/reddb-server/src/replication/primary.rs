@@ -47,7 +47,7 @@
 //! existing spools; never written. A v1 record found in a spool will
 //! be returned to consumers but flagged via `LogicalWalEntry::v1`.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -107,8 +107,6 @@ fn term_from_payload(payload: &[u8]) -> u64 {
 pub struct WalBuffer {
     /// Circular buffer of (lsn, serialized_record) pairs.
     records: RwLock<VecDeque<(u64, Vec<u8>)>>,
-    /// Maximum records to keep in buffer.
-    max_size: usize,
     /// Current write LSN.
     current_lsn: RwLock<u64>,
 }
@@ -117,7 +115,6 @@ impl WalBuffer {
     pub fn new(max_size: usize) -> Self {
         Self {
             records: RwLock::new(VecDeque::with_capacity(max_size)),
-            max_size,
             current_lsn: RwLock::new(0),
         }
     }
@@ -126,9 +123,6 @@ impl WalBuffer {
     pub fn append(&self, lsn: u64, data: Vec<u8>) {
         let mut records = self.records.write().unwrap_or_else(|e| e.into_inner());
         records.push_back((lsn, data));
-        while records.len() > self.max_size {
-            records.pop_front();
-        }
 
         let mut current = self.current_lsn.write().unwrap_or_else(|e| e.into_inner());
         *current = (*current).max(lsn);
@@ -153,6 +147,17 @@ impl WalBuffer {
     pub fn set_current_lsn(&self, lsn: u64) {
         let mut current = self.current_lsn.write().unwrap_or_else(|e| e.into_inner());
         *current = (*current).max(lsn);
+    }
+
+    pub fn prune_through(&self, upto_lsn: u64) {
+        let mut records = self.records.write().unwrap_or_else(|e| e.into_inner());
+        while records
+            .front()
+            .map(|(lsn, _)| *lsn <= upto_lsn)
+            .unwrap_or(false)
+        {
+            records.pop_front();
+        }
     }
 
     /// Oldest available LSN (for gap detection).
@@ -639,6 +644,108 @@ fn read_one_v1(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     })
 }
 
+#[derive(Debug, Clone)]
+pub struct ReplicationSlot {
+    pub id: String,
+    pub restart_lsn: u64,
+    pub confirmed_lsn: u64,
+}
+
+fn load_replication_slots(path: Option<&Path>) -> BTreeMap<String, ReplicationSlot> {
+    let Some(path) = path else {
+        return BTreeMap::new();
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return BTreeMap::new(),
+        Err(err) => {
+            warn!(
+                target: "reddb::replication::slots",
+                path = %path.display(),
+                error = %err,
+                "failed to read replication slot store"
+            );
+            return BTreeMap::new();
+        }
+    };
+    match crate::serde_json::from_slice::<crate::serde_json::Value>(&bytes) {
+        Ok(value) => value
+            .get("slots")
+            .and_then(crate::serde_json::Value::as_array)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|value| {
+                let object = value.as_object()?;
+                let id = object.get("id")?.as_str()?.to_string();
+                let restart_lsn = object.get("restart_lsn")?.as_u64()?;
+                let confirmed_lsn = object.get("confirmed_lsn")?.as_u64()?;
+                Some((
+                    id.clone(),
+                    ReplicationSlot {
+                        id,
+                        restart_lsn,
+                        confirmed_lsn,
+                    },
+                ))
+            })
+            .collect(),
+        Err(err) => {
+            warn!(
+                target: "reddb::replication::slots",
+                path = %path.display(),
+                error = %err,
+                "failed to decode replication slot store"
+            );
+            BTreeMap::new()
+        }
+    }
+}
+
+fn persist_replication_slots(
+    path: Option<&Path>,
+    slots: &BTreeMap<String, ReplicationSlot>,
+) -> io::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp_path = path.with_extension("logical.slots.tmp");
+    let slots_json = slots
+        .values()
+        .map(|slot| {
+            let mut object = crate::serde_json::Map::new();
+            object.insert(
+                "id".to_string(),
+                crate::serde_json::Value::String(slot.id.clone()),
+            );
+            object.insert(
+                "restart_lsn".to_string(),
+                crate::serde_json::Value::Number(slot.restart_lsn as f64),
+            );
+            object.insert(
+                "confirmed_lsn".to_string(),
+                crate::serde_json::Value::Number(slot.confirmed_lsn as f64),
+            );
+            crate::serde_json::Value::Object(object)
+        })
+        .collect();
+    let mut root = crate::serde_json::Map::new();
+    root.insert(
+        "slots".to_string(),
+        crate::serde_json::Value::Array(slots_json),
+    );
+    let value = crate::serde_json::Value::Object(root);
+    let bytes = crate::serde_json::to_string_pretty(&value)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let mut temp = File::create(&temp_path)?;
+    temp.write_all(bytes.as_bytes())?;
+    temp.sync_all()?;
+    fs::rename(&temp_path, path)?;
+    Ok(())
+}
+
 /// State of a connected replica. PLAN.md Phase 11.4 fields:
 /// `last_seen_at_unix_ms` updates on every interaction (pull or ack);
 /// `last_sent_lsn` updates when the primary serves a `pull_wal_records`
@@ -664,6 +771,8 @@ pub struct PrimaryReplication {
     pub wal_buffer: Arc<WalBuffer>,
     pub logical_wal_spool: Option<Arc<LogicalWalSpool>>,
     pub replicas: RwLock<Vec<ReplicaState>>,
+    slot_path: Option<PathBuf>,
+    slots: RwLock<BTreeMap<String, ReplicationSlot>>,
     /// PLAN.md Phase 11.4 — ack-driven commit synchronization. Always
     /// allocated so the policy enum can flip from `Local` to
     /// `AckN`/`Quorum` without touching this struct's shape.
@@ -678,13 +787,29 @@ pub struct PrimaryReplication {
 }
 
 impl PrimaryReplication {
+    pub fn slot_path_for(data_path: &Path) -> PathBuf {
+        let file_name = data_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("reddb.rdb");
+        let slot_name = format!("{file_name}.logical.slots.json");
+        match data_path.parent() {
+            Some(parent) => parent.join(slot_name),
+            None => PathBuf::from(slot_name),
+        }
+    }
+
     pub fn new(data_path: Option<&Path>) -> Self {
+        let slot_path = data_path.map(Self::slot_path_for);
+        let slots = load_replication_slots(slot_path.as_deref());
         Self {
             wal_buffer: Arc::new(WalBuffer::new(100_000)),
             logical_wal_spool: data_path
                 .and_then(|path| LogicalWalSpool::open(path).ok())
                 .map(Arc::new),
             replicas: RwLock::new(Vec::new()),
+            slot_path,
+            slots: RwLock::new(slots),
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
             topology_epoch: std::sync::atomic::AtomicU64::new(0),
         }
@@ -707,32 +832,32 @@ impl PrimaryReplication {
     /// rewound, only `last_seen_at_unix_ms` is refreshed (and `region` when
     /// a non-`None` value is supplied). A re-registration is not a
     /// registry-shape change, so it does **not** bump the topology epoch.
-    /// Returns the LSN the replica should resume streaming from: the
-    /// current WAL LSN for a fresh registration, or the existing
-    /// `last_sent_lsn` for a reconnect.
+    /// Returns the slot `restart_lsn` the replica should resume streaming from:
+    /// the current WAL LSN for a fresh registration, or the durable slot
+    /// restart point for a reconnect.
     pub fn register_replica_with_region(&self, id: String, region: Option<String>) -> u64 {
         let now_ms = crate::utils::now_unix_millis() as u128;
+        let resume_lsn = self.ensure_slot(&id, self.current_logical_lsn());
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = replicas.iter_mut().find(|r| r.id == id) {
             existing.last_seen_at_unix_ms = now_ms;
             if region.is_some() {
                 existing.region = region;
             }
-            return existing.last_sent_lsn;
+            return resume_lsn;
         }
-        let lsn = self.wal_buffer.current_lsn();
         replicas.push(ReplicaState {
             id,
-            last_acked_lsn: lsn,
-            last_sent_lsn: lsn,
-            last_durable_lsn: lsn,
+            last_acked_lsn: resume_lsn,
+            last_sent_lsn: resume_lsn,
+            last_durable_lsn: resume_lsn,
             connected_at_unix_ms: now_ms,
             last_seen_at_unix_ms: now_ms,
             region,
         });
         drop(replicas);
         self.bump_topology_epoch();
-        lsn
+        resume_lsn
     }
 
     /// Ensure a replica identifying itself with `id` is present in the
@@ -807,6 +932,7 @@ impl PrimaryReplication {
     /// `ack_n` / `quorum` can wake and re-check its threshold.
     pub fn ack_replica_lsn(&self, id: &str, applied_lsn: u64, durable_lsn: u64) {
         let now_ms = crate::utils::now_unix_millis() as u128;
+        self.advance_slot(id, applied_lsn, durable_lsn);
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_acked_lsn = r.last_acked_lsn.max(applied_lsn);
@@ -843,11 +969,92 @@ impl PrimaryReplication {
             .clone()
     }
 
+    pub fn slot_snapshots(&self) -> Vec<ReplicationSlot> {
+        self.slots
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn retention_floor_lsn(&self) -> Option<u64> {
+        self.slots
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|slot| slot.restart_lsn)
+            .min()
+    }
+
+    pub fn prune_retained_wal_through(&self, archived_lsn: u64) -> io::Result<u64> {
+        let prune_lsn = self
+            .retention_floor_lsn()
+            .map(|floor| floor.min(archived_lsn))
+            .unwrap_or(archived_lsn);
+        if prune_lsn > 0 {
+            if let Some(spool) = &self.logical_wal_spool {
+                spool.prune_through(prune_lsn)?;
+            }
+            self.wal_buffer.prune_through(prune_lsn);
+        }
+        Ok(prune_lsn)
+    }
+
     pub fn replica_count(&self) -> usize {
         self.replicas
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .len()
+    }
+
+    fn current_logical_lsn(&self) -> u64 {
+        self.logical_wal_spool
+            .as_ref()
+            .map(|spool| spool.current_lsn())
+            .unwrap_or_else(|| self.wal_buffer.current_lsn())
+    }
+
+    fn ensure_slot(&self, id: &str, initial_lsn: u64) -> u64 {
+        let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = slots.get(id) {
+            return slot.restart_lsn;
+        }
+        slots.insert(
+            id.to_string(),
+            ReplicationSlot {
+                id: id.to_string(),
+                restart_lsn: initial_lsn,
+                confirmed_lsn: initial_lsn,
+            },
+        );
+        let restart_lsn = initial_lsn;
+        self.persist_slots_locked(&slots);
+        restart_lsn
+    }
+
+    fn advance_slot(&self, id: &str, confirmed_lsn: u64, restart_lsn: u64) {
+        let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
+        let slot = slots
+            .entry(id.to_string())
+            .or_insert_with(|| ReplicationSlot {
+                id: id.to_string(),
+                restart_lsn: 0,
+                confirmed_lsn: 0,
+            });
+        slot.confirmed_lsn = slot.confirmed_lsn.max(confirmed_lsn).max(restart_lsn);
+        slot.restart_lsn = slot.restart_lsn.max(restart_lsn);
+        self.persist_slots_locked(&slots);
+    }
+
+    fn persist_slots_locked(&self, slots: &BTreeMap<String, ReplicationSlot>) {
+        if let Err(err) = persist_replication_slots(self.slot_path.as_deref(), slots) {
+            warn!(
+                target: "reddb::replication::slots",
+                error = %err,
+                "failed to persist replication slots"
+            );
+        }
     }
 }
 
@@ -1040,8 +1247,90 @@ mod tests {
         assert_eq!(after.last_sent_lsn, 42, "last_sent_lsn preserved");
         assert_eq!(after.last_acked_lsn, 40, "last_acked_lsn preserved");
         assert_eq!(after.last_durable_lsn, 40, "last_durable_lsn preserved");
-        // Reconnect returns the resume point (existing last_sent_lsn).
-        assert_eq!(resume_lsn, 42, "reconnect returns the existing resume LSN");
+        // Reconnect returns the slot restart point, not the last sent LSN.
+        assert_eq!(resume_lsn, 40, "reconnect returns the slot restart LSN");
+    }
+
+    #[test]
+    fn replica_slot_persists_and_reconnect_resumes_from_restart_lsn() {
+        let data_path = temp_data_path("replication_slots");
+        let spool_path = LogicalWalSpool::path_for(&data_path);
+        let slot_path = PrimaryReplication::slot_path_for(&data_path);
+
+        {
+            let primary = PrimaryReplication::new(Some(&data_path));
+            primary.register_replica("r1".to_string());
+            primary.note_replica_pull("r1", 12);
+            primary.ack_replica_lsn("r1", 10, 8);
+
+            let slot = primary
+                .slot_snapshots()
+                .into_iter()
+                .find(|slot| slot.id == "r1")
+                .expect("r1 slot present");
+            assert_eq!(slot.restart_lsn, 8);
+            assert_eq!(slot.confirmed_lsn, 10);
+        }
+
+        let reopened = PrimaryReplication::new(Some(&data_path));
+        let slot = reopened
+            .slot_snapshots()
+            .into_iter()
+            .find(|slot| slot.id == "r1")
+            .expect("r1 slot loaded after reopen");
+        assert_eq!(slot.restart_lsn, 8);
+        assert_eq!(slot.confirmed_lsn, 10);
+        assert_eq!(
+            reopened.register_replica("r1".to_string()),
+            8,
+            "reconnect resumes from the durable slot restart LSN"
+        );
+
+        let _ = fs::remove_file(spool_path);
+        let _ = fs::remove_file(slot_path);
+    }
+
+    #[test]
+    fn retention_floor_follows_slowest_slot_and_prunes_wal() {
+        let primary = PrimaryReplication::new(None);
+        primary.register_replica("fast".to_string());
+        primary.register_replica("slow".to_string());
+
+        for lsn in 1..=6 {
+            primary.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+
+        primary.ack_replica_lsn("fast", 5, 5);
+        primary.ack_replica_lsn("slow", 3, 2);
+
+        assert_eq!(
+            primary.retention_floor_lsn(),
+            Some(2),
+            "slowest slot restart_lsn sets the retention floor"
+        );
+        assert_eq!(primary.prune_retained_wal_through(6).unwrap(), 2);
+        let retained: Vec<_> = primary
+            .wal_buffer
+            .read_since(0, usize::MAX)
+            .into_iter()
+            .map(|(lsn, _)| lsn)
+            .collect();
+        assert_eq!(retained, vec![3, 4, 5, 6]);
+
+        primary.ack_replica_lsn("slow", 6, 6);
+        assert_eq!(
+            primary.retention_floor_lsn(),
+            Some(5),
+            "slot confirmation advances the retention floor"
+        );
+        assert_eq!(primary.prune_retained_wal_through(6).unwrap(), 5);
+        let retained: Vec<_> = primary
+            .wal_buffer
+            .read_since(0, usize::MAX)
+            .into_iter()
+            .map(|(lsn, _)| lsn)
+            .collect();
+        assert_eq!(retained, vec![6]);
     }
 
     #[test]
