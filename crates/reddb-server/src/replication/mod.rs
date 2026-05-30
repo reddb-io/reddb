@@ -41,6 +41,8 @@ pub use topology_advertiser::{
 };
 
 pub const DEFAULT_REPLICATION_TERM: u64 = 1;
+pub const DEFAULT_SLOT_RETENTION_MAX_LAG_LSN: u64 = 100_000;
+pub const DEFAULT_SLOT_IDLE_TIMEOUT_MS: u64 = 86_400_000;
 
 /// Role of this RedDB instance in a replication cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -76,6 +78,11 @@ pub struct ReplicationConfig {
     pub region: String,
     /// Quorum configuration (Phase 2.6 multi-region).
     pub quorum: QuorumConfig,
+    /// Maximum LSN lag a replication slot may pin before the primary
+    /// invalidates it and allows WAL pruning to continue.
+    pub slot_retention_max_lag_lsn: u64,
+    /// Maximum wall-clock idle age for a slot before invalidation.
+    pub slot_idle_timeout_ms: u64,
 }
 
 impl ReplicationConfig {
@@ -87,6 +94,8 @@ impl ReplicationConfig {
             max_batch_size: 1000,
             region: "local".to_string(),
             quorum: QuorumConfig::async_commit(),
+            slot_retention_max_lag_lsn: DEFAULT_SLOT_RETENTION_MAX_LAG_LSN,
+            slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
         }
     }
 
@@ -98,6 +107,8 @@ impl ReplicationConfig {
             max_batch_size: 1000,
             region: "local".to_string(),
             quorum: QuorumConfig::async_commit(),
+            slot_retention_max_lag_lsn: DEFAULT_SLOT_RETENTION_MAX_LAG_LSN,
+            slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
         }
     }
 
@@ -111,6 +122,8 @@ impl ReplicationConfig {
             max_batch_size: 1000,
             region: "local".to_string(),
             quorum: QuorumConfig::async_commit(),
+            slot_retention_max_lag_lsn: DEFAULT_SLOT_RETENTION_MAX_LAG_LSN,
+            slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
         }
     }
 
@@ -129,6 +142,16 @@ impl ReplicationConfig {
     /// Set the replication term stamped into newly produced records.
     pub fn with_term(mut self, term: u64) -> Self {
         self.term = term;
+        self
+    }
+
+    pub fn with_slot_retention_max_lag_lsn(mut self, max_lag_lsn: u64) -> Self {
+        self.slot_retention_max_lag_lsn = max_lag_lsn;
+        self
+    }
+
+    pub fn with_slot_idle_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.slot_idle_timeout_ms = timeout_ms;
         self
     }
 }
