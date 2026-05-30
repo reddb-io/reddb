@@ -2853,6 +2853,16 @@ impl RedDb for GrpcRuntime {
                                 "confirmed_lsn".into(),
                                 JsonValue::Number(slot.confirmed_lsn as f64),
                             );
+                            slot_json.insert(
+                                "invalidated".into(),
+                                JsonValue::Bool(slot.invalidation_reason.is_some()),
+                            );
+                            if let Some(reason) = slot.invalidation_reason {
+                                slot_json.insert(
+                                    "invalidation_reason".into(),
+                                    JsonValue::String(reason.as_str().to_string()),
+                                );
+                            }
                             JsonValue::Object(slot_json)
                         })
                         .collect();
@@ -2927,6 +2937,16 @@ impl RedDb for GrpcRuntime {
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let mut since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
         let max_count = json_usize_field(&payload, "max_count").unwrap_or(1000);
+        let current_lsn = repl
+            .logical_wal_spool
+            .as_ref()
+            .map(|spool| spool.current_lsn())
+            .unwrap_or_else(|| repl.wal_buffer.current_lsn());
+        let oldest_available_lsn = repl
+            .logical_wal_spool
+            .as_ref()
+            .and_then(|spool| spool.oldest_lsn().ok().flatten())
+            .or_else(|| repl.wal_buffer.oldest_lsn());
         // PLAN.md Phase 11.4 — caller may identify itself so primary can
         // track per-replica `last_sent_lsn` and `last_seen_at_unix_ms`.
         let replica_id = payload
@@ -2936,6 +2956,24 @@ impl RedDb for GrpcRuntime {
 
         if let Some(id) = &replica_id {
             repl.ensure_replica_registered(id);
+            if let Some(reason) = repl.slot_rebootstrap_reason(id, since_lsn, oldest_available_lsn)
+            {
+                let mut map = crate::json::Map::new();
+                map.insert("records".into(), JsonValue::Array(Vec::new()));
+                map.insert("current_lsn".into(), JsonValue::Number(current_lsn as f64));
+                if let Some(oldest) = oldest_available_lsn {
+                    map.insert(
+                        "oldest_available_lsn".into(),
+                        JsonValue::Number(oldest as f64),
+                    );
+                }
+                map.insert("needs_rebootstrap".into(), JsonValue::Bool(true));
+                map.insert(
+                    "invalidation_reason".into(),
+                    JsonValue::String(reason.as_str().to_string()),
+                );
+                return Ok(Response::new(json_payload_reply(JsonValue::Object(map))));
+            }
             if let Some(slot) = repl.slot_snapshots().into_iter().find(|slot| slot.id == *id) {
                 since_lsn = since_lsn.max(slot.restart_lsn);
             }
@@ -2970,21 +3008,8 @@ impl RedDb for GrpcRuntime {
 
         let mut map = crate::json::Map::new();
         map.insert("records".into(), JsonValue::Array(entries));
-        map.insert(
-            "current_lsn".into(),
-            JsonValue::Number(
-                repl.logical_wal_spool
-                    .as_ref()
-                    .map(|spool| spool.current_lsn())
-                    .unwrap_or_else(|| repl.wal_buffer.current_lsn()) as f64,
-            ),
-        );
-        if let Some(oldest) = repl
-            .logical_wal_spool
-            .as_ref()
-            .and_then(|spool| spool.oldest_lsn().ok().flatten())
-            .or_else(|| repl.wal_buffer.oldest_lsn())
-        {
+        map.insert("current_lsn".into(), JsonValue::Number(current_lsn as f64));
+        if let Some(oldest) = oldest_available_lsn {
             map.insert(
                 "oldest_available_lsn".into(),
                 JsonValue::Number(oldest as f64),
