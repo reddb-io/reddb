@@ -55,6 +55,29 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let effective_group_by = effective_table_group_by_exprs(query);
     let effective_having = effective_table_having_filter(query);
 
+    // Hypertable chunk pruning (PRD #850, Phase 0): when this table is a
+    // hypertable and the WHERE clause constrains the time column, consult
+    // the per-chunk time bounds. If no chunk overlaps the predicate
+    // window, the scan is skipped entirely — by the pruner's soundness
+    // contract there is provably no matching row, so returning an empty
+    // result is exact, not a heuristic. Non-temporal predicates and
+    // non-hypertable collections fall through untouched: the pruner keeps
+    // every chunk conservatively, so `kept` is non-empty and the scan
+    // proceeds as before.
+    if let Some(spec) = db.hypertables().get(&query.table) {
+        let chunks = db.hypertables().show_chunks(&query.table);
+        if !chunks.is_empty() {
+            let kept = crate::storage::query::planner::hypertable_pruning::prune_hypertable_chunks(
+                &spec,
+                &chunks,
+                effective_filter.as_ref(),
+            );
+            if kept.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+    }
+
     // ── FROM SUBQUERY PATH (Fase 1.7 / W4 rebind): when the query's
     // source is a `(SELECT …) AS alias`, execute the inner query
     // recursively to get its records, then apply the outer query's

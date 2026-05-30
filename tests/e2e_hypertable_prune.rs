@@ -184,6 +184,168 @@ fn insert_routes_rows_into_chunks_automatically() {
     );
 }
 
+fn ts_values(records: &[reddb::storage::query::UnifiedRecord], col: &str) -> Vec<i64> {
+    let mut out: Vec<i64> = records
+        .iter()
+        .filter_map(|r| match r.get(col) {
+            Some(Value::Integer(n)) => Some(*n),
+            Some(Value::UnsignedInteger(n)) => Some(*n as i64),
+            _ => None,
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+#[test]
+fn select_temporal_predicate_matches_unpruned_full_scan() {
+    // Acceptance #2: a temporal range predicate on a hypertable returns
+    // exactly the same rows the full scan would. The chunk-pruning hook
+    // must not drop a single matching row.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
+    })
+    .expect("create ok");
+
+    // Insert one row per hour across 6 hours → 6 chunks.
+    for hour in 0..6u64 {
+        q.execute(ExecuteQueryInput {
+            query: format!(
+                "INSERT INTO metrics (ts, load) VALUES ({}, {}.0)",
+                hour * HOUR_NS,
+                hour + 1
+            ),
+        })
+        .expect("insert");
+    }
+
+    // Pruned query: ts in [2h, 4h).
+    let lo = 2 * HOUR_NS;
+    let hi = 4 * HOUR_NS;
+    let pruned = q
+        .execute(ExecuteQueryInput {
+            query: format!("SELECT ts FROM metrics WHERE ts >= {lo} AND ts < {hi}"),
+        })
+        .expect("pruned select");
+
+    // Reference: the same predicate evaluated client-side over a full
+    // unfiltered scan.
+    let full = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT ts FROM metrics".into(),
+        })
+        .expect("full select");
+
+    let pruned_ts = ts_values(&pruned.result.records, "ts");
+    let expected: Vec<i64> = ts_values(&full.result.records, "ts")
+        .into_iter()
+        .filter(|t| *t >= lo as i64 && *t < hi as i64)
+        .collect();
+    assert_eq!(
+        pruned_ts, expected,
+        "pruned rows must equal filtered full scan"
+    );
+    assert_eq!(pruned_ts, vec![(2 * HOUR_NS) as i64, (3 * HOUR_NS) as i64]);
+}
+
+#[test]
+fn select_window_outside_all_chunks_returns_empty() {
+    // Acceptance #1: a temporal predicate whose window overlaps no chunk
+    // prunes every chunk at plan time and returns no rows.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
+    })
+    .expect("create ok");
+    for hour in 0..3u64 {
+        q.execute(ExecuteQueryInput {
+            query: format!(
+                "INSERT INTO metrics (ts, load) VALUES ({}, 1.0)",
+                hour * HOUR_NS
+            ),
+        })
+        .expect("insert");
+    }
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: format!("SELECT ts FROM metrics WHERE ts >= {}", 100 * HOUR_NS),
+        })
+        .expect("select");
+    assert!(
+        r.result.records.is_empty(),
+        "window past every chunk must prune to empty, got {:?}",
+        r.result.records
+    );
+}
+
+#[test]
+fn select_without_temporal_predicate_is_unaffected() {
+    // Acceptance #4: a query with no temporal predicate sees every row —
+    // pruning must not engage when the WHERE doesn't constrain time.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
+    })
+    .expect("create ok");
+    for hour in 0..4u64 {
+        q.execute(ExecuteQueryInput {
+            query: format!(
+                "INSERT INTO metrics (ts, load) VALUES ({}, {}.0)",
+                hour * HOUR_NS,
+                hour + 1
+            ),
+        })
+        .expect("insert");
+    }
+    // Filter on a non-time column: every chunk must stay live.
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT ts FROM metrics WHERE load >= 1.0".into(),
+        })
+        .expect("select");
+    assert_eq!(ts_values(&r.result.records, "ts").len(), 4);
+}
+
+#[test]
+fn select_on_non_hypertable_collection_is_unaffected() {
+    // Acceptance #4: a plain (non-hypertable) collection never enters the
+    // pruning branch.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE TABLE events (id INT, ts INT, label TEXT)".into(),
+    })
+    .expect("create table");
+    for i in 0..3i64 {
+        q.execute(ExecuteQueryInput {
+            query: format!(
+                "INSERT INTO events (id, ts, label) VALUES ({}, {}, 'a')",
+                i,
+                i * 10
+            ),
+        })
+        .expect("insert");
+    }
+    // A temporal-looking predicate on a plain table must behave exactly
+    // like any other range scan — the hypertable pruning branch is never
+    // reached because `events` is not registered as a hypertable.
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM events WHERE ts BETWEEN 10 AND 100".into(),
+        })
+        .expect("select");
+    assert_eq!(
+        r.result.records.len(),
+        2,
+        "plain-table range scan unaffected, got {:?}",
+        r.result.records
+    );
+}
+
 #[test]
 fn prune_unknown_hypertable_returns_null() {
     let rt = rt();
