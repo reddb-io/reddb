@@ -4455,10 +4455,7 @@ impl RedDBRuntime {
                 refresh_records: None,
             };
             let encoded = record.encode();
-            primary.wal_buffer.append(record.lsn, encoded.clone());
-            if let Some(spool) = &primary.logical_wal_spool {
-                let _ = spool.append(record.lsn, &encoded);
-            }
+            primary.append_logical_record(record.lsn, encoded);
         }
         lsn
     }
@@ -4543,10 +4540,7 @@ impl RedDBRuntime {
                 refresh_records: None,
             };
             let encoded = record.encode();
-            primary.wal_buffer.append(record.lsn, encoded.clone());
-            if let Some(spool) = &primary.logical_wal_spool {
-                let _ = spool.append(record.lsn, &encoded);
-            }
+            primary.append_logical_record(record.lsn, encoded);
         }
         lsn
     }
@@ -4674,10 +4668,7 @@ impl RedDBRuntime {
                 refresh_records: None,
             };
             let encoded = record.encode();
-            primary.wal_buffer.append(record.lsn, encoded.clone());
-            if let Some(spool) = &primary.logical_wal_spool {
-                let _ = spool.append(record.lsn, &encoded);
-            }
+            primary.append_logical_record(record.lsn, encoded);
         }
 
         lsn
@@ -4773,7 +4764,9 @@ impl RedDBRuntime {
                 let payload = crate::json!({
                     "since_lsn": since_lsn,
                     "max_count": max_count,
-                    "replica_id": replica_id
+                    "replica_id": replica_id,
+                    "await_data": true,
+                    "await_timeout_ms": 30_000
                 });
                 let request = tonic::Request::new(JsonPayloadRequest {
                     payload_json: crate::json::to_string(&payload)
@@ -4984,9 +4977,8 @@ impl RedDBRuntime {
                         None,
                         None,
                     );
+                    std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
                 }
-
-                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
             }
         });
     }
@@ -7407,10 +7399,7 @@ impl RedDBRuntime {
                             )
                             .with_term(self.current_replication_term());
                             let encoded = record.encode();
-                            primary.wal_buffer.append(record.lsn, encoded.clone());
-                            if let Some(spool) = &primary.logical_wal_spool {
-                                let _ = spool.append(record.lsn, &encoded);
-                            }
+                            primary.append_logical_record(record.lsn, encoded);
                         }
 
                         let duration_ms = started.elapsed().as_millis() as u64;
