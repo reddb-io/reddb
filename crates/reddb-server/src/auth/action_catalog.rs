@@ -694,6 +694,28 @@ pub const ACTIONS: &[ActionEntry] = &[
         lifecycle_state: LifecycleState::Active,
         gates_description: "any operational read verb",
     },
+    // -- Replication control (#820 / PRD #819) ---------------------------
+    // Dedicated replication capabilities. These are intentionally not
+    // covered by generic data reads: WAL streaming exposes the change set,
+    // and replica acks can move synchronous-commit watermarks.
+    ActionEntry {
+        name: "cluster:replication:stream",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "stream primary WAL records and replication snapshots to a replica",
+    },
+    ActionEntry {
+        name: "cluster:replication:ack",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "acknowledge replica LSN progress to the primary",
+    },
+    ActionEntry {
+        name: "cluster:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any cluster-scoped capability",
+    },
     // -- Vector operations (#756 / PRD #735) -----------------------------
     // Red UI needs to grant vector toolbar actions independently —
     // metadata / data reads, similarity / text / hybrid search,
