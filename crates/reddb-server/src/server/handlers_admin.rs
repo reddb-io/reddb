@@ -1185,7 +1185,33 @@ impl RedDBServer {
             }
             let _ = writeln!(
                 body,
-                "# HELP reddb_replica_lag_records Distance from primary current LSN to replica acked LSN."
+                "# HELP reddb_replica_applied_lsn Most recent LSN applied by each replica."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_applied_lsn gauge");
+            for r in &replicas {
+                let _ = writeln!(
+                    body,
+                    "reddb_replica_applied_lsn{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    r.last_acked_lsn
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_durable_lsn Most recent LSN durably persisted by each replica."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_durable_lsn gauge");
+            for r in &replicas {
+                let _ = writeln!(
+                    body,
+                    "reddb_replica_durable_lsn{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    r.last_durable_lsn
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_lag_records Real LSN distance from last sent LSN to applied LSN."
             );
             let _ = writeln!(body, "# TYPE reddb_replica_lag_records gauge");
             for r in &replicas {
@@ -1193,7 +1219,33 @@ impl RedDBServer {
                     body,
                     "reddb_replica_lag_records{{replica_id=\"{}\"}} {}",
                     sanitize_label(&r.id),
-                    current_lsn.saturating_sub(r.last_acked_lsn)
+                    r.last_sent_lsn.saturating_sub(r.last_acked_lsn)
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_apply_errors_total Replica-reported WAL apply errors since process start."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_apply_errors_total counter");
+            for r in &replicas {
+                let _ = writeln!(
+                    body,
+                    "reddb_replica_apply_errors_total{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    r.apply_error_count
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_divergence_total Replica-reported WAL divergence errors since process start."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_divergence_total counter");
+            for r in &replicas {
+                let _ = writeln!(
+                    body,
+                    "reddb_replica_divergence_total{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    r.divergence_count
                 );
             }
             let _ = writeln!(
