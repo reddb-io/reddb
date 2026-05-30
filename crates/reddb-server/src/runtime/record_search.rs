@@ -161,6 +161,9 @@ pub(super) fn scan_runtime_table_source_records_limited(
             .query_all(move |e| table_row_resolver.resolve_read_candidate(e).is_some())
             .into_iter()
             .filter_map(|(collection, entity)| {
+                if !db.replica_allows_entity_at_read(&collection, &entity) {
+                    return None;
+                }
                 let mut record = runtime_any_record_from_entity(entity)?;
                 set_source_collection(&mut record, &collection);
                 Some(record)
@@ -194,7 +197,9 @@ pub(super) fn scan_runtime_table_source_records_limited(
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
         manager.for_each_entity(|e| {
-            if table_row_resolver.resolve_read_candidate(e).is_some() {
+            if table_row_resolver.resolve_read_candidate(e).is_some()
+                && db.replica_allows_entity_at_read(table, e)
+            {
                 entities.push(e.clone());
             }
             true
@@ -246,6 +251,9 @@ pub(super) fn scan_runtime_table_source_records_limited(
         if table_row_resolver.resolve_read_candidate(entity).is_none() {
             return true;
         }
+        if !db.replica_allows_entity_at_read(table, entity) {
+            return true;
+        }
         if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
             entity,
             manager.column_schema().as_ref(),
@@ -292,7 +300,9 @@ pub(crate) fn stream_runtime_table_source_scan(
     let table_row_resolver = TableRowMvccReadResolver::current_statement();
     let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> = Vec::new();
     manager.for_each_entity(|entity| {
-        if table_row_resolver.resolve_read_candidate(entity).is_some() {
+        if table_row_resolver.resolve_read_candidate(entity).is_some()
+            && db.replica_allows_entity_at_read(table, entity)
+        {
             entities.push(entity.clone());
         }
         true
