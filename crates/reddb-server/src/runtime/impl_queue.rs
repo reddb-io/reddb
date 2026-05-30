@@ -799,6 +799,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 1,
                     statement_type: "insert",
+                    bookmark: None,
                 })
             }
             QueueCommand::Pop { queue, side, count } => {
@@ -833,6 +834,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: popped_count,
                     statement_type: "delete",
+                    bookmark: None,
                 })
             }
             QueueCommand::Peek { queue, count } => {
@@ -861,6 +863,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueueCommand::Len { queue } => {
@@ -882,6 +885,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueueCommand::Purge { queue } => {
@@ -1016,6 +1020,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueueCommand::Pending { queue, group } => {
@@ -1065,6 +1070,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                    bookmark: None,
                 })
             }
             QueueCommand::Claim {
@@ -1115,6 +1121,7 @@ impl RedDBRuntime {
                     result,
                     affected_rows,
                     statement_type: "update",
+                    bookmark: None,
                 })
             }
             QueueCommand::Ack {
@@ -1313,6 +1320,7 @@ impl RedDBRuntime {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         })
     }
 
@@ -1443,6 +1451,7 @@ impl RedDBRuntime {
             result,
             affected_rows: selected_count,
             statement_type: "update",
+            bookmark: None,
         })
     }
 
