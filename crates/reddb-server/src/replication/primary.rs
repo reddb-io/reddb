@@ -573,10 +573,29 @@ impl PrimaryReplication {
     /// Preferred when the replica handshake declares a region — the quorum
     /// coordinator uses this field to decide whether the replica counts
     /// toward a `QuorumMode::Regions` commit.
+    ///
+    /// Idempotent on reconnect (issue #812): if a replica with `id` is
+    /// already registered, the existing entry is *updated in place* rather
+    /// than duplicated — progress LSNs (`last_acked_lsn`, `last_sent_lsn`,
+    /// `last_durable_lsn`) are preserved so a reconnecting replica is not
+    /// rewound, only `last_seen_at_unix_ms` is refreshed (and `region` when
+    /// a non-`None` value is supplied). A re-registration is not a
+    /// registry-shape change, so it does **not** bump the topology epoch.
+    /// Returns the LSN the replica should resume streaming from: the
+    /// current WAL LSN for a fresh registration, or the existing
+    /// `last_sent_lsn` for a reconnect.
     pub fn register_replica_with_region(&self, id: String, region: Option<String>) -> u64 {
-        let lsn = self.wal_buffer.current_lsn();
         let now_ms = crate::utils::now_unix_millis() as u128;
-        let state = ReplicaState {
+        let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = replicas.iter_mut().find(|r| r.id == id) {
+            existing.last_seen_at_unix_ms = now_ms;
+            if region.is_some() {
+                existing.region = region;
+            }
+            return existing.last_sent_lsn;
+        }
+        let lsn = self.wal_buffer.current_lsn();
+        replicas.push(ReplicaState {
             id,
             last_acked_lsn: lsn,
             last_sent_lsn: lsn,
@@ -584,12 +603,32 @@ impl PrimaryReplication {
             connected_at_unix_ms: now_ms,
             last_seen_at_unix_ms: now_ms,
             region,
-        };
-        let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
-        replicas.push(state);
+        });
         drop(replicas);
         self.bump_topology_epoch();
         lsn
+    }
+
+    /// Ensure a replica identifying itself with `id` is present in the
+    /// registry (issue #812). This is the production self-registration hook
+    /// used by the `pull_wal_records` path: the first time a replica sends
+    /// its `replica_id` on a pull, the primary registers it so it is no
+    /// longer blind to that replica's existence; subsequent pulls are
+    /// idempotent no-ops. Returns `true` when a new registration was
+    /// created. Delegates to `register_replica_with_region`, so reconnects
+    /// preserve progress and do not bump the topology epoch.
+    pub fn ensure_replica_registered(&self, id: &str) -> bool {
+        let already = self
+            .replicas
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|r| r.id == id);
+        if already {
+            return false;
+        }
+        self.register_replica(id.to_string());
+        true
     }
 
     /// Unregister a replica by id. Returns `true` when the replica
@@ -777,6 +816,109 @@ mod tests {
             primary.topology_epoch(),
             e3,
             "unregistering a missing replica must not bump the epoch"
+        );
+    }
+
+    #[test]
+    fn register_replica_is_idempotent_on_reconnect() {
+        // Issue #812 acceptance: registration is the production foundation
+        // for per-replica progress tracking. A reconnect must update the
+        // existing registry entry rather than create a duplicate or rewind
+        // progress. Uses the `None` data-path fake — no engine boot.
+        let primary = PrimaryReplication::new(None);
+
+        // First registration creates exactly one entry and bumps the epoch.
+        primary.register_replica("r1".to_string());
+        assert_eq!(
+            primary.replica_count(),
+            1,
+            "first register creates an entry"
+        );
+        let epoch_after_first = primary.topology_epoch();
+
+        // Advance the replica's progress as a real pull/ack would.
+        primary.note_replica_pull("r1", 42);
+        primary.ack_replica_lsn("r1", 40, 40);
+        let before = primary
+            .replica_snapshots()
+            .into_iter()
+            .find(|r| r.id == "r1")
+            .expect("r1 present");
+        assert_eq!(before.last_sent_lsn, 42);
+        assert_eq!(before.last_acked_lsn, 40);
+        assert_eq!(before.last_durable_lsn, 40);
+
+        // Reconnect: re-register the same id.
+        let resume_lsn = primary.register_replica("r1".to_string());
+
+        // No duplicate entry.
+        assert_eq!(
+            primary.replica_count(),
+            1,
+            "reconnect must not create a duplicate registry entry"
+        );
+        // Re-registration is not a registry-shape change — epoch is untouched.
+        assert_eq!(
+            primary.topology_epoch(),
+            epoch_after_first,
+            "reconnect must not bump the topology epoch"
+        );
+        // Progress preserved, not rewound to the current WAL LSN.
+        let after = primary
+            .replica_snapshots()
+            .into_iter()
+            .find(|r| r.id == "r1")
+            .expect("r1 still present");
+        assert_eq!(after.last_sent_lsn, 42, "last_sent_lsn preserved");
+        assert_eq!(after.last_acked_lsn, 40, "last_acked_lsn preserved");
+        assert_eq!(after.last_durable_lsn, 40, "last_durable_lsn preserved");
+        // Reconnect returns the resume point (existing last_sent_lsn).
+        assert_eq!(resume_lsn, 42, "reconnect returns the existing resume LSN");
+    }
+
+    #[test]
+    fn ensure_replica_registered_self_registers_then_is_a_noop() {
+        // Issue #812 acceptance: the production pull path auto-registers a
+        // replica the first time it identifies itself, then advances its
+        // per-replica state on subsequent pulls without duplicating it.
+        let primary = PrimaryReplication::new(None);
+
+        // First pull-with-id self-registers.
+        assert!(
+            primary.ensure_replica_registered("r1"),
+            "first identification registers the replica"
+        );
+        assert_eq!(primary.replica_count(), 1);
+        let epoch_after_register = primary.topology_epoch();
+
+        // Per-replica state advances on pull for the now-registered replica.
+        primary.note_replica_pull("r1", 7);
+        assert_eq!(
+            primary
+                .replica_snapshots()
+                .into_iter()
+                .find(|r| r.id == "r1")
+                .map(|r| r.last_sent_lsn),
+            Some(7),
+            "primary tracks last_sent_lsn for a registered replica's pull"
+        );
+
+        // Subsequent identification is an idempotent no-op: no duplicate,
+        // no epoch bump, progress preserved.
+        assert!(
+            !primary.ensure_replica_registered("r1"),
+            "already-registered replica is not re-registered"
+        );
+        assert_eq!(primary.replica_count(), 1);
+        assert_eq!(primary.topology_epoch(), epoch_after_register);
+        assert_eq!(
+            primary
+                .replica_snapshots()
+                .into_iter()
+                .find(|r| r.id == "r1")
+                .map(|r| r.last_sent_lsn),
+            Some(7),
+            "no-op registration preserves progress"
         );
     }
 }
