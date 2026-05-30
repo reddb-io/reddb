@@ -45,6 +45,30 @@ impl RedDBServer {
                         "replica_count".to_string(),
                         JsonValue::Number(primary.replica_count() as f64),
                     );
+                    if let Some(floor) = primary.retention_floor_lsn() {
+                        object.insert(
+                            "retention_floor_lsn".to_string(),
+                            JsonValue::Number(floor as f64),
+                        );
+                    }
+                    let slots = primary
+                        .slot_snapshots()
+                        .into_iter()
+                        .map(|slot| {
+                            let mut slot_json = Map::new();
+                            slot_json.insert("id".to_string(), JsonValue::String(slot.id));
+                            slot_json.insert(
+                                "restart_lsn".to_string(),
+                                JsonValue::Number(slot.restart_lsn as f64),
+                            );
+                            slot_json.insert(
+                                "confirmed_lsn".to_string(),
+                                JsonValue::Number(slot.confirmed_lsn as f64),
+                            );
+                            JsonValue::Object(slot_json)
+                        })
+                        .collect();
+                    object.insert("slots".to_string(), JsonValue::Array(slots));
                 }
             }
             crate::replication::ReplicationRole::Replica { primary_addr } => {
