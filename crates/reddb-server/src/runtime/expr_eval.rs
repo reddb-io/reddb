@@ -864,6 +864,9 @@ fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Opti
     // doesn't need a hypertable name — handle before the per-name
     // dispatch path.
     if name == "HYPERTABLE_SWEEP_ALL_EXPIRED" {
+        if db.is_replica_role() {
+            return Some(Value::Integer(0));
+        }
         let now_ns = args
             .first()
             .and_then(|v| match v {
@@ -894,6 +897,9 @@ fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Opti
                 .collect(),
         )),
         "HYPERTABLE_DROP_CHUNKS_BEFORE" => {
+            if db.is_replica_role() {
+                return Some(Value::Integer(0));
+            }
             let cutoff = match args.get(1)? {
                 Value::Integer(n) | Value::BigInt(n) => *n as u64,
                 Value::UnsignedInteger(n) => *n,
@@ -903,6 +909,9 @@ fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Opti
             Some(Value::Integer(dropped as i64))
         }
         "HYPERTABLE_SWEEP_EXPIRED" => {
+            if db.is_replica_role() {
+                return Some(Value::Integer(0));
+            }
             let now_ns = args
                 .get(1)
                 .and_then(|v| match v {
@@ -920,6 +929,9 @@ fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Opti
             Some(Value::Integer(dropped as i64))
         }
         "HYPERTABLE_SET_TTL" => {
+            if db.is_replica_role() {
+                return Some(Value::Boolean(false));
+            }
             // HYPERTABLE_SET_TTL(name, duration | null)
             let ttl_ns = match args.get(1)? {
                 Value::Null => None,
