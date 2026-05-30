@@ -2823,6 +2823,16 @@ impl RedDb for GrpcRuntime {
                         "replica_count".into(),
                         JsonValue::Number(repl.replica_count() as f64),
                     );
+                    if let Some(progress) = repl.replication_progress() {
+                        map.insert(
+                            "replication_lag_lsn".into(),
+                            JsonValue::Number(progress.lag_lsn as f64),
+                        );
+                        map.insert(
+                            "safe_replay_lsn".into(),
+                            JsonValue::Number(progress.safe_replay_lsn as f64),
+                        );
+                    }
                     if let Some(floor) = repl.retention_floor_lsn() {
                         map.insert(
                             "retention_floor_lsn".into(),
