@@ -656,6 +656,7 @@ mod grpc_ask_query_reply_tests {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         }
     }
 
@@ -732,6 +733,7 @@ mod grpc_ask_query_reply_tests {
                 result,
                 affected_rows: 0,
                 statement_type: "select",
+                bookmark: None,
             },
             &None,
             &None,

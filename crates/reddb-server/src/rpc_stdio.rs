@@ -2354,6 +2354,7 @@ mod tests {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         });
 
         let payload = json
@@ -2539,6 +2540,7 @@ mod tests {
             result,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         });
 
         assert_eq!(

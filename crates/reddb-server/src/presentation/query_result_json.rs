@@ -75,6 +75,12 @@ pub(crate) fn runtime_query_json(
             JsonValue::String(result.statement_type.to_string()),
         );
     }
+    if let Some(bookmark) = result.bookmark.as_deref() {
+        object.insert(
+            "bookmark".to_string(),
+            JsonValue::String(bookmark.to_string()),
+        );
+    }
     object.insert(
         "result".to_string(),
         unified_result_json_with_records(&result.result, &records),
@@ -1128,6 +1134,7 @@ mod descriptor_tests {
             result: unified,
             affected_rows: 0,
             statement_type: "select",
+            bookmark: None,
         };
 
         let json = runtime_query_json(&runtime_result, &None, &None);

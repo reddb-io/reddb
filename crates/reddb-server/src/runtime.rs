@@ -481,6 +481,7 @@ pub struct RuntimeQueryResult {
     pub affected_rows: u64,
     /// High-level statement type: "select", "insert", "update", "delete", "create", "drop", "alter"
     pub statement_type: &'static str,
+    pub bookmark: Option<String>,
 }
 
 impl RuntimeQueryResult {
@@ -499,6 +500,7 @@ impl RuntimeQueryResult {
             result: UnifiedResult::empty(),
             affected_rows: affected,
             statement_type,
+            bookmark: None,
         }
     }
 
@@ -518,6 +520,7 @@ impl RuntimeQueryResult {
             result,
             affected_rows: 0,
             statement_type,
+            bookmark: None,
         }
     }
 
@@ -548,7 +551,12 @@ impl RuntimeQueryResult {
             result,
             affected_rows: 0,
             statement_type,
+            bookmark: None,
         }
+    }
+
+    pub fn bookmark_token(&self) -> Option<&str> {
+        self.bookmark.as_deref()
     }
 }
 
@@ -1257,6 +1265,46 @@ pub struct RedDBRuntime {
 pub struct RuntimeConnection {
     id: u64,
     inner: Arc<RuntimeInner>,
+}
+
+pub struct CausalSession {
+    runtime: RedDBRuntime,
+    bookmark: Option<crate::replication::CausalBookmark>,
+    wait_timeout: std::time::Duration,
+}
+
+impl CausalSession {
+    pub fn bookmark_token(&self) -> Option<String> {
+        self.bookmark.map(|bookmark| bookmark.encode())
+    }
+
+    pub fn inject_bookmark(&mut self, token: &str) -> RedDBResult<()> {
+        let bookmark = crate::replication::CausalBookmark::decode(token)
+            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?;
+        self.bookmark = Some(bookmark);
+        Ok(())
+    }
+
+    pub fn execute_query(&mut self, query: &str) -> RedDBResult<RuntimeQueryResult> {
+        if is_select_query_text(query) {
+            if let Some(bookmark) = self.bookmark {
+                self.runtime
+                    .wait_for_bookmark(&bookmark, self.wait_timeout)?;
+            }
+        }
+        let result = self.runtime.execute_query(query)?;
+        if let Some(token) = result.bookmark.as_deref() {
+            self.inject_bookmark(token)?;
+        }
+        Ok(result)
+    }
+}
+
+fn is_select_query_text(query: &str) -> bool {
+    query
+        .trim_start()
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("select"))
 }
 
 pub mod ai;
