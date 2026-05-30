@@ -2937,12 +2937,16 @@ impl RedDb for GrpcRuntime {
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let mut since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
         let max_count = json_usize_field(&payload, "max_count").unwrap_or(1000);
-        let current_lsn = repl
+        let await_data = json_bool_field(&payload, "await_data").unwrap_or(false);
+        let await_timeout_ms = json_usize_field(&payload, "await_timeout_ms")
+            .unwrap_or(30_000)
+            .clamp(1, 30_000) as u64;
+        let mut current_lsn = repl
             .logical_wal_spool
             .as_ref()
             .map(|spool| spool.current_lsn())
             .unwrap_or_else(|| repl.wal_buffer.current_lsn());
-        let oldest_available_lsn = repl
+        let mut oldest_available_lsn = repl
             .logical_wal_spool
             .as_ref()
             .and_then(|spool| spool.oldest_lsn().ok().flatten())
@@ -2977,6 +2981,26 @@ impl RedDb for GrpcRuntime {
             if let Some(slot) = repl.slot_snapshots().into_iter().find(|slot| slot.id == *id) {
                 since_lsn = since_lsn.max(slot.restart_lsn);
             }
+        }
+
+        if await_data && current_lsn <= since_lsn {
+            let repl_for_wait = repl.clone();
+            let timeout = std::time::Duration::from_millis(await_timeout_ms);
+            tokio::task::spawn_blocking(move || {
+                repl_for_wait.wait_for_logical_lsn_after(since_lsn, timeout)
+            })
+            .await
+            .map_err(|err| Status::internal(format!("await-data worker failed: {err}")))?;
+            current_lsn = repl
+                .logical_wal_spool
+                .as_ref()
+                .map(|spool| spool.current_lsn())
+                .unwrap_or_else(|| repl.wal_buffer.current_lsn());
+            oldest_available_lsn = repl
+                .logical_wal_spool
+                .as_ref()
+                .and_then(|spool| spool.oldest_lsn().ok().flatten())
+                .or_else(|| repl.wal_buffer.oldest_lsn());
         }
 
         let records = if let Some(spool) = &repl.logical_wal_spool {
