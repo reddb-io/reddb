@@ -51,8 +51,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
 
@@ -860,6 +860,7 @@ pub struct PrimaryReplication {
     pub wal_buffer: Arc<WalBuffer>,
     pub logical_wal_spool: Option<Arc<LogicalWalSpool>>,
     pub replicas: RwLock<Vec<ReplicaState>>,
+    wal_appended: (Mutex<u64>, Condvar),
     slot_path: Option<PathBuf>,
     slots: RwLock<BTreeMap<String, ReplicationSlot>>,
     slot_retention_max_lag_lsn: u64,
@@ -901,12 +902,18 @@ impl PrimaryReplication {
         let now_ms = crate::utils::now_unix_millis() as u128;
         let slot_path = data_path.map(Self::slot_path_for);
         let slots = load_replication_slots(slot_path.as_deref(), now_ms);
+        let logical_wal_spool = data_path
+            .and_then(|path| LogicalWalSpool::open(path).ok())
+            .map(Arc::new);
+        let current_lsn = logical_wal_spool
+            .as_ref()
+            .map(|spool| spool.current_lsn())
+            .unwrap_or(0);
         Self {
             wal_buffer: Arc::new(WalBuffer::new(100_000)),
-            logical_wal_spool: data_path
-                .and_then(|path| LogicalWalSpool::open(path).ok())
-                .map(Arc::new),
+            logical_wal_spool,
             replicas: RwLock::new(Vec::new()),
+            wal_appended: (Mutex::new(current_lsn), Condvar::new()),
             slot_path,
             slots: RwLock::new(slots),
             slot_retention_max_lag_lsn: config.slot_retention_max_lag_lsn,
@@ -914,6 +921,41 @@ impl PrimaryReplication {
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
             topology_epoch: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    pub fn append_logical_record(&self, lsn: u64, encoded: Vec<u8>) {
+        self.wal_buffer.append(lsn, encoded.clone());
+        if let Some(spool) = &self.logical_wal_spool {
+            let _ = spool.append(lsn, &encoded);
+        }
+        let (lock, cvar) = &self.wal_appended;
+        let mut latest = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *latest = (*latest).max(lsn);
+        cvar.notify_all();
+    }
+
+    pub fn wait_for_logical_lsn_after(&self, since_lsn: u64, timeout: Duration) -> bool {
+        if self.current_logical_lsn() > since_lsn {
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        let (lock, cvar) = &self.wal_appended;
+        let mut latest = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while *latest <= since_lsn {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (guard, result) = cvar
+                .wait_timeout(latest, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            latest = guard;
+            if result.timed_out() && *latest <= since_lsn {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn register_replica(&self, id: String) -> u64 {
