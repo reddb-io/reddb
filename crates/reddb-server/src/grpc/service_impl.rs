@@ -2912,6 +2912,11 @@ impl RedDb for GrpcRuntime {
         }
 
         if let Some(id) = &replica_id {
+            // Issue #812 — the replica identifies itself on every pull. The
+            // first identified pull self-registers it (production path) so
+            // the primary is no longer blind to its existence; reconnects are
+            // idempotent. Per-replica `last_sent_lsn` then advances on pull.
+            repl.ensure_replica_registered(id);
             repl.note_replica_pull(id, max_sent_lsn);
         }
 
