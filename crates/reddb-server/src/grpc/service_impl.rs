@@ -2819,6 +2819,30 @@ impl RedDb for GrpcRuntime {
                         "replica_count".into(),
                         JsonValue::Number(repl.replica_count() as f64),
                     );
+                    if let Some(floor) = repl.retention_floor_lsn() {
+                        map.insert(
+                            "retention_floor_lsn".into(),
+                            JsonValue::Number(floor as f64),
+                        );
+                    }
+                    let slots = repl
+                        .slot_snapshots()
+                        .into_iter()
+                        .map(|slot| {
+                            let mut slot_json = crate::json::Map::new();
+                            slot_json.insert("id".into(), JsonValue::String(slot.id));
+                            slot_json.insert(
+                                "restart_lsn".into(),
+                                JsonValue::Number(slot.restart_lsn as f64),
+                            );
+                            slot_json.insert(
+                                "confirmed_lsn".into(),
+                                JsonValue::Number(slot.confirmed_lsn as f64),
+                            );
+                            JsonValue::Object(slot_json)
+                        })
+                        .collect();
+                    map.insert("slots".into(), JsonValue::Array(slots));
                     if let Some(oldest) = repl
                         .logical_wal_spool
                         .as_ref()
@@ -2887,7 +2911,7 @@ impl RedDb for GrpcRuntime {
         })?;
 
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
-        let since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
+        let mut since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
         let max_count = json_usize_field(&payload, "max_count").unwrap_or(1000);
         // PLAN.md Phase 11.4 — caller may identify itself so primary can
         // track per-replica `last_sent_lsn` and `last_seen_at_unix_ms`.
@@ -2895,6 +2919,13 @@ impl RedDb for GrpcRuntime {
             .get("replica_id")
             .and_then(JsonValue::as_str)
             .map(|s| s.to_string());
+
+        if let Some(id) = &replica_id {
+            repl.ensure_replica_registered(id);
+            if let Some(slot) = repl.slot_snapshots().into_iter().find(|slot| slot.id == *id) {
+                since_lsn = since_lsn.max(slot.restart_lsn);
+            }
+        }
 
         let records = if let Some(spool) = &repl.logical_wal_spool {
             spool
@@ -2920,7 +2951,6 @@ impl RedDb for GrpcRuntime {
             // first identified pull self-registers it (production path) so
             // the primary is no longer blind to its existence; reconnects are
             // idempotent. Per-replica `last_sent_lsn` then advances on pull.
-            repl.ensure_replica_registered(id);
             repl.note_replica_pull(id, max_sent_lsn);
         }
 
