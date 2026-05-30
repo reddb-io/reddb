@@ -1482,8 +1482,23 @@ impl UnifiedStore {
     where
         F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
     {
-        let collections = self.collections.read();
-        let pairs: Vec<_> = collections.iter().collect();
+        // Issue #815 — snapshot the (name, manager) handles under a brief
+        // read lock, then release the `collections` lock *before* the
+        // potentially long per-collection scan. Holding `collections.read()`
+        // across a full-store scan let a large `/catalog` snapshot block (and
+        // be blocked by) the replica apply loop's collection-creation writes:
+        // under parking_lot a writer waiting behind the long read parks every
+        // subsequent reader, so `/catalog` and readiness wedged during a big
+        // WAL re-apply. The managers are `Arc`-shared with their own internal
+        // locks, so scanning them off the map lock is safe and keeps the HTTP
+        // surface responsive.
+        let pairs: Vec<(String, Arc<SegmentManager>)> = {
+            let collections = self.collections.read();
+            collections
+                .iter()
+                .map(|(name, mgr)| (name.clone(), Arc::clone(mgr)))
+                .collect()
+        };
 
         let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
         if !use_parallel {
@@ -1541,14 +1556,25 @@ impl UnifiedStore {
 
     /// Get statistics
     pub fn stats(&self) -> StoreStats {
-        let collections = self.collections.read();
+        // Issue #815 — snapshot the manager handles, drop the `collections`
+        // read lock, then gather per-collection stats off the map lock. The
+        // readiness probe (via `health()`) walks `stats()`, so holding the
+        // store lock across a full-store stats scan was part of the same
+        // wedge that froze `/catalog` during a large replica re-apply.
+        let pairs: Vec<(String, Arc<SegmentManager>)> = {
+            let collections = self.collections.read();
+            collections
+                .iter()
+                .map(|(name, mgr)| (name.clone(), Arc::clone(mgr)))
+                .collect()
+        };
 
         let mut stats = StoreStats {
-            collection_count: collections.len(),
+            collection_count: pairs.len(),
             ..Default::default()
         };
 
-        for (name, manager) in collections.iter() {
+        for (name, manager) in &pairs {
             let manager_stats = manager.stats();
             stats.total_entities += manager_stats.total_entities;
             stats.total_memory_bytes += manager_stats.total_memory_bytes;
