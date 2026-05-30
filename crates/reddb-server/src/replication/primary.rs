@@ -644,14 +644,43 @@ fn read_one_v1(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotInvalidationCause {
+    WalRemoved,
+    Horizon,
+    IdleTimeout,
+}
+
+impl SlotInvalidationCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WalRemoved => "wal-removed",
+            Self::Horizon => "horizon",
+            Self::IdleTimeout => "idle-timeout",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "wal-removed" => Some(Self::WalRemoved),
+            "horizon" => Some(Self::Horizon),
+            "idle-timeout" => Some(Self::IdleTimeout),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplicationSlot {
     pub id: String,
     pub restart_lsn: u64,
     pub confirmed_lsn: u64,
+    pub last_seen_at_unix_ms: u128,
+    pub invalidation_reason: Option<SlotInvalidationCause>,
+    pub invalidated_at_unix_ms: Option<u128>,
 }
 
-fn load_replication_slots(path: Option<&Path>) -> BTreeMap<String, ReplicationSlot> {
+fn load_replication_slots(path: Option<&Path>, now_ms: u128) -> BTreeMap<String, ReplicationSlot> {
     let Some(path) = path else {
         return BTreeMap::new();
     };
@@ -679,12 +708,28 @@ fn load_replication_slots(path: Option<&Path>) -> BTreeMap<String, ReplicationSl
                 let id = object.get("id")?.as_str()?.to_string();
                 let restart_lsn = object.get("restart_lsn")?.as_u64()?;
                 let confirmed_lsn = object.get("confirmed_lsn")?.as_u64()?;
+                let last_seen_at_unix_ms = object
+                    .get("last_seen_at_unix_ms")
+                    .and_then(crate::serde_json::Value::as_u64)
+                    .map(u128::from)
+                    .unwrap_or(now_ms);
+                let invalidation_reason = object
+                    .get("invalidation_reason")
+                    .and_then(crate::serde_json::Value::as_str)
+                    .and_then(SlotInvalidationCause::from_str);
+                let invalidated_at_unix_ms = object
+                    .get("invalidated_at_unix_ms")
+                    .and_then(crate::serde_json::Value::as_u64)
+                    .map(u128::from);
                 Some((
                     id.clone(),
                     ReplicationSlot {
                         id,
                         restart_lsn,
                         confirmed_lsn,
+                        last_seen_at_unix_ms,
+                        invalidation_reason,
+                        invalidated_at_unix_ms,
                     },
                 ))
             })
@@ -728,6 +773,22 @@ fn persist_replication_slots(
                 "confirmed_lsn".to_string(),
                 crate::serde_json::Value::Number(slot.confirmed_lsn as f64),
             );
+            object.insert(
+                "last_seen_at_unix_ms".to_string(),
+                crate::serde_json::Value::Number(slot.last_seen_at_unix_ms as f64),
+            );
+            if let Some(reason) = slot.invalidation_reason {
+                object.insert(
+                    "invalidation_reason".to_string(),
+                    crate::serde_json::Value::String(reason.as_str().to_string()),
+                );
+            }
+            if let Some(invalidated_at) = slot.invalidated_at_unix_ms {
+                object.insert(
+                    "invalidated_at_unix_ms".to_string(),
+                    crate::serde_json::Value::Number(invalidated_at as f64),
+                );
+            }
             crate::serde_json::Value::Object(object)
         })
         .collect();
@@ -801,6 +862,8 @@ pub struct PrimaryReplication {
     pub replicas: RwLock<Vec<ReplicaState>>,
     slot_path: Option<PathBuf>,
     slots: RwLock<BTreeMap<String, ReplicationSlot>>,
+    slot_retention_max_lag_lsn: u64,
+    slot_idle_timeout_ms: u64,
     /// PLAN.md Phase 11.4 — ack-driven commit synchronization. Always
     /// allocated so the policy enum can flip from `Local` to
     /// `AckN`/`Quorum` without touching this struct's shape.
@@ -828,8 +891,16 @@ impl PrimaryReplication {
     }
 
     pub fn new(data_path: Option<&Path>) -> Self {
+        Self::new_with_config(data_path, &crate::replication::ReplicationConfig::primary())
+    }
+
+    pub fn new_with_config(
+        data_path: Option<&Path>,
+        config: &crate::replication::ReplicationConfig,
+    ) -> Self {
+        let now_ms = crate::utils::now_unix_millis() as u128;
         let slot_path = data_path.map(Self::slot_path_for);
-        let slots = load_replication_slots(slot_path.as_deref());
+        let slots = load_replication_slots(slot_path.as_deref(), now_ms);
         Self {
             wal_buffer: Arc::new(WalBuffer::new(100_000)),
             logical_wal_spool: data_path
@@ -838,6 +909,8 @@ impl PrimaryReplication {
             replicas: RwLock::new(Vec::new()),
             slot_path,
             slots: RwLock::new(slots),
+            slot_retention_max_lag_lsn: config.slot_retention_max_lag_lsn,
+            slot_idle_timeout_ms: config.slot_idle_timeout_ms,
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
             topology_epoch: std::sync::atomic::AtomicU64::new(0),
         }
@@ -977,7 +1050,7 @@ impl PrimaryReplication {
         divergence_count: u64,
     ) {
         let now_ms = crate::utils::now_unix_millis() as u128;
-        self.advance_slot(id, applied_lsn, durable_lsn);
+        self.advance_slot(id, applied_lsn, durable_lsn, now_ms);
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_acked_lsn = r.last_acked_lsn.max(applied_lsn);
@@ -999,6 +1072,7 @@ impl PrimaryReplication {
     /// from apply-side delay.
     pub fn note_replica_pull(&self, id: &str, last_sent_lsn: u64) {
         let now_ms = crate::utils::now_unix_millis() as u128;
+        self.touch_slot(id, now_ms);
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_sent_lsn = r.last_sent_lsn.max(last_sent_lsn);
@@ -1035,11 +1109,13 @@ impl PrimaryReplication {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .values()
+            .filter(|slot| slot.invalidation_reason.is_none())
             .map(|slot| slot.restart_lsn)
             .min()
     }
 
     pub fn prune_retained_wal_through(&self, archived_lsn: u64) -> io::Result<u64> {
+        self.enforce_retention_limits(crate::utils::now_unix_millis() as u128);
         let prune_lsn = self
             .retention_floor_lsn()
             .map(|floor| floor.min(archived_lsn))
@@ -1068,9 +1144,13 @@ impl PrimaryReplication {
     }
 
     fn ensure_slot(&self, id: &str, initial_lsn: u64) -> u64 {
+        let now_ms = crate::utils::now_unix_millis() as u128;
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = slots.get(id) {
-            return slot.restart_lsn;
+        if let Some(slot) = slots.get_mut(id) {
+            slot.last_seen_at_unix_ms = now_ms;
+            let restart_lsn = slot.restart_lsn;
+            self.persist_slots_locked(&slots);
+            return restart_lsn;
         }
         slots.insert(
             id.to_string(),
@@ -1078,6 +1158,9 @@ impl PrimaryReplication {
                 id: id.to_string(),
                 restart_lsn: initial_lsn,
                 confirmed_lsn: initial_lsn,
+                last_seen_at_unix_ms: now_ms,
+                invalidation_reason: None,
+                invalidated_at_unix_ms: None,
             },
         );
         let restart_lsn = initial_lsn;
@@ -1085,7 +1168,7 @@ impl PrimaryReplication {
         restart_lsn
     }
 
-    fn advance_slot(&self, id: &str, confirmed_lsn: u64, restart_lsn: u64) {
+    fn advance_slot(&self, id: &str, confirmed_lsn: u64, restart_lsn: u64, now_ms: u128) {
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let slot = slots
             .entry(id.to_string())
@@ -1093,10 +1176,88 @@ impl PrimaryReplication {
                 id: id.to_string(),
                 restart_lsn: 0,
                 confirmed_lsn: 0,
+                last_seen_at_unix_ms: now_ms,
+                invalidation_reason: None,
+                invalidated_at_unix_ms: None,
             });
+        if slot.invalidation_reason.is_some() {
+            return;
+        }
         slot.confirmed_lsn = slot.confirmed_lsn.max(confirmed_lsn).max(restart_lsn);
         slot.restart_lsn = slot.restart_lsn.max(restart_lsn);
+        slot.last_seen_at_unix_ms = now_ms;
         self.persist_slots_locked(&slots);
+    }
+
+    pub fn touch_slot(&self, id: &str, now_ms: u128) {
+        let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        if let Some(slot) = slots.get_mut(id) {
+            if slot.invalidation_reason.is_none() {
+                slot.last_seen_at_unix_ms = now_ms;
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist_slots_locked(&slots);
+        }
+    }
+
+    pub fn enforce_retention_limits(&self, now_ms: u128) -> Vec<(String, SlotInvalidationCause)> {
+        let current_lsn = self.current_logical_lsn();
+        let mut invalidated = Vec::new();
+        let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
+        for slot in slots.values_mut() {
+            if slot.invalidation_reason.is_some() {
+                continue;
+            }
+            let reason = if self.slot_retention_max_lag_lsn > 0
+                && current_lsn.saturating_sub(slot.restart_lsn) > self.slot_retention_max_lag_lsn
+            {
+                Some(SlotInvalidationCause::Horizon)
+            } else if self.slot_idle_timeout_ms > 0
+                && now_ms.saturating_sub(slot.last_seen_at_unix_ms)
+                    > u128::from(self.slot_idle_timeout_ms)
+            {
+                Some(SlotInvalidationCause::IdleTimeout)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                slot.invalidation_reason = Some(reason);
+                slot.invalidated_at_unix_ms = Some(now_ms);
+                invalidated.push((slot.id.clone(), reason));
+            }
+        }
+        if !invalidated.is_empty() {
+            self.persist_slots_locked(&slots);
+        }
+        invalidated
+    }
+
+    pub fn slot_rebootstrap_reason(
+        &self,
+        id: &str,
+        requested_since_lsn: u64,
+        oldest_available_lsn: Option<u64>,
+    ) -> Option<SlotInvalidationCause> {
+        let now_ms = crate::utils::now_unix_millis() as u128;
+        let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
+        let slot = slots.get_mut(id)?;
+        if let Some(reason) = slot.invalidation_reason {
+            return Some(reason);
+        }
+        let slot_floor = slot.restart_lsn.max(requested_since_lsn);
+        if oldest_available_lsn
+            .map(|oldest| oldest > slot_floor.saturating_add(1))
+            .unwrap_or(false)
+        {
+            slot.invalidation_reason = Some(SlotInvalidationCause::WalRemoved);
+            slot.invalidated_at_unix_ms = Some(now_ms);
+            self.persist_slots_locked(&slots);
+            return Some(SlotInvalidationCause::WalRemoved);
+        }
+        None
     }
 
     fn persist_slots_locked(&self, slots: &BTreeMap<String, ReplicationSlot>) {
@@ -1383,6 +1544,102 @@ mod tests {
             .map(|(lsn, _)| lsn)
             .collect();
         assert_eq!(retained, vec![6]);
+    }
+
+    #[test]
+    fn default_config_enables_finite_slot_retention_cap() {
+        let config = crate::replication::ReplicationConfig::primary();
+
+        assert!(
+            config.slot_retention_max_lag_lsn > 0,
+            "primary replication must default to a finite slot retention cap"
+        );
+    }
+
+    #[test]
+    fn retention_cap_invalidates_slow_slot_and_releases_wal_floor() {
+        let primary = PrimaryReplication::new_with_config(
+            None,
+            &crate::replication::ReplicationConfig::primary().with_slot_retention_max_lag_lsn(3),
+        );
+        primary.register_replica("fast".to_string());
+        primary.register_replica("slow".to_string());
+
+        for lsn in 1..=6 {
+            primary.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+        primary.ack_replica_lsn("fast", 6, 6);
+
+        assert_eq!(primary.prune_retained_wal_through(6).unwrap(), 6);
+
+        let slow = primary
+            .slot_snapshots()
+            .into_iter()
+            .find(|slot| slot.id == "slow")
+            .expect("slow slot present");
+        assert_eq!(
+            slow.invalidation_reason,
+            Some(SlotInvalidationCause::Horizon)
+        );
+
+        let retained: Vec<_> = primary
+            .wal_buffer
+            .read_since(0, usize::MAX)
+            .into_iter()
+            .map(|(lsn, _)| lsn)
+            .collect();
+        assert!(
+            retained.is_empty(),
+            "invalidated slow slot must not pin WAL"
+        );
+    }
+
+    #[test]
+    fn slot_invalidation_cause_codes_cover_wal_removed_horizon_and_idle_timeout() {
+        let wal_removed = PrimaryReplication::new_with_config(
+            None,
+            &crate::replication::ReplicationConfig::primary()
+                .with_slot_retention_max_lag_lsn(3)
+                .with_slot_idle_timeout_ms(10),
+        );
+        wal_removed.register_replica("wal".to_string());
+        assert_eq!(
+            wal_removed.slot_rebootstrap_reason("wal", 0, Some(2)),
+            Some(SlotInvalidationCause::WalRemoved)
+        );
+
+        let horizon = PrimaryReplication::new_with_config(
+            None,
+            &crate::replication::ReplicationConfig::primary().with_slot_retention_max_lag_lsn(3),
+        );
+        horizon.register_replica("horizon".to_string());
+        for lsn in 1..=4 {
+            horizon.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+        horizon.enforce_retention_limits(0);
+        assert_eq!(
+            horizon
+                .slot_snapshots()
+                .into_iter()
+                .find(|slot| slot.id == "horizon")
+                .and_then(|slot| slot.invalidation_reason),
+            Some(SlotInvalidationCause::Horizon)
+        );
+
+        let idle = PrimaryReplication::new_with_config(
+            None,
+            &crate::replication::ReplicationConfig::primary().with_slot_idle_timeout_ms(10),
+        );
+        idle.register_replica("idle".to_string());
+        idle.touch_slot("idle", 1);
+        idle.enforce_retention_limits(12);
+        assert_eq!(
+            idle.slot_snapshots()
+                .into_iter()
+                .find(|slot| slot.id == "idle")
+                .and_then(|slot| slot.invalidation_reason),
+            Some(SlotInvalidationCause::IdleTimeout)
+        );
     }
 
     #[test]
