@@ -13,6 +13,7 @@ pub mod cache;
 pub mod cache_key;
 pub mod cost;
 pub mod histogram;
+pub mod hypertable_pruning;
 pub mod index_only;
 pub mod join_dp;
 pub mod optimizer;
