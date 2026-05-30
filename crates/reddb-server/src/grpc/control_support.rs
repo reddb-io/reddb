@@ -132,6 +132,51 @@ impl GrpcRuntime {
         check_permission(&auth, false, true).map_err(Status::permission_denied)
     }
 
+    pub(crate) fn authorize_replication_stream(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<String, Status> {
+        self.authorize_replication_capability(metadata, "cluster:replication:stream")
+    }
+
+    pub(crate) fn authorize_replication_ack(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<String, Status> {
+        self.authorize_replication_capability(metadata, "cluster:replication:ack")
+    }
+
+    fn authorize_replication_capability(
+        &self,
+        metadata: &MetadataMap,
+        action: &str,
+    ) -> Result<String, Status> {
+        let auth = self.resolve_auth(metadata);
+        let username = match auth {
+            AuthResult::Authenticated { username, .. } => username,
+            AuthResult::Denied(reason) => return Err(Status::unauthenticated(reason)),
+            AuthResult::Anonymous => {
+                return Err(Status::unauthenticated("authentication required"));
+            }
+        };
+
+        let principal = crate::auth::UserId::platform(username.clone());
+        let resource = crate::auth::policies::ResourceRef::new("cluster", "replication");
+        let outcome = self.auth_store.simulate(
+            &principal,
+            action,
+            &resource,
+            crate::auth::store::SimCtx::default(),
+        );
+        match outcome.decision {
+            crate::auth::policies::Decision::Allow { .. }
+            | crate::auth::policies::Decision::AdminBypass => Ok(username),
+            _ => Err(Status::permission_denied(format!(
+                "policy: principal '{username}' is not allowed to perform '{action}'"
+            ))),
+        }
+    }
+
     /// PLAN.md Phase 11.4 — call after a successful gRPC write to
     /// enforce the configured commit policy. When policy is `Local`
     /// (default) this returns immediately. When policy is
