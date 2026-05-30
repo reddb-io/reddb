@@ -24,6 +24,7 @@ pub mod bookmark;
 pub mod cdc;
 pub mod commit_policy;
 pub mod commit_waiter;
+pub mod flow_control;
 pub mod lease;
 pub mod logical;
 pub mod primary;
@@ -35,6 +36,7 @@ pub mod topology_advertiser;
 pub use bookmark::{BookmarkDecodeError, CausalBookmark};
 pub use commit_policy::CommitPolicy;
 pub use commit_waiter::{AwaitOutcome, CommitWaiter};
+pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
 pub use topology_advertiser::{
