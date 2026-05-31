@@ -2297,6 +2297,7 @@ version = "1.7.0"
 dependencies = [
  "aes-gcm",
  "blake3",
+ "crc32fast",
  "criterion",
  "crossbeam-queue",
  "ed25519-dalek",
