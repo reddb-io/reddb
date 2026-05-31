@@ -452,6 +452,7 @@ mod tests {
                     healthy: true,
                     lag_ms: 12,
                     last_applied_lsn: 4242,
+                    rebootstrapping: false,
                 },
                 ReplicaInfo {
                     addr: "replica-b.example.com:5050".into(),
@@ -459,6 +460,7 @@ mod tests {
                     healthy: false,
                     lag_ms: 999,
                     last_applied_lsn: 4100,
+                    rebootstrapping: false,
                 },
             ],
         }
