@@ -580,6 +580,36 @@ pub struct PhysicalTreeDefinition {
     pub updated_at_unix_ms: u128,
 }
 
+/// A single persisted hypertable chunk. Mirror of
+/// `storage::timeseries::ChunkMeta`, flattened for the metadata
+/// sidecar so the registry's routing spine survives a restart
+/// (issue #866). `start_ns` plus the owning hypertable name is the
+/// chunk's stable identity.
+#[derive(Debug, Clone)]
+pub struct PhysicalHypertableChunk {
+    pub start_ns: u64,
+    pub end_ns_exclusive: u64,
+    pub row_count: u64,
+    pub min_ts_ns: u64,
+    pub max_ts_ns: u64,
+    pub sealed: bool,
+    pub ttl_override_ns: Option<u64>,
+}
+
+/// A persisted hypertable spec plus all of its chunks. Stored in the
+/// physical metadata sidecar alongside collection contracts so chunk
+/// bounds / routing / TTL are recovered identically after a restart
+/// — the same durability path the rest of the catalog already uses,
+/// not a parallel one (issue #866).
+#[derive(Debug, Clone)]
+pub struct PhysicalHypertable {
+    pub name: String,
+    pub time_column: String,
+    pub chunk_interval_ns: u64,
+    pub default_ttl_ns: Option<u64>,
+    pub chunks: Vec<PhysicalHypertableChunk>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PhysicalMetadataFile {
     pub protocol_version: String,
@@ -595,6 +625,10 @@ pub struct PhysicalMetadataFile {
     pub tree_definitions: Vec<PhysicalTreeDefinition>,
     pub collection_ttl_defaults_ms: BTreeMap<String, u64>,
     pub collection_contracts: Vec<CollectionContract>,
+    /// Persisted hypertable chunk spine (issue #866). Empty on legacy
+    /// sidecars written before the feature and for non-hypertable
+    /// databases.
+    pub hypertables: Vec<PhysicalHypertable>,
     pub exports: Vec<ExportDescriptor>,
     pub superblock: SuperblockHeader,
     pub snapshots: Vec<SnapshotDescriptor>,
