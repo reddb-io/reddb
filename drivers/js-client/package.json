@@ -4,16 +4,53 @@
   "description": "Thin remote-only RedDB driver. Downloads the `red_client` binary on install. Speaks RedWire/gRPC/HTTP. Embedded URIs (memory://, file://, red:///path) are rejected — use @reddb-io/sdk for those.",
   "type": "module",
   "main": "src/index.js",
+  "browser": "./src/index.browser.js",
   "exports": {
     ".": {
-      "import": "./src/index.js",
-      "types": "./index.d.ts"
-    }
+      "browser": {
+        "types": "./index.browser.d.ts",
+        "import": "./src/index.browser.js"
+      },
+      "node": {
+        "types": "./index.d.ts",
+        "import": "./src/index.js"
+      },
+      "bun": {
+        "types": "./index.d.ts",
+        "import": "./src/index.js"
+      },
+      "deno": {
+        "types": "./index.d.ts",
+        "import": "./src/index.js"
+      },
+      "default": {
+        "types": "./index.browser.d.ts",
+        "import": "./src/index.browser.js"
+      }
+    },
+    "./node": {
+      "types": "./index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./browser": {
+      "types": "./index.browser.d.ts",
+      "import": "./src/index.browser.js"
+    },
+    "./bun": {
+      "types": "./index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./deno": {
+      "types": "./index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "types": "./index.d.ts",
   "files": [
     "src/",
     "index.d.ts",
+    "index.browser.d.ts",
     "postinstall.js",
     "README.md",
     "LICENSE"
