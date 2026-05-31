@@ -60,7 +60,8 @@ pub use bitmap_index::{BitmapColumnIndex, BitmapIndexManager, BitmapIndexStats};
 pub use bloom_index::{BloomFilterRegistry, BloomRegistryStats};
 pub use column_block::{
     read_column_block, write_column_block, ColumnBlockError, ColumnInput, DecodedColumn,
-    DecodedColumnBlock, GranuleIndex, GranuleStats, COLUMN_BLOCK_MAGIC, COLUMN_BLOCK_VERSION_V1,
+    DecodedColumnBlock, GranuleBloom, GranuleIndex, GranuleStats, COLUMN_BLOCK_MAGIC,
+    COLUMN_BLOCK_VERSION_V1,
 };
 pub use context_index::{ContextIndex, ContextIndexStats, ContextPosting, ContextSearchHit};
 pub use devx::{
