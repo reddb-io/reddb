@@ -13,6 +13,88 @@ use std::sync::Arc;
 /// record-level rather than page-level.
 const WAL_BUFFER_BYTES: usize = 64 * 1024;
 
+/// Size of one pre-allocated WAL segment.
+///
+/// The writer keeps disk blocks reserved one segment ahead of its write
+/// frontier via `fallocate(2)` with `FALLOC_FL_KEEP_SIZE`, so the
+/// continuously-growing WAL lands in contiguous extents instead of
+/// fragmenting the data file's extents on ext4/XFS (issue #893, PRD #851).
+/// 16 MiB mirrors postgres' default WAL segment size.
+const WAL_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Next segment boundary strictly above `pos`.
+///
+/// `pos` already at a boundary still rounds *up* to the following one, so the
+/// reservation always stays at least one boundary ahead of the frontier.
+#[inline]
+fn next_wal_segment_boundary(pos: u64) -> u64 {
+    (pos / WAL_SEGMENT_BYTES + 1) * WAL_SEGMENT_BYTES
+}
+
+/// Reserve disk blocks for `[offset, offset + len)` **without** growing the
+/// file's logical length (`FALLOC_FL_KEEP_SIZE`).
+///
+/// Pinning `i_size` is the whole trick that makes preallocation invisible to
+/// crash recovery: the WAL's logical end stays equal to its real data length,
+/// so [`WalReader`](super::reader::WalReader)'s EOF scan never walks into a
+/// zero-filled reserved tail (a `0x00` type byte would otherwise decode to an
+/// "Invalid record type" error and abort recovery). This is why we cannot use
+/// `fs2::allocate` here — it calls `posix_fallocate`, which *extends* `i_size`.
+///
+/// Linux-only; other targets return [`io::ErrorKind::Unsupported`] so the
+/// caller disables the optimization silently.
+#[cfg(target_os = "linux")]
+fn reserve_wal_blocks(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    if len == 0 {
+        return Ok(());
+    }
+    // SAFETY: `file` owns a valid fd for the duration of the call; fallocate
+    // only mutates block reservations for that fd, never process memory.
+    let ret = unsafe {
+        libc::fallocate(
+            file.as_raw_fd(),
+            libc::FALLOC_FL_KEEP_SIZE,
+            offset as libc::off_t,
+            len as libc::off_t,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reserve_wal_blocks(_file: &File, _offset: u64, _len: u64) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "WAL preallocation is only implemented on linux",
+    ))
+}
+
+/// Whether a `fallocate` failure means "this filesystem can't preallocate"
+/// (tmpfs, overlayfs, many network filesystems) rather than a real I/O error.
+/// Those are soft failures that flip the feature off; anything else is left to
+/// the normal write path to surface (e.g. a genuine `ENOSPC`).
+fn fallocate_unsupported(err: &io::Error) -> bool {
+    if err.kind() == io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        matches!(
+            err.raw_os_error(),
+            Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS) | Some(libc::EINVAL)
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 /// Writer for the Write-Ahead Log
 ///
 /// Wraps the underlying file in a [`BufWriter`] so each `append` does
@@ -49,6 +131,17 @@ pub struct WalWriter {
     /// See `src/storage/cache/README.md` § Invariant 2 and the Target 3
     /// section of `PLAN.md`.
     durable_lsn: u64,
+    /// Exclusive byte offset up to which disk blocks are pre-reserved via
+    /// `fallocate(FALLOC_FL_KEEP_SIZE)`. Advances one [`WAL_SEGMENT_BYTES`]
+    /// segment at a time as `current_lsn` approaches it (issue #893). Reset to
+    /// `0` on [`truncate`](Self::truncate) — which frees the blocks — and
+    /// immediately re-extended (the checkpoint re-extend path).
+    preallocated_to: u64,
+    /// Cleared the first time `fallocate` reports the backing filesystem can't
+    /// preallocate (tmpfs/overlay/NFS → `EOPNOTSUPP`/`ENOSYS`, or any non-Linux
+    /// target) so we stop issuing syscalls that will always fail. Preallocation
+    /// is a best-effort optimization; clearing this never affects correctness.
+    prealloc_supported: bool,
 }
 
 impl WalWriter {
@@ -94,12 +187,48 @@ impl WalWriter {
         // On open, every byte already on disk is by definition durable
         // (any pre-crash unflushed tail was lost when the OS dropped
         // page cache). Initialise `durable_lsn` to `current_lsn`.
-        Ok(Self {
+        let mut writer = Self {
             file,
             sync_handle,
             current_lsn,
             durable_lsn: current_lsn,
-        })
+            preallocated_to: 0,
+            prealloc_supported: true,
+        };
+        // Reserve the first segment up front so the very first appends land in
+        // contiguous extents rather than growing the file page-by-page.
+        writer.ensure_preallocated()?;
+        Ok(writer)
+    }
+
+    /// Ensure disk blocks are reserved at least up to the next segment
+    /// boundary above the current write frontier (`current_lsn`).
+    ///
+    /// Cheap (pure arithmetic) until the frontier crosses a
+    /// [`WAL_SEGMENT_BYTES`] boundary, at which point it issues a single
+    /// `fallocate`. Best-effort: a filesystem that can't preallocate disables
+    /// the feature; a transient error is swallowed so a write never fails
+    /// because preallocation hiccuped (the write path surfaces a genuine
+    /// `ENOSPC` on its own). Never grows the file's logical length, so it is
+    /// invisible to crash recovery.
+    fn ensure_preallocated(&mut self) -> io::Result<()> {
+        if !self.prealloc_supported {
+            return Ok(());
+        }
+        let target = next_wal_segment_boundary(self.current_lsn);
+        if target <= self.preallocated_to {
+            return Ok(());
+        }
+        let from = self.preallocated_to;
+        match reserve_wal_blocks(self.file.get_ref(), from, target - from) {
+            Ok(()) => self.preallocated_to = target,
+            Err(ref e) if fallocate_unsupported(e) => self.prealloc_supported = false,
+            Err(_) => {
+                // Best-effort: leave `preallocated_to` as-is and retry at the
+                // next boundary. Never propagate.
+            }
+        }
+        Ok(())
     }
 
     /// Append a record to the WAL.
@@ -117,6 +246,7 @@ impl WalWriter {
         let record_lsn = self.current_lsn;
         self.current_lsn += bytes.len() as u64;
 
+        self.ensure_preallocated()?;
         Ok(record_lsn)
     }
 
@@ -135,6 +265,7 @@ impl WalWriter {
         self.file.write_all(bytes)?;
         let record_lsn = self.current_lsn;
         self.current_lsn += bytes.len() as u64;
+        self.ensure_preallocated()?;
         Ok(record_lsn)
     }
 
@@ -260,6 +391,12 @@ impl WalWriter {
 
         self.current_lsn = 8;
         self.durable_lsn = 8;
+
+        // `set_len(0)` freed every reserved block, so the WAL would otherwise
+        // grow page-by-page again from here. Re-extend a fresh segment now —
+        // this is the "truncate/re-extend on checkpoint" half of issue #893.
+        self.preallocated_to = 0;
+        self.ensure_preallocated()?;
         Ok(())
     }
 }
@@ -634,5 +771,121 @@ mod tests {
         // include the unsync'd records depending on platform; the
         // contract we care about is that durable_lsn ≥ synced_lsn.
         assert!(writer.durable_lsn() >= synced_lsn);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #893: fallocate-based WAL segment preallocation
+    // -----------------------------------------------------------------
+
+    /// On-disk blocks reserved by `fallocate`, in bytes. Returns the
+    /// allocated size (st_blocks × 512), independent of the logical length.
+    fn allocated_bytes(path: &std::path::Path) -> u64 {
+        use fs2::FileExt;
+        let f = std::fs::File::open(path).unwrap();
+        f.allocated_size().unwrap()
+    }
+
+    #[test]
+    fn segment_boundary_rounds_strictly_up() {
+        // Always lands one boundary ahead so the reservation stays in front
+        // of the write frontier.
+        assert_eq!(next_wal_segment_boundary(0), WAL_SEGMENT_BYTES);
+        assert_eq!(next_wal_segment_boundary(8), WAL_SEGMENT_BYTES);
+        assert_eq!(
+            next_wal_segment_boundary(WAL_SEGMENT_BYTES - 1),
+            WAL_SEGMENT_BYTES
+        );
+        // Exactly on a boundary still advances to the next one.
+        assert_eq!(
+            next_wal_segment_boundary(WAL_SEGMENT_BYTES),
+            2 * WAL_SEGMENT_BYTES
+        );
+        assert_eq!(
+            next_wal_segment_boundary(WAL_SEGMENT_BYTES + 1),
+            2 * WAL_SEGMENT_BYTES
+        );
+    }
+
+    #[test]
+    fn open_preallocates_first_segment() {
+        // A freshly opened WAL must reserve a whole segment up front instead
+        // of growing incrementally (acceptance #1).
+        let (_guard, path) = temp_wal("prealloc_open");
+        let writer = WalWriter::open(&path).unwrap();
+        if !writer.prealloc_supported {
+            return; // filesystem without fallocate — feature is a no-op.
+        }
+        assert_eq!(writer.preallocated_to, WAL_SEGMENT_BYTES);
+        // The reservation is real on disk, yet the logical file is still just
+        // the 8-byte header.
+        assert!(allocated_bytes(&path) >= WAL_SEGMENT_BYTES);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn preallocation_does_not_grow_logical_length() {
+        // The load-bearing invariant for crash recovery: appending records
+        // must NOT inflate the logical file size beyond the real data, or the
+        // EOF scan in WalReader would walk into the reserved tail. Holds on
+        // every filesystem (fallocate keeps i_size pinned; absent fallocate
+        // there is no reservation at all).
+        let (_guard, path) = temp_wal("prealloc_logical");
+        let mut writer = WalWriter::open(&path).unwrap();
+        for tx in 0..50u64 {
+            writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
+        }
+        writer.sync().unwrap();
+        let logical = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(logical, 8 + 50 * 21, "preallocation inflated i_size");
+        assert_eq!(writer.current_lsn(), logical);
+    }
+
+    #[test]
+    fn truncate_re_extends_a_fresh_segment() {
+        // After checkpoint truncation the WAL must re-extend rather than grow
+        // unbounded page-by-page (acceptance #2).
+        let (_guard, path) = temp_wal("prealloc_truncate");
+        let mut writer = WalWriter::open(&path).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+
+        writer.truncate().unwrap();
+
+        assert_eq!(writer.current_lsn(), 8);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+        if writer.prealloc_supported {
+            assert_eq!(writer.preallocated_to, WAL_SEGMENT_BYTES);
+            assert!(allocated_bytes(&path) >= WAL_SEGMENT_BYTES);
+        }
+    }
+
+    #[test]
+    fn preallocated_wal_recovers_records_without_trailing_garbage() {
+        // End-to-end: a preallocated WAL must read back exactly the records
+        // written — the reserved (unwritten) tail must be invisible to the
+        // reader, proving crash-recovery is unchanged (acceptance #3).
+        use super::super::reader::WalReader;
+        let (_guard, path) = temp_wal("prealloc_recover");
+        {
+            let mut writer = WalWriter::open(&path).unwrap();
+            writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+            writer
+                .append(&WalRecord::PageWrite {
+                    tx_id: 1,
+                    page_id: 7,
+                    data: vec![1, 2, 3, 4],
+                })
+                .unwrap();
+            writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+            writer.sync().unwrap();
+        }
+        let records: Vec<_> = WalReader::open(&path)
+            .unwrap()
+            .iter()
+            .collect::<Result<_, _>>()
+            .expect("reader must stop cleanly at real EOF, not in reserved tail");
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].1, WalRecord::Begin { tx_id: 1 });
+        assert_eq!(records[2].1, WalRecord::Commit { tx_id: 1 });
     }
 }
