@@ -14,6 +14,7 @@ use crate::storage::schema::types::DataType;
 use crate::storage::unified::column_block::{
     read_column_block, write_column_block, ColumnBlockError, ColumnInput,
 };
+use crate::storage::unified::segment_codec::ColumnSemantics;
 
 /// Stable column id of the timestamp column within a v1 columnar chunk.
 pub const COLUMNAR_TS_COLUMN_ID: u32 = 0;
@@ -213,9 +214,11 @@ impl TimeSeriesChunk {
 
     /// Seal the chunk and emit its **columnar** on-disk form: an `RDCC`
     /// [`ColumnBlock`](crate::storage::engine::PageType::ColumnBlock)
-    /// transposing the live `(ts, value)` columns into two ZSTD streams
-    /// (PRD #850, Phase 1). Sealing first (via [`seal`](Self::seal))
-    /// guarantees timestamp order, so the columns are written sorted.
+    /// transposing the live `(ts, value)` columns into per-column codec
+    /// streams — delta-of-delta+ZSTD for the monotonic timestamps,
+    /// Gorilla/XOR+ZSTD for the float gauge (#853, PRD #850 Phase 1).
+    /// Sealing first (via [`seal`](Self::seal)) guarantees timestamp
+    /// order, so the columns are written sorted.
     ///
     /// `chunk_id` / `schema_ref` are recorded verbatim in the block header
     /// so a reader is self-describing. The returned bytes are written into
@@ -246,11 +249,15 @@ impl TimeSeriesChunk {
                 ColumnInput {
                     column_id: COLUMNAR_TS_COLUMN_ID,
                     logical_type: DataType::UnsignedInteger.to_byte(),
+                    // Monotonic, sealed-sorted timestamps → delta-of-delta.
+                    semantics: ColumnSemantics::Timestamp,
                     data: &ts_bytes,
                 },
                 ColumnInput {
                     column_id: COLUMNAR_VALUE_COLUMN_ID,
                     logical_type: DataType::Float.to_byte(),
+                    // Floating-point gauge readings → Gorilla/XOR.
+                    semantics: ColumnSemantics::Gauge,
                     data: &val_bytes,
                 },
             ],
