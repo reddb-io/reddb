@@ -56,6 +56,49 @@ degraded and why.
 - [ ] Set up monitoring at `/stats`
 - [ ] Enable snapshots for backup
 - [ ] Configure systemd or Docker for restart policy
+- [ ] Tune the data filesystem (see [Filesystem Tuning](#filesystem-tuning))
+
+## Filesystem Tuning
+
+RedDB writes its data file in 16 KiB pages (the engine `PAGE_SIZE`). Matching the
+underlying filesystem's block/record size to that page avoids read-modify-write
+amplification and keeps `fsync` cheap. Apply these at deploy time, before the
+data file is created, on the dataset or file that holds `--path`.
+
+### ZFS
+
+```bash
+# On the dataset backing --path, before first write
+zfs set recordsize=16K rpool/reddb
+```
+
+ZFS defaults to a 128 KiB recordsize, so every 16 KiB page write forces a
+read-modify-write of a full 128 KiB record — roughly **8× write amplification**.
+Setting `recordsize=16K` aligns the record to the RedDB page and eliminates it.
+
+### btrfs
+
+```bash
+# Disable copy-on-write on the data file (or its parent dir before creation)
+chattr +C /var/lib/reddb/data.rdb
+```
+
+btrfs copy-on-write relocates every overwritten block, fragmenting the data file
+and doubling write traffic under RedDB's in-place page updates and WAL fsync.
+`chattr +C` (nodatacow) keeps overwrites in place. Set it on an empty file or on
+the parent directory before the data file is created — the flag only takes
+effect for files created afterward.
+
+### ext4 / XFS
+
+```bash
+# Default 4 KiB block size is fine; ensure the volume is mounted without atime churn
+mount -o noatime /dev/sdX /var/lib/reddb
+```
+
+ext4 and XFS need no special tuning: their default 4 KiB block size divides the
+16 KiB page evenly, so there is no record-level write amplification. Mount with
+`noatime` to avoid metadata writes on every read.
 
 ## Systemd
 
