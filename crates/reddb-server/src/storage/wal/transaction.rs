@@ -223,9 +223,12 @@ impl Transaction {
                 page_id: *page_id,
                 data: buffered.data.to_vec(),
             };
-            blob.extend_from_slice(&record.encode());
+            // Encode straight into the per-call blob scratch — no fresh Vec
+            // per record. `blob` is owned by this commit frame and never
+            // shared across appenders, so this is safe on the lock-free path.
+            record.encode_into(&mut blob);
         }
-        blob.extend_from_slice(&WalRecord::Commit { tx_id: self.id }.encode());
+        WalRecord::Commit { tx_id: self.id }.encode_into(&mut blob);
 
         // ── Reserve + enqueue (lock-free) ───────────────────────────
         // One atomic fetch_add reserves our LSN range; one
