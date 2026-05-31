@@ -129,8 +129,21 @@ pub(crate) struct HttpResponse {
 impl HttpResponse {
     pub(crate) fn to_http_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
+        // RedDB is an API, not a website: it authenticates by
+        // `Authorization` header / API key, never cookies. A wildcard
+        // `Access-Control-Allow-Origin: *` is therefore the correct,
+        // credential-safe posture (the browser only forbids `*` paired
+        // with `Access-Control-Allow-Credentials: true`, which we never
+        // send). Emitting these on every response — through the single
+        // serialization choke point — is what lets browser clients call
+        // the HTTP API cross-origin without a reverse proxy. The OPTIONS
+        // preflight is answered in `routing::route` before auth.
         let header = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n\
+             Access-Control-Allow-Headers: *\r\n\
+             Access-Control-Max-Age: 86400\r\n",
             self.status,
             status_text(self.status),
             self.content_type,
@@ -444,6 +457,23 @@ mod transport_tests {
         assert_eq!(head.matches("\r\n\r\n").count(), 1);
         assert!(head
             .starts_with("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "));
+    }
+
+    #[test]
+    fn to_http_bytes_always_emits_permissive_cors() {
+        // RedDB is an API authenticated by header / API key, never
+        // cookies — so a wildcard CORS posture is correct and rides on
+        // *every* response so browser clients reach the HTTP API
+        // cross-origin without a reverse proxy. Wildcard origin must
+        // never be paired with Allow-Credentials (the browser rejects
+        // that combination), so this also pins its absence.
+        let head = String::from_utf8_lossy(&json_ok("hi").to_http_bytes()).into_owned();
+        assert!(head.contains("\r\nAccess-Control-Allow-Origin: *\r\n"), "got: {head}");
+        assert!(head.contains("\r\nAccess-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"));
+        assert!(head.contains("\r\nAccess-Control-Allow-Headers: *\r\n"));
+        assert!(!head.to_ascii_lowercase().contains("access-control-allow-credentials"));
+        // Framing invariant survives: still exactly one header/body split.
+        assert_eq!(head.matches("\r\n\r\n").count(), 1);
     }
 }
 pub(crate) fn split_target(target: &str) -> (String, BTreeMap<String, String>) {
