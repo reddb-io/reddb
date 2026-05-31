@@ -272,6 +272,20 @@ impl RedDBServer {
             body,
         } = request;
 
+        // CORS preflight. Browsers send `OPTIONS` with no credentials
+        // before a cross-origin request; it must be answered *before*
+        // auth/surface checks (a 401/404 on preflight would block the
+        // real request). 204 + the permissive `Access-Control-*` headers
+        // that ride on every response (see `HttpResponse::to_http_bytes`).
+        if method == "OPTIONS" {
+            return HttpResponse {
+                status: 204,
+                content_type: "application/json",
+                body: Vec::new(),
+                extra_headers: Vec::new(),
+            };
+        }
+
         // PLAN.md Phase 6.2 — endpoint segregation. Listeners bound
         // to the dedicated admin / metrics ports refuse paths
         // outside their surface so accidentally exposing them does

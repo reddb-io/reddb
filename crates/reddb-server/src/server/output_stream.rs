@@ -536,8 +536,19 @@ pub fn write_chunked_response_header<W: std::io::Write>(
     status: u16,
     content_type: &str,
 ) -> std::io::Result<()> {
+    // Streaming responses write their own head here instead of going
+    // through `HttpResponse::to_http_bytes`, so they must repeat the
+    // same permissive CORS posture — otherwise a browser that can call
+    // the JSON endpoints cross-origin would still be blocked on the
+    // NDJSON/SSE streaming routes (graph/vector results). API auth is
+    // by header/API key, never cookies, so wildcard origin is safe and
+    // Allow-Credentials is deliberately never sent.
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\nConnection: close\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n\
+         Access-Control-Allow-Headers: *\r\n\
+         Access-Control-Max-Age: 86400\r\n\r\n",
         status,
         crate::server::transport::status_text(status),
         content_type,
