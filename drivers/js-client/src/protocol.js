@@ -8,22 +8,15 @@
  * Spec: PLAN_DRIVERS.md, "Spec do protocolo stdio".
  */
 
+import { RedDBError } from './core/errors.js'
+
+// Re-exported from the transport-agnostic core so existing
+// `import { RedDBError } from './protocol.js'` call sites keep working.
+export { RedDBError }
+
 const NEWLINE = 0x0a // '\n'
 const encoder = new TextEncoder()
 const decoder = new TextDecoder('utf-8')
-
-/**
- * RedDB-shaped error. Drivers in other languages should expose an
- * equivalent class with the same `code` field.
- */
-export class RedDBError extends Error {
-  constructor(code, message, data) {
-    super(message)
-    this.name = 'RedDBError'
-    this.code = code
-    this.data = data ?? null
-  }
-}
 
 export class RpcClient {
   /** @param {import('./spawn.js').RedProcess} child */
