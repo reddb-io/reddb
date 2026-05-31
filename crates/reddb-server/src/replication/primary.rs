@@ -1023,6 +1023,13 @@ pub struct ReplicaState {
     /// handshake extension lands in 2.6.2; the quorum coordinator's
     /// region-binding map covers the in-process case meanwhile.
     pub region: Option<String>,
+    /// `true` while this replica is re-bootstrapping — loading a fresh
+    /// snapshot to replace its current dataset (issue #837). It keeps
+    /// serving non-causal reads from the old data, but the advertiser
+    /// surfaces this flag so a causal reader routes bookmark reads
+    /// elsewhere: the replica's `last_acked_lsn` describes data it is
+    /// about to discard. Cleared atomically when the swap completes.
+    pub rebootstrapping: bool,
 }
 
 /// Primary-side replication progress derived from the replica registry.
@@ -1214,10 +1221,39 @@ impl PrimaryReplication {
             connected_at_unix_ms: now_ms,
             last_seen_at_unix_ms: now_ms,
             region,
+            rebootstrapping: false,
         });
         drop(replicas);
         self.bump_topology_epoch();
         resume_lsn
+    }
+
+    /// Mark (or clear) a replica's re-bootstrap state (issue #837).
+    ///
+    /// While `rebootstrapping` is `true` the replica keeps serving
+    /// non-causal reads from its existing data, but the advertiser
+    /// surfaces the flag so causal (bookmark) reads route to a
+    /// caught-up peer instead — the rebuilding replica's applied
+    /// frontier describes data it is about to discard. The primary
+    /// flips this back to `false` when the replica reports its atomic
+    /// snapshot swap complete.
+    ///
+    /// A change to the flag is a registry-shape change for routing
+    /// purposes, so it bumps the topology epoch to force consumers to
+    /// re-read the advertisement. Returns `true` when a replica with
+    /// `id` was present and updated.
+    pub fn set_replica_rebootstrapping(&self, id: &str, rebootstrapping: bool) -> bool {
+        let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = replicas.iter_mut().find(|r| r.id == id) else {
+            return false;
+        };
+        if state.rebootstrapping == rebootstrapping {
+            return true;
+        }
+        state.rebootstrapping = rebootstrapping;
+        drop(replicas);
+        self.bump_topology_epoch();
+        true
     }
 
     /// Ensure a replica identifying itself with `id` is present in the
@@ -2146,6 +2182,7 @@ mod tests {
                 connected_at_unix_ms: now,
                 last_seen_at_unix_ms: now,
                 region: None,
+                rebootstrapping: false,
             },
             ReplicaState {
                 id: "slow".to_string(),
@@ -2157,6 +2194,7 @@ mod tests {
                 connected_at_unix_ms: now,
                 last_seen_at_unix_ms: now,
                 region: None,
+                rebootstrapping: false,
             },
         ];
 
