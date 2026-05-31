@@ -71,7 +71,7 @@ pub use encrypted_pager::{EncryptedPager, EncryptedPagerConfig, EncryptedPagerEr
 pub use freelist::FreeList;
 pub use graph_store::{GraphStore, LabelId, LabelRegistry, StoredEdge, StoredNode, TableRef};
 pub use graph_table_index::{GraphTableIndex, GraphTableIndexStats, RowKey};
-pub use page::{Page, PageHeader, PageType, HEADER_SIZE, PAGE_SIZE};
+pub use page::{Page, PageHeader, PageLocation, PageType, HEADER_SIZE, PAGE_SIZE};
 pub use page_cache::PageCache;
 pub use pager::{Pager, PagerConfig, PhysicalFileHeader};
 
