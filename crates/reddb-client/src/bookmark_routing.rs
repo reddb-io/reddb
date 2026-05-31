@@ -98,20 +98,31 @@ pub struct ReadEndpoint {
     pub lag_ms: u32,
     /// Contiguous applied frontier (`ReplicaInfo::last_applied_lsn`).
     pub frontier_lsn: u64,
-    /// `true` when this replica can serve the bookmark *now*: healthy
-    /// and its frontier already covers the bookmark commit LSN.
+    /// `true` while this replica is re-bootstrapping (issue #837). Its
+    /// advertised frontier describes data it is about to discard, so it
+    /// is never eligible for a causal read regardless of how far ahead
+    /// that frontier sits.
+    pub rebootstrapping: bool,
+    /// `true` when this replica can serve the bookmark *now*: healthy,
+    /// **not** re-bootstrapping, and its frontier already covers the
+    /// bookmark commit LSN.
     pub bookmark_eligible: bool,
 }
 
 impl ReadEndpoint {
     fn from_replica(info: &ReplicaInfo, bookmark: BookmarkTarget) -> Self {
-        let eligible = info.healthy && info.last_applied_lsn >= bookmark.commit_lsn;
+        // A re-bootstrapping replica is excluded even when its frontier
+        // covers the bookmark: that frontier describes data it is about
+        // to throw away on the atomic swap (issue #837).
+        let eligible =
+            info.healthy && !info.rebootstrapping && info.last_applied_lsn >= bookmark.commit_lsn;
         Self {
             addr: info.addr.clone(),
             region: info.region.clone(),
             healthy: info.healthy,
             lag_ms: info.lag_ms,
             frontier_lsn: info.last_applied_lsn,
+            rebootstrapping: info.rebootstrapping,
             bookmark_eligible: eligible,
         }
     }
@@ -257,20 +268,29 @@ impl RoutingTable {
             .collect()
     }
 
-    /// Pick the index of the wait target: a healthy replica, preferring
-    /// `preferred_region`, otherwise the first healthy replica in
-    /// advertised order. `None` when no replica is healthy.
+    /// Pick the index of the wait target: a healthy, non-rebuilding
+    /// replica, preferring `preferred_region`, otherwise the first such
+    /// replica in advertised order. `None` when no replica can serve a
+    /// causal read.
+    ///
+    /// A re-bootstrapping replica is skipped entirely (issue #837):
+    /// there is no point waiting on or polling a node whose frontier
+    /// describes data it is about to discard — it can never become a
+    /// valid causal target until its swap completes and it re-advertises
+    /// without the flag.
     fn pick_target_index(&self, preferred_region: Option<&str>) -> Option<usize> {
         if let Some(region) = preferred_region {
             if let Some(i) = self
                 .replicas
                 .iter()
-                .position(|r| r.healthy && r.region == region)
+                .position(|r| r.healthy && !r.rebootstrapping && r.region == region)
             {
                 return Some(i);
             }
         }
-        self.replicas.iter().position(|r| r.healthy)
+        self.replicas
+            .iter()
+            .position(|r| r.healthy && !r.rebootstrapping)
     }
 
     /// Resolve a causal read with bounded-wait-then-fallback.
@@ -333,7 +353,10 @@ impl RoutingTable {
         waited: Duration,
     ) -> RouteDecision {
         let caught_up = self.replicas.iter().enumerate().find(|(i, r)| {
-            Some(*i) != exclude && r.healthy && r.last_applied_lsn >= bookmark.commit_lsn
+            Some(*i) != exclude
+                && r.healthy
+                && !r.rebootstrapping
+                && r.last_applied_lsn >= bookmark.commit_lsn
         });
         match caught_up {
             Some((_, r)) => RouteDecision {
@@ -369,6 +392,21 @@ mod tests {
             healthy,
             lag_ms: if healthy { 5 } else { u32::MAX },
             last_applied_lsn: frontier,
+            rebootstrapping: false,
+        }
+    }
+
+    /// A re-bootstrapping replica: healthy and far ahead on its
+    /// advertised frontier, but rebuilding — so never causally
+    /// eligible (issue #837).
+    fn rebuilding_replica(addr: &str, region: &str, frontier: u64) -> ReplicaInfo {
+        ReplicaInfo {
+            addr: addr.into(),
+            region: region.into(),
+            healthy: true,
+            lag_ms: 5,
+            last_applied_lsn: frontier,
+            rebootstrapping: true,
         }
     }
 
@@ -472,6 +510,101 @@ mod tests {
         // frontier == commit_lsn must count as eligible.
         let reads = table.read_endpoints(BookmarkTarget::new(1, 100));
         assert!(reads[0].bookmark_eligible);
+    }
+
+    // ---- rebootstrapping replicas are excluded from causal reads ----
+
+    #[test]
+    fn rebootstrapping_replica_is_never_bookmark_eligible_despite_frontier() {
+        // Frontier 999 is well past the bookmark, but the node is
+        // rebuilding — its frontier describes data it will discard.
+        let table = RoutingTable::from_membership(
+            membership(vec![rebuilding_replica("rebuild:5050", "us-east-1", 999)]),
+            1,
+        );
+        let reads = table.read_endpoints(BookmarkTarget::new(1, 100));
+        assert_eq!(reads[0].frontier_lsn, 999);
+        assert!(reads[0].rebootstrapping);
+        assert!(
+            !reads[0].bookmark_eligible,
+            "a rebuilding node must never be bookmark-eligible"
+        );
+    }
+
+    #[test]
+    fn route_skips_rebuilding_node_and_falls_back_to_caught_up_peer() {
+        // The rebuilding node is first in advertised order and far
+        // ahead, but causal reads must bounce to the caught-up peer —
+        // without ever polling the rebuilding node.
+        let table = RoutingTable::from_membership(
+            membership(vec![
+                rebuilding_replica("rebuild:5050", "us-east-1", 999),
+                replica("caught-up:5050", "us-east-1", true, 300),
+            ]),
+            1,
+        );
+        let mut waiter = ScriptedWaiter::new(vec![], Duration::from_millis(10));
+        let decision = table.route_causal_read(
+            BookmarkTarget::new(1, 100),
+            &CausalReadOptions::with_deadline(Duration::from_millis(500)),
+            &mut waiter,
+        );
+        // The caught-up peer is the target chosen straight away; the
+        // rebuilding node was never selected as the wait target.
+        assert_eq!(decision.endpoint.addr, "caught-up:5050");
+        assert!(!decision.kind.is_fallback());
+        assert!(
+            waiter.polled_addrs.iter().all(|a| a != "rebuild:5050"),
+            "must never poll a rebuilding node"
+        );
+    }
+
+    #[test]
+    fn route_falls_back_to_primary_when_every_replica_is_rebuilding() {
+        // All replicas are rebuilding (and ahead of the bookmark);
+        // a causal read must still resolve — to the primary.
+        let table = RoutingTable::from_membership(
+            membership(vec![
+                rebuilding_replica("rebuild-a:5050", "us-east-1", 999),
+                rebuilding_replica("rebuild-b:5050", "us-west-2", 999),
+            ]),
+            4,
+        );
+        let mut waiter = ScriptedWaiter::new(vec![], Duration::from_millis(10));
+        let decision = table.route_causal_read(
+            BookmarkTarget::new(4, 100),
+            &CausalReadOptions::with_deadline(Duration::from_millis(500)),
+            &mut waiter,
+        );
+        assert_eq!(decision.kind, RouteKind::FallbackPrimary);
+        assert_eq!(decision.endpoint.addr, "primary:5050");
+        assert!(
+            waiter.polled_addrs.is_empty(),
+            "no rebuilding node should be polled"
+        );
+    }
+
+    #[test]
+    fn rebuilding_node_excluded_as_fallback_target() {
+        // The wait target (region-preferred, lagging) never catches up;
+        // the only frontier-ahead peer is rebuilding, so the fallback
+        // skips it and lands on the primary rather than serving a
+        // bookmark from data about to be discarded.
+        let table = RoutingTable::from_membership(
+            membership(vec![
+                replica("east-lag:5050", "us-east-1", true, 10),
+                rebuilding_replica("west-rebuild:5050", "us-west-2", 999),
+            ]),
+            2,
+        );
+        let mut waiter = ScriptedWaiter::new(vec![10, 20, 30], Duration::from_millis(10));
+        let decision = table.route_causal_read(
+            BookmarkTarget::new(2, 100),
+            &CausalReadOptions::with_deadline(Duration::from_millis(25)).prefer_region("us-east-1"),
+            &mut waiter,
+        );
+        assert_eq!(decision.kind, RouteKind::FallbackPrimary);
+        assert_eq!(decision.endpoint.addr, "primary:5050");
     }
 
     // ---- route: immediate eligible target (no wait) ----

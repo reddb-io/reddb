@@ -184,6 +184,9 @@ fn replica_to_info(state: &ReplicaState, primary_lsn: u64, lag: &LagConfig) -> R
         healthy,
         lag_ms,
         last_applied_lsn: state.last_acked_lsn,
+        // Surface the replica's re-bootstrap state so the consumer's
+        // routing table can exclude it from causal reads (issue #837).
+        rebootstrapping: state.rebootstrapping,
     }
 }
 
@@ -290,6 +293,7 @@ mod tests {
             connected_at_unix_ms: now,
             last_seen_at_unix_ms: last_seen,
             region: region.map(String::from),
+            rebootstrapping: false,
         }
     }
 
