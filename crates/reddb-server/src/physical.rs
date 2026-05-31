@@ -420,6 +420,12 @@ pub struct CollectionContract {
     /// retention_duration_ms` by the collection's timestamp column.
     /// Issue #580 — DeclarativeRetention slice 1.
     pub retention_duration_ms: Option<u64>,
+    /// Analytical-storage seam (PRD #850, Phase 1). When present and
+    /// `columnar = true`, sealing this collection's hypertable chunks
+    /// routes to the columnar `ColumnBlock` writer; `None` (the default)
+    /// keeps the row engine. Decodes to `None` on sidecars written before
+    /// the feature.
+    pub analytical_storage: Option<crate::catalog::AnalyticalStorageConfig>,
 }
 
 /// Canonical artifact lifecycle states.
@@ -594,6 +600,11 @@ pub struct PhysicalHypertableChunk {
     pub max_ts_ns: u64,
     pub sealed: bool,
     pub ttl_override_ns: Option<u64>,
+    /// Columnar-vs-row migration discriminant — mirror of
+    /// `ChunkMeta.columnar_page` (PRD #850, Phase 1). `Some` → the chunk's
+    /// `RDCC` `ColumnBlock` location; `None` → legacy row-stored. Absent on
+    /// sidecars written before the feature, decoding to `None`.
+    pub columnar_page: Option<crate::storage::engine::PageLocation>,
 }
 
 /// A persisted hypertable spec plus all of its chunks. Stored in the
