@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::impl_core::{
@@ -261,6 +263,14 @@ pub(super) struct StatementExecutionFrame {
     /// scoring (issue #119). `None` when no auth store is wired
     /// (embedded test mode) — AI search refuses on `None`.
     visible_collections: Option<HashSet<String>>,
+    /// Per-owner buffer arena for query-result row chunks (#885). Owned
+    /// by the frame because the frame already owns the query lifecycle;
+    /// lent to the row-streaming path (`execute_runtime_table_query_in`)
+    /// so chunk buffers are reused across the statement's chunk-fetches
+    /// instead of allocated fresh per chunk. Reclaimed when the frame
+    /// drops at statement end — no `thread_local!` scratch, which would
+    /// be unsound under tokio's work-stealing runtime.
+    row_arena: Rc<RefCell<super::query_exec::RowBufferArena>>,
 }
 
 pub(super) struct StatementFrameGuards {
@@ -332,7 +342,16 @@ impl StatementExecutionFrame {
             required_privilege,
             lock_intent,
             visible_collections,
+            row_arena: Rc::new(RefCell::new(super::query_exec::RowBufferArena::new())),
         })
+    }
+
+    /// Lend the frame's per-owner row-buffer arena (#885) to the
+    /// row-streaming path. Returns a cloned `Rc` handle; the frame remains
+    /// the owner and the arena is reclaimed when the frame drops at
+    /// statement end.
+    pub(super) fn row_arena(&self) -> Rc<RefCell<super::query_exec::RowBufferArena>> {
+        Rc::clone(&self.row_arena)
     }
 
     pub(super) fn install(&self, runtime: &RedDBRuntime) -> StatementFrameGuards {
@@ -1309,6 +1328,55 @@ mod tests {
             msg.contains("permission denied") && msg.contains("Write"),
             "expected frame-level Write deny, got: {msg}"
         );
+
+        reset_thread_locals();
+    }
+
+    /// End-to-end proof that the frame-owned row-buffer arena (#885) is
+    /// wired into the SELECT path and produces observable results
+    /// byte-identical to the per-request-allocation baseline.
+    ///
+    /// A table with more rows than the streaming high-water mark
+    /// (`DEFAULT_HIGH_WATER_MARK`) forces the `execute_runtime_table_query_in`
+    /// path to assemble many chunks, each leasing/recycling the frame
+    /// arena's single chunk buffer. Driving it through `execute_query`
+    /// (which builds a `StatementExecutionFrame` and lends its arena)
+    /// must return every inserted row, in order — exactly what the
+    /// allocate-per-chunk path returned. A bug in the arena wiring
+    /// (dropped rows, bled rows, mis-ordering) would surface here.
+    #[test]
+    fn large_select_through_frame_arena_returns_all_rows_in_order() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE big (id INT)")
+            .expect("create table");
+
+        // > DEFAULT_HIGH_WATER_MARK (1024) rows so the streaming channel
+        // spans multiple chunks and the arena buffer is reused.
+        const N: usize = 2_500;
+        let values = (0..N)
+            .map(|i| format!("({i})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rt.execute_query(&format!("INSERT INTO big (id) VALUES {values}"))
+            .expect("insert rows");
+
+        let result = rt
+            .execute_query("SELECT id FROM big ORDER BY id")
+            .expect("large SELECT executes through the frame arena path");
+        assert_eq!(result.statement_type, "select");
+        assert_eq!(
+            result.result.records.len(),
+            N,
+            "every inserted row streams back through the arena-backed channel"
+        );
+        for (i, record) in result.result.records.iter().enumerate() {
+            assert_eq!(
+                record.get("id"),
+                Some(&crate::storage::schema::Value::Integer(i as i64)),
+                "row {i} is byte-identical to the per-request-allocation baseline"
+            );
+        }
 
         reset_thread_locals();
     }

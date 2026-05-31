@@ -45,7 +45,7 @@ use table::{
     RuntimeTableExecutionContext,
 };
 
-pub(crate) use row_stream::{RowStream, DEFAULT_HIGH_WATER_MARK};
+pub(crate) use row_stream::{RowBufferArena, RowStream, DEFAULT_HIGH_WATER_MARK};
 
 /// Public table-query entry. Produces its result through the #806
 /// bounded-memory streaming channel ([`RowStream`]) and collects the
@@ -60,8 +60,30 @@ pub(super) fn execute_runtime_table_query(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<UnifiedResult> {
+    execute_runtime_table_query_in(db, query, index_store, None)
+}
+
+/// Arena-aware variant of [`execute_runtime_table_query`] (#885). When a
+/// `StatementFrame`-owned [`RowBufferArena`] is supplied, the streaming
+/// channel's chunk buffers are leased from / recycled to it instead of
+/// allocated fresh per chunk, reusing one buffer across the chunk-fetches
+/// of the statement. Passing `None` reproduces the original
+/// allocate-per-chunk behaviour exactly, so observable results are
+/// byte-identical either way. The frameless dispatch paths (prepared
+/// statements, view/CTE subqueries) call the `None` form above.
+pub(super) fn execute_runtime_table_query_in(
+    db: &RedDB,
+    query: &TableQuery,
+    index_store: Option<&super::index_store::IndexStore>,
+    arena: Option<std::rc::Rc<std::cell::RefCell<RowBufferArena>>>,
+) -> RedDBResult<UnifiedResult> {
     let materialized = execute_runtime_table_query_materialized(db, query, index_store)?;
-    RowStream::from_unified(materialized, DEFAULT_HIGH_WATER_MARK).collect_unified()
+    let stream = RowStream::from_unified(materialized, DEFAULT_HIGH_WATER_MARK);
+    let stream = match arena {
+        Some(arena) => stream.with_arena(arena),
+        None => stream,
+    };
+    stream.collect_unified()
 }
 
 fn execute_runtime_table_query_materialized(
