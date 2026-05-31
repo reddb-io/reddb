@@ -20,6 +20,10 @@ use crate::storage::unified::segment_codec::ColumnSemantics;
 pub const COLUMNAR_TS_COLUMN_ID: u32 = 0;
 /// Stable column id of the value column within a v1 columnar chunk.
 pub const COLUMNAR_VALUE_COLUMN_ID: u32 = 1;
+/// Default sparse-granule-index stride: one min/max mark per ~8192 rows
+/// (PRD #850 Phase 1, #854). Configurable per seal via
+/// [`TimeSeriesChunk::seal_columnar_with_granule_size`].
+pub const DEFAULT_GRANULE_SIZE: u32 = 8192;
 
 /// A single time-series data point
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +234,20 @@ impl TimeSeriesChunk {
         chunk_id: u64,
         schema_ref: u64,
     ) -> Result<Vec<u8>, ColumnBlockError> {
+        self.seal_columnar_with_granule_size(chunk_id, schema_ref, DEFAULT_GRANULE_SIZE)
+    }
+
+    /// As [`seal_columnar`](Self::seal_columnar), but with an explicit
+    /// sparse-granule-index stride (#854). The writer records one min/max
+    /// mark per `granule_size` rows for each numeric column (timestamp +
+    /// value) in the block's footer; a reader prunes granules that cannot
+    /// match a range predicate. `granule_size == 0` writes no index.
+    pub fn seal_columnar_with_granule_size(
+        &mut self,
+        chunk_id: u64,
+        schema_ref: u64,
+        granule_size: u32,
+    ) -> Result<Vec<u8>, ColumnBlockError> {
         if !self.sealed {
             self.seal();
         }
@@ -245,6 +263,7 @@ impl TimeSeriesChunk {
             self.timestamps.len() as u64,
             self.min_timestamp().unwrap_or(0),
             self.max_timestamp().unwrap_or(0),
+            granule_size,
             &[
                 ColumnInput {
                     column_id: COLUMNAR_TS_COLUMN_ID,
@@ -430,9 +449,114 @@ pub fn points_from_column_block(bytes: &[u8]) -> Result<Vec<TimeSeriesPoint>, Co
     Ok(points)
 }
 
+/// Result of a granule-pruned range scan over a sealed columnar chunk.
+/// `granules_total` vs `granules_scanned` makes pruning observable: a
+/// selective predicate decodes fewer granules than the chunk holds
+/// (PRD #850 Phase 1, #854 — criterion 2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrunedColumnScan {
+    /// Matching points, in timestamp order, drawn only from surviving
+    /// granules and filtered to the query window.
+    pub points: Vec<TimeSeriesPoint>,
+    /// Total granule marks in the timestamp column's sparse index.
+    pub granules_total: usize,
+    /// Granules that survived pruning and were materialised.
+    pub granules_scanned: usize,
+}
+
+/// Range query `[start_ns, end_ns]` (inclusive) over a sealed columnar
+/// chunk that uses the timestamp column's **sparse granule index** to skip
+/// granules whose min/max prove they cannot intersect the window. Only
+/// surviving granules are materialised into points; rows within a
+/// surviving granule are still filtered to the window (granule boundaries
+/// are coarse). The inverse-with-pruning of [`points_from_column_block`].
+///
+/// **Soundness**: a granule is kept whenever `granule_min <= end_ns &&
+/// granule_max >= start_ns`, i.e. exactly when it *could* hold a matching
+/// row — so pruning never drops a matching row regardless of where the
+/// granule boundaries fall (#854 — criterion 3). When the block carries no
+/// granule index, every row is scanned (`granules_total == granules_scanned
+/// == 1`).
+pub fn query_column_block_range(
+    bytes: &[u8],
+    start_ns: u64,
+    end_ns: u64,
+) -> Result<PrunedColumnScan, ColumnBlockError> {
+    let block = read_column_block(bytes)?;
+    let ts_col = block
+        .columns
+        .iter()
+        .find(|c| c.column_id == COLUMNAR_TS_COLUMN_ID)
+        .ok_or(ColumnBlockError::BadDirectory)?;
+    let val_col = block
+        .columns
+        .iter()
+        .find(|c| c.column_id == COLUMNAR_VALUE_COLUMN_ID)
+        .ok_or(ColumnBlockError::BadDirectory)?;
+    if !ts_col.data.len().is_multiple_of(8) || !val_col.data.len().is_multiple_of(8) {
+        return Err(ColumnBlockError::BadDirectory);
+    }
+    let n = ts_col.data.len() / 8;
+    if val_col.data.len() / 8 != n {
+        return Err(ColumnBlockError::BadDirectory);
+    }
+
+    let ts_at =
+        |i: usize| -> u64 { u64::from_le_bytes(ts_col.data[i * 8..i * 8 + 8].try_into().unwrap()) };
+    let val_at = |i: usize| -> f64 {
+        f64::from_le_bytes(val_col.data[i * 8..i * 8 + 8].try_into().unwrap())
+    };
+    let take_row = |i: usize, out: &mut Vec<TimeSeriesPoint>| {
+        let ts = ts_at(i);
+        if ts >= start_ns && ts <= end_ns {
+            out.push(TimeSeriesPoint {
+                timestamp_ns: ts,
+                value: val_at(i),
+            });
+        }
+    };
+
+    let mut points = Vec::new();
+    let (granules_total, granules_scanned) = match &ts_col.granule_index {
+        Some(gi) if gi.granule_count() > 0 => {
+            // Keep a granule when its [min, max] timestamp interval can
+            // intersect the query window — the BRIN MINMAX skip rule.
+            let survivors = gi.surviving_granules(|min, max| {
+                if min.len() < 8 || max.len() < 8 {
+                    return true; // malformed mark → conservative keep
+                }
+                let gmin = u64::from_le_bytes(min[..8].try_into().unwrap());
+                let gmax = u64::from_le_bytes(max[..8].try_into().unwrap());
+                gmin <= end_ns && gmax >= start_ns
+            });
+            for &g in &survivors {
+                let (s, e) = gi.row_range(g, n);
+                for i in s..e {
+                    take_row(i, &mut points);
+                }
+            }
+            (gi.granule_count(), survivors.len())
+        }
+        // No granule index → full scan (conservative, still correct).
+        _ => {
+            for i in 0..n {
+                take_row(i, &mut points);
+            }
+            (1, 1)
+        }
+    };
+
+    Ok(PrunedColumnScan {
+        points,
+        granules_total,
+        granules_scanned,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn make_tags(host: &str) -> HashMap<String, String> {
         let mut tags = HashMap::new();
@@ -630,6 +754,136 @@ mod tests {
 
         drop(pager);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // -----------------------------------------------------------------
+    // Sparse granule index + min/max skip (PRD #850, Phase 1 — #854)
+    // -----------------------------------------------------------------
+
+    /// Criterion 1: a sealed columnar chunk carries granule marks +
+    /// per-granule min/max in the footer, for both numeric columns.
+    #[test]
+    fn sealed_columnar_chunk_carries_granule_index_in_footer() {
+        let mut chunk = TimeSeriesChunk::with_max_points("cpu.idle", make_tags("srv1"), 1000);
+        for i in 0..1000u64 {
+            chunk.append(1_000 + i, 50.0 + (i % 7) as f64);
+        }
+        let block = chunk
+            .seal_columnar_with_granule_size(1, 0, 100)
+            .expect("seal columnar");
+
+        let decoded = read_column_block(&block).expect("decode");
+        for col in &decoded.columns {
+            let gi = col
+                .granule_index
+                .as_ref()
+                .expect("both numeric columns carry a granule index");
+            assert_eq!(gi.granule_size, 100);
+            assert_eq!(gi.granule_count(), 10); // 1000 / 100
+            assert_eq!(gi.granules.len(), 10);
+            // Each mark has a real min/max (8-byte values).
+            assert!(gi
+                .granules
+                .iter()
+                .all(|g| g.min.len() == 8 && g.max.len() == 8));
+        }
+    }
+
+    /// Criterion 2: a selective range query reads only the granules that
+    /// can match, and the pruning is observable (fewer granules scanned).
+    #[test]
+    fn range_query_prunes_non_matching_granules() {
+        let mut chunk = TimeSeriesChunk::with_max_points("mem.used", make_tags("srv1"), 1000);
+        // Monotonic timestamps 0,10,20,… → granule g covers [g*1000, …].
+        for i in 0..1000u64 {
+            chunk.append(i * 10, i as f64);
+        }
+        let block = chunk
+            .seal_columnar_with_granule_size(1, 0, 100)
+            .expect("seal columnar");
+
+        // Window [2050, 2150] lands wholly inside the 3rd granule
+        // (rows 200..300 → ts 2000..2990).
+        let scan = query_column_block_range(&block, 2_050, 2_150).expect("scan");
+        assert_eq!(scan.granules_total, 10);
+        assert!(
+            scan.granules_scanned < scan.granules_total,
+            "pruning must skip granules: scanned {} of {}",
+            scan.granules_scanned,
+            scan.granules_total
+        );
+        assert_eq!(scan.granules_scanned, 1);
+        // ts 2050,2060,…,2150 (multiples of 10 in the window) → 11 points.
+        assert_eq!(scan.points.len(), 11);
+        assert!(scan
+            .points
+            .iter()
+            .all(|p| p.timestamp_ns >= 2_050 && p.timestamp_ns <= 2_150));
+        // Points come back in timestamp order.
+        assert!(scan
+            .points
+            .windows(2)
+            .all(|w| w[0].timestamp_ns <= w[1].timestamp_ns));
+
+        // A window past the end prunes everything.
+        let empty = query_column_block_range(&block, 100_000, 200_000).expect("scan");
+        assert_eq!(empty.granules_scanned, 0);
+        assert!(empty.points.is_empty());
+    }
+
+    /// Criterion 3: pruning NEVER drops a row that matches the predicate,
+    /// regardless of granule boundaries. The pruned scan must equal a full
+    /// scan filtered to the same window — as a multiset of points.
+    fn sort_points(mut v: Vec<TimeSeriesPoint>) -> Vec<TimeSeriesPoint> {
+        v.sort_by(|a, b| {
+            a.timestamp_ns
+                .cmp(&b.timestamp_ns)
+                .then_with(|| a.value.to_bits().cmp(&b.value.to_bits()))
+        });
+        v
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn granule_pruning_never_drops_a_matching_row(
+            rows in prop::collection::vec(
+                (0u64..5_000, prop::num::f64::NORMAL),
+                0..400,
+            ),
+            granule_size in 1u32..50,
+            a in 0u64..5_000,
+            b in 0u64..5_000,
+        ) {
+            let (start, end) = (a.min(b), a.max(b));
+
+            let mut chunk = TimeSeriesChunk::with_max_points("m", HashMap::new(), 512);
+            for (ts, v) in &rows {
+                chunk.append(*ts, *v);
+            }
+            let block = chunk
+                .seal_columnar_with_granule_size(1, 0, granule_size)
+                .expect("seal columnar");
+
+            let scan = query_column_block_range(&block, start, end).expect("pruned scan");
+
+            // Reference: full decode, filtered to the window. seal() sorted
+            // the points, so this is the ground-truth match set.
+            let expected: Vec<TimeSeriesPoint> = points_from_column_block(&block)
+                .expect("full decode")
+                .into_iter()
+                .filter(|p| p.timestamp_ns >= start && p.timestamp_ns <= end)
+                .collect();
+
+            prop_assert_eq!(
+                sort_points(scan.points.clone()),
+                sort_points(expected),
+                "granule pruning dropped or invented a row for [{}, {}] @ g={}",
+                start, end, granule_size
+            );
+            prop_assert!(scan.granules_scanned <= scan.granules_total);
+        }
     }
 
     #[test]
