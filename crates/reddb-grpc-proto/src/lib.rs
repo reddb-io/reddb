@@ -41,6 +41,7 @@ mod topology_tests {
                 healthy: true,
                 lag_ms: 4,
                 last_applied_lsn: 99,
+                rebootstrapping: false,
             }],
         }
     }
