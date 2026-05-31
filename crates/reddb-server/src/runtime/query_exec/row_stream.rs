@@ -31,10 +31,96 @@
 //! `{"end": …}` / `{"error": …}` frames at the executor level.
 
 use super::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Default chunk high-water mark (rows). Bounds the resident record set
 /// of a [`RowStream`] regardless of how many rows the source yields.
 pub(crate) const DEFAULT_HIGH_WATER_MARK: usize = 1024;
+
+/// Per-owner buffer arena for query-result row chunks (#885).
+///
+/// A [`RowStream`] historically allocated a fresh `Vec<UnifiedRecord>`
+/// for every chunk it assembled in [`RowStream::next_chunk`]. For a
+/// result that spans many chunks that is one heap allocation per
+/// chunk-fetch on the row-streaming path. This arena keeps a small
+/// free-list of emptied buffers so the chunk Vec is reused across the
+/// chunk-fetches of a single statement instead of reallocated.
+///
+/// Ownership model (the safety argument from the issue): the arena is
+/// owned by the `StatementFrame` that already owns the query lifecycle
+/// and lent to the stream it spawns via an `Rc`. It is **not** a
+/// `thread_local!` scratch — under tokio's multi-threaded work-stealing
+/// runtime a task may resume on a different worker after `.await`, which
+/// would make thread-local scratch unsound; tying the buffer lifetime to
+/// the frame sidesteps that entirely. The arena is single-owner and
+/// never shared across threads.
+///
+/// Reuse is leak-free by construction: a buffer is cleared the moment it
+/// is recycled (and again when leased), so no record from a prior chunk
+/// can bleed into a reused buffer — only the backing allocation is
+/// retained. Caps bound how much memory the free-list can pin so a single
+/// oversized chunk does not hoard capacity for the rest of the frame.
+#[derive(Debug, Default)]
+pub(crate) struct RowBufferArena {
+    /// Emptied buffers available for reuse. Each is `len == 0`; only the
+    /// backing capacity is retained.
+    free: Vec<Vec<UnifiedRecord>>,
+}
+
+impl RowBufferArena {
+    /// Maximum number of buffers the free-list retains. Only one chunk
+    /// buffer is ever in flight per stream (lease → consume → recycle),
+    /// so a small cap is plenty; the extra slots absorb the rare case of
+    /// nested streams sharing one frame arena.
+    const MAX_BUFFERS: usize = 4;
+    /// Drop (rather than retain) any recycled buffer whose capacity grew
+    /// past this many records, so a one-off huge chunk cannot pin a large
+    /// allocation for the remainder of the frame.
+    const MAX_BUFFER_CAPACITY: usize = DEFAULT_HIGH_WATER_MARK * 4;
+
+    pub(crate) fn new() -> Self {
+        Self { free: Vec::new() }
+    }
+
+    /// Hand out a cleared buffer for the next chunk. Reuses a recycled
+    /// allocation when one is available, otherwise allocates fresh. The
+    /// returned buffer is always empty, so a reused buffer never carries
+    /// rows from a prior chunk.
+    pub(crate) fn lease(&mut self) -> Vec<UnifiedRecord> {
+        match self.free.pop() {
+            Some(mut buf) => {
+                buf.clear();
+                buf
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Return a drained buffer to the free-list for reuse. Clears it first
+    /// so no record can bleed across reuses, and refuses to retain it when
+    /// the free-list is full or the buffer's capacity is oversized.
+    pub(crate) fn recycle(&mut self, mut buf: Vec<UnifiedRecord>) {
+        if self.free.len() >= Self::MAX_BUFFERS || buf.capacity() > Self::MAX_BUFFER_CAPACITY {
+            return;
+        }
+        buf.clear();
+        self.free.push(buf);
+    }
+
+    /// Reclaim the arena to a clean state at frame end — drops every
+    /// retained buffer so nothing is pinned past the frame that owns it.
+    pub(crate) fn reset(&mut self) {
+        self.free.clear();
+    }
+
+    /// Number of buffers currently held for reuse. Observability surface
+    /// for the reuse / no-bleed unit tests.
+    #[cfg(test)]
+    pub(crate) fn pooled(&self) -> usize {
+        self.free.len()
+    }
+}
 
 /// One bounded batch of rows emitted by a [`RowStream`]. Its length never
 /// exceeds the stream's high-water mark.
@@ -95,6 +181,12 @@ pub(crate) struct RowStream {
     peak_buffered: usize,
     /// Set once the source drains or errors.
     terminal: Option<StreamTerminal>,
+    /// Optional per-owner buffer arena (#885). When present, chunk
+    /// buffers are leased from / recycled to this arena instead of
+    /// allocated fresh per chunk. `None` preserves the original
+    /// allocate-per-chunk behaviour exactly (used by every consumer that
+    /// is not driven by a `StatementFrame`-owned arena).
+    arena: Option<Rc<RefCell<RowBufferArena>>>,
 }
 
 impl RowStream {
@@ -115,6 +207,7 @@ impl RowStream {
             row_count: 0,
             peak_buffered: 0,
             terminal: None,
+            arena: None,
         }
     }
 
@@ -140,7 +233,17 @@ impl RowStream {
             row_count: 0,
             peak_buffered: 0,
             terminal: None,
+            arena: None,
         }
+    }
+
+    /// Bind a per-owner buffer arena (#885) to this stream. Chunk buffers
+    /// will be leased from / recycled to it instead of allocated fresh per
+    /// chunk. Builder-style so existing constructors keep their original
+    /// signatures and the arena stays opt-in.
+    pub(crate) fn with_arena(mut self, arena: Rc<RefCell<RowBufferArena>>) -> Self {
+        self.arena = Some(arena);
+        self
     }
 
     /// Largest record count ever resident in one in-flight chunk. Bounded
@@ -163,7 +266,13 @@ impl RowStream {
         if self.terminal.is_some() {
             return None;
         }
-        let mut records: Vec<UnifiedRecord> = Vec::new();
+        // Lease a chunk buffer from the per-owner arena when one is wired
+        // (#885); otherwise allocate fresh, preserving the original
+        // per-chunk allocation behaviour byte-for-byte.
+        let mut records: Vec<UnifiedRecord> = match &self.arena {
+            Some(arena) => arena.borrow_mut().lease(),
+            None => Vec::new(),
+        };
         while records.len() < self.high_water_mark {
             match self.source.next() {
                 Some(Ok(record)) => records.push(record),
@@ -189,7 +298,13 @@ impl RowStream {
         self.row_count += records.len() as u64;
         if records.is_empty() {
             // Either we errored with nothing buffered, or the source was
-            // empty; ensure a terminal is set and stop.
+            // empty; ensure a terminal is set and stop. Recycle the
+            // (empty) leased buffer rather than dropping it, so a stream
+            // whose row count is an exact multiple of the high-water mark
+            // does not silently discard the chunk allocation (#885).
+            if let Some(arena) = &self.arena {
+                arena.borrow_mut().recycle(records);
+            }
             if self.terminal.is_none() {
                 self.terminal = Some(StreamTerminal::End {
                     row_count: self.row_count,
@@ -208,7 +323,16 @@ impl RowStream {
     pub(crate) fn collect_unified(mut self) -> RedDBResult<UnifiedResult> {
         let mut records: Vec<UnifiedRecord> = Vec::new();
         while let Some(chunk) = self.next_chunk() {
-            records.extend(chunk.records);
+            // `append` moves the chunk's rows into the accumulator in
+            // order (identical to the old `extend`) and leaves the chunk
+            // buffer empty-but-allocated, so it can be recycled to the
+            // arena for the next chunk-fetch (#885). Without an arena the
+            // buffer simply drops here, exactly as before.
+            let mut buf = chunk.records;
+            records.append(&mut buf);
+            if let Some(arena) = &self.arena {
+                arena.borrow_mut().recycle(buf);
+            }
         }
         if let Some(StreamTerminal::Error { message, .. }) = self.terminal {
             return Err(RedDBError::Query(message));
@@ -227,7 +351,13 @@ impl RowStream {
     pub(crate) fn collect_records(mut self) -> RedDBResult<Vec<UnifiedRecord>> {
         let mut records: Vec<UnifiedRecord> = Vec::new();
         while let Some(chunk) = self.next_chunk() {
-            records.extend(chunk.records);
+            // See `collect_unified`: append-then-recycle reuses the chunk
+            // buffer via the arena (#885) while preserving row order.
+            let mut buf = chunk.records;
+            records.append(&mut buf);
+            if let Some(arena) = &self.arena {
+                arena.borrow_mut().recycle(buf);
+            }
         }
         if let Some(StreamTerminal::Error { message, .. }) = self.terminal {
             return Err(RedDBError::Query(message));
@@ -361,6 +491,116 @@ mod tests {
             stream.terminal(),
             Some(&StreamTerminal::End { row_count: 0 })
         );
+    }
+
+    /// A leased buffer is always empty even when reused — recycling a
+    /// buffer that held rows must not let those rows bleed into the next
+    /// lease (#885 acceptance: "no data bleeds across requests when a
+    /// buffer is reused").
+    #[test]
+    fn arena_lease_never_bleeds_prior_rows() {
+        let mut arena = RowBufferArena::new();
+        let mut buf = arena.lease();
+        assert!(buf.is_empty(), "fresh lease is empty");
+        buf.push(row(1));
+        buf.push(row(2));
+        arena.recycle(buf);
+        assert_eq!(arena.pooled(), 1, "recycled buffer is retained for reuse");
+
+        let reused = arena.lease();
+        assert!(
+            reused.is_empty(),
+            "a reused buffer carries no rows from the prior chunk"
+        );
+        assert_eq!(arena.pooled(), 0, "leasing drains the free-list slot");
+    }
+
+    /// `reset()` reclaims the arena to a clean state — every retained
+    /// buffer is dropped (#885 acceptance: "reset to a clean state at
+    /// frame end").
+    #[test]
+    fn arena_reset_drops_retained_buffers() {
+        let mut arena = RowBufferArena::new();
+        let buf = arena.lease();
+        arena.recycle(buf);
+        let buf2 = arena.lease();
+        arena.recycle(buf2);
+        assert!(arena.pooled() >= 1);
+        arena.reset();
+        assert_eq!(arena.pooled(), 0, "reset clears the free-list");
+    }
+
+    /// Driving a multi-chunk stream through an arena recycles the single
+    /// in-flight chunk buffer across chunk-fetches instead of allocating a
+    /// fresh one each time, and the collected result is byte-identical to
+    /// the arena-free baseline (#885 acceptance: byte-identical results,
+    /// buffer reuse).
+    #[test]
+    fn arena_backed_stream_reuses_buffer_and_matches_baseline() {
+        const N: u64 = 5_000;
+        const HWM: usize = 256;
+
+        let baseline = RowStream::from_lazy(
+            vec!["n".into()],
+            Default::default(),
+            HWM,
+            Box::new((0..N).map(|i| Ok(row(i)))),
+        )
+        .collect_records()
+        .expect("baseline collects");
+
+        let arena = Rc::new(RefCell::new(RowBufferArena::new()));
+        let arena_backed = RowStream::from_lazy(
+            vec!["n".into()],
+            Default::default(),
+            HWM,
+            Box::new((0..N).map(|i| Ok(row(i)))),
+        )
+        .with_arena(Rc::clone(&arena))
+        .collect_records()
+        .expect("arena-backed collects");
+
+        assert_eq!(
+            arena_backed.len(),
+            baseline.len(),
+            "row count identical to the per-request-allocation baseline"
+        );
+        for (a, b) in arena_backed.iter().zip(baseline.iter()) {
+            assert_eq!(
+                a.get("n"),
+                b.get("n"),
+                "each row is byte-identical to the baseline"
+            );
+        }
+        // After draining a many-chunk stream the arena holds exactly the
+        // one recycled chunk buffer — proof the buffer was reused rather
+        // than reallocated per chunk.
+        assert_eq!(
+            arena.borrow().pooled(),
+            1,
+            "one chunk buffer is recycled and reused across all chunk-fetches"
+        );
+    }
+
+    /// `from_unified` round-trips byte-identically whether or not an arena
+    /// is bound — the arena is a pure allocation optimisation (#885
+    /// acceptance: byte-identical observable results).
+    #[test]
+    fn arena_backed_from_unified_round_trips_verbatim() {
+        let original = UnifiedResult {
+            columns: vec!["a".into(), "b".into()],
+            records: vec![row(1), row(2), row(3)],
+            stats: Default::default(),
+            pre_serialized_json: Some("{\"fast\":true}".into()),
+        };
+        let arena = Rc::new(RefCell::new(RowBufferArena::new()));
+        let collected = RowStream::from_unified(original.clone(), 2)
+            .with_arena(arena)
+            .collect_unified()
+            .expect("arena-backed stream collects ok");
+        assert_eq!(collected.columns, original.columns);
+        assert_eq!(collected.records.len(), original.records.len());
+        assert_eq!(collected.pre_serialized_json, original.pre_serialized_json);
     }
 
     /// Bounded-memory over a *real* table scan: a query producing N rows
