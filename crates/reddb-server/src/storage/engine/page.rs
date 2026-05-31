@@ -78,6 +78,12 @@ pub enum PageType {
     NativeMeta = 11,
     /// Encrypted auth vault page (users, API keys, bootstrap state)
     Vault = 12,
+    /// Sealed hypertable chunk in columnar form — carries one `RDCC`
+    /// column block (header + per-column ZSTD streams + footer). Written
+    /// by the columnar chunk-seal path (PRD #850, Phase 1). A trailing
+    /// variant: old engines never wrote 13, so its presence is itself a
+    /// columnar discriminant gated by the page `format_version`.
+    ColumnBlock = 13,
 }
 
 impl PageType {
@@ -97,7 +103,35 @@ impl PageType {
             10 => Some(Self::GraphMeta),
             11 => Some(Self::NativeMeta),
             12 => Some(Self::Vault),
+            13 => Some(Self::ColumnBlock),
             _ => None,
+        }
+    }
+}
+
+/// Coordinate of a stored block within the page file — the page that
+/// holds it plus the `[offset, offset + length)` byte window inside that
+/// page's content area. Introduced for `ChunkMeta.columnar_page` (the
+/// columnar-vs-row migration discriminant, PRD #850 Phase 1): a sealed
+/// chunk records where its `RDCC` [`PageType::ColumnBlock`] block lives so
+/// reads decode the columnar form, while `None` means a legacy row-stored
+/// chunk served by the entity path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageLocation {
+    /// Page id holding the block.
+    pub page_id: u32,
+    /// Byte offset of the block within that page's content area.
+    pub offset: u32,
+    /// Byte length of the block.
+    pub length: u32,
+}
+
+impl PageLocation {
+    pub fn new(page_id: u32, offset: u32, length: u32) -> Self {
+        Self {
+            page_id,
+            offset,
+            length,
         }
     }
 }
@@ -511,6 +545,7 @@ mod tests {
             PageType::GraphMeta,
             PageType::NativeMeta,
             PageType::Vault,
+            PageType::ColumnBlock,
         ];
 
         for (i, &pt) in page_types.iter().enumerate() {
@@ -528,7 +563,8 @@ mod tests {
         assert_eq!(PageType::from_u8(10), Some(PageType::GraphMeta));
         assert_eq!(PageType::from_u8(11), Some(PageType::NativeMeta));
         assert_eq!(PageType::from_u8(12), Some(PageType::Vault));
-        assert_eq!(PageType::from_u8(13), None);
+        assert_eq!(PageType::from_u8(13), Some(PageType::ColumnBlock));
+        assert_eq!(PageType::from_u8(14), None);
         assert_eq!(PageType::from_u8(255), None);
     }
 

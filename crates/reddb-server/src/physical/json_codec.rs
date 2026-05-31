@@ -440,6 +440,14 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
+        "analytical_storage".to_string(),
+        contract
+            .analytical_storage
+            .as_ref()
+            .map(analytical_storage_to_json)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "table_def".to_string(),
         contract
             .table_def
@@ -448,6 +456,40 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
             .unwrap_or(JsonValue::Null),
     );
     JsonValue::Object(object)
+}
+
+fn analytical_storage_to_json(cfg: &crate::catalog::AnalyticalStorageConfig) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("columnar".to_string(), JsonValue::Bool(cfg.columnar));
+    object.insert(
+        "time_key".to_string(),
+        JsonValue::String(cfg.time_key.clone()),
+    );
+    object.insert(
+        "order_by_key".to_string(),
+        cfg.order_by_key
+            .as_ref()
+            .map(|k| JsonValue::String(k.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
+}
+
+fn analytical_storage_from_json(
+    value: &JsonValue,
+) -> io::Result<crate::catalog::AnalyticalStorageConfig> {
+    let object = expect_object(value, "analytical_storage")?;
+    Ok(crate::catalog::AnalyticalStorageConfig {
+        columnar: object
+            .get("columnar")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        time_key: json_string_required(object, "time_key")?,
+        order_by_key: object
+            .get("order_by_key")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+    })
 }
 
 pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<CollectionContract> {
@@ -600,6 +642,12 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
         retention_duration_ms: match object.get("retention_duration_ms") {
             Some(JsonValue::Null) | None => None,
             Some(value) => Some(json_u64_value(value)?),
+        },
+        // Legacy sidecars written before the columnar analytical-storage
+        // seam lack this key — default None (row engine). PRD #850 Phase 1.
+        analytical_storage: match object.get("analytical_storage") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(analytical_storage_from_json(value)?),
         },
     })
 }
@@ -1631,7 +1679,31 @@ pub(super) fn hypertable_chunk_to_json(chunk: &PhysicalHypertableChunk) -> JsonV
             .map(json_u64)
             .unwrap_or(JsonValue::Null),
     );
+    object.insert(
+        "columnar_page".to_string(),
+        chunk
+            .columnar_page
+            .map(page_location_to_json)
+            .unwrap_or(JsonValue::Null),
+    );
     JsonValue::Object(object)
+}
+
+fn page_location_to_json(loc: crate::storage::engine::PageLocation) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("page_id".to_string(), json_u64(loc.page_id as u64));
+    object.insert("offset".to_string(), json_u64(loc.offset as u64));
+    object.insert("length".to_string(), json_u64(loc.length as u64));
+    JsonValue::Object(object)
+}
+
+fn page_location_from_json(value: &JsonValue) -> io::Result<crate::storage::engine::PageLocation> {
+    let object = expect_object(value, "page location")?;
+    Ok(crate::storage::engine::PageLocation {
+        page_id: json_u64_required(object, "page_id")? as u32,
+        offset: json_u64_required(object, "offset")? as u32,
+        length: json_u64_required(object, "length")? as u32,
+    })
 }
 
 pub(super) fn hypertable_chunk_from_json(value: &JsonValue) -> io::Result<PhysicalHypertableChunk> {
@@ -1649,6 +1721,10 @@ pub(super) fn hypertable_chunk_from_json(value: &JsonValue) -> io::Result<Physic
         ttl_override_ns: match object.get("ttl_override_ns") {
             Some(JsonValue::Null) | None => None,
             Some(value) => Some(json_u64_value(value)?),
+        },
+        columnar_page: match object.get("columnar_page") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(page_location_from_json(value)?),
         },
     })
 }
@@ -1836,5 +1912,67 @@ mod tests {
         let value = minimal_contract_object(Some(true));
         let contract = collection_contract_from_json(&value).expect("decode");
         assert!(contract.context_index_enabled);
+    }
+
+    #[test]
+    fn columnar_page_round_trips_through_chunk_json() {
+        // The migration discriminant MUST survive the sidecar (PRD #850).
+        let chunk = PhysicalHypertableChunk {
+            start_ns: 10,
+            end_ns_exclusive: 20,
+            row_count: 3,
+            min_ts_ns: 11,
+            max_ts_ns: 19,
+            sealed: true,
+            ttl_override_ns: Some(99),
+            columnar_page: Some(crate::storage::engine::PageLocation::new(7, 0, 1234)),
+        };
+        let decoded =
+            hypertable_chunk_from_json(&hypertable_chunk_to_json(&chunk)).expect("decode");
+        assert_eq!(
+            decoded.columnar_page,
+            Some(crate::storage::engine::PageLocation::new(7, 0, 1234))
+        );
+        assert!(decoded.sealed);
+        assert_eq!(decoded.ttl_override_ns, Some(99));
+    }
+
+    #[test]
+    fn legacy_chunk_without_columnar_page_decodes_none() {
+        // A sidecar written before the feature lacks the key — a
+        // row-stored chunk must never be mis-read as columnar.
+        let mut obj = Map::new();
+        obj.insert("start_ns".to_string(), JsonValue::Number(0.0));
+        obj.insert("end_ns_exclusive".to_string(), JsonValue::Number(1.0));
+        obj.insert("row_count".to_string(), JsonValue::Number(0.0));
+        obj.insert("min_ts_ns".to_string(), JsonValue::Number(0.0));
+        obj.insert("max_ts_ns".to_string(), JsonValue::Number(0.0));
+        let decoded = hypertable_chunk_from_json(&JsonValue::Object(obj)).expect("decode");
+        assert_eq!(decoded.columnar_page, None);
+    }
+
+    #[test]
+    fn analytical_storage_round_trips_and_defaults_none() {
+        // Absent key (legacy sidecar) → row engine (None).
+        let contract = collection_contract_from_json(&minimal_contract_object(None)).expect("dec");
+        assert!(contract.analytical_storage.is_none());
+
+        // Present + columnar → preserved verbatim.
+        let JsonValue::Object(mut obj) = minimal_contract_object(None) else {
+            unreachable!()
+        };
+        let mut cfg = Map::new();
+        cfg.insert("columnar".to_string(), JsonValue::Bool(true));
+        cfg.insert("time_key".to_string(), JsonValue::String("ts".to_string()));
+        cfg.insert(
+            "order_by_key".to_string(),
+            JsonValue::String("host".to_string()),
+        );
+        obj.insert("analytical_storage".to_string(), JsonValue::Object(cfg));
+        let contract = collection_contract_from_json(&JsonValue::Object(obj)).expect("dec");
+        let cfg = contract.analytical_storage.expect("present");
+        assert!(cfg.columnar);
+        assert_eq!(cfg.time_key, "ts");
+        assert_eq!(cfg.order_by_key.as_deref(), Some("host"));
     }
 }

@@ -1778,6 +1778,7 @@ fn collection_contract_from_create_table(
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     })
 }
 
@@ -1811,6 +1812,7 @@ fn default_collection_contract_for_existing_table(
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     }
 }
 
@@ -1846,6 +1848,7 @@ fn keyed_collection_contract(
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     }
 }
 
@@ -1882,6 +1885,7 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     }
 }
 
@@ -1913,6 +1917,7 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     }
 }
 
@@ -2496,6 +2501,7 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     }
 }
 

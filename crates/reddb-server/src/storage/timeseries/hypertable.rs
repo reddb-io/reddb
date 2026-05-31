@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use super::retention::parse_duration_ns;
+use crate::storage::engine::PageLocation;
 
 /// Spec declared by `CREATE HYPERTABLE`.
 #[derive(Debug, Clone)]
@@ -135,6 +136,14 @@ pub struct ChunkMeta {
     /// current month of data forever but expire everything older
     /// than 90 days.
     pub ttl_override_ns: Option<u64>,
+    /// Columnar-vs-row **migration discriminant** (PRD #850, Phase 1).
+    /// `Some(loc)` → this chunk was sealed columnar; its `RDCC`
+    /// [`ColumnBlock`](crate::storage::engine::PageType::ColumnBlock) lives
+    /// at `loc` and reads decode the columnar form. `None` → a legacy
+    /// row-stored chunk served by the entity path (read-bridge lands in
+    /// #861). This MUST persist so pre-existing row-stored data is never
+    /// mis-read as columnar after a restart.
+    pub columnar_page: Option<PageLocation>,
 }
 
 impl ChunkMeta {
@@ -147,6 +156,7 @@ impl ChunkMeta {
             max_ts_ns: 0,
             sealed: false,
             ttl_override_ns: None,
+            columnar_page: None,
         }
     }
 
