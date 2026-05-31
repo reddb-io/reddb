@@ -19,6 +19,7 @@
 //! - "SIEVE is Simpler than LRU" (NSDI '24)
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::page::Page;
@@ -43,12 +44,18 @@ pub const DEFAULT_CACHE_CAPACITY: usize = 100_000;
 /// Minimum cache capacity
 pub const MIN_CACHE_CAPACITY: usize = 2;
 
-/// Cache entry with SIEVE visited bit
+/// Lock-protected cache entry.
+///
+/// Per ADR 0033 (`page-cache-lock-free-hit`), the SIEVE `visited` bit
+/// no longer lives here — it moved to [`ShardMeta`], a separate
+/// cache-line-packed atomic array, so a cache hit can flip it without
+/// upgrading the per-shard write lock. `pin_count` and `dirty` stay in
+/// the entry behind the `entries` `RwLock`: they are written only by
+/// structural operations (`pin`/`unpin`/`mark_dirty`/`mark_clean`,
+/// which take the write lock) and are *never* touched by the hit path.
 struct CacheEntry {
     /// The cached page
     page: Page,
-    /// Visited bit for SIEVE algorithm (true = recently accessed)
-    visited: bool,
     /// Pin count (page cannot be evicted while pinned)
     pin_count: usize,
     /// Whether the page is dirty (modified)
@@ -59,10 +66,170 @@ impl CacheEntry {
     fn new(page: Page) -> Self {
         Self {
             page,
-            visited: false,
             pin_count: 0,
             dirty: false,
         }
+    }
+}
+
+/// Cache line size in bytes (x86-64 / aarch64). The SIEVE `visited`
+/// bits and per-slot `tag`s are laid out in their own line-aligned,
+/// densely packed arrays (see [`ShardMeta`]) so the lock-free hit path
+/// — which only ever touches `visited`/`tag` — never shares a cache
+/// line with the lock-protected [`CacheEntry`] payload (page bytes,
+/// `pin_count`, `dirty`). ADR 0033.
+const CACHE_LINE: usize = 64;
+
+/// Sentinel `tag` value for an unoccupied slot. `u32::MAX` is reserved
+/// (no real page id uses it) so the hit path can tell, with a single
+/// relaxed load, whether the slot it resolved still belongs to the
+/// page it is marking.
+const TAG_EMPTY: u32 = u32::MAX;
+
+/// One cache line of packed `visited` bits: one [`AtomicBool`] (1 byte)
+/// per slot, 64 slots per line. `#[repr(align(64))]` forces the boxed
+/// backing buffer onto a line boundary, so the array starts aligned and
+/// no two unrelated lines ever false-share.
+#[repr(align(64))]
+struct VisitedLine([AtomicBool; CACHE_LINE]);
+
+/// Number of `AtomicU32` tags that fit in one cache line.
+const TAGS_PER_LINE: usize = CACHE_LINE / 4;
+
+/// One cache line of packed slot tags: one [`AtomicU32`] (4 bytes) per
+/// slot, 16 slots per line. Line-aligned for the same reason as
+/// [`VisitedLine`].
+#[repr(align(64))]
+struct TagLine([AtomicU32; TAGS_PER_LINE]);
+
+/// Cache-line-packed SIEVE metadata, split out of [`CacheEntry`].
+///
+/// Both arrays are indexed by slot and are *separate, line-aligned*
+/// allocations (ADR 0033 acceptance: "visited/tag metadata is laid out
+/// in separate cache-line-aligned arrays"). Because the elements are
+/// atomics, the hit path mutates `visited` through a shared `&self`
+/// with no lock at all — satisfying the contract's "cache hits set
+/// visited without acquiring the per-shard write lock".
+///
+/// The arrays are sized to the shard `capacity`. In normal operation a
+/// slot index never reaches `capacity` (`insert` evicts before growing
+/// `entries`), so every access lands in range. The one pathological
+/// exception — a full cache whose every slot is pinned, where `insert`
+/// grows `entries` past `capacity` — is handled by the bounds guards
+/// below: an out-of-range slot reports "not visited" / `TAG_EMPTY`,
+/// which makes that emergency over-capacity entry the first eviction
+/// candidate once a slot frees. No panic, no unbounded metadata.
+struct ShardMeta {
+    visited: Box<[VisitedLine]>,
+    tag: Box<[TagLine]>,
+    capacity: usize,
+}
+
+impl ShardMeta {
+    fn new(capacity: usize) -> Self {
+        let visited = (0..capacity.div_ceil(CACHE_LINE))
+            .map(|_| VisitedLine(std::array::from_fn(|_| AtomicBool::new(false))))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let tag = (0..capacity.div_ceil(TAGS_PER_LINE))
+            .map(|_| TagLine(std::array::from_fn(|_| AtomicU32::new(TAG_EMPTY))))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            visited,
+            tag,
+            capacity,
+        }
+    }
+
+    /// Lock-free SIEVE hit mark. Benign-race by contract (ADR 0033): a
+    /// concurrent eviction clearing this same bit only costs one extra
+    /// SIEVE cycle. `Relaxed` is sufficient — the bit carries no
+    /// happens-before obligation toward any other state.
+    #[inline]
+    fn mark_visited(&self, slot: usize) {
+        if let Some(b) = self.visited_bit(slot) {
+            b.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    fn is_visited(&self, slot: usize) -> bool {
+        self.visited_bit(slot)
+            .map(|b| b.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    /// Clear the visited bit. Structural (called from the eviction hand
+    /// under the per-shard locks), but the store itself is a relaxed
+    /// atomic so it composes with the lock-free hit mark.
+    #[inline]
+    fn clear_visited(&self, slot: usize) {
+        if let Some(b) = self.visited_bit(slot) {
+            b.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// The page id currently tagged at `slot`, or [`TAG_EMPTY`].
+    #[inline]
+    fn tag(&self, slot: usize) -> u32 {
+        self.tag_slot(slot)
+            .map(|t| t.load(Ordering::Relaxed))
+            .unwrap_or(TAG_EMPTY)
+    }
+
+    /// Bind a slot to a page and reset its visited bit. Structural:
+    /// the caller holds the per-shard write lock that serialises slot
+    /// ownership.
+    #[inline]
+    fn occupy(&self, slot: usize, page_id: u32) {
+        if let Some(t) = self.tag_slot(slot) {
+            t.store(page_id, Ordering::Relaxed);
+        }
+        self.clear_visited(slot);
+    }
+
+    /// Release a slot. Structural; caller holds the write lock.
+    #[inline]
+    fn vacate(&self, slot: usize) {
+        if let Some(t) = self.tag_slot(slot) {
+            t.store(TAG_EMPTY, Ordering::Relaxed);
+        }
+        self.clear_visited(slot);
+    }
+
+    /// Reset all metadata to the empty state (used by `clear`).
+    fn reset(&self) {
+        for line in self.visited.iter() {
+            for b in line.0.iter() {
+                b.store(false, Ordering::Relaxed);
+            }
+        }
+        for line in self.tag.iter() {
+            for t in line.0.iter() {
+                t.store(TAG_EMPTY, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline]
+    fn visited_bit(&self, slot: usize) -> Option<&AtomicBool> {
+        if slot >= self.capacity {
+            return None;
+        }
+        self.visited
+            .get(slot / CACHE_LINE)
+            .map(|line| &line.0[slot % CACHE_LINE])
+    }
+
+    #[inline]
+    fn tag_slot(&self, slot: usize) -> Option<&AtomicU32> {
+        if slot >= self.capacity {
+            return None;
+        }
+        self.tag
+            .get(slot / TAGS_PER_LINE)
+            .map(|line| &line.0[slot % TAGS_PER_LINE])
     }
 }
 
@@ -103,6 +270,10 @@ pub struct PageCacheShard {
     fifo: Mutex<VecDeque<u32>>,
     /// Cache entries (indexed by slot)
     entries: RwLock<Vec<Option<CacheEntry>>>,
+    /// Cache-line-packed SIEVE metadata (`visited` bits + slot `tag`s),
+    /// kept out of `entries` so the hit path can mark `visited` with a
+    /// lock-free relaxed atomic store. ADR 0033.
+    meta: ShardMeta,
     /// Free slots
     free_slots: Mutex<Vec<usize>>,
     /// SIEVE eviction hand position
@@ -121,6 +292,7 @@ impl PageCacheShard {
             index: RwLock::new(HashMap::with_capacity(capacity)),
             fifo: Mutex::new(VecDeque::with_capacity(capacity)),
             entries: RwLock::new(Vec::with_capacity(capacity)),
+            meta: ShardMeta::new(capacity),
             free_slots: Mutex::new(Vec::new()),
             hand: Mutex::new(0),
             stats: Mutex::new(CacheStats::default()),
@@ -175,23 +347,29 @@ impl PageCacheShard {
         };
         drop(index);
 
-        // Get entry and mark as visited. Clone the page under a read
-        // lock; upgrade to a write lock *only* if the visited bit
-        // actually needs flipping. Hot-loop reads of an already-visited
-        // page (e.g. BTree inserts hammering the rightmost leaf) can
-        // then stay on the read lock — a second write lock per insert
-        // was one of the costliest steps on `insert_sequential`.
+        // Lock-free hit path (ADR 0033). Clone the page under a *read*
+        // lock — never a write lock — then set the SIEVE `visited` bit
+        // with a single relaxed atomic store on the separate
+        // cache-line-packed metadata array. The hit path acquires no
+        // write lock and never touches `pin_count`/`dirty` (those live
+        // in `CacheEntry` behind the write lock and are mutated only by
+        // structural operations). Dropping the per-hit write-lock
+        // upgrade is the whole point: hot-loop reads of an
+        // already-cached page (e.g. BTree inserts hammering the
+        // rightmost leaf) no longer serialise on the entries writer.
         let entries = cache_read(&self.entries);
         if let Some(entry) = entries.get(slot).and_then(|e| e.as_ref()) {
             let page = entry.page.clone();
-            let needs_mark = !entry.visited;
             drop(entries);
 
-            if needs_mark {
-                let mut entries = cache_write(&self.entries);
-                if let Some(Some(entry)) = entries.get_mut(slot) {
-                    entry.visited = true;
-                }
+            // Mark visited lock-free. Confirm the slot still tags this
+            // page id first: if a racing eviction repurposed the slot
+            // we simply skip the mark (benign — at worst one extra
+            // SIEVE cycle, never a wrong-page write). The tag check
+            // never changes hit/miss accounting; the entry existed, so
+            // this is a hit.
+            if self.meta.tag(slot) == page_id {
+                self.meta.mark_visited(slot);
             }
 
             cache_lock(&self.stats).hits += 1;
@@ -214,12 +392,16 @@ impl PageCacheShard {
             if let Some(&slot) = index.get(&page_id) {
                 drop(index);
 
-                // Update existing entry
+                // Update existing entry under the write lock; the
+                // SIEVE visited bit lives in the separate metadata
+                // array and is set lock-free (matches the prior
+                // behaviour of marking a re-inserted page visited).
                 let mut entries = cache_write(&self.entries);
                 if let Some(Some(entry)) = entries.get_mut(slot) {
                     entry.page = page;
-                    entry.visited = true;
                 }
+                drop(entries);
+                self.meta.mark_visited(slot);
                 return None;
             }
         }
@@ -266,6 +448,11 @@ impl PageCacheShard {
             let mut index = cache_write(&self.index);
             index.insert(page_id, slot);
         }
+
+        // Bind the metadata slot to this page (tag = page_id, visited
+        // reset). Structural: ordered after the entry/index writes that
+        // the per-shard write lock serialises.
+        self.meta.occupy(slot, page_id);
 
         // Add to FIFO
         {
@@ -318,7 +505,9 @@ impl PageCacheShard {
                 }
             };
 
-            // Check entry
+            // Check entry. `pin_count`/`dirty` are read under the
+            // entries lock; the SIEVE `visited` bit is read from the
+            // separate atomic metadata array.
             let (should_evict, dirty) = {
                 let entries = cache_read(&self.entries);
                 match entries.get(slot).and_then(|e| e.as_ref()) {
@@ -326,7 +515,7 @@ impl PageCacheShard {
                         if entry.pin_count > 0 {
                             // Pinned, can't evict
                             (false, false)
-                        } else if entry.visited {
+                        } else if self.meta.is_visited(slot) {
                             // Clear visited bit, skip (SIEVE)
                             (false, false)
                         } else {
@@ -342,21 +531,33 @@ impl PageCacheShard {
             };
 
             if !should_evict {
-                // Clear visited bit
-                let mut entries = cache_write(&self.entries);
-                if let Some(Some(entry)) = entries.get_mut(slot) {
-                    entry.visited = false;
-                }
+                // Clear visited bit lock-free (no entries write lock
+                // needed — `visited` is no longer part of `CacheEntry`).
+                self.meta.clear_visited(slot);
                 *hand += 1;
                 continue;
             }
 
-            // Evict this entry
+            // Evict this entry. Contract guard (ADR 0033): the eviction
+            // hand must never select a pinned page. We re-check under
+            // the write lock — the only place `pin_count` is read for
+            // the eviction decision and the place it must hold.
             let evicted_page = {
                 let mut entries = cache_write(&self.entries);
+                debug_assert!(
+                    entries
+                        .get(slot)
+                        .and_then(|e| e.as_ref())
+                        .map(|e| e.pin_count == 0)
+                        .unwrap_or(true),
+                    "ADR 0033 violation: eviction selected a pinned page (slot {slot})"
+                );
                 let entry = entries[slot].take();
                 entry.map(|e| e.page)
             };
+
+            // Release the metadata slot (tag -> empty, visited -> false).
+            self.meta.vacate(slot);
 
             // Remove from index
             {
@@ -462,6 +663,9 @@ impl PageCacheShard {
             let mut entries = cache_write(&self.entries);
             entries.get_mut(slot).and_then(|e| e.take())
         };
+
+        // Release the metadata slot.
+        self.meta.vacate(slot);
 
         // Remove from FIFO
         {
@@ -574,6 +778,7 @@ impl PageCacheShard {
         entries.clear();
         fifo.clear();
         free_slots.clear();
+        self.meta.reset();
         *cache_lock(&self.hand) = 0;
     }
 
@@ -955,6 +1160,171 @@ mod tests {
         assert_eq!(cache.stats().misses, 1);
         cache.reset_stats();
         assert_eq!(cache.stats().misses, 0);
+    }
+
+    /// ADR 0033: the SIEVE `visited`/`tag` metadata lives in its own
+    /// cache-line-packed, line-aligned arrays — separate from the
+    /// lock-protected `CacheEntry`. Assert the line types are exactly
+    /// one 64-byte line and 64-byte aligned (so the boxed backing
+    /// buffers start on a line boundary and never false-share), and
+    /// that `CacheEntry` no longer carries the visited bit.
+    #[test]
+    fn test_metadata_layout_is_cache_line_packed() {
+        assert_eq!(std::mem::align_of::<VisitedLine>(), CACHE_LINE);
+        assert_eq!(std::mem::size_of::<VisitedLine>(), CACHE_LINE);
+        assert_eq!(std::mem::align_of::<TagLine>(), CACHE_LINE);
+        assert_eq!(std::mem::size_of::<TagLine>(), CACHE_LINE);
+
+        // The metadata arrays are distinct allocations from `entries`.
+        let meta = ShardMeta::new(200);
+        // Densely packed: 64 visited bits per line, 16 tags per line.
+        assert_eq!(meta.visited.len(), 200usize.div_ceil(64));
+        assert_eq!(meta.tag.len(), 200usize.div_ceil(16));
+
+        // occupy/vacate round-trip through the tag array.
+        meta.occupy(5, 42);
+        assert_eq!(meta.tag(5), 42);
+        assert!(!meta.is_visited(5));
+        meta.mark_visited(5);
+        assert!(meta.is_visited(5));
+        meta.vacate(5);
+        assert_eq!(meta.tag(5), TAG_EMPTY);
+        assert!(!meta.is_visited(5));
+    }
+
+    /// ADR 0033: a cache hit sets the SIEVE `visited` bit on the
+    /// separate metadata array (no write-lock upgrade), and that bit
+    /// drives eviction exactly as before — a hit page survives one
+    /// eviction sweep while an un-hit page is evicted first.
+    #[test]
+    fn test_hit_sets_visited_and_preserves_sieve_policy() {
+        let cache = PageCacheShard::new(4);
+        for i in 0..4 {
+            cache.insert(i, make_page(i));
+        }
+
+        // Hit pages 0 and 1 (lock-free visited mark via metadata array).
+        assert!(cache.get(0).is_some());
+        assert!(cache.get(1).is_some());
+
+        // Insert two more: SIEVE evicts the un-hit 2 and 3 first.
+        cache.insert(10, make_page(10));
+        cache.insert(11, make_page(11));
+
+        assert!(cache.contains(0), "hit page 0 must survive");
+        assert!(cache.contains(1), "hit page 1 must survive");
+        assert!(cache.contains(10));
+        assert!(cache.contains(11));
+        assert!(!cache.contains(2));
+        assert!(!cache.contains(3));
+    }
+
+    /// ADR 0033 acceptance: under concurrent hits + eviction, no pinned
+    /// page is ever evicted, and dirty pages are never silently lost —
+    /// every dirty page that leaves the cache is returned for
+    /// writeback. Stress/loom-style: many threads hammer hits while
+    /// other threads drive insertions (and thus the eviction hand).
+    #[test]
+    fn test_concurrent_hits_never_evict_pinned_or_lose_dirty() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        const CAP: u32 = 64;
+        const PINNED: u32 = 8; // pages 0..8 stay pinned for the whole run
+        const DIRTY: u32 = 8; // pages 8..16 are dirty
+        const HITTERS: usize = 6;
+        const INSERTERS: usize = 4;
+        const ROUNDS: usize = 4_000;
+
+        let cache = Arc::new(PageCacheShard::new(CAP as usize));
+        for i in 0..CAP {
+            cache.insert(i, make_page(i));
+        }
+        for p in 0..PINNED {
+            assert!(cache.pin(p), "pin {p}");
+        }
+        for p in PINNED..PINNED + DIRTY {
+            cache.mark_dirty(p);
+        }
+
+        // Count dirty pages handed back by insert() so we can prove no
+        // dirty data is silently dropped.
+        let dirty_written_back = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Hitters: loop on the lock-free visited path until signalled.
+        let mut hitters = Vec::with_capacity(HITTERS);
+        for h in 0..HITTERS {
+            let cache = Arc::clone(&cache);
+            let stop = Arc::clone(&stop);
+            hitters.push(std::thread::spawn(move || {
+                let mut id = (h as u32) % CAP;
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = cache.get(id);
+                    id = (id + 1) % CAP;
+                }
+            }));
+        }
+
+        // Inserters: bounded churn that drives the eviction hand.
+        let mut inserters = Vec::with_capacity(INSERTERS);
+        for w in 0..INSERTERS {
+            let cache = Arc::clone(&cache);
+            let dirty_written_back = Arc::clone(&dirty_written_back);
+            inserters.push(std::thread::spawn(move || {
+                let base = 1_000 + (w as u32) * 1_000_000;
+                for i in 0..ROUNDS {
+                    let id = base + i as u32;
+                    if cache.insert(id, make_page(id)).is_some() {
+                        // insert only returns Some for a dirty victim.
+                        dirty_written_back.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Invariant checked mid-storm: pinned pages are
+                    // never evicted.
+                    for p in 0..PINNED {
+                        assert!(
+                            cache.contains(p),
+                            "pinned page {p} was evicted under concurrency"
+                        );
+                    }
+                }
+            }));
+        }
+
+        // Inserters finish their bounded work; then stop the hitters.
+        for h in inserters {
+            h.join()
+                .expect("inserter thread panicked (invariant broke)");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for h in hitters {
+            h.join().expect("hitter thread panicked (invariant broke)");
+        }
+
+        // Pinned pages survived the entire storm.
+        for p in 0..PINNED {
+            assert!(cache.contains(p), "pinned page {p} missing after storm");
+        }
+
+        // Dirty accounting: a dirty page still in the cache, plus any
+        // dirty victims handed back for writeback, must conserve the
+        // original dirty set — no dirty page silently vanished.
+        let dirty_resident = (PINNED..PINNED + DIRTY)
+            .filter(|&p| cache.contains(p))
+            .count();
+        assert!(
+            dirty_resident + dirty_written_back.load(Ordering::Relaxed) >= DIRTY as usize,
+            "dirty pages lost: resident={dirty_resident} written_back={}",
+            dirty_written_back.load(Ordering::Relaxed)
+        );
+
+        // Note: we deliberately do NOT assert `len <= CAP`. The
+        // pre-existing fine-grained-lock `insert` checks length and
+        // evicts in separate steps, so concurrent inserters can
+        // transiently push a shard past capacity. ShardMeta's bounds
+        // guards make that overflow safe (over-capacity slots report
+        // "not visited" / TAG_EMPTY and drain first); enforcing a hard
+        // cap is out of scope for this lock-free-hit change.
     }
 
     /// Legacy single-lock baseline used as a regression check for the
