@@ -250,6 +250,88 @@ impl RedDB {
         }
     }
 
+    /// Snapshot the live hypertable registry (specs + every chunk)
+    /// into the sidecar-serialisable form. Called from
+    /// [`persist_metadata`] so the chunk routing spine is durable on
+    /// the same metadata path as collection contracts — issue #866.
+    /// Returns an empty vec (and touches nothing) when no hypertable
+    /// has ever been declared, so non-hypertable databases pay no
+    /// persist cost.
+    pub(crate) fn hypertable_registry_snapshot(&self) -> Vec<crate::physical::PhysicalHypertable> {
+        let registry = self.hypertables();
+        if registry.is_empty() {
+            return Vec::new();
+        }
+        use std::collections::BTreeMap;
+        let mut chunks_by_table: BTreeMap<String, Vec<crate::physical::PhysicalHypertableChunk>> =
+            BTreeMap::new();
+        for chunk in registry.snapshot_chunks() {
+            chunks_by_table
+                .entry(chunk.id.hypertable.clone())
+                .or_default()
+                .push(crate::physical::PhysicalHypertableChunk {
+                    start_ns: chunk.id.start_ns,
+                    end_ns_exclusive: chunk.end_ns_exclusive,
+                    row_count: chunk.row_count,
+                    min_ts_ns: chunk.min_ts_ns,
+                    max_ts_ns: chunk.max_ts_ns,
+                    sealed: chunk.sealed,
+                    ttl_override_ns: chunk.ttl_override_ns,
+                });
+        }
+        registry
+            .list()
+            .into_iter()
+            .map(|spec| crate::physical::PhysicalHypertable {
+                chunks: chunks_by_table.remove(&spec.name).unwrap_or_default(),
+                name: spec.name,
+                time_column: spec.time_column,
+                chunk_interval_ns: spec.chunk_interval_ns,
+                default_ttl_ns: spec.default_ttl_ns,
+            })
+            .collect()
+    }
+
+    /// Rehydrate the hypertable registry from the physical metadata
+    /// sidecar at boot. Mirror of
+    /// [`load_collection_ttl_defaults_from_metadata`] — specs and
+    /// chunks are restored verbatim so bounds / routing / TTL are
+    /// identical to the pre-restart state (issue #866).
+    pub(crate) fn load_hypertables_from_metadata(&self) {
+        let Some(metadata) = self.physical_metadata() else {
+            return;
+        };
+        if metadata.hypertables.is_empty() {
+            return;
+        }
+        let registry = self.hypertables();
+        for hypertable in &metadata.hypertables {
+            let mut spec = crate::storage::timeseries::HypertableSpec::new(
+                hypertable.name.clone(),
+                hypertable.time_column.clone(),
+                hypertable.chunk_interval_ns,
+            );
+            if let Some(ttl) = hypertable.default_ttl_ns {
+                spec = spec.with_ttl_ns(ttl);
+            }
+            registry.register(spec);
+            for chunk in &hypertable.chunks {
+                registry.restore_chunk(crate::storage::timeseries::ChunkMeta {
+                    id: crate::storage::timeseries::ChunkId {
+                        hypertable: hypertable.name.clone(),
+                        start_ns: chunk.start_ns,
+                    },
+                    end_ns_exclusive: chunk.end_ns_exclusive,
+                    row_count: chunk.row_count,
+                    min_ts_ns: chunk.min_ts_ns,
+                    max_ts_ns: chunk.max_ts_ns,
+                    sealed: chunk.sealed,
+                    ttl_override_ns: chunk.ttl_override_ns,
+                });
+            }
+        }
+    }
+
     pub fn run_maintenance(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.store.run_maintenance()?;
         self.persist_metadata()?;
