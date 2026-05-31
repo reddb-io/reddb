@@ -85,6 +85,19 @@ pub struct ReplicaInfo {
     pub healthy: bool,
     pub lag_ms: u32,
     pub last_applied_lsn: u64,
+    /// `true` while this replica is re-bootstrapping (loading a fresh
+    /// snapshot). Its `last_applied_lsn` describes data it is about to
+    /// discard, so a causal reader must treat it as ineligible for
+    /// bookmark reads even when the advertised frontier covers the
+    /// bookmark (issue #837). Non-causal reads are unaffected.
+    ///
+    /// Additive field (ADR 0008 §4): it rides the existing `0x01`
+    /// version tag as a trailing per-replica flag block appended after
+    /// the replica records. An old decoder stops after the records and
+    /// ignores the trailing bytes (defaulting every replica to
+    /// `false`); a new decoder reading old bytes finds no trailing
+    /// block and likewise defaults to `false`. No version bump.
+    pub rebootstrapping: bool,
 }
 
 /// Decode-side errors. Distinct from "unknown version tag", which
@@ -140,6 +153,14 @@ pub fn encode_topology(topology: &Topology) -> Vec<u8> {
         body.push(if r.healthy { 1 } else { 0 });
         body.extend_from_slice(&r.lag_ms.to_le_bytes());
         body.extend_from_slice(&r.last_applied_lsn.to_le_bytes());
+    }
+    // Additive trailing block (ADR 0008 §4): one `rebootstrapping`
+    // byte per replica, in advertised order, appended after the
+    // records. Placed at the tail rather than interleaved into each
+    // record so an old decoder — which stops after `replicas.len`
+    // records — skips it cleanly instead of mis-framing every field.
+    for r in &topology.replicas {
+        body.push(if r.rebootstrapping { 1 } else { 0 });
     }
 
     let mut out = Vec::with_capacity(TOPOLOGY_HEADER_SIZE + body.len());
@@ -197,7 +218,23 @@ pub fn decode_topology(bytes: &[u8]) -> Result<Option<Topology>, TopologyError> 
             healthy,
             lag_ms,
             last_applied_lsn,
+            // Default until the trailing block is read below. A
+            // pre-#837 advertisement carries no trailing block, so
+            // every replica stays `false`.
+            rebootstrapping: false,
         });
+    }
+    // Additive trailing block: a `rebootstrapping` byte per replica.
+    // Present only when the producer is post-#837. When the producer
+    // is older the cursor has no bytes left here and every flag keeps
+    // its `false` default. A partial/truncated block (fewer bytes than
+    // replicas) leaves the unread tail `false` rather than erroring —
+    // forward-compat posture per ADR 0008 §4.
+    for r in replicas.iter_mut() {
+        if cur.remaining() == 0 {
+            break;
+        }
+        r.rebootstrapping = cur.read_u8()? != 0;
     }
     Ok(Some(Topology {
         epoch,
@@ -215,6 +252,8 @@ fn estimate_body_size(t: &Topology) -> usize {
     for r in &t.replicas {
         n += 4 + r.addr.len() + 4 + r.region.len() + 1 + 4 + 8;
     }
+    // Trailing `rebootstrapping` flag block: one byte per replica.
+    n += t.replicas.len();
     n
 }
 
@@ -398,6 +437,7 @@ mod tests {
                     healthy: true,
                     lag_ms: 12,
                     last_applied_lsn: 4242,
+                    rebootstrapping: false,
                 },
                 ReplicaInfo {
                     addr: "replica-b.example.com:5050".into(),
@@ -405,6 +445,7 @@ mod tests {
                     healthy: false,
                     lag_ms: 999,
                     last_applied_lsn: 4100,
+                    rebootstrapping: true,
                 },
             ],
         }
@@ -471,6 +512,42 @@ mod tests {
         // reserves the bump for genuinely breaking changes; a PR
         // adding an optional field must NOT touch this value.
         assert_eq!(TOPOLOGY_WIRE_VERSION_V1, 0x01);
+    }
+
+    #[test]
+    fn rebootstrapping_flag_round_trips_per_replica() {
+        // The additive #837 flag survives a full encode/decode and is
+        // carried independently per replica.
+        let t = fixture();
+        let decoded = decode_topology(&encode_topology(&t))
+            .expect("decode")
+            .expect("v1 known");
+        assert!(!decoded.replicas[0].rebootstrapping);
+        assert!(decoded.replicas[1].rebootstrapping);
+    }
+
+    #[test]
+    fn legacy_blob_without_trailing_block_defaults_rebootstrapping_false() {
+        // Backward-compat (ADR 0008 §4): a pre-#837 producer emits no
+        // trailing flag block. Synthesise that blob by encoding, then
+        // truncating the trailing per-replica flag bytes off the body
+        // and fixing the declared length. The decoder must still parse
+        // and default every replica to `false`.
+        let t = fixture();
+        let full = encode_topology(&t);
+        let trailing = t.replicas.len();
+        let body_len = (full.len() - TOPOLOGY_HEADER_SIZE - trailing) as u32;
+        let mut legacy = Vec::new();
+        legacy.push(TOPOLOGY_WIRE_VERSION_V1);
+        legacy.extend_from_slice(&body_len.to_le_bytes());
+        legacy.extend_from_slice(&full[TOPOLOGY_HEADER_SIZE..full.len() - trailing]);
+        let decoded = decode_topology(&legacy).expect("decode").expect("v1 known");
+        assert_eq!(decoded.replicas.len(), 2);
+        assert!(decoded.replicas.iter().all(|r| !r.rebootstrapping));
+        // Every other field is preserved verbatim — only the new flag
+        // is absent.
+        assert_eq!(decoded.replicas[0].last_applied_lsn, 4242);
+        assert_eq!(decoded.replicas[1].lag_ms, 999);
     }
 
     #[test]
