@@ -313,6 +313,7 @@ fn hypertable_collection_contract(
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     }
 }
 
@@ -354,6 +355,7 @@ fn timeseries_collection_contract(
         session_key: query.session_key.clone(),
         session_gap_ms: query.session_gap_ms,
         retention_duration_ms: None,
+        analytical_storage: None,
     }
 }
 
