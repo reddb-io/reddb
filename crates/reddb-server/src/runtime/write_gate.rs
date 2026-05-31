@@ -604,6 +604,7 @@ mod tests {
             connected_at_unix_ms: 0,
             last_seen_at_unix_ms: 0,
             region: region.map(String::from),
+            rebootstrapping: false,
         }
     }
 
