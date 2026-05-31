@@ -687,4 +687,41 @@ mod tests {
         let _ = fs::remove_file(&wal_path);
         cleanup(&db_path);
     }
+
+    // -----------------------------------------------------------------
+    // gh-892: filesystem block-size alignment diagnostic
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn block_size_warn_fires_for_mismatched_block_size() {
+        // A block size that does not divide the 16 KiB page size means a
+        // page write straddles FS blocks — the predicate must report a
+        // misalignment so `open()` emits the warning.
+        assert!(Pager::page_size_misaligned_with_block(PAGE_SIZE, 6000));
+        // Block larger than the page (e.g. 1 MiB): 16384 % 1048576 != 0.
+        assert!(Pager::page_size_misaligned_with_block(PAGE_SIZE, 1_048_576));
+        // 6 KiB also fails to divide 16 KiB.
+        assert!(Pager::page_size_misaligned_with_block(PAGE_SIZE, 6 * 1024));
+    }
+
+    #[test]
+    fn block_size_silent_for_divisor() {
+        // Block sizes that evenly divide the page size: no straddle, no warn.
+        assert!(!Pager::page_size_misaligned_with_block(PAGE_SIZE, 4096));
+        assert!(!Pager::page_size_misaligned_with_block(PAGE_SIZE, 16384));
+        assert!(!Pager::page_size_misaligned_with_block(PAGE_SIZE, 512));
+        assert!(!Pager::page_size_misaligned_with_block(PAGE_SIZE, 8192));
+    }
+
+    #[test]
+    fn block_size_unavailable_is_silent() {
+        // st_blksize == 0 means the probe is unavailable; never warn on it.
+        assert!(!Pager::page_size_misaligned_with_block(PAGE_SIZE, 0));
+    }
+
+    #[test]
+    fn page_size_is_unchanged_16kib() {
+        // The diagnostic must never alter the compile-time page size.
+        assert_eq!(PAGE_SIZE, 16 * 1024);
+    }
 }

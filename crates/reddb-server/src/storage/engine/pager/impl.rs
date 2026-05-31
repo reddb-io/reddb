@@ -119,7 +119,7 @@ impl Pager {
     /// treated as aligned so a missing probe never produces a warning.
     /// Pure function with no I/O so the warn decision is unit-testable.
     pub(crate) fn page_size_misaligned_with_block(page_size: usize, fs_block_size: u64) -> bool {
-        fs_block_size != 0 && (page_size as u64) % fs_block_size != 0
+        fs_block_size != 0 && !(page_size as u64).is_multiple_of(fs_block_size)
     }
 
     /// Inspect page 0 for the `RDBE` encryption marker, then resolve
