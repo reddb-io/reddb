@@ -143,6 +143,35 @@ impl WalRecord {
     /// the physical record envelope.
     pub fn encode_with_term(&self, term: u64) -> Vec<u8> {
         let mut buf = Vec::new();
+        self.encode_with_term_into(&mut buf, term);
+        buf
+    }
+
+    /// Serialize record into a caller-owned scratch buffer, appending the
+    /// encoded bytes (including checksum) to `out`.
+    ///
+    /// This is the allocation-light entry point for the lock-free append path:
+    /// concurrent appenders each encode into their own per-call `out` buffer
+    /// *before* taking the WAL lock, so the scratch is never shared across
+    /// threads and needs no `thread_local!`. Reusing one `out` across many
+    /// records (the commit blob) avoids the fresh `Vec` + copy that
+    /// [`encode`](Self::encode) allocates per record. The bytes appended are
+    /// byte-identical to `encode()`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        self.encode_with_term_into(out, WAL_DEFAULT_TERM)
+    }
+
+    /// Serialize record into a caller-owned scratch buffer with the replication
+    /// term stamped into the physical envelope. See [`encode_into`](Self::encode_into).
+    ///
+    /// The checksum is computed over only the bytes this call appends (the slice
+    /// starting at the buffer's prior length), so appending after existing
+    /// records leaves them untouched and keeps each record's CRC self-contained.
+    pub fn encode_with_term_into(&self, out: &mut Vec<u8>, term: u64) {
+        // Offset where this record begins; the checksum covers only `out[start..]`
+        // so a reused scratch buffer's earlier records are excluded.
+        let start = out.len();
+        let buf = out;
 
         // Layout (non-PageWrite):
         // [Type: 1]
@@ -195,9 +224,9 @@ impl WalRecord {
                             buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // orig_len
                             buf.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
                             buf.extend_from_slice(&compressed);
-                            let checksum = crc32(&buf);
+                            let checksum = crc32(&buf[start..]);
                             buf.extend_from_slice(&checksum.to_le_bytes());
-                            return buf;
+                            return;
                         }
                     }
                 }
@@ -255,11 +284,9 @@ impl WalRecord {
             }
         }
 
-        // Calculate and append checksum
-        let checksum = crc32(&buf);
+        // Calculate and append checksum over only this record's bytes.
+        let checksum = crc32(&buf[start..]);
         buf.extend_from_slice(&checksum.to_le_bytes());
-
-        buf
     }
 
     /// Read a record from a reader.
@@ -927,6 +954,106 @@ mod tests {
     }
 
     // ==================== Constants Tests ====================
+
+    // ==================== encode_into scratch-buffer Tests ====================
+
+    /// `encode_into` appended to a fresh scratch must be byte-identical to the
+    /// per-allocation `encode()` baseline, for every record variant.
+    #[test]
+    fn test_encode_into_matches_encode_for_all_variants() {
+        let records = vec![
+            WalRecord::Begin { tx_id: 12345 },
+            WalRecord::Commit { tx_id: 99999 },
+            WalRecord::Rollback { tx_id: 54321 },
+            WalRecord::Checkpoint { lsn: 1_000_000 },
+            WalRecord::PageWrite {
+                tx_id: 100,
+                page_id: 42,
+                data: vec![1, 2, 3, 4, 5],
+            },
+            // Large, highly compressible payload → exercises the
+            // PageWriteCompressed early-return branch.
+            WalRecord::PageWrite {
+                tx_id: 7,
+                page_id: 3,
+                data: vec![0xABu8; 1024],
+            },
+            WalRecord::TxCommitBatch {
+                tx_id: 7,
+                actions: vec![b"insert".to_vec(), b"update".to_vec()],
+            },
+            WalRecord::FullPageImage {
+                tx_id: 11,
+                page_id: 9,
+                ckpt_epoch: 42,
+                data: (0..4096).map(|i| (i % 251) as u8).collect(),
+            },
+            WalRecord::VectorInsert {
+                collection: "turbo".to_string(),
+                entity_id: 42,
+                vector: vec![1.0, -0.5, 0.25],
+            },
+        ];
+
+        for record in &records {
+            let baseline = record.encode();
+            let mut scratch = Vec::new();
+            record.encode_into(&mut scratch);
+            assert_eq!(scratch, baseline, "encode_into mismatch for {record:?}");
+        }
+    }
+
+    /// Reusing one scratch buffer across several records yields exactly the
+    /// concatenation of the per-record `encode()` baselines — proving the
+    /// checksum is computed over each record's own slice, not the whole buffer.
+    #[test]
+    fn test_encode_into_reuses_scratch_across_records() {
+        let records = vec![
+            WalRecord::Begin { tx_id: 1 },
+            WalRecord::PageWrite {
+                tx_id: 1,
+                page_id: 10,
+                data: vec![1, 2, 3],
+            },
+            WalRecord::Commit { tx_id: 1 },
+        ];
+
+        let mut expected = Vec::new();
+        for r in &records {
+            expected.extend_from_slice(&r.encode());
+        }
+
+        // One scratch, reused for every record — no per-record allocation.
+        let mut scratch = Vec::new();
+        for r in &records {
+            r.encode_into(&mut scratch);
+        }
+
+        assert_eq!(scratch, expected);
+
+        // And the concatenation round-trips back to the original records.
+        let mut cursor = Cursor::new(scratch);
+        for expected in &records {
+            let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
+            assert_eq!(&decoded, expected);
+        }
+        assert!(WalRecord::read(&mut cursor).unwrap().is_none());
+    }
+
+    /// `encode_with_term_into` honours the term and matches the allocating
+    /// `encode_with_term` baseline even when appended after existing bytes.
+    #[test]
+    fn test_encode_with_term_into_matches_and_preserves_prefix() {
+        let prefix = b"PREFIX-BYTES".to_vec();
+        let record = WalRecord::Begin { tx_id: 42 };
+
+        let mut scratch = prefix.clone();
+        record.encode_with_term_into(&mut scratch, 9);
+
+        // Prefix untouched; suffix equals the allocating baseline.
+        assert_eq!(&scratch[..prefix.len()], &prefix[..]);
+        assert_eq!(&scratch[prefix.len()..], &record.encode_with_term(9)[..]);
+    }
 
     #[test]
     fn test_wal_magic() {
