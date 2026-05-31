@@ -886,6 +886,168 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------
+    // TimeSeries collection kind seals through the SAME columnar path
+    // (PRD #850, Phase 1 — issue #860)
+    //
+    // Under the chunk-is-segment model both `Metrics` and `TimeSeries`
+    // collections route hypertable → chunk, and the physical chunk is the
+    // SAME `TimeSeriesChunk`. These guards pin that a collection of kind
+    // `EntityKind::TimeSeriesPoint`, flagged columnar via
+    // `AnalyticalStorageConfig`, seals through `seal_chunk_with_config`
+    // into the #852 `RDCC` ColumnBlock format VERBATIM — one format, both
+    // kinds, no fork. The live INSERT→seal wiring is #861's; here we drive
+    // the seal directly from TimeSeries-collection entities.
+    // -----------------------------------------------------------------
+
+    /// Build a `UnifiedEntity` of the TimeSeries collection kind
+    /// (`EntityKind::TimeSeriesPoint` + `EntityData::TimeSeries`) carrying a
+    /// single point — the same kind/data pairing the runtime INSERT path
+    /// constructs (see `runtime::impl_dml`).
+    fn timeseries_entity(
+        series: &str,
+        metric: &str,
+        timestamp_ns: u64,
+        value: f64,
+    ) -> crate::storage::unified::entity::UnifiedEntity {
+        use crate::storage::unified::entity::{
+            EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
+        };
+        UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind {
+                series: series.to_string(),
+                metric: metric.to_string(),
+            })),
+            EntityData::TimeSeries(TimeSeriesData {
+                metric: metric.to_string(),
+                timestamp_ns,
+                value,
+                tags: HashMap::new(),
+            }),
+        )
+    }
+
+    /// Transpose a TimeSeries collection's points into the
+    /// `TimeSeriesChunk` the seal path consumes — exactly the (metric,
+    /// tags) grouping + (ts, value) append the Metrics path performs.
+    /// Asserts every entity really IS the TimeSeries collection kind, so
+    /// the test cannot silently drift to another kind.
+    fn chunk_from_timeseries_collection(
+        series: &str,
+        entities: &[crate::storage::unified::entity::UnifiedEntity],
+    ) -> TimeSeriesChunk {
+        use crate::storage::unified::entity::{EntityData, EntityKind};
+        let mut chunk = TimeSeriesChunk::with_max_points(series, HashMap::new(), entities.len());
+        for e in entities {
+            assert!(
+                matches!(e.kind, EntityKind::TimeSeriesPoint(_)),
+                "fixture must be the TimeSeries collection kind"
+            );
+            match &e.data {
+                EntityData::TimeSeries(ts) => {
+                    assert!(chunk.append(ts.timestamp_ns, ts.value));
+                }
+                _ => panic!("TimeSeriesPoint entity must carry TimeSeries data"),
+            }
+        }
+        chunk
+    }
+
+    #[test]
+    fn timeseries_collection_kind_seals_through_the_same_columnar_path() {
+        // A TimeSeries collection (EntityKind::TimeSeriesPoint), flagged
+        // columnar. Use distinct timestamps/values so the round-trip is a
+        // real equality check, not a degenerate one.
+        let expected: Vec<TimeSeriesPoint> = (0..200u64)
+            .map(|i| TimeSeriesPoint {
+                timestamp_ns: 1_700_000_000_000 + i * 1_000_000,
+                value: 42.0 + (i % 7) as f64 * 0.25,
+            })
+            .collect();
+        let entities: Vec<_> = expected
+            .iter()
+            .map(|p| timeseries_entity("svc.latency", "p99", p.timestamp_ns, p.value))
+            .collect();
+        let mut chunk = chunk_from_timeseries_collection("svc.latency", &entities);
+
+        let cfg = AnalyticalStorageConfig {
+            columnar: true,
+            time_key: "ts".to_string(),
+            order_by_key: None,
+        };
+
+        // Criterion 1: the columnar flag routes the seal to the ColumnBlock
+        // path — identical dispatch to the Metrics collection kind.
+        let routed = seal_chunk_with_config(&mut chunk, Some(&cfg), 860, 0).expect("seal");
+        let bytes = match routed {
+            SealedChunkStorage::Columnar(b) => b,
+            SealedChunkStorage::Row => {
+                panic!("TimeSeries columnar flag must seal through the ColumnBlock writer")
+            }
+        };
+
+        // Criterion 3: it is the #852 RDCC ColumnBlock format VERBATIM — the
+        // SAME `read_column_block` reader the Metrics path uses decodes it,
+        // with the SAME stable column ids and logical types. The shared
+        // `seal_columnar` tags ts→Timestamp / value→Gauge so the #853
+        // per-column codec chain (delta-of-delta / Gorilla-XOR) is applied
+        // identically for both kinds; the decoded streams are self-describing,
+        // so a lossless round-trip below proves those codecs decoded back.
+        let block = read_column_block(&bytes).expect("decode #852 RDCC block");
+        let ts_col = block
+            .columns
+            .iter()
+            .find(|c| c.column_id == COLUMNAR_TS_COLUMN_ID)
+            .expect("timestamp column present");
+        let val_col = block
+            .columns
+            .iter()
+            .find(|c| c.column_id == COLUMNAR_VALUE_COLUMN_ID)
+            .expect("value column present");
+        assert_eq!(ts_col.logical_type, DataType::UnsignedInteger.to_byte());
+        assert_eq!(val_col.logical_type, DataType::Float.to_byte());
+
+        // Criterion 2: lossless round-trip for the TimeSeries columns,
+        // value-for-value — the same decoder the Metrics path uses.
+        let decoded = points_from_column_block(&bytes).expect("round-trip");
+        assert_eq!(decoded.len(), expected.len());
+        assert_eq!(
+            decoded, expected,
+            "TimeSeries columnar round-trip must be lossless"
+        );
+    }
+
+    #[test]
+    fn timeseries_collection_without_columnar_flag_stays_row() {
+        // Criterion 1 (negative): the SAME dispatch keeps the row engine the
+        // default for a TimeSeries collection that is not flagged columnar —
+        // no accidental columnar fork.
+        let entities: Vec<_> = (0..10u64)
+            .map(|i| timeseries_entity("svc", "m", 1_000 + i, i as f64))
+            .collect();
+
+        // No config at all → row.
+        let mut chunk = chunk_from_timeseries_collection("svc", &entities);
+        assert!(matches!(
+            seal_chunk_with_config(&mut chunk, None, 860, 0).unwrap(),
+            SealedChunkStorage::Row
+        ));
+        assert!(chunk.is_sealed());
+
+        // columnar = false → still row.
+        let mut chunk_off = chunk_from_timeseries_collection("svc", &entities);
+        let off = AnalyticalStorageConfig {
+            columnar: false,
+            time_key: "ts".to_string(),
+            order_by_key: None,
+        };
+        assert!(matches!(
+            seal_chunk_with_config(&mut chunk_off, Some(&off), 860, 0).unwrap(),
+            SealedChunkStorage::Row
+        ));
+    }
+
     #[test]
     fn test_chunk_compression_ratio() {
         let mut chunk = TimeSeriesChunk::new("regular", HashMap::new());
