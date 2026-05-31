@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/client-bun",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "RedDB wire protocol client for Bun — ultra-fast native TCP",
   "main": "index.ts",
   "scripts": {
