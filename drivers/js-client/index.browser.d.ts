@@ -1,0 +1,453 @@
+/**
+ * @reddb-io/client — TypeScript definitions for the **browser** entrypoint
+ * (`src/index.browser.js`). Hand-written, kept in sync with the Node stub
+ * `index.d.ts`.
+ *
+ * The browser surface is identical to Node's, with two deliberate differences:
+ *
+ *   - It declares **no `node:stream` dependency**: the streaming row wrappers
+ *     `RowReadable` / `RowWritable` are described by their public surface
+ *     (`AsyncIterable<Row>`, `cancel()`, `completion()`) rather than by
+ *     extending Node's `Readable` / `Writable`, so browser type-checking never
+ *     pulls in `@types/node`.
+ *   - It omits `splitNdjson()` (a `node:stream` `Transform`), which has no
+ *     browser counterpart.
+ *
+ * `connect()` only reaches `http(s)://` from a browser; `grpc(s)://`,
+ * `red(s)://`, and `pg` throw `RedDBError` with code
+ * `'BROWSER_TRANSPORT_UNSUPPORTED'`, and embedded URIs throw
+ * `EmbeddedNotSupported`.
+ */
+
+export type AuthOptions =
+  | { token: string }
+  | { apiKey: string }
+  | { username: string; password: string; loginUrl?: string }
+
+export interface ConnectOptions {
+  /** Authentication credentials for the HTTP transport. */
+  auth?: AuthOptions
+}
+
+export interface QueryResult {
+  statement: string
+  affected: number
+  columns: string[]
+  rows: Array<Record<string, unknown>>
+}
+
+export type QueryParam =
+  | null
+  | boolean
+  | number
+  | string
+  | Uint8Array
+  | Date
+  | Float32Array
+  | Float64Array
+  | number[]
+  | Record<string, unknown>
+
+export interface InsertResult { affected: number; rid: string | number; id: string | number }
+export interface BulkInsertResult {
+  affected: number
+  rids: Array<string | number>
+  ids: Array<string | number>
+}
+export interface GetResult { entity: Record<string, unknown> | null }
+export interface DeleteResult { affected: number }
+export interface CollectionMeta {
+  name: string
+  model: string
+  capabilities: string[]
+  [key: string]: unknown
+}
+export interface HealthResult { ok: boolean; version: string }
+export interface VersionResult { version: string; protocol: string }
+
+export type Role = 'read' | 'write' | 'admin'
+
+export interface LoginResult {
+  token: string
+  username: string
+  role: Role
+  expires_at: number
+}
+
+export interface WhoamiResult { username: string; role: Role }
+export interface CreateApiKeyResult { key: string; role: Role; created_at: number }
+export interface ChangePasswordResult { ok: true }
+export interface RevokeApiKeyResult { ok: true }
+
+export class RedDBError extends Error {
+  readonly name: 'RedDBError'
+  readonly code: string
+  readonly data: unknown
+  constructor(code: string, message: string, data?: unknown)
+}
+
+// ---------------------------------------------------------------------------
+// Cache API
+// ---------------------------------------------------------------------------
+
+export interface CachePutOptions {
+  ttl_ms?: number
+  tags?: string[]
+  policy?: {
+    idle_evict_ms?: number
+    stale_while_revalidate_ms?: number
+    jitter_ms?: number
+  }
+}
+
+export type CacheExistsStatus = 'present' | 'absent' | 'maybe'
+
+export class CacheClient {
+  get(namespace: string, key: string): Promise<Uint8Array | null>
+  put(
+    namespace: string,
+    key: string,
+    value: Uint8Array | string,
+    opts?: CachePutOptions,
+  ): Promise<void>
+  exists(namespace: string, key: string): Promise<CacheExistsStatus>
+  invalidate(namespace: string, key: string): Promise<void>
+  invalidatePrefix(namespace: string, prefix: string): Promise<number>
+  invalidateTags(namespace: string, tags: string[]): Promise<number>
+  flushNamespace(namespace: string): Promise<void>
+}
+
+export interface KvWatchEvent {
+  key: string
+  op: 'insert' | 'update' | 'delete'
+  before: unknown
+  after: unknown
+  lsn: number
+  committed_at: number
+  dropped_event_count: number
+}
+
+export class KvClient {
+  put(
+    key: string,
+    value: unknown,
+    options?: { collection?: string; expireMs?: number; tags?: string[] },
+  ): Promise<QueryResult>
+  get(key: string, options?: { collection?: string }): Promise<unknown | null>
+  getMany(keys: string[], options?: { collection?: string }): Promise<Array<unknown | null>>
+  exists(key: string, options?: { collection?: string }): Promise<{ exists: boolean }>
+  delete(key: string, options?: { collection?: string }): Promise<DeleteResult>
+  list(options?: { collection?: string; prefix?: string; limit?: number }): Promise<{
+    items: Array<{ key: string; value: unknown }>
+  }>
+  invalidateTags(tags: string[], options?: { collection?: string }): Promise<number>
+  watch(
+    key: string,
+    options?: { collection?: string; sinceLsn?: number; limit?: number },
+  ): AsyncIterable<KvWatchEvent>
+  watchPrefix(
+    prefix: string,
+    options?: { collection?: string; sinceLsn?: number; limit?: number },
+  ): AsyncIterable<KvWatchEvent>
+}
+
+export interface DocumentInsertResult<T extends Record<string, unknown> = Record<string, unknown>> {
+  affected: number
+  rid: string | number
+  item: T & { rid: string | number }
+}
+
+export class DocumentClient {
+  insert<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    document: Record<string, unknown>,
+  ): Promise<DocumentInsertResult<T>>
+  get<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    rid: string | number,
+  ): Promise<T & { rid: string | number }>
+  list<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    options?: { filter?: string; orderBy?: string; order_by?: string; limit?: number },
+  ): Promise<{ items: Array<T & { rid: string | number }> }>
+  patch<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    rid: string | number,
+    patch: Record<string, unknown>,
+  ): Promise<T & { rid: string | number }>
+  delete(collection: string, rid: string | number): Promise<DeleteResult>
+}
+
+export class QueueClient {
+  push(
+    queue: string,
+    value: unknown,
+    options?: { priority?: number },
+  ): Promise<QueryResult>
+  pop(queue: string, count?: number): Promise<unknown[]>
+  peek(queue: string, count?: number): Promise<unknown[]>
+  len(queue: string): Promise<number>
+  purge(queue: string): Promise<QueryResult>
+  readWait(
+    queue: string,
+    consumer: string,
+    options: { waitMs: number; group?: string; count?: number },
+  ): Promise<unknown[]>
+}
+
+/**
+ * Caller-typed SELECT builder. RedDB does not infer `T`; provide it
+ * explicitly with `db.from<T>('collection')`.
+ */
+export class TypedQueryBuilder<T extends Record<string, unknown> = Record<string, unknown>> {
+  select(): TypedQueryBuilder<T>
+  select(column: '*'): TypedQueryBuilder<T>
+  select<K extends keyof T & string>(...columns: K[]): TypedQueryBuilder<Pick<T, K>>
+  select<K extends keyof T & string>(columns: K[]): TypedQueryBuilder<Pick<T, K>>
+  where(condition: string, params: QueryParam[]): TypedQueryBuilder<T>
+  where(condition: string, ...params: QueryParam[]): TypedQueryBuilder<T>
+  run(): Promise<T[]>
+}
+
+// ---------------------------------------------------------------------------
+// Streaming API (PRD #759 / S11) — Web-streams variant
+// ---------------------------------------------------------------------------
+
+export type Row = Record<string, unknown>
+
+export interface StreamDescriptor {
+  result_kind?: string
+  columns?: Array<{ name: string; type?: string; nullable?: boolean }>
+  schema_fingerprint?: string
+  [key: string]: unknown
+}
+
+export interface StreamCursor {
+  token: string
+  snapshot_lsn?: number
+  ttl_ms?: number
+  expires_at_ms?: number
+  resumable?: boolean
+}
+
+export interface StreamEndEnvelope {
+  row_count?: number
+  committed_rid?: number
+  chunk_count?: number
+  lease_handle?: string
+  snapshot_lsn?: number
+  [key: string]: unknown
+}
+
+export interface StreamOptions {
+  /** Abort the stream when this signal fires. */
+  signal?: AbortSignal
+  /** Resume a prior stream from an opaque cursor token (HTTP only). */
+  cursor?: string
+}
+
+export interface InputStreamOptions {
+  signal?: AbortSignal
+  /** Ingest column set; inferred from the first row's keys when omitted. */
+  columns?: string[]
+}
+
+/**
+ * A streaming read backed by a Web `ReadableStream`. Conforms to
+ * `AsyncIterable<Row>` — `for await (const row of stream)` yields rows as they
+ * arrive. `'descriptor'` / `'cursor'` events fire when the transport surfaces
+ * them. Unlike the Node entry, this does **not** extend `node:stream`'s
+ * `Readable`.
+ */
+export class RowReadable implements AsyncIterable<Row> {
+  /** Schema descriptor (HTTP NDJSON) once seen, else null. */
+  readonly descriptor: StreamDescriptor | null
+  /** Resumable cursor control frame once seen, else null. */
+  readonly cursor: StreamCursor | null
+  /** Terminal `end` envelope once the stream completes, else null. */
+  readonly endInfo: StreamEndEnvelope | null
+  /** Subscribe to `'descriptor'` / `'cursor'` / `'error'` / `'end'` events. */
+  on(event: string, listener: (...args: unknown[]) => void): this
+  once(event: string, listener: (...args: unknown[]) => void): this
+  off(event: string, listener: (...args: unknown[]) => void): this
+  /** Terminate the stream; rejects pending iterations with a cancellation error. */
+  cancel(reason?: string): Promise<void>
+  [Symbol.asyncIterator](): AsyncIterableIterator<Row>
+}
+
+/**
+ * A streaming write backed by a Web `WritableStream`. `write(row)` pushes a
+ * row (backpressure flows through the returned promise); `end()` signals
+ * end-of-stream and the server's terminal envelope resolves `.completion()`.
+ * Unlike the Node entry, this does **not** extend `node:stream`'s `Writable`.
+ */
+export class RowWritable {
+  /** Terminal `end` envelope once the write completes, else null. */
+  readonly endInfo: StreamEndEnvelope | null
+  /** Push a row; the returned promise resolves when backpressure clears. */
+  write(row: Row): Promise<void>
+  /** Signal end-of-stream. */
+  end(): Promise<void>
+  /** Resolves with the server's terminal envelope; rejects on error/cancel. */
+  completion(): Promise<StreamEndEnvelope>
+  /** Abandon the ingest; rejects `.completion()` with a cancellation error. */
+  cancel(reason?: string): Promise<void>
+}
+
+/**
+ * A streaming-capable collection/table handle. `query()` is a one-shot
+ * Promise; `stream()` / `inputStream()` are the streaming surfaces.
+ */
+export class Collection {
+  readonly name: string
+  query(sql: string): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  stream(sql: string, opts?: StreamOptions): RowReadable
+  inputStream(opts?: InputStreamOptions): RowWritable
+}
+
+export class ConfigClient {
+  put(
+    key: string,
+    value: unknown,
+    options?: {
+      collection?: string
+      tags?: string[]
+      secretRef?: { collection: string; key: string }
+    },
+  ): Promise<QueryResult>
+  get(key: string, options?: { collection?: string }): Promise<QueryResult>
+  resolve(key: string, options?: { collection?: string }): Promise<QueryResult>
+}
+
+export class VaultClient {
+  put(
+    key: string,
+    value: unknown,
+    options?: { collection?: string; tags?: string[] },
+  ): Promise<QueryResult>
+  get(key: string, options?: { collection?: string }): Promise<QueryResult>
+  unseal(key: string, options?: { collection?: string }): Promise<QueryResult>
+}
+
+/**
+ * Specialised error thrown when an embedded URI is passed to the
+ * thin client. Always has `code === 'EmbeddedNotSupported'`. Use
+ * `@reddb-io/sdk` instead for in-memory or file-backed engines.
+ */
+export class EmbeddedNotSupported extends RedDBError {
+  readonly name: 'EmbeddedNotSupported'
+  readonly code: 'EmbeddedNotSupported'
+  readonly uri: string
+  constructor(uri: string)
+}
+
+export const EMBEDDED_REJECTION_MESSAGE: string
+
+/** Returns true when `uri` selects the embedded engine. */
+export function isEmbeddedUri(uri: string): boolean
+
+export interface RedDBTransaction {
+  query(sql: string): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string): Promise<QueryResult>
+  execute(sql: string, params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
+  bulkInsert(
+    collection: string,
+    payloads: Array<Record<string, unknown>>,
+  ): Promise<BulkInsertResult>
+  transaction<T>(
+    callback: (tx: RedDBTransaction) => T | Promise<T>,
+  ): Promise<T>
+}
+
+export class RedDB {
+  readonly cache: CacheClient
+  readonly queue: QueueClient
+  readonly documents: DocumentClient
+  readonly kv: KvClient & ((collection?: string) => KvClient)
+  readonly config: (collection?: string) => ConfigClient
+  readonly vault: (collection?: string) => VaultClient
+
+  query(sql: string): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string): Promise<QueryResult>
+  execute(sql: string, params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
+  bulkInsert(
+    collection: string,
+    payloads: Array<Record<string, unknown>>,
+  ): Promise<BulkInsertResult>
+  transaction<T>(
+    callback: (tx: RedDBTransaction) => T | Promise<T>,
+  ): Promise<T>
+  exists(collection: string): Promise<boolean>
+  list(): Promise<CollectionMeta[]>
+  /**
+   * Caller-typed collection handle. Supply `T`; the SDK does not
+   * generate or validate row types at runtime.
+   */
+  from<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+  ): TypedQueryBuilder<T>
+  /** Streaming-capable handle for a collection/table (PRD #759 S11). */
+  collection(name: string): Collection
+  /** Stream a read-only SELECT as an `AsyncIterable<Row>` over HTTP NDJSON. */
+  stream(sql: string, opts?: StreamOptions): RowReadable
+  /**
+   * Open a streaming write into `target`; `.completion()` resolves with
+   * the server's terminal envelope.
+   */
+  inputStream(target: string, opts?: InputStreamOptions): RowWritable
+  get(collection: string, id: string | number): Promise<GetResult>
+  delete(collection: string, id: string | number): Promise<DeleteResult>
+  health(): Promise<HealthResult>
+  version(): Promise<VersionResult>
+
+  login(username: string, password: string): Promise<LoginResult>
+  whoami(): Promise<WhoamiResult>
+  changePassword(currentPassword: string, newPassword: string): Promise<ChangePasswordResult>
+  createApiKey(opts?: { username?: string; role?: Role }): Promise<CreateApiKeyResult>
+  revokeApiKey(key: string): Promise<RevokeApiKeyResult>
+
+  close(): Promise<void>
+}
+
+/**
+ * Connect to a remote RedDB instance from a browser.
+ *
+ * Only `http://host:port` / `https://host:port` are reachable from a browser
+ * sandbox. `grpc(s)://`, `red(s)://`, and `pg` throw `RedDBError` with code
+ * `'BROWSER_TRANSPORT_UNSUPPORTED'`. Embedded URIs (`memory://`, `memory:`,
+ * `file:///path`, `red:///`, `red://:memory[:]`) throw `EmbeddedNotSupported`.
+ */
+export function connect(uri: string, options?: ConnectOptions): Promise<RedDB>
+
+/** Exchange username + password for a bearer token via /auth/login. */
+export function login(
+  loginUrl: string,
+  credentials: { username: string; password: string },
+): Promise<LoginResult>
+
+export interface ParsedUri {
+  kind: 'embedded' | 'http' | 'https' | 'red' | 'reds' | 'grpc' | 'grpcs' | 'pg'
+  host?: string
+  port?: number
+  path?: string
+  username?: string
+  password?: string
+  token?: string
+  apiKey?: string
+  loginUrl?: string
+  params?: URLSearchParams
+  originalUri: string
+}
+
+export function parseUri(uri: string): ParsedUri
+export function deriveLoginUrl(parsed: ParsedUri): string
