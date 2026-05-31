@@ -241,6 +241,7 @@ mod tests {
             session_key: Some("user_id".to_string()),
             session_gap_ms: Some(30_000),
             retention_duration_ms: None,
+            analytical_storage: None,
         }
     }
 
