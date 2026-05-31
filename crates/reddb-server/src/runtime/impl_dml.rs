@@ -2838,6 +2838,7 @@ fn ensure_graph_insert_contract(runtime: &RedDBRuntime, collection: &str) -> Red
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
+        analytical_storage: None,
     })
     .map(|_| ())
     .map_err(|err| RedDBError::Internal(err.to_string()))

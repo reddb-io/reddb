@@ -40,7 +40,10 @@ pub enum ColumnCodec {
 }
 
 impl ColumnCodec {
-    fn tag(&self) -> u8 {
+    /// Single-byte codec discriminant recorded in stream + column-block
+    /// directory headers. Public so the columnar chunk layout
+    /// (`column_block`) can store the codec each column was written with.
+    pub fn tag(&self) -> u8 {
         match self {
             ColumnCodec::None => 0,
             ColumnCodec::Lz4 => 1,
@@ -51,7 +54,10 @@ impl ColumnCodec {
         }
     }
 
-    fn from_tag(tag: u8) -> Option<ColumnCodec> {
+    /// Inverse of [`ColumnCodec::tag`]. `Zstd` decodes to the default
+    /// level (3); the real level is carried inline by the stream header,
+    /// so a tag round-trip is only used for directory bookkeeping.
+    pub fn from_tag(tag: u8) -> Option<ColumnCodec> {
         match tag {
             0 => Some(ColumnCodec::None),
             1 => Some(ColumnCodec::Lz4),

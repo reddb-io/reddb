@@ -468,10 +468,17 @@ mod transport_tests {
         // never be paired with Allow-Credentials (the browser rejects
         // that combination), so this also pins its absence.
         let head = String::from_utf8_lossy(&json_ok("hi").to_http_bytes()).into_owned();
-        assert!(head.contains("\r\nAccess-Control-Allow-Origin: *\r\n"), "got: {head}");
-        assert!(head.contains("\r\nAccess-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"));
+        assert!(
+            head.contains("\r\nAccess-Control-Allow-Origin: *\r\n"),
+            "got: {head}"
+        );
+        assert!(head.contains(
+            "\r\nAccess-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+        ));
         assert!(head.contains("\r\nAccess-Control-Allow-Headers: *\r\n"));
-        assert!(!head.to_ascii_lowercase().contains("access-control-allow-credentials"));
+        assert!(!head
+            .to_ascii_lowercase()
+            .contains("access-control-allow-credentials"));
         // Framing invariant survives: still exactly one header/body split.
         assert_eq!(head.matches("\r\n\r\n").count(), 1);
     }
