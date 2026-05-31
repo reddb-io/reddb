@@ -896,6 +896,121 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Columnar chunk eviction via the EXISTING TTL/drop path (issue #859)
+    //
+    // A sealed *columnar* chunk is one whose `ChunkMeta.columnar_page` is
+    // `Some(..)` — the RDCC `ColumnBlock` discriminant (PRD #850 Phase 1).
+    // These guards prove the retention path is storage-form agnostic: the
+    // SAME `sweep_expired` / `drop_chunks_before` metadata sweep that drops
+    // row chunks drops columnar chunks too, in O(1) metadata work (no
+    // per-row delete), and hands the `columnar_page` back on the dropped
+    // meta so the physical-storage callback can release the RDCC block.
+    // No separate columnar TTL/partition subsystem exists or is needed.
+    // -----------------------------------------------------------------
+
+    /// Build a sealed columnar chunk meta directly — mirrors what the
+    /// boot/seal path restores: a chunk carrying its RDCC `columnar_page`.
+    fn columnar_chunk(hypertable: &str, start_ns: u64, max_ts_ns: u64) -> ChunkMeta {
+        let mut meta = ChunkMeta::new(
+            ChunkId {
+                hypertable: hypertable.into(),
+                start_ns,
+            },
+            start_ns + DAY_NS,
+        );
+        meta.row_count = 1;
+        meta.min_ts_ns = max_ts_ns;
+        meta.max_ts_ns = max_ts_ns;
+        meta.sealed = true;
+        meta.columnar_page = Some(PageLocation::new(7, 0, 1234));
+        meta
+    }
+
+    #[test]
+    fn columnar_chunk_evicts_via_sweep_expired_carrying_its_page() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("metrics", "ts", DAY_NS).with_ttl_ns(DAY_NS));
+        // Inject a sealed columnar chunk (max_ts=0 → expiry at 1d).
+        reg.restore_chunk(columnar_chunk("metrics", 0, 0));
+        assert!(reg.show_chunks("metrics")[0].columnar_page.is_some());
+
+        // now = 3d → past the 1d TTL. The existing partition sweep drops it.
+        let dropped = reg.sweep_expired("metrics", 3 * DAY_NS);
+        assert_eq!(dropped.len(), 1, "columnar chunk must evict via TTL sweep");
+        assert_eq!(
+            dropped[0].columnar_page,
+            Some(PageLocation::new(7, 0, 1234)),
+            "dropped meta must carry columnar_page so physical release frees the RDCC block"
+        );
+        assert!(reg.show_chunks("metrics").is_empty());
+    }
+
+    #[test]
+    fn columnar_chunk_evicts_via_drop_chunks_before() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("metrics", "ts", DAY_NS));
+        reg.restore_chunk(columnar_chunk("metrics", 0, 0));
+
+        let dropped = reg.drop_chunks_before("metrics", DAY_NS);
+        assert_eq!(dropped.len(), 1);
+        assert!(
+            dropped[0].columnar_page.is_some(),
+            "drop_chunks_before is metadata-only and carries columnar_page through"
+        );
+        assert!(reg.show_chunks("metrics").is_empty());
+    }
+
+    #[test]
+    fn columnar_and_row_chunks_share_one_eviction_path() {
+        // Regression guard (acceptance #3): a row chunk and a columnar
+        // chunk with identical bounds + TTL must produce identical sweep
+        // outcomes. If a separate columnar TTL subsystem were ever
+        // introduced, the two would diverge here.
+        let mk = |columnar: bool| {
+            let reg = HypertableRegistry::new();
+            reg.register(HypertableSpec::new("m", "ts", DAY_NS).with_ttl_ns(DAY_NS));
+            if columnar {
+                reg.restore_chunk(columnar_chunk("m", 0, 0));
+            } else {
+                reg.route("m", 0).unwrap(); // row chunk, max_ts=0
+            }
+            reg.sweep_expired("m", 3 * DAY_NS).len()
+        };
+        assert_eq!(mk(false), 1, "row chunk evicts");
+        assert_eq!(mk(true), 1, "columnar chunk evicts the same way");
+    }
+
+    #[test]
+    fn columnar_chunk_prunes_by_time_bounds_like_row_chunk() {
+        // Acceptance #2: the partition pruner selects chunks by their
+        // [start_ns, end_ns_exclusive) bounds (surfaced via show_chunks) —
+        // it never inspects columnar_page, so a columnar chunk outside the
+        // query window is eliminated identically to a row chunk. We assert
+        // the bounds the pruner consumes survive verbatim for a columnar
+        // chunk.
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+        reg.restore_chunk(columnar_chunk("m", 0, 0));
+        reg.restore_chunk(columnar_chunk("m", 2 * DAY_NS, 2 * DAY_NS));
+        let chunks = reg.show_chunks("m");
+        // A window of [2d, 3d) overlaps only the second chunk — same
+        // arithmetic the RangeChild pruner runs against these bounds.
+        let lo = 2 * DAY_NS;
+        let hi = 3 * DAY_NS;
+        let overlapping: Vec<u64> = chunks
+            .iter()
+            .filter(|c| c.id.start_ns < hi && c.end_ns_exclusive > lo)
+            .map(|c| c.id.start_ns)
+            .collect();
+        assert_eq!(
+            overlapping,
+            vec![2 * DAY_NS],
+            "only in-window columnar chunk kept"
+        );
+        assert!(chunks.iter().all(|c| c.columnar_page.is_some()));
+    }
+
     #[test]
     fn chunks_expiring_within_previews_without_dropping() {
         let reg = HypertableRegistry::new();
