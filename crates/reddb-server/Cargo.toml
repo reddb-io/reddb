@@ -25,6 +25,13 @@ reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = ".
 reddb-client-connector = { package = "reddb-io-client-connector", version = "1.0", path = "../reddb-client-connector" }
 aes-gcm = "0.10"
 blake3 = "1"
+# SIMD/PCLMULQDQ CRC32 (IEEE 802.3 polynomial) for WAL/page record
+# checksums (issue #883 / PRD #882). Runtime CPU feature detection
+# selects the pclmulqdq path with a table-based scalar fallback —
+# byte-identical to the previous hand-rolled software CRC32, so no
+# on-disk WAL format change. Already in the tree transitively via
+# flate2; promoted here to a direct dependency.
+crc32fast = "1.5"
 hmac = "0.13"
 itoa = "1"
 zstd = { version = "0.13", default-features = false }
