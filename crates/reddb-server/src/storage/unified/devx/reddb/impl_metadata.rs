@@ -391,6 +391,10 @@ impl RedDB {
             // that caused stack overflow / 12-second hang on startup.
         }
         self.load_collection_ttl_defaults_from_metadata();
+        // Issue #866 — rehydrate the hypertable chunk spine before the
+        // API opens so chunk routing / pruning / TTL work immediately
+        // after a restart.
+        self.load_hypertables_from_metadata();
         self.recover_queue_pending_state();
         Ok(self)
     }
@@ -417,6 +421,10 @@ impl RedDB {
             previous.as_ref(),
         );
         metadata.collection_ttl_defaults_ms = self.collection_ttl_defaults_snapshot();
+        // Issue #866 — persist the hypertable chunk spine (specs +
+        // chunk bounds / routing / TTL) onto the same metadata path as
+        // collection contracts so a restart recovers it identically.
+        metadata.hypertables = self.hypertable_registry_snapshot();
         metadata.save_for_data_path(path)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(())
@@ -786,6 +794,9 @@ impl RedDB {
                 .unwrap_or_default(),
             collection_contracts: previous
                 .map(|metadata| metadata.collection_contracts.clone())
+                .unwrap_or_default(),
+            hypertables: previous
+                .map(|metadata| metadata.hypertables.clone())
                 .unwrap_or_default(),
             tree_definitions: previous
                 .map(|metadata| metadata.tree_definitions.clone())
