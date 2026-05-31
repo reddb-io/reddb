@@ -277,6 +277,7 @@ impl RedDB {
                     max_ts_ns: chunk.max_ts_ns,
                     sealed: chunk.sealed,
                     ttl_override_ns: chunk.ttl_override_ns,
+                    columnar_page: chunk.columnar_page,
                 });
         }
         registry
@@ -327,6 +328,7 @@ impl RedDB {
                     max_ts_ns: chunk.max_ts_ns,
                     sealed: chunk.sealed,
                     ttl_override_ns: chunk.ttl_override_ns,
+                    columnar_page: chunk.columnar_page,
                 });
             }
         }
