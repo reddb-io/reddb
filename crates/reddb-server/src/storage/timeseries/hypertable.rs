@@ -490,6 +490,50 @@ impl HypertableRegistry {
         guard.specs.keys().cloned().collect()
     }
 
+    /// True when no hypertable is registered and no chunk is tracked.
+    /// Lets the durability layer skip the persist step entirely for
+    /// workloads that never declared a hypertable (zero overhead).
+    pub fn is_empty(&self) -> bool {
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.specs.is_empty() && guard.chunks.is_empty()
+    }
+
+    /// Snapshot every chunk across all hypertables, ordered by
+    /// `(hypertable, start_ns)` so the persisted form is deterministic.
+    /// Pairs with [`restore_chunk`] on boot. Specs are snapshotted via
+    /// [`list`].
+    pub fn snapshot_chunks(&self) -> Vec<ChunkMeta> {
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.chunks.values().cloned().collect()
+    }
+
+    /// Reinstate a chunk verbatim during recovery. Overwrites any
+    /// existing entry for the same `(hypertable, start_ns)`.
+    ///
+    /// Unlike [`route`], this does **not** observe a timestamp — it
+    /// restores the persisted counters (`row_count`, `min_ts_ns`,
+    /// `max_ts_ns`, `sealed`, `ttl_override_ns`) exactly so the
+    /// post-restart registry is identical to the pre-restart one. The
+    /// caller is expected to [`register`] the owning spec first; a
+    /// chunk whose hypertable has no spec is still tracked (routing
+    /// falls back to the spec once it is registered), matching the
+    /// pre-restart invariant that chunks outlive a missing spec only
+    /// transiently.
+    pub fn restore_chunk(&self, meta: ChunkMeta) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let key = (meta.id.hypertable.clone(), meta.id.start_ns);
+        guard.chunks.insert(key, meta);
+    }
+
     /// Drop the whole hypertable (spec + every chunk). Returns the
     /// number of chunks removed.
     pub fn drop_hypertable(&self, name: &str) -> usize {
@@ -777,6 +821,69 @@ mod tests {
         reg.set_chunk_ttl_ns(&id, Some(HOUR_NS));
         let dropped = reg.sweep_expired("m", 10 * HOUR_NS);
         assert_eq!(dropped.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_then_restore_reproduces_registry_identically() {
+        // Pre-restart registry: two hypertables, several chunks, with a
+        // sealed chunk and a per-chunk TTL override — the bits that are
+        // NOT derivable from row data and so must round-trip verbatim.
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("metrics", "ts", DAY_NS).with_ttl_ns(7 * DAY_NS));
+        reg.register(HypertableSpec::new("events", "ts", HOUR_NS));
+        for t in [0, DAY_NS + 5, DAY_NS + 9, 2 * DAY_NS] {
+            reg.route("metrics", t).unwrap();
+        }
+        let id = reg.route("events", 0).unwrap();
+        reg.seal_chunk(&id);
+        reg.set_chunk_ttl_ns(&id, Some(3 * HOUR_NS));
+
+        let specs = reg.list();
+        let chunks = reg.snapshot_chunks();
+        assert!(!reg.is_empty());
+
+        // Simulated restart: rebuild a fresh registry from the snapshot.
+        let restored = HypertableRegistry::new();
+        assert!(restored.is_empty());
+        for spec in specs {
+            restored.register(spec);
+        }
+        for chunk in chunks {
+            restored.restore_chunk(chunk);
+        }
+
+        // Specs identical.
+        let before = reg.get("metrics").unwrap();
+        let after = restored.get("metrics").unwrap();
+        assert_eq!(after.chunk_interval_ns, before.chunk_interval_ns);
+        assert_eq!(after.time_column, before.time_column);
+        assert_eq!(after.default_ttl_ns, before.default_ttl_ns);
+
+        // Chunk metadata identical (bounds, counts, sealed, TTL override).
+        let m_before = reg.show_chunks("metrics");
+        let m_after = restored.show_chunks("metrics");
+        assert_eq!(m_after.len(), m_before.len());
+        for (a, b) in m_after.iter().zip(m_before.iter()) {
+            assert_eq!(a.id.start_ns, b.id.start_ns);
+            assert_eq!(a.end_ns_exclusive, b.end_ns_exclusive);
+            assert_eq!(a.row_count, b.row_count);
+            assert_eq!(a.min_ts_ns, b.min_ts_ns);
+            assert_eq!(a.max_ts_ns, b.max_ts_ns);
+        }
+        let e_after = restored.show_chunks("events");
+        assert_eq!(e_after.len(), 1);
+        assert!(e_after[0].sealed, "sealed flag must survive restore");
+        assert_eq!(e_after[0].ttl_override_ns, Some(3 * HOUR_NS));
+
+        // A post-restart write routes to the EXISTING chunk — no
+        // duplicate allocation.
+        let routed = restored.route("metrics", DAY_NS + 1).unwrap();
+        assert_eq!(routed.start_ns, DAY_NS);
+        assert_eq!(
+            restored.show_chunks("metrics").len(),
+            m_before.len(),
+            "write after restore must not allocate a new chunk"
+        );
     }
 
     #[test]
