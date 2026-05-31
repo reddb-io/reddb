@@ -8,7 +8,17 @@ use std::collections::HashMap;
 use super::compression::{
     delta_decode_timestamps, delta_encode_timestamps, xor_decode_values, xor_encode_values,
 };
+use crate::catalog::AnalyticalStorageConfig;
 use crate::storage::index::{BloomSegment, HasBloom, ZoneDecision, ZoneMap, ZonePredicate};
+use crate::storage::schema::types::DataType;
+use crate::storage::unified::column_block::{
+    read_column_block, write_column_block, ColumnBlockError, ColumnInput,
+};
+
+/// Stable column id of the timestamp column within a v1 columnar chunk.
+pub const COLUMNAR_TS_COLUMN_ID: u32 = 0;
+/// Stable column id of the value column within a v1 columnar chunk.
+pub const COLUMNAR_VALUE_COLUMN_ID: u32 = 1;
 
 /// A single time-series data point
 #[derive(Debug, Clone, PartialEq)]
@@ -201,6 +211,52 @@ impl TimeSeriesChunk {
         self.sealed = true;
     }
 
+    /// Seal the chunk and emit its **columnar** on-disk form: an `RDCC`
+    /// [`ColumnBlock`](crate::storage::engine::PageType::ColumnBlock)
+    /// transposing the live `(ts, value)` columns into two ZSTD streams
+    /// (PRD #850, Phase 1). Sealing first (via [`seal`](Self::seal))
+    /// guarantees timestamp order, so the columns are written sorted.
+    ///
+    /// `chunk_id` / `schema_ref` are recorded verbatim in the block header
+    /// so a reader is self-describing. The returned bytes are written into
+    /// a `ColumnBlock` page by the caller, which records the resulting
+    /// [`PageLocation`](crate::storage::engine::PageLocation) in
+    /// `ChunkMeta.columnar_page`.
+    pub fn seal_columnar(
+        &mut self,
+        chunk_id: u64,
+        schema_ref: u64,
+    ) -> Result<Vec<u8>, ColumnBlockError> {
+        if !self.sealed {
+            self.seal();
+        }
+        let ts_bytes: Vec<u8> = self
+            .timestamps
+            .iter()
+            .flat_map(|t| t.to_le_bytes())
+            .collect();
+        let val_bytes: Vec<u8> = self.values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        write_column_block(
+            chunk_id,
+            schema_ref,
+            self.timestamps.len() as u64,
+            self.min_timestamp().unwrap_or(0),
+            self.max_timestamp().unwrap_or(0),
+            &[
+                ColumnInput {
+                    column_id: COLUMNAR_TS_COLUMN_ID,
+                    logical_type: DataType::UnsignedInteger.to_byte(),
+                    data: &ts_bytes,
+                },
+                ColumnInput {
+                    column_id: COLUMNAR_VALUE_COLUMN_ID,
+                    logical_type: DataType::Float.to_byte(),
+                    data: &val_bytes,
+                },
+            ],
+        )
+    }
+
     /// Query points within a time range [start_ns, end_ns] inclusive.
     ///
     /// BRIN-style pre-filter: if the chunk's timestamp zone map proves no
@@ -306,6 +362,67 @@ impl TimeSeriesChunk {
     }
 }
 
+/// Outcome of routing a chunk seal through the analytical-storage seam.
+#[derive(Debug)]
+pub enum SealedChunkStorage {
+    /// The collection was flagged columnar — the sealed chunk's `RDCC`
+    /// `ColumnBlock` bytes, ready to write into a `ColumnBlock` page.
+    Columnar(Vec<u8>),
+    /// Default row engine — the chunk was sealed in place; nothing
+    /// columnar was emitted.
+    Row,
+}
+
+/// Seal `chunk`, routing to the columnar `ColumnBlock` writer when the
+/// collection's [`AnalyticalStorageConfig`] flags it columnar; otherwise
+/// the row engine stays the default and the chunk is sealed in place
+/// (PRD #850, Phase 1 — acceptance criterion 1).
+pub fn seal_chunk_with_config(
+    chunk: &mut TimeSeriesChunk,
+    config: Option<&AnalyticalStorageConfig>,
+    chunk_id: u64,
+    schema_ref: u64,
+) -> Result<SealedChunkStorage, ColumnBlockError> {
+    if config.map(|c| c.columnar).unwrap_or(false) {
+        Ok(SealedChunkStorage::Columnar(
+            chunk.seal_columnar(chunk_id, schema_ref)?,
+        ))
+    } else {
+        chunk.seal();
+        Ok(SealedChunkStorage::Row)
+    }
+}
+
+/// Decode a sealed columnar chunk's `RDCC` block back into points,
+/// transposing the two column streams into `(timestamp_ns, value)` rows.
+/// The inverse of [`TimeSeriesChunk::seal_columnar`].
+pub fn points_from_column_block(bytes: &[u8]) -> Result<Vec<TimeSeriesPoint>, ColumnBlockError> {
+    let block = read_column_block(bytes)?;
+    let ts_col = block
+        .columns
+        .iter()
+        .find(|c| c.column_id == COLUMNAR_TS_COLUMN_ID)
+        .ok_or(ColumnBlockError::BadDirectory)?;
+    let val_col = block
+        .columns
+        .iter()
+        .find(|c| c.column_id == COLUMNAR_VALUE_COLUMN_ID)
+        .ok_or(ColumnBlockError::BadDirectory)?;
+    if ts_col.data.len() % 8 != 0 || val_col.data.len() % 8 != 0 {
+        return Err(ColumnBlockError::BadDirectory);
+    }
+    let points = ts_col
+        .data
+        .chunks_exact(8)
+        .zip(val_col.data.chunks_exact(8))
+        .map(|(t, v)| TimeSeriesPoint {
+            timestamp_ns: u64::from_le_bytes(t.try_into().unwrap()),
+            value: f64::from_le_bytes(v.try_into().unwrap()),
+        })
+        .collect();
+    Ok(points)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +498,131 @@ mod tests {
         // the data.
         let _ = chunk.may_contain_timestamp(9999);
         assert!(chunk.query_range(9999, 9999).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Columnar sealed-chunk layout v1 (PRD #850, Phase 1)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn seal_columnar_round_trips_points_value_for_value() {
+        let mut chunk = TimeSeriesChunk::new("cpu.idle", make_tags("srv1"));
+        let expected: Vec<TimeSeriesPoint> = (0..200)
+            .map(|i| TimeSeriesPoint {
+                timestamp_ns: 1_700_000_000_000 + i * 1_000_000,
+                value: 95.0 + (i % 11) as f64 * 0.125,
+            })
+            .collect();
+        for p in &expected {
+            assert!(chunk.append(p.timestamp_ns, p.value));
+        }
+
+        let block = chunk.seal_columnar(7, 42).expect("seal columnar");
+        assert!(chunk.is_sealed());
+
+        let decoded = points_from_column_block(&block).expect("decode block");
+        assert_eq!(decoded.len(), expected.len());
+        assert_eq!(decoded, expected, "lossless value-for-value round-trip");
+    }
+
+    #[test]
+    fn seal_chunk_with_config_routes_columnar_vs_row() {
+        // Columnar-flagged → ColumnBlock bytes.
+        let mut columnar = TimeSeriesChunk::new("m", HashMap::new());
+        for i in 0..50 {
+            columnar.append(i * 1000, i as f64);
+        }
+        let cfg = AnalyticalStorageConfig {
+            columnar: true,
+            time_key: "ts".to_string(),
+            order_by_key: None,
+        };
+        let routed = seal_chunk_with_config(&mut columnar, Some(&cfg), 1, 0).unwrap();
+        match routed {
+            SealedChunkStorage::Columnar(bytes) => {
+                assert_eq!(points_from_column_block(&bytes).unwrap().len(), 50);
+            }
+            SealedChunkStorage::Row => panic!("columnar flag must route to ColumnBlock writer"),
+        }
+
+        // No config / columnar=false → row engine stays the default.
+        let mut row = TimeSeriesChunk::new("m", HashMap::new());
+        for i in 0..50 {
+            row.append(i * 1000, i as f64);
+        }
+        assert!(matches!(
+            seal_chunk_with_config(&mut row, None, 1, 0).unwrap(),
+            SealedChunkStorage::Row
+        ));
+        assert!(row.is_sealed());
+
+        let mut row_off = TimeSeriesChunk::new("m", HashMap::new());
+        row_off.append(1, 1.0);
+        let off = AnalyticalStorageConfig {
+            columnar: false,
+            time_key: "ts".to_string(),
+            order_by_key: None,
+        };
+        assert!(matches!(
+            seal_chunk_with_config(&mut row_off, Some(&off), 1, 0).unwrap(),
+            SealedChunkStorage::Row
+        ));
+    }
+
+    #[test]
+    fn columnar_chunk_round_trips_through_durable_column_block_page() {
+        use crate::storage::engine::{PageLocation, PageType, Pager};
+
+        // Build + seal a columnar chunk.
+        let mut chunk = TimeSeriesChunk::new("mem.used", make_tags("srv1"));
+        for i in 0..200u64 {
+            chunk.append(1_000_000 + i * 60_000, 72.5 + (i as f64) * 0.1);
+        }
+        let block = chunk.seal_columnar(99, 3).expect("seal columnar");
+
+        // Emit a *durable* PageType::ColumnBlock page through a real Pager.
+        let path = std::env::temp_dir().join(format!(
+            "reddb-columnblock-{}-{}.rdb",
+            std::process::id(),
+            crate::utils::now_unix_nanos()
+        ));
+        let pager = Pager::open_default(&path).expect("open pager");
+        let mut page = pager
+            .allocate_page(PageType::ColumnBlock)
+            .expect("allocate column block page");
+        assert_eq!(page.page_type().unwrap(), PageType::ColumnBlock);
+        let page_id = page.page_id();
+        page.content_mut()[..block.len()].copy_from_slice(&block);
+        pager.write_page(page_id, page).expect("write page");
+
+        // The discriminant a sealed chunk records in ChunkMeta.columnar_page.
+        let loc = PageLocation::new(page_id, 0, block.len() as u32);
+
+        // Read it back from disk and decode by the recorded location.
+        let read = pager.read_page(loc.page_id).expect("read page");
+        assert_eq!(read.page_type().unwrap(), PageType::ColumnBlock);
+        let start = loc.offset as usize;
+        let stored = &read.content()[start..start + loc.length as usize];
+        let points = points_from_column_block(stored).expect("decode page block");
+
+        // "Query the collection" end-to-end: same rows back, value-for-value.
+        assert_eq!(points, chunk.points());
+        // And a range query over the reconstructed points matches the source.
+        let reconstructed = {
+            let mut c = TimeSeriesChunk::new("mem.used", make_tags("srv1"));
+            for p in &points {
+                c.append(p.timestamp_ns, p.value);
+            }
+            c.seal();
+            c
+        };
+        assert_eq!(
+            reconstructed.query_range(1_000_000, 1_000_000 + 50 * 60_000),
+            chunk.query_range(1_000_000, 1_000_000 + 50 * 60_000)
+        );
+
+        drop(pager);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
