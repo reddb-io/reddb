@@ -400,6 +400,7 @@ fn make_topology_bytes(primary: &SocketAddr, replicas: &[SocketAddr]) -> Vec<u8>
                 healthy: true,
                 lag_ms: 0,
                 last_applied_lsn: 100 + i as u64,
+                rebootstrapping: false,
             })
             .collect(),
     };
