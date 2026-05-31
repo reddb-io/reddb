@@ -7,11 +7,14 @@
 //! as a [`PageType::ColumnBlock`](crate::storage::engine::PageType) page.
 //!
 //! It is the first real caller of [`segment_codec`](super::segment_codec):
-//! every column stream is one `segment_codec` pipeline output. v1 writes a
-//! single codec (ZSTD level 3) for every column — per-column codec
-//! *selection* is #853; granule skip-indexes are #854; per-granule blooms
-//! are #855. The directory reserves zeroed fields for all three so those
-//! slices extend within this envelope without forcing a format v2.
+//! every column stream is one `segment_codec` pipeline output. The codec
+//! chain is chosen **per column** from its [`ColumnSemantics`] via
+//! [`select_codecs`](super::segment_codec::select_codecs) (#853) — the
+//! directory's `codec` byte records the leading (semantic) codec so the
+//! sealed chunk is self-describing; granule skip-indexes are #854 and
+//! per-granule blooms are #855. The directory reserves zeroed fields for
+//! both so those slices extend within this envelope without forcing a
+//! format v2.
 //!
 //! # Layout (`RDCC`)
 //!
@@ -47,7 +50,9 @@
 //!   magic_tail           b"RDCC"  (4)
 //! ```
 
-use super::segment_codec::{decode_bytes, encode_bytes, CodecError, ColumnCodec};
+use super::segment_codec::{
+    decode_bytes, encode_bytes, select_codecs, CodecError, ColumnCodec, ColumnSemantics,
+};
 use crate::storage::engine::crc32::crc32;
 
 /// `b"RDCC"` — RedDB Columnar Chunk. Opens and closes every block.
@@ -69,6 +74,9 @@ pub struct ColumnInput<'a> {
     pub column_id: u32,
     /// Logical type tag (`DataType::to_byte()`).
     pub logical_type: u8,
+    /// The column's role — drives per-column codec selection (#853).
+    /// Callers that have no semantic hint pass [`ColumnSemantics::Generic`].
+    pub semantics: ColumnSemantics,
     /// Raw little-endian column bytes (pre-compression).
     pub data: &'a [u8],
 }
@@ -142,9 +150,10 @@ impl From<CodecError> for ColumnBlockError {
 }
 
 /// Serialize `columns` into the v1 `RDCC` layout. Each column's raw bytes
-/// are compressed with ZSTD(3) through `segment_codec`; the directory
-/// records the codec tag so the reader decodes by the *recorded* codec
-/// (#853 changes only write-time selection, never the read path).
+/// run through the codec chain [`select_codecs`] picks from its
+/// [`ColumnSemantics`]; the directory records the *leading* (semantic)
+/// codec tag. The reader decodes from each stream's own self-describing
+/// header, so #853 changed only write-time selection, never the read path.
 pub fn write_column_block(
     chunk_id: u64,
     schema_ref: u64,
@@ -159,10 +168,16 @@ pub fn write_column_block(
     let streams_off = dir_off + dir_len;
 
     // Encode every column stream first so we know each length/offset.
-    let codec = ColumnCodec::Zstd { level: 3 };
+    // The codec chain is chosen per column from its semantics; the tag we
+    // record in the directory is the *leading* (semantic) codec — the one
+    // that characterises the column. An empty chain (never produced by
+    // `select_codecs`) records `None`.
     let mut streams: Vec<Vec<u8>> = Vec::with_capacity(column_count);
+    let mut codec_tags: Vec<u8> = Vec::with_capacity(column_count);
     for col in columns {
-        streams.push(encode_bytes(std::slice::from_ref(&codec), col.data)?);
+        let codecs = select_codecs(col.logical_type, col.semantics);
+        codec_tags.push(codecs.first().unwrap_or(&ColumnCodec::None).tag());
+        streams.push(encode_bytes(&codecs, col.data)?);
     }
 
     let mut out = Vec::with_capacity(streams_off + streams.iter().map(Vec::len).sum::<usize>());
@@ -181,10 +196,10 @@ pub fn write_column_block(
 
     // --- Column directory ---
     let mut cursor = streams_off as u64;
-    for (col, stream) in columns.iter().zip(streams.iter()) {
+    for ((col, stream), codec_tag) in columns.iter().zip(streams.iter()).zip(codec_tags.iter()) {
         out.extend_from_slice(&col.column_id.to_le_bytes());
         out.push(col.logical_type);
-        out.push(codec.tag());
+        out.push(*codec_tag);
         out.extend_from_slice(&cursor.to_le_bytes()); // stream_offset
         out.extend_from_slice(&(stream.len() as u64).to_le_bytes()); // stream_len
         out.extend_from_slice(&0u64.to_le_bytes()); // granule_index_off (reserved #854)
@@ -335,11 +350,13 @@ mod tests {
                 ColumnInput {
                     column_id: 0,
                     logical_type: 2,
+                    semantics: ColumnSemantics::Timestamp,
                     data: &ts_raw,
                 },
                 ColumnInput {
                     column_id: 1,
                     logical_type: 3,
+                    semantics: ColumnSemantics::Gauge,
                     data: &val_raw,
                 },
             ],
@@ -355,12 +372,59 @@ mod tests {
         assert_eq!(decoded.columns.len(), 2);
         assert_eq!(decoded.columns[0].column_id, 0);
         assert_eq!(decoded.columns[0].logical_type, 2);
-        assert_eq!(
-            decoded.columns[0].codec_tag,
-            ColumnCodec::Zstd { level: 3 }.tag()
-        );
+        // Per-column selection: the directory records the *leading*
+        // semantic codec — DoubleDelta for the timestamp column, XOR for
+        // the float gauge — not a single uniform ZSTD tag.
+        assert_eq!(decoded.columns[0].codec_tag, ColumnCodec::DoubleDelta.tag());
+        assert_eq!(decoded.columns[1].codec_tag, ColumnCodec::Xor.tag());
+        // …yet both still decode byte-for-byte (criterion 1 + 2).
         assert_eq!(decoded.columns[0].data, ts_raw);
         assert_eq!(decoded.columns[1].data, val_raw);
+    }
+
+    fn str_stream(items: &[&str]) -> Vec<u8> {
+        let mut out = (items.len() as u32).to_le_bytes().to_vec();
+        for s in items {
+            out.extend_from_slice(&(s.len() as u16).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn records_counter_and_low_cardinality_codecs_and_round_trips() {
+        let counter = u64_stream(&(0..300).map(|i| (i * 5) as u64).collect::<Vec<_>>());
+        let labels: Vec<&str> = (0..300).map(|i| ["a", "b", "c"][i % 3]).collect();
+        let labels_raw = str_stream(&labels);
+
+        let block = write_column_block(
+            9,
+            1,
+            300,
+            0,
+            0,
+            &[
+                ColumnInput {
+                    column_id: 10,
+                    logical_type: 2,
+                    semantics: ColumnSemantics::Counter,
+                    data: &counter,
+                },
+                ColumnInput {
+                    column_id: 11,
+                    logical_type: 4,
+                    semantics: ColumnSemantics::LowCardinality,
+                    data: &labels_raw,
+                },
+            ],
+        )
+        .unwrap();
+
+        let decoded = read_column_block(&block).unwrap();
+        assert_eq!(decoded.columns[0].codec_tag, ColumnCodec::Delta.tag());
+        assert_eq!(decoded.columns[1].codec_tag, ColumnCodec::Dict.tag());
+        assert_eq!(decoded.columns[0].data, counter);
+        assert_eq!(decoded.columns[1].data, labels_raw);
     }
 
     #[test]
@@ -399,6 +463,7 @@ mod tests {
             &[ColumnInput {
                 column_id: 0,
                 logical_type: 2,
+                semantics: ColumnSemantics::Generic,
                 data: &raw,
             }],
         )
@@ -422,6 +487,7 @@ mod tests {
             &[ColumnInput {
                 column_id: 0,
                 logical_type: 3,
+                semantics: ColumnSemantics::Gauge,
                 data: &raw,
             }],
         )
