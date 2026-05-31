@@ -17,6 +17,7 @@
 //! | `Delta`        | monotonic or near-monotonic ints  | reuses `t64_encode` for residuals |
 //! | `DoubleDelta`  | regular time-series timestamps    | reuses existing DoD path |
 //! | `Dict`         | low-cardinality strings / ints    | builds inline dictionary |
+//! | `Xor`          | floating-point gauges             | reuses Gorilla `xor_*_values` |
 //!
 //! Codecs chain: callers compose a `Vec<ColumnCodec>` and apply them
 //! outer → inner on encode, inner → outer on decode. The pipeline
@@ -24,8 +25,8 @@
 //! the schema declaration — just the byte buffer.
 
 use crate::storage::timeseries::compression::{
-    delta_decode_timestamps, delta_encode_timestamps, t64_decode, t64_encode, zstd_compress,
-    zstd_decompress,
+    delta_decode_timestamps, delta_encode_timestamps, t64_decode, t64_encode, xor_decode_values,
+    xor_encode_values, zstd_compress, zstd_decompress,
 };
 
 /// Codec identifiers. Stored as a single byte in the header.
@@ -33,10 +34,16 @@ use crate::storage::timeseries::compression::{
 pub enum ColumnCodec {
     None,
     Lz4,
-    Zstd { level: i32 },
+    Zstd {
+        level: i32,
+    },
     Delta,
     DoubleDelta,
     Dict,
+    /// Gorilla XOR for floating-point gauges. Reuses the existing
+    /// time-series `xor_encode_values`/`xor_decode_values` — #853 only
+    /// *wires* the codec into the pipeline, it adds no new algorithm.
+    Xor,
 }
 
 impl ColumnCodec {
@@ -51,6 +58,7 @@ impl ColumnCodec {
             ColumnCodec::Delta => 3,
             ColumnCodec::DoubleDelta => 4,
             ColumnCodec::Dict => 5,
+            ColumnCodec::Xor => 6,
         }
     }
 
@@ -65,7 +73,58 @@ impl ColumnCodec {
             3 => Some(ColumnCodec::Delta),
             4 => Some(ColumnCodec::DoubleDelta),
             5 => Some(ColumnCodec::Dict),
+            6 => Some(ColumnCodec::Xor),
             _ => None,
+        }
+    }
+}
+
+/// Column semantics — the *role* a column plays, independent of its raw
+/// logical type. This is the signal [`select_codecs`] keys off: a numeric
+/// column can be a monotonic timestamp, an oscillating gauge, or a
+/// monotonic counter, and each wants a different codec even though all
+/// three are stored as 8-byte little-endian values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnSemantics {
+    /// Monotonic, regularly-spaced timestamps → delta-of-delta + ZSTD.
+    Timestamp,
+    /// Floating-point gauge (oscillating reading) → Gorilla/XOR + ZSTD.
+    Gauge,
+    /// Monotonic-ish integer counter → delta + ZSTD.
+    Counter,
+    /// Low-cardinality string / enum label → dictionary + ZSTD.
+    LowCardinality,
+    /// No semantic hint — fall back to a generic ZSTD codec.
+    Generic,
+}
+
+/// Pick the codec pipeline for a column from its semantics (and, for the
+/// `Generic` case, its logical type). This is the whole of #853: it wires
+/// *selection* over the existing codecs — delta-of-delta for timestamps,
+/// Gorilla/XOR for gauges, delta for counters, dictionary for
+/// low-cardinality strings, ZSTD otherwise. Every semantic codec is
+/// chained with `Zstd(3)` so the residual stream (which the leading codec
+/// only *re-shapes* into mostly-zero bytes) is actually shrunk on disk —
+/// the ClickHouse `CODEC(DoubleDelta, ZSTD)` parity posture.
+///
+/// The leading codec is the *semantic* one; [`crate::storage::unified::column_block`]
+/// records its tag in the chunk directory as the column's chosen codec.
+/// The full chain is always self-described by the stream header, so the
+/// reader never consults this function.
+pub fn select_codecs(logical_type: u8, semantics: ColumnSemantics) -> Vec<ColumnCodec> {
+    let zstd = ColumnCodec::Zstd { level: 3 };
+    match semantics {
+        ColumnSemantics::Timestamp => vec![ColumnCodec::DoubleDelta, zstd],
+        ColumnSemantics::Gauge => vec![ColumnCodec::Xor, zstd],
+        ColumnSemantics::Counter => vec![ColumnCodec::Delta, zstd],
+        ColumnSemantics::LowCardinality => vec![ColumnCodec::Dict, zstd],
+        // `Generic` ignores the logical type today — there is no
+        // type-only heuristic that beats ZSTD without a semantic hint.
+        // The parameter is kept so a future slice can refine the fallback
+        // (e.g. bit-pack narrow ints) without changing this signature.
+        ColumnSemantics::Generic => {
+            let _ = logical_type;
+            vec![zstd]
         }
     }
 }
@@ -190,6 +249,24 @@ fn apply_encode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
             }
             Ok(out)
         }
+        ColumnCodec::Xor => {
+            // f64 stream required.
+            if !data.len().is_multiple_of(8) {
+                return Err(CodecError::InvalidPayload("xor expects f64 stream"));
+            }
+            let values: Vec<f64> = data
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let encoded = xor_encode_values(&values);
+            // Pack as (count:u32) + u64 XOR words.
+            let mut out = Vec::with_capacity(4 + encoded.len() * 8);
+            out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            for v in encoded {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            Ok(out)
+        }
         ColumnCodec::Dict => encode_dict(data),
     }
 }
@@ -223,6 +300,27 @@ fn apply_decode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
                 .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
                 .collect();
             let decoded = delta_decode_timestamps(&encoded);
+            let mut out = Vec::with_capacity(decoded.len() * 8);
+            for v in decoded {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            Ok(out)
+        }
+        ColumnCodec::Xor => {
+            if data.len() < 4 {
+                return Err(CodecError::Truncated);
+            }
+            let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+            let payload = &data[4..];
+            if payload.len() < count * 8 {
+                return Err(CodecError::Truncated);
+            }
+            let encoded: Vec<u64> = payload
+                .chunks_exact(8)
+                .take(count)
+                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let decoded = xor_decode_values(&encoded);
             let mut out = Vec::with_capacity(decoded.len() * 8);
             for v in decoded {
                 out.extend_from_slice(&v.to_le_bytes());
@@ -456,5 +554,167 @@ mod tests {
     fn delta_codec_rejects_non_multiple_of_eight() {
         let encoded = encode_bytes(&[ColumnCodec::Delta], &[1u8, 2, 3]);
         assert!(encoded.is_err());
+    }
+
+    fn f64_stream(values: &[f64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    fn u64_stream(values: &[u64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn xor_codec_round_trips_gauge_floats() {
+        // Slowly-varying gauge — the case Gorilla/XOR targets.
+        let values: Vec<f64> = (0..2000).map(|i| 95.0 + (i % 13) as f64 * 0.125).collect();
+        let raw = f64_stream(&values);
+        let encoded = encode_bytes(&[ColumnCodec::Xor], &raw).unwrap();
+        let decoded = decode_bytes(&encoded).unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn xor_codec_is_lossless_for_special_floats() {
+        // NaN / inf / signed zero must survive bit-for-bit.
+        let values = vec![
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            1.5,
+            -1.5,
+        ];
+        let raw = f64_stream(&values);
+        let encoded = encode_bytes(&[ColumnCodec::Xor], &raw).unwrap();
+        let decoded = decode_bytes(&encoded).unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn xor_codec_rejects_non_multiple_of_eight() {
+        assert!(encode_bytes(&[ColumnCodec::Xor], &[1u8, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn xor_tag_round_trips() {
+        assert_eq!(
+            ColumnCodec::from_tag(ColumnCodec::Xor.tag()),
+            Some(ColumnCodec::Xor)
+        );
+    }
+
+    #[test]
+    fn select_codecs_maps_semantics_to_expected_chains() {
+        let z = ColumnCodec::Zstd { level: 3 };
+        assert_eq!(
+            select_codecs(0, ColumnSemantics::Timestamp),
+            vec![ColumnCodec::DoubleDelta, z.clone()]
+        );
+        assert_eq!(
+            select_codecs(0, ColumnSemantics::Gauge),
+            vec![ColumnCodec::Xor, z.clone()]
+        );
+        assert_eq!(
+            select_codecs(0, ColumnSemantics::Counter),
+            vec![ColumnCodec::Delta, z.clone()]
+        );
+        assert_eq!(
+            select_codecs(0, ColumnSemantics::LowCardinality),
+            vec![ColumnCodec::Dict, z.clone()]
+        );
+        assert_eq!(select_codecs(0, ColumnSemantics::Generic), vec![z]);
+    }
+
+    /// Criterion 2: round-trip stays lossless for every codec/type
+    /// combination the selector can produce.
+    #[test]
+    fn selected_codecs_round_trip_losslessly() {
+        let ts = u64_stream(
+            &(0..1000)
+                .map(|i| 1_700_000_000_000 + i * 1_000_000)
+                .collect::<Vec<_>>(),
+        );
+        let gauge = f64_stream(
+            &(0..1000)
+                .map(|i| 50.0 + (i % 9) as f64 * 0.5)
+                .collect::<Vec<_>>(),
+        );
+        let counter = u64_stream(&(0..1000).map(|i| (i * 7) as u64).collect::<Vec<_>>());
+        let strings = str_stream(&["a", "a", "b", "c", "a", "b", "b", "a", "c", "a"]);
+        let cases = [
+            (ColumnSemantics::Timestamp, 2u8, &ts),
+            (ColumnSemantics::Gauge, 3u8, &gauge),
+            (ColumnSemantics::Counter, 2u8, &counter),
+            (ColumnSemantics::LowCardinality, 4u8, &strings),
+            (ColumnSemantics::Generic, 4u8, &strings),
+        ];
+        for (sem, ty, raw) in cases {
+            let codecs = select_codecs(ty, sem);
+            let encoded = encode_bytes(&codecs, raw).unwrap();
+            let decoded = decode_bytes(&encoded).unwrap();
+            assert_eq!(decoded, *raw, "lossless round-trip failed for {sem:?}");
+        }
+    }
+
+    /// Criterion 3: loose compression-ratio sanity bounds per codec so a
+    /// regression that bloats storage is caught. Bands are deliberately
+    /// generous — they assert "this codec actually shrinks its target
+    /// shape", not a precise ratio.
+    #[test]
+    fn selected_codecs_meet_loose_ratio_bounds() {
+        // Regular timestamps: delta-of-delta collapses to ~0 residuals,
+        // ZSTD then crushes them. Expect a large win.
+        let ts = u64_stream(
+            &(0..4000)
+                .map(|i| 1_700_000_000_000 + i * 1_000_000)
+                .collect::<Vec<_>>(),
+        );
+        let enc = encode_bytes(&select_codecs(2, ColumnSemantics::Timestamp), &ts).unwrap();
+        assert!(
+            enc.len() < ts.len() / 4,
+            "timestamp codec ratio too weak: {} -> {}",
+            ts.len(),
+            enc.len()
+        );
+
+        // Slowly-varying gauge: XOR yields long zero runs, ZSTD shrinks.
+        let gauge = f64_stream(
+            &(0..4000)
+                .map(|i| 95.0 + (i % 5) as f64 * 0.1)
+                .collect::<Vec<_>>(),
+        );
+        let enc = encode_bytes(&select_codecs(3, ColumnSemantics::Gauge), &gauge).unwrap();
+        assert!(
+            enc.len() < gauge.len() / 2,
+            "gauge codec ratio too weak: {} -> {}",
+            gauge.len(),
+            enc.len()
+        );
+
+        // Monotonic counter: constant delta → ~0 residuals.
+        let counter = u64_stream(&(0..4000).map(|i| (i * 3) as u64).collect::<Vec<_>>());
+        let enc = encode_bytes(&select_codecs(2, ColumnSemantics::Counter), &counter).unwrap();
+        assert!(
+            enc.len() < counter.len() / 4,
+            "counter codec ratio too weak: {} -> {}",
+            counter.len(),
+            enc.len()
+        );
+
+        // Low-cardinality strings: dictionary folds repeats.
+        let labels: Vec<&str> = (0..4000)
+            .map(|i| ["us-east-1", "eu-west-1", "apac-south-1"][i % 3])
+            .collect();
+        let strings = str_stream(&labels);
+        let enc =
+            encode_bytes(&select_codecs(4, ColumnSemantics::LowCardinality), &strings).unwrap();
+        assert!(
+            enc.len() < strings.len() / 2,
+            "low-cardinality codec ratio too weak: {} -> {}",
+            strings.len(),
+            enc.len()
+        );
     }
 }
