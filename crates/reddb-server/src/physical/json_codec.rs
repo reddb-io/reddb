@@ -1613,6 +1613,104 @@ pub(super) fn tree_definition_from_json(value: &JsonValue) -> io::Result<Physica
     })
 }
 
+pub(super) fn hypertable_chunk_to_json(chunk: &PhysicalHypertableChunk) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("start_ns".to_string(), json_u64(chunk.start_ns));
+    object.insert(
+        "end_ns_exclusive".to_string(),
+        json_u64(chunk.end_ns_exclusive),
+    );
+    object.insert("row_count".to_string(), json_u64(chunk.row_count));
+    object.insert("min_ts_ns".to_string(), json_u64(chunk.min_ts_ns));
+    object.insert("max_ts_ns".to_string(), json_u64(chunk.max_ts_ns));
+    object.insert("sealed".to_string(), JsonValue::Bool(chunk.sealed));
+    object.insert(
+        "ttl_override_ns".to_string(),
+        chunk
+            .ttl_override_ns
+            .map(json_u64)
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
+}
+
+pub(super) fn hypertable_chunk_from_json(value: &JsonValue) -> io::Result<PhysicalHypertableChunk> {
+    let object = expect_object(value, "hypertable chunk")?;
+    Ok(PhysicalHypertableChunk {
+        start_ns: json_u64_required(object, "start_ns")?,
+        end_ns_exclusive: json_u64_required(object, "end_ns_exclusive")?,
+        row_count: json_u64_required(object, "row_count")?,
+        min_ts_ns: json_u64_required(object, "min_ts_ns")?,
+        max_ts_ns: json_u64_required(object, "max_ts_ns")?,
+        sealed: object
+            .get("sealed")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        ttl_override_ns: match object.get("ttl_override_ns") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(json_u64_value(value)?),
+        },
+    })
+}
+
+pub(super) fn hypertable_to_json(hypertable: &PhysicalHypertable) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "name".to_string(),
+        JsonValue::String(hypertable.name.clone()),
+    );
+    object.insert(
+        "time_column".to_string(),
+        JsonValue::String(hypertable.time_column.clone()),
+    );
+    object.insert(
+        "chunk_interval_ns".to_string(),
+        json_u64(hypertable.chunk_interval_ns),
+    );
+    object.insert(
+        "default_ttl_ns".to_string(),
+        hypertable
+            .default_ttl_ns
+            .map(json_u64)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "chunks".to_string(),
+        JsonValue::Array(
+            hypertable
+                .chunks
+                .iter()
+                .map(hypertable_chunk_to_json)
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
+}
+
+pub(super) fn hypertable_from_json(value: &JsonValue) -> io::Result<PhysicalHypertable> {
+    let object = expect_object(value, "hypertable")?;
+    Ok(PhysicalHypertable {
+        name: json_string_required(object, "name")?,
+        time_column: json_string_required(object, "time_column")?,
+        chunk_interval_ns: json_u64_required(object, "chunk_interval_ns")?,
+        default_ttl_ns: match object.get("default_ttl_ns") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(json_u64_value(value)?),
+        },
+        chunks: object
+            .get("chunks")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(hypertable_chunk_from_json)
+                    .collect::<io::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default(),
+    })
+}
+
 pub(super) fn index_kind_from_str(value: &str) -> io::Result<IndexKind> {
     match value {
         "btree" => Ok(IndexKind::BTree),
