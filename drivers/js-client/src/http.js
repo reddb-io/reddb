@@ -37,7 +37,7 @@
  */
 
 import { RedDBError } from './protocol.js'
-import { classifyNdjsonFrame } from './streaming.js'
+import { classifyNdjsonFrame, splitLines } from './core/ndjson.js'
 
 export class HttpRpcClient {
   /**
@@ -239,10 +239,9 @@ async function* ndjsonFrameIterator(reader, controller) {
       const { value, done } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
-      let nl
-      while ((nl = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, nl)
-        buffer = buffer.slice(nl + 1)
+      const { lines, rest } = splitLines(buffer)
+      buffer = rest
+      for (const line of lines) {
         const frame = classifyNdjsonFrame(line)
         if (frame) yield frame
       }

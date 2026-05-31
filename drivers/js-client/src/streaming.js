@@ -37,6 +37,12 @@
 
 import { Readable, Writable, Transform } from 'node:stream'
 import { RedDBError } from './protocol.js'
+import { classifyNdjsonFrame } from './core/ndjson.js'
+
+// `classifyNdjsonFrame` is a pure NDJSON helper that now lives in the
+// transport-agnostic core; re-exported here so the historical
+// `import { classifyNdjsonFrame } from './streaming.js'` path keeps working.
+export { classifyNdjsonFrame }
 
 function cancelError(reason) {
   const suffix = typeof reason === 'string' && reason.length > 0 ? `: ${reason}` : ''
@@ -301,34 +307,6 @@ export function splitNdjson() {
       if (parseLine(buffer, (row) => this.push(row), callback)) callback()
     },
   })
-}
-
-/**
- * Parse an NDJSON line into a typed read-session frame, or `null` for a
- * blank line. Shared by the HTTP and any text-framed transport.
- * @param {string} line
- * @returns {{type:string,value:unknown}|null}
- */
-export function classifyNdjsonFrame(line) {
-  const trimmed = line.trim()
-  if (trimmed.length === 0) return null
-  let parsed
-  try {
-    parsed = JSON.parse(trimmed)
-  } catch (err) {
-    throw new RedDBError('STREAM_PROTOCOL', `stream frame is not JSON: ${err.message}`)
-  }
-  if (parsed && typeof parsed === 'object') {
-    if ('descriptor' in parsed) return { type: 'descriptor', value: parsed.descriptor }
-    if ('cursor' in parsed) return { type: 'cursor', value: parsed.cursor }
-    if ('row' in parsed) return { type: 'row', value: parsed.row }
-    if ('end' in parsed) return { type: 'end', value: parsed.end }
-    if ('error' in parsed) {
-      const e = parsed.error ?? {}
-      throw new RedDBError(e.code || 'STREAM_ERROR', e.message || 'stream error', e)
-    }
-  }
-  throw new RedDBError('STREAM_PROTOCOL', `unrecognised stream frame: ${trimmed.slice(0, 120)}`)
 }
 
 /**
