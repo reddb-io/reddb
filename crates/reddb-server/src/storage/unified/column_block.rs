@@ -15,9 +15,13 @@
 //! (one min/max mark per `granule_size` rows — #854) is stored as a
 //! self-describing blob whose offset/length live in the directory's
 //! `granule_index_off`/`granule_index_len` (zeroed when a column has no
-//! index, e.g. variable-width streams); per-granule blooms are #855 and
-//! still occupy reserved zeroed fields. All extensions live inside this
-//! envelope without forcing a format v2.
+//! index, e.g. variable-width streams). A column's **per-granule bloom skip
+//! index** (one split-block bloom per `granule_size` rows — #855) is stored
+//! the same way, pointed at by the directory's now-live `bloom_off`/
+//! `bloom_len` (zeroed when a column has no bloom). The bloom serves
+//! equality/point predicates with a false-positives-only contract; min/max
+//! serves ranges. All extensions live inside this envelope without forcing a
+//! format v2.
 //!
 //! # Layout (`RDCC`)
 //!
@@ -41,17 +45,23 @@
 //!   stream_len           u64
 //!   granule_index_off    u64            byte offset of this column's granule index (0 = none) #854
 //!   granule_index_len    u64            length of the granule index blob (0 = none)
-//!   bloom_off            u64  = 0       reserved → #855
-//!   bloom_len            u64  = 0
+//!   bloom_off            u64            byte offset of this column's granule bloom (0 = none) #855
+//!   bloom_len            u64            length of the granule bloom blob (0 = none)
 //!
 //! Column streams        column_count segment_codec runs, back-to-back
 //! Granule indexes       per-column granule-index blobs, back-to-back (#854)
+//! Granule blooms        per-column granule-bloom blobs, back-to-back (#855)
 //!
 //! Granule index blob (per indexed column)
 //!   granule_size_rows    u32            rows per mark (last mark may be shorter)
 //!   value_width          u32            bytes per min/max value (8 for u64/f64)
 //!   granule_count        u32
 //!   per granule:  min[value_width]  max[value_width]   raw column-encoded bytes
+//!
+//! Granule bloom blob (per indexed column)
+//!   granule_size_rows    u32            rows per bloom (last bloom may cover fewer)
+//!   granule_count        u32
+//!   per granule:  num_blocks u32        then num_blocks × 32 bytes of bloom words
 //!
 //! Footer (24 bytes)
 //!   col_directory_off    u64
@@ -64,6 +74,7 @@ use super::segment_codec::{
     decode_bytes, encode_bytes, select_codecs, CodecError, ColumnCodec, ColumnSemantics,
 };
 use crate::storage::engine::crc32::crc32;
+use crate::storage::primitives::split_block_bloom::{hash_bytes_u32, SplitBlockBloom};
 
 /// `b"RDCC"` — RedDB Columnar Chunk. Opens and closes every block.
 pub const COLUMN_BLOCK_MAGIC: [u8; 4] = *b"RDCC";
@@ -105,6 +116,10 @@ pub struct DecodedColumn {
     /// directory recorded a zero-length granule slice (variable-width /
     /// non-numeric columns, or `granule_size == 0` at write time).
     pub granule_index: Option<GranuleIndex>,
+    /// Per-granule bloom skip index for this column (#855), or `None` when
+    /// the directory recorded a zero-length bloom slice. Serves
+    /// equality/point predicates with a false-positives-only contract.
+    pub granule_bloom: Option<GranuleBloom>,
 }
 
 /// A fully decoded column block: the self-describing header plus every
@@ -273,6 +288,141 @@ impl GranuleIndex {
     }
 }
 
+/// Per-granule bloom skip index over one column (#855): one
+/// [`SplitBlockBloom`] per `granule_size` rows, tiled on the *same* granule
+/// boundaries as [`GranuleIndex`] so `row_range` is shared. Where the min/max
+/// index serves range predicates, the bloom serves **equality/point**
+/// predicates: a granule is probed for the target value and kept only if the
+/// bloom *may* contain it. The split-block bloom never reports a false
+/// negative, so a granule that actually holds the value always probes true —
+/// the pruner therefore over-includes (false positives) but never
+/// under-includes (PRD #850 Phase 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GranuleBloom {
+    /// Rows per granule bloom. The final granule may cover fewer rows.
+    pub granule_size: u32,
+    /// One bloom per granule, in row order.
+    pub blooms: Vec<SplitBlockBloom>,
+}
+
+impl GranuleBloom {
+    /// Number of granule blooms.
+    pub fn granule_count(&self) -> usize {
+        self.blooms.len()
+    }
+
+    /// Row range `[start, end)` covered by granule `i`, clamped to
+    /// `row_count` — identical tiling to [`GranuleIndex::row_range`].
+    pub fn row_range(&self, i: usize, row_count: usize) -> (usize, usize) {
+        let g = (self.granule_size as usize).max(1);
+        let start = i.saturating_mul(g).min(row_count);
+        let end = (i + 1).saturating_mul(g).min(row_count);
+        (start, end)
+    }
+
+    /// Indices of granules whose bloom **may** contain `key_bytes`, i.e. the
+    /// granules an equality predicate cannot prove empty. `key_bytes` are the
+    /// raw little-endian value bytes, folded to a `u32` with the same
+    /// [`hash_bytes_u32`] the writer used. A granule the bloom rejects is
+    /// definitely absent and pruned; survivors may be false positives.
+    pub fn surviving_granules(&self, key_bytes: &[u8]) -> Vec<usize> {
+        let key = hash_bytes_u32(key_bytes);
+        (0..self.blooms.len())
+            .filter(|&i| self.blooms[i].probe(key))
+            .collect()
+    }
+
+    /// Serialize to the self-describing blob the column directory points at.
+    /// Each granule's bloom carries its own block count, so granules of
+    /// different row spans (e.g. a short final granule) serialize cleanly.
+    fn serialize(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + self.blooms.len() * 36);
+        out.extend_from_slice(&self.granule_size.to_le_bytes());
+        out.extend_from_slice(&(self.blooms.len() as u32).to_le_bytes());
+        for bloom in &self.blooms {
+            out.extend_from_slice(&bloom.to_bytes());
+        }
+        out
+    }
+
+    /// Inverse of [`GranuleBloom::serialize`]. Like the granule index it
+    /// lives inside the CRC-covered region, so this only guards against
+    /// internally-inconsistent lengths, reported as
+    /// [`ColumnBlockError::BadDirectory`].
+    fn deserialize(bytes: &[u8]) -> Result<GranuleBloom, ColumnBlockError> {
+        if bytes.len() < 8 {
+            return Err(ColumnBlockError::BadDirectory);
+        }
+        let granule_size = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let mut blooms = Vec::with_capacity(count);
+        let mut cur = 8;
+        for _ in 0..count {
+            // Each bloom's leading u32 is its block count; reconstruct it and
+            // advance the cursor by the bytes it consumed.
+            if cur + 4 > bytes.len() {
+                return Err(ColumnBlockError::BadDirectory);
+            }
+            let num_blocks = u32::from_le_bytes(bytes[cur..cur + 4].try_into().unwrap()) as usize;
+            let bloom_len = 4usize
+                .checked_add(
+                    num_blocks
+                        .checked_mul(32)
+                        .ok_or(ColumnBlockError::BadDirectory)?,
+                )
+                .ok_or(ColumnBlockError::BadDirectory)?;
+            let end = cur
+                .checked_add(bloom_len)
+                .ok_or(ColumnBlockError::BadDirectory)?;
+            if end > bytes.len() {
+                return Err(ColumnBlockError::BadDirectory);
+            }
+            let bloom = SplitBlockBloom::from_bytes(&bytes[cur..end])
+                .ok_or(ColumnBlockError::BadDirectory)?;
+            blooms.push(bloom);
+            cur = end;
+        }
+        Ok(GranuleBloom {
+            granule_size,
+            blooms,
+        })
+    }
+}
+
+/// Build a per-granule bloom index over a fixed-width numeric column, on the
+/// same granule boundaries as [`build_granule_index`]. Returns `None` under
+/// the same conditions (zero stride, empty/ragged data, non-numeric column),
+/// so the directory's bloom slice stays zero-length in lockstep with the
+/// min/max slice. Every value in a granule is folded through
+/// [`hash_bytes_u32`] and inserted, so the bloom probes true for any value it
+/// holds — the no-false-negative property the pruner relies on.
+fn build_granule_bloom(logical_type: u8, granule_size: u32, data: &[u8]) -> Option<GranuleBloom> {
+    if granule_size == 0 {
+        return None;
+    }
+    NumKind::from_logical(logical_type)?;
+    if data.is_empty() || !data.len().is_multiple_of(8) {
+        return None;
+    }
+    let n = data.len() / 8;
+    let g = granule_size as usize;
+    let mut blooms = Vec::with_capacity(n.div_ceil(g));
+    let mut start = 0usize;
+    while start < n {
+        let end = (start + g).min(n);
+        let mut bloom = SplitBlockBloom::with_capacity(end - start);
+        for v in data[start * 8..end * 8].chunks_exact(8) {
+            bloom.insert(hash_bytes_u32(v));
+        }
+        blooms.push(bloom);
+        start = end;
+    }
+    Some(GranuleBloom {
+        granule_size,
+        blooms,
+    })
+}
+
 /// Type-aware ordering for the fixed-width numeric columns a granule index
 /// covers. The min/max bytes are stored in the column's own little-endian
 /// encoding, but the *ordering* differs per type (raw byte order is wrong
@@ -396,6 +546,7 @@ pub fn write_column_block(
     let mut streams: Vec<Vec<u8>> = Vec::with_capacity(column_count);
     let mut codec_tags: Vec<u8> = Vec::with_capacity(column_count);
     let mut granule_blobs: Vec<Vec<u8>> = Vec::with_capacity(column_count);
+    let mut bloom_blobs: Vec<Vec<u8>> = Vec::with_capacity(column_count);
     for col in columns {
         let codecs = select_codecs(col.logical_type, col.semantics);
         codec_tags.push(codecs.first().unwrap_or(&ColumnCodec::None).tag());
@@ -405,17 +556,28 @@ pub fn write_column_block(
                 .map(|gi| gi.serialize())
                 .unwrap_or_default(),
         );
+        // Per-granule bloom skip index (#855), on the same granule
+        // boundaries as the min/max index; equality predicates probe it.
+        bloom_blobs.push(
+            build_granule_bloom(col.logical_type, granule_size, col.data)
+                .map(|gb| gb.serialize())
+                .unwrap_or_default(),
+        );
     }
 
-    // Granule indexes are laid back-to-back after all streams. Compute the
-    // start of that region so directory offsets can be filled in one pass.
+    // Granule indexes are laid back-to-back after all streams, then the
+    // granule blooms back-to-back after the indexes. Compute each region's
+    // start so directory offsets can be filled in one pass.
     let granule_region_off =
         streams_off as u64 + streams.iter().map(|s| s.len() as u64).sum::<u64>();
+    let bloom_region_off =
+        granule_region_off + granule_blobs.iter().map(|s| s.len() as u64).sum::<u64>();
 
     let mut out = Vec::with_capacity(
         streams_off
             + streams.iter().map(Vec::len).sum::<usize>()
             + granule_blobs.iter().map(Vec::len).sum::<usize>()
+            + bloom_blobs.iter().map(Vec::len).sum::<usize>()
             + FOOTER_LEN,
     );
 
@@ -434,11 +596,13 @@ pub fn write_column_block(
     // --- Column directory ---
     let mut cursor = streams_off as u64;
     let mut granule_cursor = granule_region_off;
-    for (((col, stream), codec_tag), granule) in columns
+    let mut bloom_cursor = bloom_region_off;
+    for ((((col, stream), codec_tag), granule), bloom) in columns
         .iter()
         .zip(streams.iter())
         .zip(codec_tags.iter())
         .zip(granule_blobs.iter())
+        .zip(bloom_blobs.iter())
     {
         out.extend_from_slice(&col.column_id.to_le_bytes());
         out.push(col.logical_type);
@@ -453,8 +617,14 @@ pub fn write_column_block(
             out.extend_from_slice(&(granule.len() as u64).to_le_bytes()); // granule_index_len
             granule_cursor += granule.len() as u64;
         }
-        out.extend_from_slice(&0u64.to_le_bytes()); // bloom_off (reserved #855)
-        out.extend_from_slice(&0u64.to_le_bytes()); // bloom_len
+        if bloom.is_empty() {
+            out.extend_from_slice(&0u64.to_le_bytes()); // bloom_off (none)
+            out.extend_from_slice(&0u64.to_le_bytes()); // bloom_len
+        } else {
+            out.extend_from_slice(&bloom_cursor.to_le_bytes()); // bloom_off (#855)
+            out.extend_from_slice(&(bloom.len() as u64).to_le_bytes()); // bloom_len
+            bloom_cursor += bloom.len() as u64;
+        }
         cursor += stream.len() as u64;
     }
     debug_assert_eq!(out.len(), streams_off);
@@ -468,6 +638,12 @@ pub fn write_column_block(
     // --- Granule indexes (#854) ---
     for granule in &granule_blobs {
         out.extend_from_slice(granule);
+    }
+    debug_assert_eq!(out.len() as u64, bloom_region_off);
+
+    // --- Granule blooms (#855) ---
+    for bloom in &bloom_blobs {
+        out.extend_from_slice(bloom);
     }
 
     // --- Footer ---
@@ -551,6 +727,10 @@ pub fn read_column_block(bytes: &[u8]) -> Result<DecodedColumnBlock, ColumnBlock
             u64::from_le_bytes(bytes[base + 22..base + 30].try_into().unwrap()) as usize;
         let granule_len =
             u64::from_le_bytes(bytes[base + 30..base + 38].try_into().unwrap()) as usize;
+        let bloom_off =
+            u64::from_le_bytes(bytes[base + 38..base + 46].try_into().unwrap()) as usize;
+        let bloom_len =
+            u64::from_le_bytes(bytes[base + 46..base + 54].try_into().unwrap()) as usize;
         let end = stream_offset
             .checked_add(stream_len)
             .ok_or(ColumnBlockError::BadDirectory)?;
@@ -573,12 +753,26 @@ pub fn read_column_block(bytes: &[u8]) -> Result<DecodedColumnBlock, ColumnBlock
             }
             Some(GranuleIndex::deserialize(&bytes[granule_off..g_end])?)
         };
+        // Parse the per-granule bloom skip index (#855) when present. A
+        // zero-length slice means the column was written without a bloom.
+        let granule_bloom = if bloom_len == 0 {
+            None
+        } else {
+            let b_end = bloom_off
+                .checked_add(bloom_len)
+                .ok_or(ColumnBlockError::BadDirectory)?;
+            if bloom_off < dir_off + dir_len || b_end > footer_start {
+                return Err(ColumnBlockError::BadDirectory);
+            }
+            Some(GranuleBloom::deserialize(&bytes[bloom_off..b_end])?)
+        };
         columns.push(DecodedColumn {
             column_id,
             logical_type,
             codec_tag,
             data,
             granule_index,
+            granule_bloom,
         });
     }
 
@@ -595,6 +789,7 @@ pub fn read_column_block(bytes: &[u8]) -> Result<DecodedColumnBlock, ColumnBlock
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn u64_stream(values: &[u64]) -> Vec<u8> {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
@@ -842,6 +1037,123 @@ mod tests {
         });
         assert_eq!(survivors, vec![1]);
         assert_eq!(gi.row_range(1, ts.len()), (100, 200));
+    }
+
+    #[test]
+    fn granule_bloom_round_trips_and_prunes_on_equality() {
+        // 250 u64 keys, 100 rows per granule → 3 granules (100/100/50). The
+        // values are deliberately scattered so a target lands in exactly one.
+        let keys: Vec<u64> = (0..250).map(|i| (i as u64) * 7 + 3).collect();
+        let raw = u64_stream(&keys);
+        let block = write_column_block(
+            1,
+            0,
+            keys.len() as u64,
+            *keys.first().unwrap(),
+            *keys.last().unwrap(),
+            100,
+            &[ColumnInput {
+                column_id: 0,
+                logical_type: 2,
+                semantics: ColumnSemantics::Timestamp,
+                data: &raw,
+            }],
+        )
+        .unwrap();
+
+        let decoded = read_column_block(&block).unwrap();
+        let gb = decoded.columns[0]
+            .granule_bloom
+            .as_ref()
+            .expect("numeric column must carry a granule bloom");
+        assert_eq!(gb.granule_count(), 3);
+        assert_eq!(gb.granule_size, 100);
+
+        // A value that lives in granule 1 (row 150 → key 150*7+3 = 1053) must
+        // keep granule 1 (no false negative). Other granules may survive as
+        // false positives, but the owning granule is never pruned.
+        let target = keys[150];
+        let survivors = gb.surviving_granules(&target.to_le_bytes());
+        assert!(
+            survivors.contains(&1),
+            "granule holding the value was pruned: {survivors:?}"
+        );
+        assert_eq!(gb.row_range(1, keys.len()), (100, 200));
+
+        // Every actually-present key probes true in its own granule — the
+        // core no-false-negative guarantee across the serialized boundary.
+        for (row, &k) in keys.iter().enumerate() {
+            let g = row / 100;
+            let survivors = gb.surviving_granules(&k.to_le_bytes());
+            assert!(
+                survivors.contains(&g),
+                "key {k} at row {row} pruned from its granule {g}: {survivors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn variable_width_column_gets_no_granule_bloom() {
+        let labels: Vec<&str> = (0..120).map(|i| ["a", "b", "c"][i % 3]).collect();
+        let labels_raw = str_stream(&labels);
+        let block = write_column_block(
+            9,
+            1,
+            120,
+            0,
+            0,
+            64,
+            &[ColumnInput {
+                column_id: 11,
+                logical_type: 4,
+                semantics: ColumnSemantics::LowCardinality,
+                data: &labels_raw,
+            }],
+        )
+        .unwrap();
+        let decoded = read_column_block(&block).unwrap();
+        // Variable-width string column: no min/max index and no bloom.
+        assert!(decoded.columns[0].granule_index.is_none());
+        assert!(decoded.columns[0].granule_bloom.is_none());
+    }
+
+    proptest! {
+        /// Soundness (criterion 2): a granule bloom may over-include but
+        /// NEVER under-includes. For any column of u64 values and any probe
+        /// key, every granule that actually *contains* that key survives the
+        /// equality prune. Tested through the full write→read serialization
+        /// path so the persisted bloom — not just an in-RAM one — is proven.
+        #[test]
+        fn bloom_never_prunes_a_granule_holding_the_key(
+            values in proptest::collection::vec(0u64..5_000, 1..400usize),
+            granule_size in 1u32..128,
+            probe in 0u64..5_000,
+        ) {
+            let raw = u64_stream(&values);
+            let block = write_column_block(
+                1, 0, values.len() as u64, 0, 0, granule_size,
+                &[ColumnInput {
+                    column_id: 0,
+                    logical_type: 2,
+                    semantics: ColumnSemantics::Generic,
+                    data: &raw,
+                }],
+            ).unwrap();
+            let decoded = read_column_block(&block).unwrap();
+            let gb = decoded.columns[0].granule_bloom.as_ref().unwrap();
+            let survivors = gb.surviving_granules(&probe.to_le_bytes());
+            let g = granule_size as usize;
+            // Every granule that holds `probe` among its rows must survive.
+            for (row, &v) in values.iter().enumerate() {
+                if v == probe {
+                    let gi = row / g;
+                    prop_assert!(
+                        survivors.contains(&gi),
+                        "granule {gi} holds {probe} at row {row} but was pruned"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
