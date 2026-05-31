@@ -32,6 +32,7 @@ pub mod primary;
 pub mod quorum;
 pub mod replica;
 pub mod scheduler;
+pub mod swap_db;
 pub mod topology_advertiser;
 
 pub use bookmark::{BookmarkDecodeError, CausalBookmark};
@@ -44,6 +45,7 @@ pub use failover::{
 pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
+pub use swap_db::{RebootstrapInProgress, SwapDb};
 pub use topology_advertiser::{
     LagConfig, TopologyAdvertiser, TopologyAuthGate, DEFAULT_REPLICA_TIMEOUT_MS,
     TOPOLOGY_READ_CAPABILITY,
