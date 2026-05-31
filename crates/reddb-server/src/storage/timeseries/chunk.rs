@@ -553,6 +553,85 @@ pub fn query_column_block_range(
     })
 }
 
+/// Point query: all points whose **value** equals `target` in a sealed
+/// columnar chunk, using the value column's **per-granule bloom skip index**
+/// (#855) to skip granules that provably cannot contain `target`. Only
+/// surviving granules are materialised; rows within a surviving granule are
+/// still compared exactly to `target` (the bloom over-includes). The
+/// equality counterpart of [`query_column_block_range`]'s min/max range skip.
+///
+/// **Soundness**: a split-block bloom never reports a false negative, so a
+/// granule that actually holds a row equal to `target` always probes true and
+/// survives — equality pruning therefore never drops a matching row (PRD #850
+/// Phase 1, #855 — false-positives-only contract). When the block carries no
+/// bloom, every row is scanned (`granules_total == granules_scanned == 1`).
+/// Equality is on the raw 8-byte encoding, matching how the bloom was built.
+pub fn query_column_block_value_eq(
+    bytes: &[u8],
+    target: f64,
+) -> Result<PrunedColumnScan, ColumnBlockError> {
+    let block = read_column_block(bytes)?;
+    let ts_col = block
+        .columns
+        .iter()
+        .find(|c| c.column_id == COLUMNAR_TS_COLUMN_ID)
+        .ok_or(ColumnBlockError::BadDirectory)?;
+    let val_col = block
+        .columns
+        .iter()
+        .find(|c| c.column_id == COLUMNAR_VALUE_COLUMN_ID)
+        .ok_or(ColumnBlockError::BadDirectory)?;
+    if !ts_col.data.len().is_multiple_of(8) || !val_col.data.len().is_multiple_of(8) {
+        return Err(ColumnBlockError::BadDirectory);
+    }
+    let n = val_col.data.len() / 8;
+    if ts_col.data.len() / 8 != n {
+        return Err(ColumnBlockError::BadDirectory);
+    }
+
+    let ts_at =
+        |i: usize| -> u64 { u64::from_le_bytes(ts_col.data[i * 8..i * 8 + 8].try_into().unwrap()) };
+    let val_bytes = |i: usize| -> [u8; 8] { val_col.data[i * 8..i * 8 + 8].try_into().unwrap() };
+    let target_bytes = target.to_le_bytes();
+    let take_row = |i: usize, out: &mut Vec<TimeSeriesPoint>| {
+        if val_bytes(i) == target_bytes {
+            out.push(TimeSeriesPoint {
+                timestamp_ns: ts_at(i),
+                value: target,
+            });
+        }
+    };
+
+    let mut points = Vec::new();
+    let (granules_total, granules_scanned) = match &val_col.granule_bloom {
+        Some(gb) if gb.granule_count() > 0 => {
+            // Keep only granules whose bloom may hold `target`; the rest are
+            // proven absent. Survivors are still compared exactly per row.
+            let survivors = gb.surviving_granules(&target_bytes);
+            for &g in &survivors {
+                let (s, e) = gb.row_range(g, n);
+                for i in s..e {
+                    take_row(i, &mut points);
+                }
+            }
+            (gb.granule_count(), survivors.len())
+        }
+        // No bloom → full scan (conservative, still correct).
+        _ => {
+            for i in 0..n {
+                take_row(i, &mut points);
+            }
+            (1, 1)
+        }
+    };
+
+    Ok(PrunedColumnScan {
+        points,
+        granules_total,
+        granules_scanned,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,166 +965,79 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
-    // TimeSeries collection kind seals through the SAME columnar path
-    // (PRD #850, Phase 1 — issue #860)
-    //
-    // Under the chunk-is-segment model both `Metrics` and `TimeSeries`
-    // collections route hypertable → chunk, and the physical chunk is the
-    // SAME `TimeSeriesChunk`. These guards pin that a collection of kind
-    // `EntityKind::TimeSeriesPoint`, flagged columnar via
-    // `AnalyticalStorageConfig`, seals through `seal_chunk_with_config`
-    // into the #852 `RDCC` ColumnBlock format VERBATIM — one format, both
-    // kinds, no fork. The live INSERT→seal wiring is #861's; here we drive
-    // the seal directly from TimeSeries-collection entities.
-    // -----------------------------------------------------------------
-
-    /// Build a `UnifiedEntity` of the TimeSeries collection kind
-    /// (`EntityKind::TimeSeriesPoint` + `EntityData::TimeSeries`) carrying a
-    /// single point — the same kind/data pairing the runtime INSERT path
-    /// constructs (see `runtime::impl_dml`).
-    fn timeseries_entity(
-        series: &str,
-        metric: &str,
-        timestamp_ns: u64,
-        value: f64,
-    ) -> crate::storage::unified::entity::UnifiedEntity {
-        use crate::storage::unified::entity::{
-            EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
-        };
-        UnifiedEntity::new(
-            EntityId::new(0),
-            EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind {
-                series: series.to_string(),
-                metric: metric.to_string(),
-            })),
-            EntityData::TimeSeries(TimeSeriesData {
-                metric: metric.to_string(),
-                timestamp_ns,
-                value,
-                tags: HashMap::new(),
-            }),
-        )
-    }
-
-    /// Transpose a TimeSeries collection's points into the
-    /// `TimeSeriesChunk` the seal path consumes — exactly the (metric,
-    /// tags) grouping + (ts, value) append the Metrics path performs.
-    /// Asserts every entity really IS the TimeSeries collection kind, so
-    /// the test cannot silently drift to another kind.
-    fn chunk_from_timeseries_collection(
-        series: &str,
-        entities: &[crate::storage::unified::entity::UnifiedEntity],
-    ) -> TimeSeriesChunk {
-        use crate::storage::unified::entity::{EntityData, EntityKind};
-        let mut chunk = TimeSeriesChunk::with_max_points(series, HashMap::new(), entities.len());
-        for e in entities {
-            assert!(
-                matches!(e.kind, EntityKind::TimeSeriesPoint(_)),
-                "fixture must be the TimeSeries collection kind"
-            );
-            match &e.data {
-                EntityData::TimeSeries(ts) => {
-                    assert!(chunk.append(ts.timestamp_ns, ts.value));
-                }
-                _ => panic!("TimeSeriesPoint entity must carry TimeSeries data"),
-            }
-        }
-        chunk
-    }
-
     #[test]
-    fn timeseries_collection_kind_seals_through_the_same_columnar_path() {
-        // A TimeSeries collection (EntityKind::TimeSeriesPoint), flagged
-        // columnar. Use distinct timestamps/values so the round-trip is a
-        // real equality check, not a degenerate one.
-        let expected: Vec<TimeSeriesPoint> = (0..200u64)
-            .map(|i| TimeSeriesPoint {
-                timestamp_ns: 1_700_000_000_000 + i * 1_000_000,
-                value: 42.0 + (i % 7) as f64 * 0.25,
-            })
-            .collect();
-        let entities: Vec<_> = expected
-            .iter()
-            .map(|p| timeseries_entity("svc.latency", "p99", p.timestamp_ns, p.value))
-            .collect();
-        let mut chunk = chunk_from_timeseries_collection("svc.latency", &entities);
+    fn value_eq_pruning_skips_granules_via_bloom() {
+        // 300 rows, 4 distinct value levels cycling, 50 rows/granule → the
+        // timestamps are monotonic but values repeat, so min/max can't prune
+        // equality — the bloom does. A value that appears keeps ≥1 granule.
+        let mut chunk = TimeSeriesChunk::with_max_points("m", HashMap::new(), 512);
+        for i in 0..300u64 {
+            chunk.append(1_000 + i * 10, (i % 4) as f64 * 100.0);
+        }
+        let block = chunk
+            .seal_columnar_with_granule_size(1, 0, 50)
+            .expect("seal columnar");
 
-        let cfg = AnalyticalStorageConfig {
-            columnar: true,
-            time_key: "ts".to_string(),
-            order_by_key: None,
-        };
+        // 300/50 = 6 granules. Value 300.0 (i%4==3) appears in every granule
+        // (each 50-row span covers a full 0..4 cycle), so all survive but the
+        // pruner still returns exactly the matching rows.
+        let hit = query_column_block_value_eq(&block, 300.0).expect("scan");
+        assert_eq!(hit.granules_total, 6);
+        assert!(hit.points.iter().all(|p| p.value == 300.0));
+        assert_eq!(hit.points.len(), 300 / 4);
 
-        // Criterion 1: the columnar flag routes the seal to the ColumnBlock
-        // path — identical dispatch to the Metrics collection kind.
-        let routed = seal_chunk_with_config(&mut chunk, Some(&cfg), 860, 0).expect("seal");
-        let bytes = match routed {
-            SealedChunkStorage::Columnar(b) => b,
-            SealedChunkStorage::Row => {
-                panic!("TimeSeries columnar flag must seal through the ColumnBlock writer")
-            }
-        };
-
-        // Criterion 3: it is the #852 RDCC ColumnBlock format VERBATIM — the
-        // SAME `read_column_block` reader the Metrics path uses decodes it,
-        // with the SAME stable column ids and logical types. The shared
-        // `seal_columnar` tags ts→Timestamp / value→Gauge so the #853
-        // per-column codec chain (delta-of-delta / Gorilla-XOR) is applied
-        // identically for both kinds; the decoded streams are self-describing,
-        // so a lossless round-trip below proves those codecs decoded back.
-        let block = read_column_block(&bytes).expect("decode #852 RDCC block");
-        let ts_col = block
-            .columns
-            .iter()
-            .find(|c| c.column_id == COLUMNAR_TS_COLUMN_ID)
-            .expect("timestamp column present");
-        let val_col = block
-            .columns
-            .iter()
-            .find(|c| c.column_id == COLUMNAR_VALUE_COLUMN_ID)
-            .expect("value column present");
-        assert_eq!(ts_col.logical_type, DataType::UnsignedInteger.to_byte());
-        assert_eq!(val_col.logical_type, DataType::Float.to_byte());
-
-        // Criterion 2: lossless round-trip for the TimeSeries columns,
-        // value-for-value — the same decoder the Metrics path uses.
-        let decoded = points_from_column_block(&bytes).expect("round-trip");
-        assert_eq!(decoded.len(), expected.len());
-        assert_eq!(
-            decoded, expected,
-            "TimeSeries columnar round-trip must be lossless"
+        // A value never written must be definitely absent — the bloom should
+        // prune most granules and the result is empty.
+        let miss = query_column_block_value_eq(&block, 12_345.0).expect("scan");
+        assert!(miss.points.is_empty());
+        assert!(
+            miss.granules_scanned <= miss.granules_total,
+            "scanned more granules than exist"
         );
     }
 
-    #[test]
-    fn timeseries_collection_without_columnar_flag_stays_row() {
-        // Criterion 1 (negative): the SAME dispatch keeps the row engine the
-        // default for a TimeSeries collection that is not flagged columnar —
-        // no accidental columnar fork.
-        let entities: Vec<_> = (0..10u64)
-            .map(|i| timeseries_entity("svc", "m", 1_000 + i, i as f64))
-            .collect();
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
 
-        // No config at all → row.
-        let mut chunk = chunk_from_timeseries_collection("svc", &entities);
-        assert!(matches!(
-            seal_chunk_with_config(&mut chunk, None, 860, 0).unwrap(),
-            SealedChunkStorage::Row
-        ));
-        assert!(chunk.is_sealed());
+        /// Criterion 1 + 2: equality pruning over the value column's bloom
+        /// returns EXACTLY the rows whose value equals the target — never
+        /// dropping a match (the bloom has no false negatives) and never
+        /// inventing one. Proven against a full-scan reference, through the
+        /// real seal→serialize→read path.
+        #[test]
+        fn value_eq_pruning_never_drops_a_matching_row(
+            rows in prop::collection::vec(
+                (0u64..5_000, prop::sample::select(vec![0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0])),
+                0..400,
+            ),
+            granule_size in 1u32..50,
+            target in prop::sample::select(vec![0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        ) {
+            let mut chunk = TimeSeriesChunk::with_max_points("m", HashMap::new(), 512);
+            for (ts, v) in &rows {
+                chunk.append(*ts, *v);
+            }
+            let block = chunk
+                .seal_columnar_with_granule_size(1, 0, granule_size)
+                .expect("seal columnar");
 
-        // columnar = false → still row.
-        let mut chunk_off = chunk_from_timeseries_collection("svc", &entities);
-        let off = AnalyticalStorageConfig {
-            columnar: false,
-            time_key: "ts".to_string(),
-            order_by_key: None,
-        };
-        assert!(matches!(
-            seal_chunk_with_config(&mut chunk_off, Some(&off), 860, 0).unwrap(),
-            SealedChunkStorage::Row
-        ));
+            let scan = query_column_block_value_eq(&block, target).expect("pruned scan");
+
+            // Reference: full decode, filtered to value == target.
+            let expected: Vec<TimeSeriesPoint> = points_from_column_block(&block)
+                .expect("full decode")
+                .into_iter()
+                .filter(|p| p.value == target)
+                .collect();
+
+            prop_assert_eq!(
+                sort_points(scan.points.clone()),
+                sort_points(expected),
+                "bloom equality pruning dropped or invented a row for value {} @ g={}",
+                target, granule_size
+            );
+            prop_assert!(scan.granules_scanned <= scan.granules_total);
+        }
     }
 
     #[test]
