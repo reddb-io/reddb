@@ -29,6 +29,30 @@ impl Pager {
             .create(config.create && !config.read_only)
             .open(&path)?;
 
+        // gh-892: diagnostic probe of the filesystem block size. If the
+        // compile-time 16 KiB PAGE_SIZE is not a multiple of the FS block
+        // size, page writes straddle FS blocks and incur read-modify-write
+        // amplification. Pure diagnostic — emitted once per open, never
+        // mutates the page size. `blksize()` is the fstat `st_blksize`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = file.metadata() {
+                let fs_block_size = meta.blksize();
+                if Self::page_size_misaligned_with_block(PAGE_SIZE, fs_block_size) {
+                    tracing::warn!(
+                        page_size = PAGE_SIZE,
+                        fs_block_size,
+                        path = %path.display(),
+                        "database page size is not a multiple of the filesystem \
+                         block size; page writes will straddle FS blocks \
+                         (read-modify-write amplification). Diagnostic only — \
+                         the page size is unchanged."
+                    );
+                }
+            }
+        }
+
         // Acquire file lock (exclusive for writes, shared for read-only)
         let lock_file = if !config.read_only {
             let lf = OpenOptions::new().read(true).write(true).open(&path)?;
@@ -86,6 +110,16 @@ impl Pager {
         }
 
         Ok(pager)
+    }
+
+    /// gh-892 diagnostic predicate: returns `true` when the database
+    /// `page_size` is **not** an integer multiple of the filesystem's
+    /// reported block size (`st_blksize`), i.e. `page_size % fs_block_size
+    /// != 0`. A `fs_block_size` of `0` (probe unavailable / unknown) is
+    /// treated as aligned so a missing probe never produces a warning.
+    /// Pure function with no I/O so the warn decision is unit-testable.
+    pub(crate) fn page_size_misaligned_with_block(page_size: usize, fs_block_size: u64) -> bool {
+        fs_block_size != 0 && !(page_size as u64).is_multiple_of(fs_block_size)
     }
 
     /// Inspect page 0 for the `RDBE` encryption marker, then resolve
