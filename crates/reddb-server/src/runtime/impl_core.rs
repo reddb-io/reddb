@@ -6445,10 +6445,17 @@ impl RedDBRuntime {
                     mode,
                     statement,
                     engine: "runtime-table",
-                    result: execute_runtime_table_query(
+                    // #885: lend the frame-owned row-buffer arena to the
+                    // streaming path so chunk buffers are reused across
+                    // this statement's chunk-fetches instead of allocated
+                    // fresh per chunk. This is the table-query dispatch
+                    // that runs under a `StatementExecutionFrame`; the
+                    // frameless prepared/subquery paths keep `None`.
+                    result: execute_runtime_table_query_in(
                         &self.inner.db,
                         &table_with_rls,
                         Some(&self.inner.index_store),
+                        Some(frame.row_arena()),
                     )?,
                     affected_rows: 0,
                     statement_type: "select",
