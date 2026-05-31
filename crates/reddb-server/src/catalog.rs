@@ -31,6 +31,31 @@ pub enum CollectionModel {
     Metrics,
 }
 
+/// Per-collection analytical-storage seam (PRD #850, Phase 1).
+///
+/// Declares that a `Metrics`/`TimeSeries` collection's hypertable chunks
+/// are backed by the **columnar** sealed-chunk layout
+/// ([`column_block`](crate::storage::unified::column_block)) rather than
+/// the default row engine. `columnar = false` (or the whole config
+/// absent) keeps the row engine — the seal dispatch routes only
+/// columnar-flagged chunks to the `ColumnBlock` writer.
+///
+/// `time_key` / `order_by_key` mirror the ClickHouse `ORDER BY` intent so
+/// downstream slices (#854 granules, #856 vectorized read) can lay the
+/// columns out in their natural sort order; v1 records them as the durable
+/// contract without yet acting on `order_by_key`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyticalStorageConfig {
+    /// When true, sealing a chunk routes to the columnar `ColumnBlock`
+    /// writer; otherwise the row engine stays the default.
+    pub columnar: bool,
+    /// Column carrying the time axis (the chunk's partition key).
+    pub time_key: String,
+    /// Optional secondary sort key (ClickHouse `ORDER BY` tail). `None`
+    /// orders by `time_key` alone.
+    pub order_by_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaMode {
     Strict,
