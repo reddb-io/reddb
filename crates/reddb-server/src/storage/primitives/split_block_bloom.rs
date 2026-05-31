@@ -29,7 +29,7 @@ const SALTS: [u32; 8] = [
 
 /// One 32-byte cache-line-aligned block: 8 × u32 words.
 #[repr(align(32))]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Block {
     words: [u32; 8],
 }
@@ -42,7 +42,7 @@ impl std::fmt::Debug for Block {
 
 /// Split-block bloom filter. Build once at compile time, probe at query time.
 /// Zero-allocation probe path.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitBlockBloom {
     blocks: Vec<Block>,
     /// `num_blocks - 1` — mask for fast modulo via bitwise AND.
@@ -93,6 +93,65 @@ impl SplitBlockBloom {
     pub fn num_blocks(&self) -> usize {
         self.blocks.len()
     }
+
+    /// Serialize to a self-describing blob: a 4-byte LE block count followed
+    /// by `num_blocks × 8` little-endian `u32` words. The block count is
+    /// always a power of two, so [`from_bytes`](Self::from_bytes) can rebuild
+    /// the modulo mask without storing it. Used to persist a per-granule
+    /// bloom in a sealed columnar chunk's footer (#855).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.blocks.len() * 32);
+        out.extend_from_slice(&(self.blocks.len() as u32).to_le_bytes());
+        for block in &self.blocks {
+            for &w in &block.words {
+                out.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Rebuild a filter from [`to_bytes`](Self::to_bytes). Returns `None` on a
+    /// truncated blob or a non-power-of-two block count (a corrupt mask would
+    /// silently mis-route probes and could manufacture false negatives, so we
+    /// refuse it rather than risk under-inclusion).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        let num_blocks = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+        if num_blocks == 0 || !num_blocks.is_power_of_two() {
+            return None;
+        }
+        if bytes.len() < 4 + num_blocks * 32 {
+            return None;
+        }
+        let mut blocks = Vec::with_capacity(num_blocks);
+        let mut cur = 4;
+        for _ in 0..num_blocks {
+            let mut words = [0u32; 8];
+            for w in &mut words {
+                *w = u32::from_le_bytes(bytes[cur..cur + 4].try_into().ok()?);
+                cur += 4;
+            }
+            blocks.push(Block { words });
+        }
+        Some(Self {
+            blocks,
+            mask: num_blocks - 1,
+        })
+    }
+}
+
+/// Hash a raw byte slice to a `u32` for bloom-filter use. The writer and the
+/// pruner MUST fold a value through this same function so a granule's stored
+/// bloom and a probe key agree bit-for-bit — that identity is what makes the
+/// no-false-negative guarantee hold across the persisted boundary (#855).
+pub fn hash_bytes_u32(bytes: &[u8]) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    let bits = h.finish();
+    (bits ^ (bits >> 32)) as u32
 }
 
 /// Hash a `Value` to a u32 for bloom filter use.
@@ -132,6 +191,38 @@ mod tests {
         for i in 0u32..1000 {
             assert!(bloom.probe(i * 2), "false negative for key {}", i * 2);
         }
+    }
+
+    #[test]
+    fn to_bytes_from_bytes_round_trips_and_keeps_no_false_negatives() {
+        let mut bloom = SplitBlockBloom::with_capacity(500);
+        for i in 0u32..500 {
+            bloom.insert(i.wrapping_mul(2_654_435_761));
+        }
+        let blob = bloom.to_bytes();
+        let restored = SplitBlockBloom::from_bytes(&blob).expect("round-trips");
+        assert_eq!(restored, bloom);
+        // The persisted filter still never reports a false negative.
+        for i in 0u32..500 {
+            assert!(restored.probe(i.wrapping_mul(2_654_435_761)));
+        }
+    }
+
+    #[test]
+    fn from_bytes_rejects_truncated_or_non_power_of_two() {
+        assert!(SplitBlockBloom::from_bytes(&[]).is_none());
+        assert!(SplitBlockBloom::from_bytes(&[1, 2, 3]).is_none());
+        // Claims 3 blocks (not a power of two) → rejected.
+        assert!(SplitBlockBloom::from_bytes(&3u32.to_le_bytes()).is_none());
+        // Claims 2 blocks but supplies no word payload → truncated.
+        assert!(SplitBlockBloom::from_bytes(&2u32.to_le_bytes()).is_none());
+    }
+
+    #[test]
+    fn hash_bytes_u32_is_stable_across_calls() {
+        let a = hash_bytes_u32(&7u64.to_le_bytes());
+        let b = hash_bytes_u32(&7u64.to_le_bytes());
+        assert_eq!(a, b);
     }
 
     #[test]
