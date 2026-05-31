@@ -109,6 +109,7 @@ pub use segment::{
     ColZone, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats, UnifiedSegment,
     ZoneColPred, ZoneColPredKind,
 };
+pub use segment_codec::{select_codecs, ColumnSemantics};
 pub use spatial_index::{
     SpatialIndex, SpatialIndexManager, SpatialIndexStats, SpatialSearchResult,
 };
