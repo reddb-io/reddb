@@ -659,6 +659,32 @@ pub fn write_column_block(
 /// Decode a v1 `RDCC` block: verify both magics, the version, and the
 /// CRC, then decode each column stream back to its raw bytes.
 pub fn read_column_block(bytes: &[u8]) -> Result<DecodedColumnBlock, ColumnBlockError> {
+    read_column_block_filtered(bytes, None)
+}
+
+/// Projection-pushdown decode (#856): like [`read_column_block`] but only
+/// the columns whose `column_id` appears in `want` have their stream run
+/// through `decode_bytes` (and their granule index / bloom parsed). Columns
+/// outside `want` are skipped entirely — their compressed bytes are never
+/// touched — so an analytical scan that references a subset of columns pays
+/// only for the columns it reads. The returned
+/// [`DecodedColumnBlock::columns`] holds exactly the wanted columns, in
+/// directory order. The whole-block CRC is still verified (integrity is not
+/// negotiable), but per-column decode work is elided for unwanted columns.
+pub fn read_column_block_projected(
+    bytes: &[u8],
+    want: &[u32],
+) -> Result<DecodedColumnBlock, ColumnBlockError> {
+    read_column_block_filtered(bytes, Some(want))
+}
+
+/// Shared decode core. `want == None` decodes every column (the eager
+/// [`read_column_block`] contract); `want == Some(ids)` decodes only the
+/// columns whose id is in `ids` (the projected #856 contract).
+fn read_column_block_filtered(
+    bytes: &[u8],
+    want: Option<&[u32]>,
+) -> Result<DecodedColumnBlock, ColumnBlockError> {
     if bytes.len() < HEADER_LEN + FOOTER_LEN {
         return Err(ColumnBlockError::Truncated);
     }
@@ -736,6 +762,13 @@ pub fn read_column_block(bytes: &[u8]) -> Result<DecodedColumnBlock, ColumnBlock
             .ok_or(ColumnBlockError::BadDirectory)?;
         if stream_offset < dir_off + dir_len || end > footer_start {
             return Err(ColumnBlockError::BadDirectory);
+        }
+        // Projection pushdown (#856): skip columns the caller did not ask
+        // for *before* the expensive `decode_bytes` / granule / bloom parse.
+        // Offset bounds are still validated above so a malformed directory is
+        // rejected whether or not the column is wanted.
+        if want.is_some_and(|ids| !ids.contains(&column_id)) {
+            continue;
         }
         // Decode by the recorded stream (its own segment_codec header
         // carries the codec); the directory tag is bookkeeping for #853.
@@ -872,6 +905,59 @@ mod tests {
             u64::from_le_bytes(ts_gi.granules[3].max.clone().try_into().unwrap()),
             *ts.last().unwrap()
         );
+    }
+
+    #[test]
+    fn projected_read_decodes_only_wanted_columns() {
+        let ts: Vec<u64> = (0..500)
+            .map(|i| 1_700_000_000_000 + i * 1_000_000)
+            .collect();
+        let vals: Vec<f64> = (0..500).map(|i| 95.0 + (i % 7) as f64 * 0.25).collect();
+        let ts_raw = u64_stream(&ts);
+        let val_raw = f64_stream(&vals);
+
+        let block = write_column_block(
+            42,
+            7,
+            ts.len() as u64,
+            *ts.first().unwrap(),
+            *ts.last().unwrap(),
+            128,
+            &[
+                ColumnInput {
+                    column_id: 0,
+                    logical_type: 2,
+                    semantics: ColumnSemantics::Timestamp,
+                    data: &ts_raw,
+                },
+                ColumnInput {
+                    column_id: 1,
+                    logical_type: 3,
+                    semantics: ColumnSemantics::Gauge,
+                    data: &val_raw,
+                },
+            ],
+        )
+        .unwrap();
+
+        // Want only the value column (id 1): the block returns exactly that
+        // one column, byte-for-byte, and the timestamp column is absent —
+        // its stream was never run through decode_bytes (#856 pushdown).
+        let projected = read_column_block_projected(&block, &[1]).unwrap();
+        assert_eq!(projected.columns.len(), 1);
+        assert_eq!(projected.columns[0].column_id, 1);
+        assert_eq!(projected.columns[0].data, val_raw);
+        // Header metadata is unaffected by projection.
+        assert_eq!(projected.row_count, 500);
+
+        // Projecting both ids is identical to the eager full read.
+        let full = read_column_block(&block).unwrap();
+        let both = read_column_block_projected(&block, &[0, 1]).unwrap();
+        assert_eq!(both, full);
+
+        // An unknown id yields no columns (but still verifies the CRC).
+        let none = read_column_block_projected(&block, &[99]).unwrap();
+        assert!(none.columns.is_empty());
     }
 
     fn str_stream(items: &[&str]) -> Vec<u8> {
