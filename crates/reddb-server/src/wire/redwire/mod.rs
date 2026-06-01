@@ -18,6 +18,7 @@ pub mod frame;
 pub mod input_stream;
 pub mod listener;
 pub mod output_stream;
+pub mod queue_wait;
 pub mod session;
 
 pub use codec::{decode_frame, encode_frame, FrameError};
