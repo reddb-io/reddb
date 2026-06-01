@@ -60,6 +60,23 @@ pub(crate) const QUEUE_MAX_WAIT_MS_CONFIG_KEY: &str = "red.config.queue.max_wait
 /// [`QUEUE_MAX_WAIT_MS_CONFIG_KEY`] — 60 seconds, in milliseconds.
 pub(crate) const QUEUE_MAX_WAIT_MS_DEFAULT: u64 = 60_000;
 
+/// Outcome of the async live queue-wait edge ([`RedDBRuntime::redwire_queue_wait_json`],
+/// issue #919). Carries the three non-error terminal states the RedWire
+/// session maps to distinct frames, so a timeout never aliases an empty
+/// delivery and a cancellation never aliases a timeout:
+///   - `Delivered` → one `QueueEventPush` per message.
+///   - `TimedOut`  → a distinct `QueueWaitTimeout` frame.
+///   - `Cancelled` → a `StreamError` with the cancellation code.
+///
+/// A genuine runtime failure (bad queue, read error) stays an `Err` on
+/// the surrounding `RedDBResult`.
+#[derive(Debug)]
+pub(crate) enum RedwireWaitOutcome {
+    Delivered(Vec<crate::serde_json::Value>),
+    TimedOut,
+    Cancelled,
+}
+
 /// Slice C of PRD #718 — scope key for the queue wait registry.
 /// Today every connection in the process shares a single namespace;
 /// the helper exists so multi-tenant scoping (e.g. tenant id) can be
@@ -313,9 +330,12 @@ impl RedDBRuntime {
     /// delivery path (`group_read`), so a delivered message is genuinely
     /// claimed, not merely observed. Returns the delivered messages
     /// rendered as JSON values (so the transport edge stays free of
-    /// runtime queue types); an empty Vec means the deadline elapsed
-    /// without a delivery, and a cancellation surfaces as the same
-    /// [`QUEUE_READ_WAIT_CANCELLED`] error the sync path uses.
+    /// runtime queue types); [`RedwireWaitOutcome::TimedOut`] means the
+    /// deadline elapsed without a delivery (issue #919 surfaces this as
+    /// a distinct timeout frame rather than an empty push), and a
+    /// cancellation surfaces as [`RedwireWaitOutcome::Cancelled`] — the
+    /// async analogue of the sync path's [`QUEUE_READ_WAIT_CANCELLED`].
+    /// A genuine runtime failure stays an `Err`.
     pub(crate) async fn redwire_queue_wait_json(
         &self,
         queue: &str,
@@ -323,7 +343,7 @@ impl RedDBRuntime {
         consumer: &str,
         count: usize,
         wait_ms: u64,
-    ) -> RedDBResult<Vec<crate::serde_json::Value>> {
+    ) -> RedDBResult<RedwireWaitOutcome> {
         let group_owned = {
             let store = self.inner.db.store();
             ensure_queue_exists(store.as_ref(), queue)?;
@@ -340,10 +360,16 @@ impl RedDBRuntime {
                     .map_err(map_qse)
             };
 
+        let render = |delivered: Vec<crate::runtime::queue_lifecycle::DeliveredMessage>| {
+            RedwireWaitOutcome::Delivered(
+                delivered.into_iter().map(delivered_message_json).collect(),
+            )
+        };
+
         // Fast path: a message is already deliverable at open time.
         let delivered = do_read(self)?;
         if !delivered.is_empty() {
-            return Ok(delivered.into_iter().map(delivered_message_json).collect());
+            return Ok(render(delivered));
         }
 
         let registry = self.queue_wait_registry();
@@ -356,23 +382,46 @@ impl RedDBRuntime {
             let waiter = registry.async_waiter(&scope, queue);
             let delivered = do_read(self)?;
             if !delivered.is_empty() {
-                return Ok(delivered.into_iter().map(delivered_message_json).collect());
+                return Ok(render(delivered));
             }
             if registry.is_cancelled() {
-                return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()));
+                return Ok(RedwireWaitOutcome::Cancelled);
             }
             if std::time::Instant::now() >= deadline {
-                return Ok(Vec::new());
+                return Ok(RedwireWaitOutcome::TimedOut);
             }
+            // The async waiter (and its `Arc<Slot>` clone) is a local
+            // dropped on every return below, so an expired or cancelled
+            // wait releases its registry slot reference and frees the
+            // tokio worker the moment this future resolves (AC #4).
             match registry.wait_until_async(&waiter, deadline).await {
                 crate::runtime::queue_wait_registry::WaitOutcome::Woken => continue,
                 crate::runtime::queue_wait_registry::WaitOutcome::Timeout => {
-                    return Ok(Vec::new());
+                    return Ok(RedwireWaitOutcome::TimedOut);
                 }
                 crate::runtime::queue_wait_registry::WaitOutcome::Cancelled => {
-                    return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()));
+                    return Ok(RedwireWaitOutcome::Cancelled);
                 }
             }
+        }
+    }
+
+    /// Reject a live queue-wait open whose requested budget exceeds the
+    /// server's maximum wait cap (issue #919), mirroring the SQL
+    /// `QUEUE READ … WAIT` cap (slice B of PRD #718). Returns the
+    /// operator-actionable message (naming the `red.config` key and the
+    /// active cap) when `wait_ms` is over the cap, or `Ok(())` to
+    /// proceed. The transport calls this *before* spawning the wait
+    /// task, so an over-cap request is refused with an explicit error
+    /// and never parks — not silently shortened (AC #3).
+    pub(crate) fn redwire_queue_wait_cap_check(&self, wait_ms: u64) -> Result<(), String> {
+        let cap = self.config_u64(QUEUE_MAX_WAIT_MS_CONFIG_KEY, QUEUE_MAX_WAIT_MS_DEFAULT);
+        if wait_ms > cap {
+            Err(format!(
+                "queue-wait WAIT {wait_ms}ms exceeds server cap {QUEUE_MAX_WAIT_MS_CONFIG_KEY} = {cap}ms"
+            ))
+        } else {
+            Ok(())
         }
     }
 
