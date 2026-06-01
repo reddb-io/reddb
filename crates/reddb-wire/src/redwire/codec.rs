@@ -407,6 +407,33 @@ mod tests {
     }
 
     #[test]
+    fn queue_wait_envelopes_round_trip() {
+        // Golden encode/decode for the live queue-wait envelopes added
+        // in issue #917 / PRD #915. Pins the new byte values and
+        // confirms the request/push pair round-trips equal through the
+        // codec, multiplexed over `stream_id` like the other streamed
+        // envelopes.
+        let open = Frame::new(
+            MessageKind::QueueWaitOpen,
+            10,
+            br#"{"queue":"jobs","consumer":"w1","count":1,"wait_ms":5000}"#.to_vec(),
+        )
+        .with_stream(3);
+        round_trip(open.clone());
+        assert_eq!(encode_frame(&open)[4], 0x2E);
+
+        let push = Frame::new(
+            MessageKind::QueueEventPush,
+            10,
+            br#"{"message_id":"42","payload":{"hello":"world"},"consumer":"w1","delivery_count":1}"#
+                .to_vec(),
+        )
+        .with_stream(3);
+        round_trip(push.clone());
+        assert_eq!(encode_frame(&push)[4], 0x2F);
+    }
+
+    #[test]
     fn uncompressed_frame_decodes_unchanged_when_flag_unset() {
         let payload = b"hello world".to_vec();
         let frame = Frame::new(MessageKind::Result, 1, payload.clone());

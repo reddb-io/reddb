@@ -113,6 +113,16 @@ pub enum MessageKind {
     StreamChunk = 0x2B,
     StreamError = 0x2C,
     StreamCancel = 0x2D,
+
+    // Live queue wait (issue #917 / PRD #915). A `QueueWaitOpen`
+    // registers an async waiter on a queue; the server pushes a
+    // `QueueEventPush` the instant a message becomes deliverable.
+    // Distinct from the OpenStream/StreamChunk output-stream family
+    // (which stays query-result pull) — these carry queue delivery,
+    // multiplexed over the frame's `stream_id` like the other
+    // streamed envelopes.
+    QueueWaitOpen = 0x2E,
+    QueueEventPush = 0x2F,
 }
 
 /// Coarse routing class for a `MessageKind`.
@@ -186,7 +196,11 @@ impl MessageKind {
             | Self::OpenAck
             | Self::StreamChunk
             | Self::StreamError
-            | Self::StreamCancel => MessageClass::Streamed,
+            | Self::StreamCancel
+            // Live queue-wait envelopes (issue #917) describe an
+            // in-flight subscription multiplexed by `stream_id`.
+            | Self::QueueWaitOpen
+            | Self::QueueEventPush => MessageClass::Streamed,
 
             // 0x10..0x1F — handshake / lifecycle.
             Self::Hello
@@ -277,7 +291,9 @@ impl MessageKind {
             | Self::GraphTraverse
             | Self::QueryWithParams
             | Self::OpenStream
-            | Self::StreamCancel => MessageDirection::ClientToServer,
+            | Self::StreamCancel
+            // Client opens a live queue wait (issue #917).
+            | Self::QueueWaitOpen => MessageDirection::ClientToServer,
 
             // `StreamChunk` is symmetric (issue #764 / PRD #759 S5):
             // the server emits chunks on an *output* stream, and the
@@ -301,7 +317,9 @@ impl MessageKind {
             | Self::RowDescription
             | Self::StreamEnd
             | Self::OpenAck
-            | Self::StreamError => MessageDirection::ServerToClient,
+            | Self::StreamError
+            // Server pushes the delivered queue message (issue #917).
+            | Self::QueueEventPush => MessageDirection::ServerToClient,
 
             // Symmetric — either peer may initiate. (`StreamChunk` is
             // also symmetric but has its own arm above — see issue
@@ -353,6 +371,8 @@ impl MessageKind {
             0x2B => Some(Self::StreamChunk),
             0x2C => Some(Self::StreamError),
             0x2D => Some(Self::StreamCancel),
+            0x2E => Some(Self::QueueWaitOpen),
+            0x2F => Some(Self::QueueEventPush),
             _ => None,
         }
     }
@@ -442,6 +462,8 @@ mod catalog_tests {
         MessageKind::StreamChunk,
         MessageKind::StreamError,
         MessageKind::StreamCancel,
+        MessageKind::QueueWaitOpen,
+        MessageKind::QueueEventPush,
     ];
 
     #[test]
@@ -491,6 +513,11 @@ mod catalog_tests {
         assert_eq!(MessageKind::StreamChunk.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::StreamError.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::StreamCancel.class(), MessageClass::Streamed);
+
+        // Live queue-wait envelopes (issue #917) — Streamed class,
+        // multiplexed by `stream_id` like the output-stream family.
+        assert_eq!(MessageKind::QueueWaitOpen.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::QueueEventPush.class(), MessageClass::Streamed);
 
         // Control plane.
         assert_eq!(MessageKind::Cancel.class(), MessageClass::ControlPlane);
@@ -617,6 +644,7 @@ mod catalog_tests {
             MessageKind::QueryWithParams,
             MessageKind::OpenStream,
             MessageKind::StreamCancel,
+            MessageKind::QueueWaitOpen,
         ] {
             assert_eq!(
                 k.direction(),
@@ -642,6 +670,7 @@ mod catalog_tests {
             MessageKind::StreamEnd,
             MessageKind::OpenAck,
             MessageKind::StreamError,
+            MessageKind::QueueEventPush,
         ] {
             assert_eq!(
                 k.direction(),
