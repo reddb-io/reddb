@@ -14,8 +14,10 @@
 //! clean pass is therefore also the AC that the session does not hold a
 //! blocking OS thread for the wait duration.
 
-use std::net::SocketAddr;
+use std::io::{Read as _, Write as _};
+use std::net::{SocketAddr, TcpListener, TcpStream as StdTcpStream};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use reddb_server::auth::enforcement_mode::PolicyEnforcementMode;
@@ -24,6 +26,7 @@ use reddb_server::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb_server::runtime::mvcc::{
     clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
 };
+use reddb_server::server::RedDBServer;
 use reddb_server::storage::query::unified::UnifiedRecord;
 use reddb_server::storage::schema::Value;
 use reddb_server::wire::redwire::{
@@ -135,6 +138,74 @@ async fn write_frame(stream: &mut TcpStream, frame: &Frame) {
         .write_all(&encode_frame(frame))
         .await
         .expect("write frame");
+}
+
+fn scrape_metrics(runtime: &RedDBRuntime) -> String {
+    let server = RedDBServer::new(runtime.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind metrics listener");
+    let addr = listener.local_addr().expect("metrics addr");
+    let handle = thread::spawn(move || server.serve_one_on(listener));
+
+    let mut stream = StdTcpStream::connect(addr).expect("connect metrics");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set metrics read timeout");
+    stream
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write metrics request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read metrics response");
+    handle
+        .join()
+        .expect("metrics server thread joined")
+        .expect("metrics request served");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "metrics scrape should return 200, got {response:?}"
+    );
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default()
+}
+
+fn assert_metric_line(body: &str, line: &str) {
+    assert!(
+        body.lines().any(|candidate| candidate == line),
+        "missing metric line {line:?}. body:\n{body}"
+    );
+}
+
+fn read_redwire_wait_function_source() -> String {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set under cargo");
+    let path = std::path::Path::new(&manifest).join("src/runtime/impl_queue.rs");
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+
+    let needle = "async fn redwire_queue_wait_json";
+    let start = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("could not find {needle} in impl_queue.rs"));
+    let after_sig = &source[start..];
+    let open = after_sig.find('{').expect("open brace after fn signature");
+    let mut depth = 0i32;
+    let mut end = open;
+    for (i, ch) in after_sig[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    after_sig[..=end].to_string()
 }
 
 /// Drive the anonymous handshake and return the connected, authed
@@ -302,6 +373,37 @@ async fn wait_opened_then_post_open_push_is_delivered() {
     assert!(
         body.contains("\"message_id\""),
         "push must carry the message_id, got {body}"
+    );
+
+    let metrics = scrape_metrics(&server.runtime);
+    assert_metric_line(
+        &metrics,
+        "queue_wait_started_total{queue=\"jobs\",scope=\"\"} 1",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_woken_total{queue=\"jobs\",scope=\"\"} 1",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_duration_ms_count{queue=\"jobs\",scope=\"\"} 1",
+    );
+}
+
+#[test]
+fn redwire_wait_outcomes_do_not_emit_audit_or_operator_events() {
+    let wait_fn_source = read_redwire_wait_function_source();
+    assert!(
+        !wait_fn_source.contains("OperatorEvent"),
+        "redwire_queue_wait_json must not emit operator events"
+    );
+    assert!(
+        !wait_fn_source.contains("emit_global"),
+        "redwire_queue_wait_json must not call operator emit_global"
+    );
+    assert!(
+        !wait_fn_source.contains("AuditValue"),
+        "redwire_queue_wait_json must not construct audit payloads"
     );
 }
 
@@ -580,6 +682,157 @@ async fn wait_times_out_with_distinct_frame() {
         pong.kind,
         MessageKind::Pong,
         "session must stay responsive after a timed-out wait"
+    );
+
+    let metrics = scrape_metrics(&server.runtime);
+    assert_metric_line(
+        &metrics,
+        "queue_wait_started_total{queue=\"jobs\",scope=\"\"} 1",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_timed_out_total{queue=\"jobs\",scope=\"\"} 1",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_duration_ms_count{queue=\"jobs\",scope=\"\"} 1",
+    );
+}
+
+/// Issue #920/#922 — a server-side cancellation over the live RedWire
+/// queue-wait path is a normal wait outcome: distinct StreamError on
+/// the wire, Prometheus counter + duration sample, no audit/operator
+/// event channel involved.
+#[tokio::test(flavor = "current_thread")]
+async fn wait_cancelled_records_prometheus_counter() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut client = connect_and_handshake(server.addr).await;
+    let open = Frame::new(
+        MessageKind::QueueWaitOpen,
+        66,
+        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":5000}"#.to_vec(),
+    )
+    .with_stream(13);
+    write_frame(&mut client, &open).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    server.runtime.queue_wait_registry().cancel_all();
+
+    let err = read_frame(&mut client).await;
+    assert_eq!(
+        err.kind,
+        MessageKind::StreamError,
+        "cancelled wait must surface as StreamError"
+    );
+    assert_eq!(err.stream_id, 13, "error echoes the open stream_id");
+    assert_eq!(err.correlation_id, 66, "error echoes the open correlation");
+    let body = String::from_utf8(err.payload.clone()).expect("utf8 payload");
+    assert!(
+        body.contains("queue_wait_cancelled"),
+        "cancellation must carry the cancellation code, got {body}"
+    );
+
+    let metrics = scrape_metrics(&server.runtime);
+    assert_metric_line(
+        &metrics,
+        "queue_wait_started_total{queue=\"jobs\",scope=\"\"} 1",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_cancelled_total{queue=\"jobs\",scope=\"\"} 1",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_duration_ms_count{queue=\"jobs\",scope=\"\"} 1",
+    );
+
+    server.runtime.queue_wait_registry().reset_cancelled();
+}
+
+/// Issue #922 — multiple live RedWire waiters share the registry's
+/// wake-all path. Metrics must count every waiter that resolves through
+/// delivery, not just the first waiter on the slot.
+#[tokio::test(flavor = "current_thread")]
+async fn wake_all_waiters_record_prometheus_counters() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut c1 = connect_and_handshake(server.addr).await;
+    let mut c2 = connect_and_handshake(server.addr).await;
+
+    write_frame(
+        &mut c1,
+        &Frame::new(
+            MessageKind::QueueWaitOpen,
+            81,
+            br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":5000}"#
+                .to_vec(),
+        )
+        .with_stream(21),
+    )
+    .await;
+    write_frame(
+        &mut c2,
+        &Frame::new(
+            MessageKind::QueueWaitOpen,
+            82,
+            br#"{"queue":"jobs","group":"workers","consumer":"c2","count":1,"wait_ms":5000}"#
+                .to_vec(),
+        )
+        .with_stream(22),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    server
+        .runtime
+        .execute_query("QUEUE PUSH jobs 'first-live'")
+        .expect("push first");
+    server
+        .runtime
+        .execute_query("QUEUE PUSH jobs 'second-live'")
+        .expect("push second");
+
+    let f1 = read_frame(&mut c1);
+    let f2 = read_frame(&mut c2);
+    let (first, second) = tokio::join!(f1, f2);
+    for frame in [&first, &second] {
+        assert_eq!(
+            frame.kind,
+            MessageKind::QueueEventPush,
+            "each waiter should receive a delivery, got {:?}",
+            frame.kind
+        );
+    }
+
+    let metrics = scrape_metrics(&server.runtime);
+    assert_metric_line(
+        &metrics,
+        "queue_wait_started_total{queue=\"jobs\",scope=\"\"} 2",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_woken_total{queue=\"jobs\",scope=\"\"} 2",
+    );
+    assert_metric_line(
+        &metrics,
+        "queue_wait_duration_ms_count{queue=\"jobs\",scope=\"\"} 2",
     );
 }
 
