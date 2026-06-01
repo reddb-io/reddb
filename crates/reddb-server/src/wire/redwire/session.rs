@@ -394,9 +394,27 @@ where
                         continue;
                     }
                 };
+                // Server max-wait cap (issue #919, AC #3). Reject an
+                // over-cap budget with an explicit error *before*
+                // spawning the wait task — no waiter is registered and
+                // the budget is never silently shortened.
+                if let Err(msg) = runtime.redwire_queue_wait_cap_check(req.wait_ms) {
+                    let err = qw::build_queue_wait_error_frame(
+                        frame_id,
+                        sid,
+                        qw::WAIT_EXCEEDS_CAP_CODE,
+                        &msg,
+                    )
+                    .map_err(|e| io::Error::other(format!("build queue-wait cap error: {e}")))?;
+                    queue_send(&out_tx, encode_frame(&err))?;
+                    continue;
+                }
                 let runtime_ref = Arc::clone(&runtime);
                 let out = out_tx.clone();
+                let queue_name = req.queue.clone();
+                let wait_ms = req.wait_ms;
                 tokio::spawn(async move {
+                    use crate::runtime::RedwireWaitOutcome;
                     match runtime_ref
                         .redwire_queue_wait_json(
                             &req.queue,
@@ -407,11 +425,8 @@ where
                         )
                         .await
                     {
-                        Ok(messages) => {
-                            // Happy path: push each delivered message.
-                            // An empty Vec (deadline elapsed without a
-                            // delivery) pushes nothing — the timeout
-                            // surface is a later slice.
+                        // Happy path: push each delivered message.
+                        Ok(RedwireWaitOutcome::Delivered(messages)) => {
                             for message in messages {
                                 match qw::build_event_push_frame(frame_id, sid, &message) {
                                     Ok(push) => {
@@ -423,11 +438,37 @@ where
                                 }
                             }
                         }
+                        // Deadline elapsed with nothing deliverable: a
+                        // distinct timeout frame, not an empty push and
+                        // not an error (AC #1 / AC #2).
+                        Ok(RedwireWaitOutcome::TimedOut) => {
+                            if let Ok(t) = qw::build_queue_wait_timeout_frame(
+                                frame_id,
+                                sid,
+                                &queue_name,
+                                wait_ms,
+                            ) {
+                                let _ = queue_send(&out, encode_frame(&t));
+                            }
+                        }
+                        // Server-side cancellation: a StreamError with
+                        // the distinct cancellation code so the client
+                        // never confuses it with a timeout (AC #2).
+                        Ok(RedwireWaitOutcome::Cancelled) => {
+                            if let Ok(ef) = qw::build_queue_wait_error_frame(
+                                frame_id,
+                                sid,
+                                qw::WAIT_CANCELLED_CODE,
+                                "queue wait cancelled by server",
+                            ) {
+                                let _ = queue_send(&out, encode_frame(&ef));
+                            }
+                        }
                         Err(err) => {
                             if let Ok(ef) = qw::build_queue_wait_error_frame(
                                 frame_id,
                                 sid,
-                                "queue_wait_failed",
+                                qw::WAIT_FAILED_CODE,
                                 &err.to_string(),
                             ) {
                                 let _ = queue_send(&out, encode_frame(&ef));
