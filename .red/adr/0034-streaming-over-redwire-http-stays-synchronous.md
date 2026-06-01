@@ -1,0 +1,22 @@
+# Long-lived streaming lives on RedWire; HTTP stays thread-per-connection
+
+Long-lived idle connections (live queue wait, ephemeral notifications, output/durable streams) are served over the **RedWire** transport, which is already a fully async tokio stack (`wire/redwire/listener.rs` accepts with `listener.accept().await`; `wire/redwire/session.rs` runs one tokio task per connection with an mpsc writer-drain). The **HTTP server stays thread-per-connection** (`server.rs:822` — `for stream in listener.incoming()` → `thread::spawn`), gated by the `HttpConnectionLimiter` cap (`(2 * num_cpus).clamp(8, 256)`) with static-503 load-shedding and `Connection: close` (no keep-alive). HTTP is good at short request/response RPC and keeps that role; it does **not** grow a multiplexed event loop.
+
+The first streaming primitive exposed over RedWire is **live queue wait** (`QUEUE READ … WAIT`), reusing the existing `runtime/queue_wait_registry.rs`. That registry parks callers on a `parking_lot::Condvar`, which a tokio task cannot block on without stalling a worker. We make the registry **dual-headed**: each slot keeps its condvar (for the synchronous HTTP caller) and gains a `tokio::sync::Notify` (for the async RedWire session). The single `notify(scope, queue)` bumps both wake paths (`cond.notify_all()` + `async.notify_waiters()`); generation counter, wake-all, and cancel semantics are unchanged. The async session does `notified().await` and **releases its worker for the duration of the wait** — which is the entire point: a parked subscriber holds a cheap tokio task, not an OS thread or one of the 256 HTTP slots.
+
+The execution engine remains 100% synchronous and disk-backed; only the *transport edge* of streaming is async, exactly as RedWire's `handle_session` already bridges async-transport ↔ sync-engine.
+
+## Considered Options
+
+- **Streaming over RedWire + dual-headed registry (chosen).** Reuses the proven async transport that already serves the flagship wire protocol, keeps the working HTTP path untouched, and is the only option that frees the worker during the wait. New work is the subscribe/event frame surface plus the async wake head on the registry.
+- **Hand-rolled epoll/mio reactor over parked HTTP sockets (rejected).** Originally proposed, then rejected: it builds a *third* concurrency mechanism to do what RedWire's tokio stack already does. tokio is already a dependency (RedWire + gRPC), so the "avoids a second concurrency model" rationale was false — HTTP's synchronous loop is the outlier, not tokio.
+- **Tokio-ify the HTTP streaming edge (rejected for v0).** Move long-lived HTTP endpoints onto the existing tokio runtime. Duplicates on HTTP what RedWire already does; deferred to a later "mirror for non-RedWire clients (browser SSE/WebSocket)" slice if such clients materialize.
+- **`spawn_blocking` onto the sync registry (rejected).** Lets the async session call the condvar registry as-is, but consumes a tokio blocking-pool thread per waiter — re-creating thread-per-waiter and defeating the multiplexing goal.
+- **Migrate the registry wholly to an async primitive (deferred).** One wake mechanism is cleaner long-term, but touches the working synchronous HTTP path (risk against a path that isn't broken). Revisit converging onto one head after the async path proves the semantics match.
+
+## Consequences
+
+- The registry carries **two wake heads** for one release window+; a future reader must understand both are driven by the same `notify(scope, queue)` and that the condvar head exists only for synchronous HTTP callers. Convergence onto a single async head is a deliberate later step, not an oversight.
+- RedWire gains a new frame surface for subscribe/event push. Output stream (`OpenStream`/`StreamChunk`, `0x29–0x2D`) is *pull over a pinned MVCC snapshot* and is **not** reused verbatim for *push of live events*; the semantic difference (events that did not exist at open time) is why a dedicated subscribe path is warranted rather than overloading the chunk-delivery machinery.
+- Streaming clients that cannot speak RedWire (browsers, HTTP-only integrations) have **no multiplexed path** until the deferred tokio-HTTP-mirror slice lands. Until then they fall back to the capped, `Connection: close` HTTP path and will exhaust the 256-slot cap under many idle subscribers — an accepted v0 limitation.
+- The engine's synchronous, disk-backed execution model is explicitly preserved; this decision is about the transport edge only and must not be cited to justify making engine internals async.
