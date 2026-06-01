@@ -152,6 +152,61 @@ Time-series data uses a chunked storage model for efficiency:
 - **Chunks seal automatically** when full, enabling immutable compressed storage
 - **Retention policies** run in the maintenance cycle, dropping expired chunks
 
+## Columnar analytical storage
+
+By default a sealed chunk is stored **row-oriented**. For analytical
+workloads — large scans and aggregations over sealed history — you can opt a
+collection into **columnar** storage with the `COLUMNAR` keyword at create
+time. Sealed chunks are then written in the column-major
+[RDCC format](../engine/columnar-chunk-format.md): each column is compressed
+with a codec matched to its shape (delta-of-delta for timestamps, Gorilla
+XOR for float values) and carries skip indexes so the reader prunes data it
+cannot need.
+
+```sql
+-- A columnar time-series collection.
+CREATE TIMESERIES cpu_cold COLUMNAR RETENTION 365 d
+```
+
+`COLUMNAR` is a standalone keyword and composes with the other clauses in any
+order (`RETENTION`, `CHUNK_SIZE`, `DOWNSAMPLE`, …). It is also accepted on
+`CREATE HYPERTABLE` — see [Hypertables → Columnar storage](./hypertables.md#columnar-storage).
+
+### Worked example
+
+```sql
+-- 1. Create a columnar hypertable: sealed chunks land in RDCC form.
+CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h' COLUMNAR;
+
+-- 2. Ingest normally — writes are buffered in the open (row) chunk.
+INSERT INTO cpu (ts, value) VALUES (1000000000, 10);
+INSERT INTO cpu (ts, value) VALUES (2000000000, 20);
+INSERT INTO cpu (ts, value) VALUES (3000000000, 30);
+
+-- 3. Query as usual.
+SELECT ts, value FROM cpu WHERE ts BETWEEN 1000000000 AND 3000000000;
+```
+
+What changes is purely physical: when a chunk **seals**, a columnar
+collection emits an RDCC `ColumnBlock` instead of a row-sealed chunk, and
+records it in the chunk's `columnar_page`. On read, that block is pruned by
+the per-column **sparse granule index** (min/max per granule, for range
+predicates) and the **per-granule bloom** (for equality predicates) before
+any surviving granule is decoded. Open (unsealed) chunks are unaffected —
+ingestion and recent-data queries behave identically to the row engine.
+
+### When to use columnar vs row
+
+| Workload | Storage |
+|:---------|:--------|
+| Analytical scans / aggregations over large sealed history | **Columnar** (`COLUMNAR`) |
+| General-purpose collections, point lookups, recent-data reads | **Row** (default) |
+
+Columnar wins when queries sweep many sealed rows but touch few columns and
+benefit from granule + bloom skipping. The row engine stays the default for
+everything else — it has lower per-chunk overhead and no transpose cost on
+seal. The choice is per collection and fixed at create time.
+
 ## Retention Policies
 
 Three complementary knobs, strongest first:

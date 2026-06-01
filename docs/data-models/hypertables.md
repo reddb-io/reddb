@@ -86,6 +86,31 @@ Column lists alongside the DDL land with the unified
 Until then declare schemas via `CREATE TABLE` + `CREATE HYPERTABLE`
 pointing at the same name, or rely on dynamic typing.
 
+## Columnar storage
+
+Append the `COLUMNAR` keyword to opt a hypertable into **columnar**
+analytical storage. Sealed chunks are then written in the column-major
+[RDCC format](../engine/columnar-chunk-format.md) instead of the default
+row form — per-column codecs plus a sparse min/max granule index and a
+per-granule bloom skip index, so analytical scans over sealed history prune
+and decode only the data they need.
+
+```sql
+-- Same hypertable, sealed chunks stored columnar.
+CREATE HYPERTABLE cpu
+  TIME_COLUMN ts
+  CHUNK_INTERVAL '1h'
+  COLUMNAR;
+```
+
+`COLUMNAR` composes with `TIME_COLUMN`, `CHUNK_INTERVAL`, `TTL`, and
+`RETENTION` in any order. It is a per-collection, create-time choice: only
+chunks that seal *after* the flag is set are written columnar, and open
+chunks ingest identically to the row engine. Leave it off (the default) for
+general-purpose collections. See
+[Time-Series → When to use columnar vs row](./timeseries.md#when-to-use-columnar-vs-row)
+for the decision note.
+
 ## API
 
 | Statement                                     | Behaviour |
