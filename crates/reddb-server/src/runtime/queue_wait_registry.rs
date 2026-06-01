@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
+use tokio::sync::Notify;
 
 /// What happened to a waiter when it returned from `wait`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +39,16 @@ pub enum WaitOutcome {
 struct Slot {
     state: Mutex<u64>,
     cond: Condvar,
+    /// Async wake head (issue #917). Bumped by the same `notify` /
+    /// `cancel_all` that drives the synchronous condvar, so a single
+    /// producer wake releases both a parked HTTP condvar waiter and an
+    /// awaiting RedWire session for the same `(scope, queue)` key. The
+    /// generation counter in `state` makes the async park lost-wake-free
+    /// the same way it does for the condvar: a waiter snapshots the
+    /// generation before its re-probe, so a notify that lands between
+    /// probe and park is observed as a generation move rather than a
+    /// missed `notify_waiters`.
+    notify: Notify,
 }
 
 impl Slot {
@@ -45,6 +56,7 @@ impl Slot {
         Self {
             state: Mutex::new(0),
             cond: Condvar::new(),
+            notify: Notify::new(),
         }
     }
 }
@@ -148,7 +160,11 @@ impl QueueWaitRegistry {
         let mut guard = slot.state.lock();
         *guard = guard.wrapping_add(1);
         drop(guard);
+        // Bump both wake heads off the same generation move: the
+        // synchronous condvar (HTTP path) and the async Notify (the
+        // RedWire session edge, issue #917).
         slot.cond.notify_all();
+        slot.notify.notify_waiters();
     }
 
     /// Shutdown drain: set the cancellation flag and wake every slot's
@@ -159,6 +175,9 @@ impl QueueWaitRegistry {
         for slot in slots.values() {
             let _g = slot.state.lock();
             slot.cond.notify_all();
+            // Wake async waiters too — they re-check `is_cancelled`
+            // after the park returns and surface `Cancelled`.
+            slot.notify.notify_waiters();
         }
         drop(slots);
         let _g = self.cancel_mu.lock();
@@ -173,6 +192,81 @@ impl QueueWaitRegistry {
 pub struct Snapshot {
     slot: Arc<Slot>,
     gen: u64,
+}
+
+/// Async analogue of [`Snapshot`] for the RedWire session edge (issue
+/// #917). Captures the slot and its generation before the caller's
+/// re-probe; [`QueueWaitRegistry::wait_until_async`] then parks on the
+/// slot's async wake head without holding a blocking OS thread.
+pub struct AsyncWaiter {
+    slot: Arc<Slot>,
+    gen: u64,
+}
+
+impl QueueWaitRegistry {
+    /// Register an async waiter on `(scope, queue)`. Mirrors
+    /// [`snapshot`](Self::snapshot): take this BEFORE the second
+    /// non-blocking probe so a notify firing between the probe and
+    /// [`wait_until_async`](Self::wait_until_async) is seen as a
+    /// generation move (lost-wake-free).
+    pub fn async_waiter(&self, scope: &str, queue: &str) -> AsyncWaiter {
+        let slot = self.slot(scope, queue);
+        let gen = *slot.state.lock();
+        AsyncWaiter { slot, gen }
+    }
+
+    /// Await the waiter's slot until a notify bumps the generation
+    /// past `waiter.gen`, the deadline elapses, or `cancel_all` fires.
+    /// Holds no OS thread for the wait duration — the tokio worker is
+    /// released back to the runtime while parked (the property the
+    /// RedWire async transport edge relies on).
+    pub async fn wait_until_async(&self, waiter: &AsyncWaiter, deadline: Instant) -> WaitOutcome {
+        if self.is_cancelled() {
+            return WaitOutcome::Cancelled;
+        }
+        loop {
+            // Arm the notification future BEFORE the generation check
+            // so a `notify_waiters` racing with this check cannot be
+            // lost: `enable()` registers interest, then the generation
+            // re-read catches any bump that already happened.
+            let notified = waiter.slot.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if self.is_cancelled() {
+                return WaitOutcome::Cancelled;
+            }
+            if *waiter.slot.state.lock() != waiter.gen {
+                return WaitOutcome::Woken;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return WaitOutcome::Timeout;
+            }
+            let sleep = tokio::time::sleep(deadline - now);
+            tokio::select! {
+                _ = notified => {
+                    if self.is_cancelled() {
+                        return WaitOutcome::Cancelled;
+                    }
+                    if *waiter.slot.state.lock() != waiter.gen {
+                        return WaitOutcome::Woken;
+                    }
+                    // Spurious (or a notify that did not move our
+                    // generation) — re-arm and re-check.
+                }
+                _ = sleep => {
+                    if self.is_cancelled() {
+                        return WaitOutcome::Cancelled;
+                    }
+                    if *waiter.slot.state.lock() != waiter.gen {
+                        return WaitOutcome::Woken;
+                    }
+                    return WaitOutcome::Timeout;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +331,61 @@ mod tests {
         reg.notify("default", "q2");
         let outcome = reg.wait_until(&snap, Instant::now() + Duration::from_millis(60));
         assert_eq!(outcome, WaitOutcome::Timeout);
+    }
+
+    #[tokio::test]
+    async fn notify_wakes_both_sync_and_async_waiter_for_same_key() {
+        // Issue #917 AC: a single `notify(scope, queue)` releases both
+        // a synchronous condvar waiter and an async waiter parked on
+        // the same key. The sync park runs on a blocking thread; the
+        // async park awaits the wake head on this task.
+        let reg = Arc::new(QueueWaitRegistry::new());
+
+        let sync_reg = reg.clone();
+        let sync_park = tokio::task::spawn_blocking(move || {
+            let snap = sync_reg.snapshot("t", "q");
+            sync_reg.wait_until(&snap, Instant::now() + Duration::from_secs(5))
+        });
+
+        let async_waiter = reg.async_waiter("t", "q");
+        let async_reg = reg.clone();
+        let async_park = tokio::spawn(async move {
+            async_reg
+                .wait_until_async(&async_waiter, Instant::now() + Duration::from_secs(5))
+                .await
+        });
+
+        // Give both waiters time to park before the single notify.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        reg.notify("t", "q");
+
+        assert_eq!(async_park.await.unwrap(), WaitOutcome::Woken);
+        assert_eq!(sync_park.await.unwrap(), WaitOutcome::Woken);
+    }
+
+    #[tokio::test]
+    async fn async_waiter_times_out_without_notify() {
+        let reg = QueueWaitRegistry::new();
+        let waiter = reg.async_waiter("t", "q");
+        let start = Instant::now();
+        let outcome = reg
+            .wait_until_async(&waiter, start + Duration::from_millis(120))
+            .await;
+        assert_eq!(outcome, WaitOutcome::Timeout);
+        assert!(start.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn async_notify_before_wait_is_observed_through_generation() {
+        // A notify that fires AFTER the waiter snapshots the generation
+        // but BEFORE the await must still return Woken (no lost wake).
+        let reg = QueueWaitRegistry::new();
+        let waiter = reg.async_waiter("t", "q");
+        reg.notify("t", "q");
+        let outcome = reg
+            .wait_until_async(&waiter, Instant::now() + Duration::from_secs(5))
+            .await;
+        assert_eq!(outcome, WaitOutcome::Woken);
     }
 
     #[test]
