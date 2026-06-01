@@ -68,6 +68,15 @@ pub struct RankOfRequest {
     pub ranking: String,
 }
 
+/// Parsed `APPROX RANK OF <id> IN <name>` read request — the approximate
+/// *tail* read (issue #923). Distinct statement head from the exact
+/// `RANK OF`, so the exact head surface (#918) is untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApproxRankOfRequest {
+    pub entity_id: u64,
+    pub ranking: String,
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -253,9 +262,50 @@ pub fn parse_rank_of(sql: &str) -> Option<RedDBResult<RankOfRequest>> {
     Some(result)
 }
 
+/// Parse `APPROX RANK OF <id> IN <name>` (also `APPROXIMATE RANK OF …`).
+///
+/// Returns `None` unless the statement starts with `APPROX[IMATE] RANK OF`,
+/// so it never shadows the exact `RANK OF` head. A malformed tail returns
+/// `Some(Err(..))` for a targeted error.
+pub fn parse_approx_rank_of(sql: &str) -> Option<RedDBResult<ApproxRankOfRequest>> {
+    let tokens = tokenize(sql);
+    let approx = tokens
+        .first()
+        .is_some_and(|t| eq(t, "APPROX") || eq(t, "APPROXIMATE"));
+    if !approx
+        || !tokens.get(1).is_some_and(|t| eq(t, "RANK"))
+        || !tokens.get(2).is_some_and(|t| eq(t, "OF"))
+    {
+        return None;
+    }
+    let err = || {
+        RedDBError::Query(
+            "invalid APPROX RANK OF: expected APPROX RANK OF <id> IN <ranking-name>".to_string(),
+        )
+    };
+    let result = (|| {
+        let id_str = tokens.get(3).ok_or_else(err)?;
+        let entity_id = id_str.parse::<u64>().map_err(|_| err())?;
+        if !tokens.get(4).is_some_and(|t| eq(t, "IN")) {
+            return Err(err());
+        }
+        let ranking = tokens.get(5).ok_or_else(err)?;
+        if tokens.get(6).is_some() {
+            return Err(err());
+        }
+        Ok(ApproxRankOfRequest {
+            entity_id,
+            ranking: ranking.clone(),
+        })
+    })();
+    Some(result)
+}
+
 // ───────────────────────── persistence ─────────────────────────
 
-fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
+/// Read the latest persisted `value` Text for an arbitrary `red_config`
+/// key (most-recent entity wins, mirroring the WAL-as-log-of-writes shape).
+fn read_latest_config_value(store: &UnifiedStore, key: &str) -> Option<String> {
     let manager = store.get_collection("red_config")?;
     let mut all = manager.query_all(|_| true);
     all.sort_by_key(|entity| std::cmp::Reverse(entity.id.raw()));
@@ -266,7 +316,7 @@ fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
         let Some(named) = &row.named else { continue };
         let matches = matches!(
             named.get("key"),
-            Some(Value::Text(value)) if value.as_ref() == REGISTRY_KEY
+            Some(Value::Text(value)) if value.as_ref() == key
         );
         if matches {
             if let Some(Value::Text(value)) = named.get("value") {
@@ -275,6 +325,40 @@ fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
         }
     }
     None
+}
+
+fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
+    read_latest_config_value(store, REGISTRY_KEY)
+}
+
+/// `red_config` key for the approximate score sketch of `(table, column)`.
+/// The sketch is keyed per `(collection, score column)` (criterion 4), not
+/// per ranking name, so two rankings over the same column share one sketch.
+fn sketch_key(table: &str, column: &str) -> String {
+    format!("red.ranking.sketch.{table}.{column}")
+}
+
+/// Persist the approximate score sketch for `(table, column)`.
+pub fn save_sketch(
+    store: &UnifiedStore,
+    table: &str,
+    column: &str,
+    sketch: &super::score_sketch::ScoreSketch,
+) {
+    store.set_config_tree(
+        &sketch_key(table, column),
+        &crate::serde_json::Value::String(sketch.to_json().to_string()),
+    );
+}
+
+/// Load the persisted approximate score sketch for `(table, column)`, if any.
+pub fn load_sketch(
+    store: &UnifiedStore,
+    table: &str,
+    column: &str,
+) -> Option<super::score_sketch::ScoreSketch> {
+    let raw = read_latest_config_value(store, &sketch_key(table, column))?;
+    super::score_sketch::ScoreSketch::from_json_str(&raw)
 }
 
 fn load(store: &UnifiedStore) -> Vec<RankingDescriptor> {
@@ -443,6 +527,45 @@ mod tests {
         assert!(parse_rank_of("SELECT 1").is_none());
         // `RANK() OVER (...)` is a window projection, not the RANK OF read.
         assert!(parse_rank_of("SELECT RANK() OVER (ORDER BY s DESC) FROM t").is_none());
+    }
+
+    #[test]
+    fn parse_approx_rank_of_full() {
+        let req = parse_approx_rank_of("APPROX RANK OF 7 IN top_players")
+            .expect("recognised")
+            .expect("valid");
+        assert_eq!(
+            req,
+            ApproxRankOfRequest {
+                entity_id: 7,
+                ranking: "top_players".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_approx_rank_of_accepts_long_keyword_and_is_case_insensitive() {
+        let req = parse_approx_rank_of("approximate rank of 9 in r")
+            .expect("recognised")
+            .expect("valid");
+        assert_eq!(req.entity_id, 9);
+        assert_eq!(req.ranking, "r");
+    }
+
+    #[test]
+    fn parse_approx_rank_of_does_not_shadow_exact_rank_of() {
+        // The exact `RANK OF` head must not be mistaken for the approx tail.
+        assert!(parse_approx_rank_of("RANK OF 1 IN r").is_none());
+        // And the exact parser must ignore the approx head.
+        assert!(parse_rank_of("APPROX RANK OF 1 IN r").is_none());
+    }
+
+    #[test]
+    fn parse_approx_rank_of_rejects_non_numeric_id() {
+        let err = parse_approx_rank_of("APPROX RANK OF xyz IN r")
+            .expect("recognised")
+            .expect_err("bad id");
+        assert!(err.to_string().contains("APPROX RANK OF"), "{err}");
     }
 
     #[test]
