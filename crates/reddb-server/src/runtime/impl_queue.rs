@@ -303,6 +303,79 @@ impl RedDBRuntime {
         }
     }
 
+    /// Issue #917 — async live-wait edge used by the RedWire session.
+    ///
+    /// Unlike [`group_read_with_optional_wait`](Self::group_read_with_optional_wait)
+    /// (the synchronous HTTP/condvar caller), this parks on the
+    /// registry's async wake head and never holds a blocking OS thread:
+    /// the awaiting tokio worker is released back to the runtime for the
+    /// wait duration. On every wake it re-probes the *normal* queue
+    /// delivery path (`group_read`), so a delivered message is genuinely
+    /// claimed, not merely observed. Returns the delivered messages
+    /// rendered as JSON values (so the transport edge stays free of
+    /// runtime queue types); an empty Vec means the deadline elapsed
+    /// without a delivery, and a cancellation surfaces as the same
+    /// [`QUEUE_READ_WAIT_CANCELLED`] error the sync path uses.
+    pub(crate) async fn redwire_queue_wait_json(
+        &self,
+        queue: &str,
+        group: Option<&str>,
+        consumer: &str,
+        count: usize,
+        wait_ms: u64,
+    ) -> RedDBResult<Vec<crate::serde_json::Value>> {
+        let group_owned = {
+            let store = self.inner.db.store();
+            ensure_queue_exists(store.as_ref(), queue)?;
+            let config = load_queue_config(store.as_ref(), queue);
+            resolve_read_group(store.as_ref(), queue, group, consumer, &config)?
+        };
+        let group_ref = group_owned.as_str();
+
+        let do_read =
+            |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
+                let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
+                lifecycle
+                    .group_read(&txn, queue, group_ref, consumer, count)
+                    .map_err(map_qse)
+            };
+
+        // Fast path: a message is already deliverable at open time.
+        let delivered = do_read(self)?;
+        if !delivered.is_empty() {
+            return Ok(delivered.into_iter().map(delivered_message_json).collect());
+        }
+
+        let registry = self.queue_wait_registry();
+        let scope = queue_wait_scope();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        loop {
+            // Register the async waiter (snapshot the generation) BEFORE
+            // the re-probe so a notify landing between probe and park is
+            // observed as a generation move rather than a lost wake.
+            let waiter = registry.async_waiter(&scope, queue);
+            let delivered = do_read(self)?;
+            if !delivered.is_empty() {
+                return Ok(delivered.into_iter().map(delivered_message_json).collect());
+            }
+            if registry.is_cancelled() {
+                return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(Vec::new());
+            }
+            match registry.wait_until_async(&waiter, deadline).await {
+                crate::runtime::queue_wait_registry::WaitOutcome::Woken => continue,
+                crate::runtime::queue_wait_registry::WaitOutcome::Timeout => {
+                    return Ok(Vec::new());
+                }
+                crate::runtime::queue_wait_registry::WaitOutcome::Cancelled => {
+                    return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()));
+                }
+            }
+        }
+    }
+
     pub(crate) fn enqueue_event_payload(
         &self,
         queue: &str,
@@ -2646,6 +2719,32 @@ pub static TUPLE_DEPRECATION_EMITS: std::sync::atomic::AtomicU64 =
 
 fn message_id_string(message_id: EntityId) -> String {
     message_id.raw().to_string()
+}
+
+/// Issue #917 — render a delivered queue message as the JSON object the
+/// RedWire `QueueEventPush` frame carries. Mirrors the column shape the
+/// SQL `QUEUE READ` projection emits (`message_id` / `payload` /
+/// `consumer` / `delivery_count`) so the wire push and the pull path
+/// stay client-compatible.
+fn delivered_message_json(
+    message: crate::runtime::queue_lifecycle::DeliveredMessage,
+) -> crate::serde_json::Value {
+    use crate::serde_json::{Map, Value as JsonValue};
+    let mut obj = Map::new();
+    obj.insert(
+        "message_id".to_string(),
+        JsonValue::String(message_id_string(EntityId::new(message.message_id))),
+    );
+    obj.insert(
+        "payload".to_string(),
+        crate::presentation::entity_json::storage_value_to_json(&message.payload),
+    );
+    obj.insert("consumer".to_string(), JsonValue::String(message.consumer));
+    obj.insert(
+        "delivery_count".to_string(),
+        JsonValue::Number(message.delivery_count as f64),
+    );
+    JsonValue::Object(obj)
 }
 
 /// Slice 10 of issue #527 — render-time scan of pending entries
