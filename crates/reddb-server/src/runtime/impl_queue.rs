@@ -425,9 +425,31 @@ impl RedDBRuntime {
         let telemetry = self.queue_telemetry();
         telemetry.record_wait_started(&scope, queue);
         let wait_start = std::time::Instant::now();
+        tracing::debug!(
+            target: "reddb::redwire::queue_wait",
+            queue,
+            group = group_ref,
+            consumer,
+            count,
+            wait_ms,
+            scope = scope.as_str(),
+            "redwire queue wait parked"
+        );
         let observe = |outcome: crate::runtime::queue_telemetry::WaitOutcomeLabel| {
             let elapsed_ms = wait_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             telemetry.record_wait_outcome(&scope, queue, outcome, elapsed_ms);
+            tracing::debug!(
+                target: "reddb::redwire::queue_wait",
+                queue,
+                group = group_ref,
+                consumer,
+                count,
+                wait_ms,
+                scope = scope.as_str(),
+                outcome = outcome.as_str(),
+                duration_ms = elapsed_ms,
+                "redwire queue wait resolved"
+            );
         };
         loop {
             // Register the async waiter (snapshot the generation) BEFORE
