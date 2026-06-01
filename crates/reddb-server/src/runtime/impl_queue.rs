@@ -316,6 +316,17 @@ impl RedDBRuntime {
     /// runtime queue types); an empty Vec means the deadline elapsed
     /// without a delivery, and a cancellation surfaces as the same
     /// [`QUEUE_READ_WAIT_CANCELLED`] error the sync path uses.
+    /// True when `err` is the cancellation sentinel
+    /// [`redwire_queue_wait_json`](Self::redwire_queue_wait_json) returns
+    /// once the wait registry is cancelled (server shutdown) while a wait
+    /// is parked. Lets the RedWire transport map a cancelled wait to a
+    /// distinct `queue_wait_cancelled` frame rather than aliasing it with
+    /// a generic runtime failure (issue #920): cancellation and a real
+    /// `QUEUE READ` error are different wire outcomes.
+    pub(crate) fn redwire_wait_error_is_cancellation(err: &RedDBError) -> bool {
+        matches!(err, RedDBError::Query(message) if message == QUEUE_READ_WAIT_CANCELLED)
+    }
+
     pub(crate) async fn redwire_queue_wait_json(
         &self,
         queue: &str,

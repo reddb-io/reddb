@@ -98,6 +98,27 @@ impl QueueWaitRegistry {
         self.cancelled.store(false, Ordering::Release);
     }
 
+    /// Number of in-flight waiter references parked on `(scope, queue)`
+    /// beyond the registry's own retained slot reference. Each live
+    /// [`Snapshot`] (sync condvar path) and [`AsyncWaiter`] (RedWire
+    /// async edge) holds one `Arc<Slot>` clone, so this is the count of
+    /// waiters currently registered on the key. Returns 0 when no slot
+    /// has been created yet.
+    ///
+    /// The observable the queue-wait cancellation surface relies on
+    /// (issue #920 AC #3): when an in-flight wait is cancelled — by a
+    /// connection close aborting the wait task, or by `cancel_all` at
+    /// shutdown — its waiter is dropped and this count falls back to 0,
+    /// proving the slot reference (and the tokio worker holding it) was
+    /// released promptly rather than lingering to the wait deadline.
+    pub fn live_waiters(&self, scope: &str, queue: &str) -> usize {
+        let slots = self.slots.lock();
+        slots
+            .get(&(scope.to_string(), queue.to_string()))
+            .map(|slot| Arc::strong_count(slot).saturating_sub(1))
+            .unwrap_or(0)
+    }
+
     fn slot(&self, scope: &str, queue: &str) -> Arc<Slot> {
         let mut slots = self.slots.lock();
         if let Some(existing) = slots.get(&(scope.to_string(), queue.to_string())) {
@@ -386,6 +407,60 @@ mod tests {
             .wait_until_async(&waiter, Instant::now() + Duration::from_secs(5))
             .await;
         assert_eq!(outcome, WaitOutcome::Woken);
+    }
+
+    #[tokio::test]
+    async fn cancel_all_wakes_async_waiter_with_cancelled() {
+        // Issue #920 AC #4: the same `cancel_all` that wakes the
+        // synchronous condvar waiters wakes an async waiter parked on
+        // the registry's async wake head, surfacing `Cancelled` (not a
+        // timeout, not a spurious `Woken`).
+        let reg = Arc::new(QueueWaitRegistry::new());
+        let waiter = reg.async_waiter("t", "q");
+        let reg_clone = reg.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            reg_clone.cancel_all();
+        });
+        // A generous deadline: the wait must end on cancellation, well
+        // before this elapses, or the assertion below is meaningless.
+        let outcome = reg
+            .wait_until_async(&waiter, Instant::now() + Duration::from_secs(5))
+            .await;
+        canceller.await.unwrap();
+        assert_eq!(outcome, WaitOutcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancelled_async_waiter_releases_its_slot_reference() {
+        // Issue #920 AC #3: a cancelled async wait drops its waiter and
+        // hence its `Arc<Slot>` clone promptly, so `live_waiters` falls
+        // back to 0 — the slot reference (and the worker holding it) is
+        // not stranded until the original wait deadline.
+        let reg = Arc::new(QueueWaitRegistry::new());
+        let reg_task = reg.clone();
+        let park = tokio::spawn(async move {
+            let waiter = reg_task.async_waiter("t", "q");
+            reg_task
+                .wait_until_async(&waiter, Instant::now() + Duration::from_secs(30))
+                .await
+        });
+        // Let the task register its waiter and park.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(reg.live_waiters("t", "q"), 1, "waiter should be parked");
+
+        // Abort mid-wait (the connection-close analogue) and confirm the
+        // slot reference is released well before the 30s deadline.
+        park.abort();
+        let mut released = false;
+        for _ in 0..200 {
+            if reg.live_waiters("t", "q") == 0 {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(released, "aborted waiter must drop its slot reference");
     }
 
     #[test]
