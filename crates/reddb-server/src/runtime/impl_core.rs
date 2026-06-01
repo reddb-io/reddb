@@ -66,6 +66,26 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Read a numeric score column out of a result record as `f64`, matching
+/// the column name case-insensitively. Used by the leaderboard-rank head
+/// walk (#918) to compare scores; non-numeric / missing columns yield
+/// `None` so a row with no comparable score never shifts a rank.
+fn record_column_f64(
+    rec: &crate::storage::query::unified::UnifiedRecord,
+    column: &str,
+) -> Option<f64> {
+    let value = rec
+        .get(column)
+        .or_else(|| rec.get(&column.to_lowercase()))?;
+    match value {
+        Value::Integer(n) => Some(*n as f64),
+        Value::UnsignedInteger(n) => Some(*n as f64),
+        Value::Float(n) => Some(*n),
+        Value::Timestamp(n) | Value::Duration(n) => Some(*n as f64),
+        _ => None,
+    }
+}
+
 fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
     match value {
         Value::Text(s) => Ok(s.to_string()),
@@ -184,6 +204,167 @@ impl RedDBRuntime {
             &format!("metric descriptor '{}' created", query.path),
             "create",
         ))
+    }
+
+    /// `CREATE RANKING <name> ON <table> (<column> [ASC|DESC]) [TOP <k>]`
+    /// — declare a Ranking capability over an ordinary table's score
+    /// column (issue #918 / ADR 0035). Persists a WAL-backed catalog
+    /// record; no new Collection model is introduced. Authorized through
+    /// the same DDL write gate as `CREATE METRIC`/`CREATE INDEX`.
+    fn execute_create_ranking(
+        &self,
+        raw_query: &str,
+        req: super::ranking_descriptor_catalog::CreateRankingRequest,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let store = self.inner.db.store();
+        let descriptor = super::ranking_descriptor_catalog::create(store.as_ref(), &req)?;
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!(
+                "ranking '{}' created on {}({})",
+                descriptor.name, descriptor.table, descriptor.column
+            ),
+            "create",
+        ))
+    }
+
+    /// `SHOW RANKINGS` — project the declared Ranking capabilities back as
+    /// rows, so a declared capability is observable (the Analytics
+    /// "prefer SELECT over admin verbs" rule).
+    fn execute_show_rankings(&self, raw_query: &str) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+        let entries = super::ranking_descriptor_catalog::list(store.as_ref());
+        let columns = vec![
+            "name".to_string(),
+            "table".to_string(),
+            "column".to_string(),
+            "direction".to_string(),
+            "top_k".to_string(),
+        ];
+        let rows = entries
+            .into_iter()
+            .map(|e| {
+                vec![
+                    ("name".to_string(), Value::text(e.name)),
+                    ("table".to_string(), Value::text(e.table)),
+                    ("column".to_string(), Value::text(e.column)),
+                    (
+                        "direction".to_string(),
+                        Value::text(if e.descending { "DESC" } else { "ASC" }.to_string()),
+                    ),
+                    ("top_k".to_string(), Value::UnsignedInteger(e.top_k)),
+                ]
+            })
+            .collect();
+        Ok(RuntimeQueryResult::ok_records(
+            raw_query.to_string(),
+            columns,
+            rows,
+            "select",
+        ))
+    }
+
+    /// `RANK OF <id> IN <name>` — exact, MVCC-correct rank of a specific
+    /// row within the capability's bounded top-K head (issue #918).
+    ///
+    /// Returns a single `rank` row when the row is visible *and* falls
+    /// inside the exact head; an empty result otherwise (not visible, or
+    /// in the approximate tail — a separate slice). The computation runs
+    /// entirely over the regular read pipeline so it inherits MVCC
+    /// visibility, RLS/policy, and tenant scope from ordinary reads.
+    fn execute_rank_of(
+        &self,
+        raw_query: &str,
+        req: super::ranking_descriptor_catalog::RankOfRequest,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+        let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
+            .ok_or_else(|| {
+                RedDBError::Query(format!("ranking '{}' does not exist", req.ranking))
+            })?;
+        let rank = self.compute_exact_head_rank(&descriptor, req.entity_id)?;
+        let columns = vec!["rank".to_string()];
+        let rows = match rank {
+            Some(rank) => vec![vec![("rank".to_string(), Value::UnsignedInteger(rank))]],
+            None => Vec::new(),
+        };
+        Ok(RuntimeQueryResult::ok_records(
+            raw_query.to_string(),
+            columns,
+            rows,
+            "select",
+        ))
+    }
+
+    /// Compute the exact rank of `target_id` within the descriptor's
+    /// bounded top-K head, or `None` if the row is invisible to the
+    /// querying snapshot or beyond the exact head.
+    ///
+    /// Faithful to ADR 0035: it walks the sorted index head
+    /// (`ORDER BY <col> {DESC|ASC} LIMIT k`, served by
+    /// `try_sorted_index_lookup` + the per-row MVCC visibility re-check)
+    /// and counts only rows visible to the current snapshot. Running the
+    /// head scan through `execute_query_inner` keeps it on the same
+    /// snapshot/tenant/policy frame as ordinary reads, so the rank agrees
+    /// with `ORDER BY <col> {DESC|ASC} LIMIT` under that snapshot by
+    /// construction. RANK semantics: tied scores share a rank, so the
+    /// rank is `1 + (number of strictly-better visible rows)`.
+    fn compute_exact_head_rank(
+        &self,
+        descriptor: &super::ranking_descriptor_catalog::RankingDescriptor,
+        target_id: u64,
+    ) -> RedDBResult<Option<u64>> {
+        let table = &descriptor.table;
+        let column = &descriptor.column;
+
+        // The exact head: top-K rows in rank order. Each row here already
+        // passed MVCC visibility *and* RLS/tenant filtering during the
+        // scan, so identifying the target *within* this result (rather
+        // than via a separate `red_entity_id` lookup, which takes the
+        // direct entity-fetch path that bypasses the RLS gate) is what
+        // makes the rank honor policy/tenant scope (criterion 5).
+        let dir = if descriptor.descending { "DESC" } else { "ASC" };
+        let head_sql = format!(
+            "SELECT * FROM {table} ORDER BY {column} {dir} LIMIT {}",
+            descriptor.top_k
+        );
+        let head_result = self.execute_query_inner(&head_sql)?;
+        let head = &head_result.result.records;
+
+        // Locate the target inside the head. Not present ⇒ either invisible
+        // to this snapshot/tenant, or beyond the exact head — both correctly
+        // yield "no exact rank" (the approximate tail is a separate slice).
+        let target_score = head.iter().find_map(|rec| {
+            let rid = match rec.get("rid") {
+                Some(Value::UnsignedInteger(n)) => *n,
+                Some(Value::Integer(n)) if *n >= 0 => *n as u64,
+                _ => return None,
+            };
+            (rid == target_id).then(|| record_column_f64(rec, column))?
+        });
+        let Some(target_score) = target_score else {
+            return Ok(None);
+        };
+
+        // RANK semantics: tied scores share a rank, so the rank is
+        // 1 + (number of strictly-better visible rows in the head).
+        let mut strictly_better = 0u64;
+        for rec in head {
+            let Some(score) = record_column_f64(rec, column) else {
+                continue;
+            };
+            let better = if descriptor.descending {
+                score > target_score
+            } else {
+                score < target_score
+            };
+            if better {
+                strictly_better += 1;
+            }
+        }
+        Ok(Some(strictly_better + 1))
     }
 
     fn execute_alter_metric(
@@ -6171,6 +6352,22 @@ impl RedDBRuntime {
             return Err(super::metric_descriptor_catalog::read_output_unsupported(
                 &path,
             ));
+        }
+
+        // Issue #918 / ADR 0035 — leaderboard rank capability. These are
+        // narrow string intercepts (the `READ METRIC` precedent) so the
+        // surface stays off the recursive-descent grammar. `RANK() OVER`
+        // window projections are unaffected — they parse `SELECT … RANK()`
+        // and never match the `RANK OF`/`CREATE RANKING`/`SHOW RANKINGS`
+        // statement heads.
+        if let Some(parsed) = super::ranking_descriptor_catalog::parse_create_ranking(query) {
+            return self.execute_create_ranking(query, parsed?);
+        }
+        if super::ranking_descriptor_catalog::parse_show_rankings(query) {
+            return self.execute_show_rankings(query);
+        }
+        if let Some(parsed) = super::ranking_descriptor_catalog::parse_rank_of(query) {
+            return self.execute_rank_of(query, parsed?);
         }
 
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
