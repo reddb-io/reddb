@@ -123,6 +123,11 @@ pub enum MessageKind {
     // streamed envelopes.
     QueueWaitOpen = 0x2E,
     QueueEventPush = 0x2F,
+    // Live queue-wait timeout (issue #919 / PRD #915). Pushed when a
+    // wait elapses with no deliverable message — a distinct kind so the
+    // outcome is unambiguous on the wire: not a `QueueEventPush`
+    // (delivery), not a `StreamError` (cancellation / failure).
+    QueueWaitTimeout = 0x30,
 }
 
 /// Coarse routing class for a `MessageKind`.
@@ -200,7 +205,10 @@ impl MessageKind {
             // Live queue-wait envelopes (issue #917) describe an
             // in-flight subscription multiplexed by `stream_id`.
             | Self::QueueWaitOpen
-            | Self::QueueEventPush => MessageClass::Streamed,
+            | Self::QueueEventPush
+            // Live queue-wait timeout push (issue #919) — same streamed
+            // class, multiplexed by `stream_id`.
+            | Self::QueueWaitTimeout => MessageClass::Streamed,
 
             // 0x10..0x1F — handshake / lifecycle.
             Self::Hello
@@ -318,8 +326,10 @@ impl MessageKind {
             | Self::StreamEnd
             | Self::OpenAck
             | Self::StreamError
-            // Server pushes the delivered queue message (issue #917).
-            | Self::QueueEventPush => MessageDirection::ServerToClient,
+            // Server pushes the delivered queue message (issue #917)
+            // and the distinct wait-timeout outcome (issue #919).
+            | Self::QueueEventPush
+            | Self::QueueWaitTimeout => MessageDirection::ServerToClient,
 
             // Symmetric — either peer may initiate. (`StreamChunk` is
             // also symmetric but has its own arm above — see issue
@@ -373,6 +383,7 @@ impl MessageKind {
             0x2D => Some(Self::StreamCancel),
             0x2E => Some(Self::QueueWaitOpen),
             0x2F => Some(Self::QueueEventPush),
+            0x30 => Some(Self::QueueWaitTimeout),
             _ => None,
         }
     }
@@ -464,6 +475,7 @@ mod catalog_tests {
         MessageKind::StreamCancel,
         MessageKind::QueueWaitOpen,
         MessageKind::QueueEventPush,
+        MessageKind::QueueWaitTimeout,
     ];
 
     #[test]
@@ -518,6 +530,11 @@ mod catalog_tests {
         // multiplexed by `stream_id` like the output-stream family.
         assert_eq!(MessageKind::QueueWaitOpen.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::QueueEventPush.class(), MessageClass::Streamed);
+        // Live queue-wait timeout push (issue #919).
+        assert_eq!(
+            MessageKind::QueueWaitTimeout.class(),
+            MessageClass::Streamed
+        );
 
         // Control plane.
         assert_eq!(MessageKind::Cancel.class(), MessageClass::ControlPlane);
@@ -671,6 +688,7 @@ mod catalog_tests {
             MessageKind::OpenAck,
             MessageKind::StreamError,
             MessageKind::QueueEventPush,
+            MessageKind::QueueWaitTimeout,
         ] {
             assert_eq!(
                 k.direction(),
