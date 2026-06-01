@@ -93,6 +93,7 @@
   - [WAL & Recovery](/engine/wal.md)
   - [SIEVE Cache](/engine/cache.md)
   - [Columnar Batch Execution](/engine/columnar-execution.md)
+  - [Columnar Chunk Format (RDCC)](/engine/columnar-chunk-format.md)
   - [Encryption at Rest](/engine/encryption.md)
 
 - **Architecture**
