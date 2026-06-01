@@ -164,3 +164,144 @@ async fn wait_opened_then_post_open_push_is_delivered() {
         "push must carry the message_id, got {body}"
     );
 }
+
+/// Issue #919 / AC #1, #2, #4 — a wait that elapses with no deliverable
+/// message returns a distinct `QueueWaitTimeout` frame (not a
+/// `QueueEventPush`, not a `StreamError`), and the session stays
+/// responsive afterwards.
+///
+/// Runs on a **current-thread** runtime: the test task and the awaiting
+/// session task share one OS thread, so a clean pass also proves the
+/// expired wait held no blocking OS thread and released its worker —
+/// the Ping/Pong round-trip after the timeout would deadlock otherwise.
+#[tokio::test(flavor = "current_thread")]
+async fn wait_times_out_with_distinct_frame() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut client = connect_and_handshake(server.addr).await;
+
+    // Open a 300 ms wait on the (empty) queue, stream_id 9. No producer
+    // ever makes a message deliverable, so the budget elapses.
+    let open = Frame::new(
+        MessageKind::QueueWaitOpen,
+        42,
+        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":300}"#.to_vec(),
+    )
+    .with_stream(9);
+    let started = std::time::Instant::now();
+    write_frame(&mut client, &open).await;
+
+    let timeout_frame = read_frame(&mut client).await;
+    let elapsed = started.elapsed();
+    assert_eq!(
+        timeout_frame.kind,
+        MessageKind::QueueWaitTimeout,
+        "elapsed wait must surface a distinct QueueWaitTimeout frame, got {:?}",
+        timeout_frame.kind
+    );
+    assert_ne!(
+        timeout_frame.kind,
+        MessageKind::QueueEventPush,
+        "timeout must not alias a delivery"
+    );
+    assert_ne!(
+        timeout_frame.kind,
+        MessageKind::StreamError,
+        "timeout must not alias an error/cancellation"
+    );
+    assert_eq!(
+        timeout_frame.stream_id, 9,
+        "timeout echoes the open stream_id"
+    );
+    assert_eq!(
+        timeout_frame.correlation_id, 42,
+        "timeout echoes the open correlation"
+    );
+    let body = String::from_utf8(timeout_frame.payload.clone()).expect("utf8 payload");
+    assert!(
+        body.contains("\"outcome\":\"timeout\""),
+        "timeout body should mark the outcome, got {body}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "should park ~the budget before timing out, elapsed={elapsed:?}"
+    );
+
+    // The session is still reading frames on this connection — Ping →
+    // Pong proves the expired wait released its worker (AC #4) and did
+    // not wedge the session loop.
+    write_frame(&mut client, &Frame::new(MessageKind::Ping, 43, Vec::new())).await;
+    let pong = read_frame(&mut client).await;
+    assert_eq!(
+        pong.kind,
+        MessageKind::Pong,
+        "session must stay responsive after a timed-out wait"
+    );
+}
+
+/// Issue #919 / AC #3 — a wait whose requested budget exceeds the
+/// server's maximum cap is rejected with an explicit `StreamError`
+/// (carrying the cap code and naming the config key), not silently
+/// shortened and never parked.
+#[tokio::test(flavor = "current_thread")]
+async fn wait_above_server_cap_is_rejected() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut client = connect_and_handshake(server.addr).await;
+
+    // Default cap is 60_000 ms; ask for 1 hour. The request must be
+    // refused before any parking, so the reply arrives promptly.
+    let open = Frame::new(
+        MessageKind::QueueWaitOpen,
+        55,
+        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":3600000}"#
+            .to_vec(),
+    )
+    .with_stream(11);
+    let started = std::time::Instant::now();
+    write_frame(&mut client, &open).await;
+
+    let err = read_frame(&mut client).await;
+    let elapsed = started.elapsed();
+    assert_eq!(
+        err.kind,
+        MessageKind::StreamError,
+        "over-cap wait must be rejected with a StreamError, got {:?}",
+        err.kind
+    );
+    assert_eq!(err.stream_id, 11, "error echoes the open stream_id");
+    assert_eq!(err.correlation_id, 55, "error echoes the open correlation");
+    let body = String::from_utf8(err.payload.clone()).expect("utf8 payload");
+    assert!(
+        body.contains("queue_wait_exceeds_cap"),
+        "rejection must carry the cap code, got {body}"
+    );
+    assert!(
+        body.contains("red.config.queue.max_wait_ms"),
+        "rejection should name the cap config key for operators, got {body}"
+    );
+    assert!(
+        body.contains("60000"),
+        "rejection should name the active cap value, got {body}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cap rejection must not park, elapsed={elapsed:?}"
+    );
+}
