@@ -1343,6 +1343,7 @@ mod impl_native;
 mod impl_physical;
 mod impl_probabilistic;
 pub mod impl_queue;
+pub(crate) use impl_queue::RedwireWaitOutcome;
 mod impl_search;
 mod impl_timeseries;
 mod impl_tree;
