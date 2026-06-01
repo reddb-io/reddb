@@ -20,6 +20,7 @@ impl<'a> Parser<'a> {
         let mut downsample_policies = Vec::new();
         let mut session_key: Option<String> = None;
         let mut session_gap_ms: Option<u64> = None;
+        let mut columnar = false;
 
         // Parse optional clauses in any order
         loop {
@@ -29,6 +30,9 @@ impl<'a> Parser<'a> {
                 retention_ms = Some((value * unit) as u64);
             } else if self.consume_ident_ci("CHUNK_SIZE")? || self.consume_ident_ci("CHUNKSIZE")? {
                 chunk_size = Some(self.parse_integer()? as usize);
+            } else if self.consume_ident_ci("COLUMNAR")? {
+                // `COLUMNAR` — activate columnar analytical storage (#911).
+                columnar = true;
             } else if self.consume_ident_ci("DOWNSAMPLE")? {
                 downsample_policies.push(self.parse_downsample_policy_spec()?);
                 while self.consume(&Token::Comma)? {
@@ -55,6 +59,7 @@ impl<'a> Parser<'a> {
             hypertable: None,
             session_key,
             session_gap_ms,
+            columnar,
         }))
     }
 
@@ -353,12 +358,16 @@ impl<'a> Parser<'a> {
         let mut chunk_interval_ns: Option<u64> = None;
         let mut ttl_ns: Option<u64> = None;
         let mut retention_ms = None;
+        let mut columnar = false;
 
         loop {
             if self.consume_ident_ci("TIME_COLUMN")? {
                 time_column = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("CHUNK_INTERVAL")? {
                 chunk_interval_ns = Some(self.parse_duration_ns_literal("CHUNK_INTERVAL")?);
+            } else if self.consume_ident_ci("COLUMNAR")? {
+                // `COLUMNAR` — activate columnar analytical storage (#911).
+                columnar = true;
             } else if self.consume_ident_ci("TTL")? {
                 ttl_ns = Some(self.parse_duration_ns_literal("TTL")?);
             } else if self.consume(&Token::Retention)? {
@@ -396,6 +405,7 @@ impl<'a> Parser<'a> {
             }),
             session_key: None,
             session_gap_ms: None,
+            columnar,
         }))
     }
 

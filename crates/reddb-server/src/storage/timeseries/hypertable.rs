@@ -211,6 +211,13 @@ struct RegistryInner {
     /// by name produce an ordered view (show_chunks must be
     /// deterministic).
     chunks: BTreeMap<(String, u64), ChunkMeta>,
+    /// `(hypertable, start_ns)` → the sealed chunk's RDCC `ColumnBlock`
+    /// bytes, populated by [`seal_chunk_columnar`](HypertableRegistry::seal_chunk_columnar)
+    /// (PRD #850, #911). RAM-resident: the migration discriminant
+    /// `ChunkMeta.columnar_page` persists across restart, but durable
+    /// engine-page persistence of these bytes is a follow-up — until the
+    /// page-write bridge lands, a columnar chunk's block lives only here.
+    columnar_blocks: BTreeMap<(String, u64), Vec<u8>>,
 }
 
 impl std::fmt::Debug for HypertableRegistry {
@@ -474,6 +481,43 @@ impl HypertableRegistry {
         } else {
             false
         }
+    }
+
+    /// Seal a chunk **columnar** (PRD #850, #911): mark it sealed, record
+    /// where its RDCC `ColumnBlock` lives in `ChunkMeta.columnar_page`,
+    /// and stash the block `bytes` so the columnar read path can decode
+    /// them. The columnar counterpart of [`seal_chunk`](Self::seal_chunk)
+    /// — the production caller (`seal_chunk_with_config`'s columnar arm)
+    /// hands the sealed bytes here. Returns `true` if the chunk existed.
+    pub fn seal_chunk_columnar(&self, id: &ChunkId, page: PageLocation, bytes: Vec<u8>) -> bool {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let key = (id.hypertable.clone(), id.start_ns);
+        if let Some(meta) = guard.chunks.get_mut(&key) {
+            meta.sealed = true;
+            meta.columnar_page = Some(page);
+            guard.columnar_blocks.insert(key, bytes);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Fetch the RDCC `ColumnBlock` bytes recorded for a columnar-sealed
+    /// chunk by [`seal_chunk_columnar`](Self::seal_chunk_columnar). `None`
+    /// for row-sealed chunks or chunks whose bytes are not RAM-resident
+    /// (e.g. after a restart, pending the durable page-write bridge).
+    pub fn columnar_block(&self, id: &ChunkId) -> Option<Vec<u8>> {
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .columnar_blocks
+            .get(&(id.hypertable.clone(), id.start_ns))
+            .cloned()
     }
 
     /// Total row count across every chunk of `hypertable`. Used by

@@ -198,6 +198,153 @@ impl RedDBRuntime {
             "drop",
         ))
     }
+
+    /// Seal every still-open chunk of a hypertable, routing each seal
+    /// through [`seal_chunk_with_config`](crate::storage::timeseries::chunk::seal_chunk_with_config)
+    /// — the production caller PRD #850 lacked (#911). For a collection
+    /// whose contract carries `analytical_storage.columnar = true`, the
+    /// chunk's rows are materialised from the entity store into a
+    /// `TimeSeriesChunk`, sealed columnar, and the resulting RDCC
+    /// `ColumnBlock` recorded in `ChunkMeta.columnar_page` (bytes stashed
+    /// for read-back). Without the flag the chunk falls to the row seal
+    /// and `columnar_page` stays `None` — no behaviour change. Returns the
+    /// number of chunks sealed columnar.
+    pub fn seal_hypertable_chunks(&self, collection: &str) -> RedDBResult<usize> {
+        let analytical = self
+            .inner
+            .db
+            .collection_contract(collection)
+            .and_then(|c| c.analytical_storage.clone());
+        let registry = self.inner.db.hypertables();
+        let Some(spec) = registry.get(collection) else {
+            return Ok(0);
+        };
+        let time_col = spec.time_column.clone();
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(0);
+        };
+
+        let mut sealed_columnar = 0usize;
+        for meta in registry.show_chunks(collection) {
+            if meta.sealed {
+                continue;
+            }
+            let start = meta.id.start_ns;
+            let end = meta.end_ns_exclusive;
+
+            // Materialise (ts, value) for rows whose time-column value
+            // lands in this chunk's `[start, end)` window.
+            let mut points: Vec<(u64, f64)> = manager
+                .query_all(|entity| {
+                    entity
+                        .data
+                        .as_row()
+                        .and_then(|row| row.get_field(&time_col))
+                        .and_then(field_as_u64)
+                        .is_some_and(|ts| ts >= start && ts < end)
+                })
+                .iter()
+                .filter_map(|entity| {
+                    let row = entity.data.as_row()?;
+                    let ts = row.get_field(&time_col).and_then(field_as_u64)?;
+                    let value = row.get_field("value").and_then(field_as_f64).unwrap_or(0.0);
+                    Some((ts, value))
+                })
+                .collect();
+            points.sort_by_key(|(ts, _)| *ts);
+
+            let mut chunk = crate::storage::timeseries::TimeSeriesChunk::with_max_points(
+                collection.to_string(),
+                HashMap::new(),
+                points.len().max(1),
+            );
+            for (ts, value) in &points {
+                chunk.append(*ts, *value);
+            }
+
+            let routed = crate::storage::timeseries::chunk::seal_chunk_with_config(
+                &mut chunk,
+                analytical.as_ref(),
+                start,
+                0,
+            )
+            .map_err(|err| RedDBError::Internal(format!("columnar seal failed: {err:?}")))?;
+
+            match routed {
+                crate::storage::timeseries::chunk::SealedChunkStorage::Columnar(bytes) => {
+                    let page = crate::storage::engine::PageLocation::new(0, 0, bytes.len() as u32);
+                    registry.seal_chunk_columnar(&meta.id, page, bytes);
+                    sealed_columnar += 1;
+                }
+                crate::storage::timeseries::chunk::SealedChunkStorage::Row => {
+                    registry.seal_chunk(&meta.id);
+                }
+            }
+        }
+        Ok(sealed_columnar)
+    }
+
+    /// Count this hypertable's chunks that were sealed columnar — i.e.
+    /// whose `ChunkMeta.columnar_page` is set (#911). Lets a caller assert
+    /// the columnar arm fired without exposing the registry's chunk type.
+    pub fn columnar_chunk_count(&self, collection: &str) -> usize {
+        self.inner
+            .db
+            .hypertables()
+            .show_chunks(collection)
+            .iter()
+            .filter(|meta| meta.columnar_page.is_some())
+            .count()
+    }
+
+    /// Read back a columnar-sealed chunk's points over `[start_ns, end_ns]`
+    /// (inclusive) via the #856 column-block range scan, decoding the RDCC
+    /// `ColumnBlock` recorded by [`seal_hypertable_chunks`](Self::seal_hypertable_chunks).
+    /// `None` when the chunk was not sealed columnar (or its bytes are not
+    /// RAM-resident). Points come back as `(timestamp_ns, value)`.
+    pub fn columnar_chunk_points(
+        &self,
+        collection: &str,
+        chunk_start_ns: u64,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> Option<Vec<(u64, f64)>> {
+        let id = crate::storage::timeseries::ChunkId {
+            hypertable: collection.to_string(),
+            start_ns: chunk_start_ns,
+        };
+        let bytes = self.inner.db.hypertables().columnar_block(&id)?;
+        let scan =
+            crate::storage::timeseries::chunk::query_column_block_range(&bytes, start_ns, end_ns)
+                .ok()?;
+        Some(
+            scan.points
+                .iter()
+                .map(|p| (p.timestamp_ns, p.value))
+                .collect(),
+        )
+    }
+}
+
+/// Read a row field as a non-negative `u64` timestamp, accepting the
+/// integer shapes the INSERT path stores for a time column (#911).
+fn field_as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Integer(n) | Value::BigInt(n) | Value::Timestamp(n) if *n >= 0 => Some(*n as u64),
+        Value::UnsignedInteger(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Read a row field as `f64` for the columnar value column (#911).
+fn field_as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(f) => Some(*f),
+        Value::Integer(n) | Value::BigInt(n) => Some(*n as f64),
+        Value::UnsignedInteger(n) => Some(*n as f64),
+        _ => None,
+    }
 }
 
 fn save_timeseries_metadata(
@@ -276,10 +423,31 @@ fn remove_timeseries_metadata(store: &crate::storage::unified::UnifiedStore, ser
     }
 }
 
+/// Build the contract's [`AnalyticalStorageConfig`] when the DDL carried
+/// `COLUMNAR` (#911). `time_key` is the column carrying the time axis —
+/// the hypertable's declared time column, or the timeseries `timestamp`
+/// convention. `None` when columnar was not requested, so non-columnar
+/// collections keep the row engine default.
+fn analytical_storage_for(
+    columnar: bool,
+    time_key: &str,
+) -> Option<crate::catalog::AnalyticalStorageConfig> {
+    columnar.then(|| crate::catalog::AnalyticalStorageConfig {
+        columnar: true,
+        time_key: time_key.to_string(),
+        order_by_key: None,
+    })
+}
+
 fn hypertable_collection_contract(
     query: &CreateTimeSeriesQuery,
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
+    let time_key = query
+        .hypertable
+        .as_ref()
+        .map(|ht| ht.time_column.as_str())
+        .unwrap_or("timestamp");
     crate::physical::CollectionContract {
         name: query.name.clone(),
         // Table model — rows go through the normal INSERT path,
@@ -313,7 +481,7 @@ fn hypertable_collection_contract(
         session_key: None,
         session_gap_ms: None,
         retention_duration_ms: None,
-        analytical_storage: None,
+        analytical_storage: analytical_storage_for(query.columnar, time_key),
     }
 }
 
@@ -355,7 +523,9 @@ fn timeseries_collection_contract(
         session_key: query.session_key.clone(),
         session_gap_ms: query.session_gap_ms,
         retention_duration_ms: None,
-        analytical_storage: None,
+        // Plain timeseries store points under the `timestamp` axis
+        // convention (the `value` column carries the measurement).
+        analytical_storage: analytical_storage_for(query.columnar, "timestamp"),
     }
 }
 
