@@ -1379,6 +1379,7 @@ pub(crate) mod retention_sweeper;
 pub(crate) mod scalar_evaluator;
 pub mod schema_diff;
 pub mod schema_vocabulary;
+pub(crate) mod score_sketch;
 pub(crate) mod sessionize;
 pub mod signed_chain;
 pub mod signed_writes_kind;
