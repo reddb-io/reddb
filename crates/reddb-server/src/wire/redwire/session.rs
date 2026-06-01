@@ -371,6 +371,71 @@ where
                     registry_ref.unregister(sid).await;
                 });
             }
+            // Live queue wait (issue #917 / PRD #915). Parse the open
+            // request, then spawn a task that awaits the runtime's async
+            // wait edge (parks on the registry's async wake head — no
+            // blocking OS thread) and pushes a `QueueEventPush` the
+            // instant a message becomes deliverable. The dispatch loop
+            // returns to reading immediately so the wait multiplexes
+            // with other frames on the connection.
+            MessageKind::QueueWaitOpen => {
+                use super::queue_wait as qw;
+                let frame_id = frame.correlation_id;
+                let sid = frame.stream_id;
+                let req = match qw::parse_queue_wait_open(&frame.payload) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let err =
+                            qw::build_queue_wait_error_frame(frame_id, sid, e.code(), e.message())
+                                .map_err(|e| {
+                                    io::Error::other(format!("build queue-wait error: {e}"))
+                                })?;
+                        queue_send(&out_tx, encode_frame(&err))?;
+                        continue;
+                    }
+                };
+                let runtime_ref = Arc::clone(&runtime);
+                let out = out_tx.clone();
+                tokio::spawn(async move {
+                    match runtime_ref
+                        .redwire_queue_wait_json(
+                            &req.queue,
+                            req.group.as_deref(),
+                            &req.consumer,
+                            req.count,
+                            req.wait_ms,
+                        )
+                        .await
+                    {
+                        Ok(messages) => {
+                            // Happy path: push each delivered message.
+                            // An empty Vec (deadline elapsed without a
+                            // delivery) pushes nothing — the timeout
+                            // surface is a later slice.
+                            for message in messages {
+                                match qw::build_event_push_frame(frame_id, sid, &message) {
+                                    Ok(push) => {
+                                        if queue_send(&out, encode_frame(&push)).is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => return,
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            if let Ok(ef) = qw::build_queue_wait_error_frame(
+                                frame_id,
+                                sid,
+                                "queue_wait_failed",
+                                &err.to_string(),
+                            ) {
+                                let _ = queue_send(&out, encode_frame(&ef));
+                            }
+                        }
+                    }
+                });
+            }
             // Input-stream chunk (issue #764 / S5). A `StreamChunk`
             // from the client carries a chunk of rows for an open
             // input stream. Each chunk commits synchronously and
