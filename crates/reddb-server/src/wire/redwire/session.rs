@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use crate::auth::store::AuthStore;
+use crate::auth::Role;
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::{self, Value as JsonValue};
 use reddb_wire::query_with_params::{
@@ -33,6 +34,8 @@ use super::{FrameBuilder, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
 #[derive(Debug)]
 struct AuthedSession {
     username: String,
+    role: Role,
+    tenant: Option<String>,
     #[allow(dead_code)]
     session_id: String,
 }
@@ -59,7 +62,7 @@ where
     if session.is_none() {
         return Ok(());
     }
-    let _session = session.unwrap();
+    let session = session.unwrap();
 
     // Per-connection state for prepared statements + streaming
     // bulk inserts. Owned by the session; dropped on disconnect.
@@ -413,6 +416,8 @@ where
                 let out = out_tx.clone();
                 let queue_name = req.queue.clone();
                 let wait_ms = req.wait_ms;
+                let auth_identity = Some((session.username.clone(), session.role));
+                let tenant = session.tenant.clone();
                 tokio::spawn(async move {
                     use crate::runtime::RedwireWaitOutcome;
                     match runtime_ref
@@ -422,6 +427,8 @@ where
                             &req.consumer,
                             req.count,
                             req.wait_ms,
+                            auth_identity,
+                            tenant,
                         )
                         .await
                     {
@@ -778,8 +785,8 @@ where
                 return Ok(None);
             }
         };
-        match super::auth::validate_oauth_jwt(validator, &raw) {
-            Ok((username, role)) => {
+        match super::auth::validate_oauth_jwt_full(validator, &raw) {
+            Ok((tenant, username, role)) => {
                 let session_id = super::auth::new_session_id_for_scram();
                 let ok = encode_frame(&build_reply(
                     resp.correlation_id,
@@ -789,6 +796,8 @@ where
                 stream.write_all(&ok).await?;
                 return Ok(Some(AuthedSession {
                     username,
+                    role,
+                    tenant,
                     session_id,
                 }));
             }
@@ -808,6 +817,7 @@ where
         AuthOutcome::Authenticated {
             username,
             role,
+            tenant,
             session_id,
         } => {
             let ok_frame = FrameBuilder::reply_to(resp.correlation_id)
@@ -819,6 +829,8 @@ where
             stream.write_all(&ok).await?;
             Ok(Some(AuthedSession {
                 username,
+                role,
+                tenant,
                 session_id,
             }))
         }
@@ -978,10 +990,12 @@ where
     }
 
     // 6. AuthOk with server signature.
-    let role = store
+    let user = store
         .list_users()
         .into_iter()
-        .find(|u| u.username == username)
+        .find(|u| u.username == username);
+    let role = user
+        .as_ref()
         .map(|u| u.role)
         .unwrap_or(crate::auth::Role::Read);
     let server_sig = crate::auth::scram::server_signature(&server_key, &auth_message);
@@ -1001,6 +1015,8 @@ where
     stream.write_all(&ok).await?;
     Ok(Some(AuthedSession {
         username,
+        role,
+        tenant: user.and_then(|u| u.tenant_id),
         session_id,
     }))
 }
