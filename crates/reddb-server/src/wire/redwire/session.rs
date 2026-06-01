@@ -101,8 +101,27 @@ where
     // without colliding (AC #2).
     let mut input_registry = super::input_stream::InputStreamRegistry::new();
 
+    // In-flight live queue-wait tasks (issue #920). Unlike the
+    // output-stream workers — which notice a closed connection the
+    // instant they try to push and self-terminate — a queue-wait task
+    // parks on the registry's async wake head and would otherwise linger
+    // until its `wait_ms` deadline after the client disconnects, holding
+    // a registry slot reference and a tokio worker the whole time. Owning
+    // the tasks in a `JoinSet` scoped to this connection fixes that: when
+    // the frame loop returns (Bye / EOF / I/O error), the set is dropped
+    // and every still-parked wait is aborted, dropping its waiter and so
+    // releasing the slot reference promptly (AC #1, AC #3). The
+    // registry's own `cancel_all` still drives the server-shutdown path
+    // (AC #2/#4) independently of this connection-scoped abort.
+    let mut queue_wait_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
     let mut buf = vec![0u8; FRAME_HEADER_SIZE];
     loop {
+        // Reap finished wait tasks so the set does not accumulate joined
+        // handles over a long-lived connection. Non-blocking — only
+        // already-complete tasks are drained.
+        while queue_wait_tasks.try_join_next().is_some() {}
+
         // Read header.
         if let Err(err) = reader.read_exact(&mut buf[..FRAME_HEADER_SIZE]).await {
             if err.kind() == io::ErrorKind::UnexpectedEof {
@@ -396,7 +415,10 @@ where
                 };
                 let runtime_ref = Arc::clone(&runtime);
                 let out = out_tx.clone();
-                tokio::spawn(async move {
+                // Owned by the connection-scoped `JoinSet` so a client
+                // disconnect (frame loop return) aborts a still-parked
+                // wait and releases its registry slot promptly (#920).
+                queue_wait_tasks.spawn(async move {
                     match runtime_ref
                         .redwire_queue_wait_json(
                             &req.queue,
@@ -424,10 +446,22 @@ where
                             }
                         }
                         Err(err) => {
+                            // A cancellation (server shutdown woke this
+                            // parked wait via the registry's `cancel_all`)
+                            // is a distinct wire outcome from a genuine
+                            // runtime failure: emit `queue_wait_cancelled`
+                            // so the client never mistakes shutdown for a
+                            // query error — or, conversely, an error for a
+                            // clean cancellation (#920 AC #2).
+                            let code = if RedDBRuntime::redwire_wait_error_is_cancellation(&err) {
+                                "queue_wait_cancelled"
+                            } else {
+                                "queue_wait_failed"
+                            };
                             if let Ok(ef) = qw::build_queue_wait_error_frame(
                                 frame_id,
                                 sid,
-                                "queue_wait_failed",
+                                code,
                                 &err.to_string(),
                             ) {
                                 let _ = queue_send(&out, encode_frame(&ef));
