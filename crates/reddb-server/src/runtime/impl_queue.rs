@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
-use crate::runtime::impl_core::current_auth_identity;
+use crate::runtime::impl_core::{
+    clear_current_auth_identity, clear_current_tenant, current_auth_identity, current_tenant,
+    set_current_auth_identity, set_current_tenant,
+};
 use crate::storage::queue::QueueMode;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
@@ -83,6 +86,33 @@ pub(crate) enum RedwireWaitOutcome {
 /// threaded through later without touching every call site.
 pub(super) fn queue_wait_scope() -> String {
     crate::runtime::impl_core::current_tenant().unwrap_or_default()
+}
+
+fn with_redwire_wait_context<T>(
+    auth_identity: &Option<(String, crate::auth::Role)>,
+    tenant: &Option<String>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous_auth = current_auth_identity();
+    let previous_tenant = current_tenant();
+    match tenant {
+        Some(t) => set_current_tenant(t.clone()),
+        None => clear_current_tenant(),
+    }
+    match auth_identity {
+        Some((username, role)) => set_current_auth_identity(username.clone(), *role),
+        None => clear_current_auth_identity(),
+    }
+    let result = f();
+    match previous_tenant {
+        Some(t) => set_current_tenant(t),
+        None => clear_current_tenant(),
+    }
+    match previous_auth {
+        Some((username, role)) => set_current_auth_identity(username, role),
+        None => clear_current_auth_identity(),
+    }
+    result
 }
 
 /// Convert a lifecycle `QueueSide` view into the AST flavour we accept
@@ -343,21 +373,38 @@ impl RedDBRuntime {
         consumer: &str,
         count: usize,
         wait_ms: u64,
+        auth_identity: Option<(String, crate::auth::Role)>,
+        tenant: Option<String>,
     ) -> RedDBResult<RedwireWaitOutcome> {
-        let group_owned = {
-            let store = self.inner.db.store();
-            ensure_queue_exists(store.as_ref(), queue)?;
-            let config = load_queue_config(store.as_ref(), queue);
-            resolve_read_group(store.as_ref(), queue, group, consumer, &config)?
-        };
+        let group_owned: RedDBResult<String> =
+            with_redwire_wait_context(&auth_identity, &tenant, || {
+                let expr = crate::storage::query::ast::QueryExpr::QueueCommand(
+                    crate::storage::query::ast::QueueCommand::GroupRead {
+                        queue: queue.to_string(),
+                        group: group.map(str::to_string),
+                        consumer: consumer.to_string(),
+                        count,
+                        wait_ms: Some(wait_ms),
+                    },
+                );
+                self.check_query_privilege(&expr)
+                    .map_err(RedDBError::Query)?;
+                let store = self.inner.db.store();
+                ensure_queue_exists(store.as_ref(), queue)?;
+                let config = load_queue_config(store.as_ref(), queue);
+                resolve_read_group(store.as_ref(), queue, group, consumer, &config)
+            });
+        let group_owned = group_owned?;
         let group_ref = group_owned.as_str();
 
         let do_read =
             |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
-                let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
-                lifecycle
-                    .group_read(&txn, queue, group_ref, consumer, count)
-                    .map_err(map_qse)
+                with_redwire_wait_context(&auth_identity, &tenant, || {
+                    let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
+                    lifecycle
+                        .group_read(&txn, queue, group_ref, consumer, count)
+                        .map_err(map_qse)
+                })
             };
 
         let render = |delivered: Vec<crate::runtime::queue_lifecycle::DeliveredMessage>| {
@@ -373,8 +420,15 @@ impl RedDBRuntime {
         }
 
         let registry = self.queue_wait_registry();
-        let scope = queue_wait_scope();
+        let scope = with_redwire_wait_context(&auth_identity, &tenant, queue_wait_scope);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        let telemetry = self.queue_telemetry();
+        telemetry.record_wait_started(&scope, queue);
+        let wait_start = std::time::Instant::now();
+        let observe = |outcome: crate::runtime::queue_telemetry::WaitOutcomeLabel| {
+            let elapsed_ms = wait_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            telemetry.record_wait_outcome(&scope, queue, outcome, elapsed_ms);
+        };
         loop {
             // Register the async waiter (snapshot the generation) BEFORE
             // the re-probe so a notify landing between probe and park is
@@ -382,24 +436,46 @@ impl RedDBRuntime {
             let waiter = registry.async_waiter(&scope, queue);
             let delivered = do_read(self)?;
             if !delivered.is_empty() {
+                observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Woken);
                 return Ok(render(delivered));
             }
             if registry.is_cancelled() {
+                observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Cancelled);
                 return Ok(RedwireWaitOutcome::Cancelled);
             }
             if std::time::Instant::now() >= deadline {
+                observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Timeout);
                 return Ok(RedwireWaitOutcome::TimedOut);
             }
+            let park_deadline = match earliest_future_available_at(&self.inner.db.store(), queue) {
+                Some(at_ns) => {
+                    let now_ns = now_ns();
+                    if at_ns <= now_ns {
+                        deadline.min(std::time::Instant::now())
+                    } else {
+                        let wait_ns = at_ns - now_ns;
+                        let due_instant =
+                            std::time::Instant::now() + std::time::Duration::from_nanos(wait_ns);
+                        deadline.min(due_instant)
+                    }
+                }
+                None => deadline,
+            };
             // The async waiter (and its `Arc<Slot>` clone) is a local
             // dropped on every return below, so an expired or cancelled
             // wait releases its registry slot reference and frees the
             // tokio worker the moment this future resolves (AC #4).
-            match registry.wait_until_async(&waiter, deadline).await {
+            match registry.wait_until_async(&waiter, park_deadline).await {
                 crate::runtime::queue_wait_registry::WaitOutcome::Woken => continue,
                 crate::runtime::queue_wait_registry::WaitOutcome::Timeout => {
-                    return Ok(RedwireWaitOutcome::TimedOut);
+                    if std::time::Instant::now() >= deadline {
+                        observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Timeout);
+                        return Ok(RedwireWaitOutcome::TimedOut);
+                    }
+                    continue;
                 }
                 crate::runtime::queue_wait_registry::WaitOutcome::Cancelled => {
+                    observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Cancelled);
                     return Ok(RedwireWaitOutcome::Cancelled);
                 }
             }

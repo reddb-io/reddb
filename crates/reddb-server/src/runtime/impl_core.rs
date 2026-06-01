@@ -11301,7 +11301,7 @@ impl RedDBRuntime {
     /// Project a `QueryExpr` to the (action, resource) pair the
     /// privilege engine cares about. Returns `Ok(())` for statements
     /// that don't touch user data (transaction control, SHOW, SET, etc.).
-    pub(super) fn check_query_privilege(
+    pub(crate) fn check_query_privilege(
         &self,
         expr: &crate::storage::query::ast::QueryExpr,
     ) -> Result<(), String> {

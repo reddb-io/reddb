@@ -18,6 +18,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reddb_server::auth::enforcement_mode::PolicyEnforcementMode;
+use reddb_server::auth::store::PrincipalRef;
+use reddb_server::auth::{AuthConfig, AuthStore, Role, UserId};
+use reddb_server::runtime::mvcc::{
+    clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
+};
+use reddb_server::storage::query::unified::UnifiedRecord;
+use reddb_server::storage::schema::Value;
 use reddb_server::wire::redwire::{
     decode_frame, encode_frame, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_KNOWN_MINOR_VERSION,
     REDWIRE_MAGIC,
@@ -32,6 +40,7 @@ const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 struct ServerHandle {
     addr: SocketAddr,
     runtime: Arc<RedDBRuntime>,
+    auth_store: Option<Arc<AuthStore>>,
     _join: tokio::task::JoinHandle<()>,
 }
 
@@ -46,8 +55,55 @@ async fn start_server() -> ServerHandle {
     ServerHandle {
         addr,
         runtime,
+        auth_store: None,
         _join: join,
     }
+}
+
+async fn start_auth_server() -> ServerHandle {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+    let mut auth = AuthConfig::default();
+    auth.enabled = true;
+    let store = Arc::new(AuthStore::new(auth));
+    store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+    store.create_user("admin", "p", Role::Admin).unwrap();
+    store.create_user("alice", "p", Role::Write).unwrap();
+    runtime.set_auth_store(Arc::clone(&store));
+    let rt = runtime.clone();
+    let join = tokio::spawn(async move {
+        let _ = reddb_server::wire::redwire::start_redwire_listener_on(listener, rt).await;
+    });
+    ServerHandle {
+        addr,
+        runtime,
+        auth_store: Some(store),
+        _join: join,
+    }
+}
+
+fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
+    set_current_auth_identity(name.to_string(), role);
+    let out = f();
+    clear_current_auth_identity();
+    out
+}
+
+fn attach_policy(store: &AuthStore, principal: UserId, id: &str, statements: &str) {
+    let policy = format!(
+        r#"{{
+        "id":"{id}",
+        "version":1,
+        "statements":{statements}
+    }}"#
+    );
+    store
+        .put_policy(reddb_server::auth::policies::Policy::from_json_str(&policy).unwrap())
+        .unwrap();
+    store
+        .attach_policy(PrincipalRef::User(principal), id)
+        .unwrap();
 }
 
 /// Read one full RedWire frame off the socket: 16-byte header, then the
@@ -111,6 +167,90 @@ async fn connect_and_handshake(addr: SocketAddr) -> TcpStream {
     stream
 }
 
+async fn connect_and_handshake_bearer(addr: SocketAddr, token: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(&[REDWIRE_MAGIC]).await.unwrap();
+    stream.write_all(&[MAX_KNOWN_MINOR_VERSION]).await.unwrap();
+    write_frame(
+        &mut stream,
+        &Frame::new(
+            MessageKind::Hello,
+            1,
+            br#"{"versions":[1],"auth_methods":["bearer"],"features":0,"client_name":"redwire-smoke"}"#.to_vec(),
+        ),
+    )
+    .await;
+    let ack = read_frame(&mut stream).await;
+    assert_eq!(ack.kind, MessageKind::HelloAck, "expected HelloAck");
+    let auth = serde_json::json!({ "token": token });
+    write_frame(
+        &mut stream,
+        &Frame::new(
+            MessageKind::AuthResponse,
+            2,
+            serde_json::to_vec(&auth).unwrap(),
+        ),
+    )
+    .await;
+    let ok = read_frame(&mut stream).await;
+    assert_eq!(ok.kind, MessageKind::AuthOk, "expected AuthOk");
+    stream
+}
+
+fn queue_wait_open(correlation_id: u64, stream_id: u16, queue: &str, consumer: &str) -> Frame {
+    let payload = serde_json::json!({
+        "queue": queue,
+        "group": "workers",
+        "consumer": consumer,
+        "count": 1,
+        "wait_ms": 700
+    });
+    Frame::new(
+        MessageKind::QueueWaitOpen,
+        correlation_id,
+        serde_json::to_vec(&payload).unwrap(),
+    )
+    .with_stream(stream_id)
+}
+
+fn text(row: &UnifiedRecord, key: &str) -> String {
+    match row.get(key) {
+        Some(Value::Text(s)) => s.to_string(),
+        other => panic!("expected text field {key}, got {other:?}"),
+    }
+}
+
+fn uint(row: &UnifiedRecord, key: &str) -> u64 {
+    match row.get(key) {
+        Some(Value::UnsignedInteger(u)) => *u,
+        Some(Value::Integer(i)) => *i as u64,
+        other => panic!("expected uint field {key}, got {other:?}"),
+    }
+}
+
+fn wait_count(rows: &Vec<((String, String), u64)>, scope: &str, queue: &str) -> u64 {
+    rows.iter()
+        .find(|((s, q), _)| s == scope && q == queue)
+        .map(|(_, n)| *n)
+        .unwrap_or(0)
+}
+
+async fn wait_for_waiters(runtime: &RedDBRuntime, scope: &str, queue: &str, target: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        let snap = runtime.queue_telemetry_snapshot();
+        if wait_count(&snap.wait_started, scope, queue) >= target {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let snap = runtime.queue_telemetry_snapshot();
+    panic!(
+        "waiters never registered for ({scope}, {queue}); got {}",
+        wait_count(&snap.wait_started, scope, queue)
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn wait_opened_then_post_open_push_is_delivered() {
     let server = start_server().await;
@@ -163,6 +303,202 @@ async fn wait_opened_then_post_open_push_is_delivered() {
         body.contains("\"message_id\""),
         "push must carry the message_id, got {body}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multiple_waiters_single_delivery_uses_normal_arbitration() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut client = connect_and_handshake(server.addr).await;
+    for i in 0..5u16 {
+        write_frame(
+            &mut client,
+            &queue_wait_open(100 + u64::from(i), i + 1, "jobs", &format!("c{i}")),
+        )
+        .await;
+    }
+    wait_for_waiters(&server.runtime, "", "jobs", 5).await;
+
+    server
+        .runtime
+        .execute_query("QUEUE PUSH jobs 'one'")
+        .expect("push");
+
+    let mut pushed = 0usize;
+    let mut timed_out = 0usize;
+    for _ in 0..5 {
+        let frame = read_frame(&mut client).await;
+        match frame.kind {
+            MessageKind::QueueEventPush => {
+                pushed += 1;
+                let body = String::from_utf8(frame.payload.clone()).expect("utf8 payload");
+                assert!(body.contains("one"), "delivery body was {body}");
+            }
+            MessageKind::QueueWaitTimeout => timed_out += 1,
+            other => panic!("unexpected wait outcome frame: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        pushed, 1,
+        "one deliverable message must produce one RedWire delivery"
+    );
+    assert_eq!(
+        timed_out, 4,
+        "losing waiters must re-park and time out after arbitration"
+    );
+    let snap = server.runtime.queue_telemetry_snapshot();
+    assert_eq!(wait_count(&snap.wait_started, "", "jobs"), 5);
+    assert_eq!(wait_count(&snap.wait_woken, "", "jobs"), 1);
+    assert_eq!(wait_count(&snap.wait_timed_out, "", "jobs"), 4);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redwire_delivery_preserves_ack_nack_and_dlq_lifecycle() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs WITH DLQ failed_jobs MAX_ATTEMPTS 1")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut client = connect_and_handshake(server.addr).await;
+
+    write_frame(&mut client, &queue_wait_open(200, 20, "jobs", "ack_worker")).await;
+    wait_for_waiters(&server.runtime, "", "jobs", 1).await;
+    server
+        .runtime
+        .execute_query("QUEUE PUSH jobs 'ack-me'")
+        .expect("push ack");
+    let ack_delivery = read_frame(&mut client).await;
+    assert_eq!(ack_delivery.kind, MessageKind::QueueEventPush);
+    let ack_body: serde_json::Value = serde_json::from_slice(&ack_delivery.payload).unwrap();
+    let ack_id = ack_body["message_id"].as_str().expect("message_id");
+    server
+        .runtime
+        .execute_query(&format!("QUEUE ACK jobs GROUP workers '{ack_id}'"))
+        .expect("ack");
+    let empty = server
+        .runtime
+        .execute_query("QUEUE READ jobs GROUP workers CONSUMER verifier COUNT 1")
+        .expect("read after ack");
+    assert!(
+        empty.result.records.is_empty(),
+        "ACK must retire the RedWire-delivered message"
+    );
+
+    write_frame(
+        &mut client,
+        &queue_wait_open(201, 21, "jobs", "nack_worker"),
+    )
+    .await;
+    wait_for_waiters(&server.runtime, "", "jobs", 2).await;
+    server
+        .runtime
+        .execute_query("QUEUE PUSH jobs 'retry-me'")
+        .expect("push retry");
+    let first = read_frame(&mut client).await;
+    assert_eq!(first.kind, MessageKind::QueueEventPush);
+    let first_body: serde_json::Value = serde_json::from_slice(&first.payload).unwrap();
+    let retry_id = first_body["message_id"].as_str().expect("message_id");
+    server
+        .runtime
+        .execute_query(&format!("QUEUE NACK jobs GROUP workers '{retry_id}'"))
+        .expect("nack moves to dlq");
+
+    let main_len = server
+        .runtime
+        .execute_query("QUEUE LEN jobs")
+        .expect("main len");
+    assert_eq!(uint(&main_len.result.records[0], "len"), 0);
+    let dlq_len = server
+        .runtime
+        .execute_query("QUEUE LEN failed_jobs")
+        .expect("dlq len");
+    assert_eq!(uint(&dlq_len.result.records[0], "len"), 1);
+    let dlq_peek = server
+        .runtime
+        .execute_query("QUEUE PEEK failed_jobs")
+        .expect("dlq peek");
+    assert_eq!(dlq_peek.result.records.len(), 1);
+    assert_eq!(text(&dlq_peek.result.records[0], "payload"), "retry-me");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn authz_denial_and_tenant_scope_apply_to_redwire_wait() {
+    let server = start_auth_server().await;
+    let store = server.auth_store.as_ref().expect("auth store");
+    as_user("admin", Role::Admin, || {
+        server
+            .runtime
+            .execute_query("CREATE QUEUE jobs")
+            .expect("create queue");
+        server
+            .runtime
+            .execute_query("QUEUE GROUP CREATE jobs workers")
+            .expect("create group");
+    });
+
+    let session = store.authenticate("alice", "p").expect("login");
+    attach_policy(
+        store,
+        UserId::platform("alice"),
+        "alice-peek-only",
+        r#"[{"effect":"allow","actions":["queue:peek"],"resources":["queue:jobs"]}]"#,
+    );
+    let mut denied = connect_and_handshake_bearer(server.addr, &session.token).await;
+    write_frame(&mut denied, &queue_wait_open(300, 30, "jobs", "alice")).await;
+    let err = read_frame(&mut denied).await;
+    assert_eq!(err.kind, MessageKind::StreamError);
+    let body = String::from_utf8(err.payload.clone()).expect("utf8 payload");
+    assert!(body.contains("queue_wait_failed"), "got {body}");
+    assert!(body.contains("action=`queue:read`"), "got {body}");
+    assert!(body.contains("denied by IAM policy"), "got {body}");
+
+    store
+        .create_user_in_tenant(Some("acme"), "tenant_alice", "p", Role::Write)
+        .unwrap();
+    attach_policy(
+        store,
+        UserId::scoped("acme", "tenant_alice"),
+        "tenant-queue-read",
+        r#"[{"effect":"allow","actions":["queue:read"],"resources":["queue:jobs"]}]"#,
+    );
+    let tenant_session = store
+        .authenticate_in_tenant(Some("acme"), "tenant_alice", "p")
+        .expect("tenant login");
+    let mut scoped = connect_and_handshake_bearer(server.addr, &tenant_session.token).await;
+    write_frame(
+        &mut scoped,
+        &queue_wait_open(301, 31, "jobs", "tenant_alice"),
+    )
+    .await;
+    let timeout = read_frame(&mut scoped).await;
+    assert_eq!(timeout.kind, MessageKind::QueueWaitTimeout);
+
+    let snap = server.runtime.queue_telemetry_snapshot();
+    assert_eq!(
+        wait_count(&snap.wait_started, "acme", "jobs"),
+        1,
+        "tenant-authenticated RedWire waits must use the tenant wait scope"
+    );
+    assert_eq!(
+        wait_count(&snap.wait_started, "", "jobs"),
+        0,
+        "tenant wait must not register in the platform queue scope"
+    );
+    clear_current_tenant();
 }
 
 /// Issue #919 / AC #1, #2, #4 — a wait that elapses with no deliverable
