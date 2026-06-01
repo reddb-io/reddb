@@ -19,9 +19,11 @@
 //! end-to-end on synthetic data.
 
 pub mod column_batch;
+pub mod columnar_scan;
 pub mod operators;
 pub mod parallel;
 pub mod simd;
 
 pub use column_batch::{ColumnBatch, ColumnVector, Schema, ValueRef, BATCH_SIZE};
+pub use columnar_scan::{column_batch_from_block, ColumnarScanError};
 pub use operators::{batch_aggregate, batch_filter, batch_project, AggregateSpec, Predicate};
