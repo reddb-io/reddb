@@ -71,10 +71,16 @@ ClickHouse's `CODEC(...)` syntax. Supported:
 * `Delta` — monotonic int streams (shares the TS Delta-of-Delta code)
 * `DoubleDelta` — regular-interval timestamps
 * `Dict` — low-cardinality strings
+* `Xor` — floating-point gauges (Gorilla XOR)
 
 Codecs chain: `CODEC(Delta, ZSTD(3))` encodes Delta first, then
 zstd. Decoding reverses the order. The header records the full
 chain, so reads never need the DDL.
+
+These codecs are the pipeline a sealed **columnar chunk** writes each
+column with. The on-disk envelope that wraps the streams — directory,
+granule index, bloom skip index, footer — is documented in
+[Columnar Chunk Format (RDCC)](columnar-chunk-format.md).
 
 ## Parallelism
 
