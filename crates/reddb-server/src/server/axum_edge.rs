@@ -86,10 +86,12 @@ async fn edge_fallback(State(state): State<EdgeState>, req: axum::extract::Reque
 impl RedDBServer {
     /// Build the axum router for one listener surface.
     fn build_edge_router(&self, transport: HttpTransport) -> axum::Router {
-        axum::Router::new().fallback(edge_fallback).with_state(EdgeState {
-            server: self.clone(),
-            transport,
-        })
+        axum::Router::new()
+            .fallback(edge_fallback)
+            .with_state(EdgeState {
+                server: self.clone(),
+                transport,
+            })
     }
 
     /// Serve the async HTTP edge on an already-bound tokio listener until
@@ -115,10 +117,7 @@ impl RedDBServer {
             let service = TowerToHyperService::new(router.clone());
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
-                if let Err(err) = connection_builder()
-                    .serve_connection(io, service)
-                    .await
-                {
+                if let Err(err) = connection_builder().serve_connection(io, service).await {
                     tracing::debug!(target: "reddb::http", error = %err, "connection closed with error");
                 }
             });
@@ -148,10 +147,7 @@ impl RedDBServer {
                 match acceptor.accept(stream).await {
                     Ok(tls_stream) => {
                         let io = TokioIo::new(tls_stream);
-                        if let Err(err) = connection_builder()
-                            .serve_connection(io, service)
-                            .await
-                        {
+                        if let Err(err) = connection_builder().serve_connection(io, service).await {
                             tracing::debug!(target: "reddb::http_tls", error = %err, "connection closed with error");
                         }
                     }
@@ -193,10 +189,7 @@ impl RedDBServer {
     pub(crate) async fn serve_edge_one(self, stream: tokio::net::TcpStream) {
         let service = TowerToHyperService::new(self.build_edge_router(HttpTransport::Http));
         let io = TokioIo::new(stream);
-        if let Err(err) = connection_builder()
-            .serve_connection(io, service)
-            .await
-        {
+        if let Err(err) = connection_builder().serve_connection(io, service).await {
             tracing::debug!(target: "reddb::http", error = %err, "connection closed with error");
         }
     }
@@ -231,7 +224,8 @@ impl RedDBServer {
         let response = if self.is_streaming_request(&request) {
             self.serve_streaming_request(request, permit).await
         } else {
-            self.serve_buffered_request(request, permit, transport).await
+            self.serve_buffered_request(request, permit, transport)
+                .await
         };
         self.http_metrics
             .record_duration(transport, started.elapsed().as_secs_f64());
@@ -387,7 +381,11 @@ fn stream_response_to_axum(response: EdgeStreamResponse) -> Response {
             status,
             headers,
             body,
-        } => build_response(status, headers, Body::from_stream(ReceiverStream::new(body))),
+        } => build_response(
+            status,
+            headers,
+            Body::from_stream(ReceiverStream::new(body)),
+        ),
     }
 }
 
@@ -420,7 +418,9 @@ fn handler_timeout_response() -> Response {
         builder = builder.header(name, value);
     }
     builder
-        .body(Body::from("{\"ok\":false,\"error\":\"handler deadline exceeded\"}"))
+        .body(Body::from(
+            "{\"ok\":false,\"error\":\"handler deadline exceeded\"}",
+        ))
         .unwrap_or_else(|_| internal_error_response())
 }
 
@@ -677,16 +677,10 @@ fn forward_stream(
     }
 }
 
-fn send_frame(
-    sender: &mpsc::Sender<Result<Bytes, io::Error>>,
-    frame: Bytes,
-) -> io::Result<()> {
-    sender.blocking_send(Ok(frame)).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "streaming client disconnected",
-        )
-    })
+fn send_frame(sender: &mpsc::Sender<Result<Bytes, io::Error>>, frame: Bytes) -> io::Result<()> {
+    sender
+        .blocking_send(Ok(frame))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "streaming client disconnected"))
 }
 
 /// Framing of a parsed response head.
@@ -701,14 +695,12 @@ enum HeadFraming {
 /// `Transfer-Encoding`, `Content-Length`) are stripped from the forwarded
 /// set — hyper re-derives framing — while their values drive the framing
 /// decision returned alongside.
-fn parse_response_head(
-    head: &[u8],
-) -> io::Result<(u16, Vec<(String, String)>, HeadFraming)> {
+fn parse_response_head(head: &[u8]) -> io::Result<(u16, Vec<(String, String)>, HeadFraming)> {
     let text = String::from_utf8_lossy(head);
     let mut lines = text.split("\r\n");
-    let status_line = lines.next().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing status line")
-    })?;
+    let status_line = lines
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing status line"))?;
     let status: u16 = status_line
         .split_whitespace()
         .nth(1)
@@ -879,7 +871,10 @@ mod tests {
             .iter()
             .map(|f| String::from_utf8_lossy(f).into_owned())
             .collect();
-        assert_eq!(decoded, vec!["{\"row\":1}\n".to_string(), "end".to_string()]);
+        assert_eq!(
+            decoded,
+            vec!["{\"row\":1}\n".to_string(), "end".to_string()]
+        );
     }
 
     #[test]
@@ -895,7 +890,10 @@ mod tests {
             .iter()
             .map(|f| String::from_utf8_lossy(f).into_owned())
             .collect();
-        assert_eq!(decoded, vec!["{\"row\":1}\n".to_string(), "end".to_string()]);
+        assert_eq!(
+            decoded,
+            vec!["{\"row\":1}\n".to_string(), "end".to_string()]
+        );
     }
 
     #[test]
@@ -941,7 +939,9 @@ mod tests {
                 assert_eq!(status, 400);
                 assert_eq!(collected, body);
             }
-            EdgeStreamResponse::Streaming { .. } => panic!("refusal must be buffered, not streamed"),
+            EdgeStreamResponse::Streaming { .. } => {
+                panic!("refusal must be buffered, not streamed")
+            }
         }
     }
 
@@ -979,7 +979,8 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let writer = std::thread::spawn(move || {
             let mut sink = StreamSink::new(tx);
-            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let head =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
             sink.write_all(head.as_bytes()).unwrap();
             sink.write_all(b"data: one\n\n").unwrap();
             sink.write_all(b"data: two\n\n").unwrap();
