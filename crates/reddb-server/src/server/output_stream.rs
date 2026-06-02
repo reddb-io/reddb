@@ -543,16 +543,22 @@ pub fn write_chunked_response_header<W: std::io::Write>(
     // NDJSON/SSE streaming routes (graph/vector results). API auth is
     // by header/API key, never cookies, so wildcard origin is safe and
     // Allow-Credentials is deliberately never sent.
-    let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\nConnection: close\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n\
-         Access-Control-Allow-Headers: *\r\n\
-         Access-Control-Max-Age: 86400\r\n\r\n",
+    let mut header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\nConnection: close\r\n",
         status,
         crate::server::transport::status_text(status),
         content_type,
     );
+    // Same permissive CORS posture as the buffered path — sourced from
+    // the single `CORS_HEADER_PAIRS` choke point so streaming routes
+    // (graph/vector NDJSON results) are reachable cross-origin too.
+    for (name, value) in crate::server::transport::CORS_HEADER_PAIRS {
+        header.push_str(name);
+        header.push_str(": ");
+        header.push_str(value);
+        header.push_str("\r\n");
+    }
+    header.push_str("\r\n");
     writer.write_all(header.as_bytes())?;
     writer.flush()
 }

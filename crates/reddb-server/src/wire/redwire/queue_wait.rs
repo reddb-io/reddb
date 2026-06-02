@@ -128,6 +128,51 @@ pub fn build_event_push_frame(
         .build()
 }
 
+/// Build a `QueueWaitTimeout` frame for an elapsed wait (issue #919).
+///
+/// A distinct frame kind — not a `QueueEventPush` (which always carries
+/// a delivered message) and not a `StreamError` (reserved for parse
+/// failures, cancellation, and runtime errors) — so the client can tell
+/// "your wait budget elapsed with nothing deliverable" apart from a
+/// delivery and apart from a cancellation purely from the frame kind.
+/// Echoes the open's `correlation_id` + `stream_id` so the client pairs
+/// the timeout with the wait it opened; the small JSON body restates the
+/// queue and the budget that elapsed for client-side logging.
+pub fn build_queue_wait_timeout_frame(
+    correlation_id: u64,
+    stream_id: u16,
+    queue: &str,
+    wait_ms: u64,
+) -> Result<Frame, super::BuildError> {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "outcome".to_string(),
+        JsonValue::String("timeout".to_string()),
+    );
+    obj.insert("queue".to_string(), JsonValue::String(queue.to_string()));
+    obj.insert("wait_ms".to_string(), JsonValue::Number(wait_ms as f64));
+    FrameBuilder::reply_to(correlation_id)
+        .kind(MessageKind::QueueWaitTimeout)
+        .stream_id(stream_id)
+        .payload(serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default())
+        .build()
+}
+
+/// `StreamError` code for a live queue-wait terminated by server-side
+/// cancellation (registry `cancel_all`, e.g. shutdown). Distinct from
+/// [`WAIT_FAILED_CODE`] (a genuine runtime error) and from the timeout
+/// frame, so the three non-delivery outcomes never alias on the wire.
+pub const WAIT_CANCELLED_CODE: &str = "queue_wait_cancelled";
+
+/// `StreamError` code for a wait open whose requested budget exceeds the
+/// server's maximum wait cap (issue #919). The accompanying message
+/// names the `red.config` key so an operator can act on it.
+pub const WAIT_EXCEEDS_CAP_CODE: &str = "queue_wait_exceeds_cap";
+
+/// `StreamError` code for a runtime failure while servicing a wait
+/// (e.g. the queue read errored). Non-fatal at the connection level.
+pub const WAIT_FAILED_CODE: &str = "queue_wait_failed";
+
 /// Build a `StreamError` frame carrying a queue-wait parse/validation
 /// failure for a specific `stream_id`. Non-fatal at the connection
 /// level — the session keeps reading other frames.
@@ -203,5 +248,32 @@ mod tests {
         assert_eq!(frame.kind, MessageKind::QueueEventPush);
         assert_eq!(frame.correlation_id, 99);
         assert_eq!(frame.stream_id, 7);
+    }
+
+    #[test]
+    fn timeout_frame_is_distinct_kind_echoing_open() {
+        let frame = build_queue_wait_timeout_frame(99, 7, "jobs", 5000).unwrap();
+        // Distinct kind — not QueueEventPush (delivery) or StreamError
+        // (cancellation / failure) — so the outcome is unambiguous on
+        // the wire (AC #1, AC #2).
+        assert_eq!(frame.kind, MessageKind::QueueWaitTimeout);
+        assert_ne!(frame.kind, MessageKind::QueueEventPush);
+        assert_ne!(frame.kind, MessageKind::StreamError);
+        assert_eq!(frame.correlation_id, 99, "echoes the open correlation");
+        assert_eq!(frame.stream_id, 7, "echoes the open stream_id");
+        let body: JsonValue = serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(body["outcome"], JsonValue::String("timeout".into()));
+        assert_eq!(body["queue"], JsonValue::String("jobs".into()));
+        assert_eq!(body["wait_ms"], JsonValue::Number(5000.0));
+    }
+
+    #[test]
+    fn cancellation_and_cap_codes_are_distinct() {
+        // The three non-delivery StreamError-bearing outcomes must not
+        // alias one another (AC #2 distinguishability extends to the
+        // error codes the client switches on).
+        assert_ne!(WAIT_CANCELLED_CODE, WAIT_FAILED_CODE);
+        assert_ne!(WAIT_CANCELLED_CODE, WAIT_EXCEEDS_CAP_CODE);
+        assert_ne!(WAIT_EXCEEDS_CAP_CODE, WAIT_FAILED_CODE);
     }
 }

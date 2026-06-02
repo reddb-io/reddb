@@ -229,6 +229,33 @@ impl RedDBServer {
         }
     }
 
+    /// Whether a parsed request would be handled by the streaming
+    /// dispatch path ([`Self::try_route_streaming`]). The async axum edge
+    /// (issue #931) calls this *before* dispatch to decide whether to
+    /// bridge the response as a chunked/SSE stream or as a single
+    /// buffered body — the detection here must stay in lock-step with the
+    /// guards at the top of `try_route_streaming`.
+    pub(crate) fn is_streaming_request(&self, request: &HttpRequest) -> bool {
+        let is_query_post = matches!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/query")
+        );
+        let is_input_stream_post = matches!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/streams/input")
+        ) && content_type_is_ndjson(&request.headers);
+        let is_select_stream_post = matches!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/query/stream")
+        );
+        if !is_query_post && !is_input_stream_post && !is_select_stream_post {
+            return false;
+        }
+        let is_sse = is_query_post && is_stream_ask_query_body(&request.body);
+        let is_ndjson = is_query_post && wants_ndjson_response(&request.headers);
+        is_sse || is_ndjson || is_input_stream_post || is_select_stream_post
+    }
+
     /// Issue #807 / 750c — resolve the tenant a `/query/stream` request runs
     /// under so a minted cursor can be scoped to it. Precedence mirrors the
     /// metrics surface: explicit `x-reddb-tenant` header, then the tenant

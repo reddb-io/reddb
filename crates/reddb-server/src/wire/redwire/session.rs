@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use crate::auth::store::AuthStore;
+use crate::auth::Role;
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::{self, Value as JsonValue};
 use reddb_wire::query_with_params::{
@@ -33,6 +34,8 @@ use super::{FrameBuilder, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
 #[derive(Debug)]
 struct AuthedSession {
     username: String,
+    role: Role,
+    tenant: Option<String>,
     #[allow(dead_code)]
     session_id: String,
 }
@@ -59,7 +62,7 @@ where
     if session.is_none() {
         return Ok(());
     }
-    let _session = session.unwrap();
+    let session = session.unwrap();
 
     // Per-connection state for prepared statements + streaming
     // bulk inserts. Owned by the session; dropped on disconnect.
@@ -413,12 +416,32 @@ where
                         continue;
                     }
                 };
+                // Server max-wait cap (issue #919, AC #3). Reject an
+                // over-cap budget with an explicit error *before*
+                // spawning the wait task — no waiter is registered and
+                // the budget is never silently shortened.
+                if let Err(msg) = runtime.redwire_queue_wait_cap_check(req.wait_ms) {
+                    let err = qw::build_queue_wait_error_frame(
+                        frame_id,
+                        sid,
+                        qw::WAIT_EXCEEDS_CAP_CODE,
+                        &msg,
+                    )
+                    .map_err(|e| io::Error::other(format!("build queue-wait cap error: {e}")))?;
+                    queue_send(&out_tx, encode_frame(&err))?;
+                    continue;
+                }
                 let runtime_ref = Arc::clone(&runtime);
                 let out = out_tx.clone();
+                let queue_name = req.queue.clone();
+                let wait_ms = req.wait_ms;
+                let auth_identity = Some((session.username.clone(), session.role));
+                let tenant = session.tenant.clone();
                 // Owned by the connection-scoped `JoinSet` so a client
                 // disconnect (frame loop return) aborts a still-parked
                 // wait and releases its registry slot promptly (#920).
                 queue_wait_tasks.spawn(async move {
+                    use crate::runtime::RedwireWaitOutcome;
                     match runtime_ref
                         .redwire_queue_wait_json(
                             &req.queue,
@@ -426,14 +449,13 @@ where
                             &req.consumer,
                             req.count,
                             req.wait_ms,
+                            auth_identity,
+                            tenant,
                         )
                         .await
                     {
-                        Ok(messages) => {
-                            // Happy path: push each delivered message.
-                            // An empty Vec (deadline elapsed without a
-                            // delivery) pushes nothing — the timeout
-                            // surface is a later slice.
+                        // Happy path: push each delivered message.
+                        Ok(RedwireWaitOutcome::Delivered(messages)) => {
                             for message in messages {
                                 match qw::build_event_push_frame(frame_id, sid, &message) {
                                     Ok(push) => {
@@ -445,23 +467,41 @@ where
                                 }
                             }
                         }
-                        Err(err) => {
-                            // A cancellation (server shutdown woke this
-                            // parked wait via the registry's `cancel_all`)
-                            // is a distinct wire outcome from a genuine
-                            // runtime failure: emit `queue_wait_cancelled`
-                            // so the client never mistakes shutdown for a
-                            // query error — or, conversely, an error for a
-                            // clean cancellation (#920 AC #2).
-                            let code = if RedDBRuntime::redwire_wait_error_is_cancellation(&err) {
-                                "queue_wait_cancelled"
-                            } else {
-                                "queue_wait_failed"
-                            };
+                        // Deadline elapsed with nothing deliverable: a
+                        // distinct timeout frame, not an empty push and
+                        // not an error (AC #1 / AC #2).
+                        Ok(RedwireWaitOutcome::TimedOut) => {
+                            if let Ok(t) = qw::build_queue_wait_timeout_frame(
+                                frame_id,
+                                sid,
+                                &queue_name,
+                                wait_ms,
+                            ) {
+                                let _ = queue_send(&out, encode_frame(&t));
+                            }
+                        }
+                        // Server-side cancellation: a StreamError with
+                        // the distinct cancellation code so the client
+                        // never confuses it with a timeout (AC #2).
+                        Ok(RedwireWaitOutcome::Cancelled) => {
                             if let Ok(ef) = qw::build_queue_wait_error_frame(
                                 frame_id,
                                 sid,
-                                code,
+                                qw::WAIT_CANCELLED_CODE,
+                                "queue wait cancelled by server",
+                            ) {
+                                let _ = queue_send(&out, encode_frame(&ef));
+                            }
+                        }
+                        // A genuine runtime failure. Server-shutdown
+                        // cancellation is surfaced as the distinct
+                        // `RedwireWaitOutcome::Cancelled` arm above, so an
+                        // `Err` here is never a cancellation (#920 AC #2).
+                        Err(err) => {
+                            if let Ok(ef) = qw::build_queue_wait_error_frame(
+                                frame_id,
+                                sid,
+                                qw::WAIT_FAILED_CODE,
                                 &err.to_string(),
                             ) {
                                 let _ = queue_send(&out, encode_frame(&ef));
@@ -771,8 +811,8 @@ where
                 return Ok(None);
             }
         };
-        match super::auth::validate_oauth_jwt(validator, &raw) {
-            Ok((username, role)) => {
+        match super::auth::validate_oauth_jwt_full(validator, &raw) {
+            Ok((tenant, username, role)) => {
                 let session_id = super::auth::new_session_id_for_scram();
                 let ok = encode_frame(&build_reply(
                     resp.correlation_id,
@@ -782,6 +822,8 @@ where
                 stream.write_all(&ok).await?;
                 return Ok(Some(AuthedSession {
                     username,
+                    role,
+                    tenant,
                     session_id,
                 }));
             }
@@ -801,6 +843,7 @@ where
         AuthOutcome::Authenticated {
             username,
             role,
+            tenant,
             session_id,
         } => {
             let ok_frame = FrameBuilder::reply_to(resp.correlation_id)
@@ -812,6 +855,8 @@ where
             stream.write_all(&ok).await?;
             Ok(Some(AuthedSession {
                 username,
+                role,
+                tenant,
                 session_id,
             }))
         }
@@ -971,10 +1016,12 @@ where
     }
 
     // 6. AuthOk with server signature.
-    let role = store
+    let user = store
         .list_users()
         .into_iter()
-        .find(|u| u.username == username)
+        .find(|u| u.username == username);
+    let role = user
+        .as_ref()
         .map(|u| u.role)
         .unwrap_or(crate::auth::Role::Read);
     let server_sig = crate::auth::scram::server_signature(&server_key, &auth_message);
@@ -994,6 +1041,8 @@ where
     stream.write_all(&ok).await?;
     Ok(Some(AuthedSession {
         username,
+        role,
+        tenant: user.and_then(|u| u.tenant_id),
         session_id,
     }))
 }

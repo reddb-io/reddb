@@ -32,6 +32,7 @@ pub enum AuthOutcome {
     Authenticated {
         username: String,
         role: Role,
+        tenant: Option<String>,
         session_id: String,
     },
     /// Auth refused; the message is operator-readable.
@@ -210,6 +211,7 @@ pub fn validate_auth_response(
             AuthOutcome::Authenticated {
                 username: "anonymous".to_string(),
                 role: Role::Read,
+                tenant: None,
                 session_id: new_session_id(),
             }
         }
@@ -220,10 +222,11 @@ pub fn validate_auth_response(
                     "bearer auth refused — server has no auth store configured".into(),
                 );
             };
-            match store.validate_token(&token) {
-                Some((username, role)) => AuthOutcome::Authenticated {
-                    username,
+            match store.validate_token_full(&token) {
+                Some((user_id, role)) => AuthOutcome::Authenticated {
+                    username: user_id.username,
                     role,
+                    tenant: user_id.tenant,
                     session_id: new_session_id(),
                 },
                 None => AuthOutcome::Refused("bearer token invalid".into()),
