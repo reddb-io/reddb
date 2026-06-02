@@ -132,7 +132,7 @@ impl SpatialIndex {
 
         let mut results: Vec<SpatialSearchResult> = self
             .tree
-            .locate_in_envelope(&aabb)
+            .locate_in_envelope(aabb)
             .filter_map(|entry| {
                 let [lon, lat] = *entry.geom();
                 let dist = haversine_km(center_lat, center_lon, lat, lon);
@@ -168,7 +168,7 @@ impl SpatialIndex {
         let aabb = AABB::from_corners([min_lon, min_lat], [max_lon, max_lat]);
 
         self.tree
-            .locate_in_envelope(&aabb)
+            .locate_in_envelope(aabb)
             .take(limit)
             .map(|entry| SpatialSearchResult {
                 entity_id: entry.data,
@@ -180,7 +180,7 @@ impl SpatialIndex {
     /// Find the K nearest points to a location
     pub fn search_nearest(&self, lat: f64, lon: f64, k: usize) -> Vec<SpatialSearchResult> {
         self.tree
-            .nearest_neighbor_iter(&[lon, lat])
+            .nearest_neighbor_iter([lon, lat])
             .take(k)
             .map(|entry| {
                 let [elon, elat] = *entry.geom();
