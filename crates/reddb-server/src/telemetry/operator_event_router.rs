@@ -838,6 +838,23 @@ mod tests {
                 attempts: *attempts,
                 reason: reason.clone(),
             },
+            OperatorEvent::DeposedPrimaryRollback {
+                common_point_lsn,
+                tail_to_lsn,
+                tail_lsns,
+                commit_watermark,
+                rollback_file,
+                new_primary_addr,
+                new_term,
+            } => OperatorEvent::DeposedPrimaryRollback {
+                common_point_lsn: *common_point_lsn,
+                tail_to_lsn: *tail_to_lsn,
+                tail_lsns: *tail_lsns,
+                commit_watermark: *commit_watermark,
+                rollback_file: rollback_file.clone(),
+                new_primary_addr: new_primary_addr.clone(),
+                new_term: *new_term,
+            },
         }
     }
 

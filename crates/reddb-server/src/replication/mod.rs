@@ -31,6 +31,7 @@ pub mod logical;
 pub mod primary;
 pub mod quorum;
 pub mod replica;
+pub mod rollback;
 pub mod scheduler;
 pub mod swap_db;
 pub mod topology_advertiser;
@@ -45,6 +46,10 @@ pub use failover::{
 pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
+pub use rollback::{
+    DivergentTail, RollbackCoordinator, RollbackError, RollbackEvent, RollbackOutcome,
+    RollbackPlan, RollbackRequest, RollbackTransport, TailRecord,
+};
 pub use swap_db::{RebootstrapInProgress, SwapDb};
 pub use topology_advertiser::{
     LagConfig, TopologyAdvertiser, TopologyAuthGate, DEFAULT_REPLICA_TIMEOUT_MS,
