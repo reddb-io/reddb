@@ -307,6 +307,15 @@ impl LastVoteStore for FileLastVoteStore {
             let _ = f.sync_all();
         }
         std::fs::rename(&tmp, &self.path).map_err(LastVoteError::Io)?;
+        // fsync the parent directory so the rename itself is durable. Without
+        // this, a crash after the rename could leave the directory entry still
+        // pointing at the old record — which would let a restarted voter
+        // double-vote, the exact failure the durable last-vote forbids.
+        if let Some(parent) = self.path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         Ok(())
     }
 }
