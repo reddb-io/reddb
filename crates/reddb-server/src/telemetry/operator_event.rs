@@ -159,6 +159,35 @@ pub enum OperatorEvent {
         attempts: u32,
         reason: String,
     },
+    /// A deposed primary auto-rolled-back its divergent tail to the common
+    /// point on rejoin (issue #840, ADR 0030). The tail is, by definition,
+    /// non-committed (above the commit watermark), so removing it from the
+    /// live timeline is correct — but the discarded writes are **always**
+    /// persisted to a rollback file so they remain auditable and
+    /// reconcilable. Rollback is never silent. The `common_point_lsn` is the
+    /// recover-to-LSN target; everything in `(common_point_lsn,
+    /// tail_to_lsn]` was removed from the live timeline and saved to
+    /// `rollback_file`. `commit_watermark` is the durable floor that was
+    /// never crossed.
+    DeposedPrimaryRollback {
+        /// LSN the deposed primary recovered to — the common point with the
+        /// new primary, the recover-to-LSN target.
+        common_point_lsn: u64,
+        /// Highest LSN in the discarded divergent tail (inclusive).
+        tail_to_lsn: u64,
+        /// Number of LSNs removed from the live timeline.
+        tail_lsns: u64,
+        /// The commit watermark — the durable floor. The invariant holds:
+        /// `common_point_lsn >= commit_watermark`, so nothing at or below
+        /// the watermark was rolled back.
+        commit_watermark: u64,
+        /// Path/handle of the rollback file the discarded tail was saved to.
+        rollback_file: String,
+        /// The new primary the node rejoins as a replica of.
+        new_primary_addr: String,
+        /// The term the node now follows.
+        new_term: u64,
+    },
 }
 
 impl OperatorEvent {
@@ -182,6 +211,7 @@ impl OperatorEvent {
             "SubscriptionSchemaChange",
             "OutboxDlqActivated",
             "QueueDlqPromoted",
+            "DeposedPrimaryRollback",
         ]
     }
 
@@ -205,6 +235,7 @@ impl OperatorEvent {
             Self::SubscriptionSchemaChange { .. } => "SubscriptionSchemaChange",
             Self::OutboxDlqActivated { .. } => "OutboxDlqActivated",
             Self::QueueDlqPromoted { .. } => "QueueDlqPromoted",
+            Self::DeposedPrimaryRollback { .. } => "DeposedPrimaryRollback",
         }
     }
 
@@ -463,6 +494,32 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("reason", reason),
                 ];
                 ("operator/queue_dlq_promoted", fields, summary)
+            }
+            Self::DeposedPrimaryRollback {
+                common_point_lsn,
+                tail_to_lsn,
+                tail_lsns,
+                commit_watermark,
+                rollback_file,
+                new_primary_addr,
+                new_term,
+            } => {
+                let summary = format!(
+                    "deposed primary auto-rollback: recovered to common_point_lsn={common_point_lsn} \
+                     (commit_watermark={commit_watermark}); discarded divergent tail of {tail_lsns} LSN(s) \
+                     up to {tail_to_lsn} saved to {rollback_file}; rejoining as replica of \
+                     {new_primary_addr} under term {new_term}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("common_point_lsn", common_point_lsn),
+                    AuditFieldEscaper::field("tail_to_lsn", tail_to_lsn),
+                    AuditFieldEscaper::field("tail_lsns", tail_lsns),
+                    AuditFieldEscaper::field("commit_watermark", commit_watermark),
+                    AuditFieldEscaper::field("rollback_file", rollback_file),
+                    AuditFieldEscaper::field("new_primary_addr", new_primary_addr),
+                    AuditFieldEscaper::field("new_term", new_term),
+                ];
+                ("operator/deposed_primary_rollback", fields, summary)
             }
         }
     }
@@ -764,6 +821,37 @@ mod tests {
             .and_then(|d| d.get("lsn"))
             .and_then(|x| x.as_i64());
         assert_eq!(lsn, Some(42_000));
+    }
+
+    #[test]
+    fn deposed_primary_rollback_emits() {
+        let (logger, path) = make_logger();
+        OperatorEvent::DeposedPrimaryRollback {
+            common_point_lsn: 200,
+            tail_to_lsn: 230,
+            tail_lsns: 30,
+            commit_watermark: 200,
+            rollback_file: "/data/rollback/term7-lsn200-230.rbk".into(),
+            new_primary_addr: "http://node-b:50051".into(),
+            new_term: 8,
+        }
+        .emit(&logger);
+        drain(&logger);
+        let v = read_last_line(&path);
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/deposed_primary_rollback")
+        );
+        let cp = v
+            .get("detail")
+            .and_then(|d| d.get("common_point_lsn"))
+            .and_then(|x| x.as_i64());
+        assert_eq!(cp, Some(200));
+        let file = v
+            .get("detail")
+            .and_then(|d| d.get("rollback_file"))
+            .and_then(|x| x.as_str());
+        assert_eq!(file, Some("/data/rollback/term7-lsn200-230.rbk"));
     }
 
     // ------------------------------------------------------------------
