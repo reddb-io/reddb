@@ -126,30 +126,52 @@ pub(crate) struct HttpResponse {
     pub(crate) extra_headers: Vec<(&'static str, http::HeaderValue)>,
 }
 
+/// Canonical permissive CORS posture for the HTTP edge (ADR 0010, issue
+/// #931 / PRD #930). RedDB is an API, not a website: it authenticates by
+/// `Authorization` header / API key, never cookies, so a wildcard
+/// `Access-Control-Allow-Origin: *` is the correct, credential-safe
+/// posture (the browser only forbids `*` paired with
+/// `Access-Control-Allow-Credentials: true`, which we never send).
+///
+/// This is the **single source of truth** for the CORS header set. Every
+/// response serializer emits exactly these pairs so the posture cannot
+/// drift per-path: [`HttpResponse::to_http_bytes`] (buffered responses),
+/// [`super::output_stream::write_chunked_response_header`] (streaming
+/// NDJSON), and the async axum edge ([`super::axum_edge`], buffered
+/// responses). Streaming/SSE heads carry these inline and the axum edge
+/// forwards them verbatim, so the choke point stays singular.
+pub(crate) const CORS_HEADER_PAIRS: [(&str, &str); 4] = [
+    ("Access-Control-Allow-Origin", "*"),
+    (
+        "Access-Control-Allow-Methods",
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    ),
+    ("Access-Control-Allow-Headers", "*"),
+    ("Access-Control-Max-Age", "86400"),
+];
+
 impl HttpResponse {
     pub(crate) fn to_http_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        // RedDB is an API, not a website: it authenticates by
-        // `Authorization` header / API key, never cookies. A wildcard
-        // `Access-Control-Allow-Origin: *` is therefore the correct,
-        // credential-safe posture (the browser only forbids `*` paired
-        // with `Access-Control-Allow-Credentials: true`, which we never
-        // send). Emitting these on every response — through the single
-        // serialization choke point — is what lets browser clients call
-        // the HTTP API cross-origin without a reverse proxy. The OPTIONS
-        // preflight is answered in `routing::route` before auth.
+        // Permissive CORS rides on every response through this single
+        // serialization choke point (see `CORS_HEADER_PAIRS`) so browser
+        // clients can call the HTTP API cross-origin without a reverse
+        // proxy. The OPTIONS preflight is answered in `routing::route`
+        // before auth.
         let header = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n\
-             Access-Control-Allow-Headers: *\r\n\
-             Access-Control-Max-Age: 86400\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
             status_text(self.status),
             self.content_type,
             self.body.len()
         );
         bytes.extend_from_slice(header.as_bytes());
+        for (name, value) in CORS_HEADER_PAIRS {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(b": ");
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.extend_from_slice(b"\r\n");
+        }
         for (name, value) in &self.extra_headers {
             bytes.extend_from_slice(name.as_bytes());
             bytes.extend_from_slice(b": ");

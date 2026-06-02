@@ -105,6 +105,7 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
     crate::presentation::admin_json::graph_projection_json(projection)
 }
 
+mod axum_edge;
 pub mod handlers_admin;
 mod handlers_ai;
 mod handlers_ai_model_cache;
@@ -255,14 +256,10 @@ pub struct RedDBServer {
     /// with the server via `Arc` so every serve loop on the same
     /// `RedDBServer` writes to one set of counters.
     http_metrics: HttpHandlerMetrics,
-    /// `Retry-After` value (seconds) emitted in the limiter's reject
-    /// path (issue #574 slice 5). Pre-rendered into `reject_503_bytes`
-    /// at construction so the hot path is one write+close.
+    /// `Retry-After` value (seconds) emitted in the async edge's
+    /// capacity-reject 503 path (issue #574 slice 5). Read on the reject
+    /// path in `axum_edge`.
     retry_after_secs: u64,
-    /// Cached bytes of the limiter's 503 response. Shared via `Arc`
-    /// across cloned server handles so flipping `retry_after_secs`
-    /// via `with_http_limits` propagates to every accept loop.
-    reject_503_bytes: Arc<Vec<u8>>,
     /// Issue #761 / S2 — process-wide output-stream capacity registry.
     /// Shared via `Arc` so cloned server handles (e.g.
     /// `serve_in_background`) all enforce against one set of counters.
@@ -386,7 +383,6 @@ impl RedDBServer {
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
             http_metrics: HttpHandlerMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
-            reject_503_bytes: Arc::new(build_reject_503_bytes(DEFAULT_RETRY_AFTER_SECS)),
             stream_capacity: output_stream::StreamCapacityRegistry::new(),
             lease_registry: output_stream::LeaseRegistry::new(),
             cursor_registry: output_stream::CursorRegistry::new(),
@@ -431,7 +427,6 @@ impl RedDBServer {
         self.http_limiter = HttpConnectionLimiter::new(limits.max_handlers);
         self.handler_timeout = Duration::from_millis(limits.handler_timeout_ms);
         self.retry_after_secs = limits.retry_after_secs;
-        self.reject_503_bytes = Arc::new(build_reject_503_bytes(limits.retry_after_secs));
         self
     }
 
@@ -818,48 +813,30 @@ impl RedDBServer {
         self.serve_on(listener)
     }
 
+    /// Serve the async axum/hyper HTTP edge (issue #931) on the given
+    /// listener until it errors fatally. A dedicated multi-threaded tokio
+    /// runtime drives the I/O; the synchronous disk-backed engine is
+    /// reached via `spawn_blocking`. This replaces the retired
+    /// thread-per-connection accept loop and its `(2*num_cpus)` thread
+    /// cap — idle keep-alive connections are now cheap parked tasks.
     pub fn serve_on(&self, listener: TcpListener) -> io::Result<()> {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => match self.http_limiter.try_acquire() {
-                    Some(permit) => {
-                        // Spawn a thread per connection for concurrent request handling
-                        let server = self.clone();
-                        thread::spawn(move || {
-                            let _guard = permit; // released on thread exit
-                            let _ = server.handle_connection(stream);
-                        });
-                    }
-                    None => {
-                        // Cap exhausted: write static 503 inline on the
-                        // accept thread, close the socket, and continue.
-                        // No thread spawn, no `HttpRequest::read_from`,
-                        // no runtime call.
-                        self.http_metrics
-                            .record_reject(HttpTransport::Http, HttpRejectReason::CapExhausted);
-                        self.reject_with_503(stream, self.options.write_timeout_ms);
-                    }
-                },
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(())
+        let runtime = axum_edge::build_edge_runtime()?;
+        runtime.block_on(self.clone().serve_edge_on_std(listener, HttpTransport::Http))
     }
 
-    /// 503 response used when the connection limiter is full. The
-    /// payload is pre-rendered into `reject_503_bytes` at construction
-    /// (issue #574 slice 5: `Retry-After` is configurable), so the
-    /// hot path is still one write and a close.
-    fn reject_with_503(&self, mut stream: TcpStream, write_timeout_ms: u64) {
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(write_timeout_ms)));
-        let _ = stream.write_all(&self.reject_503_bytes);
-        let _ = stream.flush();
-        let _ = stream.shutdown(std::net::Shutdown::Both);
-    }
-
+    /// Accept and serve a single connection to completion, then return.
+    /// Used by tests that want a one-shot HTTP server alongside another
+    /// transport.
     pub fn serve_one_on(&self, listener: TcpListener) -> io::Result<()> {
-        let (stream, _) = listener.accept()?;
-        self.handle_connection(stream)
+        let runtime = axum_edge::build_background_edge_runtime()?;
+        let server = self.clone();
+        runtime.block_on(async move {
+            listener.set_nonblocking(true)?;
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            let (stream, _peer) = listener.accept().await?;
+            server.serve_edge_one(stream).await;
+            Ok(())
+        })
     }
 
     pub fn serve_in_background(&self) -> thread::JoinHandle<io::Result<()>> {
@@ -872,7 +849,10 @@ impl RedDBServer {
         listener: TcpListener,
     ) -> thread::JoinHandle<io::Result<()>> {
         let server = self.clone();
-        thread::spawn(move || server.serve_on(listener))
+        thread::spawn(move || {
+            let runtime = axum_edge::build_background_edge_runtime()?;
+            runtime.block_on(server.serve_edge_on_std(listener, HttpTransport::Http))
+        })
     }
 
     /// Serve TLS-wrapped HTTPS on the configured `bind_addr`. The
@@ -888,33 +868,12 @@ impl RedDBServer {
         listener: TcpListener,
         tls_config: std::sync::Arc<rustls::ServerConfig>,
     ) -> io::Result<()> {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => match self.http_limiter.try_acquire() {
-                    Some(permit) => {
-                        let server = self.clone();
-                        let cfg = tls_config.clone();
-                        thread::spawn(move || {
-                            let _guard = permit; // released on thread exit
-                            let _ = server.handle_tls_connection(stream, cfg);
-                        });
-                    }
-                    None => {
-                        // Issue #572 slice 3: cross-transport cap shared
-                        // with the clear-text limiter. Writing a 503 over
-                        // a non-handshaken TLS socket is not meaningful,
-                        // so reject by closing the raw socket. No TLS
-                        // handshake, no thread spawn, no runtime call.
-                        self.http_metrics
-                            .record_reject(HttpTransport::Https, HttpRejectReason::CapExhausted);
-                        let _ = stream.shutdown(std::net::Shutdown::Both);
-                        drop(stream);
-                    }
-                },
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(())
+        let runtime = axum_edge::build_edge_runtime()?;
+        let acceptor = axum_edge::tls_acceptor(tls_config);
+        runtime.block_on(
+            self.clone()
+                .serve_edge_tls_on_std(listener, acceptor, HttpTransport::Https),
+        )
     }
 
     pub fn serve_tls_in_background(
@@ -931,7 +890,15 @@ impl RedDBServer {
         tls_config: std::sync::Arc<rustls::ServerConfig>,
     ) -> thread::JoinHandle<io::Result<()>> {
         let server = self.clone();
-        thread::spawn(move || server.serve_tls_on(listener, tls_config))
+        thread::spawn(move || {
+            let runtime = axum_edge::build_background_edge_runtime()?;
+            let acceptor = axum_edge::tls_acceptor(tls_config);
+            runtime.block_on(server.serve_edge_tls_on_std(
+                listener,
+                acceptor,
+                HttpTransport::Https,
+            ))
+        })
     }
 
     fn handle_connection(&self, stream: TcpStream) -> io::Result<()> {
@@ -1006,100 +973,4 @@ impl RedDBServer {
         let _ = stream.flush();
     }
 
-    fn handle_tls_connection(
-        &self,
-        tcp: TcpStream,
-        tls_config: std::sync::Arc<rustls::ServerConfig>,
-    ) -> io::Result<()> {
-        let started = Instant::now();
-        let result = self.handle_tls_connection_inner(tcp, tls_config);
-        let elapsed = started.elapsed().as_secs_f64();
-        self.http_metrics
-            .record_duration(HttpTransport::Https, elapsed);
-        result
-    }
-
-    fn handle_tls_connection_inner(
-        &self,
-        tcp: TcpStream,
-        tls_config: std::sync::Arc<rustls::ServerConfig>,
-    ) -> io::Result<()> {
-        tcp.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
-        tcp.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
-
-        // Issue #572 slice 3 / #621: per-handler deadline applies to TLS
-        // handlers too — same injectable-clock scaffolding as the
-        // clear-text path.
-        let deadline = HandlerDeadline::arm(Arc::clone(&self.handler_clock), self.handler_timeout);
-
-        let mut tls_stream = match self::tls::accept_tls(tls_config, tcp) {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(
-                    target: "reddb::http_tls",
-                    err = %err,
-                    "TLS handshake failed"
-                );
-                return Err(err);
-            }
-        };
-        let request = match HttpRequest::read_from(&mut tls_stream, self.options.max_body_bytes) {
-            Ok(req) => req,
-            Err(err) => {
-                tracing::warn!(
-                    target: "reddb::http_tls",
-                    err = %err,
-                    "TLS request parse failed"
-                );
-                return Err(err);
-            }
-        };
-
-        // Boundary (a): between request parse and route dispatch.
-        if deadline.expired() {
-            self.http_metrics
-                .record_reject(HttpTransport::Https, HttpRejectReason::HandlerTimeout);
-            Self::write_handler_timeout_503(&mut tls_stream);
-            return Ok(());
-        }
-
-        if self.try_route_streaming(&request, &mut tls_stream)? {
-            return Ok(());
-        }
-        let response = self.route(request);
-
-        // Test-only injected slow downstream (issue #572 slice 3
-        // integration test). Production sets this to 0.
-        let inject_ms = self.slow_inject_ms.load(Ordering::Relaxed);
-        if inject_ms > 0 {
-            thread::sleep(Duration::from_millis(inject_ms));
-        }
-
-        // Boundary (b): between route dispatch and response write.
-        if deadline.expired() {
-            self.http_metrics
-                .record_reject(HttpTransport::Https, HttpRejectReason::HandlerTimeout);
-            Self::write_handler_timeout_503(&mut tls_stream);
-            return Ok(());
-        }
-
-        tls_stream.write_all(&response.to_http_bytes())?;
-        tls_stream.flush()?;
-        Ok(())
-    }
-}
-
-/// Pre-render the limiter-reject 503 response. The `Retry-After`
-/// value comes from the resolved HTTP limits (issue #574 slice 5)
-/// and is fixed for the lifetime of the server, so we build the
-/// bytes once and hand a shared `Arc<Vec<u8>>` to every accept loop.
-fn build_reject_503_bytes(retry_after_secs: u64) -> Vec<u8> {
-    format!(
-        "HTTP/1.1 503 Service Unavailable\r\n\
-         Connection: close\r\n\
-         Content-Length: 0\r\n\
-         Retry-After: {retry_after_secs}\r\n\
-         \r\n"
-    )
-    .into_bytes()
 }
