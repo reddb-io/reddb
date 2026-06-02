@@ -821,7 +821,10 @@ impl RedDBServer {
     /// cap — idle keep-alive connections are now cheap parked tasks.
     pub fn serve_on(&self, listener: TcpListener) -> io::Result<()> {
         let runtime = axum_edge::build_edge_runtime()?;
-        runtime.block_on(self.clone().serve_edge_on_std(listener, HttpTransport::Http))
+        runtime.block_on(
+            self.clone()
+                .serve_edge_on_std(listener, HttpTransport::Http),
+        )
     }
 
     /// Accept and serve a single connection to completion, then return.
@@ -870,10 +873,11 @@ impl RedDBServer {
     ) -> io::Result<()> {
         let runtime = axum_edge::build_edge_runtime()?;
         let acceptor = axum_edge::tls_acceptor(tls_config);
-        runtime.block_on(
-            self.clone()
-                .serve_edge_tls_on_std(listener, acceptor, HttpTransport::Https),
-        )
+        runtime.block_on(self.clone().serve_edge_tls_on_std(
+            listener,
+            acceptor,
+            HttpTransport::Https,
+        ))
     }
 
     pub fn serve_tls_in_background(
@@ -893,11 +897,7 @@ impl RedDBServer {
         thread::spawn(move || {
             let runtime = axum_edge::build_background_edge_runtime()?;
             let acceptor = axum_edge::tls_acceptor(tls_config);
-            runtime.block_on(server.serve_edge_tls_on_std(
-                listener,
-                acceptor,
-                HttpTransport::Https,
-            ))
+            runtime.block_on(server.serve_edge_tls_on_std(listener, acceptor, HttpTransport::Https))
         })
     }
 
@@ -972,5 +972,4 @@ impl RedDBServer {
         let _ = stream.write_all(RESPONSE);
         let _ = stream.flush();
     }
-
 }
