@@ -67,8 +67,10 @@ async fn start_auth_server() -> ServerHandle {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
-    let mut auth = AuthConfig::default();
-    auth.enabled = true;
+    let auth = AuthConfig {
+        enabled: true,
+        ..Default::default()
+    };
     let store = Arc::new(AuthStore::new(auth));
     store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
     store.create_user("admin", "p", Role::Admin).unwrap();
@@ -299,7 +301,7 @@ fn uint(row: &UnifiedRecord, key: &str) -> u64 {
     }
 }
 
-fn wait_count(rows: &Vec<((String, String), u64)>, scope: &str, queue: &str) -> u64 {
+fn wait_count(rows: &[((String, String), u64)], scope: &str, queue: &str) -> u64 {
     rows.iter()
         .find(|((s, q), _)| s == scope && q == queue)
         .map(|(_, n)| *n)
