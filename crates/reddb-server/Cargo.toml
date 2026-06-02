@@ -63,7 +63,7 @@ parking_lot = "0.12"
 # BufWriter under the WAL file mutex. Preserves on-disk format.
 crossbeam-queue = "0.3"
 rayon = "1.12"
-rstar = "0.12"
+rstar = "0.13"
 regex = "1"
 fs2 = "0.4"
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
