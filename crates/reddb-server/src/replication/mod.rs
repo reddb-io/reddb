@@ -24,6 +24,7 @@ pub mod bookmark;
 pub mod cdc;
 pub mod commit_policy;
 pub mod commit_waiter;
+pub mod election;
 pub mod failover;
 pub mod flow_control;
 pub mod lease;
@@ -38,6 +39,12 @@ pub mod topology_advertiser;
 pub use bookmark::{BookmarkDecodeError, CausalBookmark};
 pub use commit_policy::CommitPolicy;
 pub use commit_waiter::{AwaitOutcome, CommitWaiter};
+pub use election::{
+    quorum_threshold, randomized_election_timeout, ElectionCoordinator, ElectionOutcome,
+    ElectionRequest, ElectionTransport, FileLastVoteStore, LastVote, LastVoteError, LastVoteStore,
+    Member, MemberKind, MemoryLastVoteStore, RefusalReason, VoteDecision, VoteRequest, Voter,
+    VotingState,
+};
 pub use failover::{
     FailoverCoordinator, FailoverError, FailoverMode, FailoverNode, FailoverOutcome,
     FailoverRequest, FailoverTransport, NodeRole, RoleAssignment,
