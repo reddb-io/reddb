@@ -894,3 +894,135 @@ async fn wait_above_server_cap_is_rejected() {
         "cap rejection must not park, elapsed={elapsed:?}"
     );
 }
+
+/// Issue #920 AC #2/#4 — server shutdown mid-wait surfaces a distinct
+/// cancellation error to an in-flight RedWire waiter.
+///
+/// The waiter opens on an empty queue and parks. We then drive the
+/// shutdown signal the way every sibling transport's smoke test does —
+/// `QueueWaitRegistry::cancel_all()`, the sanctioned in-process analogue
+/// of a server drain (AC #4: the same cancel that wakes the synchronous
+/// condvar waiters wakes the async one). The waiter must emit a
+/// `StreamError` carrying the `queue_wait_cancelled` code — a wire
+/// outcome distinct from a `QueueEventPush` delivery and from the silent
+/// no-frame timeout — echoing the open's correlation and stream so the
+/// client pairs it with the wait it opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_shutdown_mid_wait_emits_distinct_cancellation_error() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut client = connect_and_handshake(server.addr).await;
+
+    // Open a long wait on the empty queue — it will still be parked when
+    // the shutdown signal fires.
+    let open = Frame::new(
+        MessageKind::QueueWaitOpen,
+        91,
+        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":5000}"#.to_vec(),
+    )
+    .with_stream(4);
+    write_frame(&mut client, &open).await;
+
+    // Give the session time to register its waiter and park, then drive
+    // the shutdown drain through the registry.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.runtime.queue_wait_registry().cancel_all();
+
+    let frame = read_frame(&mut client).await;
+    assert_eq!(
+        frame.kind,
+        MessageKind::StreamError,
+        "cancellation must surface as a StreamError, not a QueueEventPush"
+    );
+    assert_ne!(
+        frame.kind,
+        MessageKind::QueueEventPush,
+        "a cancelled wait delivered no message"
+    );
+    assert_eq!(frame.stream_id, 4, "error echoes the wait's stream_id");
+    assert_eq!(
+        frame.correlation_id, 91,
+        "error echoes the open correlation"
+    );
+    let body = String::from_utf8(frame.payload.clone()).expect("utf8 payload");
+    assert!(
+        body.contains("queue_wait_cancelled"),
+        "cancellation code must be distinct from queue_wait_failed, got {body}"
+    );
+}
+
+/// Issue #920 AC #1/#3 — closing the connection mid-wait aborts the
+/// in-flight wait and releases its registry slot promptly, rather than
+/// stranding the waiter (and a tokio worker) until the `wait_ms`
+/// deadline.
+///
+/// Observability hook: `QueueWaitRegistry::live_waiters` counts the
+/// `Arc<Slot>` references held by parked waiters on a key. The waiter
+/// opens with a deliberately long `wait_ms`; once parked the count is 1.
+/// After the client socket is dropped, the session's frame loop hits EOF
+/// and returns, dropping the connection-scoped `JoinSet` and aborting
+/// the wait — so the count must fall back to 0 far inside the wait
+/// budget, distinct from a timeout that would only fire at the deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_close_mid_wait_releases_registry_slot() {
+    let server = start_server().await;
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut client = connect_and_handshake(server.addr).await;
+
+    // A 30s budget: a release observed within a couple of seconds is
+    // unambiguously the connection-close abort, not the wait deadline.
+    let open = Frame::new(
+        MessageKind::QueueWaitOpen,
+        55,
+        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":30000}"#.to_vec(),
+    )
+    .with_stream(6);
+    write_frame(&mut client, &open).await;
+
+    let registry = server.runtime.queue_wait_registry();
+
+    // Wait for the session to park its waiter (live_waiters → 1). The
+    // scope is the default (empty) tenant the RedWire path resolves to.
+    let mut parked = false;
+    for _ in 0..200 {
+        if registry.live_waiters("", "jobs") == 1 {
+            parked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(parked, "waiter should be parked before we close the socket");
+
+    // Close the connection mid-wait.
+    drop(client);
+
+    // The slot reference must be released well before the 30s deadline.
+    let mut released = false;
+    for _ in 0..300 {
+        if registry.live_waiters("", "jobs") == 0 {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        released,
+        "closing the connection must abort the parked wait and release its slot promptly"
+    );
+}
