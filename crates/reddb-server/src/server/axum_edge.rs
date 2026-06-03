@@ -39,6 +39,7 @@ use hyper_util::service::TowerToHyperService;
 
 use super::http_connection_limiter::HttpConnectionPermit;
 use super::http_handler_metrics::{HttpRejectReason, HttpTransport};
+use super::http_principal_limiter::{PrincipalCapExceeded, PrincipalInflightPermit};
 use super::transport::{
     find_header_end, json_error, parse_query_string, HttpRequest, HttpResponse, CORS_HEADER_PAIRS,
 };
@@ -212,6 +213,18 @@ impl RedDBServer {
         // Admission control is now per in-flight request, not per
         // connection: an idle keep-alive connection holds no slot, so the
         // cap no longer bounds connection count (issue #931 / AC #4).
+        //
+        // Two gates, in order:
+        //   1. Global cap — bounds *total* in-flight work (async
+        //      backpressure). Exhaustion is a server-wide 503; it hits
+        //      every caller equally, which is the backpressure signal.
+        //   2. Per-principal cap (issue #934) — bounds any *single*
+        //      caller's share so one abusive principal can't drain the
+        //      global cap and starve the rest. Over-cap is a structured
+        //      429 carrying the principal's limit/current so it can back
+        //      off precisely. Checked second: there is no point telling a
+        //      caller "you're over your share" when the server has no room
+        //      for anyone.
         let permit = match self.http_limiter.try_acquire() {
             Some(permit) => permit,
             None => {
@@ -221,10 +234,24 @@ impl RedDBServer {
             }
         };
 
+        let principal = super::routing::principal_for(&request.headers);
+        let principal_permit = match self.principal_limiter.try_acquire(&principal) {
+            Ok(principal_permit) => principal_permit,
+            Err(err) => {
+                // Drop the global permit before returning so the slot this
+                // refused caller briefly held is freed immediately.
+                drop(permit);
+                self.http_metrics
+                    .record_reject(transport, HttpRejectReason::PrincipalCapExhausted);
+                return self.reject_principal_response(&err);
+            }
+        };
+
         let response = if self.is_streaming_request(&request) {
-            self.serve_streaming_request(request, permit).await
+            self.serve_streaming_request(request, permit, principal_permit)
+                .await
         } else {
-            self.serve_buffered_request(request, permit, transport)
+            self.serve_buffered_request(request, permit, principal_permit, transport)
                 .await
         };
         self.http_metrics
@@ -238,13 +265,29 @@ impl RedDBServer {
         &self,
         request: HttpRequest,
         permit: HttpConnectionPermit,
+        principal_permit: PrincipalInflightPermit,
         transport: HttpTransport,
     ) -> Response {
         let server = self.clone();
         let join = tokio::task::spawn_blocking(move || {
-            // Permit is held for the duration of the engine call and
-            // released when this closure returns.
+            // Both the global and per-principal permits are held for the
+            // duration of the engine call and released when this closure
+            // returns — so the per-principal slot is occupied for exactly
+            // as long as the request is in flight.
             let _permit = permit;
+            let _principal_permit = principal_permit;
+            // Test-only hook (shared with the retired sync path): a slow
+            // injection keeps the request in flight while it sleeps, so an
+            // integration test can saturate the per-principal cap with a
+            // handful of concurrent requests instead of racing real load.
+            // The atomic is 0 in production, so this is a single relaxed
+            // load on the hot path.
+            let inject_ms = server
+                .slow_inject_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if inject_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(inject_ms));
+            }
             server.route(request)
         });
         match tokio::time::timeout(self.handler_timeout, join).await {
@@ -269,11 +312,16 @@ impl RedDBServer {
         &self,
         request: HttpRequest,
         permit: HttpConnectionPermit,
+        principal_permit: PrincipalInflightPermit,
     ) -> Response {
         let (head_tx, head_rx) = oneshot::channel::<EdgeStreamResponse>();
         let server = self.clone();
         tokio::task::spawn_blocking(move || {
+            // Held for the whole stream lifetime (head + body): the
+            // per-principal slot is released only when the synchronous
+            // streaming handler returns, matching the global permit.
             let _permit = permit;
+            let _principal_permit = principal_permit;
             let mut sink = StreamSink::new(head_tx);
             // Errors here are connection-level (client gone / broken
             // pipe); the sync handler already wrote what it could.
@@ -286,6 +334,18 @@ impl RedDBServer {
             // complete response head — surface a 500 rather than hang.
             Err(_) => internal_error_response(),
         }
+    }
+
+    /// Structured 429 emitted when a principal is over its per-principal
+    /// concurrent in-flight cap (issue #934). The body shape is built by
+    /// [`super::routing::principal_inflight_refusal_response`] — shared with
+    /// the stream-capacity refusal so clients branch on `error.code` — and
+    /// converted here, which applies the canonical CORS posture and any
+    /// guard-validated headers (the `Retry-After`).
+    fn reject_principal_response(&self, err: &PrincipalCapExceeded) -> Response {
+        let response =
+            super::routing::principal_inflight_refusal_response(err, self.retry_after_secs);
+        buffered_response_to_axum(response)
     }
 
     /// 503 emitted when the in-flight-request admission cap is exhausted.

@@ -392,6 +392,11 @@ fn server_flags() -> Vec<FlagSchema> {
              red_config: red.http.retry_after_secs; clamped to [1, 30])",
             )
             .with_default("5"),
+        FlagSchema::new("http-max-inflight-per-principal").with_description(
+            "Max concurrent in-flight HTTP requests per principal; over-cap requests \
+             get a structured 429 (env: REDDB_HTTP_MAX_INFLIGHT_PER_PRINCIPAL; \
+             red_config: red.http.max_inflight_per_principal; 0 disables; default: 64)",
+        ),
     ]
 }
 

@@ -2517,6 +2517,7 @@ fn apply_http_limits(
         max_handlers = resolved.max_handlers,
         handler_timeout_ms = resolved.handler_timeout_ms,
         retry_after_secs = resolved.retry_after_secs,
+        max_inflight_per_principal = resolved.max_inflight_per_principal,
         "http_limits resolved"
     );
     server.with_http_limits(resolved)
