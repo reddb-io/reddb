@@ -234,25 +234,9 @@ impl RedDBRuntime {
             let end = meta.end_ns_exclusive;
 
             // Materialise (ts, value) for rows whose time-column value
-            // lands in this chunk's `[start, end)` window.
-            let mut points: Vec<(u64, f64)> = manager
-                .query_all(|entity| {
-                    entity
-                        .data
-                        .as_row()
-                        .and_then(|row| row.get_field(&time_col))
-                        .and_then(field_as_u64)
-                        .is_some_and(|ts| ts >= start && ts < end)
-                })
-                .iter()
-                .filter_map(|entity| {
-                    let row = entity.data.as_row()?;
-                    let ts = row.get_field(&time_col).and_then(field_as_u64)?;
-                    let value = row.get_field("value").and_then(field_as_f64).unwrap_or(0.0);
-                    Some((ts, value))
-                })
-                .collect();
-            points.sort_by_key(|(ts, _)| *ts);
+            // lands in this chunk's `[start, end)` window — the same
+            // entity/row reader the read-bridge serves row chunks from.
+            let points = materialize_row_points(&manager, &time_col, start, end);
 
             let mut chunk = crate::storage::timeseries::TimeSeriesChunk::with_max_points(
                 collection.to_string(),
@@ -325,6 +309,135 @@ impl RedDBRuntime {
                 .collect(),
         )
     }
+
+    /// Read-bridge (#861): read every point of `collection` in the
+    /// inclusive range `[start_ns, end_ns]`, dispatching **per chunk** on
+    /// its storage format so row-stored and columnar (`RDCC`) chunks
+    /// coexist after `COLUMNAR` is enabled — with no mass rewrite of the
+    /// pre-existing row data.
+    ///
+    /// Each chunk's [`ChunkMeta::format`](crate::storage::timeseries::ChunkMeta::format)
+    /// is the format-version gate:
+    /// - [`ChunkFormat::ColumnarV1`] → decode the chunk's RDCC `ColumnBlock`
+    ///   through the granule-pruned column-block range scan, after
+    ///   confirming the block's embedded `format_version` is one this build
+    ///   understands ([`peek_column_block_version`]).
+    /// - [`ChunkFormat::Row`] → materialise the chunk's rows from the
+    ///   entity/row store, the same reader the seal sources from.
+    ///
+    /// Points come back merged and timestamp-ordered, so a caller sees one
+    /// logical series regardless of how each chunk is physically stored.
+    /// Chunk windows are disjoint, so a columnar chunk is read only through
+    /// its RDCC block and never double-counted via the row path.
+    pub fn read_bridge_points(
+        &self,
+        collection: &str,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> RedDBResult<Vec<(u64, f64)>> {
+        use crate::storage::timeseries::ChunkFormat;
+        use crate::storage::unified::column_block::{
+            peek_column_block_version, COLUMN_BLOCK_VERSION_V1,
+        };
+
+        let registry = self.inner.db.hypertables();
+        let Some(spec) = registry.get(collection) else {
+            return Ok(Vec::new());
+        };
+        let time_col = spec.time_column.clone();
+        let store = self.inner.db.store();
+
+        let mut out: Vec<(u64, f64)> = Vec::new();
+        for meta in registry.show_chunks(collection) {
+            // Skip chunks whose observed window cannot intersect the query.
+            // An empty chunk has min_ts_ns == u64::MAX, so it is skipped.
+            if meta.max_ts_ns < start_ns || meta.min_ts_ns > end_ns {
+                continue;
+            }
+            match meta.format() {
+                ChunkFormat::ColumnarV1 => {
+                    // RDCC reader. Bytes may be absent post-restart (pending
+                    // the durable page-write bridge); nothing to read then.
+                    let Some(bytes) = registry.columnar_block(&meta.id) else {
+                        continue;
+                    };
+                    // Format-version gate: reject a block this build cannot
+                    // read rather than mis-decode it.
+                    match peek_column_block_version(&bytes) {
+                        Some(COLUMN_BLOCK_VERSION_V1) => {}
+                        Some(v) => {
+                            return Err(RedDBError::Internal(format!(
+                                "chunk {} @ {} carries unsupported columnar format version {v}",
+                                meta.id.hypertable, meta.id.start_ns
+                            )));
+                        }
+                        None => {
+                            return Err(RedDBError::Internal(format!(
+                                "chunk {} @ {} is flagged columnar but its block is not RDCC",
+                                meta.id.hypertable, meta.id.start_ns
+                            )));
+                        }
+                    }
+                    let scan = crate::storage::timeseries::chunk::query_column_block_range(
+                        &bytes, start_ns, end_ns,
+                    )
+                    .map_err(|err| {
+                        RedDBError::Internal(format!("columnar read-bridge decode failed: {err:?}"))
+                    })?;
+                    out.extend(scan.points.iter().map(|p| (p.timestamp_ns, p.value)));
+                }
+                ChunkFormat::Row => {
+                    // Row reader: materialise the chunk window, then filter
+                    // to the inclusive query range (mirrors the columnar
+                    // scan's `[start_ns, end_ns]` contract).
+                    let Some(manager) = store.get_collection(collection) else {
+                        continue;
+                    };
+                    let chunk_start = meta.id.start_ns;
+                    let chunk_end = meta.end_ns_exclusive;
+                    out.extend(
+                        materialize_row_points(&manager, &time_col, chunk_start, chunk_end)
+                            .into_iter()
+                            .filter(|(ts, _)| *ts >= start_ns && *ts <= end_ns),
+                    );
+                }
+            }
+        }
+        out.sort_by_key(|(ts, _)| *ts);
+        Ok(out)
+    }
+}
+
+/// Materialise `(timestamp_ns, value)` rows from the entity/row store for
+/// the half-open chunk window `[start, end)`, timestamp-ordered. This is
+/// the shared row reader: the columnar seal sources its chunk from it, and
+/// the read-bridge serves row-stored chunks through it (#861). `time_col`
+/// names the time axis; the value column follows the `value` convention.
+fn materialize_row_points(
+    manager: &crate::storage::unified::SegmentManager,
+    time_col: &str,
+    start: u64,
+    end: u64,
+) -> Vec<(u64, f64)> {
+    let mut points: Vec<(u64, f64)> = manager
+        .query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .and_then(|row| row.get_field(time_col))
+                .and_then(field_as_u64)
+                .is_some_and(|ts| ts >= start && ts < end)
+        })
+        .iter()
+        .filter_map(|entity| {
+            let row = entity.data.as_row()?;
+            let ts = row.get_field(time_col).and_then(field_as_u64)?;
+            let value = row.get_field("value").and_then(field_as_f64).unwrap_or(0.0);
+            Some((ts, value))
+        })
+        .collect();
+    points.sort_by_key(|(ts, _)| *ts);
+    points
 }
 
 /// Read a row field as a non-negative `u64` timestamp, accepting the

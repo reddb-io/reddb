@@ -656,6 +656,27 @@ pub fn write_column_block(
     Ok(out)
 }
 
+/// Peek the RDCC **format version** from a column-block buffer without
+/// decoding it. Returns `Some(version)` when `bytes` opens with the `RDCC`
+/// magic, or `None` when it does not (too short, or the leading magic is
+/// not `RDCC` — i.e. the buffer is not the columnar form at all).
+///
+/// This is the read-bridge's format detector (#861): a chunk's stored
+/// bytes are classified — and a columnar chunk's version gated — before
+/// dispatching to the columnar reader, so an unknown future layout is
+/// rejected rather than misread. It touches only the 6-byte magic+version
+/// prefix; no CRC, directory, or stream work.
+pub fn peek_column_block_version(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < HEADER_LEN + FOOTER_LEN {
+        return None;
+    }
+    let magic: [u8; 4] = bytes[0..4].try_into().unwrap();
+    if magic != COLUMN_BLOCK_MAGIC {
+        return None;
+    }
+    Some(u16::from_le_bytes([bytes[4], bytes[5]]))
+}
+
 /// Decode a v1 `RDCC` block: verify both magics, the version, and the
 /// CRC, then decode each column stream back to its raw bytes.
 pub fn read_column_block(bytes: &[u8]) -> Result<DecodedColumnBlock, ColumnBlockError> {
@@ -1022,6 +1043,31 @@ mod tests {
         // Empty (zero-column) block still decodes.
         let decoded = read_column_block(&block).unwrap();
         assert!(decoded.columns.is_empty());
+    }
+
+    #[test]
+    fn peek_version_classifies_rdcc_and_rejects_non_rdcc() {
+        // A real block peeks as v1 without a full decode.
+        let block = write_column_block(1, 0, 0, 0, 0, 0, &[]).unwrap();
+        assert_eq!(
+            peek_column_block_version(&block),
+            Some(COLUMN_BLOCK_VERSION_V1)
+        );
+        // The peek reads the raw version word — even a future version the
+        // full reader rejects is reported here, so the read-bridge can gate.
+        let mut future = block.clone();
+        future[4..6].copy_from_slice(&(COLUMN_BLOCK_VERSION_V1 + 7).to_le_bytes());
+        assert_eq!(
+            peek_column_block_version(&future),
+            Some(COLUMN_BLOCK_VERSION_V1 + 7)
+        );
+        // Non-RDCC bytes (wrong magic) → not the columnar form.
+        let mut wrong_magic = block.clone();
+        wrong_magic[0] = b'X';
+        assert_eq!(peek_column_block_version(&wrong_magic), None);
+        // Row-form / arbitrary short bytes → not a column block.
+        assert_eq!(peek_column_block_version(b"row-stored bytes"), None);
+        assert_eq!(peek_column_block_version(&[]), None);
     }
 
     #[test]
