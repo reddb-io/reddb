@@ -20,7 +20,7 @@ import { RedDBError } from './errors.js'
 
 /**
  * @typedef {object} ParsedUri
- * @property {'embedded' | 'http' | 'https' | 'red' | 'reds' | 'grpc' | 'grpcs' | 'pg'} kind
+ * @property {'embedded' | 'http' | 'https' | 'red' | 'reds' | 'redwss' | 'grpc' | 'grpcs' | 'pg'} kind
  * @property {string} [host]
  * @property {number} [port]
  * @property {string} [path]            // for embedded `file://`-equivalent
@@ -47,10 +47,46 @@ export function parseUri(uri) {
       "connect() requires a URI string (e.g. 'red://localhost:5050' or 'red:///data.rdb')",
     )
   }
+  if (uri.startsWith('red+wss://')) {
+    return parseRedWssUrl(uri)
+  }
   if (uri.startsWith('red://') || uri === 'red:' || uri === 'red:/') {
     return parseRedUrl(uri)
   }
   return parseLegacyUrl(uri)
+}
+
+/**
+ * Parse `red+wss://[user:pass@]host:port[?token=...]` — RedWire framing
+ * tunneled over a binary WebSocket (the browser transport; #937, ADR
+ * 0036). Resolves to a `wss://host:port/redwire` endpoint downstream.
+ * Default port is 443 (the TLS edge).
+ */
+export function parseRedWssUrl(uri) {
+  let parsed
+  try {
+    // Borrow the URL parser via an `https://` authority so user / pass /
+    // host / port / query all decode with the standard rules.
+    parsed = new URL('https://' + uri.slice('red+wss://'.length))
+  } catch (err) {
+    throw new RedDBError('UNPARSEABLE_URI', `failed to parse '${uri}': ${err.message}`)
+  }
+  if (!parsed.hostname) {
+    throw new TypeError(`invalid red+wss:// URI: missing host in '${uri}'`)
+  }
+  const params = parsed.searchParams
+  return {
+    kind: 'redwss',
+    host: parsed.hostname,
+    port: parsed.port ? Number(parsed.port) : 443,
+    username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+    password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+    token: params.get('token') ?? undefined,
+    apiKey: params.get('apiKey') ?? params.get('api_key') ?? undefined,
+    loginUrl: params.get('loginUrl') ?? params.get('login_url') ?? undefined,
+    params,
+    originalUri: uri,
+  }
 }
 
 /**

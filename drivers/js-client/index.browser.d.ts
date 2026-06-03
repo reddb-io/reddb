@@ -13,10 +13,10 @@
  *   - It omits `splitNdjson()` (a `node:stream` `Transform`), which has no
  *     browser counterpart.
  *
- * `connect()` only reaches `http(s)://` from a browser; `grpc(s)://`,
- * `red(s)://`, and `pg` throw `RedDBError` with code
- * `'BROWSER_TRANSPORT_UNSUPPORTED'`, and embedded URIs throw
- * `EmbeddedNotSupported`.
+ * `connect()` reaches `http(s)://` and `red+wss://` (RedWire-over-binary-
+ * WebSocket, #937) from a browser; `grpc(s)://`, `red(s)://`, and `pg`
+ * throw `RedDBError` with code `'BROWSER_TRANSPORT_UNSUPPORTED'`, and
+ * embedded URIs throw `EmbeddedNotSupported`.
  */
 
 export type AuthOptions =
@@ -422,7 +422,8 @@ export class RedDB {
 /**
  * Connect to a remote RedDB instance from a browser.
  *
- * Only `http://host:port` / `https://host:port` are reachable from a browser
+ * `http://host:port`, `https://host:port`, and `red+wss://host:port`
+ * (RedWire-over-binary-WebSocket, #937) are reachable from a browser
  * sandbox. `grpc(s)://`, `red(s)://`, and `pg` throw `RedDBError` with code
  * `'BROWSER_TRANSPORT_UNSUPPORTED'`. Embedded URIs (`memory://`, `memory:`,
  * `file:///path`, `red:///`, `red://:memory[:]`) throw `EmbeddedNotSupported`.
@@ -436,7 +437,7 @@ export function login(
 ): Promise<LoginResult>
 
 export interface ParsedUri {
-  kind: 'embedded' | 'http' | 'https' | 'red' | 'reds' | 'grpc' | 'grpcs' | 'pg'
+  kind: 'embedded' | 'http' | 'https' | 'red' | 'reds' | 'redwss' | 'grpc' | 'grpcs' | 'pg'
   host?: string
   port?: number
   path?: string
