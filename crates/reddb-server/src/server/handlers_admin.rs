@@ -1323,6 +1323,36 @@ impl RedDBServer {
             flow.observed_lag_lsn()
         );
 
+        // Issue #839 — full-resync / re-bootstrap counter is the primary
+        // operator alert signal. A healthy cluster re-bootstraps rarely;
+        // any sustained rise means slots are invalidated faster than
+        // replicas keep up. The partial-resync counter is emitted beside
+        // it so an alert can distinguish a benign reconnect storm (partial
+        // climbing, full flat) from genuine slot loss.
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_full_resync_total Pulls that forced a replica full re-bootstrap since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_replication_full_resync_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_replication_full_resync_total {}",
+            self.runtime.replication_full_resync_count()
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_partial_resync_total Pulls served as an incremental partial resync since process start."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_replication_partial_resync_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_replication_partial_resync_total {}",
+            self.runtime.replication_partial_resync_count()
+        );
+
         // PLAN.md Phase 11.5 — replica apply error counters and
         // current health label. Counters are global across the
         // instance lifetime; the health label reflects whatever the
@@ -3697,6 +3727,33 @@ mod tests {
             "reddb_cache_blob_version_mismatch_total{namespace=\"runtime.result_cache\"}",
         ] {
             assert!(body.contains(needle), "missing metric line for {needle}");
+        }
+    }
+
+    #[test]
+    fn metrics_expose_replication_resync_alert_counters() {
+        // Issue #839 — the full-resync counter must be scrapeable as an
+        // alerting metric; the partial counter rides alongside for context.
+        let runtime = crate::runtime::RedDBRuntime::with_options(
+            crate::api::RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("runtime");
+
+        let server = RedDBServer::new(runtime);
+        let response = server.handle_metrics();
+        let body = String::from_utf8(response.body).expect("utf8 metrics");
+
+        for needle in [
+            "# TYPE reddb_replication_full_resync_total counter",
+            "reddb_replication_full_resync_total 0",
+            "# TYPE reddb_replication_partial_resync_total counter",
+            "reddb_replication_partial_resync_total 0",
+        ] {
+            assert!(
+                body.contains(needle),
+                "missing metric line for {needle}\n{body}"
+            );
         }
     }
 

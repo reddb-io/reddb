@@ -5279,6 +5279,49 @@ impl RedDBRuntime {
             .unwrap_or_default()
     }
 
+    /// Issue #839 — the primary's current logical-WAL head LSN, used as
+    /// the reference point for per-replica lag. `0` on non-primary
+    /// instances or before the logical spool has any records.
+    pub fn primary_logical_head_lsn(&self) -> u64 {
+        self.inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| repl.current_logical_lsn())
+            .unwrap_or(0)
+    }
+
+    /// Issue #839 — count of pulls that forced a full re-bootstrap since
+    /// process start. The primary operator alert signal; always `0` on a
+    /// non-primary instance.
+    pub fn replication_full_resync_count(&self) -> u64 {
+        self.inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| repl.full_resync_count())
+            .unwrap_or(0)
+    }
+
+    /// Issue #839 — count of pulls served as a partial (incremental)
+    /// resync since process start. Always `0` on a non-primary instance.
+    pub fn replication_partial_resync_count(&self) -> u64 {
+        self.inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| repl.partial_resync_count())
+            .unwrap_or(0)
+    }
+
+    /// Issue #839 — this node's stable identity, surfaced as the leader
+    /// identity in `/replication/status` when the node is the primary.
+    /// Reuses the same persisted id a replica advertises to the primary,
+    /// so a cluster has one stable name per node regardless of role.
+    pub fn node_id(&self) -> String {
+        self.resolve_replica_id()
+    }
+
     /// Issue #826 — re-evaluate write-admission flow control from the
     /// live primary replica registry and return the resulting throttle
     /// state. Computes the max lag across in-quorum replicas (async
