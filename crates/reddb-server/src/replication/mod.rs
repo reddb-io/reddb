@@ -21,6 +21,7 @@
 //! ```
 
 pub mod bookmark;
+pub mod cascade;
 pub mod cdc;
 pub mod commit_policy;
 pub mod commit_waiter;
@@ -40,6 +41,10 @@ pub mod topology_advertiser;
 pub mod witness;
 
 pub use bookmark::{BookmarkDecodeError, CausalBookmark};
+pub use cascade::{
+    plan_upstream, CascadeRefusal, CascadeRelay, CascadeUpstream, DownstreamSlot, ReplicaClass,
+    UpstreamChoice,
+};
 pub use commit_policy::CommitPolicy;
 pub use commit_waiter::{AwaitOutcome, CommitWaiter};
 pub use election::{
@@ -113,6 +118,16 @@ pub struct ReplicationConfig {
     pub slot_retention_max_lag_lsn: u64,
     /// Maximum wall-clock idle age for a slot before invalidation.
     pub slot_idle_timeout_ms: u64,
+    /// Streaming class (issue #838). A [`ReplicaClass::Voting`] node is on the
+    /// durability/election path and always streams directly from the primary;
+    /// a [`ReplicaClass::AsyncReadReplica`] may cascade from an intermediate.
+    /// Defaults to `Voting` — a node only cascades when explicitly declared a
+    /// read-replica.
+    pub replica_class: ReplicaClass,
+    /// Optional intermediate replica to cascade from (issue #838). Honoured
+    /// only for an async read-replica; a voting member refuses it and streams
+    /// directly from the primary. See [`ReplicationConfig::resolved_upstream`].
+    pub cascade_from: Option<CascadeUpstream>,
 }
 
 impl ReplicationConfig {
@@ -126,6 +141,8 @@ impl ReplicationConfig {
             quorum: QuorumConfig::async_commit(),
             slot_retention_max_lag_lsn: DEFAULT_SLOT_RETENTION_MAX_LAG_LSN,
             slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
+            replica_class: ReplicaClass::Voting,
+            cascade_from: None,
         }
     }
 
@@ -139,6 +156,8 @@ impl ReplicationConfig {
             quorum: QuorumConfig::async_commit(),
             slot_retention_max_lag_lsn: DEFAULT_SLOT_RETENTION_MAX_LAG_LSN,
             slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
+            replica_class: ReplicaClass::Voting,
+            cascade_from: None,
         }
     }
 
@@ -154,6 +173,8 @@ impl ReplicationConfig {
             quorum: QuorumConfig::async_commit(),
             slot_retention_max_lag_lsn: DEFAULT_SLOT_RETENTION_MAX_LAG_LSN,
             slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
+            replica_class: ReplicaClass::Voting,
+            cascade_from: None,
         }
     }
 
@@ -183,5 +204,35 @@ impl ReplicationConfig {
     pub fn with_slot_idle_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.slot_idle_timeout_ms = timeout_ms;
         self
+    }
+
+    /// Set the streaming class explicitly (issue #838).
+    pub fn with_replica_class(mut self, class: ReplicaClass) -> Self {
+        self.replica_class = class;
+        self
+    }
+
+    /// Declare this node an async read-replica that cascades from `intermediate`
+    /// (issue #838). Sets [`ReplicaClass::AsyncReadReplica`] and the cascade
+    /// source together — the only combination that actually streams from an
+    /// intermediate. A node left at the default `Voting` class ignores any
+    /// cascade source and streams directly from the primary.
+    pub fn cascading_from(mut self, node_id: impl Into<String>, addr: impl Into<String>) -> Self {
+        self.replica_class = ReplicaClass::AsyncReadReplica;
+        self.cascade_from = Some(CascadeUpstream::new(node_id, addr));
+        self
+    }
+
+    /// Resolve where this node should open its WAL stream, applying the
+    /// cascade policy (issue #838). A voting member always resolves to the
+    /// primary even when a cascade source is configured; the returned
+    /// [`CascadeRefusal`] explains any fallback so it is observable rather
+    /// than silent. `self_node_id` guards against a node cascading from its
+    /// own slot.
+    pub fn resolved_upstream(
+        &self,
+        self_node_id: &str,
+    ) -> (UpstreamChoice, Option<CascadeRefusal>) {
+        plan_upstream(self_node_id, self.replica_class, self.cascade_from.as_ref())
     }
 }
