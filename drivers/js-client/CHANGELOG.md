@@ -1,5 +1,28 @@
 # @reddb-io/client
 
+## 1.10.0
+
+### Minor Changes
+
+- [`9650677`](https://github.com/reddb-io/reddb/commit/9650677d83265068383d568cfbb2d3f00a3749de) Thanks [@filipeforattini](https://github.com/filipeforattini)! - feat(js-client): Node-native streaming surface ([#770](https://github.com/reddb-io/reddb/issues/770) / PRD [#759](https://github.com/reddb-io/reddb/issues/759) S11)
+
+  Expose the streaming wire from the JS driver:
+
+  - `db.collection(name).stream(sql)` / `db.stream(sql)` — a Node `Readable`
+    in object mode that also conforms to `AsyncIterable<Row>`. Backpressure
+    flows via `read()` / `pause()` / `resume()`; errors surface as `'error'`
+    events and rejected iterations.
+  - `db.collection(name).inputStream()` / `db.inputStream(target)` — a Node
+    `Writable` in object mode. Backpressure via `write()` + `'drain'`; the
+    server's terminal envelope resolves a `.completion()` promise.
+  - `.cancel(reason?)` on both — `StreamCancel` over RedWire,
+    `AbortController.abort()` over HTTP NDJSON.
+  - `splitNdjson()` transform for piping NDJSON files into `inputStream()`.
+
+  Transport is chosen by the connection (RedWire when available, HTTP NDJSON
+  otherwise) with an identical caller-facing surface. `db.query()` stays a
+  one-shot Promise — no streaming-surface leakage.
+
 ## 1.5.0
 
 ## 1.4.0
