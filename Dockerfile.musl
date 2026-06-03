@@ -17,7 +17,7 @@
 #     -e RED_BACKEND=fs -e RED_FS_PATH=/backups \
 #     reddb:musl
 
-FROM rust:1.95-alpine AS build
+FROM rust:1.96-alpine AS build
 RUN apk add --no-cache musl-dev openssl-dev pkgconfig protoc protobuf-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
