@@ -153,15 +153,21 @@ pub async fn start_redwire_tls_listener(
     }
 }
 
-/// Standalone entry: consume the magic byte ourselves before the
-/// session loop. The router-multiplexed entry skips this — the
-/// detector already consumed the magic.
-async fn handle_standalone(
-    mut stream: TcpStream,
+/// Consume the RedWire magic byte off an arbitrary async byte stream,
+/// then run the session. This is the seam (issue #932, ADR 0036) that
+/// lets a non-socket transport — the WebSocket data channel (#935) —
+/// reuse the exact standalone preamble: the browser sends the same
+/// `0xFE` magic as native drivers, and the WS edge peels it here before
+/// handing the stream to the transport-agnostic session.
+pub(crate) async fn handle_session_consume_magic<S>(
+    mut stream: S,
     runtime: Arc<RedDBRuntime>,
     auth_store: Option<Arc<AuthStore>>,
     oauth: Option<Arc<crate::auth::oauth::OAuthValidator>>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let mut magic = [0u8; 1];
     stream.read_exact(&mut magic).await?;
     if magic[0] != REDWIRE_MAGIC {
@@ -171,6 +177,18 @@ async fn handle_standalone(
         )));
     }
     handle_session(stream, runtime, auth_store, oauth).await
+}
+
+/// Standalone entry: consume the magic byte ourselves before the
+/// session loop. The router-multiplexed entry skips this — the
+/// detector already consumed the magic.
+async fn handle_standalone(
+    stream: TcpStream,
+    runtime: Arc<RedDBRuntime>,
+    auth_store: Option<Arc<AuthStore>>,
+    oauth: Option<Arc<crate::auth::oauth::OAuthValidator>>,
+) -> io::Result<()> {
+    handle_session_consume_magic(stream, runtime, auth_store, oauth).await
 }
 
 #[cfg(unix)]
