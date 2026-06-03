@@ -26,7 +26,7 @@ pub use continuous_aggregate::{
     BucketState, ContinuousAggregateColumn, ContinuousAggregateEngine, ContinuousAggregateSource,
     ContinuousAggregateSpec, ContinuousAggregateState, RefreshPoint,
 };
-pub use hypertable::{ChunkId, ChunkMeta, HypertableRegistry, HypertableSpec};
+pub use hypertable::{ChunkFormat, ChunkId, ChunkMeta, HypertableRegistry, HypertableSpec};
 pub use log_pipeline::{LogIngestStats, LogLine, LogPipeline, LogSeverity};
 pub use retention::{
     RetentionBackend, RetentionDaemonHandle, RetentionPolicy, RetentionRegistry, RetentionStats,

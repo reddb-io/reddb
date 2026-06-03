@@ -9,6 +9,7 @@
 //!   - max_handlers      = (2 * num_cpus).clamp(8, 256)
 //!   - handler_timeout   = 30_000 ms
 //!   - retry_after_secs  = 5
+//!   - max_inflight_per_principal = 64   (issue #934; 0 disables)
 //!
 //! Each knob is validated at parse time and at resolution time so a
 //! stale red_config value cannot corrupt the running server.
@@ -34,12 +35,31 @@ pub fn default_max_handlers() -> usize {
 pub const DEFAULT_HANDLER_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 
+/// Built-in default for `max_inflight_per_principal` (issue #934). Bounds
+/// any single principal's concurrent in-flight requests at the async edge so
+/// one caller can't drain the whole global handler cap and starve the rest.
+/// `0` disables the per-principal cap entirely; a single-tenant deployment
+/// can set it there to pay nothing. Chosen below the typical multi-core
+/// global cap (256) so it provides real fairness headroom, while sitting
+/// above the global cap on tiny boxes (where there is no abuse pressure) so
+/// it never trips spuriously.
+pub const DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL: usize = 64;
+
 /// Validate a `max_handlers` candidate from any source. Returns the
 /// value unchanged on success.
 pub fn validate_max_handlers(value: usize) -> Result<usize, String> {
     if value == 0 {
         return Err("http max_handlers must be >= 1".to_string());
     }
+    Ok(value)
+}
+
+/// Validate a `max_inflight_per_principal` candidate (issue #934). Every
+/// `usize` is acceptable: a positive value caps each principal's concurrent
+/// in-flight requests, and `0` disables the per-principal cap. Present for
+/// symmetry with the other knobs so the CLI parser can run all four through
+/// the same validated-parse helper.
+pub fn validate_max_inflight_per_principal(value: usize) -> Result<usize, String> {
     Ok(value)
 }
 
@@ -73,6 +93,8 @@ pub struct HttpLimitsCliInput {
     pub handler_timeout_ms_env: Option<u64>,
     pub retry_after_secs_flag: Option<u64>,
     pub retry_after_secs_env: Option<u64>,
+    pub max_inflight_per_principal_flag: Option<usize>,
+    pub max_inflight_per_principal_env: Option<usize>,
 }
 
 /// Resolved values after applying the full precedence chain. Stamped
@@ -82,6 +104,8 @@ pub struct HttpLimitsResolved {
     pub max_handlers: usize,
     pub handler_timeout_ms: u64,
     pub retry_after_secs: u64,
+    /// Per-principal concurrent in-flight cap (issue #934). `0` disables.
+    pub max_inflight_per_principal: usize,
 }
 
 impl HttpLimitsResolved {
@@ -90,6 +114,7 @@ impl HttpLimitsResolved {
             max_handlers: default_max_handlers(),
             handler_timeout_ms: DEFAULT_HANDLER_TIMEOUT_MS,
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
+            max_inflight_per_principal: DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL,
         }
     }
 }
@@ -136,10 +161,21 @@ where
         .or(input.retry_after_secs_env)
         .unwrap_or(defaults.retry_after_secs);
 
+    let max_inflight_per_principal = input
+        .max_inflight_per_principal_flag
+        .or_else(|| {
+            config_lookup("red.http.max_inflight_per_principal")
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .and_then(|v| validate_max_inflight_per_principal(v).ok())
+        })
+        .or(input.max_inflight_per_principal_env)
+        .unwrap_or(defaults.max_inflight_per_principal);
+
     HttpLimitsResolved {
         max_handlers,
         handler_timeout_ms,
         retry_after_secs,
+        max_inflight_per_principal,
     }
 }
 
@@ -272,5 +308,69 @@ mod tests {
     fn default_max_handlers_in_bounds() {
         let cap = default_max_handlers();
         assert!((8..=256).contains(&cap));
+    }
+
+    #[test]
+    fn max_inflight_per_principal_follows_precedence_chain() {
+        // default
+        let resolved = resolve_http_limits(&HttpLimitsCliInput::default(), no_config());
+        assert_eq!(
+            resolved.max_inflight_per_principal,
+            DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL
+        );
+
+        // env over default
+        let input = HttpLimitsCliInput {
+            max_inflight_per_principal_env: Some(17),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_http_limits(&input, no_config()).max_inflight_per_principal,
+            17
+        );
+
+        // red_config over env
+        let input = HttpLimitsCliInput {
+            max_inflight_per_principal_env: Some(17),
+            ..Default::default()
+        };
+        let lookup = map_lookup(HashMap::from([(
+            "red.http.max_inflight_per_principal",
+            "9",
+        )]));
+        assert_eq!(
+            resolve_http_limits(&input, lookup).max_inflight_per_principal,
+            9
+        );
+
+        // flag over everything
+        let input = HttpLimitsCliInput {
+            max_inflight_per_principal_flag: Some(3),
+            max_inflight_per_principal_env: Some(17),
+            ..Default::default()
+        };
+        let lookup = map_lookup(HashMap::from([(
+            "red.http.max_inflight_per_principal",
+            "9",
+        )]));
+        assert_eq!(
+            resolve_http_limits(&input, lookup).max_inflight_per_principal,
+            3
+        );
+    }
+
+    #[test]
+    fn max_inflight_per_principal_zero_disables_and_is_honored() {
+        // 0 is a legal value (disables the per-principal cap) and must
+        // survive the resolve chain rather than being treated as unset.
+        let lookup = map_lookup(HashMap::from([(
+            "red.http.max_inflight_per_principal",
+            "0",
+        )]));
+        assert_eq!(
+            resolve_http_limits(&HttpLimitsCliInput::default(), lookup).max_inflight_per_principal,
+            0
+        );
+        assert!(validate_max_inflight_per_principal(0).is_ok());
     }
 }
