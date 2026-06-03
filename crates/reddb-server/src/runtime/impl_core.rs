@@ -3057,6 +3057,7 @@ impl RedDBRuntime {
                 ec_worker: crate::ec::worker::EcWorker::new(),
                 auth_store: parking_lot::RwLock::new(None),
                 oauth_validator: parking_lot::RwLock::new(None),
+                browser_token_authority: parking_lot::RwLock::new(None),
                 views: parking_lot::RwLock::new(HashMap::new()),
                 materialized_views: parking_lot::RwLock::new(
                     crate::storage::cache::result::MaterializedViewCache::new(),
@@ -3883,6 +3884,27 @@ impl RedDBRuntime {
     /// is present, so we hand back a cheap Arc clone.
     pub fn oauth_validator(&self) -> Option<Arc<crate::auth::oauth::OAuthValidator>> {
         self.inner.oauth_validator.read().clone()
+    }
+
+    /// Inject the browser-token authority (issue #936). When set, the
+    /// RedWire WS handshake accepts the short-lived access JWT it mints
+    /// (alongside, and tried before, the federated OAuth validator), and
+    /// the `/auth/browser/*` HTTP endpoints can issue/rotate the pair.
+    /// `None` leaves the browser credential flow inert.
+    pub fn set_browser_token_authority(
+        &self,
+        authority: Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>>,
+    ) {
+        *self.inner.browser_token_authority.write() = authority;
+    }
+
+    /// Snapshot the browser-token authority, if wired. Read on the WS
+    /// handshake path and by the `/auth/browser/*` handlers; a cheap Arc
+    /// clone keeps the lock hold short.
+    pub fn browser_token_authority(
+        &self,
+    ) -> Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>> {
+        self.inner.browser_token_authority.read().clone()
     }
 
     /// Returns the vault AES key (`red.secret.aes_key`) if an auth
