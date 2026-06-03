@@ -2840,6 +2840,19 @@ impl RedDb for GrpcRuntime {
             }
             crate::replication::ReplicationRole::Primary => {
                 map.insert("role".into(), JsonValue::String("primary".into()));
+                // Leader identity + resync counters (issue #839) — mirror
+                // the HTTP `/replication/status` surface so a gRPC consumer
+                // sees the same observability fields.
+                map.insert("is_leader".into(), JsonValue::Bool(true));
+                map.insert("leader".into(), JsonValue::String(self.runtime.node_id()));
+                map.insert(
+                    "full_resync_count".into(),
+                    JsonValue::Number(self.runtime.replication_full_resync_count() as f64),
+                );
+                map.insert(
+                    "partial_resync_count".into(),
+                    JsonValue::Number(self.runtime.replication_partial_resync_count() as f64),
+                );
                 if let Some(ref repl) = db.replication {
                     let lsn = repl
                         .logical_wal_spool
@@ -2855,6 +2868,42 @@ impl RedDb for GrpcRuntime {
                         "replica_count".into(),
                         JsonValue::Number(repl.replica_count() as f64),
                     );
+                    // Per-replica lag in LSN-offset and wall-clock (#839).
+                    let head_lsn = repl.current_logical_lsn();
+                    let now_ms = crate::utils::now_unix_millis() as u128;
+                    let replicas = repl
+                        .replica_snapshots()
+                        .into_iter()
+                        .map(|replica| {
+                            let mut replica_json = crate::json::Map::new();
+                            replica_json.insert("id".into(), JsonValue::String(replica.id.clone()));
+                            replica_json.insert(
+                                "last_acked_lsn".into(),
+                                JsonValue::Number(replica.last_acked_lsn as f64),
+                            );
+                            replica_json.insert(
+                                "last_sent_lsn".into(),
+                                JsonValue::Number(replica.last_sent_lsn as f64),
+                            );
+                            replica_json.insert(
+                                "lag_lsn".into(),
+                                JsonValue::Number(
+                                    head_lsn.saturating_sub(replica.last_acked_lsn) as f64,
+                                ),
+                            );
+                            let lag_ms = now_ms.saturating_sub(replica.last_seen_at_unix_ms);
+                            replica_json.insert(
+                                "lag_seconds".into(),
+                                JsonValue::Number((lag_ms as f64) / 1000.0),
+                            );
+                            replica_json.insert(
+                                "rebootstrapping".into(),
+                                JsonValue::Bool(replica.rebootstrapping),
+                            );
+                            JsonValue::Object(replica_json)
+                        })
+                        .collect();
+                    map.insert("replicas".into(), JsonValue::Array(replicas));
                     if let Some(progress) = repl.replication_progress() {
                         map.insert(
                             "replication_lag_lsn".into(),
@@ -2914,6 +2963,8 @@ impl RedDb for GrpcRuntime {
             }
             crate::replication::ReplicationRole::Replica { primary_addr } => {
                 map.insert("role".into(), JsonValue::String("replica".into()));
+                map.insert("is_leader".into(), JsonValue::Bool(false));
+                map.insert("leader".into(), JsonValue::String(primary_addr.clone()));
                 map.insert(
                     "primary_addr".into(),
                     JsonValue::String(primary_addr.clone()),
