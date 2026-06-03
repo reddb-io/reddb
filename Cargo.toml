@@ -110,12 +110,22 @@ proptest = "1"
 [profile.dev]
 incremental = true
 codegen-units = 256
+# Full debuginfo (cargo default `debug = true`) was ~400MB PER test binary;
+# with ~350 integration-test files each statically linking the whole engine,
+# that ballooned target/debug to 75G+ (disk-full link failures). line-tables-only
+# keeps file:line in backtraces (enough to locate a failing assertion) and drops
+# the variable/type debuginfo that was the bulk. unpacked split-debuginfo moves
+# what remains into separate files instead of embedding it in every binary.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 # Test profile inherits from dev, but we restate the values so the
 # intent is explicit and `cargo test` is as fast as `cargo build`.
 [profile.test]
 incremental = true
 codegen-units = 256
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 # Production binaries abort on panic. RedDB relies on WAL/recovery for
 # consistency after process death; unwinding through worker/write paths
