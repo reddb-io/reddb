@@ -367,6 +367,110 @@ impl RedDBRuntime {
         Ok(Some(strictly_better + 1))
     }
 
+    /// `APPROX RANK OF <id> IN <name>` — the *approximate tail* read
+    /// (issue #923 / ADR 0035). Serves an explicitly-approximate
+    /// percentile / rank for an entry below the exact top-K head from a
+    /// per-`(table, column)` score sketch.
+    ///
+    /// The result is always labeled approximate (`approximate = true`,
+    /// distinct from the exact `RANK OF` surface which returns only a bare
+    /// `rank`) so a caller never reads a tail estimate as an exact head
+    /// position. An invisible / non-existent row yields no row, exactly
+    /// like the exact surface.
+    fn execute_approx_rank_of(
+        &self,
+        raw_query: &str,
+        req: super::ranking_descriptor_catalog::ApproxRankOfRequest,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+        let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
+            .ok_or_else(|| {
+                RedDBError::Query(format!("ranking '{}' does not exist", req.ranking))
+            })?;
+
+        let approx = self.compute_approx_rank(&descriptor, req.entity_id)?;
+        let columns = vec![
+            "rank".to_string(),
+            "percentile".to_string(),
+            "approximate".to_string(),
+        ];
+        let rows = match approx {
+            Some(approx) => vec![vec![
+                ("rank".to_string(), Value::UnsignedInteger(approx.rank)),
+                ("percentile".to_string(), Value::Float(approx.percentile)),
+                ("approximate".to_string(), Value::Boolean(true)),
+            ]],
+            None => Vec::new(),
+        };
+        Ok(RuntimeQueryResult::ok_records(
+            raw_query.to_string(),
+            columns,
+            rows,
+            "select",
+        ))
+    }
+
+    /// Refresh the per-`(table, column)` score sketch from the rows visible
+    /// to the current snapshot and return the target's approximate rank, or
+    /// `None` if the target row is invisible to this snapshot / tenant.
+    ///
+    /// The sketch is rebuilt from the live column on each read and persisted
+    /// back to `red_config` keyed by `(table, column)` — so it is maintained
+    /// per `(collection, score column)` and stays current as scores change
+    /// (criterion 4). The scan runs through `execute_query_inner`, inheriting
+    /// the same MVCC snapshot, RLS/tenant scope, and policy as ordinary
+    /// reads. The *approximation* is the histogram bucketing in
+    /// [`super::score_sketch::ScoreSketch`], not the data freshness, so the
+    /// estimate carries the documented error band even though it is built
+    /// from a full scan in this v0 (incremental maintenance is an ADR-0035
+    /// implementation detail, left open and reversible).
+    fn compute_approx_rank(
+        &self,
+        descriptor: &super::ranking_descriptor_catalog::RankingDescriptor,
+        target_id: u64,
+    ) -> RedDBResult<Option<super::score_sketch::ApproxRank>> {
+        let table = &descriptor.table;
+        let column = &descriptor.column;
+
+        // Scan the visible rows once: it both feeds the sketch and locates
+        // the target's score under the same snapshot/tenant/policy frame.
+        let scan_sql = format!("SELECT * FROM {table}");
+        let scan = self.execute_query_inner(&scan_sql)?;
+        let records = &scan.result.records;
+
+        let mut scores: Vec<f64> = Vec::with_capacity(records.len());
+        let mut target_score: Option<f64> = None;
+        for rec in records {
+            let Some(score) = record_column_f64(rec, column) else {
+                continue;
+            };
+            scores.push(score);
+            let rid = match rec.get("rid") {
+                Some(Value::UnsignedInteger(n)) => Some(*n),
+                Some(Value::Integer(n)) if *n >= 0 => Some(*n as u64),
+                _ => None,
+            };
+            if rid == Some(target_id) {
+                target_score = Some(score);
+            }
+        }
+
+        let sketch = super::score_sketch::ScoreSketch::from_scores(&scores);
+        // Persist the refreshed sketch per (table, column).
+        super::ranking_descriptor_catalog::save_sketch(
+            self.inner.db.store().as_ref(),
+            table,
+            column,
+            &sketch,
+        );
+
+        let Some(target_score) = target_score else {
+            // Not visible to this snapshot/tenant ⇒ no rank (matches exact).
+            return Ok(None);
+        };
+        Ok(sketch.approx_rank(target_score, descriptor.descending))
+    }
+
     fn execute_alter_metric(
         &self,
         raw_query: &str,
@@ -6436,6 +6540,9 @@ impl RedDBRuntime {
         }
         if super::ranking_descriptor_catalog::parse_show_rankings(query) {
             return self.execute_show_rankings(query);
+        }
+        if let Some(parsed) = super::ranking_descriptor_catalog::parse_approx_rank_of(query) {
+            return self.execute_approx_rank_of(query, parsed?);
         }
         if let Some(parsed) = super::ranking_descriptor_catalog::parse_rank_of(query) {
             return self.execute_rank_of(query, parsed?);
