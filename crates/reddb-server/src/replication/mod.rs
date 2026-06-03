@@ -26,6 +26,7 @@ pub mod commit_policy;
 pub mod commit_waiter;
 pub mod election;
 pub mod failover;
+pub mod fence;
 pub mod flow_control;
 pub mod lease;
 pub mod logical;
@@ -49,6 +50,10 @@ pub use election::{
 pub use failover::{
     FailoverCoordinator, FailoverError, FailoverMode, FailoverNode, FailoverOutcome,
     FailoverRequest, FailoverTransport, NodeRole, RoleAssignment,
+};
+pub use fence::{
+    FenceBoundary, FenceVerdict, FileTermStore, MemoryTermStore, StaleTermFenced, TermFence,
+    TermStore, TermStoreError,
 };
 pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};

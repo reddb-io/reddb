@@ -15,6 +15,7 @@
 //! {
 //!   "database_key": "main",
 //!   "holder_id": "instance-uuid",
+//!   "term": 3,
 //!   "generation": 7,
 //!   "acquired_at_ms": 1730000000000,
 //!   "expires_at_ms":  1730000060000
@@ -26,6 +27,12 @@
 //!   stale writer (whose lease was poached because it expired) can be
 //!   detected during reclaim by reading the current lease and
 //!   comparing.
+//! - `term` is the replication term the holder acquired under (issue
+//!   #835, ADR 0030). A contender on a term *behind* the published
+//!   lease's term is a deposed primary and is fenced
+//!   (`LeaseError::Fenced`) — even if the lease has expired and would
+//!   otherwise be poachable. Legacy lease objects without a `term`
+//!   field decode as `DEFAULT_REPLICATION_TERM`.
 //! - `expires_at_ms` is wall-clock millis since UNIX epoch. A holder
 //!   refreshes it periodically; a contender treats anything past it as
 //!   poachable.
@@ -70,6 +77,15 @@ fn lease_temp_path(kind: &str) -> std::path::PathBuf {
 pub struct WriterLease {
     pub database_key: String,
     pub holder_id: String,
+    /// Replication term the holder acquired the lease under (issue #835,
+    /// ADR 0030). Tying the lease to the term is what makes a deposed
+    /// primary fail closed: once a new primary acquires the lease at a
+    /// higher term, the old holder's term is behind and every term-gated
+    /// op it attempts is fenced. Defaults to
+    /// [`DEFAULT_REPLICATION_TERM`](crate::replication::DEFAULT_REPLICATION_TERM)
+    /// when read from a legacy (pre-#835) lease object that did not carry
+    /// a term, so older lease files stay readable.
+    pub term: u64,
     pub generation: u64,
     pub acquired_at_ms: u64,
     pub expires_at_ms: u64,
@@ -78,6 +94,22 @@ pub struct WriterLease {
 impl WriterLease {
     pub fn is_expired(&self, now_ms: u64) -> bool {
         self.expires_at_ms <= now_ms
+    }
+
+    /// Is this lease fenced by `current_term`? A holder whose lease was
+    /// stamped under a term *behind* the cluster's current term is a
+    /// stale writer from a superseded timeline (issue #835) — it must
+    /// fail closed rather than keep mutating the new timeline.
+    pub fn fenced_by_term(&self, current_term: u64) -> bool {
+        self.term < current_term
+    }
+
+    /// The monotonic fencing token `(term, generation)`. Both components
+    /// advance forward across a legitimate handover (a new primary wins a
+    /// higher term *and* takes a fresh lease generation), so a stale
+    /// holder is ordered strictly behind on both axes (ADR 0030).
+    pub fn fencing_token(&self) -> (u64, u64) {
+        (self.term, self.generation)
     }
 
     fn to_json(&self) -> JsonValue {
@@ -90,6 +122,7 @@ impl WriterLease {
             "holder_id".to_string(),
             JsonValue::String(self.holder_id.clone()),
         );
+        object.insert("term".to_string(), JsonValue::Number(self.term as f64));
         object.insert(
             "generation".to_string(),
             JsonValue::Number(self.generation as f64),
@@ -120,6 +153,13 @@ impl WriterLease {
                 .and_then(JsonValue::as_str)
                 .ok_or_else(|| LeaseError::InvalidFormat("missing holder_id".into()))?
                 .to_string(),
+            // Legacy lease objects (pre-#835) carry no term — default to the
+            // base replication term so they stay readable and act as "never
+            // fenced" until a termed primary re-stamps them.
+            term: obj
+                .get("term")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(crate::replication::DEFAULT_REPLICATION_TERM),
             generation: obj
                 .get("generation")
                 .and_then(JsonValue::as_u64)
@@ -157,6 +197,15 @@ pub enum LeaseError {
         attempted_holder: String,
         attempted_generation: u64,
         observed: Option<WriterLease>,
+    },
+    /// A holder on a term *behind* the current term tried to take or keep
+    /// the lease (issue #835). The deposed primary is fenced: a newer term
+    /// already owns the timeline, so the stale holder fails closed rather
+    /// than mutate it.
+    Fenced {
+        attempted_holder: String,
+        attempted_term: u64,
+        current_term: u64,
     },
 }
 
@@ -199,6 +248,15 @@ impl std::fmt::Display for LeaseError {
                     attempted_holder, attempted_generation
                 ),
             },
+            Self::Fenced {
+                attempted_holder,
+                attempted_term,
+                current_term,
+            } => write!(
+                f,
+                "fenced lease op: '{attempted_holder}' on stale term {attempted_term} \
+                 is behind current term {current_term}"
+            ),
         }
     }
 }
@@ -304,15 +362,56 @@ impl LeaseStore {
     /// - `LeaseError::Held` if a different holder owns a non-expired
     ///   lease.
     /// - `LeaseError::LostRace` if a concurrent contender beat us.
+    ///
+    /// Acquires under the base replication term; use
+    /// [`LeaseStore::try_acquire_for_term`] to stamp a specific term and
+    /// fence stale-term contenders (issue #835).
     pub fn try_acquire(
         &self,
         database_key: &str,
         holder_id: &str,
         ttl_ms: u64,
     ) -> Result<WriterLease, LeaseError> {
+        self.try_acquire_for_term(
+            database_key,
+            holder_id,
+            ttl_ms,
+            crate::replication::DEFAULT_REPLICATION_TERM,
+        )
+    }
+
+    /// Like [`LeaseStore::try_acquire`] but stamps `term` onto the lease
+    /// and **fences** any contender whose `term` is behind the published
+    /// lease's term (issue #835, ADR 0030).
+    ///
+    /// The term tie is what makes a deposed primary fail closed: a new
+    /// primary that won a higher term takes the lease under that term, so
+    /// a returning ex-primary on the old term sees a published lease whose
+    /// term is *ahead* of its own and is refused with `LeaseError::Fenced`
+    /// — even when the lease has since expired and would otherwise be
+    /// poachable. A stale holder can never re-take the writer slot until
+    /// it adopts the new term.
+    pub fn try_acquire_for_term(
+        &self,
+        database_key: &str,
+        holder_id: &str,
+        ttl_ms: u64,
+        term: u64,
+    ) -> Result<WriterLease, LeaseError> {
         let now_ms = crate::utils::now_unix_millis();
 
         let current = self.current_versioned(database_key)?;
+        // Term fence first — a contender behind the published term is a
+        // deposed writer and fails closed regardless of expiry or holder.
+        if let Some(c) = &current {
+            if term < c.lease.term {
+                return Err(LeaseError::Fenced {
+                    attempted_holder: holder_id.to_string(),
+                    attempted_term: term,
+                    current_term: c.lease.term,
+                });
+            }
+        }
         // If a healthy lease exists held by someone else, refuse
         // immediately. Two cases collapse: either the current holder
         // is us (refresh) or it's somebody else with time left.
@@ -330,6 +429,7 @@ impl LeaseStore {
         let new_lease = WriterLease {
             database_key: database_key.to_string(),
             holder_id: holder_id.to_string(),
+            term,
             generation: next_generation,
             acquired_at_ms: now_ms,
             expires_at_ms: now_ms.saturating_add(ttl_ms),
@@ -365,6 +465,7 @@ impl LeaseStore {
                 observed: WriterLease {
                     database_key: database_key.to_string(),
                     holder_id: "<missing>".to_string(),
+                    term: 0,
                     generation: 0,
                     acquired_at_ms: 0,
                     expires_at_ms: 0,
@@ -395,6 +496,7 @@ impl LeaseStore {
                 observed: WriterLease {
                     database_key: database_key.to_string(),
                     holder_id: "<missing>".to_string(),
+                    term: 0,
                     generation: 0,
                     acquired_at_ms: 0,
                     expires_at_ms: 0,
@@ -440,6 +542,31 @@ impl LeaseStore {
                 observed: other.map(|v| v.lease),
             }),
         }
+    }
+
+    /// Refresh the lease, but **fail closed** if the holder's term has
+    /// fallen behind `current_term` (issue #835). This is the keep-alive
+    /// counterpart to the acquire fence: a primary that was deposed while
+    /// holding a live lease cannot keep extending it once the cluster has
+    /// moved to a newer term — its next refresh is fenced before it ever
+    /// touches the backend, so it stops mutating and drains.
+    ///
+    /// When the holder's own term still matches or leads `current_term`,
+    /// this is exactly [`LeaseStore::refresh`].
+    pub fn refresh_for_term(
+        &self,
+        lease: &WriterLease,
+        ttl_ms: u64,
+        current_term: u64,
+    ) -> Result<WriterLease, LeaseError> {
+        if lease.fenced_by_term(current_term) {
+            return Err(LeaseError::Fenced {
+                attempted_holder: lease.holder_id.clone(),
+                attempted_term: lease.term,
+                current_term,
+            });
+        }
+        self.refresh(lease, ttl_ms)
     }
 
     /// Release the lease. Only succeeds when the published lease
@@ -577,6 +704,95 @@ mod tests {
         let _ = s.try_acquire("db", "writer-b", 60_000).unwrap();
         let err = s.refresh(&lease, 60_000).unwrap_err();
         assert!(matches!(err, LeaseError::Stale { .. }));
+    }
+
+    #[test]
+    fn acquire_stamps_term_onto_lease() {
+        let s = store();
+        let lease = s.try_acquire_for_term("db", "writer-a", 60_000, 7).unwrap();
+        assert_eq!(lease.term, 7);
+        assert_eq!(lease.fencing_token(), (7, 1));
+    }
+
+    #[test]
+    fn legacy_lease_defaults_to_base_term() {
+        // A lease acquired through the term-agnostic API carries the base
+        // replication term, so it is never fenced until a termed primary
+        // re-stamps it.
+        let s = store();
+        let lease = s.try_acquire("db", "writer-a", 60_000).unwrap();
+        assert_eq!(lease.term, crate::replication::DEFAULT_REPLICATION_TERM);
+        assert!(!lease.fenced_by_term(crate::replication::DEFAULT_REPLICATION_TERM));
+    }
+
+    #[test]
+    fn stale_term_contender_is_fenced_even_when_lease_expired() {
+        // New primary holds the lease at term 5. The lease then expires,
+        // but a returning ex-primary on the old term 4 still cannot poach
+        // it — the term fence refuses before expiry is even consulted.
+        let s = store();
+        let _new_primary = s.try_acquire_for_term("db", "new-primary", 1, 5).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let err = s
+            .try_acquire_for_term("db", "ex-primary", 60_000, 4)
+            .unwrap_err();
+        match err {
+            LeaseError::Fenced {
+                attempted_term,
+                current_term,
+                ..
+            } => {
+                assert_eq!(attempted_term, 4);
+                assert_eq!(current_term, 5);
+            }
+            other => panic!("expected Fenced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_or_higher_term_contender_may_poach_expired_lease() {
+        // The fence only bites a *behind* term. A contender at the same or
+        // a higher term takes an expired lease normally, and the generation
+        // advances with the handover.
+        let s = store();
+        let _ = s.try_acquire_for_term("db", "old", 1, 5).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let lease = s.try_acquire_for_term("db", "new", 60_000, 6).unwrap();
+        assert_eq!(lease.holder_id, "new");
+        assert_eq!(lease.term, 6);
+        assert_eq!(lease.generation, 2, "poaching advances the generation");
+    }
+
+    #[test]
+    fn refresh_for_term_fails_closed_once_term_advances() {
+        // A primary holds a live lease at term 4, then the cluster moves to
+        // term 5 underneath it. Its keep-alive refresh is fenced before it
+        // touches the backend — the deposed holder stops mutating.
+        let s = store();
+        let lease = s.try_acquire_for_term("db", "deposed", 60_000, 4).unwrap();
+        let err = s.refresh_for_term(&lease, 60_000, 5).unwrap_err();
+        match err {
+            LeaseError::Fenced {
+                attempted_holder,
+                attempted_term,
+                current_term,
+            } => {
+                assert_eq!(attempted_holder, "deposed");
+                assert_eq!(attempted_term, 4);
+                assert_eq!(current_term, 5);
+            }
+            other => panic!("expected Fenced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_for_term_succeeds_while_term_holds() {
+        let s = store();
+        let lease = s.try_acquire_for_term("db", "primary", 1_000, 5).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let refreshed = s.refresh_for_term(&lease, 60_000, 5).unwrap();
+        assert_eq!(refreshed.term, 5);
+        assert!(refreshed.expires_at_ms > lease.expires_at_ms);
     }
 
     // The legacy `acquire_fails_closed_without_backend_conditional_writes`
