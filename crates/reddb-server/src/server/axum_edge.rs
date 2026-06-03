@@ -1,4 +1,4 @@
-//! Async HTTP edge on axum/hyper (issue #931, PRD #930, ADR 0035).
+//! Async HTTP edge on axum/hyper (issue #931, PRD #930, ADR 0036).
 //!
 //! Replaces the thread-per-connection HTTP backend with an async
 //! axum/hyper service running on a tokio runtime. The execution engine
@@ -71,9 +71,9 @@ fn connection_builder() -> AutoConnBuilder<TokioExecutor> {
 /// the server plus which transport this listener represents (so reject /
 /// duration metrics land in the right bucket).
 #[derive(Clone)]
-struct EdgeState {
-    server: RedDBServer,
-    transport: HttpTransport,
+pub(super) struct EdgeState {
+    pub(super) server: RedDBServer,
+    pub(super) transport: HttpTransport,
 }
 
 /// axum catch-all: every method + path funnels through the existing
@@ -86,13 +86,24 @@ async fn edge_fallback(State(state): State<EdgeState>, req: axum::extract::Reque
 
 impl RedDBServer {
     /// Build the axum router for one listener surface.
+    ///
+    /// The RedWire-over-WSS upgrade route (`/redwire`, issue #935, ADR
+    /// 0036) is mounted **only** when an `Origin` allowlist is configured
+    /// — default-deny. The handler itself additionally rejects the
+    /// upgrade on a non-TLS edge, so even if mounted on the clear-text
+    /// listener it will not run a session over `ws://`.
     fn build_edge_router(&self, transport: HttpTransport) -> axum::Router {
-        axum::Router::new()
-            .fallback(edge_fallback)
-            .with_state(EdgeState {
-                server: self.clone(),
-                transport,
-            })
+        let mut router = axum::Router::new().fallback(edge_fallback);
+        if !self.websocket_allowed_origins().is_empty() {
+            router = router.route(
+                super::ws_edge::REDWIRE_WS_PATH,
+                axum::routing::get(super::ws_edge::redwire_ws_upgrade),
+            );
+        }
+        router.with_state(EdgeState {
+            server: self.clone(),
+            transport,
+        })
     }
 
     /// Serve the async HTTP edge on an already-bound tokio listener until
