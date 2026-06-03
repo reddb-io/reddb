@@ -1,0 +1,85 @@
+name: TLA+ Model Check
+
+# Formally model-checks the replication consensus-core specs (issue #841,
+# PRD #819, ADR 0030 / ADR 0032). Each module asserts one safety property
+# and TLC exhausts a small bounded model:
+#
+#   * ElectionSafety  -- no two nodes hold primary in the same term.
+#   * Durability      -- a write at/below the commit watermark is never
+#                        rolled back (CommittedNeverRolledBack +
+#                        LeaderCompleteness).
+#   * SafeReconfig    -- every membership change preserves quorum overlap.
+#
+# TLC exits non-zero on a violated invariant, which fails the job (and so
+# the build). The models are sized to finish in CI seconds-to-minutes.
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'specs/tla/**'
+      - '.github/workflows/tla-check.yml'
+  pull_request:
+    paths:
+      - 'specs/tla/**'
+      - '.github/workflows/tla-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pin the model checker. The checksum is the real integrity anchor: if the
+# upstream asset ever changes byte-for-byte, the verify step fails loudly
+# rather than silently checking against a different tool.
+env:
+  TLA_TOOLS_VERSION: v1.8.0
+  TLA_TOOLS_SHA256: 237332bdcc79a35c7d26efa7b82c77c85c2744591c5598673a8a45085ff2a4fb
+
+jobs:
+  model-check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        spec:
+          - ElectionSafety
+          - Durability
+          - SafeReconfig
+    name: model-check (${{ matrix.spec }})
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache tla2tools.jar
+        id: cache-tla
+        uses: actions/cache@v4
+        with:
+          path: tools/tla2tools.jar
+          key: tla2tools-${{ env.TLA_TOOLS_VERSION }}-${{ env.TLA_TOOLS_SHA256 }}
+
+      - name: Fetch and verify tla2tools.jar
+        if: steps.cache-tla.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p tools
+          url="https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+          echo "Fetching $url"
+          curl -fsSL -o tools/tla2tools.jar "$url"
+          echo "${TLA_TOOLS_SHA256}  tools/tla2tools.jar" | sha256sum -c -
+
+      - name: Verify checksum (cache hit)
+        if: steps.cache-tla.outputs.cache-hit == 'true'
+        run: echo "${TLA_TOOLS_SHA256}  tools/tla2tools.jar" | sha256sum -c -
+
+      - name: Model-check ${{ matrix.spec }}
+        working-directory: specs/tla
+        run: |
+          java -XX:+UseParallelGC \
+            -cp "${GITHUB_WORKSPACE}/tools/tla2tools.jar" tlc2.TLC \
+            -deadlock \
+            -config "${{ matrix.spec }}.cfg" \
+            "${{ matrix.spec }}.tla"
