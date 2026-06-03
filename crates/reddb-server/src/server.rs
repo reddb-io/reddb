@@ -134,6 +134,7 @@ pub mod header_escape_guard;
 pub mod http_connection_limiter;
 pub mod http_handler_metrics;
 pub mod http_limits;
+pub mod http_principal_limiter;
 pub mod ingest_pipeline;
 pub mod output_stream;
 mod patch_support;
@@ -158,6 +159,7 @@ use self::http_handler_metrics::{HttpHandlerMetrics, HttpRejectReason, HttpTrans
 pub use self::http_limits::{
     HttpLimitsCliInput, HttpLimitsResolved, DEFAULT_HANDLER_TIMEOUT_MS, DEFAULT_RETRY_AFTER_SECS,
 };
+use self::http_principal_limiter::PrincipalConnectionLimiter;
 use self::patch_support::*;
 use self::request_body::*;
 use self::routing::*;
@@ -260,6 +262,14 @@ pub struct RedDBServer {
     /// capacity-reject 503 path (issue #574 slice 5). Read on the reject
     /// path in `axum_edge`.
     retry_after_secs: u64,
+    /// Issue #934 / PRD #930 — per-principal concurrent in-flight cap. The
+    /// global `http_limiter` bounds *total* in-flight work (async
+    /// backpressure); this bounds any *single* principal's share so one
+    /// abusive caller can't drain the whole global cap and starve the rest.
+    /// Consulted at the async edge after global admission; a principal over
+    /// its cap gets a structured 429 refusal. Shared via `Arc` (inside the
+    /// limiter) so cloned server handles enforce one set of counters.
+    principal_limiter: PrincipalConnectionLimiter,
     /// Issue #761 / S2 — process-wide output-stream capacity registry.
     /// Shared via `Arc` so cloned server handles (e.g.
     /// `serve_in_background`) all enforce against one set of counters.
@@ -383,6 +393,9 @@ impl RedDBServer {
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
             http_metrics: HttpHandlerMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
+            principal_limiter: PrincipalConnectionLimiter::new(
+                http_limits::DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL,
+            ),
             stream_capacity: output_stream::StreamCapacityRegistry::new(),
             lease_registry: output_stream::LeaseRegistry::new(),
             cursor_registry: output_stream::CursorRegistry::new(),
@@ -427,7 +440,23 @@ impl RedDBServer {
         self.http_limiter = HttpConnectionLimiter::new(limits.max_handlers);
         self.handler_timeout = Duration::from_millis(limits.handler_timeout_ms);
         self.retry_after_secs = limits.retry_after_secs;
+        self.principal_limiter = PrincipalConnectionLimiter::new(limits.max_inflight_per_principal);
         self
+    }
+
+    /// Visible for tests. Override the per-principal concurrent in-flight
+    /// cap (issue #934) so the integration test can saturate one principal
+    /// and observe the structured 429 refusal without standing up hundreds
+    /// of real sockets. `0` disables the per-principal cap.
+    #[doc(hidden)]
+    pub fn with_principal_inflight_cap(mut self, cap: usize) -> Self {
+        self.principal_limiter = PrincipalConnectionLimiter::new(cap);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn principal_limiter(&self) -> &PrincipalConnectionLimiter {
+        &self.principal_limiter
     }
 
     #[doc(hidden)]

@@ -54,13 +54,21 @@ impl HttpTransport {
 pub enum HttpRejectReason {
     CapExhausted,
     HandlerTimeout,
+    /// Issue #934 — a principal hit its per-principal concurrent in-flight
+    /// cap (the global cap still had room; this caller did not).
+    PrincipalCapExhausted,
 }
+
+/// Number of distinct [`HttpRejectReason`] variants — array width for the
+/// per-transport rejection counters.
+const REJECT_REASONS: usize = 3;
 
 impl HttpRejectReason {
     fn label(self) -> &'static str {
         match self {
             HttpRejectReason::CapExhausted => "cap_exhausted",
             HttpRejectReason::HandlerTimeout => "handler_timeout",
+            HttpRejectReason::PrincipalCapExhausted => "principal_cap_exhausted",
         }
     }
 
@@ -68,7 +76,17 @@ impl HttpRejectReason {
         match self {
             HttpRejectReason::CapExhausted => 0,
             HttpRejectReason::HandlerTimeout => 1,
+            HttpRejectReason::PrincipalCapExhausted => 2,
         }
+    }
+
+    /// All variants, for render-time iteration.
+    fn all() -> [HttpRejectReason; REJECT_REASONS] {
+        [
+            HttpRejectReason::CapExhausted,
+            HttpRejectReason::HandlerTimeout,
+            HttpRejectReason::PrincipalCapExhausted,
+        ]
     }
 }
 
@@ -125,8 +143,13 @@ impl TransportHistogram {
 
 #[derive(Debug)]
 struct Inner {
-    rejected: [[AtomicU64; 2]; 2],
+    rejected: [[AtomicU64; REJECT_REASONS]; 2],
     duration: [TransportHistogram; 2],
+}
+
+/// One fresh zeroed rejection-counter row (`REJECT_REASONS` wide).
+fn zeroed_reject_row() -> [AtomicU64; REJECT_REASONS] {
+    std::array::from_fn(|_| AtomicU64::new(0))
 }
 
 #[derive(Debug, Clone)]
@@ -138,10 +161,7 @@ impl HttpHandlerMetrics {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
-                rejected: [
-                    [AtomicU64::new(0), AtomicU64::new(0)],
-                    [AtomicU64::new(0), AtomicU64::new(0)],
-                ],
+                rejected: [zeroed_reject_row(), zeroed_reject_row()],
                 duration: [TransportHistogram::new(), TransportHistogram::new()],
             }),
         }
@@ -214,10 +234,7 @@ impl HttpHandlerMetrics {
         );
         let _ = writeln!(body, "# TYPE http_handler_rejected_total counter");
         for transport in [HttpTransport::Http, HttpTransport::Https] {
-            for reason in [
-                HttpRejectReason::CapExhausted,
-                HttpRejectReason::HandlerTimeout,
-            ] {
+            for reason in HttpRejectReason::all() {
                 let _ = writeln!(
                     body,
                     "http_handler_rejected_total{{transport=\"{}\",reason=\"{}\"}} {}",
@@ -362,7 +379,11 @@ mod tests {
         let mut body = String::new();
         m.render(&mut body, &limiter);
         for transport in ["http", "https"] {
-            for reason in ["cap_exhausted", "handler_timeout"] {
+            for reason in [
+                "cap_exhausted",
+                "handler_timeout",
+                "principal_cap_exhausted",
+            ] {
                 let expected = format!(
                     "http_handler_rejected_total{{transport=\"{transport}\",reason=\"{reason}\"}} 0"
                 );

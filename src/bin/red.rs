@@ -2888,7 +2888,8 @@ fn build_http_limits_cli_input(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<reddb::server::HttpLimitsCliInput, String> {
     use reddb::server::http_limits::{
-        validate_handler_timeout_ms, validate_max_handlers, validate_retry_after_secs,
+        validate_handler_timeout_ms, validate_max_handlers, validate_max_inflight_per_principal,
+        validate_retry_after_secs,
     };
 
     fn parse_usize_validated<V>(
@@ -2962,6 +2963,17 @@ fn build_http_limits_cli_input(
         validate_retry_after_secs,
     )?;
 
+    let max_inflight_per_principal_flag = parse_usize_validated(
+        "--http-max-inflight-per-principal",
+        flag_string(flags, "http-max-inflight-per-principal").filter(|v| !v.is_empty()),
+        validate_max_inflight_per_principal,
+    )?;
+    let max_inflight_per_principal_env = parse_usize_validated(
+        "REDDB_HTTP_MAX_INFLIGHT_PER_PRINCIPAL",
+        env_string("REDDB_HTTP_MAX_INFLIGHT_PER_PRINCIPAL"),
+        validate_max_inflight_per_principal,
+    )?;
+
     Ok(reddb::server::HttpLimitsCliInput {
         max_handlers_flag,
         max_handlers_env,
@@ -2969,6 +2981,8 @@ fn build_http_limits_cli_input(
         handler_timeout_ms_env,
         retry_after_secs_flag,
         retry_after_secs_env,
+        max_inflight_per_principal_flag,
+        max_inflight_per_principal_env,
     })
 }
 

@@ -2213,6 +2213,53 @@ mod tests {
     }
 
     #[test]
+    fn principal_inflight_refusal_has_structured_backoff_shape() {
+        use crate::server::http_principal_limiter::PrincipalCapExceeded;
+
+        let err = PrincipalCapExceeded {
+            // Embed a quote-bearing principal so the test also proves the
+            // tainted-field path escapes hostile header-derived labels.
+            principal: "replica:ev\"il".to_string(),
+            limit: 64,
+            current: 64,
+        };
+        let response = principal_inflight_refusal_response(&err, 5);
+        assert_eq!(response.status, 429);
+        assert_eq!(response.content_type, "application/json");
+
+        // `Retry-After: 5` rides as a guard-validated header so clients
+        // with only header-level backoff still get a hint.
+        assert!(
+            response
+                .extra_headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("Retry-After")
+                    && value.to_str().ok() == Some("5")),
+            "expected Retry-After: 5, got {:?}",
+            response.extra_headers
+        );
+
+        let body: crate::json::Value =
+            crate::json::from_slice(&response.body).expect("refusal body is valid JSON");
+        assert_eq!(body["ok"], crate::json::Value::Bool(false));
+        assert_eq!(body["retry_after_secs"], crate::json::Value::Number(5.0));
+        let error = &body["error"];
+        assert_eq!(
+            error["code"],
+            crate::json::Value::String(
+                crate::server::http_principal_limiter::PRINCIPAL_INFLIGHT_CODE.to_string()
+            )
+        );
+        assert_eq!(error["limit"], crate::json::Value::Number(64.0));
+        assert_eq!(error["current"], crate::json::Value::Number(64.0));
+        // The principal round-trips intact through the tainted-field escape.
+        assert_eq!(
+            error["principal"],
+            crate::json::Value::String("replica:ev\"il".to_string())
+        );
+    }
+
+    #[test]
     fn fresh_server_health_is_ready_when_query_endpoint_works() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let server = RedDBServer::new(runtime);
@@ -4816,6 +4863,55 @@ pub(crate) fn stream_capacity_refusal_response(
     if let Ok(retry_after) =
         crate::server::header_escape_guard::HeaderEscapeGuard::header_value("1")
     {
+        response = response.with_header("Retry-After", retry_after);
+    }
+    response
+}
+
+/// Issue #934 / PRD #930 — structured refusal for a request rejected by the
+/// per-principal concurrent in-flight cap at the async edge. Shares the
+/// `{"ok":false,"error":{code,limit,current,principal}}` shape with the
+/// stream-capacity refusal so a client can branch on `error.code` without
+/// re-parsing prose, and carries a `Retry-After` header for clients with
+/// only header-level backoff. The principal label is emitted through the
+/// tainted-field path so a hostile `x-reddb-replica-id` header can't break
+/// out of the JSON string.
+pub(crate) fn principal_inflight_refusal_response(
+    err: &crate::server::http_principal_limiter::PrincipalCapExceeded,
+    retry_after_secs: u64,
+) -> HttpResponse {
+    use crate::json::{Map, Value as JsonValue};
+
+    let mut error_obj = Map::new();
+    error_obj.insert(
+        "code".to_string(),
+        JsonValue::String(
+            crate::server::http_principal_limiter::PRINCIPAL_INFLIGHT_CODE.to_string(),
+        ),
+    );
+    error_obj.insert(
+        "message".to_string(),
+        JsonValue::String("per-principal in-flight request cap exceeded".to_string()),
+    );
+    error_obj.insert(
+        "principal".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&err.principal),
+    );
+    error_obj.insert("limit".to_string(), JsonValue::Number(err.limit as f64));
+    error_obj.insert("current".to_string(), JsonValue::Number(err.current as f64));
+
+    let mut root = Map::new();
+    root.insert("ok".to_string(), JsonValue::Bool(false));
+    root.insert("error".to_string(), JsonValue::Object(error_obj));
+    root.insert(
+        "retry_after_secs".to_string(),
+        JsonValue::Number(retry_after_secs as f64),
+    );
+
+    let mut response = json_response(429, JsonValue::Object(root));
+    if let Ok(retry_after) = crate::server::header_escape_guard::HeaderEscapeGuard::header_value(
+        &retry_after_secs.to_string(),
+    ) {
         response = response.with_header("Retry-After", retry_after);
     }
     response
