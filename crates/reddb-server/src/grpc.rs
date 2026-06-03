@@ -258,6 +258,30 @@ impl RedDBGrpcServer {
         Ok(())
     }
 
+    /// Serve gRPC over a stream of already-accepted connections fed by the
+    /// in-process protocol demux (issue #933). The demux classifies each
+    /// inbound connection on the shared port and hands the HTTP/2 ones
+    /// straight in through `rx` — there is no loopback socket and no
+    /// `copy_bidirectional` hop. The server runs until `rx` closes (the
+    /// demux acceptor dropped its sender) and all in-flight RPCs drain.
+    pub(crate) async fn serve_router_demux(
+        &self,
+        rx: tokio::sync::mpsc::Receiver<tokio::net::TcpStream>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use tokio_stream::StreamExt;
+        let incoming = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::io::Error>);
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = &self.options.tls {
+            log_grpc_tls_identity(tls);
+            builder = builder.tls_config(tls.to_tonic_config()?)?;
+        }
+        builder
+            .add_service(Self::configured_service(self.grpc_runtime()))
+            .serve_with_incoming(incoming)
+            .await?;
+        Ok(())
+    }
+
     fn configured_service(runtime: GrpcRuntime) -> RedDbServer<GrpcRuntime> {
         // Advertise zstd + gzip so clients can opt in. Server compresses
         // outbound replies with zstd; sticking to a single send codec keeps

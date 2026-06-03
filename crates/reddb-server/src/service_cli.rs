@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::auth::store::AuthStore;
 use crate::replication::ReplicationConfig;
 use crate::runtime::RedDBRuntime;
-use crate::service_router::{serve_tcp_router, TcpProtocolRouterConfig};
+use crate::service_router::{serve_tcp_router, InProcessRouterConfig};
 use crate::{
     GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBServer, ServerOptions, StorageMode,
 };
@@ -1413,27 +1413,26 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
 
     spawn_admin_metrics_listeners(&runtime, &auth_store);
 
-    let http_listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|err| format!("bind internal HTTP listener: {err}"))?;
-    let http_backend = http_listener
-        .local_addr()
-        .map_err(|err| format!("inspect internal HTTP listener: {err}"))?;
+    // Issue #933: collapse the loopback proxy. All three transports are
+    // served from one in-process acceptor that shares the single tokio
+    // runtime (ADR 0035) — no internal HTTP/gRPC/wire listeners, no
+    // `copy_bidirectional` hop. We build the handler objects here and hand
+    // them to the demux, which classifies each connection and dispatches.
     let http_server = build_http_server(
         runtime.clone(),
         auth_store.clone(),
-        http_backend.to_string(),
+        router_bind_addr.clone(),
     );
     let http_server = apply_http_limits(http_server, &config, &runtime);
-    let http_handle = http_server.serve_in_background_on(http_listener);
 
-    thread::sleep(Duration::from_millis(100));
-    if http_handle.is_finished() {
-        return match http_handle.join() {
-            Ok(Ok(())) => Err("HTTP backend exited unexpectedly".to_string()),
-            Ok(Err(err)) => Err(err.to_string()),
-            Err(_) => Err("HTTP backend thread panicked".to_string()),
-        };
-    }
+    let grpc_server = RedDBGrpcServer::with_options(
+        runtime.clone(),
+        GrpcServerOptions {
+            bind_addr: router_bind_addr.clone(),
+            tls: None,
+        },
+        auth_store,
+    );
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1443,54 +1442,20 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
     let signal_runtime = runtime.clone();
+    let wire_runtime = Arc::new(runtime);
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
-        let grpc_listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .map_err(|err| format!("bind internal gRPC listener: {err}"))?;
-        let grpc_backend = grpc_listener
-            .local_addr()
-            .map_err(|err| format!("inspect internal gRPC listener: {err}"))?;
-        let grpc_server = RedDBGrpcServer::with_options(
-            runtime.clone(),
-            GrpcServerOptions {
-                bind_addr: grpc_backend.to_string(),
-                tls: None,
-            },
-            auth_store,
-        );
-        tokio::spawn(async move {
-            if let Err(err) = grpc_server.serve_on(grpc_listener).await {
-                tracing::error!(err = %err, "gRPC backend error");
-            }
-        });
-
-        let wire_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|err| format!("bind internal wire listener: {err}"))?;
-        let wire_backend = wire_listener
-            .local_addr()
-            .map_err(|err| format!("inspect internal wire listener: {err}"))?;
-        let wire_rt = Arc::new(runtime);
-        tokio::spawn(async move {
-            if let Err(err) =
-                crate::wire::redwire::listener::start_redwire_listener_on(wire_listener, wire_rt)
-                    .await
-            {
-                tracing::error!(err = %err, "redwire backend error");
-            }
-        });
-
         tracing::info!(
             bind = %router_bind_addr,
             cpus = rt_config.available_cpus,
             workers = worker_threads,
             "router bootstrapping"
         );
-        serve_tcp_router(TcpProtocolRouterConfig {
+        serve_tcp_router(InProcessRouterConfig {
             bind_addr: router_bind_addr,
-            grpc_backend,
-            http_backend,
-            wire_backend,
+            http_server,
+            grpc_server,
+            wire_runtime,
         })
         .await
         .map_err(|err| err.to_string())

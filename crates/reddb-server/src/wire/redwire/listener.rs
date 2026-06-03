@@ -1,9 +1,10 @@
 //! TCP / TLS / Unix listeners for the RedWire protocol.
 //!
 //! Each accepted connection spawns a `handle_session` task. The
-//! first byte off the wire (the RedWire magic, `0xFE`) is consumed
-//! by the service-router detector before reaching this listener;
-//! when the listener runs standalone it reads the magic itself.
+//! RedWire magic (`0xFE`) is always read here off the wire: the
+//! standalone listeners read it before the session loop, and the
+//! in-process demux (issue #933) only *peeks* to classify, so the
+//! magic is still buffered when `handle_router_connection` reads it.
 
 use std::io;
 use std::sync::Arc;
@@ -48,10 +49,10 @@ pub async fn start_redwire_listener(
     serve_redwire_tcp(listener, runtime, config.auth_store, config.oauth).await
 }
 
-/// Start a RedWire listener on an already-bound TCP listener (used
-/// by the service router which owns the public socket and proxies
-/// to a loopback redwire backend, and by service_cli's spawn_wire_listeners
-/// when binding the user-facing wire port directly).
+/// Start a RedWire listener on an already-bound TCP listener (used by
+/// service_cli's spawn_wire_listeners when binding the user-facing wire
+/// port directly; the shared-port demux instead dispatches per connection
+/// through [`handle_router_connection`]).
 ///
 /// Pulls the auth store off the runtime so bearer tokens issued by the
 /// HTTP `/auth/login` endpoint are honoured on the wire transport too —
@@ -151,6 +152,19 @@ pub async fn start_redwire_tls_listener(
             }
         });
     }
+}
+
+/// In-process demux entry (issue #933): serve one RedWire connection the
+/// protocol router classified on the shared port. The router peeks — it
+/// does not consume — so the `0xFE` magic is still on the wire and is
+/// read here exactly as in the standalone path. The auth store is pulled
+/// off the runtime so bearer tokens minted over HTTP are honoured here too.
+pub async fn handle_router_connection(
+    stream: TcpStream,
+    runtime: Arc<RedDBRuntime>,
+) -> io::Result<()> {
+    let auth_store = runtime.auth_store();
+    handle_standalone(stream, runtime, auth_store, None).await
 }
 
 /// Standalone entry: consume the magic byte ourselves before the
