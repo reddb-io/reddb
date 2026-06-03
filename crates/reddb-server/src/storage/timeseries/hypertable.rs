@@ -120,6 +120,23 @@ pub struct ChunkId {
     pub start_ns: u64,
 }
 
+/// On-disk storage format of a chunk — the **read-bridge dispatch key**
+/// (PRD #850 Phase 1, #861). After `COLUMNAR` is enabled on a collection
+/// that already holds row data, pre-existing chunks stay `Row` and new
+/// chunks seal `ColumnarV1`; the two coexist in the same collection and a
+/// read dispatches on this discriminant — `Row` to the entity/row reader,
+/// `ColumnarV1` to the RDCC column-block reader — with no mass rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkFormat {
+    /// Legacy row-stored chunk (`columnar_page == None`): it predates the
+    /// columnar seal, or sealed while the collection was non-columnar. Its
+    /// rows are served from the entity/row path.
+    Row,
+    /// Columnar `RDCC` chunk, format version 1 (`columnar_page == Some`).
+    /// Its rows decode from the recorded `ColumnBlock`.
+    ColumnarV1,
+}
+
 /// Metadata tracked per child chunk. Physical storage lives in
 /// `TimeSeriesChunk` keyed by `(hypertable, start_ns)`.
 #[derive(Debug, Clone)]
@@ -158,6 +175,24 @@ impl ChunkMeta {
             ttl_override_ns: None,
             columnar_page: None,
         }
+    }
+
+    /// The chunk's storage format — the read-bridge dispatch key (#861).
+    /// Derived from the migration discriminant `columnar_page`: a recorded
+    /// RDCC `ColumnBlock` location means [`ChunkFormat::ColumnarV1`], its
+    /// absence means the legacy [`ChunkFormat::Row`] form. This is the
+    /// format-version gate that lets old row chunks and new columnar chunks
+    /// coexist in one collection without a rewrite.
+    pub fn format(&self) -> ChunkFormat {
+        match self.columnar_page {
+            Some(_) => ChunkFormat::ColumnarV1,
+            None => ChunkFormat::Row,
+        }
+    }
+
+    /// True when this chunk is stored in the columnar `RDCC` form.
+    pub fn is_columnar(&self) -> bool {
+        matches!(self.format(), ChunkFormat::ColumnarV1)
     }
 
     pub fn observe(&mut self, ts_ns: u64) {
@@ -1053,6 +1088,29 @@ mod tests {
             "only in-window columnar chunk kept"
         );
         assert!(chunks.iter().all(|c| c.columnar_page.is_some()));
+    }
+
+    /// Read-bridge dispatch key (#861): `ChunkMeta::format()` classifies a
+    /// chunk purely from the `columnar_page` migration discriminant, so a
+    /// pre-existing row chunk and a newly columnar-sealed chunk in the same
+    /// registry are disambiguated by format version — the gate the read
+    /// path dispatches on.
+    #[test]
+    fn chunk_format_dispatches_on_columnar_page_discriminant() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+        // A row chunk (allocated by a write) and a columnar chunk coexist.
+        reg.route("m", 0).unwrap();
+        reg.restore_chunk(columnar_chunk("m", DAY_NS, DAY_NS));
+
+        let chunks = reg.show_chunks("m");
+        let row = chunks.iter().find(|c| c.id.start_ns == 0).unwrap();
+        let col = chunks.iter().find(|c| c.id.start_ns == DAY_NS).unwrap();
+
+        assert_eq!(row.format(), ChunkFormat::Row);
+        assert!(!row.is_columnar());
+        assert_eq!(col.format(), ChunkFormat::ColumnarV1);
+        assert!(col.is_columnar());
     }
 
     #[test]

@@ -1085,6 +1085,13 @@ pub struct PrimaryReplication {
     /// replication metric so a brief disconnect that recovers via
     /// partial resync is observable.
     partial_resync_count: std::sync::atomic::AtomicU64,
+    /// Count of pulls that forced a full re-bootstrap — the replica's
+    /// retained WAL no longer covers its requested position, so it must
+    /// discard its dataset and reload a fresh snapshot (issue #839).
+    /// This is the primary alert signal: a healthy cluster re-bootstraps
+    /// rarely, so any sustained rise means slots are being invalidated
+    /// faster than replicas can keep up.
+    full_resync_count: std::sync::atomic::AtomicU64,
 }
 
 /// How a replica's pull should be served, decided from its slot state.
@@ -1142,6 +1149,7 @@ impl PrimaryReplication {
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
             topology_epoch: std::sync::atomic::AtomicU64::new(0),
             partial_resync_count: std::sync::atomic::AtomicU64::new(0),
+            full_resync_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1573,6 +1581,8 @@ impl PrimaryReplication {
         if let Some(cause) =
             self.slot_rebootstrap_reason(id, requested_since_lsn, oldest_available_lsn)
         {
+            self.full_resync_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return ResumeMode::FullRebootstrap { cause };
         }
         let resume_lsn = self
@@ -1590,6 +1600,14 @@ impl PrimaryReplication {
     /// Surfaced in the replication metrics/status payload (issue #832).
     pub fn partial_resync_count(&self) -> u64 {
         self.partial_resync_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Number of pulls that forced a full re-bootstrap since process
+    /// start (issue #839). Surfaced as `reddb_replication_full_resync_total`
+    /// and in `/replication/status` — the primary operator alert signal.
+    pub fn full_resync_count(&self) -> u64 {
+        self.full_resync_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -2095,6 +2113,11 @@ mod tests {
             before + 1,
             "partial resync must be observable via the metric"
         );
+        assert_eq!(
+            within.full_resync_count(),
+            0,
+            "a partial resync must not bump the full-resync counter"
+        );
 
         // A slot driven past the retention cap is invalidated and must
         // re-bootstrap — and that decision must NOT count as a partial
@@ -2109,6 +2132,7 @@ mod tests {
         }
         past_cap.enforce_retention_limits(0);
         let before_full = past_cap.partial_resync_count();
+        let before_full_count = past_cap.full_resync_count();
         match past_cap.plan_replica_resume("slow", 0, past_cap.wal_buffer.oldest_lsn()) {
             ResumeMode::FullRebootstrap { cause } => {
                 assert_eq!(cause, SlotInvalidationCause::Horizon)
@@ -2119,6 +2143,11 @@ mod tests {
             past_cap.partial_resync_count(),
             before_full,
             "a full re-bootstrap must not be counted as a partial resync"
+        );
+        assert_eq!(
+            past_cap.full_resync_count(),
+            before_full_count + 1,
+            "a full re-bootstrap must bump the full-resync alert counter (issue #839)"
         );
     }
 
