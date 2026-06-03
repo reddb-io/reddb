@@ -37,6 +37,7 @@ pub mod rollback;
 pub mod scheduler;
 pub mod swap_db;
 pub mod topology_advertiser;
+pub mod witness;
 
 pub use bookmark::{BookmarkDecodeError, CausalBookmark};
 pub use commit_policy::CommitPolicy;
@@ -67,6 +68,7 @@ pub use topology_advertiser::{
     LagConfig, TopologyAdvertiser, TopologyAuthGate, DEFAULT_REPLICA_TIMEOUT_MS,
     TOPOLOGY_READ_CAPABILITY,
 };
+pub use witness::{RuntimeProfile, WitnessSupervisor};
 
 pub const DEFAULT_REPLICATION_TERM: u64 = 1;
 pub const DEFAULT_SLOT_RETENTION_MAX_LAG_LSN: u64 = 100_000;
