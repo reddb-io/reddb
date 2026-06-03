@@ -5076,6 +5076,12 @@ impl RedDBRuntime {
                                         let kind = match &err {
                                             crate::replication::logical::LogicalApplyError::Gap { .. } => "stalled_gap",
                                             crate::replication::logical::LogicalApplyError::Divergence { .. } => "divergence",
+                                            // Issue #835 — a stale-term record from a
+                                            // returning ex-primary was fenced. The
+                                            // replica stays put (no apply, no watermark
+                                            // advance) until the legitimate primary's
+                                            // current-term stream resumes.
+                                            crate::replication::logical::LogicalApplyError::StaleTermFenced { .. } => "stale_term_fenced",
                                             _ => "apply_error",
                                         };
                                         self.persist_replication_health(
@@ -5317,7 +5323,7 @@ impl RedDBRuntime {
     /// `apply_miss` kind for deletes against a missing target.
     pub fn replica_apply_error_counts(
         &self,
-    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 5] {
+    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 6] {
         self.inner.replica_apply_metrics.snapshot()
     }
 
