@@ -443,7 +443,7 @@ export function login(
 ): Promise<LoginResult>
 
 export interface ParsedUri {
-  kind: 'embedded' | 'http' | 'https' | 'red' | 'reds' | 'grpc' | 'grpcs' | 'pg'
+  kind: 'embedded' | 'http' | 'https' | 'red' | 'reds' | 'redwss' | 'grpc' | 'grpcs' | 'pg'
   host?: string
   port?: number
   path?: string

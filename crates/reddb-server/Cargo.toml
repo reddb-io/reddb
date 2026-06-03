@@ -87,14 +87,18 @@ tracing-appender = "0.2"
 # transitive graph via tonic; pinning it here makes the dep
 # explicit and survives if tonic ever drops it.
 http = "1"
-# Async HTTP edge (issue #931, PRD #930, ADR 0035) — the HTTP transport
+# Async HTTP edge (issue #931, PRD #930, ADR 0036) — the HTTP transport
 # moved off thread-per-connection onto an axum/hyper service on tokio.
 # All four crates already resolved in Cargo.lock via the tonic/tower
 # graph, so pinning them here only makes the dependency explicit. The
 # sync disk-backed engine is reached from the async edge via
 # `spawn_blocking`, exactly as the RedWire session bridges
 # async-transport ↔ sync-engine.
-axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"] }
+# `ws` adds the binary-WebSocket upgrade extractor used by the
+# RedWire-over-WSS browser endpoint (issue #935, ADR 0036). It pulls
+# tokio-tungstenite, which terminates the WS protocol; the binary data
+# channel is bridged into the transport-agnostic RedWire session (#932).
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 bytes = "1"

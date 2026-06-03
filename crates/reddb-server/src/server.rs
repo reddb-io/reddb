@@ -106,6 +106,7 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
 }
 
 mod axum_edge;
+mod ws_edge;
 pub mod handlers_admin;
 mod handlers_ai;
 mod handlers_ai_model_cache;
@@ -197,6 +198,14 @@ pub struct ServerOptions {
     /// admin / scrape ports (PLAN.md Phase 6.2).
     pub surface: ServerSurface,
     pub transport_readiness: crate::service_cli::TransportReadiness,
+    /// Allowed `Origin` values for the RedWire-over-WSS browser endpoint
+    /// (issue #935, ADR 0036). WebSocket is not covered by CORS, so the
+    /// upgrade is gated on an explicit allowlist to block Cross-Site
+    /// WebSocket Hijacking. **Default-deny:** empty means the `/redwire`
+    /// route is not mounted at all — operators opt in by configuring at
+    /// least one origin. Matched exactly (scheme+host+port), e.g.
+    /// `https://app.example.com`.
+    pub websocket_allowed_origins: Vec<String>,
 }
 
 pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -211,6 +220,7 @@ impl Default for ServerOptions {
             max_scan_limit: 1_000,
             surface: ServerSurface::Public,
             transport_readiness: crate::service_cli::TransportReadiness::default(),
+            websocket_allowed_origins: Vec::new(),
         }
     }
 }
@@ -515,6 +525,20 @@ impl RedDBServer {
     pub fn with_replication(mut self, state: Arc<ServerReplicationState>) -> Self {
         self.replication = Some(state);
         self
+    }
+
+    /// Set the `Origin` allowlist that enables the RedWire-over-WSS
+    /// browser endpoint (issue #935, ADR 0036). A non-empty list mounts
+    /// the `/redwire` upgrade route on the TLS edge; an empty list leaves
+    /// it unmounted (default-deny).
+    pub fn with_websocket_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.options.websocket_allowed_origins = origins;
+        self
+    }
+
+    /// The configured RedWire-over-WSS `Origin` allowlist (issue #935).
+    pub(crate) fn websocket_allowed_origins(&self) -> &[String] {
+        &self.options.websocket_allowed_origins
     }
 
     pub fn runtime(&self) -> &RedDBRuntime {
