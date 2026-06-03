@@ -2888,7 +2888,8 @@ fn build_http_limits_cli_input(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<reddb::server::HttpLimitsCliInput, String> {
     use reddb::server::http_limits::{
-        validate_handler_timeout_ms, validate_max_handlers, validate_retry_after_secs,
+        validate_handler_timeout_ms, validate_max_conns_per_principal, validate_max_handlers,
+        validate_retry_after_secs,
     };
 
     fn parse_usize_validated<V>(
@@ -2962,6 +2963,17 @@ fn build_http_limits_cli_input(
         validate_retry_after_secs,
     )?;
 
+    let max_conns_per_principal_flag = parse_usize_validated(
+        "--http-max-conns-per-principal",
+        flag_string(flags, "http-max-conns-per-principal").filter(|v| !v.is_empty()),
+        validate_max_conns_per_principal,
+    )?;
+    let max_conns_per_principal_env = parse_usize_validated(
+        "REDDB_HTTP_MAX_CONNS_PER_PRINCIPAL",
+        env_string("REDDB_HTTP_MAX_CONNS_PER_PRINCIPAL"),
+        validate_max_conns_per_principal,
+    )?;
+
     Ok(reddb::server::HttpLimitsCliInput {
         max_handlers_flag,
         max_handlers_env,
@@ -2969,6 +2981,8 @@ fn build_http_limits_cli_input(
         handler_timeout_ms_env,
         retry_after_secs_flag,
         retry_after_secs_env,
+        max_conns_per_principal_flag,
+        max_conns_per_principal_env,
     })
 }
 
@@ -5063,6 +5077,19 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         assert_eq!(limits.max_handlers_env, Some(99));
         assert_eq!(limits.handler_timeout_ms_env, Some(7_000));
         assert_eq!(limits.retry_after_secs_env, Some(9));
+    }
+
+    #[test]
+    fn build_http_limits_reads_max_conns_per_principal_flag_and_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[("REDDB_HTTP_MAX_CONNS_PER_PRINCIPAL", "12")]);
+        let flags = HashMap::from([(
+            "http-max-conns-per-principal".to_string(),
+            str_flag("4"),
+        )]);
+        let limits = build_http_limits_cli_input(&flags).unwrap();
+        assert_eq!(limits.max_conns_per_principal_flag, Some(4));
+        assert_eq!(limits.max_conns_per_principal_env, Some(12));
     }
 
     #[test]

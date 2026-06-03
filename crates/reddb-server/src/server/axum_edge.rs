@@ -39,10 +39,25 @@ use hyper_util::service::TowerToHyperService;
 
 use super::http_connection_limiter::HttpConnectionPermit;
 use super::http_handler_metrics::{HttpRejectReason, HttpTransport};
+use super::per_principal_conns::PrincipalConnPermit;
+use super::routing::{
+    is_health_probe_request, principal_connection_refusal_response, principal_for,
+};
 use super::transport::{
     find_header_end, json_error, parse_query_string, HttpRequest, HttpResponse, CORS_HEADER_PAIRS,
 };
 use super::RedDBServer;
+
+/// Both admission permits a request holds for its lifetime: the global
+/// in-flight limiter slot (async backpressure — bounds total in-flight
+/// work without a thread cap) and the per-principal in-flight slot
+/// (fairness — one caller cannot monopolise the global budget). Bundled so
+/// they move into the `spawn_blocking` closure together and release in
+/// lock-step when the handler returns (issue #934).
+struct EdgeAdmission {
+    _global: HttpConnectionPermit,
+    _principal: PrincipalConnPermit,
+}
 
 /// Bounded buffer between the sync streaming producer (running on the
 /// `spawn_blocking` pool) and the async hyper body. Small enough to apply
@@ -209,10 +224,35 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
-        // Admission control is now per in-flight request, not per
-        // connection: an idle keep-alive connection holds no slot, so the
-        // cap no longer bounds connection count (issue #931 / AC #4).
-        let permit = match self.http_limiter.try_acquire() {
+        // Per-principal fairness cap (issue #934). Checked *before* the
+        // global slot so an over-cap caller is shed without ever consuming
+        // global admission — that is the point of the fairness bound.
+        // Health probes are exempt: a refused `/health/*` reads as the
+        // instance being down to a load balancer. A cap of `0` (the
+        // default) disables enforcement and the acquire is infallible.
+        let principal = principal_for(&request.headers);
+        let principal_cap = if is_health_probe_request(&request.method, &request.path) {
+            0
+        } else {
+            self.max_conns_per_principal
+        };
+        let principal_permit = match self.principal_conns.try_acquire(&principal, principal_cap) {
+            Ok(permit) => permit,
+            Err(err) => {
+                self.http_metrics
+                    .record_reject(transport, HttpRejectReason::PrincipalCapExhausted);
+                return buffered_response_to_axum(principal_connection_refusal_response(
+                    &err,
+                    self.retry_after_secs,
+                ));
+            }
+        };
+
+        // Global admission is per in-flight request, not per connection:
+        // an idle keep-alive connection holds no slot, so the cap no
+        // longer bounds connection count (issue #931 / AC #4). This is the
+        // async-backpressure bound that replaces the retired thread cap.
+        let global_permit = match self.http_limiter.try_acquire() {
             Some(permit) => permit,
             None => {
                 self.http_metrics
@@ -221,10 +261,15 @@ impl RedDBServer {
             }
         };
 
+        let admission = EdgeAdmission {
+            _global: global_permit,
+            _principal: principal_permit,
+        };
+
         let response = if self.is_streaming_request(&request) {
-            self.serve_streaming_request(request, permit).await
+            self.serve_streaming_request(request, admission).await
         } else {
-            self.serve_buffered_request(request, permit, transport)
+            self.serve_buffered_request(request, admission, transport)
                 .await
         };
         self.http_metrics
@@ -237,15 +282,25 @@ impl RedDBServer {
     async fn serve_buffered_request(
         &self,
         request: HttpRequest,
-        permit: HttpConnectionPermit,
+        admission: EdgeAdmission,
         transport: HttpTransport,
     ) -> Response {
         let server = self.clone();
         let join = tokio::task::spawn_blocking(move || {
-            // Permit is held for the duration of the engine call and
-            // released when this closure returns.
-            let _permit = permit;
-            server.route(request)
+            // Both admission permits are held for the duration of the
+            // engine call and released together when this closure returns.
+            let _admission = admission;
+            let response = server.route(request);
+            // Test-only injected slow downstream (doc-hidden hook). In
+            // production this is 0, so it is a single relaxed atomic load
+            // on the hot path. Sleeping here — while the admission permits
+            // are still held — lets a test deterministically hold a
+            // per-principal slot to exercise the cap (issue #934).
+            let inject_ms = server.test_slow_inject_ms();
+            if inject_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(inject_ms));
+            }
+            response
         });
         match tokio::time::timeout(self.handler_timeout, join).await {
             Ok(Ok(response)) => buffered_response_to_axum(response),
@@ -268,12 +323,12 @@ impl RedDBServer {
     async fn serve_streaming_request(
         &self,
         request: HttpRequest,
-        permit: HttpConnectionPermit,
+        admission: EdgeAdmission,
     ) -> Response {
         let (head_tx, head_rx) = oneshot::channel::<EdgeStreamResponse>();
         let server = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _admission = admission;
             let mut sink = StreamSink::new(head_tx);
             // Errors here are connection-level (client gone / broken
             // pipe); the sync handler already wrote what it could.

@@ -136,6 +136,7 @@ pub mod http_handler_metrics;
 pub mod http_limits;
 pub mod ingest_pipeline;
 pub mod output_stream;
+pub mod per_principal_conns;
 mod patch_support;
 mod request_body;
 mod request_context;
@@ -158,6 +159,7 @@ use self::http_handler_metrics::{HttpHandlerMetrics, HttpRejectReason, HttpTrans
 pub use self::http_limits::{
     HttpLimitsCliInput, HttpLimitsResolved, DEFAULT_HANDLER_TIMEOUT_MS, DEFAULT_RETRY_AFTER_SECS,
 };
+use self::per_principal_conns::PerPrincipalConnLimiter;
 use self::patch_support::*;
 use self::request_body::*;
 use self::routing::*;
@@ -260,6 +262,18 @@ pub struct RedDBServer {
     /// capacity-reject 503 path (issue #574 slice 5). Read on the reject
     /// path in `axum_edge`.
     retry_after_secs: u64,
+    /// Issue #934 / PRD #930 — per-principal concurrent in-flight-request
+    /// ceiling enforced at the async edge alongside the global limiter.
+    /// The global limiter is the backpressure bound (total in-flight work
+    /// without a thread cap); this registry is the fairness bound (one
+    /// caller cannot monopolise the global budget). Shared via `Arc` so
+    /// cloned server handles enforce against one set of counters.
+    principal_conns: Arc<PerPrincipalConnLimiter>,
+    /// Per-principal in-flight cap consulted at acquire time. `0` disables
+    /// enforcement (the default — all anonymous callers share `anon`, so a
+    /// finite default would throttle aggregate anonymous traffic). Set via
+    /// [`Self::with_http_limits`] from `red.http.max_conns_per_principal`.
+    max_conns_per_principal: usize,
     /// Issue #761 / S2 — process-wide output-stream capacity registry.
     /// Shared via `Arc` so cloned server handles (e.g.
     /// `serve_in_background`) all enforce against one set of counters.
@@ -383,6 +397,8 @@ impl RedDBServer {
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
             http_metrics: HttpHandlerMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
+            principal_conns: PerPrincipalConnLimiter::new(),
+            max_conns_per_principal: 0,
             stream_capacity: output_stream::StreamCapacityRegistry::new(),
             lease_registry: output_stream::LeaseRegistry::new(),
             cursor_registry: output_stream::CursorRegistry::new(),
@@ -427,7 +443,27 @@ impl RedDBServer {
         self.http_limiter = HttpConnectionLimiter::new(limits.max_handlers);
         self.handler_timeout = Duration::from_millis(limits.handler_timeout_ms);
         self.retry_after_secs = limits.retry_after_secs;
+        self.max_conns_per_principal = limits.max_conns_per_principal;
         self
+    }
+
+    /// Visible for tests. Override the per-principal in-flight cap (issue
+    /// #934) directly without going through the full limits resolver.
+    /// `0` disables enforcement.
+    #[doc(hidden)]
+    pub fn with_max_conns_per_principal(mut self, cap: usize) -> Self {
+        self.max_conns_per_principal = cap;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn max_conns_per_principal(&self) -> usize {
+        self.max_conns_per_principal
+    }
+
+    #[doc(hidden)]
+    pub fn principal_conns(&self) -> &Arc<PerPrincipalConnLimiter> {
+        &self.principal_conns
     }
 
     #[doc(hidden)]
@@ -471,6 +507,14 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn set_test_slow_inject_ms(&self, ms: u64) {
         self.slow_inject_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Current value of the doc-hidden slow-downstream test hook. Read on
+    /// the async edge's buffered path (see `axum_edge`) so a test can hold
+    /// a handler — and its admission permits — for a deterministic window.
+    #[doc(hidden)]
+    pub(crate) fn test_slow_inject_ms(&self) -> u64 {
+        self.slow_inject_ms.load(Ordering::Relaxed)
     }
 
     /// Attach an `AuthStore` for HTTP-layer authentication.

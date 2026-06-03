@@ -392,6 +392,11 @@ fn server_flags() -> Vec<FlagSchema> {
              red_config: red.http.retry_after_secs; clamped to [1, 30])",
             )
             .with_default("5"),
+        FlagSchema::new("http-max-conns-per-principal").with_description(
+            "Max concurrent in-flight HTTP requests per principal; over-cap requests get a \
+             structured 429 refusal (env: REDDB_HTTP_MAX_CONNS_PER_PRINCIPAL; \
+             red_config: red.http.max_conns_per_principal; default: 0 = disabled)",
+        ),
     ]
 }
 
@@ -788,6 +793,8 @@ mod tests {
         assert!(flag_names.contains(&"http-max-handlers"));
         assert!(flag_names.contains(&"http-handler-timeout-ms"));
         assert!(flag_names.contains(&"http-retry-after-secs"));
+        // Issue #934 — per-principal in-flight cap.
+        assert!(flag_names.contains(&"http-max-conns-per-principal"));
     }
 
     #[test]
@@ -796,7 +803,9 @@ mod tests {
         assert!(help.contains("--http-max-handlers"));
         assert!(help.contains("--http-handler-timeout-ms"));
         assert!(help.contains("--http-retry-after-secs"));
+        assert!(help.contains("--http-max-conns-per-principal"));
         assert!(help.contains("REDDB_HTTP_MAX_HANDLERS"));
+        assert!(help.contains("REDDB_HTTP_MAX_CONNS_PER_PRINCIPAL"));
     }
 
     #[test]

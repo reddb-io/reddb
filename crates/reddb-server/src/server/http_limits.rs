@@ -34,12 +34,28 @@ pub fn default_max_handlers() -> usize {
 pub const DEFAULT_HANDLER_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 
+/// Built-in default for the per-principal in-flight cap (issue #934).
+/// `0` disables enforcement: all unauthenticated callers share the single
+/// `anon` principal, so a finite default would throttle aggregate
+/// anonymous traffic — mirrors the QPS quota, which also defaults off.
+/// Operators opt in by setting `red.http.max_conns_per_principal`.
+pub const DEFAULT_MAX_CONNS_PER_PRINCIPAL: usize = 0;
+
 /// Validate a `max_handlers` candidate from any source. Returns the
 /// value unchanged on success.
 pub fn validate_max_handlers(value: usize) -> Result<usize, String> {
     if value == 0 {
         return Err("http max_handlers must be >= 1".to_string());
     }
+    Ok(value)
+}
+
+/// Validate a `max_conns_per_principal` candidate (issue #934). Every
+/// `usize` is accepted: `0` is the sentinel that disables enforcement,
+/// any positive value is a real cap. The validator exists so the parse
+/// path is symmetric with the other knobs (a non-numeric red_config value
+/// is still rejected by the `parse::<usize>()` upstream).
+pub fn validate_max_conns_per_principal(value: usize) -> Result<usize, String> {
     Ok(value)
 }
 
@@ -73,6 +89,8 @@ pub struct HttpLimitsCliInput {
     pub handler_timeout_ms_env: Option<u64>,
     pub retry_after_secs_flag: Option<u64>,
     pub retry_after_secs_env: Option<u64>,
+    pub max_conns_per_principal_flag: Option<usize>,
+    pub max_conns_per_principal_env: Option<usize>,
 }
 
 /// Resolved values after applying the full precedence chain. Stamped
@@ -82,6 +100,9 @@ pub struct HttpLimitsResolved {
     pub max_handlers: usize,
     pub handler_timeout_ms: u64,
     pub retry_after_secs: u64,
+    /// Issue #934 — per-principal concurrent in-flight-request ceiling.
+    /// `0` disables enforcement.
+    pub max_conns_per_principal: usize,
 }
 
 impl HttpLimitsResolved {
@@ -90,6 +111,7 @@ impl HttpLimitsResolved {
             max_handlers: default_max_handlers(),
             handler_timeout_ms: DEFAULT_HANDLER_TIMEOUT_MS,
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
+            max_conns_per_principal: DEFAULT_MAX_CONNS_PER_PRINCIPAL,
         }
     }
 }
@@ -136,10 +158,21 @@ where
         .or(input.retry_after_secs_env)
         .unwrap_or(defaults.retry_after_secs);
 
+    let max_conns_per_principal = input
+        .max_conns_per_principal_flag
+        .or_else(|| {
+            config_lookup("red.http.max_conns_per_principal")
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .and_then(|v| validate_max_conns_per_principal(v).ok())
+        })
+        .or(input.max_conns_per_principal_env)
+        .unwrap_or(defaults.max_conns_per_principal);
+
     HttpLimitsResolved {
         max_handlers,
         handler_timeout_ms,
         retry_after_secs,
+        max_conns_per_principal,
     }
 }
 
@@ -272,5 +305,83 @@ mod tests {
     fn default_max_handlers_in_bounds() {
         let cap = default_max_handlers();
         assert!((8..=256).contains(&cap));
+    }
+
+    #[test]
+    fn max_conns_per_principal_defaults_to_disabled() {
+        let resolved = resolve_http_limits(&HttpLimitsCliInput::default(), no_config());
+        assert_eq!(resolved.max_conns_per_principal, 0);
+        assert_eq!(
+            HttpLimitsResolved::builtin_defaults().max_conns_per_principal,
+            DEFAULT_MAX_CONNS_PER_PRINCIPAL
+        );
+    }
+
+    #[test]
+    fn max_conns_per_principal_precedence_flag_over_config_over_env() {
+        let input = HttpLimitsCliInput {
+            max_conns_per_principal_flag: Some(4),
+            max_conns_per_principal_env: Some(9),
+            ..Default::default()
+        };
+        let lookup = map_lookup(HashMap::from([("red.http.max_conns_per_principal", "7")]));
+        // Flag wins.
+        assert_eq!(
+            resolve_http_limits(&input, lookup).max_conns_per_principal,
+            4
+        );
+
+        // Without a flag, red_config wins over env.
+        let input = HttpLimitsCliInput {
+            max_conns_per_principal_env: Some(9),
+            ..Default::default()
+        };
+        let lookup = map_lookup(HashMap::from([("red.http.max_conns_per_principal", "7")]));
+        assert_eq!(
+            resolve_http_limits(&input, lookup).max_conns_per_principal,
+            7
+        );
+
+        // Env wins over the built-in default.
+        let input = HttpLimitsCliInput {
+            max_conns_per_principal_env: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_http_limits(&input, no_config()).max_conns_per_principal,
+            9
+        );
+    }
+
+    #[test]
+    fn max_conns_per_principal_zero_in_config_is_honored_as_disabled() {
+        // Unlike max_handlers, 0 is a valid value here (it disables the
+        // cap), so a `red_config` 0 must take effect rather than fall
+        // through to a lower layer.
+        let lookup = map_lookup(HashMap::from([("red.http.max_conns_per_principal", "0")]));
+        let input = HttpLimitsCliInput {
+            max_conns_per_principal_env: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_http_limits(&input, lookup).max_conns_per_principal,
+            0
+        );
+    }
+
+    #[test]
+    fn non_numeric_max_conns_per_principal_config_falls_through() {
+        let lookup = map_lookup(HashMap::from([(
+            "red.http.max_conns_per_principal",
+            "not-a-number",
+        )]));
+        let input = HttpLimitsCliInput {
+            max_conns_per_principal_env: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_http_limits(&input, lookup).max_conns_per_principal,
+            5
+        );
     }
 }

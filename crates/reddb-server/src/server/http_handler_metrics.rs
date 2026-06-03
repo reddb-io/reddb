@@ -54,13 +54,22 @@ impl HttpTransport {
 pub enum HttpRejectReason {
     CapExhausted,
     HandlerTimeout,
+    /// Issue #934 — per-principal in-flight cap fired; the request was
+    /// shed with a structured 429 so one caller cannot monopolise the
+    /// global admission budget.
+    PrincipalCapExhausted,
 }
+
+/// Number of distinct [`HttpRejectReason`] variants — the width of the
+/// per-transport reject counter array.
+pub const REJECT_REASONS: usize = 3;
 
 impl HttpRejectReason {
     fn label(self) -> &'static str {
         match self {
             HttpRejectReason::CapExhausted => "cap_exhausted",
             HttpRejectReason::HandlerTimeout => "handler_timeout",
+            HttpRejectReason::PrincipalCapExhausted => "principal_cap_exhausted",
         }
     }
 
@@ -68,8 +77,17 @@ impl HttpRejectReason {
         match self {
             HttpRejectReason::CapExhausted => 0,
             HttpRejectReason::HandlerTimeout => 1,
+            HttpRejectReason::PrincipalCapExhausted => 2,
         }
     }
+
+    /// All variants, in `index()` order — the canonical iteration set for
+    /// rendering every reject series.
+    const ALL: [HttpRejectReason; REJECT_REASONS] = [
+        HttpRejectReason::CapExhausted,
+        HttpRejectReason::HandlerTimeout,
+        HttpRejectReason::PrincipalCapExhausted,
+    ];
 }
 
 /// Prometheus client default histogram buckets, in seconds. Aligned
@@ -125,7 +143,7 @@ impl TransportHistogram {
 
 #[derive(Debug)]
 struct Inner {
-    rejected: [[AtomicU64; 2]; 2],
+    rejected: [[AtomicU64; REJECT_REASONS]; 2],
     duration: [TransportHistogram; 2],
 }
 
@@ -139,8 +157,8 @@ impl HttpHandlerMetrics {
         Self {
             inner: Arc::new(Inner {
                 rejected: [
-                    [AtomicU64::new(0), AtomicU64::new(0)],
-                    [AtomicU64::new(0), AtomicU64::new(0)],
+                    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+                    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
                 ],
                 duration: [TransportHistogram::new(), TransportHistogram::new()],
             }),
@@ -214,10 +232,7 @@ impl HttpHandlerMetrics {
         );
         let _ = writeln!(body, "# TYPE http_handler_rejected_total counter");
         for transport in [HttpTransport::Http, HttpTransport::Https] {
-            for reason in [
-                HttpRejectReason::CapExhausted,
-                HttpRejectReason::HandlerTimeout,
-            ] {
+            for reason in HttpRejectReason::ALL {
                 let _ = writeln!(
                     body,
                     "http_handler_rejected_total{{transport=\"{}\",reason=\"{}\"}} {}",
@@ -356,19 +371,39 @@ mod tests {
     }
 
     #[test]
-    fn render_emits_all_four_rejection_labels() {
+    fn render_emits_every_rejection_label() {
         let m = HttpHandlerMetrics::new();
         let limiter = HttpConnectionLimiter::new(1);
         let mut body = String::new();
         m.render(&mut body, &limiter);
         for transport in ["http", "https"] {
-            for reason in ["cap_exhausted", "handler_timeout"] {
+            for reason in ["cap_exhausted", "handler_timeout", "principal_cap_exhausted"] {
                 let expected = format!(
                     "http_handler_rejected_total{{transport=\"{transport}\",reason=\"{reason}\"}} 0"
                 );
                 assert!(body.contains(&expected), "missing line: {expected}");
             }
         }
+    }
+
+    #[test]
+    fn principal_cap_reject_counter_is_isolated() {
+        let m = HttpHandlerMetrics::new();
+        m.record_reject(HttpTransport::Http, HttpRejectReason::PrincipalCapExhausted);
+        m.record_reject(HttpTransport::Http, HttpRejectReason::PrincipalCapExhausted);
+        assert_eq!(
+            m.rejected_count(HttpTransport::Http, HttpRejectReason::PrincipalCapExhausted),
+            2
+        );
+        // Other reasons / transports stay at zero.
+        assert_eq!(
+            m.rejected_count(HttpTransport::Http, HttpRejectReason::CapExhausted),
+            0
+        );
+        assert_eq!(
+            m.rejected_count(HttpTransport::Https, HttpRejectReason::PrincipalCapExhausted),
+            0
+        );
     }
 
     #[test]

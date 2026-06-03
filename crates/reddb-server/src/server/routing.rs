@@ -327,10 +327,7 @@ impl RedDBServer {
 
         // PLAN.md Phase 4.4 — per-caller QPS quota. Health probes
         // skip the gate so probes never trip 429 on a hot instance.
-        let is_health_probe = matches!(
-            (method.as_str(), path.as_str()),
-            ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
-        );
+        let is_health_probe = is_health_probe_request(&method, &path);
         if !is_health_probe {
             let principal = principal_for(&headers);
             match self.runtime.quota_bucket().consume(&principal) {
@@ -4737,6 +4734,78 @@ pub(crate) fn principal_for(headers: &BTreeMap<String, String>) -> String {
         }
     }
     "anon".to_string()
+}
+
+/// Whether `(method, path)` is one of the liveness/readiness probes that
+/// bypass the abuse-defense gates (per-caller QPS quota and the
+/// per-principal in-flight cap). A probe must never be throttled or shed
+/// — load balancers read a 429/503 on `/health/*` as the instance being
+/// down. Shared by the synchronous router and the async edge so the
+/// exempt set cannot drift between them.
+pub(crate) fn is_health_probe_request(method: &str, path: &str) -> bool {
+    matches!(
+        (method, path),
+        ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
+    )
+}
+
+/// Issue #934 / PRD #930 — build the structured 429 refusal returned when
+/// the async edge cannot admit a request because the principal is already
+/// at its per-principal in-flight cap. Mirrors the shape of
+/// [`stream_capacity_refusal_response`] so a client can branch on the
+/// `error.code` field and read `limit` / `current` for precise backoff,
+/// regardless of which abuse-defense surface refused it.
+///
+/// Wire shape:
+///   `Retry-After: <retry_after_secs>` header
+///   `{"ok": false, "error": {"code": "principal_connection_quota_exhausted",
+///       "message": "...", "principal": "...", "limit": N, "current": M,
+///       "retry_after_secs": S}}`
+pub(crate) fn principal_connection_refusal_response(
+    err: &crate::server::per_principal_conns::PrincipalCapExceeded,
+    retry_after_secs: u64,
+) -> HttpResponse {
+    use crate::json::{Map, Value as JsonValue};
+    use crate::server::per_principal_conns::PrincipalCapExceeded;
+
+    let message = format!(
+        "principal {} connection quota exhausted (limit {}, current {})",
+        err.principal, err.limit, err.current
+    );
+
+    let mut error_obj = Map::new();
+    error_obj.insert(
+        "code".to_string(),
+        JsonValue::String(PrincipalCapExceeded::CODE.to_string()),
+    );
+    error_obj.insert(
+        "message".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&message),
+    );
+    // `principal` can embed a header-derived `replica:<id>`; route it
+    // through the JSON-boundary guard so it cannot terminate the field.
+    error_obj.insert(
+        "principal".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&err.principal),
+    );
+    error_obj.insert("limit".to_string(), JsonValue::Number(err.limit as f64));
+    error_obj.insert("current".to_string(), JsonValue::Number(err.current as f64));
+    error_obj.insert(
+        "retry_after_secs".to_string(),
+        JsonValue::Number(retry_after_secs as f64),
+    );
+
+    let mut root = Map::new();
+    root.insert("ok".to_string(), JsonValue::Bool(false));
+    root.insert("error".to_string(), JsonValue::Object(error_obj));
+
+    let mut response = json_response(429, JsonValue::Object(root));
+    if let Ok(retry_after) = crate::server::header_escape_guard::HeaderEscapeGuard::header_value(
+        &retry_after_secs.to_string(),
+    ) {
+        response = response.with_header("Retry-After", retry_after);
+    }
+    response
 }
 
 /// Issue #761 / S2 — build the structured 429 refusal handed back when
