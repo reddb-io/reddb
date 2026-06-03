@@ -50,6 +50,40 @@ fn rank_of(rt: &RedDBRuntime, sql: &str) -> Option<u64> {
         })
 }
 
+/// An `APPROX RANK OF …` row, or `None` when the read returned no row.
+struct ApproxRow {
+    rank: u64,
+    percentile: f64,
+    approximate: bool,
+}
+
+fn approx_rank_of(rt: &RedDBRuntime, sql: &str) -> Option<ApproxRow> {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|e| panic!("query failed: {sql}\n  -> {e}"));
+    let rec = result.result.records.first()?;
+    let rank = match rec.get("rank") {
+        Some(Value::UnsignedInteger(n)) => *n,
+        Some(Value::Integer(n)) => *n as u64,
+        other => panic!("rank missing/typed wrong: {other:?}"),
+    };
+    let percentile = match rec.get("percentile") {
+        Some(Value::Float(f)) => *f,
+        Some(Value::Integer(n)) => *n as f64,
+        Some(Value::UnsignedInteger(n)) => *n as f64,
+        other => panic!("percentile missing/typed wrong: {other:?}"),
+    };
+    let approximate = match rec.get("approximate") {
+        Some(Value::Boolean(b)) => *b,
+        other => panic!("approximate missing/typed wrong: {other:?}"),
+    };
+    Some(ApproxRow {
+        rank,
+        percentile,
+        approximate,
+    })
+}
+
 /// Entity id (`rid`) of the row whose `name` column matches.
 fn rid_of(rt: &RedDBRuntime, table: &str, name: &str) -> u64 {
     let result = rt
@@ -305,6 +339,125 @@ fn rank_reads_honor_tenant_rls() {
         rank_of(&rt, &format!("WITHIN TENANT 'globex' RANK OF {alice} IN r")),
         None,
         "a row hidden by RLS has no rank for that tenant"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Issue #923 — approximate tail: percentile/rank for entries below the
+// exact top-K head, served from a per-(collection, score column) sketch.
+// ══════════════════════════════════════════════════════════════════════
+
+/// Seed `n` players with score == their index (1..=n), a known uniform
+/// distribution the error band can be checked against.
+fn seed_uniform(rt: &RedDBRuntime, n: u64) {
+    exec(rt, "CREATE TABLE players (name TEXT, score INT)");
+    for v in 1..=n {
+        exec(
+            rt,
+            &format!("INSERT INTO players (name, score) VALUES ('p{v}', {v})"),
+        );
+    }
+}
+
+// ── #923 criteria 1 & 2: tail entry gets an approximate, labeled rank ──
+
+#[test]
+fn tail_entry_below_head_gets_a_labeled_approximate_rank() {
+    let rt = runtime();
+    seed_uniform(&rt, 100);
+    // Exact head of just 5: everything below rank 5 is the approximate tail.
+    exec(&rt, "CREATE RANKING r ON players (score DESC) TOP 5");
+
+    // p50 (score 50) ranks 51 exactly (50 higher scores) — well into the
+    // tail. The exact surface serves no rank for it…
+    let p50 = rid_of(&rt, "players", "p50");
+    assert_eq!(
+        rank_of(&rt, &format!("RANK OF {p50} IN r")),
+        None,
+        "an entry below the top-K head has no exact rank"
+    );
+
+    // …but the approximate surface does, explicitly labeled approximate.
+    let approx = approx_rank_of(&rt, &format!("APPROX RANK OF {p50} IN r"))
+        .expect("approximate tail rank is served");
+    assert!(
+        approx.approximate,
+        "tail result must be labeled approximate, not presented as exact"
+    );
+    assert!(
+        approx.rank >= 49 && approx.rank <= 53,
+        "approx rank {} should sit near the exact 51",
+        approx.rank
+    );
+    // Percentile: ~half the field ranks at or below p50.
+    assert!(
+        (40.0..=60.0).contains(&approx.percentile),
+        "percentile {} should sit near the middle",
+        approx.percentile
+    );
+
+    // A non-existent / invisible row yields no approximate row either.
+    assert!(approx_rank_of(&rt, "APPROX RANK OF 999999 IN r").is_none());
+}
+
+// ── #923 criterion 3: estimate within the documented error band ───────
+
+#[test]
+fn approx_rank_stays_within_documented_error_band() {
+    let rt = runtime();
+    let n = 500u64;
+    seed_uniform(&rt, n);
+    exec(&rt, "CREATE RANKING r ON players (score DESC) TOP 10");
+
+    // The sketch uses 256 equi-width buckets; the documented bound is
+    // |approx − exact| ≤ max bucket population, which for this spread
+    // distribution is ≈ total/256. Allow a small slack for rounding.
+    let band = (n / 256) + 3;
+    for v in (20..=n).step_by(37) {
+        let exact = n - v + 1; // descending: v higher scores beat score v
+        let id = rid_of(&rt, "players", &format!("p{v}"));
+        let approx = approx_rank_of(&rt, &format!("APPROX RANK OF {id} IN r"))
+            .expect("approx rank")
+            .rank;
+        let delta = exact.abs_diff(approx);
+        assert!(
+            delta <= band,
+            "score {v}: approx {approx} vs exact {exact} exceeds band {band}"
+        );
+    }
+}
+
+// ── #923 criterion 4: sketch is per-(table,column) & tracks score changes ──
+
+#[test]
+fn approx_rank_tracks_score_changes() {
+    let rt = runtime();
+    seed_uniform(&rt, 100);
+    exec(&rt, "CREATE RANKING r ON players (score DESC) TOP 5");
+
+    let p50 = rid_of(&rt, "players", "p50");
+    let before = approx_rank_of(&rt, &format!("APPROX RANK OF {p50} IN r"))
+        .expect("approx rank before")
+        .rank;
+    assert!(
+        (49..=53).contains(&before),
+        "baseline approx rank {before} near 51"
+    );
+
+    // Insert 100 new players that all outscore p50. The per-(table,column)
+    // sketch must reflect the new scores: p50 drops far down the board.
+    for k in 1..=100 {
+        exec(
+            &rt,
+            &format!("INSERT INTO players (name, score) VALUES ('hi{k}', 1000)"),
+        );
+    }
+    let after = approx_rank_of(&rt, &format!("APPROX RANK OF {p50} IN r"))
+        .expect("approx rank after")
+        .rank;
+    assert!(
+        after >= before + 80,
+        "after adding 100 higher scores p50 must drop sharply: {before} -> {after}"
     );
 }
 
