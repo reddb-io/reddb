@@ -50,3 +50,10 @@ perf.data.old
 *.pprof
 .red/tmp/
 .red/state/
+
+# Test/runtime DB artifacts — never commit, backstop against test leaks (see PRD test-hygiene)
+*.rdb
+*.rdbx
+*.rdb-uwal
+*.wal
+**/wal/
