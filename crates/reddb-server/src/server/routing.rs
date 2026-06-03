@@ -355,6 +355,10 @@ impl RedDBServer {
             // Auth endpoints
             ("POST", "/auth/bootstrap") => self.handle_auth_bootstrap(body),
             ("POST", "/auth/login") => self.handle_auth_login(body),
+            // Browser credential layer — hybrid token (issue #936).
+            ("POST", "/auth/browser/login") => self.handle_browser_login(body),
+            ("POST", "/auth/browser/refresh") => self.handle_browser_refresh(&headers),
+            ("POST", "/auth/browser/logout") => self.handle_browser_logout(),
             ("POST", "/v1/_admin/system-users") => self.handle_admin_create_system_user(body),
             ("POST", "/auth/users") => self.handle_auth_create_user(&headers, body, None),
             ("GET", "/auth/users") => self.handle_auth_list_users(&headers, &query),
@@ -2028,6 +2032,14 @@ impl RedDBServer {
                 | ("GET", "/ready/serverless/repair")
                 | ("POST", "/auth/login")
                 | ("POST", "/auth/bootstrap")
+                // Browser credential layer (issue #936): login takes a
+                // password, refresh/logout authenticate via the HttpOnly
+                // refresh cookie — none of them carry a bearer token, so
+                // they must bypass the bearer gate (they enforce their
+                // own credentials inside the handler).
+                | ("POST", "/auth/browser/login")
+                | ("POST", "/auth/browser/refresh")
+                | ("POST", "/auth/browser/logout")
                 // #752 — feature/capability discovery. Both levels are
                 // unauthenticated: the UI must be able to discover what
                 // the server offers (and what an *anonymous* caller may

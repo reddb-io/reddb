@@ -79,9 +79,10 @@ impl WsRejection {
                 StatusCode::FORBIDDEN,
                 "redwire websocket upgrade requires an Origin header",
             ),
-            WsRejection::OriginRejected => {
-                (StatusCode::FORBIDDEN, "origin not allowed for redwire websocket")
-            }
+            WsRejection::OriginRejected => (
+                StatusCode::FORBIDDEN,
+                "origin not allowed for redwire websocket",
+            ),
         }
     }
 }
@@ -122,9 +123,11 @@ pub(super) async fn redwire_ws_upgrade(
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
 
-    if let Err(rejection) =
-        ws_upgrade_decision(state.transport, origin, state.server.websocket_allowed_origins())
-    {
+    if let Err(rejection) = ws_upgrade_decision(
+        state.transport,
+        origin,
+        state.server.websocket_allowed_origins(),
+    ) {
         return rejection.into_response();
     }
 
@@ -310,8 +313,7 @@ mod tests {
         // order — the bridge writes each chunk to the session stream as
         // it lands.
         let first = classify_inbound(Some(Ok(Message::Binary(Bytes::from_static(&[0xFE, 0x01])))));
-        let second =
-            classify_inbound(Some(Ok(Message::Binary(Bytes::from_static(&[0x10, 0x00])))));
+        let second = classify_inbound(Some(Ok(Message::Binary(Bytes::from_static(&[0x10, 0x00])))));
         assert_data(first, &[0xFE, 0x01]);
         assert_data(second, &[0x10, 0x00]);
     }
