@@ -31,6 +31,10 @@ pub struct ReplicaApplyMetrics {
     /// #813), but recorded so a missed delete that drives collection-count
     /// drift leaves a trail instead of being swallowed by `let _ =`.
     pub apply_miss_total: std::sync::atomic::AtomicU64,
+    /// Issue #835 — a streamed record fenced because its term is behind the
+    /// highest term this replica has applied (a returning stale ex-primary).
+    /// Fail-closed: the chain does not advance.
+    pub stale_term_total: std::sync::atomic::AtomicU64,
 }
 
 impl ReplicaApplyMetrics {
@@ -52,10 +56,13 @@ impl ReplicaApplyMetrics {
             ApplyErrorKind::Miss => {
                 self.apply_miss_total.fetch_add(1, Relaxed);
             }
+            ApplyErrorKind::StaleTerm => {
+                self.stale_term_total.fetch_add(1, Relaxed);
+            }
         }
     }
 
-    pub fn snapshot(&self) -> [(ApplyErrorKind, u64); 5] {
+    pub fn snapshot(&self) -> [(ApplyErrorKind, u64); 6] {
         use std::sync::atomic::Ordering::Relaxed;
         [
             (ApplyErrorKind::Gap, self.gap_total.load(Relaxed)),
@@ -69,6 +76,10 @@ impl ReplicaApplyMetrics {
                 self.decode_error_total.load(Relaxed),
             ),
             (ApplyErrorKind::Miss, self.apply_miss_total.load(Relaxed)),
+            (
+                ApplyErrorKind::StaleTerm,
+                self.stale_term_total.load(Relaxed),
+            ),
         ]
     }
 }
@@ -82,6 +93,9 @@ pub enum ApplyErrorKind {
     /// Issue #814 — apply ran against a missing target (delete on an
     /// absent collection/entity). Non-fatal divergence signal.
     Miss,
+    /// Issue #835 — a record stamped with a term behind the replica's
+    /// highest applied term was fenced (returning stale ex-primary).
+    StaleTerm,
 }
 
 impl ApplyErrorKind {
@@ -92,6 +106,7 @@ impl ApplyErrorKind {
             Self::Apply => "apply",
             Self::Decode => "decode",
             Self::Miss => "apply_miss",
+            Self::StaleTerm => "stale_term",
         }
     }
 }
@@ -101,6 +116,7 @@ impl LogicalApplyError {
         match self {
             Self::Gap { .. } => ApplyErrorKind::Gap,
             Self::Divergence { .. } => ApplyErrorKind::Divergence,
+            Self::StaleTerm { .. } => ApplyErrorKind::StaleTerm,
             Self::Apply { .. } => ApplyErrorKind::Apply,
         }
     }
@@ -134,6 +150,16 @@ pub enum LogicalApplyError {
         expected: String,
         got: String,
     },
+    /// Issue #835 — a streamed record carries a term *behind* the highest
+    /// term this replica has already applied. It is a returning ex-primary
+    /// pushing its stale timeline; the apply boundary fences it (fail closed)
+    /// so no watermark advances and no stale record lands. See
+    /// [`crate::replication::fence`].
+    StaleTerm {
+        current_term: u64,
+        record_term: u64,
+        lsn: u64,
+    },
     Apply {
         lsn: u64,
         source: RedDBError,
@@ -153,6 +179,14 @@ impl std::fmt::Display for LogicalApplyError {
             } => write!(
                 f,
                 "LSN divergence on apply at term/lsn=({got_term},{lsn}): expected term {expected_term} payload hash {expected}, got {got}"
+            ),
+            Self::StaleTerm {
+                current_term,
+                record_term,
+                lsn,
+            } => write!(
+                f,
+                "stale-term record fenced at lsn={lsn}: record term {record_term} is behind current term {current_term}"
             ),
             Self::Apply { lsn, source } => write!(f, "apply error at lsn={lsn}: {source}"),
         }
@@ -318,6 +352,23 @@ impl LogicalChangeApplier {
     ) -> Result<ApplyOutcome, LogicalApplyError> {
         let last = self.last_applied_lsn.load(Ordering::Acquire);
         let last_term = self.last_applied_term.load(Ordering::Acquire);
+
+        // Issue #835 — stale-term fence (apply boundary). A record whose term
+        // is behind the highest term we have applied is a returning ex-primary
+        // pushing its superseded timeline. Fail closed *before* touching any
+        // state: do not advance the received frontier, the LSN chain, or the
+        // store. The replica stays on the new timeline until the source
+        // re-syncs and adopts the current term. The pristine replica
+        // (`last_term` defaults to the minimum term) never trips this — its
+        // first record only ever carries an equal-or-newer term.
+        if crate::replication::fence::term_is_stale(record.term, last_term) {
+            return Err(LogicalApplyError::StaleTerm {
+                current_term: last_term,
+                record_term: record.term,
+                lsn: record.lsn,
+            });
+        }
+
         let payload_hash = record_payload_hash(record);
         self.received_frontier_lsn
             .fetch_max(record.lsn, Ordering::AcqRel);
@@ -828,6 +879,60 @@ mod tests {
         );
         assert_eq!(applier.last_applied_term(), 1);
         assert_eq!(applier.last_applied_lsn(), 7);
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #835 — a record whose term is behind the replica's highest
+    // applied term is fenced (returning stale ex-primary). Fail closed: the
+    // LSN chain and term do not advance, and the stale-term metric ticks.
+    #[test]
+    fn apply_fences_a_stale_term_record_at_the_apply_boundary() {
+        let (db, path) = open_db();
+        let applier =
+            LogicalChangeApplier::with_metrics(0, Arc::new(ReplicaApplyMetrics::default()));
+
+        // The replica has followed the new primary up to term 2, lsn 2.
+        applier
+            .apply(&db, &record(1, b"a").with_term(2), ApplyMode::Replica)
+            .unwrap();
+        applier
+            .apply(&db, &record(2, b"b").with_term(2), ApplyMode::Replica)
+            .unwrap();
+        assert_eq!(applier.last_applied_term(), 2);
+        assert_eq!(applier.last_applied_lsn(), 2);
+
+        // A deposed ex-primary returns and streams the next LSN under its
+        // stale term 1. It must be fenced, not applied.
+        let err = applier
+            .apply(&db, &record(3, b"c").with_term(1), ApplyMode::Replica)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LogicalApplyError::StaleTerm {
+                    current_term: 2,
+                    record_term: 1,
+                    lsn: 3,
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(err.kind(), ApplyErrorKind::StaleTerm);
+        // Fail closed: nothing advanced.
+        assert_eq!(applier.last_applied_term(), 2, "term must not regress");
+        assert_eq!(applier.last_applied_lsn(), 2, "lsn chain must not advance");
+        assert_eq!(
+            applier.received_frontier_lsn(),
+            2,
+            "a fenced record must not advance the received frontier"
+        );
+
+        // Once the ex-primary re-syncs and adopts the new term, its records
+        // apply again — fencing is a gate, not a ban.
+        applier
+            .apply(&db, &record(3, b"c").with_term(2), ApplyMode::Replica)
+            .unwrap();
+        assert_eq!(applier.last_applied_lsn(), 3);
         let _ = std::fs::remove_file(path);
     }
 

@@ -5071,11 +5071,23 @@ impl RedDBRuntime {
                                                 }
                                                 .emit_global();
                                             }
+                                            // Issue #835 — a returning stale ex-primary streamed a
+                                            // record behind the current term. The stream is fenced,
+                                            // not merely lagging: surface it as broken so an operator
+                                            // sees the rejoining-on-stale-term condition.
+                                            crate::replication::logical::LogicalApplyError::StaleTerm { current_term, record_term, lsn } => {
+                                                crate::telemetry::operator_event::OperatorEvent::ReplicationBroken {
+                                                    peer: "primary".to_string(),
+                                                    reason: format!("fenced stale term at lsn={lsn}: record term {record_term} behind current term {current_term}"),
+                                                }
+                                                .emit_global();
+                                            }
                                             _ => {}
                                         }
                                         let kind = match &err {
                                             crate::replication::logical::LogicalApplyError::Gap { .. } => "stalled_gap",
                                             crate::replication::logical::LogicalApplyError::Divergence { .. } => "divergence",
+                                            crate::replication::logical::LogicalApplyError::StaleTerm { .. } => "stale_term_fenced",
                                             _ => "apply_error",
                                         };
                                         self.persist_replication_health(
@@ -5317,7 +5329,7 @@ impl RedDBRuntime {
     /// `apply_miss` kind for deletes against a missing target.
     pub fn replica_apply_error_counts(
         &self,
-    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 5] {
+    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 6] {
         self.inner.replica_apply_metrics.snapshot()
     }
 
