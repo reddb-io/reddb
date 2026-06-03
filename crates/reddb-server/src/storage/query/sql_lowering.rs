@@ -94,8 +94,15 @@ pub fn select_item_to_projection(item: &SelectItem) -> Option<Projection> {
         SelectItem::Wildcard => Some(Projection::All),
         SelectItem::Expr { expr, alias } => {
             let projection = expr_to_projection(expr)?;
-            let output_name = alias.clone().or_else(|| Some(render_expr_label(expr)));
-            Some(attach_projection_alias(projection, output_name))
+            // Attach ONLY an explicit alias here. The previous
+            // `.or_else(|| Some(render_expr_label(expr)))` synthesized an implicit
+            // output label from the expression text and baked it into the legacy
+            // Projection — mangling function names (`CAST` → `CAST:CAST(.. AS ..)`),
+            // wrapping bare columns in a redundant `Alias(name, name)`, and thereby
+            // breaking render→parse→render idempotency. The default output-column
+            // label for an un-aliased projection is derived at render time from the
+            // SelectItem (which keeps `alias: None`), not from this lowering.
+            Some(attach_projection_alias(projection, alias.clone()))
         }
     }
 }
