@@ -38,6 +38,14 @@ zstd = { version = "0.13", default-features = false }
 lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
 sha2 = "0.11"
 hex = "0.4"
+# Browser credential layer — hybrid token (issue #936, PRD #930).
+# `auth::browser_token` mints + verifies the short-lived HS256 access
+# JWT and the refresh JWT with this vetted library (RedDB is both issuer
+# and verifier, so the symmetric HS256 path is sufficient — the
+# asymmetric RS256/JWKS machinery of `auth::oauth` exists to trust a
+# *foreign* IdP). `rust_crypto` keeps the backend pure-Rust, matching the
+# dev-dependency the OAuth e2e test already pins.
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 # Ed25519 signature verification for Signed Writes (issue #520 / #522).
 # Used by `storage::signed_writes` to validate that an INSERT's
 # `signature` column was produced by a key in the collection's
@@ -153,11 +161,10 @@ tempfile = "3"
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"
-# OAuth-JWT end-to-end smoke. `jsonwebtoken` mints + decodes RS256
-# tokens; `serde_json` shapes the JWKS responses. Both are dev-only.
-# v10 requires opting into a crypto backend; `rust_crypto` keeps the
-# tests pure-Rust (no system C deps), matching the rest of the dev tree.
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# OAuth-JWT end-to-end smoke uses `jsonwebtoken` to mint + decode RS256
+# tokens; it is now a normal dependency (see `[dependencies]`, used by
+# `auth::browser_token`) so it no longer needs a dev-dependency entry.
+# `serde_json` shapes the JWKS responses in tests.
 serde_json = "1"
 # Parser hardening harness (issue #87): property tests via proptest,
 # pinned error-message snapshots via insta. The `filters` feature

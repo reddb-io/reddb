@@ -1004,6 +1004,14 @@ struct RuntimeInner {
     /// configured issuer + audience + signature before falling back to
     /// the local AuthStore lookup.
     oauth_validator: parking_lot::RwLock<Option<Arc<crate::auth::oauth::OAuthValidator>>>,
+    /// Browser credential layer — the hybrid-token authority (issue
+    /// #936, PRD #930). When wired (an operator opts the browser
+    /// endpoint in), the RedWire WS handshake accepts the short-lived
+    /// access JWT it mints, and the `/auth/browser/*` HTTP endpoints
+    /// issue/rotate the access+refresh pair. `None` leaves the browser
+    /// flow inert — default-deny, matching the WS endpoint itself.
+    browser_token_authority:
+        parking_lot::RwLock<Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>>>,
     /// View registry (Phase 2.1 PG parity).
     ///
     /// Holds the parsed `SELECT` body for every view created via

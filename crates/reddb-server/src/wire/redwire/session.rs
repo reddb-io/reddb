@@ -777,22 +777,14 @@ where
         return Ok(None);
     }
 
-    // OAuth-JWT branch — needs the validator that the 1-RTT
-    // shape doesn't get. Done inline so the rest of the path
-    // (anonymous / bearer) keeps the same bookkeeping.
+    // OAuth-JWT branch. The `jwt` field carries either a browser access
+    // JWT (the hybrid-token model, issue #936) or a federated IdP token
+    // validated by the configured `OAuthValidator`. The browser access
+    // token is tried *first* and independently of `oauth` being wired, so
+    // a deployment that runs the browser credential layer without any
+    // external OAuth IdP still authenticates. mTLS stays native-only
+    // (ADR 0036) — the browser presents this access JWT and nothing else.
     if chosen == "oauth-jwt" {
-        let validator = match oauth {
-            Some(v) => v,
-            None => {
-                let fail = encode_frame(&build_reply(
-                    resp.correlation_id,
-                    MessageKind::AuthFail,
-                    build_auth_fail("oauth-jwt requires RedWireConfig.oauth"),
-                )?);
-                let _ = stream.write_all(&fail).await;
-                return Ok(None);
-            }
-        };
         let raw = match crate::serde_json::from_slice::<JsonValue>(&resp.payload)
             .ok()
             .and_then(|v| {
@@ -806,6 +798,59 @@ where
                     resp.correlation_id,
                     MessageKind::AuthFail,
                     build_auth_fail("oauth-jwt: AuthResponse missing 'jwt' string"),
+                )?);
+                let _ = stream.write_all(&fail).await;
+                return Ok(None);
+            }
+        };
+
+        // 1. Browser hybrid-token access JWT (issue #936). A *valid*
+        //    access token (correct issuer/audience/signature, `typ:
+        //    access`, unexpired) authenticates the session directly.
+        //    Anything else (expired, wrong type, or simply not one of our
+        //    tokens — e.g. a foreign IdP RS256 token) falls through to the
+        //    OAuth validator below; the net effect is "valid browser
+        //    token accepted, expired/invalid rejected" (AC #2). The stream
+        //    lease (ADR 0029) then decouples this token's expiry from any
+        //    stream the session opens, so a later refresh never tears down
+        //    in-flight work (AC #3).
+        if let Some(authority) = runtime.browser_token_authority() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if let Ok(identity) = authority.validate_access(&raw, now) {
+                let session_id = super::auth::new_session_id_for_scram();
+                let ok = encode_frame(&build_reply(
+                    resp.correlation_id,
+                    MessageKind::AuthOk,
+                    build_auth_ok(
+                        &session_id,
+                        &identity.username,
+                        identity.role,
+                        server_features,
+                    ),
+                )?);
+                stream.write_all(&ok).await?;
+                return Ok(Some(AuthedSession {
+                    username: identity.username,
+                    role: identity.role,
+                    tenant: identity.tenant,
+                    session_id,
+                }));
+            }
+        }
+
+        // 2. Federated OAuth-JWT (RS256/ES256 against a configured IdP).
+        let validator = match oauth {
+            Some(v) => v,
+            None => {
+                let fail = encode_frame(&build_reply(
+                    resp.correlation_id,
+                    MessageKind::AuthFail,
+                    build_auth_fail(
+                        "oauth-jwt: token rejected (no browser-token authority or OAuth validator accepted it)",
+                    ),
                 )?);
                 let _ = stream.write_all(&fail).await;
                 return Ok(None);

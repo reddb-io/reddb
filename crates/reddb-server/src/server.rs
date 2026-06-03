@@ -106,12 +106,12 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
 }
 
 mod axum_edge;
-mod ws_edge;
 pub mod handlers_admin;
 mod handlers_ai;
 mod handlers_ai_model_cache;
 mod handlers_auth;
 mod handlers_backup;
+mod handlers_browser_auth;
 mod handlers_collection_policy;
 mod handlers_ec;
 pub(crate) mod handlers_entity;
@@ -122,6 +122,7 @@ mod handlers_log;
 mod handlers_metrics;
 mod handlers_ops;
 mod handlers_ops_policy;
+mod ws_edge;
 // `pub(crate)` so the RedWire input-stream path (issue #764 / S5)
 // can reuse the canonical S4 INSERT builders / identifier checks
 // (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
@@ -539,6 +540,20 @@ impl RedDBServer {
     /// The configured RedWire-over-WSS `Origin` allowlist (issue #935).
     pub(crate) fn websocket_allowed_origins(&self) -> &[String] {
         &self.options.websocket_allowed_origins
+    }
+
+    /// Enable the browser credential layer (issue #936, PRD #930) by
+    /// wiring a hybrid-token authority into the runtime. Once set, the
+    /// `/auth/browser/*` HTTP endpoints issue/rotate the access+refresh
+    /// pair and the RedWire WS handshake accepts the access JWT. Left
+    /// unset, the browser flow is inert (default-deny), matching the WS
+    /// endpoint's own opt-in posture.
+    pub fn with_browser_token_authority(
+        self,
+        authority: Arc<crate::auth::browser_token::BrowserTokenAuthority>,
+    ) -> Self {
+        self.runtime.set_browser_token_authority(Some(authority));
+        self
     }
 
     pub fn runtime(&self) -> &RedDBRuntime {
