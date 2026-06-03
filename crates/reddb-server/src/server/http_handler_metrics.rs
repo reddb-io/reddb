@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use super::http_connection_limiter::HttpConnectionLimiter;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpTransport {
     Http,
     Https,
