@@ -673,6 +673,9 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::DetachPolicy { .. }
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
+        | QueryExpr::RankOf(_)
+        | QueryExpr::ApproxRankOf(_)
+        | QueryExpr::RankRange(_)
         | QueryExpr::SimulatePolicy { .. }
         | QueryExpr::LintPolicy { .. }
         | QueryExpr::MigratePolicyMode { .. }
