@@ -153,23 +153,24 @@ impl GroupCommit {
 
         // Phase 1 — take the WAL lock BRIEFLY to drain the BufWriter
         // into the kernel and capture both the LSN and a cloned
-        // file handle for the fsync. The whole point of this dance
+        // file handle for the size-aware sync. The whole point of this dance
         // is that we DO NOT hold the WAL lock during the expensive
-        // sync_all() call below.
-        let (target_lsn, sync_handle) = {
+        // disk sync below.
+        let sync = {
             let mut wal_guard = wal.lock().unwrap_or_else(|p| p.into_inner());
             wal_guard.drain_for_group_sync()?
         };
 
         // Phase 2 — the lock is released. Other writers can now
         // append into the BufWriter while we wait on fsync. Their
-        // bytes will either be picked up by THIS sync_all() (if
+        // bytes will either be picked up by THIS sync (if
         // they reach the kernel before the syscall returns) or
         // by the NEXT leader.
         //
-        // sync_all() on the cloned handle flushes the same kernel
-        // inode the BufWriter writes to, so coverage is correct.
-        sync_handle.sync_all()?;
+        // The sync plan uses sync_data() when the WAL remains inside
+        // already-synced preallocation, and sync_all() when file/allocation
+        // metadata must be forced.
+        sync.sync()?;
 
         // Phase 3 — take the WAL lock briefly to publish the new
         // durable LSN. Other writers may have appended in the
@@ -181,12 +182,12 @@ impl GroupCommit {
         // fsync'd.
         {
             let mut wal_guard = wal.lock().unwrap_or_else(|p| p.into_inner());
-            wal_guard.mark_durable(target_lsn);
+            wal_guard.mark_durable(&sync);
         }
 
         // Publish the new flushed LSN to atomic readers, then
         // let the leadership guard wake every waiter.
-        self.flushed_lsn.store(target_lsn, Ordering::Release);
+        self.flushed_lsn.store(sync.target_lsn(), Ordering::Release);
 
         Ok(())
     }
