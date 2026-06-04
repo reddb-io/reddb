@@ -249,6 +249,12 @@ pub enum QueryExpr {
         user: PolicyUserRef,
         resource: Option<PolicyResourceRef>,
     },
+    /// Exact rank of one row in a declared leaderboard ranking.
+    RankOf(RankOfQuery),
+    /// Approximate tail rank of one row in a declared leaderboard ranking.
+    ApproxRankOf(RankOfQuery),
+    /// Exact rank-ordered range in a declared leaderboard ranking.
+    RankRange(RankRangeQuery),
     /// `SIMULATE <name> ACTION <verb> ON <kind>:<name>`.
     SimulatePolicy {
         user: PolicyUserRef,
@@ -300,6 +306,29 @@ pub struct PolicyResourceRef {
 pub enum PolicyPrincipalRef {
     User(PolicyUserRef),
     Group(String),
+}
+
+/// `RANK OF <entity_id> IN <ranking>` canonical leaderboard read.
+///
+/// Redis-flavor `ZRANK <ranking> <entity_id>` desugars to this exact same
+/// shape, so it carries no execution semantics that the canonical rank read
+/// lacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankOfQuery {
+    pub ranking: String,
+    pub entity_id: u64,
+}
+
+/// `RANK RANGE <lo> TO <hi> IN <ranking>` canonical leaderboard read.
+///
+/// Redis-flavor `ZRANGE <ranking> <start> <stop> [WITHSCORES]` desugars by
+/// translating Redis' zero-based inclusive offsets to the canonical one-based
+/// rank bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankRangeQuery {
+    pub ranking: String,
+    pub lo: u64,
+    pub hi: u64,
 }
 
 // ---------------------------------------------------------------------------
