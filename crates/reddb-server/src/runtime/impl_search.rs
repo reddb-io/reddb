@@ -921,11 +921,16 @@ impl RedDBRuntime {
         // ── Expansion: Graph traversal ──────────────────────────────────
         let mut expanded_graph = 0usize;
         if expand_graph && graph_depth > 0 {
-            let seed_node_ids: Vec<(u64, String, f32)> = scored
+            let seed_node_ids: Vec<(u64, String, f32, String)> = scored
                 .values()
-                .filter_map(|(entity, score, _, _)| {
+                .filter_map(|(entity, score, _, collection)| {
                     if matches!(entity.kind, EntityKind::GraphNode(_)) {
-                        Some((entity.id.raw(), entity.id.raw().to_string(), *score))
+                        Some((
+                            entity.id.raw(),
+                            entity.id.raw().to_string(),
+                            *score,
+                            collection.clone(),
+                        ))
                     } else {
                         None
                     }
@@ -934,9 +939,10 @@ impl RedDBRuntime {
 
             if !seed_node_ids.is_empty() {
                 // Use lazy graph materialization — only loads seed nodes + BFS neighbors
-                let seed_ids: Vec<u64> = seed_node_ids.iter().map(|(id, _, _)| *id).collect();
+                let seed_ids: Vec<u64> = seed_node_ids.iter().map(|(id, _, _, _)| *id).collect();
                 if let Ok(graph) = materialize_graph_lazy(store.as_ref(), &seed_ids, graph_depth) {
-                    for (source_id, node_id_str, source_score) in &seed_node_ids {
+                    for (source_id, node_id_str, source_score, source_collection) in &seed_node_ids
+                    {
                         let mut visited: HashSet<String> = HashSet::new();
                         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
                         visited.insert(node_id_str.clone());
@@ -966,7 +972,6 @@ impl RedDBRuntime {
                                         let decayed_score = source_score * decay;
                                         if decayed_score >= min_score {
                                             expanded_graph += 1;
-                                            let collection = entity.kind.collection().to_string();
                                             scored.insert(
                                                 parsed,
                                                 (
@@ -977,7 +982,7 @@ impl RedDBRuntime {
                                                         edge_type: "adjacent".to_string(),
                                                         depth: depth + 1,
                                                     },
-                                                    collection,
+                                                    source_collection.clone(),
                                                 ),
                                             );
                                         }
