@@ -351,6 +351,9 @@ impl JoinReorderingPass {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::RankOf(_)
+            | QueryExpr::ApproxRankOf(_)
+            | QueryExpr::RankRange(_)
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
             | QueryExpr::MigratePolicyMode { .. }
