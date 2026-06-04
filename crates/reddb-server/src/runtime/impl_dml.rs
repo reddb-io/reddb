@@ -1772,6 +1772,17 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
+        let needs_rmw_lock = update_needs_rmw_lock(query);
+        let table_rmw_lock = if needs_rmw_lock {
+            Some(
+                self.inner
+                    .rmw_locks
+                    .lock_for(&query.table, "__table_rmw_update__"),
+            )
+        } else {
+            None
+        };
+        let _table_rmw_guard = table_rmw_lock.as_ref().map(|lock| lock.lock());
         let mut touched_ids: Vec<EntityId> = Vec::new();
         let limit_cap = query.limit.map(|l| l as usize);
         let manager = store
@@ -1782,21 +1793,24 @@ impl RedDBRuntime {
         } else {
             None
         };
-        let ids_to_update = super::dml_target_scan::DmlTargetScan::with_update_target(
+        let mut target_scan = super::dml_target_scan::DmlTargetScan::with_update_target(
             self,
             &query.table,
             effective_filter.as_ref(),
             scan_limit,
             query.target,
-        )
-        .find_target_ids()?;
+        );
+        if needs_rmw_lock {
+            target_scan = target_scan.with_live_table_rows();
+        }
+        let ids_to_update = target_scan.find_target_ids()?;
         let ids_to_update = if query.order_by.is_empty() {
             ids_to_update
         } else {
             ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, limit_cap)
         };
 
-        if update_needs_rmw_lock(query) {
+        if needs_rmw_lock {
             return self.execute_update_inner_tracked_locked(
                 raw_query,
                 query,
@@ -3086,10 +3100,7 @@ fn resolve_update_entity_by_logical_id(
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
-    if let Some(entity) =
-        crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
-            .resolve_logical_id(&store, table, logical_id)
-    {
+    if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
         return Some(entity);
     }
     // Fallback for non-table-row entities (graph nodes/edges, etc.) where

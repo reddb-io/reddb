@@ -1813,13 +1813,13 @@ mod tests {
 
         let rt = mk_runtime();
         rt.execute_query(
-            "CREATE TABLE users (id INT, name TEXT, email TEXT, age INT, city TEXT, score FLOAT, created_at TEXT)",
+            "CREATE TABLE users (id INT, name TEXT, email TEXT, age INT, city TEXT, score FLOAT, created_txt TEXT)",
         )
         .unwrap();
         rt.execute_query("CREATE INDEX idx_city_age ON users (city, age) USING BTREE")
             .unwrap();
         rt.execute_query(
-            "INSERT INTO users (id, name, email, age, city, score, created_at) VALUES \
+            "INSERT INTO users (id, name, email, age, city, score, created_txt) VALUES \
              (1, 'a', 'a@example.com', 30, 'NYC', 80.0, 't1'), \
              (2, 'b', 'b@example.com', 35, 'NYC', 95.0, 't2'), \
              (3, 'c', 'c@example.com', 40, 'NYC', 60.0, 't3'), \

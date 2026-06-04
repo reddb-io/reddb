@@ -581,7 +581,7 @@ impl OperatorEventRouter {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
 
@@ -1004,9 +1004,33 @@ mod tests {
         // Accept one connection in a background thread.
         let server_thread = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = vec![0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            String::from_utf8_lossy(&buf[..n]).to_string()
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if http_request_body_complete(&buf) {
+                            break;
+                        }
+                    }
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(err) => panic!("mock webhook read failed: {err}"),
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            String::from_utf8_lossy(&buf).to_string()
         });
 
         // Set up env var for auth.
@@ -1036,6 +1060,23 @@ mod tests {
         // The request should contain our auth header and JSON body.
         assert!(raw.contains("Bearer test-token-42"), "missing auth header");
         assert!(raw.contains("shutdown_forced"), "missing event in body");
+    }
+
+    fn http_request_body_complete(buf: &[u8]) -> bool {
+        let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        });
+        let Some(content_length) = content_length else {
+            return true;
+        };
+        buf.len().saturating_sub(header_end + 4) >= content_length
     }
 
     // -----------------------------------------------------------------------

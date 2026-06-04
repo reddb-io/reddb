@@ -15052,11 +15052,12 @@ mod inline_graph_tvf_tests {
     }
 
     #[test]
-    fn graph_collection_tvf_has_no_cache_scope() {
-        // The graph-collection form reads the whole graph store and is not
-        // scoped to any named collection (issue #795 behaviour preserved).
+    fn graph_collection_tvf_cache_scope_is_graph_argument() {
+        // The graph-collection form still materializes the active graph, but
+        // result-cache invalidation is scoped to the named graph argument so
+        // INSERT INTO g NODE/EDGE invalidates cached TVF rows.
         let scopes = scopes_for("SELECT * FROM components(g)");
-        assert!(scopes.is_empty(), "collection form unscoped: {scopes:?}");
+        assert!(scopes.contains("g"), "collection form scoped: {scopes:?}");
     }
 
     #[test]

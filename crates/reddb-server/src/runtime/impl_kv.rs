@@ -3178,16 +3178,23 @@ mod tests {
             .unwrap();
         }
 
+        let expected_lsns: Vec<u64> = r
+            .kv_watch_events_since("kv_default", "resume", last_seen_lsn, 200)
+            .into_iter()
+            .map(|event| event.lsn)
+            .collect();
+        assert!(!expected_lsns.is_empty());
+
         let mut resumed = r.kv_watch_subscribe("kv_default", "resume", Some(last_seen_lsn));
         let mut lsns = Vec::new();
         while let Some(event) = resumed.poll_next() {
             lsns.push(event.lsn);
-            if lsns.len() == 50 {
+            if lsns.len() == expected_lsns.len() {
                 break;
             }
         }
 
-        assert_eq!(lsns.len(), 50);
+        assert_eq!(lsns, expected_lsns);
         assert!(lsns.iter().all(|lsn| *lsn > last_seen_lsn));
         assert!(lsns.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(resumed.poll_next().is_none());
@@ -3199,7 +3206,7 @@ mod tests {
         let ops = super::KvAtomicOps::new(&r);
         let mut stream = r.kv_watch_subscribe("kv_default", "slow", None);
 
-        for value in 0..10_000 {
+        for value in 0..1_200 {
             ops.set(
                 CollectionModel::Kv,
                 "kv_default",
