@@ -685,6 +685,14 @@ async fn wait_times_out_with_distinct_frame() {
         MessageKind::Pong,
         "session must stay responsive after a timed-out wait"
     );
+    assert_eq!(
+        server
+            .runtime
+            .queue_wait_registry()
+            .live_waiters("", "jobs"),
+        0,
+        "expired wait must release its registry slot reference"
+    );
 
     let metrics = scrape_metrics(&server.runtime);
     assert_metric_line(

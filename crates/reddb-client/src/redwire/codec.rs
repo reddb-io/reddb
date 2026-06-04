@@ -125,4 +125,19 @@ mod tests {
         assert_eq!(n, bytes.len());
         assert_eq!(decoded, f);
     }
+
+    #[test]
+    fn decodes_live_queue_wait_timeout_kind() {
+        let f = Frame::new(MessageKind::QueueWaitTimeout, 42, Vec::new()).with_stream(9);
+        let bytes = encode_frame(&f);
+
+        assert_eq!(bytes[4], 0x30, "wire kind byte is pinned");
+        let (decoded, n) = decode_frame(&bytes).unwrap();
+
+        assert_eq!(n, bytes.len());
+        assert_eq!(decoded.kind, MessageKind::QueueWaitTimeout);
+        assert_eq!(decoded.stream_id, 9);
+        assert_eq!(decoded.correlation_id, 42);
+        assert!(decoded.payload.is_empty());
+    }
 }
