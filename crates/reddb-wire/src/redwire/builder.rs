@@ -197,6 +197,13 @@ impl FrameBuilder {
             });
         }
 
+        if !kind.permits_flags(self.flags) {
+            return Err(BuildError::FlagsNotAllowedForKind {
+                kind,
+                flags: self.flags.bits(),
+            });
+        }
+
         let mut flags = self.flags;
         if self.more_frames {
             flags = flags.insert(Flags::MORE_FRAMES);
