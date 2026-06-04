@@ -79,6 +79,25 @@ fn rank_range_rows(rt: &RedDBRuntime, sql: &str) -> Vec<(u64, u64, String)> {
         .collect()
 }
 
+fn query_snapshot(rt: &RedDBRuntime, sql: &str) -> (Vec<String>, Vec<Vec<Value>>) {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|e| panic!("query failed: {sql}\n  -> {e}"))
+        .result;
+    let rows = result
+        .records
+        .iter()
+        .map(|record| {
+            result
+                .columns
+                .iter()
+                .map(|column| record.get(column).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect();
+    (result.columns, rows)
+}
+
 /// An `APPROX RANK OF …` row, or `None` when the read returned no row.
 struct ApproxRow {
     rank: u64,
@@ -473,6 +492,56 @@ fn rank_range_ties_are_deterministic_and_match_rank_of() {
         rank_of(&rt, &format!("RANK OF {c} IN r")),
         None,
         "the same deterministic TOP k boundary applies to RANK OF"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Issue #925 — Redis-flavor Z* sugar desugars to canonical rank reads.
+// ══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn zrank_returns_the_same_rows_as_rank_of() {
+    let rt = runtime();
+    seed_players(&rt, &[("alice", 100), ("bob", 80), ("eve", 80)]);
+    exec(&rt, "CREATE RANKING r ON players (score DESC)");
+    let bob = rid_of(&rt, "players", "bob");
+
+    assert_eq!(
+        query_snapshot(&rt, &format!("ZRANK r {bob}")),
+        query_snapshot(&rt, &format!("RANK OF {bob} IN r")),
+        "ZRANK must be parser sugar for the canonical rank-of-row read"
+    );
+    assert_eq!(
+        query_snapshot(&rt, "ZRANK r 999999"),
+        query_snapshot(&rt, "RANK OF 999999 IN r"),
+        "missing rows must desugar to the same empty result"
+    );
+}
+
+#[test]
+fn zrange_withscores_returns_the_same_rows_as_rank_range_for_ties_and_empty_pages() {
+    let rt = runtime();
+    seed_players(
+        &rt,
+        &[
+            ("alice", 100),
+            ("bob", 80),
+            ("eve", 80),
+            ("carol", 60),
+            ("dave", 40),
+        ],
+    );
+    exec(&rt, "CREATE RANKING r ON players (score DESC)");
+
+    assert_eq!(
+        query_snapshot(&rt, "ZRANGE r 1 3 WITHSCORES"),
+        query_snapshot(&rt, "RANK RANGE 2 TO 4 IN r"),
+        "ZRANGE offsets must desugar to the canonical one-based rank range"
+    );
+    assert_eq!(
+        query_snapshot(&rt, "ZRANGE r 20 30 WITHSCORES"),
+        query_snapshot(&rt, "RANK RANGE 21 TO 31 IN r"),
+        "out-of-range pages must desugar to the same empty result"
     );
 }
 
