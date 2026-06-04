@@ -646,6 +646,9 @@ macro_rules! json {
     ([ $( $elem:expr ),* $(,)? ]) => {
         $crate::serde_json::Value::Array(vec![ $( $crate::json!($elem) ),* ])
     };
+    ({}) => {
+        $crate::serde_json::Value::Object($crate::serde_json::Map::new())
+    };
     ({ $( $key:literal : $value:expr ),* $(,)? }) => {{
         let mut map = $crate::serde_json::Map::new();
         $( map.insert($key.to_string(), $crate::json!($value)); )*
@@ -657,3 +660,21 @@ macro_rules! json {
 }
 
 pub use crate::json;
+
+#[cfg(test)]
+mod json_macro_tests {
+    use super::Value;
+    use crate::json::json;
+
+    #[test]
+    fn object_macro_supports_empty_and_non_empty_objects() {
+        assert_eq!(json!({}), Value::Object(Default::default()));
+
+        let value = json!({ "name": "reddb", "ok": true });
+        let Value::Object(map) = value else {
+            panic!("non-empty object macro should produce an object");
+        };
+        assert_eq!(map.get("name"), Some(&Value::String("reddb".to_string())));
+        assert_eq!(map.get("ok"), Some(&Value::Bool(true)));
+    }
+}
