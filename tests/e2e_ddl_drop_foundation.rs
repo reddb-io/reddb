@@ -110,6 +110,7 @@ fn register_collection(rt: &RedDBRuntime, name: &str, model: CollectionModel) {
             metrics_rollup_policies: Vec::new(),
             metrics_tenant_identity: None,
             metrics_namespace: None,
+            analytics_config: Vec::new(),
             append_only: false,
             subscriptions: Vec::new(),
             session_key: None,
