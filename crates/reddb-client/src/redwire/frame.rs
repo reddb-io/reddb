@@ -65,6 +65,7 @@ pub enum MessageKind {
     Get = 0x19,
     Delete = 0x1A,
     DeleteOk = 0x1B,
+    QueueWaitTimeout = 0x30,
 }
 
 impl MessageKind {
@@ -91,6 +92,7 @@ impl MessageKind {
             0x19 => Some(Self::Get),
             0x1A => Some(Self::Delete),
             0x1B => Some(Self::DeleteOk),
+            0x30 => Some(Self::QueueWaitTimeout),
             _ => None,
         }
     }
