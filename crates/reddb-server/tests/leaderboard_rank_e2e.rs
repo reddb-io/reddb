@@ -50,6 +50,35 @@ fn rank_of(rt: &RedDBRuntime, sql: &str) -> Option<u64> {
         })
 }
 
+/// `(rank, rid, name)` rows from a `RANK RANGE …` read.
+fn rank_range_rows(rt: &RedDBRuntime, sql: &str) -> Vec<(u64, u64, String)> {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|e| panic!("query failed: {sql}\n  -> {e}"));
+    result
+        .result
+        .records
+        .iter()
+        .map(|rec| {
+            let rank = match rec.get("rank") {
+                Some(Value::UnsignedInteger(n)) => *n,
+                Some(Value::Integer(n)) => *n as u64,
+                other => panic!("rank missing/typed wrong: {other:?}"),
+            };
+            let rid = match rec.get("rid") {
+                Some(Value::UnsignedInteger(n)) => *n,
+                Some(Value::Integer(n)) => *n as u64,
+                other => panic!("rid missing/typed wrong: {other:?}"),
+            };
+            let name = match rec.get("name") {
+                Some(Value::Text(t)) => t.to_string(),
+                other => panic!("name missing/typed wrong: {other:?}"),
+            };
+            (rank, rid, name)
+        })
+        .collect()
+}
+
 /// An `APPROX RANK OF …` row, or `None` when the read returned no row.
 struct ApproxRow {
     rank: u64,
@@ -339,6 +368,111 @@ fn rank_reads_honor_tenant_rls() {
         rank_of(&rt, &format!("WITHIN TENANT 'globex' RANK OF {alice} IN r")),
         None,
         "a row hidden by RLS has no rank for that tenant"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Issue #924 — exact head range-by-rank reads for position pagination.
+// ══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn rank_range_returns_entries_in_rank_order() {
+    let rt = runtime();
+    seed_players(
+        &rt,
+        &[
+            ("alice", 100),
+            ("bob", 80),
+            ("eve", 80),
+            ("carol", 60),
+            ("dave", 40),
+        ],
+    );
+    exec(&rt, "CREATE RANKING r ON players (score DESC)");
+
+    let rows = rank_range_rows(&rt, "RANK RANGE 2 TO 4 IN r");
+    let projected: Vec<(u64, String)> = rows
+        .into_iter()
+        .map(|(rank, _rid, name)| (rank, name))
+        .collect();
+    assert_eq!(
+        projected,
+        vec![
+            (2, "bob".to_string()),
+            (2, "eve".to_string()),
+            (4, "carol".to_string()),
+        ],
+        "range read must return entries in rank order, including tied rank rows"
+    );
+}
+
+#[test]
+fn rank_range_pages_are_gap_free_on_a_stable_snapshot() {
+    let rt = runtime();
+    seed_uniform(&rt, 6);
+    exec(&rt, "CREATE RANKING r ON players (score DESC)");
+
+    set_current_connection_id(1);
+    exec(&rt, "BEGIN");
+    let page1 = rank_range_rows(&rt, "RANK RANGE 1 TO 2 IN r");
+
+    set_current_connection_id(2);
+    exec(&rt, "BEGIN");
+    exec(
+        &rt,
+        "INSERT INTO players (name, score) VALUES ('late_winner', 1000)",
+    );
+    exec(&rt, "COMMIT");
+
+    set_current_connection_id(1);
+    let page2 = rank_range_rows(&rt, "RANK RANGE 3 TO 4 IN r");
+    let page3 = rank_range_rows(&rt, "RANK RANGE 5 TO 6 IN r");
+    exec(&rt, "COMMIT");
+    clear_current_connection_id();
+
+    let names: Vec<String> = page1
+        .into_iter()
+        .chain(page2)
+        .chain(page3)
+        .map(|(_rank, _rid, name)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "p6".to_string(),
+            "p5".to_string(),
+            "p4".to_string(),
+            "p3".to_string(),
+            "p2".to_string(),
+            "p1".to_string(),
+        ],
+        "stable-snapshot pages must not overlap, leave gaps, or shift after a later commit"
+    );
+}
+
+#[test]
+fn rank_range_ties_are_deterministic_and_match_rank_of() {
+    let rt = runtime();
+    seed_players(&rt, &[("a", 100), ("b", 100), ("c", 100), ("d", 90)]);
+    exec(&rt, "CREATE RANKING r ON players (score DESC) TOP 2");
+
+    let a = rid_of(&rt, "players", "a");
+    let b = rid_of(&rt, "players", "b");
+    let c = rid_of(&rt, "players", "c");
+
+    let rows = rank_range_rows(&rt, "RANK RANGE 1 TO 1 IN r");
+    let projected: Vec<(u64, u64, String)> = rows;
+    assert_eq!(
+        projected,
+        vec![(1, a, "a".to_string()), (1, b, "b".to_string())],
+        "equal scores inside the bounded head must be ordered by rid"
+    );
+    assert_eq!(rank_of(&rt, &format!("RANK OF {a} IN r")), Some(1));
+    assert_eq!(rank_of(&rt, &format!("RANK OF {b} IN r")), Some(1));
+    assert_eq!(
+        rank_of(&rt, &format!("RANK OF {c} IN r")),
+        None,
+        "the same deterministic TOP k boundary applies to RANK OF"
     );
 }
 
