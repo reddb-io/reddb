@@ -494,6 +494,9 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::DetachPolicy { .. }
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
+        | QueryExpr::RankOf(_)
+        | QueryExpr::ApproxRankOf(_)
+        | QueryExpr::RankRange(_)
         | QueryExpr::SimulatePolicy { .. }
         | QueryExpr::LintPolicy { .. }
         | QueryExpr::MigratePolicyMode { .. }
@@ -868,6 +871,9 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::DetachPolicy { .. } => "detach_policy",
         QueryExpr::ShowPolicies { .. } => "show_policies",
         QueryExpr::ShowEffectivePermissions { .. } => "show_effective_permissions",
+        QueryExpr::RankOf(_) => "rank_of",
+        QueryExpr::ApproxRankOf(_) => "approx_rank_of",
+        QueryExpr::RankRange(_) => "rank_range",
         QueryExpr::SimulatePolicy { .. } => "simulate_policy",
         QueryExpr::LintPolicy { .. } => "lint_policy",
         QueryExpr::MigratePolicyMode { .. } => "migrate_policy_mode",
