@@ -303,9 +303,10 @@ impl AdminIntentLog {
         let line = serialize_record(&record)?;
 
         {
+            let mut bytes = line.into_bytes();
+            bytes.push(b'\n');
             let mut file = self.file.lock().unwrap();
-            file.write_all(line.as_bytes())?;
-            file.write_all(b"\n")?;
+            file.write_all(&bytes)?;
             file.flush()?;
             // fsync on begin only — see module doc
             file.sync_data().map_err(IntentLogError::SyncFailed)?;
@@ -366,9 +367,10 @@ impl AdminIntentLog {
             summary.map(|s| s.to_json_value()),
         );
         let line = serialize_record(&record)?;
+        let mut bytes = line.into_bytes();
+        bytes.push(b'\n');
         let mut file = self.file.lock().unwrap();
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
+        file.write_all(&bytes)?;
         file.flush()?;
         Ok(())
     }
@@ -810,11 +812,15 @@ mod tests {
         }
 
         // --- parent mode ---
-        let path = format!(
-            "/tmp/reddb-intent-mp-{}-{}.log",
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join(".red/tmp/admin-intent-log-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!(
+            "reddb-intent-mp-{}-{}.log",
             std::process::id(),
             crate::utils::now_unix_nanos()
-        );
+        ));
 
         // Create the file before spawning children
         let log = AdminIntentLog::open(&path).unwrap();
@@ -841,8 +847,8 @@ mod tests {
             h.complete(None).unwrap();
         }
 
-        let s1 = child1.wait().expect("child1 wait");
-        let s2 = child2.wait().expect("child2 wait");
+        let s1 = wait_child_with_deadline(&mut child1, "child1");
+        let s2 = wait_child_with_deadline(&mut child2, "child2");
         assert!(s1.success(), "child1 exited with failure");
         assert!(s2.success(), "child2 exited with failure");
 
@@ -862,5 +868,26 @@ mod tests {
         assert!(line_count >= 120, "expected ≥120 lines, got {line_count}");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn wait_child_with_deadline(
+        child: &mut std::process::Child,
+        name: &str,
+    ) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match child
+                .try_wait()
+                .unwrap_or_else(|err| panic!("{name} wait failed: {err}"))
+            {
+                Some(status) => return status,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{name} did not exit before deadline");
+                }
+                None => std::thread::yield_now(),
+            }
+        }
     }
 }
