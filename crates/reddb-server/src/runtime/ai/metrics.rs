@@ -311,7 +311,7 @@ mod tests {
         h.observe(50, bounds); // le=100, le=500, le=1000, +Inf
         h.observe(200, bounds); // le=500, le=1000, +Inf
         h.observe(2000, bounds); // +Inf only
-        assert_eq!(h.counts, vec![1, 2, 3, 3]); // cumulative
+        assert_eq!(h.counts, vec![1, 2, 2, 3]); // cumulative
         assert_eq!(h.sum, 2250);
         assert_eq!(h.count, 3);
     }
