@@ -48,7 +48,7 @@ fn linux_fstatfs_type(file: &File) -> Option<i64> {
         return None;
     }
     let stat = unsafe { stat.assume_init() };
-    Some(stat.f_type as i64)
+    Some(stat.f_type)
 }
 
 #[cfg(target_os = "linux")]
