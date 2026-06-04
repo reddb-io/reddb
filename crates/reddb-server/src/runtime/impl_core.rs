@@ -86,6 +86,19 @@ fn record_column_f64(
     }
 }
 
+fn record_rid_u64(rec: &crate::storage::query::unified::UnifiedRecord) -> Option<u64> {
+    match rec.get("rid") {
+        Some(Value::UnsignedInteger(n)) => Some(*n),
+        Some(Value::Integer(n)) if *n >= 0 => Some(*n as u64),
+        _ => None,
+    }
+}
+
+struct RankedHeadEntry {
+    rank: u64,
+    record: crate::storage::query::unified::UnifiedRecord,
+}
+
 fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
     match value {
         Value::Text(s) => Ok(s.to_string()),
@@ -298,6 +311,56 @@ impl RedDBRuntime {
         ))
     }
 
+    /// `RANK RANGE <lo> TO <hi> IN <name>` — exact, MVCC-correct entries
+    /// occupying a contiguous rank range within the bounded top-K head.
+    ///
+    /// The output is in leaderboard order and includes `rank` plus the
+    /// row columns returned by the canonical exact-head SQL read.
+    fn execute_rank_range(
+        &self,
+        raw_query: &str,
+        req: super::ranking_descriptor_catalog::RankRangeRequest,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+        let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
+            .ok_or_else(|| {
+                RedDBError::Query(format!("ranking '{}' does not exist", req.ranking))
+            })?;
+        let (head_columns, entries) = self.compute_ranked_head_entries(&descriptor)?;
+
+        let mut columns = Vec::with_capacity(head_columns.len() + 1);
+        columns.push("rank".to_string());
+        for column in &head_columns {
+            if column != "rank" {
+                columns.push(column.clone());
+            }
+        }
+
+        let rows = entries
+            .into_iter()
+            .filter(|entry| entry.rank >= req.lo && entry.rank <= req.hi)
+            .map(|entry| {
+                let mut row = Vec::with_capacity(columns.len());
+                row.push(("rank".to_string(), Value::UnsignedInteger(entry.rank)));
+                for column in &head_columns {
+                    if column == "rank" {
+                        continue;
+                    }
+                    if let Some(value) = entry.record.get(column) {
+                        row.push((column.clone(), value.clone()));
+                    }
+                }
+                row
+            })
+            .collect();
+        Ok(RuntimeQueryResult::ok_records(
+            raw_query.to_string(),
+            columns,
+            rows,
+            "select",
+        ))
+    }
+
     /// Compute the exact rank of `target_id` within the descriptor's
     /// bounded top-K head, or `None` if the row is invisible to the
     /// querying snapshot or beyond the exact head.
@@ -316,6 +379,18 @@ impl RedDBRuntime {
         descriptor: &super::ranking_descriptor_catalog::RankingDescriptor,
         target_id: u64,
     ) -> RedDBResult<Option<u64>> {
+        let (_columns, entries) = self.compute_ranked_head_entries(descriptor)?;
+        Ok(entries
+            .into_iter()
+            .find(|entry| record_rid_u64(&entry.record) == Some(target_id))
+            .map(|entry| entry.rank))
+    }
+
+    /// Return the exact head rows in deterministic rank order.
+    fn compute_ranked_head_entries(
+        &self,
+        descriptor: &super::ranking_descriptor_catalog::RankingDescriptor,
+    ) -> RedDBResult<(Vec<String>, Vec<RankedHeadEntry>)> {
         let table = &descriptor.table;
         let column = &descriptor.column;
 
@@ -327,44 +402,32 @@ impl RedDBRuntime {
         // makes the rank honor policy/tenant scope (criterion 5).
         let dir = if descriptor.descending { "DESC" } else { "ASC" };
         let head_sql = format!(
-            "SELECT * FROM {table} ORDER BY {column} {dir} LIMIT {}",
+            "SELECT * FROM {table} ORDER BY {column} {dir}, rid ASC LIMIT {}",
             descriptor.top_k
         );
         let head_result = self.execute_query_inner(&head_sql)?;
-        let head = &head_result.result.records;
 
-        // Locate the target inside the head. Not present ⇒ either invisible
-        // to this snapshot/tenant, or beyond the exact head — both correctly
-        // yield "no exact rank" (the approximate tail is a separate slice).
-        let target_score = head.iter().find_map(|rec| {
-            let rid = match rec.get("rid") {
-                Some(Value::UnsignedInteger(n)) => *n,
-                Some(Value::Integer(n)) if *n >= 0 => *n as u64,
-                _ => return None,
-            };
-            (rid == target_id).then(|| record_column_f64(rec, column))?
-        });
-        let Some(target_score) = target_score else {
-            return Ok(None);
-        };
-
-        // RANK semantics: tied scores share a rank, so the rank is
-        // 1 + (number of strictly-better visible rows in the head).
-        let mut strictly_better = 0u64;
-        for rec in head {
+        let mut entries = Vec::with_capacity(head_result.result.records.len());
+        let mut row_position = 0u64;
+        let mut current_rank = 0u64;
+        let mut previous_score: Option<f64> = None;
+        for rec in &head_result.result.records {
             let Some(score) = record_column_f64(rec, column) else {
                 continue;
             };
-            let better = if descriptor.descending {
-                score > target_score
+            row_position += 1;
+            current_rank = if previous_score == Some(score) {
+                current_rank
             } else {
-                score < target_score
+                row_position
             };
-            if better {
-                strictly_better += 1;
-            }
+            previous_score = Some(score);
+            entries.push(RankedHeadEntry {
+                rank: current_rank,
+                record: rec.clone(),
+            });
         }
-        Ok(Some(strictly_better + 1))
+        Ok((head_result.result.columns, entries))
     }
 
     /// `APPROX RANK OF <id> IN <name>` — the *approximate tail* read
@@ -6540,6 +6603,9 @@ impl RedDBRuntime {
         }
         if super::ranking_descriptor_catalog::parse_show_rankings(query) {
             return self.execute_show_rankings(query);
+        }
+        if let Some(parsed) = super::ranking_descriptor_catalog::parse_rank_range(query) {
+            return self.execute_rank_range(query, parsed?);
         }
         if let Some(parsed) = super::ranking_descriptor_catalog::parse_approx_rank_of(query) {
             return self.execute_approx_rank_of(query, parsed?);
