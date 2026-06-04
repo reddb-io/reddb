@@ -167,6 +167,34 @@ jobs:
       - name: Doc-generation tooling contract test
         run: node --test scripts/docs_matrix_contract.test.mjs
 
+  afk-validation-sidecar:
+    # Issue #970 — machine-check AFK's structured validation sidecar against
+    # the actual merged diff. The contract test always runs; the live diff
+    # check activates when an AFK/CI caller supplies RED_AFK_VALIDATION_SIDECAR.
+    name: AFK Validation Sidecar
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Sidecar tooling contract test
+        run: node --test scripts/check-afk-validation-diff.test.mjs
+      - name: Check supplied AFK validation sidecar against diff
+        run: |
+          if [ -z "${RED_AFK_VALIDATION_SIDECAR:-}" ]; then
+            echo "No RED_AFK_VALIDATION_SIDECAR supplied; contract test covered the gate."
+            exit 0
+          fi
+          node scripts/check-afk-validation-diff.mjs \
+            --sidecar "$RED_AFK_VALIDATION_SIDECAR" \
+            --base "${RED_AFK_VALIDATION_BASE:-origin/main}" \
+            --head "${RED_AFK_VALIDATION_HEAD:-HEAD}"
+
   quality:
     name: Quality (fmt, check, clippy)
     needs: gate
