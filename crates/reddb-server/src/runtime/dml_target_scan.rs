@@ -26,6 +26,7 @@ pub(super) struct DmlTargetScan<'a> {
     limit: Option<usize>,
     target: Option<UpdateTarget>,
     table_row_resolver: TableRowMvccReadResolver,
+    live_table_rows: bool,
 }
 
 impl<'a> DmlTargetScan<'a> {
@@ -42,6 +43,7 @@ impl<'a> DmlTargetScan<'a> {
             limit,
             target: None,
             table_row_resolver: TableRowMvccReadResolver::current_statement(),
+            live_table_rows: false,
         }
     }
 
@@ -59,7 +61,13 @@ impl<'a> DmlTargetScan<'a> {
             limit,
             target: Some(target),
             table_row_resolver: TableRowMvccReadResolver::current_statement(),
+            live_table_rows: false,
         }
+    }
+
+    pub(super) fn with_live_table_rows(mut self) -> Self {
+        self.live_table_rows = true;
+        self
     }
 
     /// Walk the source collection, apply the (compiled) WHERE clause,
@@ -88,11 +96,14 @@ impl<'a> DmlTargetScan<'a> {
             if let Some(entity_id) =
                 query_exec::extract_entity_id_from_filter(&self.filter.cloned())
             {
-                if let Some(entity) = self.table_row_resolver.resolve_logical_id(
-                    &store,
-                    self.table,
-                    EntityId::new(entity_id),
-                ) {
+                let logical_id = EntityId::new(entity_id);
+                let entity = if self.live_table_rows {
+                    store.get_table_row_by_logical_id(self.table, logical_id)
+                } else {
+                    self.table_row_resolver
+                        .resolve_logical_id(&store, self.table, logical_id)
+                };
+                if let Some(entity) = entity {
                     return Ok(self.target_ids_from_entities([entity]));
                 }
                 return Ok(Vec::new());
@@ -269,6 +280,9 @@ impl<'a> DmlTargetScan<'a> {
 
     fn visible_candidate(&self, entity: &crate::storage::UnifiedEntity) -> bool {
         if matches!(entity.kind, EntityKind::TableRow { .. }) {
+            if self.live_table_rows {
+                return entity.xmax == 0;
+            }
             return self.table_row_resolver.resolve_candidate(entity).is_some();
         }
         crate::runtime::impl_core::entity_visible_under_current_snapshot(entity)
