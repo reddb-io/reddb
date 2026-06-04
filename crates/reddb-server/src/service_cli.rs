@@ -3455,7 +3455,11 @@ mod tests {
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
 
-        let manifest_path = std::env::temp_dir().join(format!(
+        let manifest_dir = std::env::current_dir()
+            .expect("current dir")
+            .join(".red/tmp/bootstrap-manifest-tests");
+        std::fs::create_dir_all(&manifest_dir).expect("create manifest test dir");
+        let manifest_path = manifest_dir.join(format!(
             "reddb-bootstrap-manifest-{}-{}.json",
             std::process::id(),
             std::time::SystemTime::now()
@@ -3481,7 +3485,7 @@ mod tests {
                         "statements": [
                             {
                                 "effect": "allow",
-                                "actions": ["red.registry:*", "policy:*", "config:write", "app:read"],
+                                "actions": ["red.registry:*", "policy:*", "config:write", "select"],
                                 "resources": ["registry:*", "policy:*", "config:*", "collection:docs"]
                             }
                         ]
@@ -3548,9 +3552,10 @@ mod tests {
             principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
+        // Manifest fixture pins a canonical data-plane read action.
         assert!(auth_store.check_policy_authz(
             &actor,
-            "app:read",
+            "select",
             &ResourceRef::new("collection", "docs"),
             &ctx
         ));
