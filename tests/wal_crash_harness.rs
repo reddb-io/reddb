@@ -140,6 +140,32 @@ fn wal_crash_grouped_commits_survive_after_force_sync() {
 }
 
 #[test]
+fn wal_crash_fdatasync_eligible_commit_survives_drop() {
+    // The first WAL commit after open covers the freshly preallocated
+    // metadata with a full sync. The next small commit stays inside that
+    // synced WAL range, so the writer may use sync_data on the hot path.
+    // Dropping without persist forces reopen to prove replay still sees it.
+    let (_g, path) = tmp_path("fdatasync_commit");
+    {
+        let store = UnifiedStore::open_with_config(&path, grouped_config()).unwrap();
+        store.create_collection("t").unwrap();
+        store
+            .insert_auto("t", row_entity(1, "fdatasync-row"))
+            .unwrap();
+    }
+
+    let reopened = UnifiedStore::open_with_config(&path, grouped_config()).unwrap();
+    let mgr = reopened.get_collection("t").expect("collection recovered");
+    let recovered = mgr.query_all(|_| true);
+    assert_eq!(recovered.len(), 1, "fdatasync-path commit must recover");
+    assert_eq!(
+        recovered[0].id.raw(),
+        1,
+        "recovered row must be the committed fdatasync-path row"
+    );
+}
+
+#[test]
 fn wal_crash_concurrent_writers_consistent_recovery() {
     let (_g, path) = tmp_path("concurrent");
     {

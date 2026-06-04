@@ -22,6 +22,31 @@ const WAL_BUFFER_BYTES: usize = 64 * 1024;
 /// 16 MiB mirrors postgres' default WAL segment size.
 const WAL_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalSyncMethod {
+    Data,
+    All,
+}
+
+pub(crate) struct WalGroupSync {
+    target_lsn: u64,
+    sync_handle: Arc<File>,
+    method: WalSyncMethod,
+}
+
+impl WalGroupSync {
+    pub(crate) fn target_lsn(&self) -> u64 {
+        self.target_lsn
+    }
+
+    pub(crate) fn sync(&self) -> io::Result<()> {
+        match self.method {
+            WalSyncMethod::Data => self.sync_handle.sync_data(),
+            WalSyncMethod::All => self.sync_handle.sync_all(),
+        }
+    }
+}
+
 /// Next segment boundary strictly above `pos`.
 ///
 /// `pos` already at a boundary still rounds *up* to the following one, so the
@@ -100,13 +125,13 @@ fn fallocate_unsupported(err: &io::Error) -> bool {
 /// Wraps the underlying file in a [`BufWriter`] so each `append` does
 /// not pay a write syscall — bytes accumulate in a 64 KiB user-space
 /// buffer until `sync()` (or `flush_until()`) drains them and then
-/// calls `sync_all()` on the raw file. This is how postgres turns
+/// calls `sync_data()`/`sync_all()` on the raw file. This is how postgres turns
 /// per-record append cost from ~500 ns down to ~5 ns; reddb's previous
 /// per-append `write_all` directly to the file paid the syscall on
 /// every record.
 ///
-/// **Critical contract:** every code path that calls `sync_all()` on
-/// the underlying file *must* drain the [`BufWriter`] first via
+/// **Critical contract:** every code path that syncs the underlying
+/// file *must* drain the [`BufWriter`] first via
 /// `BufWriter::flush()`. Otherwise the bytes in user-space never reach
 /// the kernel before fsync, and durability is silently broken.
 pub struct WalWriter {
@@ -131,6 +156,11 @@ pub struct WalWriter {
     /// See `src/storage/cache/README.md` § Invariant 2 and the Target 3
     /// section of `PLAN.md`.
     durable_lsn: u64,
+    /// WAL byte frontier covered by the last full file sync. Appends that stay
+    /// inside this synced preallocation range can use `sync_data()`; crossing
+    /// it, or syncing after fresh preallocation metadata, falls back to
+    /// `sync_all()`.
+    last_synced_size: u64,
     /// Exclusive byte offset up to which disk blocks are pre-reserved via
     /// `fallocate(FALLOC_FL_KEEP_SIZE)`. Advances one [`WAL_SEGMENT_BYTES`]
     /// segment at a time as `current_lsn` approaches it (issue #893). Reset to
@@ -142,6 +172,12 @@ pub struct WalWriter {
     /// target) so we stop issuing syscalls that will always fail. Preallocation
     /// is a best-effort optimization; clearing this never affects correctness.
     prealloc_supported: bool,
+    /// Set when `fallocate(FALLOC_FL_KEEP_SIZE)` successfully reserved a new
+    /// range and that allocation metadata has not yet been covered by a full
+    /// sync.
+    prealloc_metadata_dirty: bool,
+    #[cfg(test)]
+    last_sync_method: Option<WalSyncMethod>,
 }
 
 impl WalWriter {
@@ -192,8 +228,12 @@ impl WalWriter {
             sync_handle,
             current_lsn,
             durable_lsn: current_lsn,
+            last_synced_size: current_lsn,
             preallocated_to: 0,
             prealloc_supported: true,
+            prealloc_metadata_dirty: false,
+            #[cfg(test)]
+            last_sync_method: None,
         };
         // Reserve the first segment up front so the very first appends land in
         // contiguous extents rather than growing the file page-by-page.
@@ -221,7 +261,10 @@ impl WalWriter {
         }
         let from = self.preallocated_to;
         match reserve_wal_blocks(self.file.get_ref(), from, target - from) {
-            Ok(()) => self.preallocated_to = target,
+            Ok(()) => {
+                self.preallocated_to = target;
+                self.prealloc_metadata_dirty = true;
+            }
             Err(ref e) if fallocate_unsupported(e) => self.prealloc_supported = false,
             Err(_) => {
                 // Best-effort: leave `preallocated_to` as-is and retry at the
@@ -288,7 +331,7 @@ impl WalWriter {
     /// `current_lsn`.
     pub fn sync(&mut self) -> io::Result<()> {
         self.file.flush()?;
-        self.file.get_ref().sync_all()?;
+        self.sync_flushed_file()?;
         self.durable_lsn = self.current_lsn;
         Ok(())
     }
@@ -305,9 +348,41 @@ impl WalWriter {
             return Ok(());
         }
         self.file.flush()?;
-        self.file.get_ref().sync_all()?;
+        self.sync_flushed_file()?;
         self.durable_lsn = self.current_lsn;
         Ok(())
+    }
+
+    fn sync_flushed_file(&mut self) -> io::Result<()> {
+        let method = self.next_sync_method();
+        match method {
+            WalSyncMethod::Data => self.file.get_ref().sync_data()?,
+            WalSyncMethod::All => self.file.get_ref().sync_all()?,
+        }
+        self.mark_sync_complete(method, self.current_lsn);
+        Ok(())
+    }
+
+    fn next_sync_method(&self) -> WalSyncMethod {
+        if !self.prealloc_metadata_dirty && self.current_lsn <= self.last_synced_size {
+            WalSyncMethod::Data
+        } else {
+            WalSyncMethod::All
+        }
+    }
+
+    fn mark_sync_complete(&mut self, method: WalSyncMethod, lsn: u64) {
+        match method {
+            WalSyncMethod::Data => {}
+            WalSyncMethod::All => {
+                self.last_synced_size = self.preallocated_to.max(lsn);
+                self.prealloc_metadata_dirty = false;
+            }
+        }
+        #[cfg(test)]
+        {
+            self.last_sync_method = Some(method);
+        }
     }
 
     /// Highest byte offset that is durable on disk. Used by the pager
@@ -323,42 +398,45 @@ impl WalWriter {
     }
 
     /// Drain the BufWriter into the kernel and return the captured
-    /// LSN plus a cloned file handle for the caller to fsync
+    /// LSN plus a cloned file handle and sync method for the caller
     /// **without holding the WAL writer mutex**.
     ///
     /// Used by the group-commit leader path. The flow is:
     ///
     /// 1. Take the WAL writer mutex.
     /// 2. Call this method — drains user-space buffer to the kernel
-    ///    and captures `(target_lsn, sync_handle)`.
+    ///    and captures a size-aware sync plan.
     /// 3. Release the WAL writer mutex.
-    /// 4. Call `sync_handle.sync_all()` — this is the expensive
-    ///    ~100 µs syscall, and other writers can keep appending
-    ///    while it runs.
+    /// 4. Execute the sync plan — this is the expensive ~100 µs syscall,
+    ///    and other writers can keep appending while it runs.
     /// 5. Take the WAL writer mutex briefly and call
-    ///    [`WalWriter::mark_durable(target_lsn)`] to publish the
-    ///    new durable position.
+    ///    [`WalWriter::mark_durable`] to publish the new durable position.
     ///
     /// The cloned `sync_handle` shares the same kernel inode with
-    /// the writer's `file`, so `sync_all()` on the clone flushes
-    /// ALL bytes that have reached the kernel for that file —
-    /// including bytes appended by other writers AFTER step 3.
+    /// the writer's `file`, so syncing the clone flushes bytes that
+    /// have reached the kernel for that file.
     /// This is the coalescing window that makes group commit win.
-    pub fn drain_for_group_sync(&mut self) -> io::Result<(u64, Arc<File>)> {
+    pub(crate) fn drain_for_group_sync(&mut self) -> io::Result<WalGroupSync> {
         // Drain user-space buffer into the kernel.
         self.file.flush()?;
-        Ok((self.current_lsn, Arc::clone(&self.sync_handle)))
+        Ok(WalGroupSync {
+            target_lsn: self.current_lsn,
+            sync_handle: Arc::clone(&self.sync_handle),
+            method: self.next_sync_method(),
+        })
     }
 
     /// Manually advance `durable_lsn` after a successful out-of-lock
-    /// `sync_all()` performed via [`WalWriter::drain_for_group_sync`].
+    /// sync performed via [`WalWriter::drain_for_group_sync`].
     ///
     /// Monotonic — never lowers `durable_lsn`. Safe to call with a
     /// stale `lsn`; just becomes a no-op.
-    pub fn mark_durable(&mut self, lsn: u64) {
+    pub(crate) fn mark_durable(&mut self, sync: &WalGroupSync) {
+        let lsn = sync.target_lsn;
         if lsn > self.durable_lsn {
             self.durable_lsn = lsn;
         }
+        self.mark_sync_complete(sync.method, lsn);
     }
 
     /// Truncate the WAL (usually after checkpoint).
@@ -391,6 +469,12 @@ impl WalWriter {
 
         self.current_lsn = 8;
         self.durable_lsn = 8;
+        self.last_synced_size = 8;
+        self.prealloc_metadata_dirty = false;
+        #[cfg(test)]
+        {
+            self.last_sync_method = Some(WalSyncMethod::All);
+        }
 
         // `set_len(0)` freed every reserved block, so the WAL would otherwise
         // grow page-by-page again from here. Re-extend a fresh segment now —
@@ -628,6 +712,94 @@ mod tests {
         assert!(after_append > before);
         writer.sync().unwrap();
         assert_eq!(writer.durable_lsn(), after_append);
+    }
+
+    #[test]
+    fn sync_all_is_used_when_wal_size_grew() {
+        let (_guard, path) = temp_wal("sync_all_grew");
+        let mut writer = WalWriter::open(&path).unwrap();
+
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+
+        assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
+        assert!(writer.last_synced_size >= writer.current_lsn());
+        assert!(!writer.prealloc_metadata_dirty);
+    }
+
+    #[test]
+    fn sync_all_is_used_for_metadata_only_preallocation() {
+        let (_guard, path) = temp_wal("sync_all_prealloc_metadata");
+        let mut writer = WalWriter::open(&path).unwrap();
+        if !writer.prealloc_supported {
+            return;
+        }
+
+        assert_eq!(writer.current_lsn(), 8);
+        assert!(writer.prealloc_metadata_dirty);
+
+        writer.sync().unwrap();
+
+        assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
+        assert_eq!(writer.last_synced_size, writer.preallocated_to);
+        assert!(!writer.prealloc_metadata_dirty);
+    }
+
+    #[test]
+    fn sync_data_is_used_when_wal_size_is_unchanged() {
+        let (_guard, path) = temp_wal("sync_data_unchanged");
+        let mut writer = WalWriter::open(&path).unwrap();
+
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+        let synced_size = writer.last_synced_size;
+        writer.sync().unwrap();
+
+        assert_eq!(writer.last_sync_method, Some(WalSyncMethod::Data));
+        assert_eq!(writer.last_synced_size, synced_size);
+        assert_eq!(writer.durable_lsn(), writer.current_lsn());
+    }
+
+    #[test]
+    fn sync_data_is_used_for_appends_within_synced_preallocation() {
+        let (_guard, path) = temp_wal("sync_data_preallocated_append");
+        let mut writer = WalWriter::open(&path).unwrap();
+        if !writer.prealloc_supported {
+            return;
+        }
+
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+        assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
+
+        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+
+        assert_eq!(writer.last_sync_method, Some(WalSyncMethod::Data));
+        assert_eq!(writer.durable_lsn(), writer.current_lsn());
+        assert!(writer.current_lsn() <= writer.last_synced_size);
+    }
+
+    #[test]
+    fn group_sync_uses_sync_data_within_synced_preallocation() {
+        let (_guard, path) = temp_wal("group_sync_data_preallocated_append");
+        let mut writer = WalWriter::open(&path).unwrap();
+        if !writer.prealloc_supported {
+            return;
+        }
+
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+        assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
+
+        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+        let sync = writer.drain_for_group_sync().unwrap();
+        assert_eq!(sync.method, WalSyncMethod::Data);
+        sync.sync().unwrap();
+        writer.mark_durable(&sync);
+
+        assert_eq!(writer.last_sync_method, Some(WalSyncMethod::Data));
+        assert_eq!(writer.durable_lsn(), writer.current_lsn());
     }
 
     #[test]
