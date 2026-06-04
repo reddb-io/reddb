@@ -361,11 +361,11 @@ impl UnifiedStore {
         let mut pager_config = PagerConfig::default();
         // Tunables via env — experimental, used by the benchmark harness
         // to compare durability profiles head-to-head with Postgres.
-        // REDDB_DOUBLE_WRITE=0 disables the double-write buffer, which
-        // otherwise adds two fsyncs per pager flush (one on DWB, one
-        // on the main file). With DWB off the pager behaves more like
-        // Postgres + full_page_writes=off — we trade torn-page
-        // protection for ingest throughput.
+        // REDDB_DOUBLE_WRITE=0 requests skipping the double-write buffer,
+        // which otherwise adds two fsyncs per pager flush (one on DWB, one
+        // on the main file). The pager honors this only when the actual
+        // data file is proven to live on a CoW filesystem with atomic page
+        // writes; otherwise it fails closed and keeps DWB enabled.
         if matches!(
             std::env::var("REDDB_DOUBLE_WRITE").ok().as_deref(),
             Some("0") | Some("false") | Some("off")

@@ -2,10 +2,142 @@ use super::*;
 
 /// DWB file magic: "RDDW"
 const DWB_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x57];
+pub(super) const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
+pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
+pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CowFilesystemKind {
+    Zfs,
+    BtrfsDataCow,
+    TestOverride,
+}
+
+pub(super) fn classify_cow_filesystem(
+    fs_type: i64,
+    mount_options: Option<&str>,
+    inode_flags: Option<u64>,
+) -> Option<CowFilesystemKind> {
+    match fs_type {
+        ZFS_SUPER_MAGIC => Some(CowFilesystemKind::Zfs),
+        BTRFS_SUPER_MAGIC => {
+            let mount_options = mount_options?;
+            if mount_options.split(',').any(|option| option == "nodatacow") {
+                return None;
+            }
+
+            let inode_flags = inode_flags?;
+            if inode_flags & FS_NOCOW_FL != 0 {
+                return None;
+            }
+
+            Some(CowFilesystemKind::BtrfsDataCow)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_fstatfs_type(file: &File) -> Option<i64> {
+    use std::mem::MaybeUninit;
+    use std::os::fd::AsRawFd;
+
+    let mut stat = MaybeUninit::<libc::statfs>::uninit();
+    let rc = unsafe { libc::fstatfs(file.as_raw_fd(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    Some(stat.f_type as i64)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_inode_flags(file: &File) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+
+    let mut flags: libc::c_long = 0;
+    let rc = unsafe { libc::ioctl(file.as_raw_fd(), libc::FS_IOC_GETFLAGS, &mut flags) };
+    if rc != 0 {
+        return None;
+    }
+    Some(flags as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mount_options_for_path(path: &Path) -> Option<String> {
+    let path = path.canonicalize().ok()?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    parse_mountinfo_options_for_path(&mountinfo, &path)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn parse_mountinfo_options_for_path(mountinfo: &str, path: &Path) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        if fields.len() < 10 {
+            continue;
+        }
+
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        if separator + 3 >= fields.len() || separator < 6 {
+            continue;
+        }
+
+        let mount_point = mountinfo_unescape_path(fields[4]);
+        if !path.starts_with(&mount_point) {
+            continue;
+        }
+
+        let fs_type = fields[separator + 1];
+        if fs_type != "btrfs" && fs_type != "zfs" {
+            continue;
+        }
+
+        let mount_options = fields[5];
+        let super_options = fields[separator + 3];
+        let options = format!("{mount_options},{super_options}");
+        let depth = mount_point.components().count();
+        if best
+            .as_ref()
+            .map(|(best_depth, _)| depth > *best_depth)
+            .unwrap_or(true)
+        {
+            best = Some((depth, options));
+        }
+    }
+
+    best.map(|(_, options)| options)
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_unescape_path(value: &str) -> PathBuf {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            let octal = &value[i + 1..i + 4];
+            if let Ok(byte) = u8::from_str_radix(octal, 8) {
+                out.push(byte);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    PathBuf::from(String::from_utf8_lossy(&out).into_owned())
+}
 
 impl Pager {
     /// Open or create a database file
-    pub fn open<P: AsRef<Path>>(path: P, config: PagerConfig) -> Result<Self, PagerError> {
+    pub fn open<P: AsRef<Path>>(path: P, mut config: PagerConfig) -> Result<Self, PagerError> {
         let path = path.as_ref().to_path_buf();
         let exists = path.exists();
 
@@ -72,7 +204,25 @@ impl Pager {
         // suppressed — torn pages are healed by replaying FullPageImage WAL
         // records during recovery. Any pre-existing `-dwb` is removed so a
         // flipped flag cannot leave a stale sidecar on disk.
+        //
+        // gh-895: an explicit `double_write = false` request is honored only
+        // when the already-open data file is proven to live on a filesystem
+        // with atomic CoW page writes. Unknown and non-CoW filesystems fail
+        // closed by keeping the DWB sidecar.
         let fold_dwb = crate::physical::fold_dwb_into_wal_enabled();
+        if !config.double_write && !config.read_only && !fold_dwb {
+            let skip_dwb_on_cow =
+                Self::cow_filesystem_has_atomic_page_writes(&path, &file).is_some();
+            if !skip_dwb_on_cow {
+                tracing::warn!(
+                    path = %path.display(),
+                    "double_write=false requested, but the data file is not proven to be on \
+                     ZFS or btrfs datacow; keeping the double-write buffer enabled"
+                );
+                config.double_write = true;
+            }
+        }
+
         let dwb_file = if config.double_write && !config.read_only && !fold_dwb {
             let f = Self::open_dwb_file(&path)?;
             Some(Mutex::new(f))
@@ -100,6 +250,9 @@ impl Pager {
         if exists {
             // Recover from double-write buffer if needed
             pager.recover_from_dwb()?;
+            if !pager.config.double_write && !pager.config.read_only {
+                let _ = std::fs::remove_file(Self::dwb_path(&pager.path));
+            }
             // Load existing database (with header shadow fallback)
             pager.load_header()?;
             pager.bind_encryption_for_existing()?;
@@ -120,6 +273,49 @@ impl Pager {
     /// Pure function with no I/O so the warn decision is unit-testable.
     pub(crate) fn page_size_misaligned_with_block(page_size: usize, fs_block_size: u64) -> bool {
         fs_block_size != 0 && !(page_size as u64).is_multiple_of(fs_block_size)
+    }
+
+    #[cfg(test)]
+    fn cow_filesystem_test_override() -> Option<bool> {
+        match COW_ATOMIC_WRITE_TEST_OVERRIDE.load(Ordering::Relaxed) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(test))]
+    fn cow_filesystem_test_override() -> Option<bool> {
+        None
+    }
+
+    fn cow_filesystem_has_atomic_page_writes(
+        path: &Path,
+        file: &File,
+    ) -> Option<CowFilesystemKind> {
+        if let Some(allowed) = Self::cow_filesystem_test_override() {
+            return allowed.then_some(CowFilesystemKind::TestOverride);
+        }
+        Self::probe_cow_filesystem(path, file)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn probe_cow_filesystem(path: &Path, file: &File) -> Option<CowFilesystemKind> {
+        let fs_type = linux_fstatfs_type(file)?;
+        match fs_type {
+            ZFS_SUPER_MAGIC => Some(CowFilesystemKind::Zfs),
+            BTRFS_SUPER_MAGIC => {
+                let mount_options = linux_mount_options_for_path(path)?;
+                let inode_flags = linux_inode_flags(file)?;
+                classify_cow_filesystem(fs_type, Some(&mount_options), Some(inode_flags))
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn probe_cow_filesystem(_path: &Path, _file: &File) -> Option<CowFilesystemKind> {
+        None
     }
 
     /// Inspect page 0 for the `RDBE` encryption marker, then resolve

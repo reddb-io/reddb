@@ -40,10 +40,15 @@ use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Default cache size (pages)
 const DEFAULT_CACHE_SIZE: usize = 10_000;
+
+#[cfg(test)]
+static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 /// Pager error types
 #[derive(Debug)]
@@ -286,6 +291,11 @@ impl Drop for Pager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use pager_impl::parse_mountinfo_options_for_path;
+    use pager_impl::{
+        classify_cow_filesystem, CowFilesystemKind, BTRFS_SUPER_MAGIC, FS_NOCOW_FL, ZFS_SUPER_MAGIC,
+    };
     use std::fs;
     use std::io::Write;
 
@@ -318,6 +328,26 @@ mod tests {
         PathBuf::from(dwb)
     }
 
+    static COW_ATOMIC_WRITE_OVERRIDE_GUARD: Mutex<()> = Mutex::new(());
+
+    struct CowAtomicWriteOverrideGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for CowAtomicWriteOverrideGuard {
+        fn drop(&mut self) {
+            COW_ATOMIC_WRITE_TEST_OVERRIDE.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn cow_atomic_write_override(value: bool) -> CowAtomicWriteOverrideGuard {
+        let guard = COW_ATOMIC_WRITE_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        COW_ATOMIC_WRITE_TEST_OVERRIDE.store(if value { 1 } else { 2 }, Ordering::Relaxed);
+        CowAtomicWriteOverrideGuard { _guard: guard }
+    }
+
     fn write_dwb_fixture(path: &Path, pages: &[(u32, Page)]) {
         let entry_size = 4 + PAGE_SIZE;
         let header_len = 12;
@@ -341,6 +371,25 @@ mod tests {
         let dwb_path = dwb_path_for(path);
         let mut file = fs::File::create(&dwb_path).unwrap();
         file.write_all(&buf).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn write_page_bytes(path: &Path, page_id: u32, page: &Page) {
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
+            .unwrap();
+        file.write_all(page.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn write_torn_page_bytes(path: &Path, page_id: u32, before: &Page, after: &Page) {
+        let mut torn = *before.as_bytes();
+        torn[..PAGE_SIZE / 2].copy_from_slice(&after.as_bytes()[..PAGE_SIZE / 2]);
+
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
+            .unwrap();
+        file.write_all(&torn).unwrap();
         file.sync_all().unwrap();
     }
 
@@ -557,6 +606,252 @@ mod tests {
             assert_eq!(fs::metadata(&dwb_path).unwrap().len(), 0);
         }
 
+        cleanup(&path);
+    }
+
+    #[test]
+    fn cow_probe_classification_fails_closed_for_btrfs_nodatacow() {
+        assert_eq!(
+            classify_cow_filesystem(ZFS_SUPER_MAGIC, None, None),
+            Some(CowFilesystemKind::Zfs),
+            "ZFS is always CoW"
+        );
+        assert_eq!(
+            classify_cow_filesystem(BTRFS_SUPER_MAGIC, Some("rw,relatime"), Some(0)),
+            Some(CowFilesystemKind::BtrfsDataCow),
+            "btrfs qualifies only when datacow remains enabled"
+        );
+        assert_eq!(
+            classify_cow_filesystem(BTRFS_SUPER_MAGIC, Some("rw,nodatacow"), Some(0)),
+            None,
+            "btrfs nodatacow mount option must reject DWB skip"
+        );
+        assert_eq!(
+            classify_cow_filesystem(BTRFS_SUPER_MAGIC, Some("rw"), Some(FS_NOCOW_FL)),
+            None,
+            "btrfs chattr +C / NOCOW inode flag must reject DWB skip"
+        );
+        assert_eq!(
+            classify_cow_filesystem(BTRFS_SUPER_MAGIC, Some("rw"), None),
+            None,
+            "missing btrfs inode flags are uncertain and must fail closed"
+        );
+        assert_eq!(
+            classify_cow_filesystem(BTRFS_SUPER_MAGIC, None, Some(0)),
+            None,
+            "missing btrfs mount options are uncertain and must fail closed"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_parser_uses_longest_cow_mount_and_rejects_nodatacow() {
+        let mountinfo = "\
+24 18 0:21 / / rw,relatime - ext4 /dev/root rw\n\
+35 24 0:42 /subvol /mnt/reddb rw,relatime - btrfs /dev/sdb rw,space_cache=v2\n\
+36 35 0:43 /nocow /mnt/reddb/nocow rw,relatime - btrfs /dev/sdb rw,nodatacow\n\
+";
+
+        assert_eq!(
+            parse_mountinfo_options_for_path(mountinfo, Path::new("/mnt/reddb/data.rdb"))
+                .as_deref(),
+            Some("rw,relatime,rw,space_cache=v2")
+        );
+        assert_eq!(
+            parse_mountinfo_options_for_path(mountinfo, Path::new("/mnt/reddb/nocow/data.rdb"))
+                .as_deref(),
+            Some("rw,relatime,rw,nodatacow")
+        );
+    }
+
+    #[test]
+    fn double_write_false_keeps_dwb_when_cow_probe_denies() {
+        let _override = cow_atomic_write_override(false);
+        let path = temp_db_path();
+        cleanup(&path);
+
+        {
+            let config = PagerConfig {
+                double_write: false,
+                ..Default::default()
+            };
+            let pager = Pager::open(&path, config).unwrap();
+            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            pager.write_page(page.page_id(), page).unwrap();
+            pager.flush().unwrap();
+        }
+
+        assert!(
+            dwb_path_for(&path).exists(),
+            "DWB must stay enabled when double_write=false is not proven safe"
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn double_write_false_skips_dwb_when_cow_probe_allows() {
+        let _override = cow_atomic_write_override(true);
+        let path = temp_db_path();
+        cleanup(&path);
+
+        {
+            let config = PagerConfig {
+                double_write: false,
+                ..Default::default()
+            };
+            let pager = Pager::open(&path, config).unwrap();
+            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            pager.write_page(page.page_id(), page).unwrap();
+            pager.flush().unwrap();
+        }
+
+        assert!(
+            !dwb_path_for(&path).exists(),
+            "DWB may be skipped only after the CoW probe allows it"
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn double_write_false_on_cow_replays_then_removes_existing_dwb() {
+        let _override = cow_atomic_write_override(true);
+        let path = temp_db_path();
+        cleanup(&path);
+
+        let page_id;
+        {
+            let pager = Pager::open(&path, PagerConfig::default()).unwrap();
+            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            page_id = page.page_id();
+            pager.sync().unwrap();
+        }
+
+        let mut recovered_page = Page::new(PageType::BTreeLeaf, page_id);
+        recovered_page.insert_cell(b"key", b"value").unwrap();
+        write_dwb_fixture(&path, &[(page_id, recovered_page)]);
+
+        {
+            let config = PagerConfig {
+                double_write: false,
+                ..Default::default()
+            };
+            let pager = Pager::open(&path, config).unwrap();
+            let read_page = pager.read_page(page_id).unwrap();
+            let (key, value) = read_page.read_cell(0).unwrap();
+            assert_eq!(key, b"key");
+            assert_eq!(value, b"value");
+        }
+
+        assert!(
+            !dwb_path_for(&path).exists(),
+            "CoW DWB-skip must replay any existing DWB before removing the sidecar"
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn simulated_cow_mid_write_leaves_a_whole_consistent_page_without_dwb() {
+        let _override = cow_atomic_write_override(true);
+        let path = temp_db_path();
+        cleanup(&path);
+
+        let config = PagerConfig {
+            double_write: false,
+            ..Default::default()
+        };
+
+        let page_id;
+        let before;
+        let after;
+        {
+            let pager = Pager::open(&path, config.clone()).unwrap();
+            let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            page_id = page.page_id();
+            page.insert_cell(b"phase", b"before").unwrap();
+            pager.write_page(page_id, page).unwrap();
+            pager.sync().unwrap();
+            before = pager.read_page(page_id).unwrap();
+
+            let mut page = before.clone();
+            page.insert_cell(b"phase2", b"after").unwrap();
+            pager.write_page(page_id, page).unwrap();
+            pager.flush().unwrap();
+            after = pager.read_page(page_id).unwrap();
+        }
+
+        // CoW crash model: the interrupted write leaves either the old full
+        // page or the new full page, never a torn mix. Exercise both outcomes.
+        for (whole_page, expected_cells) in [(&before, 1), (&after, 2)] {
+            write_page_bytes(&path, page_id, whole_page);
+
+            let pager = Pager::open(&path, config.clone()).unwrap();
+            let recovered = pager.read_page(page_id).unwrap();
+            assert_eq!(recovered.cell_count(), expected_cells);
+            let (key, value) = recovered.read_cell(0).unwrap();
+            assert_eq!(key, b"phase");
+            assert_eq!(value, b"before");
+            if expected_cells == 2 {
+                let (key, value) = recovered.read_cell(1).unwrap();
+                assert_eq!(key, b"phase2");
+                assert_eq!(value, b"after");
+            }
+            drop(pager);
+        }
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn same_mid_write_without_cow_recovers_from_dwb() {
+        let _override = cow_atomic_write_override(false);
+        let path = temp_db_path();
+        cleanup(&path);
+
+        let config = PagerConfig {
+            double_write: false,
+            ..Default::default()
+        };
+
+        let page_id;
+        let before;
+        let after;
+        {
+            let pager = Pager::open(&path, config.clone()).unwrap();
+            let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            page_id = page.page_id();
+            page.insert_cell(b"phase", b"before").unwrap();
+            pager.write_page(page_id, page).unwrap();
+            pager.sync().unwrap();
+            before = pager.read_page(page_id).unwrap();
+
+            let mut page = before.clone();
+            page.insert_cell(b"phase2", b"after").unwrap();
+            pager.write_page(page_id, page).unwrap();
+            pager.flush().unwrap();
+            after = pager.read_page(page_id).unwrap();
+        }
+
+        write_dwb_fixture(&path, &[(page_id, after.clone())]);
+        write_torn_page_bytes(&path, page_id, &before, &after);
+
+        {
+            let pager = Pager::open(&path, config).unwrap();
+            let recovered = pager.read_page(page_id).unwrap();
+            assert_eq!(recovered.cell_count(), 2);
+
+            let (key, value) = recovered.read_cell(0).unwrap();
+            assert_eq!(key, b"phase");
+            assert_eq!(value, b"before");
+
+            let (key, value) = recovered.read_cell(1).unwrap();
+            assert_eq!(key, b"phase2");
+            assert_eq!(value, b"after");
+        }
+
+        assert_eq!(fs::metadata(dwb_path_for(&path)).unwrap().len(), 0);
         cleanup(&path);
     }
 
