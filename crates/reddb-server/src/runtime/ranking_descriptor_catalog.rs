@@ -68,6 +68,14 @@ pub struct RankOfRequest {
     pub ranking: String,
 }
 
+/// Parsed `RANK RANGE <lo> TO <hi> IN <name>` read request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankRangeRequest {
+    pub lo: u64,
+    pub hi: u64,
+    pub ranking: String,
+}
+
 /// Parsed `APPROX RANK OF <id> IN <name>` read request — the approximate
 /// *tail* read (issue #923). Distinct statement head from the exact
 /// `RANK OF`, so the exact head surface (#918) is untouched.
@@ -256,6 +264,50 @@ pub fn parse_rank_of(sql: &str) -> Option<RedDBResult<RankOfRequest>> {
         }
         Ok(RankOfRequest {
             entity_id,
+            ranking: ranking.clone(),
+        })
+    })();
+    Some(result)
+}
+
+/// Parse `RANK RANGE <lo> TO <hi> IN <name>`.
+///
+/// Returns `None` unless the statement starts with `RANK RANGE`. A malformed
+/// tail returns `Some(Err(..))` for a targeted error.
+pub fn parse_rank_range(sql: &str) -> Option<RedDBResult<RankRangeRequest>> {
+    let tokens = tokenize(sql);
+    if tokens.len() < 2 || !eq(&tokens[0], "RANK") || !eq(&tokens[1], "RANGE") {
+        return None;
+    }
+    let err = || {
+        RedDBError::Query(
+            "invalid RANK RANGE: expected RANK RANGE <lo> TO <hi> IN <ranking-name>".to_string(),
+        )
+    };
+    let result = (|| {
+        let lo_str = tokens.get(2).ok_or_else(err)?;
+        let lo = lo_str.parse::<u64>().map_err(|_| err())?;
+        if lo == 0 {
+            return Err(err());
+        }
+        if !tokens.get(3).is_some_and(|t| eq(t, "TO")) {
+            return Err(err());
+        }
+        let hi_str = tokens.get(4).ok_or_else(err)?;
+        let hi = hi_str.parse::<u64>().map_err(|_| err())?;
+        if hi < lo {
+            return Err(err());
+        }
+        if !tokens.get(5).is_some_and(|t| eq(t, "IN")) {
+            return Err(err());
+        }
+        let ranking = tokens.get(6).ok_or_else(err)?;
+        if tokens.get(7).is_some() {
+            return Err(err());
+        }
+        Ok(RankRangeRequest {
+            lo,
+            hi,
             ranking: ranking.clone(),
         })
     })();
@@ -527,6 +579,50 @@ mod tests {
         assert!(parse_rank_of("SELECT 1").is_none());
         // `RANK() OVER (...)` is a window projection, not the RANK OF read.
         assert!(parse_rank_of("SELECT RANK() OVER (ORDER BY s DESC) FROM t").is_none());
+    }
+
+    #[test]
+    fn parse_rank_range_full() {
+        let req = parse_rank_range("RANK RANGE 100 TO 110 IN top_players")
+            .expect("recognised")
+            .expect("valid");
+        assert_eq!(
+            req,
+            RankRangeRequest {
+                lo: 100,
+                hi: 110,
+                ranking: "top_players".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_rank_range_is_case_insensitive() {
+        let req = parse_rank_range("rank range 1 to 5 in r")
+            .expect("recognised")
+            .expect("valid");
+        assert_eq!(req.lo, 1);
+        assert_eq!(req.hi, 5);
+        assert_eq!(req.ranking, "r");
+    }
+
+    #[test]
+    fn parse_rank_range_rejects_bad_bounds() {
+        let err = parse_rank_range("RANK RANGE 0 TO 5 IN r")
+            .expect("recognised")
+            .expect_err("zero lower bound");
+        assert!(err.to_string().contains("RANK RANGE"), "{err}");
+
+        let err = parse_rank_range("RANK RANGE 5 TO 4 IN r")
+            .expect("recognised")
+            .expect_err("inverted bounds");
+        assert!(err.to_string().contains("RANK RANGE"), "{err}");
+    }
+
+    #[test]
+    fn parse_rank_range_does_not_shadow_exact_rank_of() {
+        assert!(parse_rank_range("RANK OF 1 IN r").is_none());
+        assert!(parse_rank_of("RANK RANGE 1 TO 2 IN r").is_none());
     }
 
     #[test]
