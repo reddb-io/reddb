@@ -252,6 +252,9 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::RankOf(_)
+            | QueryExpr::ApproxRankOf(_)
+            | QueryExpr::RankRange(_)
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
             | QueryExpr::MigratePolicyMode { .. }
@@ -382,6 +385,9 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::RankOf(_)
+            | QueryExpr::ApproxRankOf(_)
+            | QueryExpr::RankRange(_)
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
             | QueryExpr::MigratePolicyMode { .. }
@@ -471,6 +477,9 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::RankOf(_)
+            | QueryExpr::ApproxRankOf(_)
+            | QueryExpr::RankRange(_)
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
             | QueryExpr::MigratePolicyMode { .. }
