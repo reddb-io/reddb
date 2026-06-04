@@ -563,6 +563,16 @@ mod tests {
             || q.get(id).map(|j| j.is_terminal()).unwrap_or(false),
             Duration::from_secs(2),
         ));
+        assert!(wait_until(
+            || backend
+                .get(super::ns::JOBS, &super::key::job(id))
+                .ok()
+                .flatten()
+                .and_then(|raw| MlJob::from_json(&raw))
+                .map(|job| job.status == MlJobStatus::Completed)
+                .unwrap_or(false),
+            Duration::from_secs(2),
+        ));
         // Raw record must exist and must reflect the completed status.
         let raw = backend
             .get(super::ns::JOBS, &super::key::job(id))
