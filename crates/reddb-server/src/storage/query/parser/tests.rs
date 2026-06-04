@@ -2486,6 +2486,50 @@ fn test_parse_show_sample_rejects_where_and_order_by() {
 }
 
 #[test]
+fn test_parse_zrank_desugars_to_rank_of() {
+    let query = parse("ZRANK top_players 42").unwrap();
+    match query {
+        QueryExpr::RankOf(rank) => {
+            assert_eq!(rank.ranking, "top_players");
+            assert_eq!(rank.entity_id, 42);
+        }
+        other => panic!("Expected RankOf, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_zrange_withscores_desugars_to_rank_range() {
+    let query = parse("ZRANGE top_players 1 3 WITHSCORES").unwrap();
+    match query {
+        QueryExpr::RankRange(range) => {
+            assert_eq!(range.ranking, "top_players");
+            assert_eq!(range.lo, 2);
+            assert_eq!(range.hi, 4);
+        }
+        other => panic!("Expected RankRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_canonical_rank_reads() {
+    match parse("RANK OF 7 IN top_players").unwrap() {
+        QueryExpr::RankOf(rank) => {
+            assert_eq!(rank.ranking, "top_players");
+            assert_eq!(rank.entity_id, 7);
+        }
+        other => panic!("Expected RankOf, got {other:?}"),
+    }
+    match parse("RANK RANGE 2 TO 4 IN top_players").unwrap() {
+        QueryExpr::RankRange(range) => {
+            assert_eq!(range.ranking, "top_players");
+            assert_eq!(range.lo, 2);
+            assert_eq!(range.hi, 4);
+        }
+        other => panic!("Expected RankRange, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {
