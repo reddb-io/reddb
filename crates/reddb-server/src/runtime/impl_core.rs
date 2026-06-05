@@ -271,12 +271,11 @@ impl RedDBRuntime {
                 ]
             })
             .collect();
-        Ok(RuntimeQueryResult::ok_records(
-            raw_query.to_string(),
-            columns,
-            rows,
-            "select",
-        ))
+        let mut result =
+            RuntimeQueryResult::ok_records(raw_query.to_string(), columns, rows, "select");
+        result.statement = "rank_of";
+        result.engine = "runtime-rank";
+        Ok(result)
     }
 
     /// `RANK OF <id> IN <name>` — exact, MVCC-correct rank of a specific
@@ -290,7 +289,7 @@ impl RedDBRuntime {
     fn execute_rank_of(
         &self,
         raw_query: &str,
-        req: super::ranking_descriptor_catalog::RankOfRequest,
+        req: &crate::storage::query::ast::RankOfQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
@@ -303,12 +302,11 @@ impl RedDBRuntime {
             Some(rank) => vec![vec![("rank".to_string(), Value::UnsignedInteger(rank))]],
             None => Vec::new(),
         };
-        Ok(RuntimeQueryResult::ok_records(
-            raw_query.to_string(),
-            columns,
-            rows,
-            "select",
-        ))
+        let mut result =
+            RuntimeQueryResult::ok_records(raw_query.to_string(), columns, rows, "select");
+        result.statement = "rank_range";
+        result.engine = "runtime-rank";
+        Ok(result)
     }
 
     /// `RANK RANGE <lo> TO <hi> IN <name>` — exact, MVCC-correct entries
@@ -319,7 +317,7 @@ impl RedDBRuntime {
     fn execute_rank_range(
         &self,
         raw_query: &str,
-        req: super::ranking_descriptor_catalog::RankRangeRequest,
+        req: &crate::storage::query::ast::RankRangeQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
@@ -353,12 +351,11 @@ impl RedDBRuntime {
                 row
             })
             .collect();
-        Ok(RuntimeQueryResult::ok_records(
-            raw_query.to_string(),
-            columns,
-            rows,
-            "select",
-        ))
+        let mut result =
+            RuntimeQueryResult::ok_records(raw_query.to_string(), columns, rows, "select");
+        result.statement = "approx_rank_of";
+        result.engine = "runtime-rank";
+        Ok(result)
     }
 
     /// Compute the exact rank of `target_id` within the descriptor's
@@ -443,7 +440,7 @@ impl RedDBRuntime {
     fn execute_approx_rank_of(
         &self,
         raw_query: &str,
-        req: super::ranking_descriptor_catalog::ApproxRankOfRequest,
+        req: &crate::storage::query::ast::RankOfQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
@@ -2095,6 +2092,9 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::DetachPolicy { .. }
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
+        | QueryExpr::RankOf(_)
+        | QueryExpr::ApproxRankOf(_)
+        | QueryExpr::RankRange(_)
         | QueryExpr::SimulatePolicy { .. }
         | QueryExpr::LintPolicy { .. }
         | QueryExpr::MigratePolicyMode { .. }
@@ -2958,6 +2958,9 @@ pub(super) fn intent_lock_modes_for(
         | QueryExpr::Ask(_)
         | QueryExpr::SearchCommand(_)
         | QueryExpr::GraphCommand(_)
+        | QueryExpr::RankOf(_)
+        | QueryExpr::ApproxRankOf(_)
+        | QueryExpr::RankRange(_)
         | QueryExpr::QueueSelect(_) => Some((IntentShared, IntentShared)),
 
         // Writes — IX / IX. Non-tabular mutations (vector insert,
@@ -6592,26 +6595,15 @@ impl RedDBRuntime {
             ));
         }
 
-        // Issue #918 / ADR 0035 — leaderboard rank capability. These are
-        // narrow string intercepts (the `READ METRIC` precedent) so the
-        // surface stays off the recursive-descent grammar. `RANK() OVER`
-        // window projections are unaffected — they parse `SELECT … RANK()`
-        // and never match the `RANK OF`/`CREATE RANKING`/`SHOW RANKINGS`
-        // statement heads.
+        // Issue #918 / ADR 0035 — leaderboard rank capability catalog
+        // declarations are still recognised before the general parser.
+        // Rank reads themselves are parser AST nodes, including Redis-flavor
+        // Z* sugar that desugars to the same canonical rank shapes.
         if let Some(parsed) = super::ranking_descriptor_catalog::parse_create_ranking(query) {
             return self.execute_create_ranking(query, parsed?);
         }
         if super::ranking_descriptor_catalog::parse_show_rankings(query) {
             return self.execute_show_rankings(query);
-        }
-        if let Some(parsed) = super::ranking_descriptor_catalog::parse_rank_range(query) {
-            return self.execute_rank_range(query, parsed?);
-        }
-        if let Some(parsed) = super::ranking_descriptor_catalog::parse_approx_rank_of(query) {
-            return self.execute_approx_rank_of(query, parsed?);
-        }
-        if let Some(parsed) = super::ranking_descriptor_catalog::parse_rank_of(query) {
-            return self.execute_rank_of(query, parsed?);
         }
 
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
@@ -6962,6 +6954,9 @@ impl RedDBRuntime {
                 statement_type: "select",
                 bookmark: None,
             }),
+            QueryExpr::RankOf(ref rank) => self.execute_rank_of(query, rank),
+            QueryExpr::ApproxRankOf(ref rank) => self.execute_approx_rank_of(query, rank),
+            QueryExpr::RankRange(ref range) => self.execute_rank_range(query, range),
             // DML execution
             QueryExpr::Insert(ref insert) if super::red_schema::is_virtual_table(&insert.table) => {
                 Err(RedDBError::Query(
@@ -11583,6 +11578,9 @@ impl RedDBRuntime {
         // Map QueryExpr → (Action, Resource).
         let (action, resource) = match expr {
             QueryExpr::Table(t) => (Action::Select, Resource::table_from_name(&t.table)),
+            QueryExpr::RankOf(_) | QueryExpr::ApproxRankOf(_) | QueryExpr::RankRange(_) => {
+                (Action::Select, Resource::Database)
+            }
             QueryExpr::QueueSelect(q) => {
                 return self.check_queue_op_privilege(
                     &auth_store,
