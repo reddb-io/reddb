@@ -346,6 +346,7 @@ impl GcHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::btree::version::Snapshot;
     use crate::storage::btree::{BPlusTree, BTreeConfig};
     use crate::storage::primitives::ids::TxnId;
 
@@ -391,16 +392,40 @@ mod tests {
 
     #[test]
     fn test_gc_incremental() {
-        let gc = GarbageCollector::new(GcConfig::new().with_batch_size(2));
+        let gc = GarbageCollector::new(
+            GcConfig::new()
+                .with_min_age(Timestamp(0))
+                .with_batch_size(2),
+        );
         let tree: BPlusTree<i32, String> = BPlusTree::new(BTreeConfig::new().with_order(4));
 
         for i in 1..=20 {
-            tree.insert(i, format!("v{}", i), TxnId(1));
+            tree.insert(i, format!("v1_{}", i), TxnId(1));
+            tree.insert(i, format!("v2_{}", i), TxnId(2));
+            tree.insert(i, format!("v3_{}", i), TxnId(3));
         }
 
-        // Run incremental - should return continuation point
+        assert!(tree.stats().leaf_nodes > 2);
+
         let next = gc.run_incremental(&tree, None);
-        // May or may not be done depending on tree structure
+        assert!(next.is_some(), "first batch should return a continuation");
+
+        let next_after_second_batch = gc.run_incremental(&tree, next);
+        assert_ne!(next_after_second_batch, next);
+
+        let mut next = next_after_second_batch;
+        while next.is_some() {
+            next = gc.run_incremental(&tree, next);
+        }
+
+        let stats_after_completion = gc.stats();
+        assert!(stats_after_completion.nodes_visited > 0);
+        assert!(stats_after_completion.versions_collected > 0);
+
+        let snapshot = Snapshot::new(TxnId(99), current_timestamp());
+        for i in 1..=20 {
+            assert_eq!(tree.get(&i, &snapshot), Some(format!("v3_{}", i)));
+        }
     }
 
     #[test]
