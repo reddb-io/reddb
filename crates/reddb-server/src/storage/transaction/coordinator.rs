@@ -781,8 +781,23 @@ mod tests {
         // Rollback to savepoint
         tm.rollback_to_savepoint(handle.id, "sp1").unwrap();
 
+        {
+            let txns = recover_read_guard(&tm.transactions);
+            let state = txns.get(&handle.id).unwrap();
+            assert_eq!(state.write_set.len(), 1);
+            assert_eq!(state.write_set[0].key, b"key1");
+            assert_eq!(state.write_set[0].new_value.as_deref(), Some(&b"v1"[..]));
+            assert!(!state.savepoints.exists("sp1"));
+        }
+
         // Should be able to commit
         tm.commit(handle.id).unwrap();
+        assert_eq!(tm.get_state(handle.id), Some(TxnState::Committed));
+
+        let committed = recover_read_guard(&tm.committed_ts);
+        assert!(committed.contains_key(&b"key1".to_vec()));
+        assert!(!committed.contains_key(&b"key2".to_vec()));
+        assert!(!committed.contains_key(&b"key3".to_vec()));
     }
 
     #[test]
