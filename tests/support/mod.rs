@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tempfile::TempDir;
+
 pub mod mock_ai_provider;
 pub mod prometheus;
 
@@ -23,6 +25,54 @@ use reddb::{CatalogUseCases, HealthState, RedDBOptions, RedDBRuntime};
 const ACCOUNTS_TTL_MS: u64 = 86_400_000;
 const METRICS_RETENTION_MS: u64 = 7 * 86_400_000;
 const FIVE_MINUTES_NS: u64 = 300_000_000_000;
+
+#[derive(Debug)]
+pub struct TestDb {
+    dir: TempDir,
+    path: PathBuf,
+}
+
+impl TestDb {
+    pub fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-test-db-")
+            .tempdir()
+            .expect("temp test db dir");
+        let path = dir.path().join("data.rdb");
+        Self { dir, path }
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn open_runtime(&self) -> RedDBRuntime {
+        RedDBRuntime::with_options(RedDBOptions::persistent(&self.path)).unwrap_or_else(|err| {
+            panic!(
+                "failed to open persistent runtime at {}: {err:?}",
+                self.path.display()
+            )
+        })
+    }
+
+    pub fn into_parts(self) -> (TempDir, PathBuf) {
+        (self.dir, self.path)
+    }
+}
+
+impl Default for TestDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn temp_db() -> (TempDir, PathBuf) {
+    TestDb::new().into_parts()
+}
 
 #[derive(Debug)]
 pub struct PersistentDbPath {
