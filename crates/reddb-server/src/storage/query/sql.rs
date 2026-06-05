@@ -11,9 +11,9 @@ use crate::storage::query::ast::{
     DropVectorQuery, DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery,
     Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery,
     InsertQuery, JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction,
-    ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RefreshMaterializedViewQuery,
-    RevokeStmt, RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand,
-    TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
+    ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
+    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
+    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::sql_lowering::filter_to_expr;
@@ -51,6 +51,7 @@ pub enum FrontendStatement {
     ProbabilisticCommand(ProbabilisticCommand),
     KvCommand(KvCommand),
     ConfigCommand(ConfigCommand),
+    Ranking(QueryExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -458,6 +459,7 @@ impl FrontendStatement {
             }
             FrontendStatement::KvCommand(command) => QueryExpr::KvCommand(command),
             FrontendStatement::ConfigCommand(command) => QueryExpr::ConfigCommand(command),
+            FrontendStatement::Ranking(expr) => expr,
         }
     }
 }
@@ -856,6 +858,15 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("RANK")
+                    || name.eq_ignore_ascii_case("APPROX")
+                    || name.eq_ignore_ascii_case("APPROXIMATE")
+                    || name.eq_ignore_ascii_case("ZRANK")
+                    || name.eq_ignore_ascii_case("ZRANGE") =>
+            {
+                self.parse_ranking_read().map(FrontendStatement::Ranking)
+            }
             Token::Desc => self.parse_sql_statement().map(FrontendStatement::Sql),
             Token::Ident(name)
                 if name.eq_ignore_ascii_case("DESCRIBE") || name.eq_ignore_ascii_case("DESC") =>
@@ -1242,12 +1253,131 @@ impl<'a> Parser<'a> {
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
                     "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
                     "QUEUE", "EVENTS", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
-                    "DESCRIBE", "DESC",
+                    "DESCRIBE", "DESC", "RANK", "ZRANK", "ZRANGE",
                 ],
                 other,
                 self.position(),
             )),
         }
+    }
+
+    fn parse_ranking_read(&mut self) -> Result<QueryExpr, ParseError> {
+        let head = self.expect_ident()?;
+        if head.eq_ignore_ascii_case("RANK") {
+            return self.parse_rank_after_rank(false);
+        }
+        if head.eq_ignore_ascii_case("APPROX") || head.eq_ignore_ascii_case("APPROXIMATE") {
+            if !self.consume_ident_ci("RANK")? {
+                return Err(ParseError::expected(
+                    vec!["RANK"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            return self.parse_rank_after_rank(true);
+        }
+        if head.eq_ignore_ascii_case("ZRANK") {
+            return self.parse_zrank();
+        }
+        if head.eq_ignore_ascii_case("ZRANGE") {
+            return self.parse_zrange();
+        }
+        Err(ParseError::expected(
+            vec!["RANK", "APPROX RANK", "ZRANK", "ZRANGE"],
+            self.peek(),
+            self.position(),
+        ))
+    }
+
+    fn parse_rank_after_rank(&mut self, approximate: bool) -> Result<QueryExpr, ParseError> {
+        if self.consume(&Token::Of)? {
+            let entity_id = self.parse_u64_slot("rank entity id")?;
+            self.expect(Token::In)?;
+            let ranking = self.expect_ident()?;
+            let query = RankOfQuery { ranking, entity_id };
+            return Ok(if approximate {
+                QueryExpr::ApproxRankOf(query)
+            } else {
+                QueryExpr::RankOf(query)
+            });
+        }
+
+        if !approximate && self.consume(&Token::Range)? {
+            let lo = self.parse_positive_u64_slot("rank range lower bound")?;
+            self.expect(Token::To)?;
+            let hi = self.parse_positive_u64_slot("rank range upper bound")?;
+            if hi < lo {
+                return Err(ParseError::value_out_of_range(
+                    "rank range upper bound",
+                    "must be greater than or equal to the lower bound",
+                    self.position(),
+                ));
+            }
+            self.expect(Token::In)?;
+            let ranking = self.expect_ident()?;
+            return Ok(QueryExpr::RankRange(RankRangeQuery { ranking, lo, hi }));
+        }
+
+        Err(ParseError::expected(
+            if approximate {
+                vec!["OF"]
+            } else {
+                vec!["OF", "RANGE"]
+            },
+            self.peek(),
+            self.position(),
+        ))
+    }
+
+    fn parse_zrank(&mut self) -> Result<QueryExpr, ParseError> {
+        let ranking = self.expect_ident()?;
+        let entity_id = self.parse_u64_slot("ZRANK entity id")?;
+        Ok(QueryExpr::RankOf(RankOfQuery { ranking, entity_id }))
+    }
+
+    fn parse_zrange(&mut self) -> Result<QueryExpr, ParseError> {
+        let ranking = self.expect_ident()?;
+        let start = self.parse_u64_slot("ZRANGE start")?;
+        let stop = self.parse_u64_slot("ZRANGE stop")?;
+        if stop < start {
+            return Err(ParseError::value_out_of_range(
+                "ZRANGE stop",
+                "must be greater than or equal to start",
+                self.position(),
+            ));
+        }
+        let _with_scores = self.consume_ident_ci("WITHSCORES")?;
+        Ok(QueryExpr::RankRange(RankRangeQuery {
+            ranking,
+            lo: start + 1,
+            hi: stop + 1,
+        }))
+    }
+
+    fn parse_positive_u64_slot(&mut self, field: &'static str) -> Result<u64, ParseError> {
+        let value = self.parse_u64_slot(field)?;
+        if value == 0 {
+            return Err(ParseError::value_out_of_range(
+                field,
+                "must be a positive integer",
+                self.position(),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn parse_u64_slot(&mut self, field: &'static str) -> Result<u64, ParseError> {
+        let pos = self.position();
+        if matches!(self.peek(), Token::Minus | Token::Dash) {
+            return Err(ParseError::value_out_of_range(
+                field,
+                "must be an unsigned integer",
+                pos,
+            ));
+        }
+        let raw = self.parse_integer()?;
+        u64::try_from(raw)
+            .map_err(|_| ParseError::value_out_of_range(field, "must be an unsigned integer", pos))
     }
 
     /// Parse any SQL/RQL-style command into the canonical SQL frontend IR.

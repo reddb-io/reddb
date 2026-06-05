@@ -195,7 +195,8 @@ fn statement_kind(query: &str) -> &'static str {
         buf[i] = bytes[i].to_ascii_uppercase();
     }
     match &buf[..n] {
-        b"SELECT" | b"WITH" | b"SHOW" | b"EXPLAIN" | b"DESCRIBE" | b"DESC" => "read",
+        b"SELECT" | b"WITH" | b"SHOW" | b"EXPLAIN" | b"DESCRIBE" | b"DESC" | b"RANK"
+        | b"APPROX" | b"APPROXIMATE" | b"ZRANK" | b"ZRANGE" => "read",
         b"INSERT" | b"UPDATE" | b"DELETE" | b"UPSERT" | b"MERGE" | b"COPY" | b"TRUNCATE" => "write",
         b"CREATE" | b"ALTER" | b"DROP" | b"REINDEX" | b"VACUUM" | b"ANALYZE" => "ddl",
         b"GRANT" | b"REVOKE" => "admin",
@@ -386,6 +387,7 @@ impl StatementExecutionFrame {
         <Self as ReadFrame>::should_cache_result(self)
             && result.statement_type == "select"
             && result.engine != "vault"
+            && result.engine != "runtime-rank"
             // `QUEUE READ` is a stateful read: a delayed message
             // (issue #722) becomes deliverable over time without a
             // producer push to invalidate the cache, so a cached empty

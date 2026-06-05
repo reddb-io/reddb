@@ -151,6 +151,12 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("show tenant")
         || lower.starts_with("show policies")
         || lower.starts_with("show effective ")
+        || lower.starts_with("rank of ")
+        || lower.starts_with("rank range ")
+        || lower.starts_with("approx rank of ")
+        || lower.starts_with("approximate rank of ")
+        || lower.starts_with("zrank ")
+        || lower.starts_with("zrange ")
         || lower.starts_with("describe ")
         || lower.starts_with("desc ")
     {
