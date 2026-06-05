@@ -2245,6 +2245,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "snap",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
