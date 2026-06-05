@@ -96,6 +96,8 @@ tokio-stream = "0.1"
 rcgen = "0.14"
 # IAM policy property tests at the umbrella integration-test layer.
 proptest = "1"
+# TempDir-backed integration-test database cleanup harness.
+tempfile = "3"
 
 # ---------------------------------------------------------------------
 # Build profile tuning — trades runtime perf for build wall time
