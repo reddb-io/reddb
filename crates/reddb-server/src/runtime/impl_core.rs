@@ -98,10 +98,6 @@ fn seed_storage_deploy_config(
     store: &crate::storage::UnifiedStore,
     selection: crate::storage::StorageProfileSelection,
 ) {
-    if selection == crate::storage::StorageProfileSelection::embedded_single_file() {
-        return;
-    }
-
     store.set_config_tree(
         "storage.deploy",
         &crate::json!({
