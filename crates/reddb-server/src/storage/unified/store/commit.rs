@@ -136,6 +136,26 @@ fn take_deferred_store_wal_capture() -> DeferredStoreWalActions {
 }
 
 impl StoreWalAction {
+    fn collection_name(&self) -> Option<&str> {
+        match self {
+            Self::CreateCollection { name, .. } => Some(name),
+            Self::DropCollection { name } => Some(name),
+            Self::UpsertEntityRecord { collection, .. }
+            | Self::DeleteEntityRecord { collection, .. }
+            | Self::BulkUpsertEntityRecords { collection, .. }
+            | Self::RefreshCollection { collection, .. } => Some(collection),
+        }
+    }
+
+    fn create_collection_range_id(&self) -> Option<String> {
+        match self {
+            Self::CreateCollection { collection_id, .. } => {
+                Some(format!("range-{collection_id:016x}"))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn upsert_entity(
         collection: &str,
         entity: &UnifiedEntity,
@@ -312,6 +332,17 @@ impl StoreWalAction {
 
 fn legacy_collection_physical_file_id(name: &str) -> String {
     format!("legacy-collection-{name}")
+}
+
+fn commit_batch_record(tx_id: u64, actions: Vec<Vec<u8>>, range_id: Option<&str>) -> WalRecord {
+    match range_id {
+        Some(range_id) => WalRecord::RangeCommitBatch {
+            tx_id,
+            range_id: range_id.to_string(),
+            actions,
+        },
+        None => WalRecord::TxCommitBatch { tx_id, actions },
+    }
 }
 
 #[derive(Debug)]
@@ -550,7 +581,11 @@ impl StoreCommitCoordinator {
         self.fsync_count.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn append_actions(&self, actions: &[StoreWalAction]) -> io::Result<()> {
+    pub(crate) fn append_actions(
+        &self,
+        actions: &[StoreWalAction],
+        range_id: Option<&str>,
+    ) -> io::Result<()> {
         if actions.is_empty() {
             return Ok(());
         }
@@ -564,10 +599,11 @@ impl StoreCommitCoordinator {
         if matches!(self.mode, DurabilityMode::Strict) {
             let commit_lsn = {
                 let mut wal = self.wal.lock();
-                wal.append(&WalRecord::TxCommitBatch {
+                wal.append(&commit_batch_record(
                     tx_id,
-                    actions: actions.iter().map(StoreWalAction::encode).collect(),
-                })?;
+                    actions.iter().map(StoreWalAction::encode).collect(),
+                    range_id,
+                ))?;
                 wal.current_lsn()
             };
             self.force_sync()?;
@@ -582,11 +618,7 @@ impl StoreCommitCoordinator {
         let wal_bytes = encoded_actions.iter().fold(0u64, |total, payload| {
             total.saturating_add(payload.len() as u64)
         });
-        let blob = WalRecord::TxCommitBatch {
-            tx_id,
-            actions: encoded_actions,
-        }
-        .encode();
+        let blob = commit_batch_record(tx_id, encoded_actions, range_id).encode();
 
         let commit_lsn = self.queue.enqueue(blob);
         self.wait_until_durable(commit_lsn, wal_bytes)?;
@@ -680,6 +712,14 @@ impl StoreCommitCoordinator {
             };
             match record {
                 WalRecord::TxCommitBatch { actions, .. } => {
+                    for payload in actions {
+                        let action = StoreWalAction::decode(&payload)?;
+                        store.apply_replayed_action(&action).map_err(|err| {
+                            io::Error::other(format!("failed to replay store wal action: {err}"))
+                        })?;
+                    }
+                }
+                WalRecord::RangeCommitBatch { actions, .. } => {
                     for payload in actions {
                         let action = StoreWalAction::decode(&payload)?;
                         store.apply_replayed_action(&action).map_err(|err| {
@@ -914,8 +954,9 @@ impl UnifiedStore {
             DurabilityMode::Strict => self.flush_paged_state(),
             DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
                 if let Some(commit) = &self.commit {
+                    let range_id = self.range_id_for_actions(&actions.actions);
                     commit
-                        .append_actions(&actions.actions)
+                        .append_actions(&actions.actions, range_id.as_deref())
                         .map_err(StoreError::Io)
                 } else {
                     self.flush_paged_state()
@@ -965,7 +1006,10 @@ impl UnifiedStore {
             DurabilityMode::Strict => self.flush_paged_state(),
             DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
                 if let Some(commit) = &self.commit {
-                    commit.append_actions(&actions).map_err(StoreError::Io)?;
+                    let range_id = self.range_id_for_actions(&actions);
+                    commit
+                        .append_actions(&actions, range_id.as_deref())
+                        .map_err(StoreError::Io)?;
                     Ok(())
                 } else {
                     self.flush_paged_state()
@@ -974,17 +1018,35 @@ impl UnifiedStore {
         }
     }
 
+    fn range_id_for_actions(&self, actions: &[StoreWalAction]) -> Option<String> {
+        let Some(_) = &self.config.cluster_range_layout else {
+            return None;
+        };
+        for action in actions {
+            if let Some(range_id) = action.create_collection_range_id() {
+                return Some(range_id);
+            }
+            if let Some(collection) = action.collection_name() {
+                if let Some(metadata) = self.collection_range_metadata(collection) {
+                    return Some(metadata.logical_range_id);
+                }
+            }
+        }
+        None
+    }
+
     pub(crate) fn apply_replayed_action(&self, action: &StoreWalAction) -> Result<(), StoreError> {
         match action {
             StoreWalAction::CreateCollection {
                 name,
                 collection_id,
-                physical_file_id: _,
+                physical_file_id,
             } => {
                 self.register_collection_id(*collection_id);
                 if self.get_collection(name).is_none() {
                     let _ = self.create_collection_in_memory(name);
                 }
+                let _ = self.register_collection_range(name, *collection_id, physical_file_id)?;
                 Ok(())
             }
             StoreWalAction::DropCollection { name } => self.drop_collection_in_memory(name),
@@ -1501,7 +1563,7 @@ mod tests {
                     physical_file_id: format!("collection-test-c{tx}"),
                 };
                 coord_c
-                    .append_actions(std::slice::from_ref(&action))
+                    .append_actions(std::slice::from_ref(&action), None)
                     .expect("append_actions");
             }));
         }
@@ -1555,7 +1617,7 @@ mod tests {
                     physical_file_id: format!("collection-test-z{tx}"),
                 };
                 coord_c
-                    .append_actions(std::slice::from_ref(&action))
+                    .append_actions(std::slice::from_ref(&action), None)
                     .expect("append_actions");
             }));
         }
