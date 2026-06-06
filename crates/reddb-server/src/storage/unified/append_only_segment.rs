@@ -12,6 +12,38 @@ use crate::storage::engine::crc32::crc32;
 use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 
 pub const APPEND_ONLY_SEGMENT_CHUNK_BYTES: usize = 512 * 1024;
+pub const APPEND_ONLY_SEGMENT_ZSTD_LEVEL: i32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendOnlySegmentCodec {
+    None,
+    Zstd { level: i32 },
+}
+
+impl AppendOnlySegmentCodec {
+    pub fn none() -> Self {
+        Self::None
+    }
+
+    pub fn zstd_default() -> Self {
+        Self::Zstd {
+            level: APPEND_ONLY_SEGMENT_ZSTD_LEVEL,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zstd { .. } => "zstd",
+        }
+    }
+}
+
+impl Default for AppendOnlySegmentCodec {
+    fn default() -> Self {
+        Self::zstd_default()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppendOnlySegmentError {
@@ -24,11 +56,23 @@ pub enum AppendOnlySegmentError {
     MissingChunkChecksum {
         chunk_index: usize,
     },
+    MissingStoredChunkChecksum {
+        chunk_index: usize,
+    },
+    MissingChunkUncompressedLength {
+        chunk_index: usize,
+    },
     ChecksumMismatch {
         chunk_index: usize,
         expected: u32,
         actual: u32,
     },
+    StoredChecksumMismatch {
+        chunk_index: usize,
+        expected: u32,
+        actual: u32,
+    },
+    Codec(String),
     MissingPrimaryKey(String),
     UpdateRejected,
     DeleteRejected,
@@ -53,6 +97,18 @@ impl std::fmt::Display for AppendOnlySegmentError {
                     "append-only segment metadata missing checksum for chunk {chunk_index}"
                 )
             }
+            Self::MissingStoredChunkChecksum { chunk_index } => {
+                write!(
+                    f,
+                    "append-only segment metadata missing stored checksum for chunk {chunk_index}"
+                )
+            }
+            Self::MissingChunkUncompressedLength { chunk_index } => {
+                write!(
+                    f,
+                    "append-only segment metadata missing uncompressed length for chunk {chunk_index}"
+                )
+            }
             Self::ChecksumMismatch {
                 chunk_index,
                 expected,
@@ -62,6 +118,16 @@ impl std::fmt::Display for AppendOnlySegmentError {
                 "append-only segment checksum mismatch for chunk {chunk_index}: \
                  expected {expected:#010x}, got {actual:#010x}"
             ),
+            Self::StoredChecksumMismatch {
+                chunk_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "append-only segment stored checksum mismatch for chunk {chunk_index}: \
+                 expected {expected:#010x}, got {actual:#010x}"
+            ),
+            Self::Codec(msg) => write!(f, "append-only segment codec error: {msg}"),
             Self::MissingPrimaryKey(pk) => write!(f, "primary key not found in segment: {pk}"),
             Self::UpdateRejected => {
                 write!(f, "APPEND ONLY segment rejects logical UPDATE in V0")
@@ -94,6 +160,9 @@ pub struct AppendOnlySegmentMetadata {
     pub segment_id: u64,
     pub chunk_size: usize,
     pub row_count: usize,
+    pub codec: AppendOnlySegmentCodec,
+    pub chunk_uncompressed_lengths: Vec<usize>,
+    pub chunk_stored_checksums: Vec<u32>,
     pub chunk_checksums: Vec<u32>,
     pub primary_index: BTreeMap<String, SegmentOffset>,
     pub column_min_max: BTreeMap<String, ColumnMinMax>,
@@ -110,6 +179,7 @@ struct PendingRecord {
 pub struct AppendOnlySegment {
     collection: String,
     segment_id: u64,
+    codec: AppendOnlySegmentCodec,
     chunks: Vec<Vec<u8>>,
     pending_records: Vec<PendingRecord>,
     closed: Option<AppendOnlySegmentMetadata>,
@@ -117,9 +187,18 @@ pub struct AppendOnlySegment {
 
 impl AppendOnlySegment {
     pub fn new(segment_id: u64, collection: impl Into<String>) -> Self {
+        Self::with_codec(segment_id, collection, AppendOnlySegmentCodec::default())
+    }
+
+    pub fn with_codec(
+        segment_id: u64,
+        collection: impl Into<String>,
+        codec: AppendOnlySegmentCodec,
+    ) -> Self {
         Self {
             collection: collection.into(),
             segment_id,
+            codec,
             chunks: vec![Vec::with_capacity(APPEND_ONLY_SEGMENT_CHUNK_BYTES)],
             pending_records: Vec::new(),
             closed: None,
@@ -178,7 +257,14 @@ impl AppendOnlySegment {
 
     pub fn close(&mut self) -> Result<&AppendOnlySegmentMetadata, AppendOnlySegmentError> {
         if self.closed.is_none() {
+            let chunk_uncompressed_lengths = self.chunks.iter().map(Vec::len).collect();
             let chunk_checksums = self.chunks.iter().map(|chunk| crc32(chunk)).collect();
+            let codec = self.codec;
+            for chunk in &mut self.chunks {
+                let encoded = encode_chunk(codec, chunk)?;
+                *chunk = encoded;
+            }
+            let chunk_stored_checksums = self.chunks.iter().map(|chunk| crc32(chunk)).collect();
             let mut primary_index = BTreeMap::new();
             let mut column_min_max: HashMap<String, (CanonicalKey, Value, CanonicalKey, Value)> =
                 HashMap::new();
@@ -223,6 +309,9 @@ impl AppendOnlySegment {
                 segment_id: self.segment_id,
                 chunk_size: APPEND_ONLY_SEGMENT_CHUNK_BYTES,
                 row_count: self.pending_records.len(),
+                codec,
+                chunk_uncompressed_lengths,
+                chunk_stored_checksums,
                 chunk_checksums,
                 primary_index,
                 column_min_max,
@@ -239,14 +328,18 @@ impl AppendOnlySegment {
         &self.chunks
     }
 
-    pub fn read_by_primary_key(&self, primary_key: &str) -> Result<&[u8], AppendOnlySegmentError> {
+    pub fn read_by_primary_key(
+        &self,
+        primary_key: &str,
+    ) -> Result<Vec<u8>, AppendOnlySegmentError> {
         let metadata = self.closed.as_ref().ok_or(AppendOnlySegmentError::Closed)?;
         self.validate_checksums(metadata)?;
         let offset = metadata
             .primary_index
             .get(primary_key)
             .ok_or_else(|| AppendOnlySegmentError::MissingPrimaryKey(primary_key.to_string()))?;
-        Ok(&self.chunks[offset.chunk_index][offset.offset..offset.offset + offset.len])
+        let decoded = self.decode_chunk(metadata, offset.chunk_index)?;
+        Ok(decoded[offset.offset..offset.offset + offset.len].to_vec())
     }
 
     pub fn validate_checksums(
@@ -254,12 +347,26 @@ impl AppendOnlySegment {
         metadata: &AppendOnlySegmentMetadata,
     ) -> Result<(), AppendOnlySegmentError> {
         for (chunk_index, chunk) in self.chunks.iter().enumerate() {
+            let expected_stored = metadata
+                .chunk_stored_checksums
+                .get(chunk_index)
+                .copied()
+                .ok_or(AppendOnlySegmentError::MissingStoredChunkChecksum { chunk_index })?;
+            let actual_stored = crc32(chunk);
+            if actual_stored != expected_stored {
+                return Err(AppendOnlySegmentError::StoredChecksumMismatch {
+                    chunk_index,
+                    expected: expected_stored,
+                    actual: actual_stored,
+                });
+            }
             let expected = metadata
                 .chunk_checksums
                 .get(chunk_index)
                 .copied()
                 .ok_or(AppendOnlySegmentError::MissingChunkChecksum { chunk_index })?;
-            let actual = crc32(chunk);
+            let decoded = self.decode_chunk(metadata, chunk_index)?;
+            let actual = crc32(&decoded);
             if actual != expected {
                 return Err(AppendOnlySegmentError::ChecksumMismatch {
                     chunk_index,
@@ -269,6 +376,23 @@ impl AppendOnlySegment {
             }
         }
         Ok(())
+    }
+
+    fn decode_chunk(
+        &self,
+        metadata: &AppendOnlySegmentMetadata,
+        chunk_index: usize,
+    ) -> Result<Vec<u8>, AppendOnlySegmentError> {
+        let chunk = self
+            .chunks
+            .get(chunk_index)
+            .ok_or(AppendOnlySegmentError::MissingChunkChecksum { chunk_index })?;
+        let len = metadata
+            .chunk_uncompressed_lengths
+            .get(chunk_index)
+            .copied()
+            .ok_or(AppendOnlySegmentError::MissingChunkUncompressedLength { chunk_index })?;
+        decode_chunk(metadata.codec, chunk, len)
     }
 
     pub fn corrupt_chunk_for_test(&mut self, chunk_index: usize, offset: usize, byte: u8) {
@@ -285,6 +409,47 @@ impl AppendOnlySegment {
 
     pub fn delete_logical(&mut self, _primary_key: &str) -> Result<(), AppendOnlySegmentError> {
         Err(AppendOnlySegmentError::DeleteRejected)
+    }
+}
+
+fn encode_chunk(
+    codec: AppendOnlySegmentCodec,
+    chunk: &[u8],
+) -> Result<Vec<u8>, AppendOnlySegmentError> {
+    match codec {
+        AppendOnlySegmentCodec::None => Ok(chunk.to_vec()),
+        AppendOnlySegmentCodec::Zstd { level } => zstd::bulk::compress(chunk, level)
+            .map_err(|err| AppendOnlySegmentError::Codec(format!("zstd compress failed: {err}"))),
+    }
+}
+
+fn decode_chunk(
+    codec: AppendOnlySegmentCodec,
+    chunk: &[u8],
+    uncompressed_len: usize,
+) -> Result<Vec<u8>, AppendOnlySegmentError> {
+    match codec {
+        AppendOnlySegmentCodec::None => {
+            if chunk.len() != uncompressed_len {
+                return Err(AppendOnlySegmentError::Codec(format!(
+                    "none codec length mismatch: expected {uncompressed_len}, got {}",
+                    chunk.len()
+                )));
+            }
+            Ok(chunk.to_vec())
+        }
+        AppendOnlySegmentCodec::Zstd { .. } => {
+            let mut out = vec![0u8; uncompressed_len];
+            let written = zstd::bulk::decompress_to_buffer(chunk, &mut out).map_err(|err| {
+                AppendOnlySegmentError::Codec(format!("zstd decompress failed: {err}"))
+            })?;
+            if written != uncompressed_len {
+                return Err(AppendOnlySegmentError::Codec(format!(
+                    "zstd length mismatch: expected {uncompressed_len}, got {written}"
+                )));
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -323,12 +488,66 @@ mod tests {
         assert_eq!(metadata.segment_id, 7);
         assert_eq!(metadata.chunk_size, APPEND_ONLY_SEGMENT_CHUNK_BYTES);
         assert_eq!(metadata.row_count, 2);
+        assert_eq!(
+            metadata.codec,
+            AppendOnlySegmentCodec::Zstd {
+                level: APPEND_ONLY_SEGMENT_ZSTD_LEVEL
+            }
+        );
         assert_eq!(metadata.primary_index.len(), 2);
         assert_eq!(metadata.chunk_checksums.len(), segment.chunks().len());
+        assert_eq!(
+            metadata.chunk_uncompressed_lengths.len(),
+            segment.chunks().len()
+        );
+        assert_eq!(
+            metadata.chunk_stored_checksums.len(),
+            segment.chunks().len()
+        );
         assert_eq!(
             segment.read_by_primary_key("pk-2").expect("read pk-2"),
             b"{\"id\":2,\"ts\":20}"
         );
+    }
+
+    #[test]
+    fn zstd_default_writes_compressed_chunks_and_reads_back() {
+        let mut segment = AppendOnlySegment::new(70, "audit_log");
+        let payload = vec![b'a'; 64 * 1024];
+        segment
+            .append("pk-1", &payload, [("id".to_string(), Value::Integer(1))])
+            .expect("append");
+
+        let metadata = segment.close().expect("close").clone();
+
+        assert_eq!(metadata.codec.as_str(), "zstd");
+        assert!(
+            segment.chunks()[0].len() < payload.len() / 4,
+            "zstd should shrink repetitive payload"
+        );
+        assert_eq!(metadata.chunk_uncompressed_lengths, vec![payload.len()]);
+        assert_eq!(segment.read_by_primary_key("pk-1").expect("read"), payload);
+    }
+
+    #[test]
+    fn none_codec_writes_plain_chunks_and_reads_back() {
+        let mut segment =
+            AppendOnlySegment::with_codec(71, "audit_log", AppendOnlySegmentCodec::none());
+        let payload = b"plain append-only bytes";
+        segment
+            .append("pk-1", payload, [("id".to_string(), Value::Integer(1))])
+            .expect("append");
+
+        let metadata = segment.close().expect("close").clone();
+
+        assert_eq!(metadata.codec, AppendOnlySegmentCodec::None);
+        assert_eq!(segment.chunks()[0], payload);
+        assert_eq!(metadata.chunk_uncompressed_lengths, vec![payload.len()]);
+        assert_eq!(
+            metadata.chunk_checksums, metadata.chunk_stored_checksums,
+            "none stores the validated bytes directly"
+        );
+        assert_eq!(segment.read_by_primary_key("pk-1").expect("read"), payload);
     }
 
     #[test]
@@ -349,11 +568,12 @@ mod tests {
         assert_eq!(second_offset.chunk_index, 1);
         assert_eq!(metadata.chunk_size, 512 * 1024);
         assert_eq!(
-            segment.chunks()[0].len(),
+            metadata.chunk_uncompressed_lengths[0],
             APPEND_ONLY_SEGMENT_CHUNK_BYTES - 8
         );
-        assert_eq!(segment.chunks()[1].len(), 16);
+        assert_eq!(metadata.chunk_uncompressed_lengths[1], 16);
         assert_eq!(metadata.chunk_checksums.len(), 2);
+        assert_eq!(metadata.chunk_stored_checksums.len(), 2);
         segment
             .validate_checksums(&metadata)
             .expect("metadata checksums validate chunks");
@@ -388,7 +608,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                AppendOnlySegmentError::ChecksumMismatch { chunk_index: 0, .. }
+                AppendOnlySegmentError::StoredChecksumMismatch { chunk_index: 0, .. }
             ),
             "unexpected error: {err}"
         );
