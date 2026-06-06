@@ -113,6 +113,12 @@ fn checkpoint_backup_records_boundary_manifest_and_file_checksums() {
         manifest.get("checkpoint_lsn").and_then(JsonValue::as_u64),
         Some(backup.checkpoint_lsn)
     );
+    assert_eq!(
+        manifest
+            .get("wal_retention_floor_lsn")
+            .and_then(JsonValue::as_u64),
+        Some(backup.wal_start_lsn)
+    );
     let files = manifest
         .get("files")
         .and_then(JsonValue::as_array)
