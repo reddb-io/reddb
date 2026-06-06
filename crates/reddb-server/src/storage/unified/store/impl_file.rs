@@ -19,6 +19,26 @@ impl UnifiedStore {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
     }
 
+    pub(crate) fn next_collection_id(&self) -> u64 {
+        self.next_collection_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub(crate) fn register_collection_id(&self, id: u64) {
+        let candidate = id.saturating_add(1);
+        let mut current = self.next_collection_id.load(Ordering::SeqCst);
+        while candidate > current {
+            match self.next_collection_id.compare_exchange(
+                current,
+                candidate,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(updated) => current = updated,
+            }
+        }
+    }
+
     /// Reserve `n` contiguous global entity IDs with one fetch_add.
     /// Caller assigns `id = EntityId::new(start + i)` per entity.
     pub fn reserve_entity_ids(&self, n: u64) -> std::ops::Range<u64> {
