@@ -57,3 +57,5 @@ perf.data.old
 *.rdb-uwal
 *.wal
 **/wal/
+!crates/reddb-server/src/storage/wal/
+!crates/reddb-server/src/storage/wal/*.rs
