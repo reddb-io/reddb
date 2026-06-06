@@ -62,6 +62,45 @@ pub struct SnapshotManifest {
     pub snapshot_sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalPruneBoundary {
+    pub archived_lsn: u64,
+    pub backup_floor_lsn: Option<u64>,
+    pub replica_restart_lsn: Option<u64>,
+}
+
+impl WalPruneBoundary {
+    pub fn new(archived_lsn: u64) -> Self {
+        Self {
+            archived_lsn,
+            backup_floor_lsn: None,
+            replica_restart_lsn: None,
+        }
+    }
+
+    pub fn with_backup_floor_lsn(mut self, floor_lsn: Option<u64>) -> Self {
+        self.backup_floor_lsn = floor_lsn;
+        self
+    }
+
+    pub fn with_replica_restart_lsn(mut self, restart_lsn: Option<u64>) -> Self {
+        self.replica_restart_lsn = restart_lsn;
+        self
+    }
+
+    pub fn prune_through_lsn(self) -> u64 {
+        [
+            Some(self.archived_lsn),
+            self.backup_floor_lsn,
+            self.replica_restart_lsn,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(0)
+    }
+}
+
 impl BackupHead {
     pub fn to_json_value(&self) -> JsonValue {
         let mut object = Map::new();
@@ -140,6 +179,10 @@ impl BackupHead {
 }
 
 impl SnapshotManifest {
+    pub fn wal_retention_floor_lsn(&self) -> u64 {
+        self.base_lsn
+    }
+
     pub fn to_json_value(&self) -> JsonValue {
         let mut object = Map::new();
         object.insert(
@@ -335,7 +378,7 @@ impl WalArchiver {
         self.backend.download(segment_key, dest)
     }
 
-    /// Delete archived segments older than the given LSN.
+    /// Delete archived segments fully covered by the given LSN.
     /// Returns the number of segments deleted.
     pub fn cleanup_before(&self, lsn: u64) -> Result<usize, BackendError> {
         let keys = self.backend.list(&self.prefix)?;
@@ -345,17 +388,18 @@ impl WalArchiver {
             let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let Some((start, _end)) = file_name
+            let Some((start, end)) = file_name
                 .strip_suffix(".wal")
                 .and_then(|base| base.split_once('-'))
             else {
                 continue;
             };
-            let Ok(lsn_start) = start.parse::<u64>() else {
+            let (Ok(_lsn_start), Ok(lsn_end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
                 continue;
             };
-            if lsn_start < lsn {
+            if lsn_end <= lsn {
                 self.backend.delete(&key)?;
+                let _ = self.backend.delete(&wal_segment_manifest_key(&key));
                 deleted += 1;
             }
         }
@@ -935,6 +979,16 @@ pub fn load_snapshot_manifest(
     Ok(Some(SnapshotManifest::from_json_value(&value)?))
 }
 
+pub fn backup_wal_retention_floor_lsn(
+    backend: &dyn RemoteBackend,
+    snapshot_prefix: &str,
+) -> Result<Option<u64>, BackendError> {
+    Ok(collect_unified_snapshots(backend, snapshot_prefix)?
+        .into_iter()
+        .map(|snapshot| snapshot.lsn)
+        .min())
+}
+
 pub fn archive_change_records(
     backend: &dyn RemoteBackend,
     prefix: &str,
@@ -1399,6 +1453,76 @@ mod tests {
         assert!(s1.prev_hash.is_none(), "first segment has no prev_hash");
         assert_eq!(s2.prev_hash, m1.sha256, "seg 2 links to seg 1 sha256");
         assert_eq!(s3.prev_hash, m2.sha256, "seg 3 links to seg 2 sha256");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn backup_manifest_floor_uses_oldest_retained_snapshot_lsn() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("reddb_backup_floor_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let backend = LocalBackend;
+        let prefix = format!("{}/snapshots/", temp_dir.to_string_lossy());
+        std::fs::create_dir_all(&prefix).unwrap();
+
+        for (snapshot_id, base_lsn) in [(1, 10), (2, 30)] {
+            let snapshot_key = format!("{prefix}{snapshot_id:012}.snapshot");
+            std::fs::write(&snapshot_key, b"snapshot").unwrap();
+            publish_snapshot_manifest(
+                &backend,
+                &SnapshotManifest {
+                    timeline_id: "main".to_string(),
+                    snapshot_key,
+                    snapshot_id,
+                    snapshot_time: snapshot_id * 100,
+                    base_lsn,
+                    schema_version: crate::api::REDDB_FORMAT_VERSION,
+                    format_version: crate::api::REDDB_FORMAT_VERSION,
+                    snapshot_sha256: None,
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            backup_wal_retention_floor_lsn(&backend, &prefix).unwrap(),
+            Some(10),
+            "oldest retained snapshot base_lsn is the PITR WAL floor"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn cleanup_before_keeps_segment_crossing_retention_floor() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("reddb_archive_cleanup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let backend = Arc::new(LocalBackend);
+        let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
+        let archiver = WalArchiver::new(backend.clone(), prefix.clone());
+
+        let wal_path = temp_dir.join("segment.wal");
+        std::fs::write(&wal_path, b"segment-1").unwrap();
+        let old = archiver.archive_segment(&wal_path, 1, 3, None).unwrap();
+        std::fs::write(&wal_path, b"segment-2").unwrap();
+        let crossing = archiver
+            .archive_segment(&wal_path, 4, 6, old.sha256.clone())
+            .unwrap();
+
+        assert_eq!(archiver.cleanup_before(5).unwrap(), 1);
+        assert!(!backend.exists(&old.key).unwrap());
+        assert!(
+            !backend.exists(&wal_segment_manifest_key(&old.key)).unwrap(),
+            "cleanup removes sidecar with deleted segment"
+        );
+        assert!(
+            backend.exists(&crossing.key).unwrap(),
+            "segment containing WAL after the restore floor must remain"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
