@@ -5960,7 +5960,14 @@ impl RedDBRuntime {
                     )
                     .map_err(|err| RedDBError::Internal(err.to_string()))?
                     {
-                        let _ = primary.prune_retained_wal_through(meta.lsn_end);
+                        let backup_floor_lsn = crate::storage::wal::backup_wal_retention_floor_lsn(
+                            backend.as_ref(),
+                            &snapshot_prefix,
+                        )
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                        let boundary = crate::storage::wal::WalPruneBoundary::new(meta.lsn_end)
+                            .with_backup_floor_lsn(backup_floor_lsn);
+                        let _ = primary.prune_retained_wal(boundary);
                         // Advance the chain head so the next archive call
                         // links to this segment's hash. If the segment has
                         // no sha256 (legacy / hashing failed) we leave the
