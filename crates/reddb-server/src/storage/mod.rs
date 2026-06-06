@@ -83,6 +83,7 @@ pub mod embedded;
 pub mod segment_pack;
 
 pub(crate) mod operational_manifest;
+pub mod operational_migration;
 
 // Blockchain collection kind: pure logic for hash-chained append-only rows.
 // Storage/wire integration tracked in issue #521.
