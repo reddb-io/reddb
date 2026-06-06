@@ -170,6 +170,20 @@ fn replay_from_zero(replica: &RedDB, records: &[ChangeRecord]) {
     }
 }
 
+fn replay_from_zero_with_indexes(replica: &RedDBRuntime, records: &[ChangeRecord]) {
+    let applier = LogicalChangeApplier::new(0);
+    for record in records {
+        applier
+            .apply_with_index_store(
+                replica.db().as_ref(),
+                replica.index_store_ref(),
+                record,
+                ApplyMode::Replica,
+            )
+            .unwrap_or_else(|err| panic!("apply lsn={} failed: {err}", record.lsn));
+    }
+}
+
 /// Pure inserts: a 5-row table replayed from LSN 0, then re-pulled from
 /// LSN 0 (cursor wiped), must not inflate the replica's entity count.
 #[test]
@@ -295,4 +309,102 @@ fn repull_with_updates_converges_to_primary_live_set() {
     drop(replica);
     cleanup(&primary_path);
     cleanup(&replica_path);
+}
+
+#[test]
+fn logical_stream_replay_maintains_declared_replica_indexes() {
+    let primary_path = temp_path("primary-indexed");
+    let replica_path = temp_path("replica-indexed");
+
+    let (records, _) = drive_primary(
+        &primary_path,
+        "users",
+        &[
+            "CREATE TABLE users (id INTEGER, age INTEGER, city TEXT)",
+            "INSERT INTO users (id, age, city) VALUES (1, 31, 'NYC')",
+            "INSERT INTO users (id, age, city) VALUES (2, 29, 'NYC')",
+            "INSERT INTO users (id, age, city) VALUES (3, 44, 'LA')",
+            "UPDATE users SET city = 'SF', age = 35 WHERE id = 2",
+        ],
+    );
+    assert!(
+        records.iter().all(|record| record.entity_bytes.is_some()),
+        "replication stream must carry semantic entity records, not physical WAL frames"
+    );
+
+    let replica = RedDBRuntime::with_options(RedDBOptions::persistent(
+        &replica_path.to_string_lossy().to_string(),
+    ))
+    .expect("open replica runtime");
+    replica
+        .execute_query("CREATE TABLE users (id INTEGER, age INTEGER, city TEXT)")
+        .unwrap();
+    replica
+        .execute_query("CREATE INDEX idx_city ON users (city) USING HASH")
+        .unwrap();
+    replica
+        .execute_query("CREATE INDEX idx_age ON users (age) USING BTREE")
+        .unwrap();
+
+    replay_from_zero_with_indexes(&replica, &records);
+
+    let live = live_rows(&replica.db().store(), "users");
+    assert!(
+        live.values().any(|fields| fields
+            .iter()
+            .any(|(name, value)| name == "city" && value.contains("SF"))),
+        "semantic replay must install the updated SF row before index lookup; live={live:?}"
+    );
+    let sf_ids = replica
+        .index_store_ref()
+        .hash_lookup("users", "idx_city", b"SF")
+        .expect("idx_city hash lookup");
+    assert_eq!(
+        sf_ids.len(),
+        1,
+        "replica index replay must populate idx_city for SF exactly once; live={live:?}"
+    );
+    let age_35_ids = replica
+        .index_store_ref()
+        .hash_lookup("users", "idx_age_hash", &35i64.to_le_bytes())
+        .expect("idx_age_hash lookup");
+    assert_eq!(
+        age_35_ids.len(),
+        1,
+        "replica BTree replay must maintain the equality helper for age=35"
+    );
+
+    drop(replica);
+    cleanup(&primary_path);
+    cleanup(&replica_path);
+}
+
+#[test]
+fn replica_progress_exposes_applied_and_durable_promotion_watermarks() {
+    let replica = RedDBRuntime::with_options(
+        RedDBOptions::in_memory()
+            .with_replication(ReplicationConfig::replica("http://primary:50051")),
+    )
+    .expect("open replica runtime");
+
+    replica.db().store().set_config_tree(
+        "red.replication",
+        &reddb::json!({
+            "last_applied_lsn": 40,
+            "last_durable_lsn": 39,
+            "last_seen_primary_lsn": 42
+        }),
+    );
+
+    assert_eq!(replica.replica_durable_lsn(), 39);
+    assert_eq!(replica.replica_required_promotion_lsn(), 42);
+    assert!(
+        reddb::replication::check_promotion_watermark(
+            replica.replica_durable_lsn(),
+            replica.replica_required_promotion_lsn(),
+            reddb::replication::CommitPolicy::AckN(1),
+        )
+        .is_err(),
+        "normal promotion must reject a replica below the durable target"
+    );
 }
