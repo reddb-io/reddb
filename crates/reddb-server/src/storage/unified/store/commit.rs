@@ -50,6 +50,8 @@ const STORE_WAL_VERSION: u8 = 1;
 pub(crate) enum StoreWalAction {
     CreateCollection {
         name: String,
+        collection_id: u64,
+        physical_file_id: String,
     },
     DropCollection {
         name: String,
@@ -150,9 +152,15 @@ impl StoreWalAction {
         let mut out = Vec::new();
         out.push(STORE_WAL_VERSION);
         match self {
-            Self::CreateCollection { name } => {
-                out.push(1);
+            Self::CreateCollection {
+                name,
+                collection_id,
+                physical_file_id,
+            } => {
+                out.push(7);
                 write_string(&mut out, name);
+                out.extend_from_slice(&collection_id.to_le_bytes());
+                write_string(&mut out, physical_file_id);
             }
             Self::DropCollection { name } => {
                 out.push(2);
@@ -213,9 +221,14 @@ impl StoreWalAction {
 
         let mut pos = 2usize;
         match bytes[1] {
-            1 => Ok(Self::CreateCollection {
-                name: read_string(bytes, &mut pos)?,
-            }),
+            1 => {
+                let name = read_string(bytes, &mut pos)?;
+                Ok(Self::CreateCollection {
+                    physical_file_id: legacy_collection_physical_file_id(&name),
+                    collection_id: 0,
+                    name,
+                })
+            }
             2 => Ok(Self::DropCollection {
                 name: read_string(bytes, &mut pos)?,
             }),
@@ -279,12 +292,26 @@ impl StoreWalAction {
                     records,
                 })
             }
+            7 => {
+                let name = read_string(bytes, &mut pos)?;
+                let collection_id = read_u64(bytes, &mut pos)?;
+                let physical_file_id = read_string(bytes, &mut pos)?;
+                Ok(Self::CreateCollection {
+                    name,
+                    collection_id,
+                    physical_file_id,
+                })
+            }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported store wal action tag: {other}"),
             )),
         }
     }
+}
+
+fn legacy_collection_physical_file_id(name: &str) -> String {
+    format!("legacy-collection-{name}")
 }
 
 #[derive(Debug)]
@@ -949,7 +976,12 @@ impl UnifiedStore {
 
     pub(crate) fn apply_replayed_action(&self, action: &StoreWalAction) -> Result<(), StoreError> {
         match action {
-            StoreWalAction::CreateCollection { name } => {
+            StoreWalAction::CreateCollection {
+                name,
+                collection_id,
+                physical_file_id: _,
+            } => {
+                self.register_collection_id(*collection_id);
                 if self.get_collection(name).is_none() {
                     let _ = self.create_collection_in_memory(name);
                 }
@@ -1375,6 +1407,56 @@ mod tests {
         path
     }
 
+    #[test]
+    fn create_collection_wal_action_carries_object_tx_and_lsn_identity() {
+        let path = temp_wal("create_identity");
+        {
+            let mut writer = WalWriter::open(&path).expect("open writer");
+            writer
+                .append(&WalRecord::TxCommitBatch {
+                    tx_id: 42,
+                    actions: vec![StoreWalAction::CreateCollection {
+                        name: "orders".to_string(),
+                        collection_id: 7,
+                        physical_file_id: "collection-0000000000000007".to_string(),
+                    }
+                    .encode()],
+                })
+                .expect("append create collection");
+            writer.sync().expect("sync wal");
+        }
+
+        let reader = WalReader::open(&path).expect("open reader");
+        let records = reader
+            .iter()
+            .collect::<io::Result<Vec<_>>>()
+            .expect("read wal");
+        assert_eq!(records.len(), 1);
+        let (lsn, record) = &records[0];
+        assert!(*lsn > 0, "WAL reader must expose the record LSN");
+        match record {
+            WalRecord::TxCommitBatch { tx_id, actions } => {
+                assert_eq!(*tx_id, 42);
+                assert_eq!(actions.len(), 1);
+                match StoreWalAction::decode(&actions[0]).expect("decode action") {
+                    StoreWalAction::CreateCollection {
+                        name,
+                        collection_id,
+                        physical_file_id,
+                    } => {
+                        assert_eq!(name, "orders");
+                        assert_eq!(collection_id, 7);
+                        assert_eq!(physical_file_id, "collection-0000000000000007");
+                    }
+                    other => panic!("expected create collection action, got {other:?}"),
+                }
+            }
+            other => panic!("expected tx commit batch, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Concurrent autocommits MUST coalesce into far fewer fsyncs
     /// than the number of callers when the adaptive group-commit
     /// window is active. Without the 200µs floor, every caller
@@ -1415,6 +1497,8 @@ mod tests {
                 barrier_c.wait();
                 let action = StoreWalAction::CreateCollection {
                     name: format!("c{tx}"),
+                    collection_id: tx as u64 + 1,
+                    physical_file_id: format!("collection-test-c{tx}"),
                 };
                 coord_c
                     .append_actions(std::slice::from_ref(&action))
@@ -1467,6 +1551,8 @@ mod tests {
                 barrier_c.wait();
                 let action = StoreWalAction::CreateCollection {
                     name: format!("z{tx}"),
+                    collection_id: tx as u64 + 1,
+                    physical_file_id: format!("collection-test-z{tx}"),
                 };
                 coord_c
                     .append_actions(std::slice::from_ref(&action))
