@@ -71,6 +71,8 @@ pub enum RecordType {
     FullPageImage = 8,
     /// Logical vector insert for vector-turbo WAL replay.
     VectorInsert = 9,
+    /// Cluster range-scoped logical commit batch.
+    RangeCommitBatch = 10,
 }
 
 impl RecordType {
@@ -85,6 +87,7 @@ impl RecordType {
             7 => Some(RecordType::TxCommitBatch),
             8 => Some(RecordType::FullPageImage),
             9 => Some(RecordType::VectorInsert),
+            10 => Some(RecordType::RangeCommitBatch),
             _ => None,
         }
     }
@@ -109,6 +112,12 @@ pub enum WalRecord {
     /// Atomic logical commit batch. Recovery applies all actions in
     /// order iff this complete record and checksum are present.
     TxCommitBatch { tx_id: u64, actions: Vec<Vec<u8>> },
+    /// Atomic logical commit batch stamped with the owning range.
+    RangeCommitBatch {
+        tx_id: u64,
+        range_id: String,
+        actions: Vec<Vec<u8>>,
+    },
     /// Full-page image — pristine page bytes captured before the first
     /// modification per checkpoint cycle. Recovery applies these before
     /// redo so torn writes are healed without the `-dwb` sidecar.
@@ -242,6 +251,22 @@ impl WalRecord {
                 buf.push(RecordType::TxCommitBatch as u8);
                 buf.extend_from_slice(&term.to_le_bytes());
                 buf.extend_from_slice(&tx_id.to_le_bytes());
+                buf.extend_from_slice(&(actions.len() as u32).to_le_bytes());
+                for action in actions {
+                    buf.extend_from_slice(&(action.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(action);
+                }
+            }
+            WalRecord::RangeCommitBatch {
+                tx_id,
+                range_id,
+                actions,
+            } => {
+                buf.push(RecordType::RangeCommitBatch as u8);
+                buf.extend_from_slice(&term.to_le_bytes());
+                buf.extend_from_slice(&tx_id.to_le_bytes());
+                buf.extend_from_slice(&(range_id.len() as u32).to_le_bytes());
+                buf.extend_from_slice(range_id.as_bytes());
                 buf.extend_from_slice(&(actions.len() as u32).to_le_bytes());
                 for action in actions {
                     buf.extend_from_slice(&(action.len() as u32).to_le_bytes());
@@ -467,6 +492,51 @@ impl WalRecord {
 
                 WalRecord::TxCommitBatch { tx_id, actions }
             }
+            RecordType::RangeCommitBatch => {
+                let mut tx_buf = [0u8; 8];
+                reader.read_exact(&mut tx_buf)?;
+                running_crc = crc32_update(running_crc, &tx_buf);
+                let tx_id = u64::from_le_bytes(tx_buf);
+
+                let mut range_len_buf = [0u8; 4];
+                reader.read_exact(&mut range_len_buf)?;
+                running_crc = crc32_update(running_crc, &range_len_buf);
+                let range_len = u32::from_le_bytes(range_len_buf) as usize;
+
+                let mut range_buf = vec![0u8; range_len];
+                reader.read_exact(&mut range_buf)?;
+                running_crc = crc32_update(running_crc, &range_buf);
+                let range_id = String::from_utf8(range_buf).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid range id utf8: {err}"),
+                    )
+                })?;
+
+                let mut count_buf = [0u8; 4];
+                reader.read_exact(&mut count_buf)?;
+                running_crc = crc32_update(running_crc, &count_buf);
+                let count = u32::from_le_bytes(count_buf) as usize;
+
+                let mut actions = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut len_buf = [0u8; 4];
+                    reader.read_exact(&mut len_buf)?;
+                    running_crc = crc32_update(running_crc, &len_buf);
+                    let len = u32::from_le_bytes(len_buf) as usize;
+
+                    let mut action = vec![0u8; len];
+                    reader.read_exact(&mut action)?;
+                    running_crc = crc32_update(running_crc, &action);
+                    actions.push(action);
+                }
+
+                WalRecord::RangeCommitBatch {
+                    tx_id,
+                    range_id,
+                    actions,
+                }
+            }
             RecordType::VectorInsert => {
                 let mut len_buf = [0u8; 4];
                 reader.read_exact(&mut len_buf)?;
@@ -585,12 +655,13 @@ mod tests {
         assert_eq!(RecordType::from_u8(7), Some(RecordType::TxCommitBatch));
         assert_eq!(RecordType::from_u8(8), Some(RecordType::FullPageImage));
         assert_eq!(RecordType::from_u8(9), Some(RecordType::VectorInsert));
+        assert_eq!(RecordType::from_u8(10), Some(RecordType::RangeCommitBatch));
     }
 
     #[test]
     fn test_record_type_invalid() {
         assert_eq!(RecordType::from_u8(0), None);
-        assert_eq!(RecordType::from_u8(10), None);
+        assert_eq!(RecordType::from_u8(11), None);
         assert_eq!(RecordType::from_u8(255), None);
     }
 
@@ -671,6 +742,18 @@ mod tests {
         let encoded = record.encode();
 
         assert_eq!(encoded[0], RecordType::TxCommitBatch as u8);
+    }
+
+    #[test]
+    fn test_encode_range_commit_batch() {
+        let record = WalRecord::RangeCommitBatch {
+            tx_id: 7,
+            range_id: "range-0000000000000007".to_string(),
+            actions: vec![b"insert".to_vec(), b"update".to_vec()],
+        };
+        let encoded = record.encode();
+
+        assert_eq!(encoded[0], RecordType::RangeCommitBatch as u8);
     }
 
     // ==================== WalRecord::read Tests ====================
@@ -768,6 +851,21 @@ mod tests {
     fn test_read_tx_commit_batch_roundtrip() {
         let original = WalRecord::TxCommitBatch {
             tx_id: 42,
+            actions: vec![b"old-version".to_vec(), b"new-version".to_vec()],
+        };
+        let encoded = original.encode();
+
+        let mut cursor = Cursor::new(encoded);
+        let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_read_range_commit_batch_roundtrip() {
+        let original = WalRecord::RangeCommitBatch {
+            tx_id: 42,
+            range_id: "range-000000000000002a".to_string(),
             actions: vec![b"old-version".to_vec(), b"new-version".to_vec()],
         };
         let encoded = original.encode();
@@ -980,6 +1078,11 @@ mod tests {
             },
             WalRecord::TxCommitBatch {
                 tx_id: 7,
+                actions: vec![b"insert".to_vec(), b"update".to_vec()],
+            },
+            WalRecord::RangeCommitBatch {
+                tx_id: 8,
+                range_id: "range-0000000000000008".to_string(),
                 actions: vec![b"insert".to_vec(), b"update".to_vec()],
             },
             WalRecord::FullPageImage {
