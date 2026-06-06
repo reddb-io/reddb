@@ -238,6 +238,13 @@ impl UnifiedStore {
         let manager = SegmentManager::with_config(&name, self.config.manager_config.clone());
         collections.insert(name.clone(), Arc::new(manager));
         drop(collections);
+
+        if let Err(err) = self.publish_operational_collection_create(&name) {
+            let mut collections = self.collections.write();
+            collections.remove(&name);
+            return Err(err);
+        }
+
         self.mark_paged_registry_dirty();
         self.finish_paged_write([StoreWalAction::CreateCollection { name }])?;
 
@@ -352,6 +359,7 @@ impl UnifiedStore {
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
+        self.publish_operational_collection_pending_drop(name)?;
         let manager = {
             let mut collections = self.collections.write();
 
@@ -392,6 +400,7 @@ impl UnifiedStore {
         self.finish_paged_write([StoreWalAction::DropCollection {
             name: name.to_string(),
         }])?;
+        self.publish_operational_collection_drop_finished(name)?;
 
         Ok(())
     }

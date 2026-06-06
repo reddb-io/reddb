@@ -409,8 +409,63 @@ impl UnifiedStore {
         if let Some(commit) = &store.commit {
             commit.replay_into(&store).map_err(StoreError::Io)?;
         }
+        store.recover_operational_manifest()?;
 
         Ok(store)
+    }
+
+    pub(crate) fn recover_operational_manifest(&self) -> Result<(), StoreError> {
+        let Some(path) = &self.db_path else {
+            return Ok(());
+        };
+        let mut collections = self.list_collections();
+        collections.sort();
+        let pending_drops =
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+                .recover_or_bootstrap(&collections)
+                .map_err(StoreError::Io)?;
+        for name in pending_drops {
+            if self.get_collection(&name).is_some() {
+                self.drop_collection(&name)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_operational_collection_create(
+        &self,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        let Some(path) = &self.db_path else {
+            return Ok(());
+        };
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+            .create_collection(name)
+            .map_err(StoreError::Io)
+    }
+
+    pub(crate) fn publish_operational_collection_pending_drop(
+        &self,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        let Some(path) = &self.db_path else {
+            return Ok(());
+        };
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+            .begin_drop_collection(name)
+            .map_err(StoreError::Io)
+    }
+
+    pub(crate) fn publish_operational_collection_drop_finished(
+        &self,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        let Some(path) = &self.db_path else {
+            return Ok(());
+        };
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+            .finish_drop_collection(name)
+            .map_err(StoreError::Io)
     }
 
     /// Load data from page-based storage

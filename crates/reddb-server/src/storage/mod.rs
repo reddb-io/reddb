@@ -77,6 +77,8 @@ pub mod layout;
 // Storage/deploy profile selection contract.
 pub mod profile;
 
+pub(crate) mod operational_manifest;
+
 // Blockchain collection kind: pure logic for hash-chained append-only rows.
 // Storage/wire integration tracked in issue #521.
 pub mod blockchain;
