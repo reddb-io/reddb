@@ -185,9 +185,14 @@ deployments use S3-compatible storage so the writer lease has a
 home. See [Remote Backends](backends.md) for the full matrix and
 the conditional-write contract.
 
+For the physical storage boundary, including checkpointed segment
+packs versus backup/WAL restore, see
+[Storage Profiles](storage-profiles.md#serverless-segment-pack).
+
 ## See also
 
 - [Backends](backends.md) — `RED_BACKEND` matrix, CAS contract
+- [Storage Profiles](storage-profiles.md) — physical packaging and migration boundaries
 - [Replication](replication.md) — commit policy, writer lease
 - [Operator Runbook](../operations/runbook.md) — full deploy / DR playbook
 - [Metrics Spec](../spec/metrics.md) — every gauge / counter named above
