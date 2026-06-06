@@ -1426,13 +1426,13 @@ impl RedDBRuntime {
         // Register metadata
         self.inner
             .index_store
-            .register(super::index_store::RegisteredIndex {
-                name: query.name.clone(),
-                collection: query.table.clone(),
-                columns: query.columns.clone(),
-                method: method_kind,
-                unique: query.unique,
-            });
+            .register(super::index_store::RegisteredIndex::replicated(
+                query.name.clone(),
+                query.table.clone(),
+                query.columns.clone(),
+                method_kind,
+                query.unique,
+            ));
         // Issue #120 — surface the index name + indexed columns in
         // the schema-vocabulary so AskPipeline (#121) can resolve
         // "the email index" back to its collection.
