@@ -70,6 +70,10 @@ That is the stepping stone toward a more Turso-like design later. The
 current architecture still runs the database locally per instance and
 uses remote storage for snapshot/WAL persistence and replay.
 
+For the storage profile presets that decide when primary-replica
+deployments must use `operational-directory` packaging, see
+[Storage Profiles](storage-profiles.md#primary-replica-operational-layout).
+
 ## Monitoring
 
 ### Replication Status
