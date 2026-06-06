@@ -21,6 +21,12 @@ fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
         .with_durability_mode(options.durability_mode)
         .with_group_commit(options.group_commit);
     config.auto_index_id = options.auto_index_id;
+    if options.storage_profile.deploy_profile == crate::storage::profile::DeployProfile::Cluster {
+        if let Some((_, paths)) = options.resolve_tiered_layout() {
+            config.cluster_range_layout =
+                Some(crate::storage::ClusterRangeLayout::new(paths.support_dir));
+        }
+    }
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {
