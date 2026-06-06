@@ -330,6 +330,21 @@ impl ContractOrigin {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferredSegmentLayout {
+    Row,
+    AppendOnlySegmentV0,
+}
+
+impl InferredSegmentLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Row => "row",
+            Self::AppendOnlySegmentV0 => "append_only_segment_v0",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DeclaredColumnContract {
     pub name: String,
@@ -427,6 +442,25 @@ pub struct CollectionContract {
     /// keeps the row engine. Decodes to `None` on sidecars written before
     /// the feature.
     pub analytical_storage: Option<crate::catalog::AnalyticalStorageConfig>,
+}
+
+impl CollectionContract {
+    /// Physical layout inferred from durable collection intent.
+    ///
+    /// Native timeseries always use the append-only segment layout. Plain
+    /// tables only do so when the contract carries explicit append-only intent;
+    /// mutable tables stay on the row layout.
+    pub fn inferred_segment_layout(&self) -> InferredSegmentLayout {
+        match self.declared_model {
+            crate::catalog::CollectionModel::TimeSeries => {
+                InferredSegmentLayout::AppendOnlySegmentV0
+            }
+            crate::catalog::CollectionModel::Table if self.append_only => {
+                InferredSegmentLayout::AppendOnlySegmentV0
+            }
+            _ => InferredSegmentLayout::Row,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
