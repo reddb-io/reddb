@@ -6,6 +6,7 @@ use std::sync::{Condvar, Mutex};
 use crate::api::{RedDBError, RedDBResult};
 use crate::application::entity::metadata_from_json;
 use crate::replication::cdc::{ChangeOperation, ChangeRecord};
+use crate::runtime::index_store::IndexStore;
 use crate::storage::{EntityId, EntityKind, RedDB, UnifiedStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +349,30 @@ impl LogicalChangeApplier {
         record: &ChangeRecord,
         mode: ApplyMode,
     ) -> Result<ApplyOutcome, LogicalApplyError> {
+        self.apply_inner(db, None, record, mode)
+    }
+
+    /// Apply one logical change record and maintain the runtime secondary
+    /// indexes declared on the replica. Restore/PITR callers should use
+    /// [`Self::apply`], because they may not have a live runtime index
+    /// store during recovery.
+    pub fn apply_with_index_store(
+        &self,
+        db: &RedDB,
+        index_store: &IndexStore,
+        record: &ChangeRecord,
+        mode: ApplyMode,
+    ) -> Result<ApplyOutcome, LogicalApplyError> {
+        self.apply_inner(db, Some(index_store), record, mode)
+    }
+
+    fn apply_inner(
+        &self,
+        db: &RedDB,
+        index_store: Option<&IndexStore>,
+        record: &ChangeRecord,
+        mode: ApplyMode,
+    ) -> Result<ApplyOutcome, LogicalApplyError> {
         let last = self.last_applied_lsn.load(Ordering::Acquire);
         let last_term = self.last_applied_term.load(Ordering::Acquire);
 
@@ -373,7 +398,7 @@ impl LogicalChangeApplier {
             .fetch_max(record.lsn, Ordering::AcqRel);
 
         if last == 0 && record.lsn > 0 {
-            self.do_apply(db, record, mode)?;
+            self.do_apply(db, index_store, record, mode)?;
             self.last_applied_term.store(record.term, Ordering::Release);
             self.last_applied_lsn.store(record.lsn, Ordering::Release);
             *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
@@ -405,7 +430,7 @@ impl LogicalChangeApplier {
             });
         }
 
-        self.do_apply(db, record, mode)?;
+        self.do_apply(db, index_store, record, mode)?;
         self.last_applied_term.store(record.term, Ordering::Release);
         self.last_applied_lsn.store(record.lsn, Ordering::Release);
         *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
@@ -416,15 +441,15 @@ impl LogicalChangeApplier {
     fn do_apply(
         &self,
         db: &RedDB,
+        index_store: Option<&IndexStore>,
         record: &ChangeRecord,
         mode: ApplyMode,
     ) -> Result<(), LogicalApplyError> {
-        Self::apply_record_with_metrics(db, record, mode, &self.metrics).map_err(|err| {
-            LogicalApplyError::Apply {
+        Self::apply_record_with_metrics_and_indexes(db, index_store, record, mode, &self.metrics)
+            .map_err(|err| LogicalApplyError::Apply {
                 lsn: record.lsn,
                 source: err,
-            }
-        })
+            })
     }
 
     /// Stateless apply — applies the record without monotonicity
@@ -447,6 +472,16 @@ impl LogicalChangeApplier {
     /// rather than being swallowed by the old `let _ =`.
     pub fn apply_record_with_metrics(
         db: &RedDB,
+        record: &ChangeRecord,
+        _mode: ApplyMode,
+        metrics: &ReplicaApplyMetrics,
+    ) -> RedDBResult<()> {
+        Self::apply_record_with_metrics_and_indexes(db, None, record, _mode, metrics)
+    }
+
+    pub fn apply_record_with_metrics_and_indexes(
+        db: &RedDB,
+        index_store: Option<&IndexStore>,
         record: &ChangeRecord,
         _mode: ApplyMode,
         metrics: &ReplicaApplyMetrics,
@@ -514,6 +549,7 @@ impl LogicalChangeApplier {
                 };
                 let entity = UnifiedStore::deserialize_entity(bytes, store.format_version())
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                let prior_entity = store.get(&record.collection, EntityId::new(record.entity_id));
 
                 // Issue #813 — MVCC table-row supersession on the replica.
                 //
@@ -577,6 +613,26 @@ impl LogicalChangeApplier {
                         .set_metadata(&record.collection, entity.id, metadata)
                         .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 }
+                if let Some(index_store) = index_store {
+                    let new_fields = entity_index_fields(&entity);
+                    if !new_fields.is_empty() {
+                        if let Some(old) = prior_entity.as_ref() {
+                            let old_fields = entity_index_fields(old);
+                            index_store
+                                .index_entity_update(
+                                    &record.collection,
+                                    entity.id,
+                                    &old_fields,
+                                    &new_fields,
+                                )
+                                .map_err(RedDBError::Internal)?;
+                        } else {
+                            index_store
+                                .index_entity_insert(&record.collection, entity.id, &new_fields)
+                                .map_err(RedDBError::Internal)?;
+                        }
+                    }
+                }
                 store
                     .context_index()
                     .index_entity(&record.collection, &entity);
@@ -584,6 +640,17 @@ impl LogicalChangeApplier {
         }
         Ok(())
     }
+}
+
+fn entity_index_fields(
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> Vec<(String, crate::storage::schema::Value)> {
+    let Some(row) = entity.data.as_row() else {
+        return Vec::new();
+    };
+    row.iter_fields()
+        .map(|(name, value)| (name.to_string(), value.clone()))
+        .collect()
 }
 
 fn record_payload_hash(record: &ChangeRecord) -> [u8; 32] {
