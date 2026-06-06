@@ -26,6 +26,14 @@ pub struct RangeMetadata {
     pub append_segment_file: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeSnapshot {
+    pub metadata: RangeMetadata,
+    pub checkpoint_dir: PathBuf,
+    pub snapshot_lsn: u64,
+    pub owner_epoch: u64,
+}
+
 impl ClusterRangeLayout {
     pub fn new(support_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -63,7 +71,38 @@ impl ClusterRangeLayout {
         touch(&metadata.data_file)?;
         touch(&metadata.index_file)?;
         touch(&metadata.append_segment_file)?;
-        self.write_metadata(metadata)
+        write_metadata_file(metadata)
+    }
+
+    pub fn export_range_snapshot(
+        &self,
+        metadata: &RangeMetadata,
+        checkpoint_root: impl AsRef<Path>,
+        snapshot_lsn: u64,
+        owner_epoch: u64,
+    ) -> io::Result<RangeSnapshot> {
+        let checkpoint_dir = checkpoint_root
+            .as_ref()
+            .join(&metadata.physical_range_dir_id);
+        replace_dir(&metadata.physical_dir, &checkpoint_dir)?;
+        let snapshot_metadata = metadata.rebased_to(&checkpoint_dir);
+        write_metadata_file(&snapshot_metadata)?;
+        Ok(RangeSnapshot {
+            metadata: snapshot_metadata,
+            checkpoint_dir,
+            snapshot_lsn,
+            owner_epoch,
+        })
+    }
+
+    pub fn install_range_snapshot(&self, snapshot: &RangeSnapshot) -> io::Result<RangeMetadata> {
+        let target_dir = self
+            .ranges_dir
+            .join(&snapshot.metadata.physical_range_dir_id);
+        replace_dir(&snapshot.checkpoint_dir, &target_dir)?;
+        let installed = snapshot.metadata.rebased_to(&target_dir);
+        write_metadata_file(&installed)?;
+        Ok(installed)
     }
 
     pub fn load_collection_range(&self, collection: &str) -> io::Result<Option<RangeMetadata>> {
@@ -89,21 +128,58 @@ impl ClusterRangeLayout {
         }
         Ok(None)
     }
+}
 
-    fn write_metadata(&self, metadata: &RangeMetadata) -> io::Result<()> {
-        let path = metadata.physical_dir.join("range.meta");
-        let body = format!(
-            "collection={}\ncollection_id={}\nlogical_range_id={}\nphysical_range_dir_id={}\ndata_file={}\nindex_file={}\nappend_segment_file={}\n",
-            metadata.collection,
-            metadata.collection_id,
-            metadata.logical_range_id,
-            metadata.physical_range_dir_id,
-            metadata.data_file.display(),
-            metadata.index_file.display(),
-            metadata.append_segment_file.display(),
-        );
-        fs::write(path, body)
+impl RangeMetadata {
+    fn rebased_to(&self, physical_dir: &Path) -> Self {
+        Self {
+            collection: self.collection.clone(),
+            collection_id: self.collection_id,
+            logical_range_id: self.logical_range_id.clone(),
+            physical_range_dir_id: self.physical_range_dir_id.clone(),
+            physical_dir: physical_dir.to_path_buf(),
+            data_file: physical_dir.join("data.rdb"),
+            index_file: physical_dir.join("index.rdb"),
+            append_segment_file: physical_dir.join("segments.aof"),
+        }
     }
+}
+
+fn write_metadata_file(metadata: &RangeMetadata) -> io::Result<()> {
+    let path = metadata.physical_dir.join("range.meta");
+    let body = format!(
+        "collection={}\ncollection_id={}\nlogical_range_id={}\nphysical_range_dir_id={}\ndata_file={}\nindex_file={}\nappend_segment_file={}\n",
+        metadata.collection,
+        metadata.collection_id,
+        metadata.logical_range_id,
+        metadata.physical_range_dir_id,
+        metadata.data_file.display(),
+        metadata.index_file.display(),
+        metadata.append_segment_file.display(),
+    );
+    fs::write(path, body)
+}
+
+fn replace_dir(source: &Path, target: &Path) -> io::Result<()> {
+    if target.exists() {
+        fs::remove_dir_all(target)?;
+    }
+    copy_dir_recursive(source, target)
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn touch(path: &Path) -> io::Result<()> {
