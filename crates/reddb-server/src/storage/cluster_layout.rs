@@ -8,6 +8,7 @@
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterRangeLayout {
@@ -32,6 +33,14 @@ pub struct RangeSnapshot {
     pub checkpoint_dir: PathBuf,
     pub snapshot_lsn: u64,
     pub owner_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeQuarantine {
+    pub range_id: String,
+    pub original_dir: PathBuf,
+    pub quarantine_dir: PathBuf,
+    pub reason: String,
 }
 
 impl ClusterRangeLayout {
@@ -105,6 +114,31 @@ impl ClusterRangeLayout {
         Ok(installed)
     }
 
+    pub fn quarantine_range(
+        &self,
+        metadata: &RangeMetadata,
+        reason: impl AsRef<str>,
+    ) -> io::Result<RangeQuarantine> {
+        let reason = sanitize_quarantine_reason(reason.as_ref());
+        let quarantine_root = self.ranges_dir.join("quarantine");
+        fs::create_dir_all(&quarantine_root)?;
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine_dir = quarantine_root.join(format!(
+            "{}.{}.{}",
+            metadata.physical_range_dir_id, reason, suffix
+        ));
+        fs::rename(&metadata.physical_dir, &quarantine_dir)?;
+        Ok(RangeQuarantine {
+            range_id: metadata.logical_range_id.clone(),
+            original_dir: metadata.physical_dir.clone(),
+            quarantine_dir,
+            reason,
+        })
+    }
+
     pub fn load_collection_range(&self, collection: &str) -> io::Result<Option<RangeMetadata>> {
         if !self.ranges_dir.exists() {
             return Ok(None);
@@ -168,8 +202,9 @@ fn replace_dir(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 fn copy_dir_recursive(source: &Path, target: &Path) -> io::Result<()> {
+    let entries = fs::read_dir(source)?;
     fs::create_dir_all(target)?;
-    for entry in fs::read_dir(source)? {
+    for entry in entries {
         let entry = entry?;
         let source_path = entry.path();
         let target_path = target.join(entry.file_name());
@@ -188,6 +223,24 @@ fn touch(path: &Path) -> io::Result<()> {
         .append(true)
         .open(path)
         .map(|_| ())
+}
+
+fn sanitize_quarantine_reason(reason: &str) -> String {
+    let sanitized: String = reason
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "repair".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn parse_metadata(raw: &str) -> Option<RangeMetadata> {
