@@ -138,6 +138,9 @@ impl ReadEndpoint {
 /// Why a causal read landed on the endpoint it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteKind {
+    /// Eventual read routed to a healthy replica without a freshness
+    /// requirement.
+    EventualReplica,
     /// The chosen target replica's snapshot frontier already covered
     /// the bookmark — no wait was needed.
     EligibleTarget,
@@ -291,6 +294,59 @@ impl RoutingTable {
         self.replicas
             .iter()
             .position(|r| r.healthy && !r.rebootstrapping)
+    }
+
+    /// Pick a replica for an ordinary eventual read.
+    ///
+    /// Eventual reads have no required LSN, so any healthy replica is
+    /// eligible. Re-bootstrapping replicas are included here: they may
+    /// keep serving their old snapshot for non-causal reads while
+    /// rebuilding, but they remain excluded from freshness-required
+    /// routes.
+    pub fn route_eventual_read(&self, preferred_region: Option<&str>) -> RouteDecision {
+        let replica = preferred_region
+            .and_then(|region| {
+                self.replicas
+                    .iter()
+                    .find(|r| r.healthy && r.region == region)
+            })
+            .or_else(|| self.replicas.iter().find(|r| r.healthy));
+
+        match replica {
+            Some(r) => RouteDecision {
+                endpoint: Endpoint {
+                    addr: r.addr.clone(),
+                    region: r.region.clone(),
+                },
+                kind: RouteKind::EventualReplica,
+                waited: Duration::ZERO,
+            },
+            None => RouteDecision {
+                endpoint: self.write.endpoint(),
+                kind: RouteKind::FallbackPrimary,
+                waited: Duration::ZERO,
+            },
+        }
+    }
+
+    /// Resolve a freshness-required read using a required contiguous
+    /// applied LSN rather than an opaque bookmark token.
+    ///
+    /// This is the same routing rule causal bookmarks use after the
+    /// token is decoded: only replicas whose contiguous applied
+    /// frontier reaches `required_lsn` may serve the read; the chosen
+    /// target gets a bounded chance to catch up before fallback.
+    pub fn route_required_lsn_read(
+        &self,
+        required_lsn: u64,
+        opts: &CausalReadOptions,
+        waiter: &mut dyn BookmarkWaiter,
+    ) -> RouteDecision {
+        self.route_causal_read(
+            BookmarkTarget::new(self.write.term, required_lsn),
+            opts,
+            waiter,
+        )
     }
 
     /// Resolve a causal read with bounded-wait-then-fallback.
