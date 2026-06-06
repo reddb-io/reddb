@@ -55,7 +55,9 @@ under `files/`.
 
 The first contract is intentionally one-way: keep the original `.rdb` as your
 rollback artifact, and open the migrated directory with the operational
-directory profile after validation.
+directory profile after validation. For the full profile matrix and unsupported
+reverse or online directions, see
+[Storage Profiles](../deployment/storage-profiles.md#migration-paths).
 
 ### One language, one system
 

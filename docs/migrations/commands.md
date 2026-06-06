@@ -58,7 +58,9 @@ must be closed; the migrator refuses an open source by taking the embedded
 runtime's exclusive file lock. It validates the checkpoint header and page
 checksums before exporting, then writes `MANIFEST.json` plus physical files under
 `files/` with stable logical file identities. Keep the original `.rdb` as the
-rollback artifact.
+rollback artifact. See
+[Storage Profiles](../deployment/storage-profiles.md#migration-paths) for the
+supported and unsupported storage-profile directions.
 
 ---
 

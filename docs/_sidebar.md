@@ -187,6 +187,7 @@
 
 - **Deployment**
   - [Embedded Mode](/deployment/embedded.md)
+  - [Storage Profiles](/deployment/storage-profiles.md)
   - [Server Mode](/deployment/server.md)
   - [Serverless Mode](/deployment/serverless.md)
   - [Docker](/deployment/docker.md)
