@@ -389,8 +389,7 @@ impl ServerCommandConfig {
         if options.remote_backend.is_some()
             || options
                 .metadata
-                .get(BACKUP_INTERVAL_META_CHECKPOINT)
-                .is_some()
+                .contains_key(BACKUP_INTERVAL_META_CHECKPOINT)
         {
             let mut selection = options.storage_profile;
             selection.managed_backup = true;
