@@ -4276,7 +4276,8 @@ impl RedDBRuntime {
         self.inner.db.store().set_config_tree(
             "red.replication",
             &crate::json!({
-                "last_applied_lsn": lsn
+                "last_applied_lsn": lsn,
+                "last_durable_lsn": lsn
             }),
         );
     }
@@ -5241,8 +5242,9 @@ impl RedDBRuntime {
                                     );
                                     continue;
                                 };
-                                match applier.apply(
+                                match applier.apply_with_index_store(
                                     self.inner.db.as_ref(),
+                                    self.index_store_ref(),
                                     &change,
                                     ApplyMode::Replica,
                                 ) {
@@ -5567,6 +5569,22 @@ impl RedDBRuntime {
     /// `Local` — current behavior, no replica blocking.
     pub fn commit_policy(&self) -> crate::replication::CommitPolicy {
         crate::replication::CommitPolicy::from_env()
+    }
+
+    /// Replica-side durable logical-stream progress. The current apply
+    /// loop persists this immediately after applying an LSN and before
+    /// acking the primary, so it is the local promotion safety watermark.
+    pub fn replica_durable_lsn(&self) -> u64 {
+        self.config_u64(
+            "red.replication.last_durable_lsn",
+            self.config_u64("red.replication.last_applied_lsn", 0),
+        )
+    }
+
+    /// Primary frontier most recently observed by this replica while
+    /// pulling the semantic logical stream.
+    pub fn replica_required_promotion_lsn(&self) -> u64 {
+        self.config_u64("red.replication.last_seen_primary_lsn", 0)
     }
 
     /// PLAN.md Phase 11.5 — accessor for replica-side apply error
