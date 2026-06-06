@@ -80,6 +80,17 @@ pub enum StorageDeployPreset {
 }
 
 impl StorageDeployPreset {
+    pub const ALL: [Self; 8] = [
+        Self::Embedded,
+        Self::Serverless,
+        Self::PrimaryReplicaDev,
+        Self::PrimaryReplicaSmall,
+        Self::PrimaryReplicaProductionHa,
+        Self::PrimaryReplicaBackup,
+        Self::PrimaryReplicaWalRetention,
+        Self::Cluster,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Embedded => "embedded",
@@ -185,6 +196,18 @@ pub struct StorageProfileSelection {
 impl StorageProfileSelection {
     pub const fn embedded_single_file() -> Self {
         StorageDeployPreset::Embedded.selection()
+    }
+
+    pub fn inferred_preset(self) -> Option<StorageDeployPreset> {
+        StorageDeployPreset::ALL
+            .into_iter()
+            .find(|preset| preset.selection() == self)
+    }
+
+    pub fn preset_name(self) -> &'static str {
+        self.inferred_preset()
+            .map(StorageDeployPreset::as_str)
+            .unwrap_or("custom")
     }
 
     pub fn validate(self) -> Result<Self, String> {
@@ -315,5 +338,24 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("cluster"));
         assert!(err.contains("embedded single-file"));
+    }
+
+    #[test]
+    fn selection_reports_matching_preset_or_custom() {
+        assert_eq!(
+            StorageDeployPreset::PrimaryReplicaProductionHa
+                .selection()
+                .preset_name(),
+            "primary-replica-production-ha"
+        );
+
+        let custom = StorageProfileSelection {
+            deploy_profile: DeployProfile::PrimaryReplica,
+            packaging: StoragePackaging::OperationalDirectory,
+            replica_count: 4,
+            managed_backup: false,
+            wal_retention: false,
+        };
+        assert_eq!(custom.preset_name(), "custom");
     }
 }

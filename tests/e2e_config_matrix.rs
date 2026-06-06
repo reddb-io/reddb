@@ -46,12 +46,50 @@ fn tier_a_critical_keys_are_self_healed_on_boot() {
     assert!(show_value(&rt, "storage.deploy.preset")
         .unwrap()
         .contains("embedded"));
+    assert!(show_value(&rt, "storage.deploy.replica_count")
+        .unwrap()
+        .contains("0"));
+    assert!(show_value(&rt, "storage.deploy.managed_backup")
+        .unwrap()
+        .contains("false"));
+    assert!(show_value(&rt, "storage.deploy.wal_retention")
+        .unwrap()
+        .contains("false"));
     assert!(show_value(&rt, "storage.bgwriter.delay_ms")
         .unwrap()
         .contains("200"));
     assert!(show_value(&rt, "storage.btree.lehman_yao")
         .unwrap()
         .contains("true"));
+}
+
+#[test]
+fn storage_deploy_profile_selection_is_visible_in_config() {
+    let options = RedDBOptions::in_memory()
+        .with_storage_profile(
+            reddb::storage::StorageDeployPreset::PrimaryReplicaProductionHa.selection(),
+        )
+        .expect("profile selection should validate");
+    let rt = RedDBRuntime::with_options(options).expect("runtime should open in-memory");
+
+    assert!(show_value(&rt, "storage.deploy.profile")
+        .unwrap()
+        .contains("primary-replica"));
+    assert!(show_value(&rt, "storage.deploy.packaging")
+        .unwrap()
+        .contains("operational-directory"));
+    assert!(show_value(&rt, "storage.deploy.preset")
+        .unwrap()
+        .contains("primary-replica-production-ha"));
+    assert!(show_value(&rt, "storage.deploy.replica_count")
+        .unwrap()
+        .contains("2"));
+    assert!(show_value(&rt, "storage.deploy.managed_backup")
+        .unwrap()
+        .contains("false"));
+    assert!(show_value(&rt, "storage.deploy.wal_retention")
+        .unwrap()
+        .contains("false"));
 }
 
 #[test]
