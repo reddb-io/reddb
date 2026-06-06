@@ -33,6 +33,7 @@ pub struct OperationalBackupFile {
 pub struct OperationalBackupManifest {
     pub version: u32,
     pub checkpoint_lsn: u64,
+    pub wal_retention_floor_lsn: u64,
     pub wal_start_lsn: u64,
     pub current_lsn: u64,
     pub files: Vec<OperationalBackupFile>,
@@ -122,6 +123,7 @@ pub fn create_operational_backup(
     let manifest = OperationalBackupManifest {
         version: 1,
         checkpoint_lsn,
+        wal_retention_floor_lsn: wal_start_lsn,
         wal_start_lsn,
         current_lsn,
         files,
@@ -303,6 +305,10 @@ fn read_manifest(path: &Path) -> Result<OperationalBackupManifest, BackendError>
 }
 
 impl OperationalBackupManifest {
+    pub fn wal_retention_floor_lsn(&self) -> u64 {
+        self.wal_retention_floor_lsn
+    }
+
     fn to_json_value(&self) -> JsonValue {
         let mut object = Map::new();
         object.insert(
@@ -312,6 +318,10 @@ impl OperationalBackupManifest {
         object.insert(
             "checkpoint_lsn".to_string(),
             JsonValue::Number(self.checkpoint_lsn as f64),
+        );
+        object.insert(
+            "wal_retention_floor_lsn".to_string(),
+            JsonValue::Number(self.wal_retention_floor_lsn as f64),
         );
         object.insert(
             "wal_start_lsn".to_string(),
@@ -351,6 +361,15 @@ impl OperationalBackupManifest {
                 .and_then(JsonValue::as_u64)
                 .ok_or_else(|| {
                     BackendError::Internal("backup manifest missing checkpoint_lsn".to_string())
+                })?,
+            wal_retention_floor_lsn: value
+                .get("wal_retention_floor_lsn")
+                .and_then(JsonValue::as_u64)
+                .or_else(|| value.get("wal_start_lsn").and_then(JsonValue::as_u64))
+                .ok_or_else(|| {
+                    BackendError::Internal(
+                        "backup manifest missing wal_retention_floor_lsn".to_string(),
+                    )
                 })?,
             wal_start_lsn: value
                 .get("wal_start_lsn")
