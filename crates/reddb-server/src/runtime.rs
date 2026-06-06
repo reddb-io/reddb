@@ -1356,7 +1356,7 @@ mod impl_search;
 mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
-mod index_store;
+pub(crate) mod index_store;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
