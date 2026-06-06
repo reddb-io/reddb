@@ -247,6 +247,7 @@ impl UnifiedStore {
 
         let collection_id = self.next_collection_id();
         let physical_file_id = format!("collection-{collection_id:016x}");
+        self.register_collection_range(&name, collection_id, &physical_file_id)?;
         self.mark_paged_registry_dirty();
         self.finish_paged_write([StoreWalAction::CreateCollection {
             name,
@@ -285,6 +286,35 @@ impl UnifiedStore {
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
         self.collections.read().get(name).map(Arc::clone)
+    }
+
+    pub(crate) fn register_collection_range(
+        &self,
+        collection: &str,
+        collection_id: u64,
+        physical_file_id: &str,
+    ) -> Result<Option<RangeMetadata>, StoreError> {
+        let Some(layout) = &self.config.cluster_range_layout else {
+            return Ok(None);
+        };
+        let metadata = layout.metadata_for(collection, collection_id, physical_file_id);
+        layout.prepare_range(&metadata)?;
+        self.collection_ranges
+            .write()
+            .insert(collection.to_string(), metadata.clone());
+        Ok(Some(metadata))
+    }
+
+    pub fn collection_range_metadata(&self, collection: &str) -> Option<RangeMetadata> {
+        if let Some(metadata) = self.collection_ranges.read().get(collection).cloned() {
+            return Some(metadata);
+        }
+        let layout = self.config.cluster_range_layout.as_ref()?;
+        let metadata = layout.load_collection_range(collection).ok().flatten()?;
+        self.collection_ranges
+            .write()
+            .insert(collection.to_string(), metadata.clone());
+        Some(metadata)
     }
 
     /// Get the context index for cross-structure search.
