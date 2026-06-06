@@ -245,8 +245,14 @@ impl UnifiedStore {
             return Err(err);
         }
 
+        let collection_id = self.next_collection_id();
+        let physical_file_id = format!("collection-{collection_id:016x}");
         self.mark_paged_registry_dirty();
-        self.finish_paged_write([StoreWalAction::CreateCollection { name }])?;
+        self.finish_paged_write([StoreWalAction::CreateCollection {
+            name,
+            collection_id,
+            physical_file_id,
+        }])?;
 
         Ok(())
     }
