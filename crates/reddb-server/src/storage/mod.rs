@@ -77,6 +77,9 @@ pub mod layout;
 // Storage/deploy profile selection contract.
 pub mod profile;
 
+// Cluster range-directory layout tracer.
+pub mod cluster_layout;
+
 // Embedded single-file `.rdb` artifact skeleton.
 pub mod embedded;
 
@@ -98,6 +101,7 @@ pub mod signed_writes;
 
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
+pub use cluster_layout::{ClusterRangeLayout, RangeMetadata};
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
     EMBEDDED_RDB_MANIFEST_OFFSET, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,

@@ -42,6 +42,7 @@ use crate::storage::engine::pager::PagerError;
 use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
 use crate::storage::primitives::encoding::{read_varu32, read_varu64, write_varu32, write_varu64};
 use crate::storage::schema::types::Value;
+use crate::storage::{ClusterRangeLayout, RangeMetadata};
 
 const STORE_MAGIC: &[u8; 4] = b"RDST";
 const STORE_VERSION_V1: u32 = 1;
@@ -286,6 +287,9 @@ pub struct UnifiedStoreConfig {
     pub group_commit: GroupCommitOptions,
     /// Data directory path
     pub data_dir: Option<std::path::PathBuf>,
+    /// Cluster range-directory tracer layout. `None` keeps embedded /
+    /// primary-replica storage on the existing single-store physical layout.
+    pub cluster_range_layout: Option<ClusterRangeLayout>,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -301,6 +305,7 @@ impl Default for UnifiedStoreConfig {
             durability_mode: DurabilityMode::WalDurableGrouped,
             group_commit: GroupCommitOptions::default(),
             data_dir: None,
+            cluster_range_layout: None,
         }
     }
 }
@@ -511,6 +516,9 @@ pub struct UnifiedStore {
     /// rebuilt state is byte-deterministic against the pre-restart
     /// state under a fixed codec seed.
     pub(crate) replayed_turbo_inserts: parking_lot::Mutex<HashMap<String, Vec<(u64, Vec<f32>)>>>,
+    /// Logical collection/range ownership metadata for the cluster
+    /// range-directory tracer.
+    collection_ranges: RwLock<HashMap<String, RangeMetadata>>,
 }
 
 mod builder;
