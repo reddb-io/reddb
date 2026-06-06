@@ -43,6 +43,20 @@ deploy records from separate systems.
 
 ## What RedDB's native migrations give you
 
+### Offline storage-profile migration
+
+RedDB also ships a storage-profile migration for the first supported physical
+layout transition: embedded single-file `.rdb` to operational directory. This is
+not a live schema migration. It is an offline, one-way export path for a closed
+and checkpointed source database. The migrator takes the same exclusive file
+lock as the embedded runtime, validates the checkpoint header and page
+checksums, writes `MANIFEST.json`, and copies stable physical file identities
+under `files/`.
+
+The first contract is intentionally one-way: keep the original `.rdb` as your
+rollback artifact, and open the migrated directory with the operational
+directory profile after validation.
+
 ### One language, one system
 
 Migrations are SQL statements executed by the same engine that runs your queries.
