@@ -36,6 +36,7 @@
 //! - GraphNode → Vector (node has embeddings)
 //! - Vector → TableRow (embedding source)
 
+pub mod append_only_segment;
 pub mod bitmap_index;
 pub mod bloom_index;
 pub mod column_block;
@@ -56,6 +57,10 @@ pub mod spatial_index;
 pub mod store;
 pub mod tokenization;
 
+pub use append_only_segment::{
+    AppendOnlySegment, AppendOnlySegmentError, AppendOnlySegmentMetadata, ColumnMinMax,
+    SegmentOffset, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+};
 pub use bitmap_index::{BitmapColumnIndex, BitmapIndexManager, BitmapIndexStats};
 pub use bloom_index::{BloomFilterRegistry, BloomRegistryStats};
 pub use column_block::{
