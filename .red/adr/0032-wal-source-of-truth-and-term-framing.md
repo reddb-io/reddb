@@ -2,6 +2,10 @@
 
 Status: proposed
 
+Operator map: [Storage Profiles](../../docs/deployment/storage-profiles.md)
+links this WAL source-of-truth decision to backup/PITR, replica catch-up, and
+cluster range-stamped WAL boundaries.
+
 RedDB keeps two logs: the storage-engine physical WAL (`storage/wal/`) for crash
 recovery, and a separate logical replication spool (`LogicalWalSpool`, v2 framing)
 that drives replication and PITR. Today they are written in parallel via a CDC hook
