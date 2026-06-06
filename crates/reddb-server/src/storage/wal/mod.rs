@@ -23,12 +23,13 @@ pub mod writer;
 
 pub use append_coordinator::WalAppendCoordinator;
 pub use archiver::{
-    archive_change_records, archive_snapshot, load_archived_change_records, load_backup_head,
-    load_snapshot_manifest, load_unified_manifest, load_wal_segment_manifest, publish_backup_head,
-    publish_snapshot_manifest, publish_unified_manifest, publish_unified_manifest_for_prefix,
-    publish_wal_segment_manifest, sha256_bytes_hex, sha256_file_hex, snapshot_manifest_key,
-    unified_manifest_key, wal_segment_manifest_key, BackupHead, SnapshotManifest, UnifiedManifest,
-    UnifiedSnapshotEntry, UnifiedWalEntry, WalArchiver, WalSegmentManifest, WalSegmentMeta,
+    archive_change_records, archive_snapshot, backup_wal_retention_floor_lsn,
+    load_archived_change_records, load_backup_head, load_snapshot_manifest, load_unified_manifest,
+    load_wal_segment_manifest, publish_backup_head, publish_snapshot_manifest,
+    publish_unified_manifest, publish_unified_manifest_for_prefix, publish_wal_segment_manifest,
+    sha256_bytes_hex, sha256_file_hex, snapshot_manifest_key, unified_manifest_key,
+    wal_segment_manifest_key, BackupHead, SnapshotManifest, UnifiedManifest, UnifiedSnapshotEntry,
+    UnifiedWalEntry, WalArchiver, WalPruneBoundary, WalSegmentManifest, WalSegmentMeta,
 };
 pub use checkpoint::{CheckpointError, CheckpointMode, CheckpointResult, Checkpointer};
 pub use group_commit::GroupCommit;
