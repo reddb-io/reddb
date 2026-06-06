@@ -467,6 +467,8 @@ pub struct UnifiedStore {
     format_version: AtomicU32,
     /// Global entity ID counter
     next_entity_id: AtomicU64,
+    /// Compact logical collection ID counter for store-WAL object identity.
+    next_collection_id: AtomicU64,
     /// Collections by name
     collections: RwLock<HashMap<String, Arc<SegmentManager>>>,
     /// Forward cross-references: source_id → [(target_id, ref_type, target_collection)]
