@@ -77,6 +77,9 @@ pub mod layout;
 // Storage/deploy profile selection contract.
 pub mod profile;
 
+// Embedded single-file `.rdb` artifact skeleton.
+pub mod embedded;
+
 pub(crate) mod operational_manifest;
 
 // Blockchain collection kind: pure logic for hash-chained append-only rows.
@@ -92,6 +95,11 @@ pub mod signed_writes;
 
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
+pub use embedded::{
+    EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
+    EMBEDDED_RDB_MANIFEST_OFFSET, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+    EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, EMBEDDED_RDB_SUPERBLOCK_SIZE,
+};
 pub use keyring::{
     clear_keyring, has_keyring_password, resolve_password, save_to_keyring, PasswordSource,
 };
