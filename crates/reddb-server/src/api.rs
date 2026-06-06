@@ -229,6 +229,9 @@ pub struct RedDBOptions {
     pub layout: crate::storage::layout::StorageLayout,
     /// Per-feature overrides applied on top of the resolved layout preset.
     pub layout_overrides: crate::storage::layout::LayoutOverrides,
+    /// Operator-facing storage/deploy profile contract. This records the
+    /// selected posture before the physical directory layout is expanded.
+    pub storage_profile: crate::storage::profile::StorageProfileSelection,
     /// True only when the caller explicitly selected a layout via
     /// `with_layout`. When false, `apply_tier_defaults` short-circuits so
     /// pre-existing process-global toggles (set by tests / env hatches
@@ -263,6 +266,7 @@ impl fmt::Debug for RedDBOptions {
             .field("query_audit", &self.query_audit)
             .field("layout", &self.layout)
             .field("layout_overrides", &self.layout_overrides)
+            .field("storage_profile", &self.storage_profile)
             .finish()
     }
 }
@@ -294,6 +298,7 @@ impl Clone for RedDBOptions {
             auto_index_id: self.auto_index_id,
             layout: self.layout,
             layout_overrides: self.layout_overrides.clone(),
+            storage_profile: self.storage_profile,
             layout_explicit: self.layout_explicit,
         }
     }
@@ -334,6 +339,8 @@ impl Default for RedDBOptions {
             auto_index_id: true,
             layout: crate::storage::layout::StorageLayout::default(),
             layout_overrides: crate::storage::layout::LayoutOverrides::default(),
+            storage_profile: crate::storage::profile::StorageProfileSelection::embedded_single_file(
+            ),
             layout_explicit: false,
         }
     }
@@ -557,6 +564,14 @@ impl RedDBOptions {
     ) -> Self {
         self.layout_overrides = overrides;
         self
+    }
+
+    pub fn with_storage_profile(
+        mut self,
+        selection: crate::storage::profile::StorageProfileSelection,
+    ) -> Result<Self, String> {
+        self.storage_profile = selection.validate()?;
+        Ok(self)
     }
 
     /// Resolve `(data_path, TieredLayoutPaths)` for this options bundle.

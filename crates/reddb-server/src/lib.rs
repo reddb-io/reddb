@@ -104,6 +104,9 @@ pub mod prelude {
         RuntimeQueryResult, RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
     };
     pub use crate::server::{RedDBServer, ServerOptions, ServerReplicationState};
+    pub use crate::storage::{
+        DeployProfile, StorageDeployPreset, StoragePackaging, StorageProfileSelection,
+    };
 }
 
 pub use crate::api::{
