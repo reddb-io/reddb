@@ -97,6 +97,10 @@ impl PersistentDbPath {
             .unwrap_or_else(|err| panic!("failed to open persistent runtime at {path}: {err:?}"))
     }
 
+    pub fn path(&self) -> &std::path::Path {
+        &self.base
+    }
+
     fn path_string(&self) -> String {
         self.base.to_string_lossy().to_string()
     }

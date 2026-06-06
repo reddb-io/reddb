@@ -80,6 +80,8 @@ pub mod profile;
 // Embedded single-file `.rdb` artifact skeleton.
 pub mod embedded;
 
+pub mod segment_pack;
+
 pub(crate) mod operational_manifest;
 
 // Blockchain collection kind: pure logic for hash-chained append-only rows.
