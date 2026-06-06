@@ -795,6 +795,9 @@ impl RedDB {
             collection_contracts: previous
                 .map(|metadata| metadata.collection_contracts.clone())
                 .unwrap_or_default(),
+            collection_layouts: previous
+                .map(|metadata| metadata.collection_layouts.clone())
+                .unwrap_or_default(),
             hypertables: previous
                 .map(|metadata| metadata.hypertables.clone())
                 .unwrap_or_default(),
@@ -963,6 +966,10 @@ impl RedDB {
             };
             fresh.push(PhysicalIndexState {
                 name: native.name.clone(),
+                logical_id: 0,
+                physical_file_id: String::new(),
+                physical_file_name: String::new(),
+                collection_logical_id: None,
                 kind,
                 collection: native.collection.clone(),
                 enabled: native.enabled,
