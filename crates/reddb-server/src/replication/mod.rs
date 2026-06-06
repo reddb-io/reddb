@@ -31,6 +31,7 @@ pub mod fence;
 pub mod flow_control;
 pub mod lease;
 pub mod logical;
+pub mod move_range;
 pub mod primary;
 pub mod quorum;
 pub mod replica;
@@ -64,6 +65,10 @@ pub use fence::{
 };
 pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
+pub use move_range::{
+    MoveRangeCatchUp, MoveRangeCutover, MoveRangeError, MoveRangeRequest, MoveRangeTargetState,
+    MoveRangeTracer, RangeIndexedRecord, RangeOwnership,
+};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
 pub use rollback::{
     DivergentTail, RollbackCoordinator, RollbackError, RollbackEvent, RollbackOutcome,
