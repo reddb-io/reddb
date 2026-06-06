@@ -1321,6 +1321,22 @@ pub(super) fn snapshot_descriptor_from_json(value: &JsonValue) -> io::Result<Sna
 pub(super) fn index_state_to_json(index: &PhysicalIndexState) -> JsonValue {
     let mut object = Map::new();
     object.insert("name".to_string(), JsonValue::String(index.name.clone()));
+    object.insert("logical_id".to_string(), json_u64(index.logical_id));
+    object.insert(
+        "physical_file_id".to_string(),
+        JsonValue::String(index.physical_file_id.clone()),
+    );
+    object.insert(
+        "physical_file_name".to_string(),
+        JsonValue::String(index.physical_file_name.clone()),
+    );
+    object.insert(
+        "collection_logical_id".to_string(),
+        index
+            .collection_logical_id
+            .map(json_u64)
+            .unwrap_or(JsonValue::Null),
+    );
     object.insert(
         "kind".to_string(),
         JsonValue::String(index.kind.as_str().to_string()),
@@ -1384,6 +1400,23 @@ pub(super) fn index_state_from_json(value: &JsonValue) -> io::Result<PhysicalInd
     let object = expect_object(value, "physical index state")?;
     Ok(PhysicalIndexState {
         name: json_string_required(object, "name")?,
+        logical_id: object
+            .get("logical_id")
+            .and_then(|value| json_u64_value(value).ok())
+            .unwrap_or(0),
+        physical_file_id: object
+            .get("physical_file_id")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        physical_file_name: object
+            .get("physical_file_name")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        collection_logical_id: object
+            .get("collection_logical_id")
+            .and_then(|value| json_u64_value(value).ok()),
         kind: index_kind_from_str(&json_string_required(object, "kind")?)?,
         collection: object
             .get("collection")
@@ -1412,6 +1445,43 @@ pub(super) fn index_state_from_json(value: &JsonValue) -> io::Result<PhysicalInd
             .and_then(JsonValue::as_str)
             .unwrap_or("unknown")
             .to_string(),
+    })
+}
+
+pub(super) fn collection_layout_to_json(layout: &PhysicalCollectionLayout) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("name".to_string(), JsonValue::String(layout.name.clone()));
+    object.insert("logical_id".to_string(), json_u64(layout.logical_id));
+    object.insert(
+        "physical_file_id".to_string(),
+        JsonValue::String(layout.physical_file_id.clone()),
+    );
+    object.insert(
+        "physical_file_name".to_string(),
+        JsonValue::String(layout.physical_file_name.clone()),
+    );
+    object.insert(
+        "created_at_unix_ms".to_string(),
+        json_u128(layout.created_at_unix_ms),
+    );
+    object.insert(
+        "updated_at_unix_ms".to_string(),
+        json_u128(layout.updated_at_unix_ms),
+    );
+    JsonValue::Object(object)
+}
+
+pub(super) fn collection_layout_from_json(
+    value: &JsonValue,
+) -> io::Result<PhysicalCollectionLayout> {
+    let object = expect_object(value, "physical collection layout")?;
+    Ok(PhysicalCollectionLayout {
+        name: json_string_required(object, "name")?,
+        logical_id: json_u64_required(object, "logical_id")?,
+        physical_file_id: json_string_required(object, "physical_file_id")?,
+        physical_file_name: json_string_required(object, "physical_file_name")?,
+        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
+        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
     })
 }
 
