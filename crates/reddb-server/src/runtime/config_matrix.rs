@@ -190,6 +190,21 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Critical,
         default: || text("embedded"),
     },
+    ConfigDefault {
+        key: "storage.deploy.replica_count",
+        tier: Tier::Critical,
+        default: || num(0.0),
+    },
+    ConfigDefault {
+        key: "storage.deploy.managed_backup",
+        tier: Tier::Critical,
+        default: || JsonValue::Bool(false),
+    },
+    ConfigDefault {
+        key: "storage.deploy.wal_retention",
+        tier: Tier::Critical,
+        default: || JsonValue::Bool(false),
+    },
     // storage.bgwriter.*
     ConfigDefault {
         key: "storage.bgwriter.delay_ms",
@@ -390,6 +405,9 @@ mod tests {
             "storage.deploy.profile",
             "storage.deploy.packaging",
             "storage.deploy.preset",
+            "storage.deploy.replica_count",
+            "storage.deploy.managed_backup",
+            "storage.deploy.wal_retention",
             "storage.bgwriter.delay_ms",
             "storage.btree.lehman_yao",
         ];

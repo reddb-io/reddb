@@ -94,6 +94,27 @@ fn record_rid_u64(rec: &crate::storage::query::unified::UnifiedRecord) -> Option
     }
 }
 
+fn seed_storage_deploy_config(
+    store: &crate::storage::UnifiedStore,
+    selection: crate::storage::StorageProfileSelection,
+) {
+    if selection == crate::storage::StorageProfileSelection::embedded_single_file() {
+        return;
+    }
+
+    store.set_config_tree(
+        "storage.deploy",
+        &crate::json!({
+            "profile": selection.deploy_profile.as_str(),
+            "packaging": selection.packaging.as_str(),
+            "preset": selection.preset_name(),
+            "replica_count": selection.replica_count,
+            "managed_backup": selection.managed_backup,
+            "wal_retention": selection.wal_retention,
+        }),
+    );
+}
+
 struct RankedHeadEntry {
     rank: u64,
     record: crate::storage::query::unified::UnifiedRecord,
@@ -3629,6 +3650,7 @@ impl RedDBRuntime {
             // (durability.mode, concurrency.locking.enabled, …) even
             // on long-running datadirs that predate the matrix.
             crate::runtime::config_matrix::heal_critical_keys(store.as_ref());
+            seed_storage_deploy_config(store.as_ref(), options.storage_profile);
 
             // Phase 5 — Lehman-Yao runtime flag. Read the Tier A
             // `storage.btree.lehman_yao` value from the matrix (env
