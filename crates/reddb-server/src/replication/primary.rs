@@ -1416,11 +1416,17 @@ impl PrimaryReplication {
     }
 
     pub fn prune_retained_wal_through(&self, archived_lsn: u64) -> io::Result<u64> {
+        self.prune_retained_wal(crate::storage::wal::WalPruneBoundary::new(archived_lsn))
+    }
+
+    pub fn prune_retained_wal(
+        &self,
+        boundary: crate::storage::wal::WalPruneBoundary,
+    ) -> io::Result<u64> {
         self.enforce_retention_limits(crate::utils::now_unix_millis() as u128);
-        let prune_lsn = self
-            .retention_floor_lsn()
-            .map(|floor| floor.min(archived_lsn))
-            .unwrap_or(archived_lsn);
+        let prune_lsn = boundary
+            .with_replica_restart_lsn(self.retention_floor_lsn())
+            .prune_through_lsn();
         if prune_lsn > 0 {
             if let Some(spool) = &self.logical_wal_spool {
                 spool.prune_through(prune_lsn)?;
@@ -1895,6 +1901,65 @@ mod tests {
             .map(|(lsn, _)| lsn)
             .collect();
         assert_eq!(retained, vec![6]);
+    }
+
+    #[test]
+    fn backup_floor_limits_wal_pruning_without_replicas() {
+        let primary = PrimaryReplication::new(None);
+        for lsn in 1..=6 {
+            primary.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+
+        let boundary = crate::storage::wal::WalPruneBoundary::new(6).with_backup_floor_lsn(Some(3));
+
+        assert_eq!(primary.prune_retained_wal(boundary).unwrap(), 3);
+        let retained: Vec<_> = primary
+            .wal_buffer
+            .read_since(0, usize::MAX)
+            .into_iter()
+            .map(|(lsn, _)| lsn)
+            .collect();
+        assert_eq!(
+            retained,
+            vec![4, 5, 6],
+            "backup/PITR floor keeps WAL needed after the retained checkpoint"
+        );
+    }
+
+    #[test]
+    fn combined_backup_and_replica_floors_choose_conservative_boundary() {
+        let primary = PrimaryReplication::new(None);
+        primary.register_replica("fast".to_string());
+        primary.register_replica("slow".to_string());
+        for lsn in 1..=8 {
+            primary.wal_buffer.append(lsn, vec![lsn as u8]);
+        }
+        primary.ack_replica_lsn("fast", 8, 8);
+        primary.ack_replica_lsn("slow", 3, 2);
+
+        let backup_floor =
+            crate::storage::wal::WalPruneBoundary::new(8).with_backup_floor_lsn(Some(6));
+        assert_eq!(
+            primary.prune_retained_wal(backup_floor).unwrap(),
+            2,
+            "slowest replica restart LSN beats the newer backup floor"
+        );
+
+        primary.ack_replica_lsn("slow", 8, 8);
+        let older_backup =
+            crate::storage::wal::WalPruneBoundary::new(8).with_backup_floor_lsn(Some(4));
+        assert_eq!(
+            primary.prune_retained_wal(older_backup).unwrap(),
+            4,
+            "older retained backup checkpoint beats caught-up replicas"
+        );
+        let retained: Vec<_> = primary
+            .wal_buffer
+            .read_since(0, usize::MAX)
+            .into_iter()
+            .map(|(lsn, _)| lsn)
+            .collect();
+        assert_eq!(retained, vec![5, 6, 7, 8]);
     }
 
     #[test]
