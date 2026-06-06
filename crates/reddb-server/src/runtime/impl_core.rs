@@ -10547,13 +10547,13 @@ impl RedDBRuntime {
         }
         self.inner
             .index_store
-            .register(super::index_store::RegisteredIndex {
-                name: index_name,
-                collection: table.to_string(),
+            .register(super::index_store::RegisteredIndex::replicated(
+                index_name,
+                table.to_string(),
                 columns,
-                method: super::index_store::IndexMethodKind::Hash,
-                unique: false,
-            });
+                super::index_store::IndexMethodKind::Hash,
+                false,
+            ));
         self.invalidate_plan_cache();
     }
 

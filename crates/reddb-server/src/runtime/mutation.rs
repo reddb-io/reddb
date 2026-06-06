@@ -445,13 +445,13 @@ impl<'rt> MutationEngine<'rt> {
             );
             return;
         }
-        index_store.register(super::index_store::RegisteredIndex {
-            name: "idx_id".to_string(),
-            collection: collection.to_string(),
+        index_store.register(super::index_store::RegisteredIndex::replicated(
+            "idx_id".to_string(),
+            collection.to_string(),
             columns,
-            method: super::index_store::IndexMethodKind::Hash,
-            unique: false,
-        });
+            super::index_store::IndexMethodKind::Hash,
+            false,
+        ));
         // Plan-cache invalidation so subsequent SELECT/UPDATE/DELETE
         // pickers see the new index when planning. Mirrors the explicit
         // `CREATE INDEX` path in `impl_ddl::execute_create_index`.

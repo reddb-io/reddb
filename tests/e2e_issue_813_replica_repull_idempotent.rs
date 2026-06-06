@@ -312,7 +312,7 @@ fn repull_with_updates_converges_to_primary_live_set() {
 }
 
 #[test]
-fn logical_stream_replay_maintains_declared_replica_indexes() {
+fn logical_stream_replay_maintains_official_replicated_indexes() {
     let primary_path = temp_path("primary-indexed");
     let replica_path = temp_path("replica-indexed");
 
@@ -345,6 +345,12 @@ fn logical_stream_replay_maintains_declared_replica_indexes() {
     replica
         .execute_query("CREATE INDEX idx_age ON users (age) USING BTREE")
         .unwrap();
+    let official = replica.index_store_ref().list_replicated_indices("users");
+    assert_eq!(
+        official.len(),
+        2,
+        "CREATE INDEX must register official replicated indexes"
+    );
 
     replay_from_zero_with_indexes(&replica, &records);
 
@@ -373,10 +379,166 @@ fn logical_stream_replay_maintains_declared_replica_indexes() {
         1,
         "replica BTree replay must maintain the equality helper for age=35"
     );
+    let catalog = replica
+        .execute_query(
+            "SELECT * FROM red.indices WHERE collection = 'users' AND name IN ('idx_city', 'idx_age')",
+        )
+        .expect("red.indices query");
+    assert_eq!(
+        catalog.result.records.len(),
+        2,
+        "official indexes must remain visible in replicated catalog views"
+    );
 
     drop(replica);
     cleanup(&primary_path);
     cleanup(&replica_path);
+}
+
+#[test]
+fn auxiliary_indexes_are_local_and_do_not_enter_catalog_state() {
+    let primary_path = temp_path("primary-aux");
+    let replica_path = temp_path("replica-aux");
+
+    let (records, _) = drive_primary(
+        &primary_path,
+        "users",
+        &[
+            "CREATE TABLE users (id INTEGER, city TEXT)",
+            "INSERT INTO users (id, city) VALUES (1, 'NYC')",
+            "INSERT INTO users (id, city) VALUES (2, 'NYC')",
+            "INSERT INTO users (id, city) VALUES (3, 'LA')",
+        ],
+    );
+
+    let replica = RedDBRuntime::with_options(RedDBOptions::persistent(
+        &replica_path.to_string_lossy().to_string(),
+    ))
+    .expect("open replica runtime");
+    replica
+        .execute_query("CREATE TABLE users (id INTEGER, city TEXT)")
+        .unwrap();
+    replica
+        .index_store_ref()
+        .create_auxiliary_hash_index("aux_city", "users", "city")
+        .expect("create local auxiliary index");
+
+    assert_eq!(
+        replica.index_store_ref().list_indices("users").len(),
+        1,
+        "auxiliary index must exist in local runtime registry"
+    );
+    assert!(
+        replica
+            .index_store_ref()
+            .list_replicated_indices("users")
+            .is_empty(),
+        "auxiliary index must not be classified as official replicated state"
+    );
+
+    let before_catalog = replica
+        .execute_query("SELECT * FROM red.indices WHERE collection = 'users' AND name = 'aux_city'")
+        .expect("red.indices query");
+    assert!(
+        before_catalog.result.records.is_empty(),
+        "auxiliary index must not appear in replicated catalog views"
+    );
+
+    replay_from_zero_with_indexes(&replica, &records);
+
+    let nyc_ids = replica
+        .index_store_ref()
+        .hash_lookup("users", "aux_city", b"NYC")
+        .expect("auxiliary hash lookup");
+    assert_eq!(
+        nyc_ids.len(),
+        2,
+        "local auxiliary index must still be maintained during replica row replay"
+    );
+    assert!(
+        replica
+            .index_store_ref()
+            .list_replicated_indices("users")
+            .is_empty(),
+        "replica row replay must not promote auxiliary indexes to official state"
+    );
+    let after_catalog = replica
+        .execute_query("SELECT * FROM red.indices WHERE collection = 'users' AND name = 'aux_city'")
+        .expect("red.indices query");
+    assert!(
+        after_catalog.result.records.is_empty(),
+        "auxiliary index must remain absent from catalog after replay"
+    );
+
+    drop(replica);
+    cleanup(&primary_path);
+    cleanup(&replica_path);
+}
+
+#[test]
+fn promotion_discards_auxiliary_indexes_without_promoting_them() {
+    let path = temp_path("promotion-aux");
+    let replica = RedDBRuntime::with_options(RedDBOptions::persistent(
+        &path.to_string_lossy().to_string(),
+    ))
+    .expect("open replica runtime");
+    replica
+        .execute_query("CREATE TABLE users (id INTEGER, city TEXT)")
+        .unwrap();
+    replica
+        .execute_query("CREATE INDEX idx_city ON users (city) USING HASH")
+        .unwrap();
+    replica
+        .index_store_ref()
+        .create_auxiliary_hash_index("aux_city", "users", "city")
+        .expect("create local auxiliary index");
+
+    assert_eq!(replica.index_store_ref().list_indices("users").len(), 2);
+    assert_eq!(
+        replica
+            .index_store_ref()
+            .list_replicated_indices("users")
+            .len(),
+        1,
+        "only the official index should be eligible to survive promotion"
+    );
+
+    replica
+        .index_store_ref()
+        .discard_auxiliary_indices_for_promotion();
+
+    let remaining = replica.index_store_ref().list_indices("users");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].name, "idx_city");
+    assert_eq!(
+        replica
+            .index_store_ref()
+            .list_replicated_indices("users")
+            .len(),
+        1,
+        "promotion discard must leave official replicated indexes intact"
+    );
+    assert!(
+        replica
+            .index_store_ref()
+            .hash_lookup("users", "aux_city", b"NYC")
+            .is_err(),
+        "auxiliary backing index must be removed during promotion discard"
+    );
+
+    let catalog = replica
+        .execute_query(
+            "SELECT * FROM red.indices WHERE collection = 'users' AND name IN ('idx_city', 'aux_city')",
+        )
+        .expect("red.indices query");
+    assert_eq!(
+        catalog.result.records.len(),
+        1,
+        "discarded auxiliary index must not become catalog-visible after promotion"
+    );
+
+    drop(replica);
+    cleanup(&path);
 }
 
 #[test]
