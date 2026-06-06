@@ -68,6 +68,15 @@ impl OperationalManifest {
         }
     }
 
+    pub(crate) fn validate_read_only(path: &Path) -> io::Result<Option<u64>> {
+        let manifest_path = Self::for_db_path(path).root.join(MANIFEST_FILE);
+        match fs::read(&manifest_path) {
+            Ok(bytes) => manifest_from_bytes(&bytes).map(|manifest| Some(manifest.generation)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     pub(crate) fn recover_or_bootstrap(
         &self,
         existing_collections: &[String],

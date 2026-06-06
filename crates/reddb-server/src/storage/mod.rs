@@ -84,6 +84,7 @@ pub mod cluster_layout;
 pub mod embedded;
 
 pub mod segment_pack;
+pub mod validation;
 
 pub(crate) mod operational_manifest;
 pub mod operational_migration;
@@ -116,6 +117,9 @@ pub use layout::{
 };
 pub use profile::{DeployProfile, StorageDeployPreset, StoragePackaging, StorageProfileSelection};
 pub use unified::RedDB;
+pub use validation::{
+    validate_append_only_segment, validate_storage, StorageValidationReport, ValidationCheck,
+};
 
 // =============================================================================
 // UNIFIED STORAGE INTERFACE (PRIMARY API)
