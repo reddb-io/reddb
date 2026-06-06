@@ -40,6 +40,61 @@
 
 use std::time::Duration;
 
+use crate::replication::CommitPolicy;
+
+/// Promotion-time view of the local replica's durable progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromotionProgress {
+    /// Highest logical stream LSN applied and durably checkpointed locally.
+    pub durable_lsn: u64,
+    /// Primary frontier the replica must cover before normal promotion.
+    pub required_lsn: u64,
+    /// Commit policy active for the cluster.
+    pub policy: CommitPolicy,
+}
+
+/// Why a normal replica promotion is unsafe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionRefusal {
+    BelowRequiredDurableWatermark(PromotionProgress),
+}
+
+impl std::fmt::Display for PromotionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BelowRequiredDurableWatermark(progress) => write!(
+                f,
+                "promotion refused: replica durable_lsn {} is below required {} for commit policy {}",
+                progress.durable_lsn,
+                progress.required_lsn,
+                progress.policy.label()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PromotionRefusal {}
+
+/// Normal promotion is only safe when the replica has durably applied
+/// the primary frontier it is being asked to assume. The frontier is a
+/// semantic logical-stream LSN, not a physical page/file WAL offset.
+pub fn check_promotion_watermark(
+    durable_lsn: u64,
+    required_lsn: u64,
+    policy: CommitPolicy,
+) -> Result<PromotionProgress, PromotionRefusal> {
+    let progress = PromotionProgress {
+        durable_lsn,
+        required_lsn,
+        policy,
+    };
+    if durable_lsn < required_lsn {
+        Err(PromotionRefusal::BelowRequiredDurableWatermark(progress))
+    } else {
+        Ok(progress)
+    }
+}
+
 /// The replication role a node plays after a failover step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeRole {
@@ -534,5 +589,27 @@ mod tests {
         assert!(!outcome.forced);
         assert_eq!(outcome.skipped_lsn, 0);
         assert!(outcome.is_zero_rpo());
+    }
+
+    #[test]
+    fn normal_promotion_rejects_replica_below_required_durable_watermark() {
+        let err =
+            check_promotion_watermark(41, 42, CommitPolicy::AckN(1)).expect_err("must reject");
+        match err {
+            PromotionRefusal::BelowRequiredDurableWatermark(progress) => {
+                assert_eq!(progress.durable_lsn, 41);
+                assert_eq!(progress.required_lsn, 42);
+                assert_eq!(progress.policy, CommitPolicy::AckN(1));
+            }
+        }
+    }
+
+    #[test]
+    fn normal_promotion_accepts_replica_at_required_durable_watermark() {
+        let progress =
+            check_promotion_watermark(42, 42, CommitPolicy::Quorum).expect("must accept");
+        assert_eq!(progress.durable_lsn, 42);
+        assert_eq!(progress.required_lsn, 42);
+        assert_eq!(progress.policy, CommitPolicy::Quorum);
     }
 }
