@@ -4,6 +4,10 @@ Status: Proposed (2026-05-14)
 
 Related: [ADR 0003: On-disk format v1.0 stable contract](0003-disk-format-v1.md)
 
+Operator map: [Storage Profiles](../../docs/deployment/storage-profiles.md)
+links these layout presets to `single-file`, `operational-directory`,
+serverless segment packs, and cluster `range-directory` packaging.
+
 ## Context
 
 RedDB currently derives sidecar files directly at individual callsites. WAL,
