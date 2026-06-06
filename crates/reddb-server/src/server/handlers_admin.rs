@@ -2736,6 +2736,39 @@ impl RedDBServer {
             return json_error(409, reason);
         }
 
+        let durable_lsn = self.runtime.replica_durable_lsn();
+        let required_lsn = self.runtime.replica_required_promotion_lsn();
+        let policy = self.runtime.commit_policy();
+        if let Err(err) =
+            crate::replication::check_promotion_watermark(durable_lsn, required_lsn, policy)
+        {
+            let reason = err.to_string();
+            if let Err(emit_err) = self.runtime.emit_control_event(
+                crate::runtime::control_events::EventKind::ReplicationSafety,
+                crate::runtime::control_events::Outcome::Denied,
+                "promotion_refused",
+                Some("replication:durable_watermark".to_string()),
+                Some(reason.clone()),
+                vec![
+                    (
+                        "durable_lsn".to_string(),
+                        crate::runtime::control_events::Sensitivity::raw(durable_lsn.to_string()),
+                    ),
+                    (
+                        "required_lsn".to_string(),
+                        crate::runtime::control_events::Sensitivity::raw(required_lsn.to_string()),
+                    ),
+                    (
+                        "commit_policy".to_string(),
+                        crate::runtime::control_events::Sensitivity::raw(policy.label()),
+                    ),
+                ],
+            ) {
+                return json_error(500, emit_err.to_string());
+            }
+            return json_error(409, reason);
+        }
+
         // Body parsing.
         let (holder_id, ttl_ms) = if body.is_empty() {
             (default_holder_id(), 60_000u64)

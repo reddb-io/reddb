@@ -54,8 +54,9 @@ pub use election::{
     VotingState,
 };
 pub use failover::{
-    FailoverCoordinator, FailoverError, FailoverMode, FailoverNode, FailoverOutcome,
-    FailoverRequest, FailoverTransport, NodeRole, RoleAssignment,
+    check_promotion_watermark, FailoverCoordinator, FailoverError, FailoverMode, FailoverNode,
+    FailoverOutcome, FailoverRequest, FailoverTransport, NodeRole, PromotionProgress,
+    PromotionRefusal, RoleAssignment,
 };
 pub use fence::{
     FenceBoundary, FenceVerdict, FileTermStore, MemoryTermStore, StaleTermFenced, TermFence,
