@@ -355,6 +355,18 @@ impl RedDBOptions {
         }
     }
 
+    pub fn operational_directory<P: AsRef<Path>>(path: P) -> Self {
+        let selection = crate::storage::profile::StorageDeployPreset::Serverless.selection();
+        Self {
+            mode: StorageMode::Persistent,
+            data_path: Some(
+                crate::storage::operational_migration::operational_data_path(path.as_ref()),
+            ),
+            storage_profile: selection,
+            ..Default::default()
+        }
+    }
+
     /// Ephemeral, tempfile-backed database.
     ///
     /// The underlying storage is a real persistent file placed under the system
