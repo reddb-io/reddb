@@ -1,6 +1,7 @@
 //! Physical storage design primitives for RedDB's deterministic on-disk layout.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -428,6 +429,16 @@ pub struct CollectionContract {
     pub analytical_storage: Option<crate::catalog::AnalyticalStorageConfig>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhysicalCollectionLayout {
+    pub name: String,
+    pub logical_id: u64,
+    pub physical_file_id: String,
+    pub physical_file_name: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
 /// Canonical artifact lifecycle states.
 ///
 /// State machine transitions:
@@ -516,6 +527,10 @@ impl std::fmt::Display for ArtifactState {
 #[derive(Debug, Clone)]
 pub struct PhysicalIndexState {
     pub name: String,
+    pub logical_id: u64,
+    pub physical_file_id: String,
+    pub physical_file_name: String,
+    pub collection_logical_id: Option<u64>,
     pub kind: IndexKind,
     pub collection: Option<String>,
     pub enabled: bool,
@@ -636,6 +651,7 @@ pub struct PhysicalMetadataFile {
     pub tree_definitions: Vec<PhysicalTreeDefinition>,
     pub collection_ttl_defaults_ms: BTreeMap<String, u64>,
     pub collection_contracts: Vec<CollectionContract>,
+    pub collection_layouts: Vec<PhysicalCollectionLayout>,
     /// Persisted hypertable chunk spine (issue #866). Empty on legacy
     /// sidecars written before the feature and for non-hypertable
     /// databases.
