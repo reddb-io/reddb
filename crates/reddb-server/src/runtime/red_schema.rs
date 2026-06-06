@@ -1757,7 +1757,10 @@ fn indices_snapshot(
         if !visible_collections.is_none_or(|visible| visible.contains(&collection.name)) {
             continue;
         }
-        for index in runtime.index_store_ref().list_indices(&collection.name) {
+        for index in runtime
+            .index_store_ref()
+            .list_replicated_indices(&collection.name)
+        {
             let key = (Some(index.collection.clone()), index.name.clone());
             if !seen.insert(key) {
                 continue;
@@ -1800,7 +1803,10 @@ fn show_indexes_snapshot(
         if !collection_is_visible(&collection.name, visible_collections) {
             continue;
         }
-        for index in runtime.index_store_ref().list_indices(&collection.name) {
+        for index in runtime
+            .index_store_ref()
+            .list_replicated_indices(&collection.name)
+        {
             let entries_indexed = runtime.index_store_ref().entries_indexed(&index);
             rows.push(UnifiedRecord::with_schema(
                 Arc::clone(&schema),
