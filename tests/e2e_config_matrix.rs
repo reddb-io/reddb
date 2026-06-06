@@ -37,6 +37,15 @@ fn tier_a_critical_keys_are_self_healed_on_boot() {
     assert!(show_value(&rt, "storage.wal.max_interval_ms")
         .unwrap()
         .contains("10"));
+    assert!(show_value(&rt, "storage.deploy.profile")
+        .unwrap()
+        .contains("embedded"));
+    assert!(show_value(&rt, "storage.deploy.packaging")
+        .unwrap()
+        .contains("single-file"));
+    assert!(show_value(&rt, "storage.deploy.preset")
+        .unwrap()
+        .contains("embedded"));
     assert!(show_value(&rt, "storage.bgwriter.delay_ms")
         .unwrap()
         .contains("200"));

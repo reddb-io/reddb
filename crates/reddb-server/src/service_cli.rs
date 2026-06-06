@@ -9,6 +9,7 @@ use crate::auth::store::AuthStore;
 use crate::replication::ReplicationConfig;
 use crate::runtime::RedDBRuntime;
 use crate::service_router::{serve_tcp_router, InProcessRouterConfig};
+use crate::storage::StorageProfileSelection;
 use crate::{
     GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBServer, ServerOptions, StorageMode,
 };
@@ -120,6 +121,7 @@ pub struct ServerCommandConfig {
     pub read_only: bool,
     pub role: String,
     pub primary_addr: Option<String>,
+    pub storage_profile: StorageProfileSelection,
     pub vault: bool,
     /// Issue #663 — explicit `--no-auth` / `--dev` flag for local
     /// no-password mode. When `true`, the boot pipeline force-disables
@@ -328,6 +330,7 @@ impl ServerCommandConfig {
             }
             _ => ReplicationConfig::standalone(),
         };
+        options.storage_profile = self.storage_profile.validate()?;
 
         if self.vault {
             options.auth.vault_enabled = true;
@@ -381,6 +384,17 @@ impl ServerCommandConfig {
             Ok(None) => {
                 configure_remote_backend_from_env(&mut options);
             }
+        }
+
+        if options.remote_backend.is_some()
+            || options
+                .metadata
+                .get(BACKUP_INTERVAL_META_CHECKPOINT)
+                .is_some()
+        {
+            let mut selection = options.storage_profile;
+            selection.managed_backup = true;
+            options.storage_profile = selection.validate()?;
         }
 
         Ok(options)
@@ -2969,6 +2983,7 @@ mod tests {
             read_only: false,
             role: "standalone".to_string(),
             primary_addr: None,
+            storage_profile: StorageProfileSelection::embedded_single_file(),
             // Operator-set `--vault`: `--no-auth` must override this
             // alongside REDDB_USERNAME/PASSWORD.
             vault: true,
@@ -3084,6 +3099,21 @@ mod tests {
             std::env::remove_var("REDDB_PASSWORD");
             std::env::remove_var("REDDB_USERNAME_FILE");
             std::env::remove_var("REDDB_PASSWORD_FILE");
+        }
+    }
+
+    fn clear_backup_env() {
+        // SAFETY: callers hold `no_auth_env_lock()`.
+        unsafe {
+            std::env::remove_var("REDDB_BACKUP_S3_ENDPOINT");
+            std::env::remove_var("REDDB_BACKUP_S3_BUCKET");
+            std::env::remove_var("REDDB_BACKUP_S3_PREFIX");
+            std::env::remove_var("REDDB_BACKUP_S3_ACCESS_KEY_ID");
+            std::env::remove_var("REDDB_BACKUP_S3_SECRET_ACCESS_KEY");
+            std::env::remove_var("REDDB_BACKUP_S3_REGION");
+            std::env::remove_var("REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS");
+            std::env::remove_var("REDDB_BACKUP_WAL_FLUSH_INTERVAL_SECS");
+            std::env::remove_var("REDDB_BACKUP_PAUSE_ON_LAG_SECS");
         }
     }
 
@@ -3250,6 +3280,30 @@ mod tests {
         );
 
         clear_preset_env();
+    }
+
+    #[test]
+    fn managed_backup_env_rejects_primary_replica_single_file_storage() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_backup_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var("REDDB_BACKUP_S3_ENDPOINT", "https://s3.example.test");
+            std::env::set_var("REDDB_BACKUP_S3_BUCKET", "reddb");
+            std::env::set_var("REDDB_BACKUP_S3_PREFIX", "clusters/prod");
+            std::env::set_var("REDDB_BACKUP_S3_ACCESS_KEY_ID", "AK");
+            std::env::set_var("REDDB_BACKUP_S3_SECRET_ACCESS_KEY", "SK");
+        }
+
+        let mut config = no_auth_test_config(false);
+        config.role = "primary".to_string();
+        config.storage_profile = crate::storage::StorageDeployPreset::PrimaryReplicaDev.selection();
+
+        let err = config.to_db_options().unwrap_err();
+        assert!(err.contains("managed backup"), "got: {err}");
+        assert!(err.contains("operational-directory"), "got: {err}");
+
+        clear_backup_env();
     }
 
     #[test]

@@ -2341,6 +2341,30 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Server role")
                     .with_choices(&["standalone", "primary", "replica"])
                     .with_default("standalone"),
+                cli::types::FlagSchema::new("storage-profile")
+                    .with_description("Storage deploy profile")
+                    .with_choices(&["embedded", "serverless", "primary-replica", "cluster"]),
+                cli::types::FlagSchema::new("storage-packaging")
+                    .with_description("Storage packaging contract")
+                    .with_choices(&["single-file", "operational-directory"]),
+                cli::types::FlagSchema::new("storage-preset")
+                    .with_description("Storage/deploy preset")
+                    .with_choices(&[
+                        "embedded",
+                        "serverless",
+                        "primary-replica-dev",
+                        "primary-replica-small",
+                        "primary-replica-production-ha",
+                        "primary-replica-backup",
+                        "primary-replica-wal-retention",
+                        "cluster",
+                    ]),
+                cli::types::FlagSchema::new("replica-count")
+                    .with_description("Expected replica count for storage profile validation"),
+                cli::types::FlagSchema::boolean("managed-backup")
+                    .with_description("Declare managed backup for storage profile validation"),
+                cli::types::FlagSchema::boolean("wal-retention")
+                    .with_description("Declare WAL retention for storage profile validation"),
                 cli::types::FlagSchema::new("primary-addr")
                     .with_description("Primary gRPC address for replica mode"),
                 cli::types::FlagSchema::boolean("read-only")
@@ -2389,6 +2413,30 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("primary-addr")
                     .with_short('p')
                     .with_description("Primary gRPC address for replication"),
+                cli::types::FlagSchema::new("storage-profile")
+                    .with_description("Storage deploy profile")
+                    .with_choices(&["embedded", "serverless", "primary-replica", "cluster"]),
+                cli::types::FlagSchema::new("storage-packaging")
+                    .with_description("Storage packaging contract")
+                    .with_choices(&["single-file", "operational-directory"]),
+                cli::types::FlagSchema::new("storage-preset")
+                    .with_description("Storage/deploy preset")
+                    .with_choices(&[
+                        "embedded",
+                        "serverless",
+                        "primary-replica-dev",
+                        "primary-replica-small",
+                        "primary-replica-production-ha",
+                        "primary-replica-backup",
+                        "primary-replica-wal-retention",
+                        "cluster",
+                    ]),
+                cli::types::FlagSchema::new("replica-count")
+                    .with_description("Expected replica count for storage profile validation"),
+                cli::types::FlagSchema::boolean("managed-backup")
+                    .with_description("Declare managed backup for storage profile validation"),
+                cli::types::FlagSchema::boolean("wal-retention")
+                    .with_description("Declare WAL retention for storage profile validation"),
                 cli::types::FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
                 cli::types::FlagSchema::boolean("http").with_description("Serve the HTTP API"),
                 cli::types::FlagSchema::new("grpc-bind")
@@ -2772,6 +2820,7 @@ fn build_server_config(
         .map(|value| value.to_string())
         .or_else(|| flag_string(flags, "role"))
         .unwrap_or_else(|| "standalone".to_string());
+    let storage_profile = resolve_storage_profile(flags, &role)?;
 
     let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
 
@@ -2872,12 +2921,81 @@ fn build_server_config(
         read_only: flag_bool(flags, "read-only"),
         role,
         primary_addr: flag_string(flags, "primary-addr").filter(|value| !value.is_empty()),
+        storage_profile,
         vault: flag_bool(flags, "vault"),
         no_auth: flag_bool(flags, "no-auth") || flag_bool(flags, "dev"),
         workers,
         telemetry: Some(telemetry),
         http_limits_cli,
     })
+}
+
+fn resolve_storage_profile(
+    flags: &HashMap<String, FlagValue>,
+    role: &str,
+) -> Result<reddb::storage::StorageProfileSelection, String> {
+    use reddb::storage::{
+        DeployProfile, StorageDeployPreset, StoragePackaging, StorageProfileSelection,
+    };
+
+    let preset_raw = flag_string(flags, "storage-preset")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("REDDB_STORAGE_PRESET"));
+
+    let mut selection = if let Some(raw) = preset_raw {
+        let preset = StorageDeployPreset::parse(&raw).ok_or_else(|| {
+            format!(
+                "storage preset {raw:?} is not recognised (expected embedded, serverless, primary-replica-dev, primary-replica-small, primary-replica-production-ha, primary-replica-backup, primary-replica-wal-retention, or cluster)"
+            )
+        })?;
+        preset.selection()
+    } else if matches!(role, "primary" | "replica") {
+        StorageDeployPreset::PrimaryReplicaDev.selection()
+    } else {
+        StorageProfileSelection::embedded_single_file()
+    };
+
+    if let Some(raw) = flag_string(flags, "storage-profile")
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            env_string("REDDB_STORAGE_PROFILE").or_else(|| env_string("REDDB_DEPLOY_PROFILE"))
+        })
+    {
+        selection.deploy_profile = DeployProfile::parse(&raw).ok_or_else(|| {
+            format!(
+                "storage profile {raw:?} is not recognised (expected embedded, serverless, primary-replica, or cluster)"
+            )
+        })?;
+    }
+
+    if let Some(raw) = flag_string(flags, "storage-packaging")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("REDDB_STORAGE_PACKAGING"))
+    {
+        selection.packaging = StoragePackaging::parse(&raw).ok_or_else(|| {
+            format!(
+                "storage packaging {raw:?} is not recognised (expected single-file or operational-directory)"
+            )
+        })?;
+    }
+
+    if let Some(raw) = flag_string(flags, "replica-count")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("REDDB_REPLICA_COUNT"))
+    {
+        selection.replica_count = raw
+            .parse::<u16>()
+            .map_err(|_| format!("replica-count must be a non-negative integer, got {raw:?}"))?;
+    }
+
+    if flag_bool(flags, "managed-backup") || env_truthy("REDDB_MANAGED_BACKUP") {
+        selection.managed_backup = true;
+    }
+    if flag_bool(flags, "wal-retention") || env_truthy("REDDB_WAL_RETENTION") {
+        selection.wal_retention = true;
+    }
+
+    selection.validate()
 }
 
 /// Read the three slice-5 HTTP limiter knobs from CLI flags and env
@@ -3148,6 +3266,17 @@ fn flag_string(flags: &HashMap<String, FlagValue>, name: &str) -> Option<String>
 
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn env_truthy(name: &str) -> bool {
+    env_string(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn resolve_server_path(flags: &HashMap<String, FlagValue>) -> Option<String> {
@@ -5194,6 +5323,101 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         );
         assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
         assert_eq!(config.http_bind_addr.as_deref(), Some("127.0.0.1:18080"));
+    }
+
+    #[test]
+    fn build_server_config_defaults_primary_role_to_dev_primary_replica_profile() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+        let flags = HashMap::from([("role".to_string(), str_flag("primary"))]);
+        let config = build_server_config(&flags, None).unwrap();
+        assert_eq!(
+            config.storage_profile.deploy_profile,
+            reddb::storage::DeployProfile::PrimaryReplica
+        );
+        assert_eq!(
+            config.storage_profile.packaging,
+            reddb::storage::StoragePackaging::SingleFile
+        );
+    }
+
+    #[test]
+    fn build_server_config_accepts_production_ha_storage_preset() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+        let flags = HashMap::from([(
+            "storage-preset".to_string(),
+            str_flag("primary-replica-production-ha"),
+        )]);
+        let config = build_server_config(&flags, None).unwrap();
+        assert_eq!(
+            config.storage_profile.deploy_profile,
+            reddb::storage::DeployProfile::PrimaryReplica
+        );
+        assert_eq!(
+            config.storage_profile.packaging,
+            reddb::storage::StoragePackaging::OperationalDirectory
+        );
+        assert_eq!(config.storage_profile.replica_count, 2);
+    }
+
+    #[test]
+    fn build_server_config_rejects_primary_replica_backup_single_file() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+        let flags = HashMap::from([
+            ("storage-profile".to_string(), str_flag("primary-replica")),
+            ("storage-packaging".to_string(), str_flag("single-file")),
+            ("managed-backup".to_string(), bool_flag(true)),
+        ]);
+        let err = build_server_config(&flags, None).unwrap_err();
+        assert!(err.contains("production primary-replica"), "got: {err}");
+        assert!(err.contains("operational-directory"), "got: {err}");
+    }
+
+    #[test]
+    fn build_server_config_rejects_cluster_single_file() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+        let flags = HashMap::from([
+            ("storage-profile".to_string(), str_flag("cluster")),
+            ("storage-packaging".to_string(), str_flag("single-file")),
+        ]);
+        let err = build_server_config(&flags, None).unwrap_err();
+        assert!(err.contains("cluster"), "got: {err}");
+        assert!(err.contains("embedded single-file"), "got: {err}");
     }
 
     #[test]

@@ -74,6 +74,9 @@ pub(crate) mod disk_accountant;
 // Pure tiered storage layout derivation.
 pub mod layout;
 
+// Storage/deploy profile selection contract.
+pub mod profile;
+
 // Blockchain collection kind: pure logic for hash-chained append-only rows.
 // Storage/wire integration tracked in issue #521.
 pub mod blockchain;
@@ -94,6 +97,7 @@ pub use layout::{
     LayoutOverrides, LayoutToggles, LogDestination, LogRoutingOverrides, StorageLayout,
     TieredLayoutPaths,
 };
+pub use profile::{DeployProfile, StorageDeployPreset, StoragePackaging, StorageProfileSelection};
 pub use unified::RedDB;
 
 // =============================================================================

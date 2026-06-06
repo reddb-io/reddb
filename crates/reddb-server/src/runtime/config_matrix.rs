@@ -174,6 +174,22 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || num(4.0),
     },
+    // storage.deploy.* — official deploy/storage profile selection.
+    ConfigDefault {
+        key: "storage.deploy.profile",
+        tier: Tier::Critical,
+        default: || text("embedded"),
+    },
+    ConfigDefault {
+        key: "storage.deploy.packaging",
+        tier: Tier::Critical,
+        default: || text("single-file"),
+    },
+    ConfigDefault {
+        key: "storage.deploy.preset",
+        tier: Tier::Critical,
+        default: || text("embedded"),
+    },
     // storage.bgwriter.*
     ConfigDefault {
         key: "storage.bgwriter.delay_ms",
@@ -371,6 +387,9 @@ mod tests {
             "runtime.result_cache.backend",
             "concurrency.locking.enabled",
             "storage.wal.max_interval_ms",
+            "storage.deploy.profile",
+            "storage.deploy.packaging",
+            "storage.deploy.preset",
             "storage.bgwriter.delay_ms",
             "storage.btree.lehman_yao",
         ];
