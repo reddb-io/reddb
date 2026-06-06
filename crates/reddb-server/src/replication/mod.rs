@@ -34,6 +34,7 @@ pub mod logical;
 pub mod move_range;
 pub mod primary;
 pub mod quorum;
+pub mod range_repair;
 pub mod replica;
 pub mod rollback;
 pub mod scheduler;
@@ -70,6 +71,10 @@ pub use move_range::{
     MoveRangeTracer, RangeIndexedRecord, RangeOwnership,
 };
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
+pub use range_repair::{
+    RangeRepairError, RangeRepairOutcome, RangeRepairReason, RangeRepairRequest, RangeRepairTracer,
+    RangeReplicaHealth, RangeReplicaRepairState,
+};
 pub use rollback::{
     DivergentTail, RollbackCoordinator, RollbackError, RollbackEvent, RollbackOutcome,
     RollbackPlan, RollbackRequest, RollbackTransport, TailRecord,
