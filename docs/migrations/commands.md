@@ -41,6 +41,27 @@ id     := literal_string | integer
 
 ---
 
+## Offline embedded-to-operational migration
+
+The first official storage-profile migration is available as a Rust API:
+
+```rust
+use reddb::RedDBOptions;
+use reddb::storage::operational_migration::migrate_embedded_to_operational;
+
+migrate_embedded_to_operational("./data.rdb", "./data-operational")?;
+let options = RedDBOptions::operational_directory("./data-operational");
+```
+
+This command is offline and one-way in the first contract. The source `.rdb`
+must be closed; the migrator refuses an open source by taking the embedded
+runtime's exclusive file lock. It validates the checkpoint header and page
+checksums before exporting, then writes `MANIFEST.json` plus physical files under
+`files/` with stable logical file identities. Keep the original `.rdb` as the
+rollback artifact.
+
+---
+
 ## `CREATE MIGRATION`
 
 Registers a migration. The body is parsed and stored; no SQL in the body is
