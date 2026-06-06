@@ -6,6 +6,10 @@
 **Superseded by:** —
 **Related issues:** [#39](https://github.com/reddb-io/reddb/issues/39)
 
+Operator map: [Storage Profiles](../../docs/deployment/storage-profiles.md)
+links this stable byte-format contract to the embedded `single-file` profile
+and the first offline embedded-to-operational migration path.
+
 ## Context
 
 RedDB is pre-1.0. The CHANGELOG explicitly says "format may change at
