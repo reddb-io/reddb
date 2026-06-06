@@ -13,6 +13,7 @@ pub mod archiver;
 pub mod checkpoint;
 pub mod checkpointer_task;
 pub mod group_commit;
+pub mod operational;
 pub mod reader;
 pub mod record;
 pub mod recovery;
@@ -31,6 +32,10 @@ pub use archiver::{
 };
 pub use checkpoint::{CheckpointError, CheckpointMode, CheckpointResult, Checkpointer};
 pub use group_commit::GroupCommit;
+pub use operational::{
+    create_operational_backup, restore_operational_backup_to_lsn, OperationalBackupFile,
+    OperationalBackupManifest, OperationalBackupResult, OperationalRestoreResult,
+};
 pub use reader::WalReader;
 pub use record::{RecordType, WalRecord};
 pub use recovery::{PointInTimeRecovery, RecoveryResult, RestorePoint};
