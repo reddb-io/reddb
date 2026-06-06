@@ -74,6 +74,9 @@ pub(crate) mod disk_accountant;
 // Pure tiered storage layout derivation.
 pub mod layout;
 
+// Embedded single-file `.rdb` artifact skeleton.
+pub mod embedded;
+
 // Blockchain collection kind: pure logic for hash-chained append-only rows.
 // Storage/wire integration tracked in issue #521.
 pub mod blockchain;
@@ -87,6 +90,11 @@ pub mod signed_writes;
 
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
+pub use embedded::{
+    EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
+    EMBEDDED_RDB_MANIFEST_OFFSET, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+    EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, EMBEDDED_RDB_SUPERBLOCK_SIZE,
+};
 pub use keyring::{
     clear_keyring, has_keyring_password, resolve_password, save_to_keyring, PasswordSource,
 };
