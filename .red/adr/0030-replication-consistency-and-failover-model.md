@@ -2,6 +2,10 @@
 
 Status: proposed
 
+Operator map: [Storage Profiles](../../docs/deployment/storage-profiles.md)
+links this consistency and failover contract to the primary-replica operational
+layout and its backup/WAL retention boundary.
+
 RedDB today does single-primary, multi-replica replication with async-by-default
 commit (`local` policy), region-aware quorum (`QuorumMode::Regions`), a CAS writer
 lease for serverless single-writer fencing, and **manual** failover — there is no

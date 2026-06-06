@@ -2,6 +2,10 @@
 
 Status: proposed
 
+Operator map: [Storage Profiles](../../docs/deployment/storage-profiles.md)
+links this bookmark and TTL replication contract to the primary-replica recovery
+boundary that depends on ADR 0030 and ADR 0032.
+
 RedDB replicas are eventually consistent and expose an LSN, but a client has no way
 to carry causality from a write to a later read, so read-your-writes across the
 primary/replica boundary is not guaranteed. Separately, TTL/expiry is evaluated
