@@ -93,6 +93,39 @@ fn storage_deploy_profile_selection_is_visible_in_config() {
 }
 
 #[test]
+fn storage_deploy_profile_selection_reseeds_default_profile_on_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("data.rdb");
+
+    {
+        let options = RedDBOptions::persistent(&path)
+            .with_storage_profile(
+                reddb::storage::StorageDeployPreset::PrimaryReplicaProductionHa.selection(),
+            )
+            .expect("profile selection should validate");
+        let rt = RedDBRuntime::with_options(options).expect("first runtime should open");
+        assert!(show_value(&rt, "storage.deploy.profile")
+            .unwrap()
+            .contains("primary-replica"));
+    }
+
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        .expect("second runtime should open");
+    assert!(show_value(&rt, "storage.deploy.profile")
+        .unwrap()
+        .contains("embedded"));
+    assert!(show_value(&rt, "storage.deploy.packaging")
+        .unwrap()
+        .contains("single-file"));
+    assert!(show_value(&rt, "storage.deploy.preset")
+        .unwrap()
+        .contains("embedded"));
+    assert!(show_value(&rt, "storage.deploy.replica_count")
+        .unwrap()
+        .contains("0"));
+}
+
+#[test]
 fn tier_b_optional_keys_stay_silent_until_user_sets_them() {
     let rt = open_runtime();
 
