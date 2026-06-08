@@ -44,6 +44,8 @@ fn server_uses_reddb_file_for_unified_wal_paths() {
         "crates/reddb-server/src/storage/engine/pager.rs",
         "crates/reddb-server/src/physical/shm.rs",
         "crates/reddb-server/src/storage/unified/store/impl_file.rs",
+        "crates/reddb-server/src/storage/wal/reader.rs",
+        "crates/reddb-server/src/storage/wal/writer.rs",
     ];
 
     for file in files {
@@ -51,6 +53,8 @@ fn server_uses_reddb_file_for_unified_wal_paths() {
         for forbidden in [
             "wal_path_for_db",
             "rb_commit_coord_",
+            "rb_wal_reader_",
+            "rb_wal_writer_",
             "with_extension(\"rdb-uwal\")",
             "with_extension(\"rdb-wal\")",
             "with_extension(\"rdb-tmp\")",
@@ -63,6 +67,14 @@ fn server_uses_reddb_file_for_unified_wal_paths() {
             );
         }
     }
+
+    let reader = read(root.join("crates/reddb-server/src/storage/wal/reader.rs"));
+    let writer = read(root.join("crates/reddb-server/src/storage/wal/writer.rs"));
+    assert!(
+        reader.contains("reddb_file::layout::wal_component_temp_path")
+            && writer.contains("reddb_file::layout::wal_component_temp_path"),
+        "WAL reader/writer temp paths should route through reddb-file layout"
+    );
 }
 
 #[test]
