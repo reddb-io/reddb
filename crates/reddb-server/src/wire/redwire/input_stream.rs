@@ -213,42 +213,6 @@ impl InputStreamRegistry {
     }
 }
 
-/// Build the success terminal `StreamEnd` payload for an input stream.
-/// Carries the committed RID range (`snapshot_lsn` .. `committed_rid`)
-/// and ingest stats.
-pub fn build_input_stream_end_payload(
-    row_count: u64,
-    chunk_count: u64,
-    committed_rid: u64,
-    snapshot_lsn: u64,
-    cancelled: bool,
-) -> Vec<u8> {
-    reddb_wire::redwire::stream::build_input_stream_end_payload(
-        row_count,
-        chunk_count,
-        committed_rid,
-        snapshot_lsn,
-        cancelled,
-    )
-}
-
-/// Build the input-stream `StreamError` payload. Unlike the output
-/// variant it carries the `recoverable_rid` prefix (the CDC LSN of the
-/// last good commit) and the failing `chunk_seq`.
-pub fn build_input_stream_error_payload(
-    code: &str,
-    message: &str,
-    chunk_seq: u64,
-    recoverable_rid: u64,
-) -> Vec<u8> {
-    reddb_wire::redwire::stream::build_input_stream_error_payload(
-        code,
-        message,
-        chunk_seq,
-        recoverable_rid,
-    )
-}
-
 /// Build an input-stream `StreamError` frame addressed to `stream_id`,
 /// echoing `correlation_id` so the client can pair it to the request.
 pub fn build_input_stream_error_frame(
@@ -443,39 +407,5 @@ mod tests {
         assert_eq!(reg.active_count(), 1);
         assert!(reg.remove(5).is_some());
         assert!(reg.remove(5).is_none());
-    }
-
-    #[test]
-    fn end_payload_carries_committed_rid_range_and_stats() {
-        let bytes = build_input_stream_end_payload(3, 2, 42, 40, false);
-        let v: JsonValue = serde_json::from_slice(&bytes).unwrap();
-        let stats = v.as_object().unwrap().get("stats").unwrap();
-        assert_eq!(stats.get("row_count").and_then(|x| x.as_u64()), Some(3));
-        assert_eq!(stats.get("chunk_count").and_then(|x| x.as_u64()), Some(2));
-        assert_eq!(
-            stats.get("committed_rid").and_then(|x| x.as_u64()),
-            Some(42)
-        );
-        assert_eq!(stats.get("snapshot_lsn").and_then(|x| x.as_u64()), Some(40));
-        assert_eq!(
-            stats.get("cancelled").and_then(|x| x.as_bool()),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn error_payload_carries_recoverable_rid_and_chunk_seq() {
-        let bytes = build_input_stream_error_payload("invalid_row", "bad", 2, 41);
-        let v: JsonValue = serde_json::from_slice(&bytes).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(
-            obj.get("code").and_then(|x| x.as_str()),
-            Some("invalid_row")
-        );
-        assert_eq!(obj.get("chunk_seq").and_then(|x| x.as_u64()), Some(2));
-        assert_eq!(
-            obj.get("recoverable_rid").and_then(|x| x.as_u64()),
-            Some(41)
-        );
     }
 }

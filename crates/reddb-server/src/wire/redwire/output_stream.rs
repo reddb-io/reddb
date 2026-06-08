@@ -46,10 +46,6 @@ pub fn parse_stream_cancel(payload: &[u8]) -> StreamCancelRequest {
     reddb_wire::redwire::stream::parse_stream_cancel(payload)
 }
 
-pub fn build_open_ack_payload(lease_id: u64, snapshot_lsn: u64, resumable: bool) -> Vec<u8> {
-    reddb_wire::redwire::stream::build_open_ack_payload(lease_id, snapshot_lsn, resumable)
-}
-
 pub fn build_open_ack_frame(
     correlation_id: u64,
     stream_id: u16,
@@ -63,32 +59,6 @@ pub fn build_open_ack_frame(
         lease_id,
         snapshot_lsn,
         resumable,
-    )
-}
-
-pub fn build_stream_chunk_payload(seq: u64, rows: Vec<JsonValue>, terminal: bool) -> Vec<u8> {
-    let rows = rows
-        .into_iter()
-        .map(|row| serde_json::to_vec(&row).unwrap_or_default())
-        .collect();
-    reddb_wire::redwire::stream::build_stream_chunk_payload_from_json_bytes(seq, rows, terminal)
-}
-
-pub fn build_stream_error_payload(seq: Option<u64>, code: &str, message: &str) -> Vec<u8> {
-    reddb_wire::redwire::stream::build_stream_error_payload(seq, code, message)
-}
-
-pub fn build_stream_end_payload(
-    row_count: u64,
-    lease_id: u64,
-    snapshot_lsn: u64,
-    cancelled: bool,
-) -> Vec<u8> {
-    reddb_wire::redwire::stream::build_stream_end_payload(
-        row_count,
-        lease_id,
-        snapshot_lsn,
-        cancelled,
     )
 }
 
@@ -421,47 +391,6 @@ mod tests {
     fn parse_stream_cancel_empty_payload_is_default() {
         assert_eq!(parse_stream_cancel(b""), StreamCancelRequest::default());
         assert_eq!(parse_stream_cancel(b"{}"), StreamCancelRequest::default());
-    }
-
-    #[test]
-    fn open_ack_payload_round_trips_through_json() {
-        let bytes = build_open_ack_payload(42, 1234, false);
-        let v: JsonValue = serde_json::from_slice(&bytes).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj.get("lease_handle").and_then(|x| x.as_str()), Some("42"));
-        assert_eq!(obj.get("resumable").and_then(|x| x.as_bool()), Some(false));
-        assert_eq!(
-            obj.get("snapshot_lsn").and_then(|x| x.as_f64()),
-            Some(1234.0)
-        );
-    }
-
-    #[test]
-    fn stream_end_payload_carries_cancelled_flag() {
-        let bytes = build_stream_end_payload(5, 7, 99, true);
-        let v: JsonValue = serde_json::from_slice(&bytes).unwrap();
-        let stats = v
-            .as_object()
-            .unwrap()
-            .get("stats")
-            .and_then(|x| x.as_object())
-            .unwrap();
-        assert_eq!(stats.get("row_count").and_then(|x| x.as_f64()), Some(5.0));
-        assert_eq!(stats.get("cancelled").and_then(|x| x.as_bool()), Some(true));
-    }
-
-    #[test]
-    fn stream_error_payload_includes_optional_seq() {
-        let with = build_stream_error_payload(Some(3), "x", "y");
-        let v: JsonValue = serde_json::from_slice(&with).unwrap();
-        assert_eq!(
-            v.as_object().unwrap().get("seq").and_then(|x| x.as_f64()),
-            Some(3.0)
-        );
-
-        let without = build_stream_error_payload(None, "x", "y");
-        let v: JsonValue = serde_json::from_slice(&without).unwrap();
-        assert!(v.as_object().unwrap().get("seq").is_none());
     }
 
     #[tokio::test]
