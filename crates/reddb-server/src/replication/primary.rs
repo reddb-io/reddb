@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use reddb_file::{ReplicationSlot, ReplicationSlotInvalidationCause};
 use tracing::warn;
 
 mod slots;
@@ -61,7 +62,6 @@ use slots::{
     load_replication_slot_catalog, load_replication_slots, persist_replication_slot_catalog,
     persist_replication_slots,
 };
-pub use slots::{ReplicationSlot, SlotInvalidationCause};
 
 fn term_from_payload(payload: &[u8]) -> u64 {
     crate::replication::cdc::ChangeRecord::decode(payload)
@@ -522,7 +522,9 @@ pub enum ResumeMode {
     PartialResync { resume_lsn: u64 },
     /// The slot is past the retention cap (or otherwise invalidated);
     /// the replica must discard and re-bootstrap from a fresh snapshot.
-    FullRebootstrap { cause: SlotInvalidationCause },
+    FullRebootstrap {
+        cause: ReplicationSlotInvalidationCause,
+    },
 }
 
 impl PrimaryReplication {
@@ -985,7 +987,10 @@ impl PrimaryReplication {
         }
     }
 
-    pub fn enforce_retention_limits(&self, now_ms: u128) -> Vec<(String, SlotInvalidationCause)> {
+    pub fn enforce_retention_limits(
+        &self,
+        now_ms: u128,
+    ) -> Vec<(String, ReplicationSlotInvalidationCause)> {
         let current_lsn = self.current_logical_lsn();
         let mut invalidated = Vec::new();
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
@@ -996,12 +1001,12 @@ impl PrimaryReplication {
             let reason = if self.slot_retention_max_lag_lsn > 0
                 && current_lsn.saturating_sub(slot.restart_lsn) > self.slot_retention_max_lag_lsn
             {
-                Some(SlotInvalidationCause::Horizon)
+                Some(ReplicationSlotInvalidationCause::Horizon)
             } else if self.slot_idle_timeout_ms > 0
                 && now_ms.saturating_sub(slot.last_seen_at_unix_ms)
                     > u128::from(self.slot_idle_timeout_ms)
             {
-                Some(SlotInvalidationCause::IdleTimeout)
+                Some(ReplicationSlotInvalidationCause::IdleTimeout)
             } else {
                 None
             };
@@ -1022,7 +1027,7 @@ impl PrimaryReplication {
         id: &str,
         requested_since_lsn: u64,
         oldest_available_lsn: Option<u64>,
-    ) -> Option<SlotInvalidationCause> {
+    ) -> Option<ReplicationSlotInvalidationCause> {
         let now_ms = crate::utils::now_unix_millis() as u128;
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let slot = slots.get_mut(id)?;
@@ -1034,10 +1039,10 @@ impl PrimaryReplication {
             .map(|oldest| oldest > slot_floor.saturating_add(1))
             .unwrap_or(false)
         {
-            slot.invalidation_reason = Some(SlotInvalidationCause::WalRemoved);
+            slot.invalidation_reason = Some(ReplicationSlotInvalidationCause::WalRemoved);
             slot.invalidated_at_unix_ms = Some(now_ms);
             self.persist_slots_locked(&slots);
-            return Some(SlotInvalidationCause::WalRemoved);
+            return Some(ReplicationSlotInvalidationCause::WalRemoved);
         }
         None
     }

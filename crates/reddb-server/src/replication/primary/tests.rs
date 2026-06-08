@@ -313,7 +313,7 @@ fn retention_cap_invalidates_slow_slot_and_releases_wal_floor() {
         .expect("slow slot present");
     assert_eq!(
         slow.invalidation_reason,
-        Some(SlotInvalidationCause::Horizon)
+        Some(ReplicationSlotInvalidationCause::Horizon)
     );
 
     let retained: Vec<_> = primary
@@ -336,7 +336,7 @@ fn slot_invalidation_cause_codes_cover_wal_removed_horizon_and_idle_timeout() {
     wal_removed.register_replica("wal".to_string());
     assert_eq!(
         wal_removed.slot_rebootstrap_reason("wal", 0, Some(2)),
-        Some(SlotInvalidationCause::WalRemoved)
+        Some(ReplicationSlotInvalidationCause::WalRemoved)
     );
 
     let horizon = PrimaryReplication::new_with_config(
@@ -354,7 +354,7 @@ fn slot_invalidation_cause_codes_cover_wal_removed_horizon_and_idle_timeout() {
             .into_iter()
             .find(|slot| slot.replica_id == "horizon")
             .and_then(|slot| slot.invalidation_reason),
-        Some(SlotInvalidationCause::Horizon)
+        Some(ReplicationSlotInvalidationCause::Horizon)
     );
 
     let idle = PrimaryReplication::new_with_config(
@@ -369,7 +369,7 @@ fn slot_invalidation_cause_codes_cover_wal_removed_horizon_and_idle_timeout() {
             .into_iter()
             .find(|slot| slot.replica_id == "idle")
             .and_then(|slot| slot.invalidation_reason),
-        Some(SlotInvalidationCause::IdleTimeout)
+        Some(ReplicationSlotInvalidationCause::IdleTimeout)
     );
 }
 
@@ -453,7 +453,9 @@ fn plan_replica_resume_partial_within_window_full_past_cap() {
     let before_full = past_cap.partial_resync_count();
     let before_full_count = past_cap.full_resync_count();
     match past_cap.plan_replica_resume("slow", 0, past_cap.wal_buffer.oldest_lsn()) {
-        ResumeMode::FullRebootstrap { cause } => assert_eq!(cause, SlotInvalidationCause::Horizon),
+        ResumeMode::FullRebootstrap { cause } => {
+            assert_eq!(cause, ReplicationSlotInvalidationCause::Horizon)
+        }
         other => panic!("slot past the cap must re-bootstrap, got {other:?}"),
     }
     assert_eq!(past_cap.partial_resync_count(), before_full);
