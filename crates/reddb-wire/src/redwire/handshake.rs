@@ -6,7 +6,7 @@
 
 use serde_json::Value as JsonValue;
 
-use super::{BuildError, Frame, FrameBuilder, MessageKind};
+use super::{BuildError, Frame, FrameBuilder, MessageKind, MAX_KNOWN_MINOR_VERSION};
 
 /// Methods RedWire v2.1 knows how to negotiate.
 pub const SUPPORTED_METHODS: &[&str] = &["bearer", "anonymous", "scram-sha-256", "oauth-jwt"];
@@ -182,6 +182,22 @@ where
         );
     }
     serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+}
+
+pub fn build_client_hello_payload<'a, I>(
+    auth_methods: I,
+    features: u32,
+    client_name: Option<&str>,
+) -> Vec<u8>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    build_hello_payload(
+        &[MAX_KNOWN_MINOR_VERSION],
+        auth_methods,
+        features,
+        client_name,
+    )
 }
 
 pub fn build_hello_ack(
@@ -529,6 +545,15 @@ mod tests {
         assert_eq!(hello.versions, vec![1]);
         assert_eq!(hello.auth_methods, vec!["anonymous", "bearer"]);
         assert_eq!(hello.features, 7);
+        assert_eq!(hello.client_name.as_deref(), Some("client"));
+    }
+
+    #[test]
+    fn client_hello_payload_uses_current_minor_version() {
+        let bytes = build_client_hello_payload(["anonymous"], 0, Some("client"));
+        let hello = Hello::from_payload(&bytes).unwrap();
+        assert_eq!(hello.versions, vec![MAX_KNOWN_MINOR_VERSION]);
+        assert_eq!(hello.auth_methods, vec!["anonymous"]);
         assert_eq!(hello.client_name.as_deref(), Some("client"));
     }
 

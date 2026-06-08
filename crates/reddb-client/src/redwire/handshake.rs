@@ -4,12 +4,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::{ClientError, ErrorCode, Result};
 use reddb_wire::redwire::handshake::{
-    build_auth_response_anonymous_payload, build_auth_response_bearer_payload, build_hello_payload,
-    AuthFail, AuthOk, HelloAck,
+    build_auth_response_anonymous_payload, build_auth_response_bearer_payload,
+    build_client_hello_payload, AuthFail, AuthOk, HelloAck,
 };
 
 use super::{io, Auth, ConnectOptions};
-use reddb_wire::redwire::{Frame, MessageKind, MAX_KNOWN_MINOR_VERSION};
+use reddb_wire::redwire::{Frame, MessageKind};
 
 #[derive(Debug)]
 pub(super) enum HandshakeOutcome {
@@ -29,12 +29,7 @@ where
         Auth::Bearer(_) => vec!["bearer"],
         Auth::Anonymous => vec!["anonymous", "bearer"],
     };
-    let hello_bytes = build_hello_payload(
-        &[MAX_KNOWN_MINOR_VERSION],
-        methods,
-        0,
-        opts.client_name.as_deref(),
-    );
+    let hello_bytes = build_client_hello_payload(methods, 0, opts.client_name.as_deref());
     let hello = Frame::new(MessageKind::Hello, 1, hello_bytes);
     io::write_frame(stream, &hello).await?;
 
