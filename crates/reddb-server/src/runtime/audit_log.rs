@@ -703,9 +703,7 @@ impl AuditLogger {
     /// Place the audit log next to the primary `.rdb` file so backup
     /// + restore flows can ship it together.
     pub fn for_data_path(data_path: &Path) -> Self {
-        let parent = data_path.parent().unwrap_or_else(|| Path::new("."));
-        let path = parent.join(".audit.log");
-        Self::with_path(path)
+        Self::with_path(reddb_file::layout::legacy_audit_log_path(data_path))
     }
 
     /// Resolve a [`crate::storage::layout::LogDestination`] into a concrete
@@ -1143,12 +1141,7 @@ fn append_line_with_rotation(path: &Path, line: &str, max_bytes: u64) -> std::io
 /// filename.
 fn rotate(active: &Path) -> std::io::Result<()> {
     let ts = crate::utils::now_unix_nanos();
-    let stem = active
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(".audit.log");
-    let parent = active.parent().unwrap_or_else(|| Path::new("."));
-    let plain = parent.join(format!("{stem}.{ts}"));
+    let plain = reddb_file::layout::audit_log_rotated_plain_path(active, ts);
     std::fs::rename(active, &plain)?;
     let raw = std::fs::read(&plain)?;
     let compressed = match zstd::bulk::compress(&raw, 3) {
@@ -1164,7 +1157,7 @@ fn rotate(active: &Path) -> std::io::Result<()> {
             return Ok(());
         }
     };
-    let zst = parent.join(format!("{stem}.{ts}.zst"));
+    let zst = reddb_file::layout::audit_log_rotated_compressed_path(active, ts);
     let mut out = std::fs::File::create(&zst)?;
     out.write_all(&compressed)?;
     out.sync_data()?;

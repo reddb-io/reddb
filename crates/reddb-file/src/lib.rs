@@ -132,11 +132,13 @@ pub use graph_table_index::{
     GRAPH_TABLE_INDEX_MAX_NODE_ID_LEN,
 };
 pub use layout::{
-    data_file_name, engine_wal_path, legacy_logical_slots_path, legacy_logical_slots_temp_path,
-    local_cas_lock_path, local_upload_temp_path, logical_wal_path, logical_wal_path_in,
-    logical_wal_temp_path, pager_dwb_path, pager_dwb_shadow_path, pager_header_path,
-    pager_header_shadow_path, pager_legacy_wal_path, pager_meta_path, pager_meta_shadow_path,
-    physical_export_data_path, physical_metadata_binary_path, physical_metadata_journal_path,
+    audit_log_rotated_compressed_path, audit_log_rotated_plain_path, data_file_name,
+    engine_wal_path, legacy_audit_log_path, legacy_logical_slots_path,
+    legacy_logical_slots_temp_path, local_cas_lock_path, local_upload_temp_path, logical_wal_path,
+    logical_wal_path_in, logical_wal_temp_path, pager_dwb_path, pager_dwb_shadow_path,
+    pager_header_path, pager_header_shadow_path, pager_legacy_wal_path, pager_meta_path,
+    pager_meta_shadow_path, parse_audit_log_rotated_timestamp, physical_export_data_path,
+    physical_metadata_binary_path, physical_metadata_journal_path,
     physical_metadata_journal_prefix, physical_metadata_json_path, primary_replica_root,
     primary_wal_segment_file_name, rebootstrap_intent_log_path, rebootstrap_pending_path,
     rebootstrap_previous_path, rebootstrap_ready_marker_path, rebootstrap_staging_root,

@@ -33,6 +33,8 @@ pub const REBOOTSTRAP_PREVIOUS_EXTENSION: &str = "rebootstrap.previous.rdb";
 pub const PRIMARY_REPLICA_ROOT_EXTENSION: &str = "primary-replica";
 pub const LEGACY_LOGICAL_SLOTS_SUFFIX: &str = "logical.slots.json";
 pub const LEGACY_LOGICAL_SLOTS_TEMP_EXTENSION: &str = "logical.slots.tmp";
+pub const LEGACY_AUDIT_LOG_FILE_NAME: &str = ".audit.log";
+pub const AUDIT_LOG_ROTATED_COMPRESSED_EXTENSION: &str = "zst";
 pub const SERVERLESS_ROOT_EXTENSION: &str = "serverless";
 pub const SERVERLESS_CACHE_DIR: &str = "cache";
 pub const RESULT_CACHE_L2_EXTENSION: &str = "result-cache.l2";
@@ -647,6 +649,39 @@ pub fn legacy_logical_slots_temp_path(path: &Path) -> PathBuf {
     path.with_extension(LEGACY_LOGICAL_SLOTS_TEMP_EXTENSION)
 }
 
+pub fn legacy_audit_log_path(data_path: &Path) -> PathBuf {
+    sibling_path(data_path, LEGACY_AUDIT_LOG_FILE_NAME)
+}
+
+pub fn audit_log_rotated_plain_path(active_path: &Path, timestamp_nanos: u128) -> PathBuf {
+    sibling_path(
+        active_path,
+        &format!("{}.{timestamp_nanos}", audit_log_file_name(active_path)),
+    )
+}
+
+pub fn audit_log_rotated_compressed_path(active_path: &Path, timestamp_nanos: u128) -> PathBuf {
+    sibling_path(
+        active_path,
+        &format!(
+            "{}.{timestamp_nanos}.{AUDIT_LOG_ROTATED_COMPRESSED_EXTENSION}",
+            audit_log_file_name(active_path)
+        ),
+    )
+}
+
+pub fn parse_audit_log_rotated_timestamp(
+    active_path: &Path,
+    candidate_file_name: &str,
+) -> Option<u128> {
+    let active_name = audit_log_file_name(active_path);
+    let rotated = candidate_file_name.strip_prefix(&format!("{active_name}."))?;
+    let timestamp = rotated
+        .strip_suffix(&format!(".{AUDIT_LOG_ROTATED_COMPRESSED_EXTENSION}"))
+        .unwrap_or(rotated);
+    timestamp.parse::<u128>().ok()
+}
+
 pub fn serverless_root(data_path: &Path) -> PathBuf {
     data_path.with_extension(SERVERLESS_ROOT_EXTENSION)
 }
@@ -662,6 +697,13 @@ pub fn serverless_namespace(data_path: &Path) -> String {
 
 pub fn serverless_cache_root(root: &Path, namespace: &str) -> PathBuf {
     root.join(namespace).join(SERVERLESS_CACHE_DIR)
+}
+
+fn audit_log_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(LEGACY_AUDIT_LOG_FILE_NAME)
+        .to_string()
 }
 
 fn push_parent(dirs: &mut Vec<PathBuf>, path: &Path) {
@@ -841,6 +883,30 @@ mod tests {
         assert_eq!(
             legacy_logical_slots_temp_path(&legacy_logical_slots_path(path)),
             PathBuf::from("/var/lib/reddb/main.rdb.logical.slots.logical.slots.tmp")
+        );
+        assert_eq!(
+            legacy_audit_log_path(path),
+            PathBuf::from("/var/lib/reddb/.audit.log")
+        );
+        assert_eq!(
+            audit_log_rotated_plain_path(&legacy_audit_log_path(path), 42),
+            PathBuf::from("/var/lib/reddb/.audit.log.42")
+        );
+        assert_eq!(
+            audit_log_rotated_compressed_path(&legacy_audit_log_path(path), 42),
+            PathBuf::from("/var/lib/reddb/.audit.log.42.zst")
+        );
+        assert_eq!(
+            parse_audit_log_rotated_timestamp(&legacy_audit_log_path(path), ".audit.log.42"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_audit_log_rotated_timestamp(&legacy_audit_log_path(path), ".audit.log.42.zst"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_audit_log_rotated_timestamp(&legacy_audit_log_path(path), "other.42.zst"),
+            None
         );
         assert_eq!(
             serverless_root(path),

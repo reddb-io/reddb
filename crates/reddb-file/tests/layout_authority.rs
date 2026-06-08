@@ -280,6 +280,63 @@ fn server_does_not_redeclare_tiered_layout_contracts() {
 }
 
 #[test]
+fn server_uses_reddb_file_for_audit_log_paths() {
+    let root = repo_root();
+    let audit_log = read(root.join("crates/reddb-server/src/runtime/audit_log.rs"));
+    let audit_query = read(root.join("crates/reddb-server/src/runtime/audit_query.rs"));
+    let non_test_log = audit_log
+        .split("#[cfg(test)]")
+        .next()
+        .expect("audit_log.rs has non-test source");
+    let non_test_query = audit_query
+        .split("#[cfg(test)]")
+        .next()
+        .expect("audit_query.rs has non-test source");
+
+    for forbidden in [
+        "parent.join(\".audit.log\")",
+        "unwrap_or(\".audit.log\")",
+        "format!(\"{stem}.{ts}\")",
+        "format!(\"{stem}.{ts}.zst\")",
+    ] {
+        assert!(
+            !non_test_log.contains(forbidden),
+            "audit log path contracts belong in reddb-file, found {forbidden:?}"
+        );
+    }
+    for required in [
+        "reddb_file::layout::legacy_audit_log_path",
+        "reddb_file::layout::audit_log_rotated_plain_path",
+        "reddb_file::layout::audit_log_rotated_compressed_path",
+    ] {
+        assert!(
+            non_test_log.contains(required),
+            "audit log path handling should route through {required}"
+        );
+    }
+
+    for forbidden in [
+        "unwrap_or(\".audit.log\")",
+        "trim_end_matches(\".zst\")",
+        "e == \"zst\"",
+    ] {
+        assert!(
+            !non_test_query.contains(forbidden),
+            "audit query rotated-name contracts belong in reddb-file, found {forbidden:?}"
+        );
+    }
+    for required in [
+        "reddb_file::layout::parse_audit_log_rotated_timestamp",
+        "reddb_file::layout::AUDIT_LOG_ROTATED_COMPRESSED_EXTENSION",
+    ] {
+        assert!(
+            non_test_query.contains(required),
+            "audit query path handling should route through {required}"
+        );
+    }
+}
+
+#[test]
 fn server_does_not_redeclare_physical_metadata_core_contracts() {
     let root = repo_root();
     let server = read(root.join("crates/reddb-server/src/physical.rs"));
