@@ -1879,6 +1879,10 @@ fn server_does_not_own_physical_metadata_document_codec() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/physical/metadata_file.rs"));
     let json_codec = read(root.join("crates/reddb-server/src/physical/json_codec.rs"));
+    let json_codec_non_test = json_codec
+        .split("#[cfg(test)]")
+        .next()
+        .expect("json_codec.rs has non-test source");
     let file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
 
     for forbidden in [
@@ -1914,16 +1918,22 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "PhysicalSchemaOptions",
         "PhysicalCatalogSnapshot",
         "PhysicalCatalogCollectionStats",
+        "PhysicalAnalyticalStorageConfig",
         "encode_physical_schema_manifest_json",
         "decode_physical_schema_manifest_json",
         "encode_physical_catalog_snapshot_json",
         "decode_physical_catalog_snapshot_json",
+        "encode_physical_analytical_storage_json",
+        "decode_physical_analytical_storage_json",
         "\"protocol_version\".to_string()",
         "\"manifest_events\".to_string()",
         "\"collection_ttl_defaults_ms\".to_string()",
         "\"stats_by_collection\".to_string()",
         "\"total_entities\".to_string()",
         "\"total_collections\".to_string()",
+        "\"columnar\".to_string()",
+        "\"time_key\".to_string()",
+        "\"order_by_key\".to_string()",
     ] {
         assert!(
             file.contains(required),
@@ -1947,9 +1957,13 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "json_required(object, \"stats_by_collection\")",
         "json_usize_required(entry, \"entities\")",
         "json_usize_required(object, \"total_entities\")",
+        "\"columnar\".to_string()",
+        "\"time_key\".to_string()",
+        "\"order_by_key\".to_string()",
+        "expect_object(value, \"analytical_storage\")",
     ] {
         assert!(
-            !json_codec.contains(forbidden),
+            !json_codec_non_test.contains(forbidden),
             "physical metadata fragment codec belongs in reddb-file, found {forbidden:?}"
         );
     }
@@ -1959,13 +1973,17 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "decode_physical_schema_manifest_json",
         "encode_physical_catalog_snapshot_json",
         "decode_physical_catalog_snapshot_json",
+        "encode_physical_analytical_storage_json",
+        "decode_physical_analytical_storage_json",
         "schema_manifest_to_persisted",
         "schema_manifest_from_persisted",
         "catalog_to_persisted",
         "catalog_from_persisted",
+        "analytical_storage_to_persisted",
+        "analytical_storage_from_persisted",
     ] {
         assert!(
-            json_codec.contains(required),
+            json_codec_non_test.contains(required),
             "server physical metadata adapter should route through {required}"
         );
     }

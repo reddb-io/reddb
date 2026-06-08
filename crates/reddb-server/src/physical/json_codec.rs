@@ -369,37 +369,38 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
 }
 
 fn analytical_storage_to_json(cfg: &crate::catalog::AnalyticalStorageConfig) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("columnar".to_string(), JsonValue::Bool(cfg.columnar));
-    object.insert(
-        "time_key".to_string(),
-        JsonValue::String(cfg.time_key.clone()),
-    );
-    object.insert(
-        "order_by_key".to_string(),
-        cfg.order_by_key
-            .as_ref()
-            .map(|k| JsonValue::String(k.clone()))
-            .unwrap_or(JsonValue::Null),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_analytical_storage_json(&analytical_storage_to_persisted(cfg))
+            .expect("reddb-file must encode physical analytical storage JSON"),
+    )
 }
 
 fn analytical_storage_from_json(
     value: &JsonValue,
 ) -> io::Result<crate::catalog::AnalyticalStorageConfig> {
-    let object = expect_object(value, "analytical_storage")?;
-    Ok(crate::catalog::AnalyticalStorageConfig {
-        columnar: object
-            .get("columnar")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(false),
-        time_key: json_string_required(object, "time_key")?,
-        order_by_key: object
-            .get("order_by_key")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string),
-    })
+    let persisted = reddb_file::decode_physical_analytical_storage_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical analytical storage: {err}")))?;
+    Ok(analytical_storage_from_persisted(persisted))
+}
+
+fn analytical_storage_to_persisted(
+    cfg: &crate::catalog::AnalyticalStorageConfig,
+) -> reddb_file::PhysicalAnalyticalStorageConfig {
+    reddb_file::PhysicalAnalyticalStorageConfig {
+        columnar: cfg.columnar,
+        time_key: cfg.time_key.clone(),
+        order_by_key: cfg.order_by_key.clone(),
+    }
+}
+
+fn analytical_storage_from_persisted(
+    cfg: reddb_file::PhysicalAnalyticalStorageConfig,
+) -> crate::catalog::AnalyticalStorageConfig {
+    crate::catalog::AnalyticalStorageConfig {
+        columnar: cfg.columnar,
+        time_key: cfg.time_key,
+        order_by_key: cfg.order_by_key,
+    }
 }
 
 pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<CollectionContract> {
