@@ -1811,6 +1811,7 @@ fn server_uses_reddb_file_for_physical_metadata_paths() {
 fn server_does_not_own_physical_metadata_document_codec() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/physical/metadata_file.rs"));
+    let json_codec = read(root.join("crates/reddb-server/src/physical/json_codec.rs"));
     let file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
 
     for forbidden in [
@@ -1842,6 +1843,10 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "PhysicalMetadataDocumentEnvelope",
         "encode_physical_metadata_document_root_json",
         "decode_physical_metadata_document_root_json",
+        "PhysicalSchemaManifest",
+        "PhysicalSchemaOptions",
+        "encode_physical_schema_manifest_json",
+        "decode_physical_schema_manifest_json",
         "\"protocol_version\".to_string()",
         "\"manifest_events\".to_string()",
         "\"collection_ttl_defaults_ms\".to_string()",
@@ -1849,6 +1854,35 @@ fn server_does_not_own_physical_metadata_document_codec() {
         assert!(
             file.contains(required),
             "reddb-file should own physical metadata document root {required}"
+        );
+    }
+
+    for forbidden in [
+        "\"durability_mode\".to_string()",
+        "\"group_commit_window_ms\".to_string()",
+        "\"group_commit_max_statements\".to_string()",
+        "\"group_commit_max_wal_bytes\".to_string()",
+        "\"snapshot_retention\".to_string()",
+        "\"export_retention\".to_string()",
+        "\"capabilities\".to_string()",
+        "expect_object(value, \"manifest\")",
+        "json_required(object, \"options\")",
+    ] {
+        assert!(
+            !json_codec.contains(forbidden),
+            "physical schema manifest codec belongs in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "encode_physical_schema_manifest_json",
+        "decode_physical_schema_manifest_json",
+        "schema_manifest_to_persisted",
+        "schema_manifest_from_persisted",
+    ] {
+        assert!(
+            json_codec.contains(required),
+            "server schema manifest adapter should route through {required}"
         );
     }
 }

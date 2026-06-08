@@ -1,118 +1,63 @@
 use super::*;
 
 pub(super) fn manifest_to_json(manifest: &SchemaManifest) -> JsonValue {
-    let mut options = Map::new();
-    options.insert(
-        "mode".to_string(),
-        JsonValue::String(match manifest.options.mode {
-            StorageMode::Persistent => "persistent".to_string(),
-        }),
-    );
-    options.insert(
-        "data_path".to_string(),
-        match &manifest.options.data_path {
-            Some(path) => JsonValue::String(path.display().to_string()),
-            None => JsonValue::Null,
-        },
-    );
-    options.insert(
-        "read_only".to_string(),
-        JsonValue::Bool(manifest.options.read_only),
-    );
-    options.insert(
-        "create_if_missing".to_string(),
-        JsonValue::Bool(manifest.options.create_if_missing),
-    );
-    options.insert(
-        "verify_checksums".to_string(),
-        JsonValue::Bool(manifest.options.verify_checksums),
-    );
-    options.insert(
-        "durability_mode".to_string(),
-        JsonValue::String(manifest.options.durability_mode.as_str().to_string()),
-    );
-    options.insert(
-        "group_commit_window_ms".to_string(),
-        JsonValue::Number(manifest.options.group_commit.window_ms as f64),
-    );
-    options.insert(
-        "group_commit_max_statements".to_string(),
-        JsonValue::Number(manifest.options.group_commit.max_statements as f64),
-    );
-    options.insert(
-        "group_commit_max_wal_bytes".to_string(),
-        JsonValue::Number(manifest.options.group_commit.max_wal_bytes as f64),
-    );
-    options.insert(
-        "auto_checkpoint_pages".to_string(),
-        JsonValue::Number(manifest.options.auto_checkpoint_pages as f64),
-    );
-    options.insert(
-        "cache_pages".to_string(),
-        JsonValue::Number(manifest.options.cache_pages as f64),
-    );
-    options.insert(
-        "snapshot_retention".to_string(),
-        JsonValue::Number(manifest.options.snapshot_retention as f64),
-    );
-    options.insert(
-        "export_retention".to_string(),
-        JsonValue::Number(manifest.options.export_retention as f64),
-    );
-    options.insert(
-        "force_create".to_string(),
-        JsonValue::Bool(manifest.options.force_create),
-    );
-    options.insert(
-        "capabilities".to_string(),
-        JsonValue::Array(
-            manifest
+    file_json_to_server_json(
+        reddb_file::encode_physical_schema_manifest_json(&schema_manifest_to_persisted(manifest))
+            .expect("reddb-file must encode physical schema manifest JSON"),
+    )
+}
+
+pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest> {
+    let persisted = reddb_file::decode_physical_schema_manifest_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical schema manifest: {err}")))?;
+    schema_manifest_from_persisted(persisted)
+}
+
+fn schema_manifest_to_persisted(manifest: &SchemaManifest) -> reddb_file::PhysicalSchemaManifest {
+    reddb_file::PhysicalSchemaManifest {
+        format_version: manifest.format_version,
+        created_at_unix_ms: manifest.created_at_unix_ms,
+        updated_at_unix_ms: manifest.updated_at_unix_ms,
+        collection_count: manifest.collection_count,
+        options: reddb_file::PhysicalSchemaOptions {
+            mode: match manifest.options.mode {
+                StorageMode::Persistent => "persistent".to_string(),
+            },
+            data_path: manifest
+                .options
+                .data_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            read_only: manifest.options.read_only,
+            create_if_missing: manifest.options.create_if_missing,
+            verify_checksums: manifest.options.verify_checksums,
+            durability_mode: Some(manifest.options.durability_mode.as_str().to_string()),
+            group_commit_window_ms: Some(manifest.options.group_commit.window_ms),
+            group_commit_max_statements: Some(manifest.options.group_commit.max_statements),
+            group_commit_max_wal_bytes: Some(manifest.options.group_commit.max_wal_bytes),
+            auto_checkpoint_pages: manifest.options.auto_checkpoint_pages,
+            cache_pages: manifest.options.cache_pages,
+            snapshot_retention: Some(manifest.options.snapshot_retention),
+            export_retention: Some(manifest.options.export_retention),
+            force_create: manifest.options.force_create,
+            capabilities: manifest
                 .options
                 .feature_gates
                 .as_slice()
                 .into_iter()
-                .map(|capability| JsonValue::String(capability.as_str().to_string()))
+                .map(|capability| capability.as_str().to_string())
                 .collect(),
-        ),
-    );
-    options.insert(
-        "metadata".to_string(),
-        JsonValue::Object(
-            manifest
-                .options
-                .metadata
-                .iter()
-                .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
-                .collect(),
-        ),
-    );
-
-    let mut object = Map::new();
-    object.insert(
-        "format_version".to_string(),
-        JsonValue::Number(manifest.format_version as f64),
-    );
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(manifest.created_at_unix_ms),
-    );
-    object.insert(
-        "updated_at_unix_ms".to_string(),
-        json_u128(manifest.updated_at_unix_ms),
-    );
-    object.insert(
-        "collection_count".to_string(),
-        JsonValue::Number(manifest.collection_count as f64),
-    );
-    object.insert("options".to_string(), JsonValue::Object(options));
-    JsonValue::Object(object)
+            metadata: manifest.options.metadata.clone(),
+        },
+    }
 }
 
-pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest> {
-    let object = expect_object(value, "manifest")?;
-    let options_object = expect_object(json_required(object, "options")?, "manifest.options")?;
-    let mut options = RedDBOptions {
-        mode: match json_string_required(options_object, "mode")?.as_str() {
+fn schema_manifest_from_persisted(
+    manifest: reddb_file::PhysicalSchemaManifest,
+) -> io::Result<SchemaManifest> {
+    let options = manifest.options;
+    let mut runtime_options = RedDBOptions {
+        mode: match options.mode.as_str() {
             "persistent" | "in_memory" => StorageMode::Persistent,
             other => {
                 return Err(invalid_data(format!(
@@ -120,91 +65,62 @@ pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest
                 )))
             }
         },
-        data_path: options_object
-            .get("data_path")
-            .and_then(JsonValue::as_str)
-            .map(PathBuf::from),
-        read_only: json_bool_required(options_object, "read_only")?,
-        create_if_missing: json_bool_required(options_object, "create_if_missing")?,
-        verify_checksums: json_bool_required(options_object, "verify_checksums")?,
-        durability_mode: options_object
-            .get("durability_mode")
-            .and_then(JsonValue::as_str)
+        data_path: options.data_path.map(PathBuf::from),
+        read_only: options.read_only,
+        create_if_missing: options.create_if_missing,
+        verify_checksums: options.verify_checksums,
+        durability_mode: options
+            .durability_mode
+            .as_deref()
             .and_then(crate::api::DurabilityMode::from_str)
             .unwrap_or(crate::api::DurabilityMode::Strict),
         group_commit: crate::api::GroupCommitOptions {
-            window_ms: options_object
-                .get("group_commit_window_ms")
-                .map(|_value| json_u64_required(options_object, "group_commit_window_ms"))
-                .transpose()?
+            window_ms: options
+                .group_commit_window_ms
                 .unwrap_or(crate::api::DEFAULT_GROUP_COMMIT_WINDOW_MS)
                 .max(1),
-            max_statements: options_object
-                .get("group_commit_max_statements")
-                .map(|_value| json_usize_required(options_object, "group_commit_max_statements"))
-                .transpose()?
+            max_statements: options
+                .group_commit_max_statements
                 .unwrap_or(crate::api::DEFAULT_GROUP_COMMIT_MAX_STATEMENTS)
                 .max(1),
-            max_wal_bytes: options_object
-                .get("group_commit_max_wal_bytes")
-                .map(|_value| json_u64_required(options_object, "group_commit_max_wal_bytes"))
-                .transpose()?
+            max_wal_bytes: options
+                .group_commit_max_wal_bytes
                 .unwrap_or(crate::api::DEFAULT_GROUP_COMMIT_MAX_WAL_BYTES)
                 .max(1),
         },
-        auto_checkpoint_pages: json_u32_required(options_object, "auto_checkpoint_pages")?,
-        cache_pages: json_usize_required(options_object, "cache_pages")?,
-        snapshot_retention: options_object
-            .get("snapshot_retention")
-            .map(|_value| json_usize_required(options_object, "snapshot_retention"))
-            .transpose()?
+        auto_checkpoint_pages: options.auto_checkpoint_pages,
+        cache_pages: options.cache_pages,
+        snapshot_retention: options
+            .snapshot_retention
             .unwrap_or(crate::api::DEFAULT_SNAPSHOT_RETENTION)
             .max(1),
-        export_retention: options_object
-            .get("export_retention")
-            .map(|_value| json_usize_required(options_object, "export_retention"))
-            .transpose()?
+        export_retention: options
+            .export_retention
             .unwrap_or(crate::api::DEFAULT_EXPORT_RETENTION)
             .max(1),
-        force_create: json_bool_required(options_object, "force_create")?,
-        metadata: options_object
-            .get("metadata")
-            .and_then(JsonValue::as_object)
-            .map(|metadata| {
-                metadata
-                    .iter()
-                    .filter_map(|(key, value)| {
-                        value.as_str().map(|value| (key.clone(), value.to_string()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        force_create: options.force_create,
+        metadata: options.metadata,
         ..Default::default()
     };
-    if let Some(capabilities) = options_object
-        .get("capabilities")
-        .and_then(JsonValue::as_array)
-    {
-        options.feature_gates =
-            capabilities
-                .iter()
-                .fold(Default::default(), |set, value| match value.as_str() {
-                    Some("table") => set.with(crate::api::Capability::Table),
-                    Some("graph") => set.with(crate::api::Capability::Graph),
-                    Some("vector") => set.with(crate::api::Capability::Vector),
-                    Some("fulltext") => set.with(crate::api::Capability::FullText),
-                    Some("security") => set.with(crate::api::Capability::Security),
-                    Some("encryption") => set.with(crate::api::Capability::Encryption),
-                    _ => set,
-                });
-    }
-
+    runtime_options.feature_gates =
+        options
+            .capabilities
+            .iter()
+            .fold(Default::default(), |set, value| match value.as_str() {
+                "table" => set.with(crate::api::Capability::Table),
+                "graph" => set.with(crate::api::Capability::Graph),
+                "vector" => set.with(crate::api::Capability::Vector),
+                "fulltext" => set.with(crate::api::Capability::FullText),
+                "security" => set.with(crate::api::Capability::Security),
+                "encryption" => set.with(crate::api::Capability::Encryption),
+                _ => set,
+            });
     Ok(SchemaManifest {
-        format_version: json_u32_required(object, "format_version")?,
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
-        options,
-        collection_count: json_usize_required(object, "collection_count")?,
+        format_version: manifest.format_version,
+        created_at_unix_ms: manifest.created_at_unix_ms,
+        updated_at_unix_ms: manifest.updated_at_unix_ms,
+        options: runtime_options,
+        collection_count: manifest.collection_count,
     })
 }
 
