@@ -84,10 +84,6 @@ impl AuditQuery {
 pub fn run_query(active_path: &Path, query: &AuditQuery) -> Vec<AuditEvent> {
     let mut events: Vec<AuditEvent> = Vec::new();
     let parent = active_path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = active_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(".audit.log");
 
     let mut rotated: Vec<(u128, std::path::PathBuf)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(parent) {
@@ -96,14 +92,9 @@ pub fn run_query(active_path: &Path, query: &AuditQuery) -> Vec<AuditEvent> {
             let Some(name_s) = name.to_str() else {
                 continue;
             };
-            if !name_s.starts_with(&format!("{stem}.")) {
-                continue;
-            }
-            // Two recognized shapes: `<stem>.<ms>` (uncompressed
-            // fallback) and `<stem>.<ms>.zst`.
-            let after = &name_s[stem.len() + 1..];
-            let ts_part = after.trim_end_matches(".zst");
-            if let Ok(ts) = ts_part.parse::<u128>() {
+            if let Some(ts) =
+                reddb_file::layout::parse_audit_log_rotated_timestamp(active_path, name_s)
+            {
                 rotated.push((ts, entry.path()));
             }
         }
@@ -118,7 +109,7 @@ pub fn run_query(active_path: &Path, query: &AuditQuery) -> Vec<AuditEvent> {
         let plain = if path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| e == "zst")
+            .map(|e| e == reddb_file::layout::AUDIT_LOG_ROTATED_COMPRESSED_EXTENSION)
             .unwrap_or(false)
         {
             match zstd::bulk::decompress(&bytes, 256 * 1024 * 1024) {
