@@ -1616,6 +1616,7 @@ fn server_uses_reddb_file_for_physical_metadata_paths() {
 fn server_does_not_own_physical_metadata_document_codec() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/physical/metadata_file.rs"));
+    let file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
 
     for forbidden in [
         "fs::read_to_string(path)",
@@ -1624,10 +1625,35 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "fs::write(path, bytes)",
         "from_slice::<JsonValue>",
         "to_vec(&self.to_json_value())",
+        "root.insert(",
+        "\"protocol_version\".to_string()",
+        "\"generated_at_unix_ms\".to_string()",
+        "\"last_loaded_from\".to_string()",
+        "\"last_healed_at_unix_ms\".to_string()",
+        "\"manifest_events\".to_string()",
+        "\"collection_ttl_defaults_ms\".to_string()",
+        "json_required(object, \"manifest\")",
+        "json_required(object, \"catalog\")",
+        "json_required(object, \"superblock\")",
+        "json_required(object, \"snapshots\")",
     ] {
         assert!(
             !text.contains(forbidden),
             "physical metadata document codec belongs in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "PhysicalMetadataDocumentEnvelope",
+        "encode_physical_metadata_document_root_json",
+        "decode_physical_metadata_document_root_json",
+        "\"protocol_version\".to_string()",
+        "\"manifest_events\".to_string()",
+        "\"collection_ttl_defaults_ms\".to_string()",
+    ] {
+        assert!(
+            file.contains(required),
+            "reddb-file should own physical metadata document root {required}"
         );
     }
 }

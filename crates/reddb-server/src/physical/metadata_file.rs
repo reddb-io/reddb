@@ -164,18 +164,11 @@ impl PhysicalMetadataFile {
                 format!("invalid physical metadata JSON: {err}"),
             )
         })?;
-        let parsed = parse_json(&text).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid physical metadata JSON: {err}"),
-            )
-        })?;
-        let json = JsonValue::from(parsed);
-        Self::from_json_value(&json)
+        Self::from_document_json(&text, "invalid physical metadata JSON")
     }
 
     pub fn save_to_path(&self, path: &Path) -> io::Result<()> {
-        let text = self.to_json_value().to_string_pretty();
+        let text = self.to_document_json(true)?;
         reddb_file::write_physical_metadata_json_document(path, &text)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
     }
@@ -187,17 +180,11 @@ impl PhysicalMetadataFile {
                 format!("invalid physical metadata binary: {err}"),
             )
         })?;
-        let json = crate::json::from_str::<JsonValue>(&text).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid physical metadata binary: {err}"),
-            )
-        })?;
-        Self::from_json_value(&json)
+        Self::from_document_json(&text, "invalid physical metadata binary")
     }
 
     pub fn save_to_binary_path(&self, path: &Path) -> io::Result<()> {
-        let text = self.to_json_value().to_string_compact();
+        let text = self.to_document_json(false)?;
         reddb_file::write_physical_metadata_binary_document(path, &text)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
     }
@@ -254,236 +241,173 @@ impl PhysicalMetadataFile {
     }
 
     pub fn to_json_value(&self) -> JsonValue {
-        let mut root = Map::new();
-        root.insert(
-            "protocol_version".to_string(),
-            JsonValue::String(self.protocol_version.clone()),
-        );
-        root.insert(
-            "generated_at_unix_ms".to_string(),
-            json_u128(self.generated_at_unix_ms),
-        );
-        root.insert(
-            "last_loaded_from".to_string(),
-            self.last_loaded_from
-                .clone()
-                .map(JsonValue::String)
-                .unwrap_or(JsonValue::Null),
-        );
-        root.insert(
-            "last_healed_at_unix_ms".to_string(),
-            self.last_healed_at_unix_ms
-                .map(json_u128)
-                .unwrap_or(JsonValue::Null),
-        );
-        root.insert("manifest".to_string(), manifest_to_json(&self.manifest));
-        root.insert("catalog".to_string(), catalog_to_json(&self.catalog));
-        root.insert(
-            "manifest_events".to_string(),
-            JsonValue::Array(
-                self.manifest_events
-                    .iter()
-                    .map(manifest_event_to_json)
-                    .collect(),
-            ),
-        );
-        root.insert(
-            "indexes".to_string(),
-            JsonValue::Array(self.indexes.iter().map(index_state_to_json).collect()),
-        );
-        root.insert(
-            "graph_projections".to_string(),
-            JsonValue::Array(
-                self.graph_projections
-                    .iter()
-                    .map(graph_projection_to_json)
-                    .collect(),
-            ),
-        );
-        root.insert(
-            "analytics_jobs".to_string(),
-            JsonValue::Array(
-                self.analytics_jobs
-                    .iter()
-                    .map(analytics_job_to_json)
-                    .collect(),
-            ),
-        );
-        root.insert(
-            "tree_definitions".to_string(),
-            JsonValue::Array(
-                self.tree_definitions
-                    .iter()
-                    .map(tree_definition_to_json)
-                    .collect(),
-            ),
-        );
-        root.insert(
-            "collection_ttl_defaults_ms".to_string(),
-            JsonValue::Object(
-                self.collection_ttl_defaults_ms
-                    .iter()
-                    .map(|(collection, ttl_ms)| (collection.clone(), json_u64(*ttl_ms)))
-                    .collect(),
-            ),
-        );
-        root.insert(
-            "collection_contracts".to_string(),
-            JsonValue::Array(
-                self.collection_contracts
-                    .iter()
-                    .map(collection_contract_to_json)
-                    .collect(),
-            ),
-        );
-        root.insert(
-            "hypertables".to_string(),
-            JsonValue::Array(self.hypertables.iter().map(hypertable_to_json).collect()),
-        );
-        root.insert(
-            "exports".to_string(),
-            JsonValue::Array(self.exports.iter().map(export_descriptor_to_json).collect()),
-        );
-        root.insert(
-            "superblock".to_string(),
-            superblock_to_json(&self.superblock),
-        );
-        root.insert(
-            "snapshots".to_string(),
-            JsonValue::Array(
-                self.snapshots
-                    .iter()
-                    .map(snapshot_descriptor_to_json)
-                    .collect(),
-            ),
-        );
-        JsonValue::Object(root)
+        let json = self
+            .to_document_json(false)
+            .expect("physical metadata must encode as JSON");
+        crate::json::from_str::<JsonValue>(&json)
+            .expect("reddb-file emitted JSON the server can parse")
     }
 
     pub fn from_json_value(value: &JsonValue) -> io::Result<Self> {
-        let object = expect_object(value, "physical metadata root")?;
-        Ok(Self {
-            protocol_version: json_string_required(object, "protocol_version")?,
-            generated_at_unix_ms: json_u128_required(object, "generated_at_unix_ms")?,
-            last_loaded_from: object
-                .get("last_loaded_from")
-                .and_then(JsonValue::as_str)
-                .map(|value| value.to_string()),
-            last_healed_at_unix_ms: object
-                .get("last_healed_at_unix_ms")
-                .map(json_u128_value)
-                .transpose()?,
-            manifest: manifest_from_json(json_required(object, "manifest")?)?,
-            catalog: catalog_from_json(json_required(object, "catalog")?)?,
-            manifest_events: object
-                .get("manifest_events")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(manifest_event_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            indexes: object
-                .get("indexes")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(index_state_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            graph_projections: object
-                .get("graph_projections")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(graph_projection_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            analytics_jobs: object
-                .get("analytics_jobs")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(analytics_job_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            tree_definitions: object
-                .get("tree_definitions")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(tree_definition_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            collection_ttl_defaults_ms: object
-                .get("collection_ttl_defaults_ms")
-                .and_then(JsonValue::as_object)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|(collection, ttl_ms)| {
-                            json_u64_value(ttl_ms)
-                                .ok()
-                                .map(|ttl_ms| (collection.clone(), ttl_ms))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            collection_contracts: object
-                .get("collection_contracts")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(collection_contract_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            hypertables: object
-                .get("hypertables")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(hypertable_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            exports: object
-                .get("exports")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(export_descriptor_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            superblock: superblock_from_json(json_required(object, "superblock")?)?,
-            snapshots: json_required(object, "snapshots")?
-                .as_array()
-                .ok_or_else(|| invalid_data("field 'snapshots' must be an array"))?
+        Self::from_document_json(&value.to_string_compact(), "invalid physical metadata JSON")
+    }
+
+    fn to_document_json(&self, pretty: bool) -> io::Result<String> {
+        reddb_file::encode_physical_metadata_document_root_json(
+            &self.to_document_envelope(),
+            pretty,
+        )
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+    }
+
+    fn from_document_json(text: &str, context: &'static str) -> io::Result<Self> {
+        let envelope =
+            reddb_file::decode_physical_metadata_document_root_json(text).map_err(|err| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("{context}: {err}"))
+            })?;
+        Self::from_document_envelope(envelope)
+    }
+
+    fn to_document_envelope(&self) -> reddb_file::PhysicalMetadataDocumentEnvelope {
+        reddb_file::PhysicalMetadataDocumentEnvelope {
+            protocol_version: self.protocol_version.clone(),
+            generated_at_unix_ms: self.generated_at_unix_ms,
+            last_loaded_from: self.last_loaded_from.clone(),
+            last_healed_at_unix_ms: self.last_healed_at_unix_ms,
+            manifest_json: manifest_to_json(&self.manifest).to_string_compact(),
+            catalog_json: catalog_to_json(&self.catalog).to_string_compact(),
+            manifest_events_json: self
+                .manifest_events
                 .iter()
-                .map(snapshot_descriptor_from_json)
-                .collect::<io::Result<Vec<_>>>()?,
+                .map(|event| manifest_event_to_json(event).to_string_compact())
+                .collect(),
+            indexes_json: self
+                .indexes
+                .iter()
+                .map(|index| index_state_to_json(index).to_string_compact())
+                .collect(),
+            graph_projections_json: self
+                .graph_projections
+                .iter()
+                .map(|projection| graph_projection_to_json(projection).to_string_compact())
+                .collect(),
+            analytics_jobs_json: self
+                .analytics_jobs
+                .iter()
+                .map(|job| analytics_job_to_json(job).to_string_compact())
+                .collect(),
+            tree_definitions_json: self
+                .tree_definitions
+                .iter()
+                .map(|definition| tree_definition_to_json(definition).to_string_compact())
+                .collect(),
+            collection_ttl_defaults_ms: self.collection_ttl_defaults_ms.clone(),
+            collection_contracts_json: self
+                .collection_contracts
+                .iter()
+                .map(|contract| collection_contract_to_json(contract).to_string_compact())
+                .collect(),
+            hypertables_json: self
+                .hypertables
+                .iter()
+                .map(|hypertable| hypertable_to_json(hypertable).to_string_compact())
+                .collect(),
+            exports_json: self
+                .exports
+                .iter()
+                .map(|export| export_descriptor_to_json(export).to_string_compact())
+                .collect(),
+            superblock_json: superblock_to_json(&self.superblock).to_string_compact(),
+            snapshots_json: self
+                .snapshots
+                .iter()
+                .map(|snapshot| snapshot_descriptor_to_json(snapshot).to_string_compact())
+                .collect(),
+        }
+    }
+
+    fn from_document_envelope(
+        envelope: reddb_file::PhysicalMetadataDocumentEnvelope,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            protocol_version: envelope.protocol_version,
+            generated_at_unix_ms: envelope.generated_at_unix_ms,
+            last_loaded_from: envelope.last_loaded_from,
+            last_healed_at_unix_ms: envelope.last_healed_at_unix_ms,
+            manifest: manifest_from_json(&parse_document_fragment(
+                &envelope.manifest_json,
+                "manifest",
+            )?)?,
+            catalog: catalog_from_json(&parse_document_fragment(
+                &envelope.catalog_json,
+                "catalog",
+            )?)?,
+            manifest_events: parse_document_fragments(
+                &envelope.manifest_events_json,
+                "manifest_events",
+                manifest_event_from_json,
+            )?,
+            indexes: parse_document_fragments(
+                &envelope.indexes_json,
+                "indexes",
+                index_state_from_json,
+            )?,
+            graph_projections: parse_document_fragments(
+                &envelope.graph_projections_json,
+                "graph_projections",
+                graph_projection_from_json,
+            )?,
+            analytics_jobs: parse_document_fragments(
+                &envelope.analytics_jobs_json,
+                "analytics_jobs",
+                analytics_job_from_json,
+            )?,
+            tree_definitions: parse_document_fragments(
+                &envelope.tree_definitions_json,
+                "tree_definitions",
+                tree_definition_from_json,
+            )?,
+            collection_ttl_defaults_ms: envelope.collection_ttl_defaults_ms,
+            collection_contracts: parse_document_fragments(
+                &envelope.collection_contracts_json,
+                "collection_contracts",
+                collection_contract_from_json,
+            )?,
+            hypertables: parse_document_fragments(
+                &envelope.hypertables_json,
+                "hypertables",
+                hypertable_from_json,
+            )?,
+            exports: parse_document_fragments(
+                &envelope.exports_json,
+                "exports",
+                export_descriptor_from_json,
+            )?,
+            superblock: superblock_from_json(&parse_document_fragment(
+                &envelope.superblock_json,
+                "superblock",
+            )?)?,
+            snapshots: parse_document_fragments(
+                &envelope.snapshots_json,
+                "snapshots",
+                snapshot_descriptor_from_json,
+            )?,
         })
     }
+}
+
+fn parse_document_fragment(json: &str, field: &'static str) -> io::Result<JsonValue> {
+    crate::json::from_str::<JsonValue>(json)
+        .map_err(|err| invalid_data(format!("invalid physical metadata field '{field}': {err}")))
+}
+
+fn parse_document_fragments<T>(
+    fragments: &[String],
+    field: &'static str,
+    decode: fn(&JsonValue) -> io::Result<T>,
+) -> io::Result<Vec<T>> {
+    fragments
+        .iter()
+        .map(|fragment| decode(&parse_document_fragment(fragment, field)?))
+        .collect()
 }
