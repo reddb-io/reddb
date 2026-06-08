@@ -133,17 +133,17 @@ pub use graph_table_index::{
 };
 pub use layout::{
     data_file_name, engine_wal_path, legacy_logical_slots_path, legacy_logical_slots_temp_path,
-    logical_wal_path, logical_wal_path_in, logical_wal_temp_path, pager_dwb_path,
-    pager_header_path, pager_legacy_wal_path, pager_meta_path, physical_export_data_path,
-    physical_metadata_binary_path, physical_metadata_journal_path,
-    physical_metadata_journal_prefix, physical_metadata_json_path, primary_replica_root,
-    primary_wal_segment_file_name, rebootstrap_intent_log_path, rebootstrap_pending_path,
-    rebootstrap_previous_path, rebootstrap_ready_marker_path, rebootstrap_staging_root,
-    relay_segment_relative_path, serverless_cache_root, serverless_namespace, serverless_root,
-    shm_path, sibling_path, sidecar_file_name, store_commit_coord_temp_wal_file_name,
-    store_commit_coord_temp_wal_path, support_dir_for, temp_path, temp_path_in, unified_wal_path,
-    unified_wal_path_in, LayoutOverrides, LayoutToggles, LogDestination, LogRoutingOverrides,
-    StorageLayout, TieredLayoutPaths,
+    local_cas_lock_path, local_upload_temp_path, logical_wal_path, logical_wal_path_in,
+    logical_wal_temp_path, pager_dwb_path, pager_header_path, pager_legacy_wal_path,
+    pager_meta_path, physical_export_data_path, physical_metadata_binary_path,
+    physical_metadata_journal_path, physical_metadata_journal_prefix, physical_metadata_json_path,
+    primary_replica_root, primary_wal_segment_file_name, rebootstrap_intent_log_path,
+    rebootstrap_pending_path, rebootstrap_previous_path, rebootstrap_ready_marker_path,
+    rebootstrap_staging_root, relay_segment_relative_path, serverless_cache_root,
+    serverless_namespace, serverless_root, shm_path, sibling_path, sidecar_file_name,
+    store_commit_coord_temp_wal_file_name, store_commit_coord_temp_wal_path, support_dir_for,
+    temp_path, temp_path_in, unified_wal_path, unified_wal_path_in, LayoutOverrides, LayoutToggles,
+    LogDestination, LogRoutingOverrides, StorageLayout, TieredLayoutPaths,
 };
 pub use logical_wal::{
     build_logical_wal_seek_index, encode_logical_wal_v2_for_compat, encode_logical_wal_v3,
