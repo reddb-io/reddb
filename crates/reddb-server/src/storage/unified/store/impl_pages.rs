@@ -719,20 +719,9 @@ impl UnifiedStore {
         let has_meta = matches!(metadata, Some(m) if !m.fields.is_empty());
         if has_meta {
             let metadata_bytes = serialize_metadata(metadata);
-            let mut buf = Vec::with_capacity(12 + entity_bytes.len() + metadata_bytes.len());
-            buf.extend_from_slice(ENTITY_RECORD_MAGIC);
-            buf.extend_from_slice(&(entity_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&entity_bytes);
-            buf.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&metadata_bytes);
-            buf
+            reddb_file::encode_native_entity_record_frame(&entity_bytes, Some(&metadata_bytes))
         } else {
-            let mut buf = Vec::with_capacity(12 + entity_bytes.len());
-            buf.extend_from_slice(ENTITY_RECORD_MAGIC);
-            buf.extend_from_slice(&(entity_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&entity_bytes);
-            buf.extend_from_slice(&0u32.to_le_bytes());
-            buf
+            reddb_file::encode_native_entity_record_frame(&entity_bytes, None)
         }
     }
 
@@ -740,30 +729,17 @@ impl UnifiedStore {
         data: &[u8],
         format_version: u32,
     ) -> Result<(UnifiedEntity, Option<Metadata>), StoreError> {
-        if data.len() < 8 || &data[..4] != ENTITY_RECORD_MAGIC {
+        let Some(frame) = reddb_file::decode_native_entity_record_frame(data)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?
+        else {
             return Self::deserialize_entity(data, format_version).map(|entity| (entity, None));
-        }
+        };
 
-        let mut pos = 4usize;
-        let entity_len = read_u32(data, &mut pos)? as usize;
-        if pos + entity_len > data.len() {
-            return Err(StoreError::Serialization(
-                "truncated entity record payload".to_string(),
-            ));
-        }
-        let entity = Self::deserialize_entity(&data[pos..pos + entity_len], format_version)?;
-        pos += entity_len;
-
-        let metadata_len = read_u32(data, &mut pos)? as usize;
-        if pos + metadata_len > data.len() {
-            return Err(StoreError::Serialization(
-                "truncated entity record metadata".to_string(),
-            ));
-        }
-        let metadata = if metadata_len == 0 {
+        let entity = Self::deserialize_entity(frame.entity, format_version)?;
+        let metadata = if frame.metadata.is_empty() {
             None
         } else {
-            let metadata = deserialize_metadata(&data[pos..pos + metadata_len])?;
+            let metadata = deserialize_metadata(frame.metadata)?;
             if metadata.is_empty() {
                 None
             } else {

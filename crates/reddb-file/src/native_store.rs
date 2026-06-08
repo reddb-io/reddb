@@ -37,8 +37,53 @@ pub const NATIVE_MANIFEST_SAMPLE_LIMIT: usize = 16;
 pub const ENTITY_RECORD_MAGIC: &[u8; 4] = b"RER1";
 pub const METADATA_OVERFLOW_MAGIC: &[u8; 4] = b"RDM3";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeEntityRecordFrame<'a> {
+    pub entity: &'a [u8],
+    pub metadata: &'a [u8],
+}
+
 pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
     bytes.len() >= STORE_MAGIC.len() && &bytes[..STORE_MAGIC.len()] == STORE_MAGIC
+}
+
+pub fn encode_native_entity_record_frame(entity: &[u8], metadata: Option<&[u8]>) -> Vec<u8> {
+    let metadata = metadata.unwrap_or(&[]);
+    let mut out = Vec::with_capacity(12 + entity.len() + metadata.len());
+    out.extend_from_slice(ENTITY_RECORD_MAGIC);
+    out.extend_from_slice(&(entity.len() as u32).to_le_bytes());
+    out.extend_from_slice(entity);
+    out.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+    out.extend_from_slice(metadata);
+    out
+}
+
+pub fn decode_native_entity_record_frame(
+    data: &[u8],
+) -> RdbFileResult<Option<NativeEntityRecordFrame<'_>>> {
+    if data.len() < 8 || &data[..4] != ENTITY_RECORD_MAGIC {
+        return Ok(None);
+    }
+
+    let mut pos = 4usize;
+    let entity_len =
+        read_native_u32(data, &mut pos, "truncated entity record entity length")? as usize;
+    let entity = read_native_bytes(
+        data,
+        &mut pos,
+        entity_len,
+        "truncated entity record payload",
+    )?;
+    let metadata_len =
+        read_native_u32(data, &mut pos, "truncated entity record metadata length")? as usize;
+    let metadata = read_native_bytes(
+        data,
+        &mut pos,
+        metadata_len,
+        "truncated entity record metadata",
+    )?;
+
+    Ok(Some(NativeEntityRecordFrame { entity, metadata }))
 }
 
 pub fn is_supported_store_version(version: u32) -> bool {
@@ -116,6 +161,30 @@ fn native_store_dump_crc32(bytes: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(bytes);
     hasher.finalize()
+}
+
+fn read_native_bytes<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+    len: usize,
+    err: &'static str,
+) -> RdbFileResult<&'a [u8]> {
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| RdbFileError::InvalidOperation(err.to_string()))?;
+    if end > data.len() {
+        return Err(RdbFileError::InvalidOperation(err.to_string()));
+    }
+    let bytes = &data[*pos..end];
+    *pos = end;
+    Ok(bytes)
+}
+
+fn read_native_u32(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u32> {
+    let bytes = read_native_bytes(data, pos, 4, err)?;
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(bytes);
+    Ok(u32::from_le_bytes(raw))
 }
 
 #[derive(Debug, Clone)]
@@ -1274,6 +1343,39 @@ mod tests {
         assert!(native_store_magic_matches(b"RDSTpayload"));
         assert!(!native_store_magic_matches(b"RDS"));
         assert!(!native_store_magic_matches(b"NOPEpayload"));
+    }
+
+    #[test]
+    fn native_entity_record_frame_round_trips_payloads() {
+        let encoded = encode_native_entity_record_frame(b"entity", Some(b"metadata"));
+        let decoded = decode_native_entity_record_frame(&encoded)
+            .expect("decode frame")
+            .expect("entity record frame");
+
+        assert_eq!(decoded.entity, b"entity");
+        assert_eq!(decoded.metadata, b"metadata");
+    }
+
+    #[test]
+    fn native_entity_record_frame_handles_empty_metadata_and_legacy_payloads() {
+        let encoded = encode_native_entity_record_frame(b"entity", None);
+        let decoded = decode_native_entity_record_frame(&encoded)
+            .expect("decode frame")
+            .expect("entity record frame");
+
+        assert_eq!(decoded.entity, b"entity");
+        assert_eq!(decoded.metadata, b"");
+        assert!(decode_native_entity_record_frame(b"legacy-entity")
+            .expect("decode legacy")
+            .is_none());
+    }
+
+    #[test]
+    fn native_entity_record_frame_rejects_truncated_payloads() {
+        let mut encoded = encode_native_entity_record_frame(b"entity", Some(b"metadata"));
+        encoded.truncate(encoded.len() - 1);
+
+        assert!(decode_native_entity_record_frame(&encoded).is_err());
     }
 
     #[test]

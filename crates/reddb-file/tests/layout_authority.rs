@@ -381,6 +381,8 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub fn encode_native_store_header",
         "pub fn decode_native_store_header",
         "pub fn native_store_magic_matches",
+        "pub fn encode_native_entity_record_frame",
+        "pub fn decode_native_entity_record_frame",
         "pub fn append_native_store_crc32_footer",
         "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
@@ -430,6 +432,7 @@ fn server_does_not_redeclare_native_store_file_contracts() {
     for path in server_store_files {
         let text = read(&path);
         for forbidden in [
+            "ENTITY_RECORD_MAGIC",
             "const ENTITY_RECORD_MAGIC",
             "const METADATA_OVERFLOW_MAGIC",
             "Invalid magic bytes - expected RDST",
@@ -478,6 +481,17 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         assert!(
             impl_file.contains(required),
             "UnifiedStore dump header/footer should route through {required}"
+        );
+    }
+
+    let impl_pages = read(root.join("crates/reddb-server/src/storage/unified/store/impl_pages.rs"));
+    for required in [
+        "reddb_file::encode_native_entity_record_frame",
+        "reddb_file::decode_native_entity_record_frame",
+    ] {
+        assert!(
+            impl_pages.contains(required),
+            "UnifiedStore entity record framing should route through {required}"
         );
     }
 }
