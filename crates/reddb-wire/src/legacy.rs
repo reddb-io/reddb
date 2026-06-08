@@ -76,6 +76,26 @@ pub fn build_legacy_error_frame(message: &[u8]) -> Vec<u8> {
     build_legacy_frame(MSG_ERROR, message)
 }
 
+pub fn build_legacy_bulk_ok_frame(payload: &[u8]) -> Vec<u8> {
+    build_legacy_frame(MSG_BULK_OK, payload)
+}
+
+pub fn build_legacy_bulk_stream_ack_frame() -> Vec<u8> {
+    build_legacy_frame(MSG_BULK_STREAM_ACK, &[])
+}
+
+pub fn build_legacy_prepared_ok_frame(payload: &[u8]) -> Vec<u8> {
+    build_legacy_frame(MSG_PREPARED_OK, payload)
+}
+
+pub fn build_legacy_cursor_ok_frame(payload: &[u8]) -> Vec<u8> {
+    build_legacy_frame(MSG_CURSOR_OK, payload)
+}
+
+pub fn build_legacy_cursor_batch_frame(payload: &[u8]) -> Vec<u8> {
+    build_legacy_frame(MSG_CURSOR_BATCH, payload)
+}
+
 #[inline]
 pub fn encode_value(buf: &mut Vec<u8>, value: &WireValue) {
     match value {
@@ -206,6 +226,26 @@ mod tests {
         assert_eq!(
             build_legacy_error_frame(b"no"),
             [3, 0, 0, 0, MSG_ERROR, b'n', b'o']
+        );
+        assert_eq!(
+            build_legacy_bulk_ok_frame(b"\x02\0\0\0\0\0\0\0"),
+            [9, 0, 0, 0, MSG_BULK_OK, 2, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            build_legacy_bulk_stream_ack_frame(),
+            [1, 0, 0, 0, MSG_BULK_STREAM_ACK]
+        );
+        assert_eq!(
+            build_legacy_prepared_ok_frame(b"p"),
+            [2, 0, 0, 0, MSG_PREPARED_OK, b'p']
+        );
+        assert_eq!(
+            build_legacy_cursor_ok_frame(b"c"),
+            [2, 0, 0, 0, MSG_CURSOR_OK, b'c']
+        );
+        assert_eq!(
+            build_legacy_cursor_batch_frame(b"b"),
+            [2, 0, 0, 0, MSG_CURSOR_BATCH, b'b']
         );
     }
 
