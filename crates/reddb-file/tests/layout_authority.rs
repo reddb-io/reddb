@@ -1500,6 +1500,15 @@ fn server_operational_manifest_is_runtime_alias_only() {
 fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));
+    let recovery = read(root.join("crates/reddb-server/src/storage/wal/recovery.rs"));
+    let non_test_archiver = text
+        .split("#[cfg(test)]")
+        .next()
+        .expect("archiver has non-test source");
+    let non_test_recovery = recovery
+        .split("#[cfg(test)]")
+        .next()
+        .expect("recovery has non-test source");
 
     for forbidden in [
         "pub struct BackupHead",
@@ -1542,10 +1551,28 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         "reddb_file::encode_archived_logical_wal_records",
         "reddb_file::decode_archived_logical_wal_records",
         "reddb_file::archived_wal_segment_key",
+        "parse_archived_wal_segment_key",
+        "is_archived_wal_segment_key",
+        "is_backup_manifest_sidecar_key",
     ] {
         assert!(
             text.contains(required),
             "backup/WAL archive manifest runtime should route through {required}"
+        );
+    }
+
+    for forbidden in [
+        ".strip_suffix(\".wal\")",
+        "!key.ends_with(\".wal\")",
+        "key.ends_with(\".manifest.json\")",
+    ] {
+        assert!(
+            !non_test_archiver.contains(forbidden),
+            "archived WAL key parsing belongs in reddb-file, found {forbidden:?}"
+        );
+        assert!(
+            !non_test_recovery.contains(forbidden),
+            "archived WAL key parsing belongs in reddb-file, found {forbidden:?}"
         );
     }
 }

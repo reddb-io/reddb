@@ -420,19 +420,8 @@ impl PointInTimeRecovery {
         let keys = self.backend.list(&self.wal_prefix)?;
         let mut out = Vec::new();
         for key in keys {
-            let Some(file_name) = std::path::Path::new(&key)
-                .file_name()
-                .and_then(|s| s.to_str())
+            let Some((lsn_start, lsn_end)) = reddb_file::parse_archived_wal_segment_key(&key)
             else {
-                continue;
-            };
-            let Some((start, end)) = file_name
-                .strip_suffix(".wal")
-                .and_then(|base| base.split_once('-'))
-            else {
-                continue;
-            };
-            let (Ok(lsn_start), Ok(lsn_end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
                 continue;
             };
             out.push(WalSegmentDescriptor {
