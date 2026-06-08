@@ -169,6 +169,171 @@ pub struct PersistedPhysicalHypertable {
     pub chunks: Vec<PersistedPhysicalHypertableChunk>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PhysicalMetadataDocumentEnvelope {
+    pub protocol_version: String,
+    pub generated_at_unix_ms: u128,
+    pub last_loaded_from: Option<String>,
+    pub last_healed_at_unix_ms: Option<u128>,
+    pub manifest_json: String,
+    pub catalog_json: String,
+    pub manifest_events_json: Vec<String>,
+    pub indexes_json: Vec<String>,
+    pub graph_projections_json: Vec<String>,
+    pub analytics_jobs_json: Vec<String>,
+    pub tree_definitions_json: Vec<String>,
+    pub collection_ttl_defaults_ms: BTreeMap<String, u64>,
+    pub collection_contracts_json: Vec<String>,
+    pub hypertables_json: Vec<String>,
+    pub exports_json: Vec<String>,
+    pub superblock_json: String,
+    pub snapshots_json: Vec<String>,
+}
+
+pub fn encode_physical_metadata_document_root_json(
+    document: &PhysicalMetadataDocumentEnvelope,
+    pretty: bool,
+) -> RdbFileResult<String> {
+    let mut root = serde_json::Map::new();
+    root.insert(
+        "protocol_version".to_string(),
+        serde_json::Value::String(document.protocol_version.clone()),
+    );
+    root.insert(
+        "generated_at_unix_ms".to_string(),
+        json_u128(document.generated_at_unix_ms),
+    );
+    root.insert(
+        "last_loaded_from".to_string(),
+        document
+            .last_loaded_from
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    root.insert(
+        "last_healed_at_unix_ms".to_string(),
+        document
+            .last_healed_at_unix_ms
+            .map(json_u128)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    root.insert(
+        "manifest".to_string(),
+        parse_json_fragment("physical metadata manifest", &document.manifest_json)?,
+    );
+    root.insert(
+        "catalog".to_string(),
+        parse_json_fragment("physical metadata catalog", &document.catalog_json)?,
+    );
+    root.insert(
+        "manifest_events".to_string(),
+        parse_json_fragment_array(
+            "physical metadata manifest event",
+            &document.manifest_events_json,
+        )?,
+    );
+    root.insert(
+        "indexes".to_string(),
+        parse_json_fragment_array("physical metadata index", &document.indexes_json)?,
+    );
+    root.insert(
+        "graph_projections".to_string(),
+        parse_json_fragment_array(
+            "physical metadata graph projection",
+            &document.graph_projections_json,
+        )?,
+    );
+    root.insert(
+        "analytics_jobs".to_string(),
+        parse_json_fragment_array(
+            "physical metadata analytics job",
+            &document.analytics_jobs_json,
+        )?,
+    );
+    root.insert(
+        "tree_definitions".to_string(),
+        parse_json_fragment_array(
+            "physical metadata tree definition",
+            &document.tree_definitions_json,
+        )?,
+    );
+    root.insert(
+        "collection_ttl_defaults_ms".to_string(),
+        serde_json::Value::Object(
+            document
+                .collection_ttl_defaults_ms
+                .iter()
+                .map(|(collection, ttl_ms)| (collection.clone(), json_u64(*ttl_ms)))
+                .collect(),
+        ),
+    );
+    root.insert(
+        "collection_contracts".to_string(),
+        parse_json_fragment_array(
+            "physical metadata collection contract",
+            &document.collection_contracts_json,
+        )?,
+    );
+    root.insert(
+        "hypertables".to_string(),
+        parse_json_fragment_array("physical metadata hypertable", &document.hypertables_json)?,
+    );
+    root.insert(
+        "exports".to_string(),
+        parse_json_fragment_array("physical metadata export", &document.exports_json)?,
+    );
+    root.insert(
+        "superblock".to_string(),
+        parse_json_fragment("physical metadata superblock", &document.superblock_json)?,
+    );
+    root.insert(
+        "snapshots".to_string(),
+        parse_json_fragment_array("physical metadata snapshot", &document.snapshots_json)?,
+    );
+
+    let value = serde_json::Value::Object(root);
+    if pretty {
+        serde_json::to_string_pretty(&value)
+    } else {
+        serde_json::to_string(&value)
+    }
+    .map_err(|err| invalid(format!("encode physical metadata document root: {err}")))
+}
+
+pub fn decode_physical_metadata_document_root_json(
+    json: &str,
+) -> RdbFileResult<PhysicalMetadataDocumentEnvelope> {
+    let value = parse_json_value(json, "physical metadata document root")?;
+    let root = expect_object(&value, "physical metadata root")?;
+    Ok(PhysicalMetadataDocumentEnvelope {
+        protocol_version: json_string_required(root, "protocol_version")?,
+        generated_at_unix_ms: json_u128_required(root, "generated_at_unix_ms")?,
+        last_loaded_from: root
+            .get("last_loaded_from")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        last_healed_at_unix_ms: root
+            .get("last_healed_at_unix_ms")
+            .filter(|value| !value.is_null())
+            .map(json_u128_value)
+            .transpose()?,
+        manifest_json: required_json_fragment(root, "manifest")?,
+        catalog_json: required_json_fragment(root, "catalog")?,
+        manifest_events_json: optional_json_fragment_array(root, "manifest_events")?,
+        indexes_json: optional_json_fragment_array(root, "indexes")?,
+        graph_projections_json: optional_json_fragment_array(root, "graph_projections")?,
+        analytics_jobs_json: optional_json_fragment_array(root, "analytics_jobs")?,
+        tree_definitions_json: optional_json_fragment_array(root, "tree_definitions")?,
+        collection_ttl_defaults_ms: optional_u64_map(root, "collection_ttl_defaults_ms")?,
+        collection_contracts_json: optional_json_fragment_array(root, "collection_contracts")?,
+        hypertables_json: optional_json_fragment_array(root, "hypertables")?,
+        exports_json: optional_json_fragment_array(root, "exports")?,
+        superblock_json: required_json_fragment(root, "superblock")?,
+        snapshots_json: required_json_fragment_array(root, "snapshots")?,
+    })
+}
+
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
     Ok(superblock_json_value(superblock).to_string())
 }
@@ -1031,6 +1196,21 @@ fn parse_json_value(json: &str, label: &'static str) -> RdbFileResult<serde_json
         .map_err(|err| RdbFileError::InvalidOperation(format!("invalid {label}: {err}")))
 }
 
+fn parse_json_fragment(label: &'static str, json: &str) -> RdbFileResult<serde_json::Value> {
+    parse_json_value(json, label)
+}
+
+fn parse_json_fragment_array(
+    label: &'static str,
+    fragments: &[String],
+) -> RdbFileResult<serde_json::Value> {
+    fragments
+        .iter()
+        .map(|fragment| parse_json_fragment(label, fragment))
+        .collect::<RdbFileResult<Vec<_>>>()
+        .map(serde_json::Value::Array)
+}
+
 fn expect_object<'a>(
     value: &'a serde_json::Value,
     context: &'static str,
@@ -1047,6 +1227,57 @@ fn required<'a>(
     object
         .get(key)
         .ok_or_else(|| invalid(format!("missing field '{key}'")))
+}
+
+fn required_json_fragment(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<String> {
+    serde_json::to_string(required(object, key)?)
+        .map_err(|err| invalid(format!("encode field '{key}' JSON fragment: {err}")))
+}
+
+fn required_json_fragment_array(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Vec<String>> {
+    let value = required(object, key)?;
+    let Some(values) = value.as_array() else {
+        return Err(invalid(format!("field '{key}' must be an array")));
+    };
+    values
+        .iter()
+        .map(|value| {
+            serde_json::to_string(value)
+                .map_err(|err| invalid(format!("encode field '{key}' JSON fragment: {err}")))
+        })
+        .collect()
+}
+
+fn optional_json_fragment_array(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Vec<String>> {
+    if object.contains_key(key) {
+        required_json_fragment_array(object, key)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn optional_u64_map(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<BTreeMap<String, u64>> {
+    let Some(value) = object.get(key) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(map) = value.as_object() else {
+        return Err(invalid(format!("field '{key}' must be an object")));
+    };
+    map.iter()
+        .map(|(item_key, item_value)| Ok((item_key.clone(), json_u64_value(item_value)?)))
+        .collect()
 }
 
 fn json_string_required(
@@ -1205,6 +1436,48 @@ mod tests {
             r#"{"sequence":1}"#
         );
         assert!(decode_physical_metadata_document(b"not-json").is_err());
+    }
+
+    #[test]
+    fn physical_metadata_document_root_envelope_round_trips() {
+        let mut ttl = BTreeMap::new();
+        ttl.insert("events".to_string(), 86_400_000);
+        let document = PhysicalMetadataDocumentEnvelope {
+            protocol_version: PHYSICAL_METADATA_PROTOCOL_VERSION.to_string(),
+            generated_at_unix_ms: 123,
+            last_loaded_from: Some("binary".to_string()),
+            last_healed_at_unix_ms: Some(456),
+            manifest_json: r#"{"format_version":2}"#.to_string(),
+            catalog_json: r#"{"total_collections":1}"#.to_string(),
+            manifest_events_json: vec![r#"{"kind":"checkpoint"}"#.to_string()],
+            indexes_json: vec![r#"{"name":"idx"}"#.to_string()],
+            graph_projections_json: vec![r#"{"name":"graph"}"#.to_string()],
+            analytics_jobs_json: vec![r#"{"id":"job"}"#.to_string()],
+            tree_definitions_json: vec![r#"{"name":"tree"}"#.to_string()],
+            collection_ttl_defaults_ms: ttl,
+            collection_contracts_json: vec![r#"{"name":"events"}"#.to_string()],
+            hypertables_json: vec![r#"{"name":"metrics"}"#.to_string()],
+            exports_json: vec![r#"{"name":"dump"}"#.to_string()],
+            superblock_json: r#"{"sequence":"9"}"#.to_string(),
+            snapshots_json: vec![r#"{"snapshot_id":"9"}"#.to_string()],
+        };
+
+        let json = encode_physical_metadata_document_root_json(&document, false).unwrap();
+        assert!(json.contains("\"protocol_version\""));
+        assert!(json.contains("\"manifest_events\""));
+        assert!(json.contains("\"collection_ttl_defaults_ms\""));
+
+        let decoded = decode_physical_metadata_document_root_json(&json).unwrap();
+        assert_eq!(decoded.protocol_version, document.protocol_version);
+        assert_eq!(decoded.generated_at_unix_ms, 123);
+        assert_eq!(decoded.last_loaded_from.as_deref(), Some("binary"));
+        assert_eq!(decoded.last_healed_at_unix_ms, Some(456));
+        assert_eq!(decoded.manifest_events_json.len(), 1);
+        assert_eq!(
+            decoded.collection_ttl_defaults_ms.get("events"),
+            Some(&86_400_000)
+        );
+        assert_eq!(decoded.snapshots_json.len(), 1);
     }
 
     #[test]

@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::{CatalogSnapshot, CollectionStats, RedDBOptions, SchemaManifest, StorageMode};
 use crate::index::IndexKind;
-use crate::json::parse_json;
 use crate::serde_json::{Map, Value as JsonValue};
 
 pub const DEFAULT_GRID_BLOCK_SIZE: usize = 512 * 1024;
