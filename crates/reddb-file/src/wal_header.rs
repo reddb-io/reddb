@@ -9,6 +9,13 @@ pub const WAL_FILE_MAGIC: &[u8; 4] = b"RDBW";
 pub const WAL_FILE_VERSION: u8 = 3;
 pub const WAL_FILE_VERSION_V2: u8 = 2;
 pub const WAL_FILE_HEADER_BYTES: usize = 8;
+/// Size of one main-engine WAL segment/preallocation extent.
+///
+/// This is the file-contract boundary used by the server writer when it
+/// reserves disk blocks ahead of the append frontier. Runtime buffering and
+/// fsync policy stay in `reddb-server`; segment sizing lives here with the WAL
+/// artifact contract.
+pub const MAIN_WAL_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalFileHeader {
@@ -39,6 +46,15 @@ pub fn decode_wal_file_header(header: &[u8; WAL_FILE_HEADER_BYTES]) -> io::Resul
     }
 
     Ok(WalFileHeader { version })
+}
+
+/// Next main-WAL segment boundary strictly above `pos`.
+///
+/// `pos` already at a boundary still rounds up to the following one, so a
+/// writer using this for preallocation always keeps at least one boundary ahead
+/// of the current append frontier.
+pub fn next_main_wal_segment_boundary(pos: u64) -> u64 {
+    (pos / MAIN_WAL_SEGMENT_BYTES + 1) * MAIN_WAL_SEGMENT_BYTES
 }
 
 #[cfg(test)]
@@ -82,6 +98,24 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "Unsupported WAL version: 99"
+        );
+    }
+
+    #[test]
+    fn main_wal_segment_boundary_rounds_strictly_above_position() {
+        assert_eq!(next_main_wal_segment_boundary(0), MAIN_WAL_SEGMENT_BYTES);
+        assert_eq!(next_main_wal_segment_boundary(8), MAIN_WAL_SEGMENT_BYTES);
+        assert_eq!(
+            next_main_wal_segment_boundary(MAIN_WAL_SEGMENT_BYTES - 1),
+            MAIN_WAL_SEGMENT_BYTES
+        );
+        assert_eq!(
+            next_main_wal_segment_boundary(MAIN_WAL_SEGMENT_BYTES),
+            2 * MAIN_WAL_SEGMENT_BYTES
+        );
+        assert_eq!(
+            next_main_wal_segment_boundary(MAIN_WAL_SEGMENT_BYTES + 1),
+            2 * MAIN_WAL_SEGMENT_BYTES
         );
     }
 }

@@ -13,15 +13,6 @@ use std::sync::Arc;
 /// record-level rather than page-level.
 const WAL_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Size of one pre-allocated WAL segment.
-///
-/// The writer keeps disk blocks reserved one segment ahead of its write
-/// frontier via `fallocate(2)` with `FALLOC_FL_KEEP_SIZE`, so the
-/// continuously-growing WAL lands in contiguous extents instead of
-/// fragmenting the data file's extents on ext4/XFS (issue #893, PRD #851).
-/// 16 MiB mirrors postgres' default WAL segment size.
-const WAL_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WalSyncMethod {
     Data,
@@ -45,15 +36,6 @@ impl WalGroupSync {
             WalSyncMethod::All => self.sync_handle.sync_all(),
         }
     }
-}
-
-/// Next segment boundary strictly above `pos`.
-///
-/// `pos` already at a boundary still rounds *up* to the following one, so the
-/// reservation always stays at least one boundary ahead of the frontier.
-#[inline]
-fn next_wal_segment_boundary(pos: u64) -> u64 {
-    (pos / WAL_SEGMENT_BYTES + 1) * WAL_SEGMENT_BYTES
 }
 
 /// Reserve disk blocks for `[offset, offset + len)` **without** growing the
@@ -162,7 +144,8 @@ pub struct WalWriter {
     /// `sync_all()`.
     last_synced_size: u64,
     /// Exclusive byte offset up to which disk blocks are pre-reserved via
-    /// `fallocate(FALLOC_FL_KEEP_SIZE)`. Advances one [`WAL_SEGMENT_BYTES`]
+    /// `fallocate(FALLOC_FL_KEEP_SIZE)`. Advances one
+    /// [`reddb_file::MAIN_WAL_SEGMENT_BYTES`]
     /// segment at a time as `current_lsn` approaches it (issue #893). Reset to
     /// `0` on [`truncate`](Self::truncate) — which frees the blocks — and
     /// immediately re-extended (the checkpoint re-extend path).
@@ -238,7 +221,7 @@ impl WalWriter {
     /// boundary above the current write frontier (`current_lsn`).
     ///
     /// Cheap (pure arithmetic) until the frontier crosses a
-    /// [`WAL_SEGMENT_BYTES`] boundary, at which point it issues a single
+    /// [`reddb_file::MAIN_WAL_SEGMENT_BYTES`] boundary, at which point it issues a single
     /// `fallocate`. Best-effort: a filesystem that can't preallocate disables
     /// the feature; a transient error is swallowed so a write never fails
     /// because preallocation hiccuped (the write path surfaces a genuine
@@ -248,7 +231,7 @@ impl WalWriter {
         if !self.prealloc_supported {
             return Ok(());
         }
-        let target = next_wal_segment_boundary(self.current_lsn);
+        let target = reddb_file::next_main_wal_segment_boundary(self.current_lsn);
         if target <= self.preallocated_to {
             return Ok(());
         }
@@ -954,20 +937,26 @@ mod tests {
     fn segment_boundary_rounds_strictly_up() {
         // Always lands one boundary ahead so the reservation stays in front
         // of the write frontier.
-        assert_eq!(next_wal_segment_boundary(0), WAL_SEGMENT_BYTES);
-        assert_eq!(next_wal_segment_boundary(8), WAL_SEGMENT_BYTES);
         assert_eq!(
-            next_wal_segment_boundary(WAL_SEGMENT_BYTES - 1),
-            WAL_SEGMENT_BYTES
+            reddb_file::next_main_wal_segment_boundary(0),
+            reddb_file::MAIN_WAL_SEGMENT_BYTES
+        );
+        assert_eq!(
+            reddb_file::next_main_wal_segment_boundary(8),
+            reddb_file::MAIN_WAL_SEGMENT_BYTES
+        );
+        assert_eq!(
+            reddb_file::next_main_wal_segment_boundary(reddb_file::MAIN_WAL_SEGMENT_BYTES - 1),
+            reddb_file::MAIN_WAL_SEGMENT_BYTES
         );
         // Exactly on a boundary still advances to the next one.
         assert_eq!(
-            next_wal_segment_boundary(WAL_SEGMENT_BYTES),
-            2 * WAL_SEGMENT_BYTES
+            reddb_file::next_main_wal_segment_boundary(reddb_file::MAIN_WAL_SEGMENT_BYTES),
+            2 * reddb_file::MAIN_WAL_SEGMENT_BYTES
         );
         assert_eq!(
-            next_wal_segment_boundary(WAL_SEGMENT_BYTES + 1),
-            2 * WAL_SEGMENT_BYTES
+            reddb_file::next_main_wal_segment_boundary(reddb_file::MAIN_WAL_SEGMENT_BYTES + 1),
+            2 * reddb_file::MAIN_WAL_SEGMENT_BYTES
         );
     }
 
@@ -980,10 +969,10 @@ mod tests {
         if !writer.prealloc_supported {
             return; // filesystem without fallocate — feature is a no-op.
         }
-        assert_eq!(writer.preallocated_to, WAL_SEGMENT_BYTES);
+        assert_eq!(writer.preallocated_to, reddb_file::MAIN_WAL_SEGMENT_BYTES);
         // The reservation is real on disk, yet the logical file is still just
         // the 8-byte header.
-        assert!(allocated_bytes(&path) >= WAL_SEGMENT_BYTES);
+        assert!(allocated_bytes(&path) >= reddb_file::MAIN_WAL_SEGMENT_BYTES);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
     }
 
@@ -1019,8 +1008,8 @@ mod tests {
         assert_eq!(writer.current_lsn(), 8);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
         if writer.prealloc_supported {
-            assert_eq!(writer.preallocated_to, WAL_SEGMENT_BYTES);
-            assert!(allocated_bytes(&path) >= WAL_SEGMENT_BYTES);
+            assert_eq!(writer.preallocated_to, reddb_file::MAIN_WAL_SEGMENT_BYTES);
+            assert!(allocated_bytes(&path) >= reddb_file::MAIN_WAL_SEGMENT_BYTES);
         }
     }
 
