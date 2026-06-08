@@ -125,77 +125,71 @@ fn schema_manifest_from_persisted(
 }
 
 pub(super) fn catalog_to_json(catalog: &CatalogSnapshot) -> JsonValue {
-    let mut stats = Map::new();
-    for (name, stat) in &catalog.stats_by_collection {
-        let mut entry = Map::new();
-        entry.insert(
-            "entities".to_string(),
-            JsonValue::Number(stat.entities as f64),
-        );
-        entry.insert(
-            "cross_refs".to_string(),
-            JsonValue::Number(stat.cross_refs as f64),
-        );
-        entry.insert(
-            "segments".to_string(),
-            JsonValue::Number(stat.segments as f64),
-        );
-        stats.insert(name.clone(), JsonValue::Object(entry));
-    }
-
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(catalog.name.clone()));
-    object.insert(
-        "total_entities".to_string(),
-        JsonValue::Number(catalog.total_entities as f64),
-    );
-    object.insert(
-        "total_collections".to_string(),
-        JsonValue::Number(catalog.total_collections as f64),
-    );
-    object.insert(
-        "updated_at_unix_ms".to_string(),
-        json_u128(
-            catalog
-                .updated_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        ),
-    );
-    object.insert("stats_by_collection".to_string(), JsonValue::Object(stats));
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_catalog_snapshot_json(&catalog_to_persisted(catalog))
+            .expect("reddb-file must encode physical catalog snapshot JSON"),
+    )
 }
 
 pub(super) fn catalog_from_json(value: &JsonValue) -> io::Result<CatalogSnapshot> {
-    let object = expect_object(value, "catalog")?;
-    let stats = expect_object(
-        json_required(object, "stats_by_collection")?,
-        "catalog.stats",
-    )?;
+    let persisted =
+        reddb_file::decode_physical_catalog_snapshot_json(&value.to_string_compact())
+            .map_err(|err| invalid_data(format!("decode physical catalog snapshot: {err}")))?;
+    catalog_from_persisted(persisted)
+}
+
+fn catalog_to_persisted(catalog: &CatalogSnapshot) -> reddb_file::PhysicalCatalogSnapshot {
     let mut stats_by_collection = BTreeMap::new();
-    for (name, value) in stats {
-        let entry = expect_object(value, "catalog.stats entry")?;
+    for (name, stat) in &catalog.stats_by_collection {
         stats_by_collection.insert(
             name.clone(),
-            CollectionStats {
-                entities: json_usize_required(entry, "entities")?,
-                cross_refs: json_usize_required(entry, "cross_refs")?,
-                segments: json_usize_required(entry, "segments")?,
+            reddb_file::PhysicalCatalogCollectionStats {
+                entities: stat.entities,
+                cross_refs: stat.cross_refs,
+                segments: stat.segments,
             },
         );
     }
 
+    reddb_file::PhysicalCatalogSnapshot {
+        name: catalog.name.clone(),
+        total_entities: catalog.total_entities,
+        total_collections: catalog.total_collections,
+        updated_at_unix_ms: catalog
+            .updated_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        stats_by_collection,
+    }
+}
+
+fn catalog_from_persisted(
+    catalog: reddb_file::PhysicalCatalogSnapshot,
+) -> io::Result<CatalogSnapshot> {
+    let stats_by_collection = catalog
+        .stats_by_collection
+        .into_iter()
+        .map(|(name, stat)| {
+            (
+                name,
+                CollectionStats {
+                    entities: stat.entities,
+                    cross_refs: stat.cross_refs,
+                    segments: stat.segments,
+                },
+            )
+        })
+        .collect();
+
     Ok(CatalogSnapshot {
-        name: json_string_required(object, "name")?,
-        total_entities: json_usize_required(object, "total_entities")?,
-        total_collections: json_usize_required(object, "total_collections")?,
+        name: catalog.name,
+        total_entities: catalog.total_entities,
+        total_collections: catalog.total_collections,
         stats_by_collection,
         updated_at: UNIX_EPOCH
             + std::time::Duration::from_millis(
-                json_u128_required(object, "updated_at_unix_ms")?
-                    .try_into()
-                    .unwrap_or(u64::MAX),
+                catalog.updated_at_unix_ms.try_into().unwrap_or(u64::MAX),
             ),
     })
 }
