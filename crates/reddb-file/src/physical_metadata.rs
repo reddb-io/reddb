@@ -242,6 +242,18 @@ pub struct PhysicalAnalyticalStorageConfig {
     pub order_by_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalSubscriptionDescriptor {
+    pub name: String,
+    pub source: String,
+    pub target_queue: String,
+    pub ops_filter: Vec<String>,
+    pub where_filter: Option<String>,
+    pub redact_fields: Vec<String>,
+    pub enabled: bool,
+    pub all_tenants: bool,
+}
+
 pub fn encode_physical_metadata_document_root_json(
     document: &PhysicalMetadataDocumentEnvelope,
     pretty: bool,
@@ -419,6 +431,19 @@ pub fn decode_physical_analytical_storage_json(
 ) -> RdbFileResult<PhysicalAnalyticalStorageConfig> {
     let value = parse_json_value(json, "physical analytical storage")?;
     analytical_storage_from_json_value(&value)
+}
+
+pub fn encode_physical_subscription_descriptor_json(
+    subscription: &PhysicalSubscriptionDescriptor,
+) -> RdbFileResult<String> {
+    Ok(subscription_descriptor_json_value(subscription).to_string())
+}
+
+pub fn decode_physical_subscription_descriptor_json(
+    json: &str,
+) -> RdbFileResult<PhysicalSubscriptionDescriptor> {
+    let value = parse_json_value(json, "physical subscription descriptor")?;
+    subscription_descriptor_from_json_value(&value)
 }
 
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
@@ -1025,6 +1050,83 @@ fn analytical_storage_from_json_value(
             .get("order_by_key")
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string),
+    })
+}
+
+fn subscription_descriptor_json_value(
+    subscription: &PhysicalSubscriptionDescriptor,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(subscription.name.clone()),
+    );
+    object.insert(
+        "source".to_string(),
+        serde_json::Value::String(subscription.source.clone()),
+    );
+    object.insert(
+        "target_queue".to_string(),
+        serde_json::Value::String(subscription.target_queue.clone()),
+    );
+    object.insert(
+        "ops_filter".to_string(),
+        string_array_json(&subscription.ops_filter),
+    );
+    object.insert(
+        "where_filter".to_string(),
+        subscription
+            .where_filter
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "redact_fields".to_string(),
+        string_array_json(&subscription.redact_fields),
+    );
+    object.insert(
+        "enabled".to_string(),
+        serde_json::Value::Bool(subscription.enabled),
+    );
+    object.insert(
+        "all_tenants".to_string(),
+        serde_json::Value::Bool(subscription.all_tenants),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn subscription_descriptor_from_json_value(
+    value: &serde_json::Value,
+) -> RdbFileResult<PhysicalSubscriptionDescriptor> {
+    let object = expect_object(value, "physical subscription descriptor")?;
+    Ok(PhysicalSubscriptionDescriptor {
+        name: object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        source: json_string_required(object, "source")?,
+        target_queue: json_string_required(object, "target_queue")?,
+        ops_filter: string_array_from_json(object.get("ops_filter")).unwrap_or_default(),
+        where_filter: match object.get("where_filter") {
+            Some(serde_json::Value::String(value)) => Some(value.clone()),
+            Some(serde_json::Value::Null) | None => None,
+            Some(_) => {
+                return Err(invalid(
+                    "physical subscription where_filter must be a string or null",
+                ))
+            }
+        },
+        redact_fields: string_array_from_json(object.get("redact_fields")).unwrap_or_default(),
+        enabled: object
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        all_tenants: object
+            .get("all_tenants")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1963,6 +2065,27 @@ mod tests {
         assert_eq!(
             decode_physical_analytical_storage_json(&json).unwrap(),
             config
+        );
+    }
+
+    #[test]
+    fn physical_subscription_descriptor_round_trips() {
+        let subscription = PhysicalSubscriptionDescriptor {
+            name: "audit".to_string(),
+            source: "events".to_string(),
+            target_queue: "audit_queue".to_string(),
+            ops_filter: vec!["insert".to_string(), "delete".to_string()],
+            where_filter: Some("tenant_id = current_tenant()".to_string()),
+            redact_fields: vec!["secret".to_string()],
+            enabled: true,
+            all_tenants: false,
+        };
+
+        let json = encode_physical_subscription_descriptor_json(&subscription).unwrap();
+        assert!(json.contains("\"target_queue\""));
+        assert_eq!(
+            decode_physical_subscription_descriptor_json(&json).unwrap(),
+            subscription
         );
     }
 
