@@ -736,21 +736,7 @@ mod grpc_query_value_tests {
         let _ = std::fs::remove_dir_all(
             crate::replication::primary::PrimaryReplication::primary_replica_root_for(data_path),
         );
-        let _ = std::fs::remove_dir_all(crate::replication::replica::rebootstrap_staging_root_for(
-            data_path,
-        ));
-        let _ = std::fs::remove_file(crate::replication::replica::rebootstrap_pending_path_for(
-            data_path,
-        ));
-        let _ = std::fs::remove_file(
-            crate::replication::replica::rebootstrap_ready_marker_path_for(data_path),
-        );
-        let _ = std::fs::remove_file(
-            crate::replication::replica::rebootstrap_intent_log_path_for(data_path),
-        );
-        let _ = std::fs::remove_file(crate::replication::replica::rebootstrap_previous_path_for(
-            data_path,
-        ));
+        reddb_file::cleanup_rebootstrap_artifacts(data_path);
     }
 }
 
