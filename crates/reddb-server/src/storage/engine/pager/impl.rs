@@ -1024,23 +1024,17 @@ impl Pager {
 
     /// Path for the header shadow file
     fn shadow_path(db_path: &Path) -> PathBuf {
-        let mut p = db_path.to_path_buf().into_os_string();
-        p.push("-hdr");
-        PathBuf::from(p)
+        reddb_file::layout::pager_header_shadow_path(db_path)
     }
 
     /// Path for the metadata shadow file
     fn meta_shadow_path(db_path: &Path) -> PathBuf {
-        let mut p = db_path.to_path_buf().into_os_string();
-        p.push("-meta");
-        PathBuf::from(p)
+        reddb_file::layout::pager_meta_shadow_path(db_path)
     }
 
     /// Path for the double-write buffer file
     fn dwb_path(db_path: &Path) -> PathBuf {
-        let mut p = db_path.to_path_buf().into_os_string();
-        p.push("-dwb");
-        PathBuf::from(p)
+        reddb_file::layout::pager_dwb_shadow_path(db_path)
     }
 
     /// Open the double-write buffer file without truncating existing content.

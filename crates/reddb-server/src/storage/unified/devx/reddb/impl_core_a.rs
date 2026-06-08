@@ -265,20 +265,16 @@ impl RedDB {
             crate::physical::PhysicalMetadataFile::metadata_path_for(local_path);
         write_optional_snapshot_sidecar(&json, "metadata_json_hex", &metadata_json_path)?;
 
-        let mut header_shadow = local_path.to_path_buf().into_os_string();
-        header_shadow.push("-hdr");
         write_optional_snapshot_sidecar(
             &json,
             "header_shadow_hex",
-            &std::path::PathBuf::from(header_shadow),
+            &reddb_file::layout::pager_header_shadow_path(local_path),
         )?;
 
-        let mut metadata_shadow = local_path.to_path_buf().into_os_string();
-        metadata_shadow.push("-meta");
         write_optional_snapshot_sidecar(
             &json,
             "metadata_shadow_hex",
-            &std::path::PathBuf::from(metadata_shadow),
+            &reddb_file::layout::pager_meta_shadow_path(local_path),
         )?;
         Ok(true)
     }

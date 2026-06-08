@@ -220,6 +220,9 @@ fn server_source_does_not_embed_owned_file_suffixes() {
             "with_extension(\"rdb-dwb\")",
             "set_extension(\"wal\")",
             "with_extension(\"shm\")",
+            "push(\"-hdr\")",
+            "push(\"-meta\")",
+            "push(\"-dwb\")",
         ] {
             assert!(
                 !text.contains(forbidden),

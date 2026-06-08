@@ -19,6 +19,9 @@ pub const ENGINE_WAL_EXTENSION: &str = "rdb-wal";
 pub const PAGER_HEADER_EXTENSION: &str = "rdb-hdr";
 pub const PAGER_META_EXTENSION: &str = "rdb-meta";
 pub const PAGER_DWB_EXTENSION: &str = "rdb-dwb";
+pub const PAGER_HEADER_SHADOW_SUFFIX: &str = "hdr";
+pub const PAGER_META_SHADOW_SUFFIX: &str = "meta";
+pub const PAGER_DWB_SHADOW_SUFFIX: &str = "dwb";
 pub const SHM_FILE_SUFFIX: &str = "shm";
 pub const PHYSICAL_METADATA_JSON_SUFFIX: &str = "meta.json";
 pub const PHYSICAL_METADATA_BINARY_EXTENSION: &str = "meta.rdbx";
@@ -521,6 +524,25 @@ pub fn pager_dwb_path(data_path: &Path) -> PathBuf {
     data_path.with_extension(PAGER_DWB_EXTENSION)
 }
 
+fn path_with_dash_suffix(data_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = data_path.to_path_buf().into_os_string();
+    path.push("-");
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+pub fn pager_header_shadow_path(data_path: &Path) -> PathBuf {
+    path_with_dash_suffix(data_path, PAGER_HEADER_SHADOW_SUFFIX)
+}
+
+pub fn pager_meta_shadow_path(data_path: &Path) -> PathBuf {
+    path_with_dash_suffix(data_path, PAGER_META_SHADOW_SUFFIX)
+}
+
+pub fn pager_dwb_shadow_path(data_path: &Path) -> PathBuf {
+    path_with_dash_suffix(data_path, PAGER_DWB_SHADOW_SUFFIX)
+}
+
 pub fn shm_path(data_path: &Path) -> PathBuf {
     sibling_path(
         data_path,
@@ -746,6 +768,18 @@ mod tests {
         assert_eq!(
             pager_legacy_wal_path(path),
             PathBuf::from("/var/lib/reddb/main.wal")
+        );
+        assert_eq!(
+            pager_header_shadow_path(path),
+            PathBuf::from("/var/lib/reddb/main.rdb-hdr")
+        );
+        assert_eq!(
+            pager_meta_shadow_path(path),
+            PathBuf::from("/var/lib/reddb/main.rdb-meta")
+        );
+        assert_eq!(
+            pager_dwb_shadow_path(path),
+            PathBuf::from("/var/lib/reddb/main.rdb-dwb")
         );
         assert_eq!(shm_path(path), PathBuf::from("/var/lib/reddb/main.rdb-shm"));
         assert_eq!(

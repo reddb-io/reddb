@@ -241,21 +241,13 @@ mod tests {
     fn cleanup(path: &Path) {
         let _ = fs::remove_file(path);
         // Clean up companion files
-        let mut hdr = path.to_path_buf().into_os_string();
-        hdr.push("-hdr");
-        let _ = fs::remove_file(&hdr);
-        let mut meta = path.to_path_buf().into_os_string();
-        meta.push("-meta");
-        let _ = fs::remove_file(&meta);
-        let mut dwb = path.to_path_buf().into_os_string();
-        dwb.push("-dwb");
-        let _ = fs::remove_file(&dwb);
+        let _ = fs::remove_file(reddb_file::layout::pager_header_shadow_path(path));
+        let _ = fs::remove_file(reddb_file::layout::pager_meta_shadow_path(path));
+        let _ = fs::remove_file(reddb_file::layout::pager_dwb_shadow_path(path));
     }
 
     fn dwb_path_for(path: &Path) -> PathBuf {
-        let mut dwb = path.to_path_buf().into_os_string();
-        dwb.push("-dwb");
-        PathBuf::from(dwb)
+        reddb_file::layout::pager_dwb_shadow_path(path)
     }
 
     static COW_ATOMIC_WRITE_OVERRIDE_GUARD: Mutex<()> = Mutex::new(());
