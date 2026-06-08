@@ -681,6 +681,60 @@ fn replication_change_record_payload_lives_in_reddb_wire() {
 }
 
 #[test]
+fn replication_basebackup_payload_lives_in_reddb_wire() {
+    let root = repo_root();
+    let grpc = read(root.join("crates/reddb-server/src/grpc/service_impl.rs"));
+    let replica = read(root.join("crates/reddb-server/src/replication/replica.rs"));
+    let wire = read(root.join("crates/reddb-wire/src/replication/basebackup.rs"));
+
+    for forbidden in [
+        "\"basebackup_available\"",
+        "\"basebackup_timeline\"",
+        "\"basebackup_start_lsn\"",
+        "\"basebackup_checkpoint_lsn\"",
+        "\"basebackup_snapshot_bytes\"",
+        "\"basebackup_snapshot_checksum\"",
+        "\"basebackup_manifest_hex\"",
+        "\"basebackup_chunks\"",
+        "\"basebackup_chunk_ordinal\"",
+        "\"basebackup_chunk_hex\"",
+        "hex::encode",
+    ] {
+        assert!(
+            !grpc.contains(forbidden),
+            "replication basebackup wire payload belongs in reddb-wire, found {forbidden:?}"
+        );
+    }
+    for required in [
+        "reddb_wire::replication::BaseBackupChunk",
+        "reddb_wire::replication::BaseBackupManifestChunk",
+        "chunk.encode_json()",
+    ] {
+        assert!(
+            grpc.contains(required),
+            "gRPC replication snapshot should route through reddb-wire {required}"
+        );
+    }
+    assert!(
+        replica.contains("reddb_wire::replication::BaseBackupChunk"),
+        "replica basebackup staging should consume the reddb-wire payload type"
+    );
+    for required in [
+        "pub struct BaseBackupChunk",
+        "pub struct BaseBackupManifestChunk",
+        "basebackup_manifest_hex",
+        "basebackup_chunk_hex",
+        "pub fn encode_json",
+        "pub fn decode_json",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire should own basebackup payload contract {required}"
+        );
+    }
+}
+
+#[test]
 fn redwire_queue_wait_payload_and_frame_builders_live_in_reddb_wire() {
     let root = repo_root();
     let server = read(root.join("crates/reddb-server/src/wire/redwire/queue_wait.rs"));

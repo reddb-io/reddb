@@ -45,88 +45,52 @@ fn grpc_batch_outcome_to_reply(
     Err(status)
 }
 
-fn insert_snapshot_sidecar(
-    map: &mut Map<String, JsonValue>,
-    field: &str,
-    path: &std::path::Path,
-) -> Result<(), Status> {
-    if path.exists() {
-        let bytes = std::fs::read(path).map_err(|e| Status::internal(e.to_string()))?;
-        map.insert(field.into(), JsonValue::String(hex::encode(bytes)));
+fn read_snapshot_sidecar(path: &std::path::Path) -> Result<Option<Vec<u8>>, Status> {
+    if !path.exists() {
+        return Ok(None);
     }
-    Ok(())
+    std::fs::read(path)
+        .map(Some)
+        .map_err(|e| Status::internal(e.to_string()))
 }
 
-fn insert_basebackup_snapshot_fields(
-    map: &mut Map<String, JsonValue>,
+fn attach_basebackup_snapshot_fields(
+    chunk: &mut reddb_wire::replication::BaseBackupChunk,
     manifest: &reddb_file::PrimaryReplicaBaseBackupManifest,
     parts_root: &std::path::Path,
     snapshot_offset: usize,
 ) -> Result<(), Status> {
-    map.insert("basebackup_available".into(), JsonValue::Bool(true));
-    map.insert(
-        "basebackup_timeline".into(),
-        JsonValue::Number(manifest.timeline.0 as f64),
-    );
-    map.insert(
-        "basebackup_start_lsn".into(),
-        JsonValue::Number(manifest.start_lsn as f64),
-    );
-    map.insert(
-        "basebackup_checkpoint_lsn".into(),
-        JsonValue::Number(manifest.checkpoint_lsn as f64),
-    );
-    map.insert(
-        "basebackup_snapshot_bytes".into(),
-        JsonValue::Number(manifest.snapshot_bytes as f64),
-    );
-    map.insert(
-        "basebackup_snapshot_checksum".into(),
-        JsonValue::Number(manifest.snapshot_checksum as f64),
-    );
-    map.insert(
-        "basebackup_manifest_hex".into(),
-        JsonValue::String(hex::encode(manifest.encode())),
-    );
-    let chunks = manifest
+    chunk.basebackup_available = true;
+    chunk.basebackup_timeline = Some(manifest.timeline.0);
+    chunk.basebackup_start_lsn = Some(manifest.start_lsn);
+    chunk.basebackup_checkpoint_lsn = Some(manifest.checkpoint_lsn);
+    chunk.basebackup_snapshot_bytes = Some(manifest.snapshot_bytes);
+    chunk.basebackup_snapshot_checksum = Some(u64::from(manifest.snapshot_checksum));
+    chunk.basebackup_manifest = Some(manifest.encode());
+    chunk.basebackup_chunks = manifest
         .chunks
         .iter()
-        .map(|chunk| {
-            let mut object = crate::json::Map::new();
-            object.insert("ordinal".into(), JsonValue::Number(chunk.ordinal as f64));
-            object.insert(
-                "snapshot_offset".into(),
-                JsonValue::Number(chunk.snapshot_offset as f64),
-            );
-            object.insert("bytes".into(), JsonValue::Number(chunk.bytes as f64));
-            object.insert("checksum".into(), JsonValue::Number(chunk.checksum as f64));
-            object.insert(
-                "relative_path".into(),
-                JsonValue::String(chunk.relative_path.display().to_string()),
-            );
-            JsonValue::Object(object)
+        .map(|part| reddb_wire::replication::BaseBackupManifestChunk {
+            ordinal: part.ordinal,
+            snapshot_offset: part.snapshot_offset,
+            bytes: part.bytes,
+            checksum: u64::from(part.checksum),
+            relative_path: part.relative_path.display().to_string(),
         })
         .collect();
-    map.insert("basebackup_chunks".into(), JsonValue::Array(chunks));
 
-    if let Some(chunk) = manifest
+    if let Some(part) = manifest
         .chunks
         .iter()
-        .find(|chunk| chunk.snapshot_offset == snapshot_offset as u64)
+        .find(|part| part.snapshot_offset == snapshot_offset as u64)
     {
-        let bytes = std::fs::read(parts_root.join(&chunk.relative_path))
+        let bytes = std::fs::read(parts_root.join(&part.relative_path))
             .map_err(|err| Status::internal(err.to_string()))?;
         manifest
-            .verify_chunk_bytes(chunk, &bytes)
+            .verify_chunk_bytes(part, &bytes)
             .map_err(|err| Status::internal(err.to_string()))?;
-        map.insert(
-            "basebackup_chunk_ordinal".into(),
-            JsonValue::Number(chunk.ordinal as f64),
-        );
-        map.insert(
-            "basebackup_chunk_hex".into(),
-            JsonValue::String(hex::encode(bytes)),
-        );
+        chunk.basebackup_chunk_ordinal = Some(part.ordinal);
+        chunk.basebackup_chunk = Some(bytes);
     }
     Ok(())
 }
@@ -3380,17 +3344,38 @@ impl RedDb for GrpcRuntime {
                 .map_err(to_status)?
         };
 
-        let mut map = crate::json::Map::new();
-        map.insert("snapshot_available".into(), JsonValue::Bool(true));
-        map.insert("replica_id".into(), JsonValue::String(replica_id.clone()));
-        map.insert(
-            "slot_restart_lsn".into(),
-            JsonValue::Number(slot_restart_lsn as f64),
-        );
+        let mut chunk = reddb_wire::replication::BaseBackupChunk {
+            snapshot_available: true,
+            replica_id: replica_id.clone(),
+            slot_restart_lsn,
+            snapshot_lsn: Some(snapshot_lsn),
+            snapshot_token: None,
+            snapshot_total_bytes: None,
+            snapshot_offset: 0,
+            next_snapshot_offset: None,
+            snapshot_complete: false,
+            snapshot_path: None,
+            snapshot_chunk: None,
+            snapshot_hex: None,
+            metadata_binary: None,
+            metadata_json: None,
+            header_shadow: None,
+            metadata_shadow: None,
+            basebackup_available: false,
+            basebackup_timeline: None,
+            basebackup_start_lsn: None,
+            basebackup_checkpoint_lsn: None,
+            basebackup_snapshot_bytes: None,
+            basebackup_snapshot_checksum: None,
+            basebackup_manifest: None,
+            basebackup_chunks: Vec::new(),
+            basebackup_chunk_ordinal: None,
+            basebackup_chunk: None,
+        };
         if let Some(manifest) = &basebackup_manifest {
             if let Some(plan) = self.runtime.primary_replica_file_plan() {
-                insert_basebackup_snapshot_fields(
-                    &mut map,
+                attach_basebackup_snapshot_fields(
+                    &mut chunk,
                     manifest,
                     &plan.basebackup_dir(),
                     snapshot_offset,
@@ -3404,18 +3389,9 @@ impl RedDb for GrpcRuntime {
             // to the same byte stream it started.
             let snapshot_token = requested_snapshot_token
                 .unwrap_or_else(|| format!("snapshot:{replica_id}:{snapshot_lsn}:{}", bytes.len()));
-            map.insert(
-                "snapshot_token".into(),
-                JsonValue::String(snapshot_token.clone()),
-            );
-            map.insert(
-                "snapshot_total_bytes".into(),
-                JsonValue::Number(bytes.len() as f64),
-            );
-            map.insert(
-                "snapshot_path".into(),
-                JsonValue::String(path.display().to_string()),
-            );
+            chunk.snapshot_token = Some(snapshot_token);
+            chunk.snapshot_total_bytes = Some(bytes.len() as u64);
+            chunk.snapshot_path = Some(path.display().to_string());
 
             if let Some(max_bytes) = snapshot_max_bytes {
                 // Chunked, resumable transfer: serve [offset, offset+max_bytes)
@@ -3427,71 +3403,40 @@ impl RedDb for GrpcRuntime {
                     ));
                 }
                 let next_offset = snapshot_offset.saturating_add(max_bytes).min(bytes.len());
-                map.insert(
-                    "snapshot_offset".into(),
-                    JsonValue::Number(snapshot_offset as f64),
-                );
-                map.insert(
-                    "snapshot_chunk_hex".into(),
-                    JsonValue::String(hex::encode(&bytes[snapshot_offset..next_offset])),
-                );
-                map.insert(
-                    "next_snapshot_offset".into(),
-                    JsonValue::Number(next_offset as f64),
-                );
-                map.insert(
-                    "snapshot_complete".into(),
-                    JsonValue::Bool(next_offset == bytes.len()),
-                );
+                chunk.snapshot_offset = snapshot_offset as u64;
+                chunk.snapshot_chunk = Some(bytes[snapshot_offset..next_offset].to_vec());
+                chunk.next_snapshot_offset = Some(next_offset as u64);
+                chunk.snapshot_complete = next_offset == bytes.len();
             } else {
                 // Legacy whole-snapshot envelope (plus sidecars) for callers
                 // that do not opt into chunked transfer.
-                let snapshot_total = JsonValue::Number(bytes.len() as f64);
-                map.insert("snapshot_hex".into(), JsonValue::String(hex::encode(bytes)));
-                map.insert("snapshot_offset".into(), JsonValue::Number(0.0));
-                map.insert("next_snapshot_offset".into(), snapshot_total);
-                map.insert("snapshot_complete".into(), JsonValue::Bool(true));
+                chunk.snapshot_hex = Some(bytes);
+                chunk.snapshot_offset = 0;
+                chunk.next_snapshot_offset = chunk.snapshot_total_bytes;
+                chunk.snapshot_complete = true;
 
-                insert_snapshot_sidecar(
-                    &mut map,
-                    "metadata_binary_hex",
+                chunk.metadata_binary = read_snapshot_sidecar(
                     &crate::physical::PhysicalMetadataFile::metadata_binary_path_for(path),
                 )?;
-                insert_snapshot_sidecar(
-                    &mut map,
-                    "metadata_json_hex",
+                chunk.metadata_json = read_snapshot_sidecar(
                     &crate::physical::PhysicalMetadataFile::metadata_path_for(path),
                 )?;
 
                 let mut header_shadow = path.to_path_buf().into_os_string();
                 header_shadow.push("-hdr");
-                insert_snapshot_sidecar(
-                    &mut map,
-                    "header_shadow_hex",
-                    &std::path::PathBuf::from(header_shadow),
-                )?;
+                chunk.header_shadow =
+                    read_snapshot_sidecar(&std::path::PathBuf::from(header_shadow))?;
 
                 let mut metadata_shadow = path.to_path_buf().into_os_string();
                 metadata_shadow.push("-meta");
-                insert_snapshot_sidecar(
-                    &mut map,
-                    "metadata_shadow_hex",
-                    &std::path::PathBuf::from(metadata_shadow),
-                )?;
+                chunk.metadata_shadow =
+                    read_snapshot_sidecar(&std::path::PathBuf::from(metadata_shadow))?;
             }
         }
-        map.insert(
-            "snapshot_lsn".into(),
-            JsonValue::Number(snapshot_lsn as f64),
-        );
-
-        let payload_json = crate::json::to_string(&JsonValue::Object(map))
-            .map_err(|err| Status::internal(format!("encode replication snapshot: {err}")))?;
-        let chunk = reddb_wire::replication::BaseBackupChunk::decode_json(payload_json.as_bytes())
-            .map_err(|err| Status::internal(format!("validate replication snapshot: {err}")))?;
+        let payload = chunk.encode_json();
         Ok(Response::new(PayloadReply {
             ok: true,
-            payload: String::from_utf8(chunk.encode_json()).unwrap_or_else(|_| "{}".to_string()),
+            payload: String::from_utf8(payload).unwrap_or_else(|_| "{}".to_string()),
         }))
     }
 
