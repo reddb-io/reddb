@@ -6,6 +6,8 @@
 
 use serde_json::Value as JsonValue;
 
+use super::{BuildError, Frame, FrameBuilder, MessageKind};
+
 /// Methods RedWire v2.1 knows how to negotiate.
 pub const SUPPORTED_METHODS: &[&str] = &["bearer", "anonymous", "scram-sha-256", "oauth-jwt"];
 
@@ -214,6 +216,24 @@ pub fn build_hello_ack(
     serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
 }
 
+pub fn build_hello_ack_frame(
+    correlation_id: u64,
+    chosen_version: u8,
+    chosen_auth: &str,
+    server_features: u32,
+    topology: Option<&crate::topology::Topology>,
+) -> Result<Frame, BuildError> {
+    FrameBuilder::reply_to(correlation_id)
+        .kind(MessageKind::HelloAck)
+        .payload(build_hello_ack(
+            chosen_version,
+            chosen_auth,
+            server_features,
+            topology,
+        ))
+        .build()
+}
+
 pub fn build_auth_response_anonymous_payload() -> Vec<u8> {
     Vec::new()
 }
@@ -261,6 +281,23 @@ pub fn build_auth_ok_payload(
         JsonValue::Number(server_features.into()),
     );
     serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+}
+
+pub fn build_auth_ok_frame_from_payload(
+    correlation_id: u64,
+    payload: Vec<u8>,
+) -> Result<Frame, BuildError> {
+    FrameBuilder::reply_to(correlation_id)
+        .kind(MessageKind::AuthOk)
+        .payload(payload)
+        .build()
+}
+
+pub fn build_auth_fail_frame(correlation_id: u64, reason: &str) -> Result<Frame, BuildError> {
+    FrameBuilder::reply_to(correlation_id)
+        .kind(MessageKind::AuthFail)
+        .payload(build_auth_fail_payload(reason))
+        .build()
 }
 
 pub fn build_scram_auth_ok_payload(
@@ -559,6 +596,38 @@ mod tests {
 
         let fail = AuthFail::from_payload(&build_auth_fail_payload("nope")).unwrap();
         assert_eq!(fail.reason, "nope");
+    }
+
+    #[test]
+    fn handshake_frame_builders_pin_message_kinds() {
+        let hello_ack = build_hello_ack_frame(7, 1, "anonymous", 3, None).unwrap();
+        assert_eq!(hello_ack.kind, MessageKind::HelloAck);
+        assert_eq!(hello_ack.correlation_id, 7);
+        assert_eq!(
+            HelloAck::from_payload(&hello_ack.payload).unwrap().auth,
+            "anonymous"
+        );
+
+        let auth_ok =
+            build_auth_ok_frame_from_payload(8, build_auth_ok_payload("s1", "alice", "admin", 3))
+                .unwrap();
+        assert_eq!(auth_ok.kind, MessageKind::AuthOk);
+        assert_eq!(auth_ok.correlation_id, 8);
+        assert_eq!(
+            AuthOk::from_payload(&auth_ok.payload)
+                .unwrap()
+                .username
+                .as_deref(),
+            Some("alice")
+        );
+
+        let auth_fail = build_auth_fail_frame(9, "nope").unwrap();
+        assert_eq!(auth_fail.kind, MessageKind::AuthFail);
+        assert_eq!(auth_fail.correlation_id, 9);
+        assert_eq!(
+            AuthFail::from_payload(&auth_fail.payload).unwrap().reason,
+            "nope"
+        );
     }
 
     #[test]
