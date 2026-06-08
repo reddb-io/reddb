@@ -235,6 +235,13 @@ pub struct PhysicalCatalogSnapshot {
     pub stats_by_collection: BTreeMap<String, PhysicalCatalogCollectionStats>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalAnalyticalStorageConfig {
+    pub columnar: bool,
+    pub time_key: String,
+    pub order_by_key: Option<String>,
+}
+
 pub fn encode_physical_metadata_document_root_json(
     document: &PhysicalMetadataDocumentEnvelope,
     pretty: bool,
@@ -399,6 +406,19 @@ pub fn encode_physical_catalog_snapshot_json(
 pub fn decode_physical_catalog_snapshot_json(json: &str) -> RdbFileResult<PhysicalCatalogSnapshot> {
     let value = parse_json_value(json, "physical catalog snapshot")?;
     catalog_snapshot_from_json_value(&value)
+}
+
+pub fn encode_physical_analytical_storage_json(
+    config: &PhysicalAnalyticalStorageConfig,
+) -> RdbFileResult<String> {
+    Ok(analytical_storage_json_value(config).to_string())
+}
+
+pub fn decode_physical_analytical_storage_json(
+    json: &str,
+) -> RdbFileResult<PhysicalAnalyticalStorageConfig> {
+    let value = parse_json_value(json, "physical analytical storage")?;
+    analytical_storage_from_json_value(&value)
 }
 
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
@@ -967,6 +987,44 @@ fn catalog_snapshot_from_json_value(
         total_collections: json_usize_required(object, "total_collections")?,
         updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
         stats_by_collection,
+    })
+}
+
+fn analytical_storage_json_value(config: &PhysicalAnalyticalStorageConfig) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "columnar".to_string(),
+        serde_json::Value::Bool(config.columnar),
+    );
+    object.insert(
+        "time_key".to_string(),
+        serde_json::Value::String(config.time_key.clone()),
+    );
+    object.insert(
+        "order_by_key".to_string(),
+        config
+            .order_by_key
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn analytical_storage_from_json_value(
+    value: &serde_json::Value,
+) -> RdbFileResult<PhysicalAnalyticalStorageConfig> {
+    let object = expect_object(value, "physical analytical storage")?;
+    Ok(PhysicalAnalyticalStorageConfig {
+        columnar: object
+            .get("columnar")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        time_key: json_string_required(object, "time_key")?,
+        order_by_key: object
+            .get("order_by_key")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
     })
 }
 
@@ -1889,6 +1947,22 @@ mod tests {
         assert_eq!(
             decode_physical_catalog_snapshot_json(&json).unwrap(),
             catalog
+        );
+    }
+
+    #[test]
+    fn physical_analytical_storage_round_trips() {
+        let config = PhysicalAnalyticalStorageConfig {
+            columnar: true,
+            time_key: "ts".to_string(),
+            order_by_key: Some("tenant_id".to_string()),
+        };
+
+        let json = encode_physical_analytical_storage_json(&config).unwrap();
+        assert!(json.contains("\"columnar\""));
+        assert_eq!(
+            decode_physical_analytical_storage_json(&json).unwrap(),
+            config
         );
     }
 
