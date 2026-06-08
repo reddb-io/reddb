@@ -795,17 +795,26 @@ mod tests {
 
     #[test]
     fn derive_backup_root_handles_typical_prefixes() {
-        assert_eq!(derive_backup_root(""), "");
-        assert_eq!(derive_backup_root("snapshots/"), "");
-        assert_eq!(derive_backup_root("snapshots"), "");
+        assert_eq!(reddb_file::backup_root_from_snapshot_prefix(""), "");
         assert_eq!(
-            derive_backup_root("clusters/dev/snapshots/"),
+            reddb_file::backup_root_from_snapshot_prefix("snapshots/"),
+            ""
+        );
+        assert_eq!(
+            reddb_file::backup_root_from_snapshot_prefix("snapshots"),
+            ""
+        );
+        assert_eq!(
+            reddb_file::backup_root_from_snapshot_prefix("clusters/dev/snapshots/"),
             "clusters/dev/"
         );
         assert_eq!(
-            derive_backup_root("clusters/dev/snapshots"),
+            reddb_file::backup_root_from_snapshot_prefix("clusters/dev/snapshots"),
             "clusters/dev/"
         );
-        assert_eq!(derive_backup_root("clusters/dev/"), "clusters/dev/");
+        assert_eq!(
+            reddb_file::backup_root_from_snapshot_prefix("clusters/dev/"),
+            "clusters/dev/"
+        );
     }
 }
