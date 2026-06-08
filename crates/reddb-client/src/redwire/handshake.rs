@@ -8,8 +8,8 @@ use reddb_wire::redwire::handshake::{
     AuthFail, AuthOk, HelloAck,
 };
 
-use super::{io, Auth, ConnectOptions, SUPPORTED_VERSION};
-use reddb_wire::redwire::{Frame, MessageKind};
+use super::{io, Auth, ConnectOptions};
+use reddb_wire::redwire::{Frame, MessageKind, MAX_KNOWN_MINOR_VERSION};
 
 #[derive(Debug)]
 pub(super) enum HandshakeOutcome {
@@ -30,7 +30,7 @@ where
         Auth::Anonymous => vec!["anonymous", "bearer"],
     };
     let hello_bytes = build_hello_payload(
-        &[SUPPORTED_VERSION],
+        &[MAX_KNOWN_MINOR_VERSION],
         methods,
         0,
         opts.client_name.as_deref(),

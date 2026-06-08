@@ -150,6 +150,8 @@ fn redwire_startup_preface_lives_in_reddb_wire() {
     let wire = read(root.join("crates/reddb-wire/src/redwire/mod.rs"));
 
     for forbidden in [
+        "pub const MAGIC",
+        "pub const SUPPORTED_VERSION",
         "write_all(&[MAGIC, SUPPORTED_VERSION])",
         "write_all(&[reddb_wire::redwire::REDWIRE_MAGIC",
     ] {

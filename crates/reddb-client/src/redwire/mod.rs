@@ -51,12 +51,6 @@ use reddb_wire::redwire::{
     encode_key_payload, supported_client_preface,
 };
 
-/// Magic byte that identifies a RedWire connection on the shared port.
-pub const MAGIC: u8 = reddb_wire::redwire::REDWIRE_MAGIC;
-
-/// Highest minor protocol version this client implements.
-pub const SUPPORTED_VERSION: u8 = reddb_wire::redwire::MAX_KNOWN_MINOR_VERSION;
-
 /// Authentication credentials for the RedWire handshake.
 #[derive(Debug, Clone)]
 pub enum Auth {

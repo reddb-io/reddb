@@ -237,7 +237,7 @@ async fn scram_sha_256_end_to_end() {
 
     // Magic + minor version.
     socket
-        .write_all(&[reddb_client::redwire::MAGIC, 0x01])
+        .write_all(&reddb_wire::redwire::supported_client_preface())
         .await
         .unwrap();
 
