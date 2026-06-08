@@ -52,12 +52,6 @@ fn embedded_single_file_selected(options: &RedDBOptions) -> bool {
         && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile
 }
 
-fn fsync_parent_dir(path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = File::open(parent).and_then(|dir| dir.sync_all());
-    }
-}
-
 fn active_rebootstrap_matches_ready_marker(
     data_path: &Path,
     ready: &crate::replication::replica::ReplicaRebootstrapReady,
@@ -126,8 +120,7 @@ fn promote_ready_replica_rebootstrap(
     if !pending.exists() {
         if data_path.exists() {
             if active_rebootstrap_matches_ready_marker(data_path, &ready)? {
-                std::fs::remove_file(&marker)?;
-                fsync_parent_dir(&marker);
+                reddb_file::discard_ready_rebootstrap_marker(data_path)?;
                 return Ok(false);
             }
         }
@@ -151,23 +144,7 @@ fn promote_ready_replica_rebootstrap(
         )
     })?;
 
-    if let Some(parent) = data_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let previous = crate::replication::replica::rebootstrap_previous_path_for(data_path);
-    let _ = std::fs::remove_file(&previous);
-    if data_path.exists() {
-        std::fs::rename(data_path, &previous)?;
-        fsync_parent_dir(data_path);
-    }
-    std::fs::rename(&pending, data_path)?;
-    fsync_parent_dir(data_path);
-    std::fs::remove_file(&marker)?;
-    fsync_parent_dir(&marker);
-    let _ = std::fs::remove_dir_all(crate::replication::replica::rebootstrap_staging_root_for(
-        data_path,
-    ));
+    reddb_file::promote_rebootstrap_pending_database(data_path)?;
     Ok(true)
 }
 

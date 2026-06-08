@@ -231,13 +231,15 @@ pub use physical_metadata::{
 };
 
 pub use primary_replica::{
-    decode_rebootstrap_ready_marker_json, encode_rebootstrap_ready_marker_json,
-    read_rebootstrap_ready_marker, write_rebootstrap_ready_marker, BaseBackupChunkRef,
-    BaseBackupPlan, PrimaryReplicaBaseBackupManifest, PrimaryReplicaFilePlan,
-    PrimaryReplicaWalRecord, PrimaryReplicaWalSegment, PromotionCandidate, RejoinDecision,
-    RelayLogSegmentRef, ReplicaAck, ReplicaCatchupMode, ReplicaRebootstrapReadyMarker,
-    ReplicaRelayLogManifest, ReplicaRelayLogRecord, ReplicaRelayLogSegment, ReplicationDurability,
-    ReplicationSlot, ReplicationSlotCatalog, ReplicationSlotInvalidationCause, TimelineHistory,
+    cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,
+    discard_ready_rebootstrap_marker, encode_rebootstrap_ready_marker_json,
+    promote_rebootstrap_pending_database, read_rebootstrap_ready_marker,
+    write_rebootstrap_ready_marker, BaseBackupChunkRef, BaseBackupPlan,
+    PrimaryReplicaBaseBackupManifest, PrimaryReplicaFilePlan, PrimaryReplicaWalRecord,
+    PrimaryReplicaWalSegment, PromotionCandidate, RejoinDecision, RelayLogSegmentRef, ReplicaAck,
+    ReplicaCatchupMode, ReplicaRebootstrapReadyMarker, ReplicaRelayLogManifest,
+    ReplicaRelayLogRecord, ReplicaRelayLogSegment, ReplicationDurability, ReplicationSlot,
+    ReplicationSlotCatalog, ReplicationSlotInvalidationCause, TimelineHistory,
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};

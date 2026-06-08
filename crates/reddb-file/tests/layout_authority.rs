@@ -1729,6 +1729,50 @@ fn server_uses_reddb_file_for_replica_rebootstrap_paths() {
 }
 
 #[test]
+fn server_uses_reddb_file_for_replica_rebootstrap_lifecycle() {
+    let root = repo_root();
+    let lifecycle =
+        read(root.join("crates/reddb-server/src/storage/unified/devx/reddb/impl_core_a.rs"));
+    let listener = read(root.join("crates/reddb-server/src/wire/listener.rs"));
+    let grpc = read(root.join("crates/reddb-server/src/grpc.rs"));
+
+    for forbidden in [
+        "std::fs::rename(data_path",
+        "std::fs::rename(&pending",
+        "std::fs::remove_file(&marker)",
+        "std::fs::remove_dir_all(crate::replication::replica::rebootstrap_staging_root_for",
+    ] {
+        assert!(
+            !lifecycle.contains(forbidden),
+            "replica rebootstrap promotion belongs in reddb-file, found {forbidden:?}"
+        );
+    }
+    for required in [
+        "reddb_file::discard_ready_rebootstrap_marker",
+        "reddb_file::promote_rebootstrap_pending_database",
+    ] {
+        assert!(
+            lifecycle.contains(required),
+            "replica rebootstrap lifecycle should route through {required}"
+        );
+    }
+
+    for text in [listener, grpc] {
+        assert!(
+            text.contains("reddb_file::cleanup_rebootstrap_artifacts(data_path)"),
+            "test cleanup should route replica rebootstrap artifact cleanup through reddb-file"
+        );
+        assert!(
+            !text.contains("rebootstrap_pending_path_for(data_path)")
+                && !text.contains("rebootstrap_ready_marker_path_for(data_path)")
+                && !text.contains("rebootstrap_intent_log_path_for(data_path)")
+                && !text.contains("rebootstrap_previous_path_for(data_path)"),
+            "test cleanup should not enumerate replica rebootstrap sidecars in server"
+        );
+    }
+}
+
+#[test]
 fn server_uses_reddb_file_for_replica_basebackup_chunk_files() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/replication/replica.rs"));

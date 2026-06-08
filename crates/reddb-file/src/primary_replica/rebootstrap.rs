@@ -76,6 +76,49 @@ pub fn read_rebootstrap_ready_marker(
     Ok(ready)
 }
 
+pub fn cleanup_rebootstrap_artifacts(data_path: impl AsRef<Path>) {
+    let data_path = data_path.as_ref();
+    let _ = fs::remove_dir_all(crate::layout::rebootstrap_staging_root(data_path));
+    let _ = fs::remove_file(crate::layout::rebootstrap_pending_path(data_path));
+    let _ = fs::remove_file(crate::layout::rebootstrap_ready_marker_path(data_path));
+    let _ = fs::remove_file(crate::layout::rebootstrap_intent_log_path(data_path));
+    let _ = fs::remove_file(crate::layout::rebootstrap_previous_path(data_path));
+}
+
+pub fn discard_ready_rebootstrap_marker(data_path: impl AsRef<Path>) -> RdbFileResult<()> {
+    let marker_path = crate::layout::rebootstrap_ready_marker_path(data_path.as_ref());
+    fs::remove_file(&marker_path)?;
+    fsync_parent_dir(&marker_path);
+    Ok(())
+}
+
+pub fn promote_rebootstrap_pending_database(data_path: impl AsRef<Path>) -> RdbFileResult<()> {
+    let data_path = data_path.as_ref();
+    let pending_path = crate::layout::rebootstrap_pending_path(data_path);
+    let previous_path = crate::layout::rebootstrap_previous_path(data_path);
+
+    if let Some(parent) = data_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let _ = fs::remove_file(&previous_path);
+    if data_path.exists() {
+        fs::rename(data_path, &previous_path)?;
+        fsync_parent_dir(data_path);
+    }
+    fs::rename(&pending_path, data_path)?;
+    fsync_parent_dir(data_path);
+    discard_ready_rebootstrap_marker(data_path)?;
+    let _ = fs::remove_dir_all(crate::layout::rebootstrap_staging_root(data_path));
+    Ok(())
+}
+
+fn fsync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +168,82 @@ mod tests {
         )
         .unwrap();
         assert!(read_rebootstrap_ready_marker(&data_path).is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cleanup_rebootstrap_artifacts_removes_all_sidecars() {
+        let root = std::env::temp_dir().join(format!(
+            "reddb-file-rebootstrap-cleanup-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let data_path = root.join("main.rdb");
+        let staging_root = crate::layout::rebootstrap_staging_root(&data_path);
+        fs::create_dir_all(&staging_root).unwrap();
+        fs::write(
+            crate::layout::rebootstrap_pending_path(&data_path),
+            b"pending",
+        )
+        .unwrap();
+        fs::write(
+            crate::layout::rebootstrap_ready_marker_path(&data_path),
+            b"ready",
+        )
+        .unwrap();
+        fs::write(
+            crate::layout::rebootstrap_intent_log_path(&data_path),
+            b"intent",
+        )
+        .unwrap();
+        fs::write(
+            crate::layout::rebootstrap_previous_path(&data_path),
+            b"previous",
+        )
+        .unwrap();
+
+        cleanup_rebootstrap_artifacts(&data_path);
+
+        assert!(!staging_root.exists());
+        assert!(!crate::layout::rebootstrap_pending_path(&data_path).exists());
+        assert!(!crate::layout::rebootstrap_ready_marker_path(&data_path).exists());
+        assert!(!crate::layout::rebootstrap_intent_log_path(&data_path).exists());
+        assert!(!crate::layout::rebootstrap_previous_path(&data_path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn promote_rebootstrap_pending_database_swaps_pending_and_cleans_ready_state() {
+        let root = std::env::temp_dir().join(format!(
+            "reddb-file-rebootstrap-promote-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let data_path = root.join("main.rdb");
+        fs::write(&data_path, b"old").unwrap();
+        fs::write(crate::layout::rebootstrap_pending_path(&data_path), b"new").unwrap();
+        fs::write(
+            crate::layout::rebootstrap_ready_marker_path(&data_path),
+            b"ready",
+        )
+        .unwrap();
+        let staging_root = crate::layout::rebootstrap_staging_root(&data_path);
+        fs::create_dir_all(&staging_root).unwrap();
+
+        promote_rebootstrap_pending_database(&data_path).unwrap();
+
+        assert_eq!(fs::read(&data_path).unwrap(), b"new");
+        assert_eq!(
+            fs::read(crate::layout::rebootstrap_previous_path(&data_path)).unwrap(),
+            b"old"
+        );
+        assert!(!crate::layout::rebootstrap_pending_path(&data_path).exists());
+        assert!(!crate::layout::rebootstrap_ready_marker_path(&data_path).exists());
+        assert!(!staging_root.exists());
 
         let _ = fs::remove_dir_all(root);
     }
