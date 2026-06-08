@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::replication::cdc::ChangeRecord;
 use crate::storage::backend::{BackendError, RemoteBackend};
 pub use reddb_file::{
+    is_archived_wal_segment_key, is_backup_manifest_sidecar_key, parse_archived_wal_segment_key,
     snapshot_manifest_key, unified_manifest_key, wal_segment_manifest_key, BackupHead,
     SnapshotManifest, UnifiedManifest, UnifiedSnapshotEntry, UnifiedWalEntry, WalSegmentManifest,
     WalSegmentMeta,
@@ -107,17 +108,7 @@ impl WalArchiver {
         let keys = self.backend.list(&self.prefix)?;
         let mut deleted = 0usize;
         for key in keys {
-            let path = PathBuf::from(&key);
-            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Some((start, _end)) = file_name
-                .strip_suffix(".wal")
-                .and_then(|base| base.split_once('-'))
-            else {
-                continue;
-            };
-            let Ok(lsn_start) = start.parse::<u64>() else {
+            let Some((lsn_start, _)) = parse_archived_wal_segment_key(&key) else {
                 continue;
             };
             if lsn_start < lsn {
@@ -245,7 +236,7 @@ fn collect_unified_snapshots(
     for key in keys {
         // Skip sidecars themselves — we only want the snapshot
         // payload keys, then we read each one's sidecar for metadata.
-        if key.ends_with(".manifest.json") {
+        if is_backup_manifest_sidecar_key(&key) {
             continue;
         }
         let Some(manifest) = load_snapshot_manifest(backend, &key)? else {
@@ -271,10 +262,10 @@ fn collect_unified_wal_segments(
     let keys = backend.list(wal_prefix)?;
     let mut out = Vec::new();
     for key in keys {
-        if key.ends_with(".manifest.json") {
+        if is_backup_manifest_sidecar_key(&key) {
             continue;
         }
-        if !key.ends_with(".wal") {
+        if !is_archived_wal_segment_key(&key) {
             continue;
         }
         let Some(manifest) = load_wal_segment_manifest(backend, &key)? else {

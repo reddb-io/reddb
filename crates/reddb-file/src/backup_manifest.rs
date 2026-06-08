@@ -7,7 +7,7 @@
 use serde_json::{Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const BACKUP_MANIFEST_FORMAT_VERSION: u32 = 2;
 
@@ -146,6 +146,10 @@ pub fn wal_segment_manifest_key(segment_key: &str) -> String {
     format!("{segment_key}.manifest.json")
 }
 
+pub fn is_backup_manifest_sidecar_key(key: &str) -> bool {
+    key.ends_with(".manifest.json")
+}
+
 pub fn unified_manifest_key(prefix: &str) -> String {
     let trimmed = prefix.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -157,6 +161,17 @@ pub fn unified_manifest_key(prefix: &str) -> String {
 
 pub fn archived_wal_segment_key(prefix: &str, lsn_start: u64, lsn_end: u64) -> String {
     format!("{prefix}{lsn_start:012}-{lsn_end:012}.wal")
+}
+
+pub fn parse_archived_wal_segment_key(key: &str) -> Option<(u64, u64)> {
+    let path = PathBuf::from(key);
+    let file_name = path.file_name()?.to_str()?;
+    let (start, end) = file_name.strip_suffix(".wal")?.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?))
+}
+
+pub fn is_archived_wal_segment_key(key: &str) -> bool {
+    parse_archived_wal_segment_key(key).is_some()
 }
 
 pub fn encode_backup_head_json(head: &BackupHead) -> io::Result<Vec<u8>> {
@@ -657,6 +672,20 @@ mod tests {
         assert_eq!(
             archived_wal_segment_key("wal/", 10, 20),
             "wal/000000000010-000000000020.wal"
+        );
+        assert_eq!(
+            parse_archived_wal_segment_key("wal/000000000010-000000000020.wal"),
+            Some((10, 20))
+        );
+        assert!(is_archived_wal_segment_key(
+            "wal/000000000010-000000000020.wal"
+        ));
+        assert!(is_backup_manifest_sidecar_key(
+            "wal/000000000010-000000000020.wal.manifest.json"
+        ));
+        assert_eq!(
+            parse_archived_wal_segment_key("wal/not-a-segment.wal"),
+            None
         );
     }
 
