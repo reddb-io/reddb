@@ -16,7 +16,7 @@ use crate::auth::store::AuthStore;
 use crate::runtime::RedDBRuntime;
 
 use super::session::handle_session;
-use super::REDWIRE_MAGIC;
+use super::validate_startup_magic;
 
 #[derive(Clone)]
 pub struct RedWireConfig {
@@ -156,7 +156,7 @@ pub async fn start_redwire_tls_listener(
 
 /// In-process demux entry (issue #933): serve one RedWire connection the
 /// protocol router classified on the shared port. The router peeks — it
-/// does not consume — so the `0xFE` magic is still on the wire and is
+/// does not consume — so the RedWire startup magic is still on the wire and is
 /// read here exactly as in the standalone path. The auth store is pulled
 /// off the runtime so bearer tokens minted over HTTP are honoured here too.
 pub async fn handle_router_connection(
@@ -171,7 +171,7 @@ pub async fn handle_router_connection(
 /// then run the session. This is the seam (issue #932, ADR 0036) that
 /// lets a non-socket transport — the WebSocket data channel (#935) —
 /// reuse the exact standalone preamble: the browser sends the same
-/// `0xFE` magic as native drivers, and the WS edge peels it here before
+/// RedWire startup magic as native drivers, and the WS edge peels it here before
 /// handing the stream to the transport-agnostic session.
 pub(crate) async fn handle_session_consume_magic<S>(
     mut stream: S,
@@ -184,12 +184,7 @@ where
 {
     let mut magic = [0u8; 1];
     stream.read_exact(&mut magic).await?;
-    if magic[0] != REDWIRE_MAGIC {
-        return Err(io::Error::other(format!(
-            "redwire: client did not present magic byte (got 0x{:02x})",
-            magic[0]
-        )));
-    }
+    validate_startup_magic(magic[0]).map_err(io::Error::other)?;
     handle_session(stream, runtime, auth_store, oauth).await
 }
 
@@ -212,12 +207,7 @@ async fn handle_standalone_unix(
 ) -> io::Result<()> {
     let mut magic = [0u8; 1];
     stream.read_exact(&mut magic).await?;
-    if magic[0] != REDWIRE_MAGIC {
-        return Err(io::Error::other(format!(
-            "redwire: client did not present magic byte (got 0x{:02x})",
-            magic[0]
-        )));
-    }
+    validate_startup_magic(magic[0]).map_err(io::Error::other)?;
     handle_session(stream, runtime, None, None).await
 }
 
@@ -230,11 +220,6 @@ where
 {
     let mut magic = [0u8; 1];
     stream.read_exact(&mut magic).await?;
-    if magic[0] != REDWIRE_MAGIC {
-        return Err(io::Error::other(format!(
-            "redwire: client did not present magic byte (got 0x{:02x})",
-            magic[0]
-        )));
-    }
+    validate_startup_magic(magic[0]).map_err(io::Error::other)?;
     handle_session(stream, runtime, None, None).await
 }

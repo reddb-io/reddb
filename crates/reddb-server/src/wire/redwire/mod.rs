@@ -26,7 +26,7 @@ pub use listener::{
 };
 
 pub use reddb_wire::redwire::{
-    decode_frame, encode_frame, BuildError, Flags, Frame, FrameBuilder, FrameError, MessageKind,
-    DEFAULT_REDWIRE_PORT, FRAME_HEADER_SIZE, MAX_FRAME_SIZE, MAX_KNOWN_MINOR_VERSION,
-    REDWIRE_MAGIC,
+    decode_frame, encode_frame, validate_minor_version, validate_startup_magic, BuildError, Flags,
+    Frame, FrameBuilder, FrameError, MessageKind, DEFAULT_REDWIRE_PORT, FRAME_HEADER_SIZE,
+    MAX_FRAME_SIZE, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
 };

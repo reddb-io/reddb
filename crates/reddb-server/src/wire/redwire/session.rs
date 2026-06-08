@@ -27,6 +27,7 @@ use reddb_wire::redwire::operations::{
 };
 
 use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
+use super::validate_minor_version;
 use reddb_wire::redwire::handshake::{build_auth_fail_payload, build_hello_ack, Hello};
 use reddb_wire::redwire::{
     decode_frame, encode_frame, frame_len_from_header, Frame, FrameBuilder, MessageDirection,
@@ -673,7 +674,7 @@ where
     let mut minor_buf = [0u8; 1];
     stream.read_exact(&mut minor_buf).await?;
     let minor = minor_buf[0];
-    if minor > MAX_KNOWN_MINOR_VERSION {
+    if validate_minor_version(minor).is_err() {
         // Future client speaking a version we don't know — refuse
         // immediately. We do not send a frame because the client
         // hasn't agreed on the framing version yet.

@@ -107,9 +107,9 @@ impl Default for ConnStringLimits {
 
 /// Normalised target produced by [`parse`].
 ///
-/// Variants intentionally mirror the existing `drivers/rust` `Target`
-/// shape so the future consolidation slice is a re-export, not a
-/// behaviour change.
+/// Variants intentionally mirror the public Rust client target shape
+/// so callers can keep a thin compatibility layer without duplicating
+/// parser behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionTarget {
     /// `memory://` — ephemeral, in-memory backend.
