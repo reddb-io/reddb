@@ -36,8 +36,10 @@ pub mod wal_record;
 pub mod zone_map;
 
 pub use backup_manifest::{
-    archived_wal_segment_key, decode_archived_logical_wal_records, decode_backup_head_json,
-    decode_snapshot_manifest_json, decode_unified_manifest_json, decode_wal_segment_manifest_json,
+    archived_snapshot_key, archived_wal_segment_key, backup_head_key,
+    backup_root_from_snapshot_prefix, backup_snapshot_prefix, backup_wal_prefix,
+    decode_archived_logical_wal_records, decode_backup_head_json, decode_snapshot_manifest_json,
+    decode_unified_manifest_json, decode_wal_segment_manifest_json,
     encode_archived_logical_wal_records, encode_backup_head_json, encode_snapshot_manifest_json,
     encode_unified_manifest_json, encode_wal_segment_manifest_json, is_archived_wal_segment_key,
     is_backup_manifest_sidecar_key, parse_archived_wal_segment_key, sha256_bytes_hex,
