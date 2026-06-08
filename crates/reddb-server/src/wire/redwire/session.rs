@@ -24,7 +24,7 @@ use reddb_wire::query_with_params::{
 };
 use reddb_wire::redwire::operations::{
     decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
-    encode_bulk_ok_payload_from_json_ids_bytes, encode_delete_ok_payload,
+    encode_bulk_ok_payload_from_json_id_literals, encode_delete_ok_payload,
     encode_get_result_payload, encode_query_result_summary_payload,
 };
 
@@ -1284,8 +1284,10 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                 Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
             }
         }
-        let ids = serde_json::to_vec(&JsonValue::Array(ids)).unwrap_or_default();
-        let payload = encode_bulk_ok_payload_from_json_ids_bytes(affected, &ids);
+        let payload = encode_bulk_ok_payload_from_json_id_literals(
+            affected,
+            ids.iter().map(|id| id.to_string()),
+        );
         return build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload);
     }
 

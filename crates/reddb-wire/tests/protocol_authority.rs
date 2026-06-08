@@ -361,6 +361,7 @@ fn redwire_json_operation_payloads_live_in_reddb_wire() {
         "out.insert(\"ids\"",
         "out.insert(\"ok\"",
         "out.insert(\"found\"",
+        "JsonValue::Array(ids)",
     ] {
         assert!(
             !server.contains(forbidden),
@@ -372,7 +373,7 @@ fn redwire_json_operation_payloads_live_in_reddb_wire() {
         "decode_get_payload",
         "decode_delete_payload",
         "encode_query_result_summary_payload",
-        "encode_bulk_ok_payload_from_json_ids_bytes",
+        "encode_bulk_ok_payload_from_json_id_literals",
         "encode_get_result_payload",
         "encode_delete_ok_payload",
     ] {
