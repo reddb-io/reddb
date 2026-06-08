@@ -1,8 +1,6 @@
 //! Replica-side replication: connects to primary, consumes WAL records.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -96,15 +94,12 @@ pub fn stage_basebackup_snapshot_chunk(
 
     let chunk_ordinal = match (payload.basebackup_chunk_ordinal, &payload.basebackup_chunk) {
         (Some(ordinal), Some(bytes)) => {
-            let chunk = manifest
-                .chunks
-                .iter()
-                .find(|chunk| chunk.ordinal == ordinal)
-                .ok_or(ReplicaBaseBackupError::InvalidField(
+            if !manifest.chunks.iter().any(|chunk| chunk.ordinal == ordinal) {
+                return Err(ReplicaBaseBackupError::InvalidField(
                     "basebackup_chunk_ordinal",
-                ))?;
-            manifest.verify_chunk_bytes(chunk, &bytes)?;
-            write_chunk_atomically(parts_root.as_ref().join(&chunk.relative_path), &bytes)?;
+                ));
+            }
+            manifest.stage_chunk_part(parts_root.as_ref(), ordinal, bytes)?;
             Some(ordinal)
         }
         (None, None) => None,
@@ -128,22 +123,9 @@ pub fn recover_staged_basebackup_chunks(
     manifest: &reddb_file::PrimaryReplicaBaseBackupManifest,
     parts_root: impl AsRef<Path>,
 ) -> Result<std::collections::BTreeSet<u32>, ReplicaBaseBackupError> {
-    let parts_root = parts_root.as_ref();
-    let mut recovered = std::collections::BTreeSet::new();
-    for chunk in &manifest.chunks {
-        let path = parts_root.join(&chunk.relative_path);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err.into()),
-        };
-        if manifest.verify_chunk_bytes(chunk, &bytes).is_ok() {
-            recovered.insert(chunk.ordinal);
-        } else {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-    Ok(recovered)
+    manifest
+        .recover_staged_chunk_parts(parts_root)
+        .map_err(Into::into)
 }
 
 pub fn rebootstrap_staging_root_for(data_path: &Path) -> PathBuf {
@@ -177,29 +159,6 @@ pub fn read_rebootstrap_ready_marker(
     data_path: &Path,
 ) -> Result<ReplicaRebootstrapReady, ReplicaBaseBackupError> {
     reddb_file::read_rebootstrap_ready_marker(data_path).map_err(Into::into)
-}
-
-fn write_chunk_atomically(path: PathBuf, bytes: &[u8]) -> Result<(), ReplicaBaseBackupError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = reddb_file::layout::atomic_temp_path(&path);
-    {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, &path)?;
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
-    Ok(())
 }
 
 impl ReplicaReplication {

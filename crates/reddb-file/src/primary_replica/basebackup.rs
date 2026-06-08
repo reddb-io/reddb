@@ -170,6 +170,48 @@ impl PrimaryReplicaBaseBackupManifest {
         self.read_snapshot_parts(root).map(|_| ())
     }
 
+    pub fn stage_chunk_part(
+        &self,
+        root: impl AsRef<Path>,
+        ordinal: u32,
+        bytes: &[u8],
+    ) -> RdbFileResult<()> {
+        let chunk = self
+            .chunks
+            .iter()
+            .find(|chunk| chunk.ordinal == ordinal)
+            .ok_or_else(|| {
+                RdbFileError::InvalidOperation(format!(
+                    "base backup chunk ordinal {ordinal} not found in manifest"
+                ))
+            })?;
+        self.verify_chunk_bytes(chunk, bytes)?;
+        write_bytes_atomically(&root.as_ref().join(&chunk.relative_path), bytes)
+    }
+
+    pub fn recover_staged_chunk_parts(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> RdbFileResult<std::collections::BTreeSet<u32>> {
+        self.validate()?;
+        let root = root.as_ref();
+        let mut recovered = std::collections::BTreeSet::new();
+        for chunk in &self.chunks {
+            let path = root.join(&chunk.relative_path);
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            };
+            if self.verify_chunk_bytes(chunk, &bytes).is_ok() {
+                recovered.insert(chunk.ordinal);
+            } else {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(recovered)
+    }
+
     pub fn read_snapshot_parts(&self, root: impl AsRef<Path>) -> RdbFileResult<Vec<u8>> {
         self.validate()?;
         let root = root.as_ref();
