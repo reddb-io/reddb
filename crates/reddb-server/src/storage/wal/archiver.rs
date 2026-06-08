@@ -466,19 +466,17 @@ fn read_json_bytes(
 }
 
 fn temp_json_path(prefix: &str, start: Option<u64>, end: Option<u64>) -> PathBuf {
-    let suffix = match (start, end) {
-        (Some(start), Some(end)) => format!("-{start}-{end}"),
-        _ => String::new(),
-    };
-    std::env::temp_dir().join(format!(
-        "{prefix}-{}{}-{}.json",
+    reddb_file::layout::backup_temp_json_path(
+        &std::env::temp_dir(),
+        prefix,
         std::process::id(),
-        suffix,
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
-    ))
+            .as_nanos(),
+        start,
+        end,
+    )
 }
 
 #[cfg(test)]
