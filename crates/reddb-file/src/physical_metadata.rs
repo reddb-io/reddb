@@ -254,6 +254,15 @@ pub struct PhysicalSubscriptionDescriptor {
     pub all_tenants: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PhysicalAnalyticsViewDescriptor {
+    pub output: String,
+    pub algorithm: Option<String>,
+    pub resolution: Option<f64>,
+    pub max_iterations: Option<i64>,
+    pub tolerance: Option<f64>,
+}
+
 pub fn encode_physical_metadata_document_root_json(
     document: &PhysicalMetadataDocumentEnvelope,
     pretty: bool,
@@ -444,6 +453,19 @@ pub fn decode_physical_subscription_descriptor_json(
 ) -> RdbFileResult<PhysicalSubscriptionDescriptor> {
     let value = parse_json_value(json, "physical subscription descriptor")?;
     subscription_descriptor_from_json_value(&value)
+}
+
+pub fn encode_physical_analytics_view_descriptor_json(
+    view: &PhysicalAnalyticsViewDescriptor,
+) -> RdbFileResult<String> {
+    Ok(analytics_view_descriptor_json_value(view).to_string())
+}
+
+pub fn decode_physical_analytics_view_descriptor_json(
+    json: &str,
+) -> RdbFileResult<PhysicalAnalyticsViewDescriptor> {
+    let value = parse_json_value(json, "physical analytics view descriptor")?;
+    analytics_view_descriptor_from_json_value(&value)
 }
 
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
@@ -1127,6 +1149,45 @@ fn subscription_descriptor_from_json_value(
             .get("all_tenants")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+    })
+}
+
+fn analytics_view_descriptor_json_value(
+    view: &PhysicalAnalyticsViewDescriptor,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "output".to_string(),
+        serde_json::Value::String(view.output.clone()),
+    );
+    object.insert(
+        "algorithm".to_string(),
+        view.algorithm
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert("resolution".to_string(), optional_f64_json(view.resolution));
+    object.insert(
+        "max_iterations".to_string(),
+        view.max_iterations
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert("tolerance".to_string(), optional_f64_json(view.tolerance));
+    serde_json::Value::Object(object)
+}
+
+fn analytics_view_descriptor_from_json_value(
+    value: &serde_json::Value,
+) -> RdbFileResult<PhysicalAnalyticsViewDescriptor> {
+    let object = expect_object(value, "physical analytics view descriptor")?;
+    Ok(PhysicalAnalyticsViewDescriptor {
+        output: json_string_required(object, "output")?,
+        algorithm: optional_string_field(object, "algorithm")?,
+        resolution: optional_f64_field(object, "resolution")?,
+        max_iterations: optional_i64_field(object, "max_iterations")?,
+        tolerance: optional_f64_field(object, "tolerance")?,
     })
 }
 
@@ -1890,6 +1951,45 @@ fn json_usize_value(value: &serde_json::Value) -> RdbFileResult<usize> {
         .ok_or_else(|| invalid("invalid usize value"))
 }
 
+fn optional_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Option<String>> {
+    match object.get(key) {
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(_) => Err(invalid(format!("field '{key}' must be a string or null"))),
+    }
+}
+
+fn optional_f64_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Option<f64>> {
+    match object.get(key) {
+        Some(serde_json::Value::Number(value)) => value
+            .as_f64()
+            .ok_or_else(|| invalid(format!("field '{key}' must be a finite number")))
+            .map(Some),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(_) => Err(invalid(format!("field '{key}' must be a number or null"))),
+    }
+}
+
+fn optional_i64_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Option<i64>> {
+    match object.get(key) {
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .ok_or_else(|| invalid(format!("field '{key}' must be an integer")))
+            .map(Some),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(_) => Err(invalid(format!("field '{key}' must be an integer or null"))),
+    }
+}
+
 fn json_u64(value: u64) -> serde_json::Value {
     serde_json::Value::String(value.to_string())
 }
@@ -1900,6 +2000,13 @@ fn json_u128(value: u128) -> serde_json::Value {
 
 fn json_usize(value: usize) -> serde_json::Value {
     serde_json::Value::Number((value as u64).into())
+}
+
+fn optional_f64_json(value: Option<f64>) -> serde_json::Value {
+    value
+        .and_then(serde_json::Number::from_f64)
+        .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn string_array_json(values: &[String]) -> serde_json::Value {
@@ -2086,6 +2193,24 @@ mod tests {
         assert_eq!(
             decode_physical_subscription_descriptor_json(&json).unwrap(),
             subscription
+        );
+    }
+
+    #[test]
+    fn physical_analytics_view_descriptor_round_trips() {
+        let view = PhysicalAnalyticsViewDescriptor {
+            output: "communities".to_string(),
+            algorithm: Some("louvain".to_string()),
+            resolution: Some(1.25),
+            max_iterations: Some(42),
+            tolerance: Some(0.0001),
+        };
+
+        let json = encode_physical_analytics_view_descriptor_json(&view).unwrap();
+        assert!(json.contains("\"max_iterations\""));
+        assert_eq!(
+            decode_physical_analytics_view_descriptor_json(&json).unwrap(),
+            view
         );
     }
 
