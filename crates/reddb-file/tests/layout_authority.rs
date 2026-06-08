@@ -383,6 +383,10 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub fn native_store_magic_matches",
         "pub fn encode_native_entity_record_frame",
         "pub fn decode_native_entity_record_frame",
+        "pub fn encode_native_metadata_overflow_header",
+        "pub fn decode_native_metadata_overflow_header",
+        "pub fn encode_native_metadata_overflow_continuation_header",
+        "pub fn decode_native_metadata_overflow_continuation_header",
         "pub fn append_native_store_crc32_footer",
         "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
@@ -433,6 +437,7 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         let text = read(&path);
         for forbidden in [
             "ENTITY_RECORD_MAGIC",
+            "METADATA_OVERFLOW_MAGIC",
             "const ENTITY_RECORD_MAGIC",
             "const METADATA_OVERFLOW_MAGIC",
             "Invalid magic bytes - expected RDST",
@@ -488,6 +493,10 @@ fn server_does_not_redeclare_native_store_file_contracts() {
     for required in [
         "reddb_file::encode_native_entity_record_frame",
         "reddb_file::decode_native_entity_record_frame",
+        "reddb_file::encode_native_metadata_overflow_header",
+        "reddb_file::decode_native_metadata_overflow_header",
+        "reddb_file::encode_native_metadata_overflow_continuation_header",
+        "reddb_file::decode_native_metadata_overflow_continuation_header",
     ] {
         assert!(
             impl_pages.contains(required),

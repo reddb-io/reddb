@@ -36,11 +36,26 @@ pub const NATIVE_BLOB_MAGIC: &[u8; 4] = b"RDBL";
 pub const NATIVE_MANIFEST_SAMPLE_LIMIT: usize = 16;
 pub const ENTITY_RECORD_MAGIC: &[u8; 4] = b"RER1";
 pub const METADATA_OVERFLOW_MAGIC: &[u8; 4] = b"RDM3";
+pub const METADATA_OVERFLOW_HEADER_BYTES: usize = 16;
+pub const METADATA_OVERFLOW_CONTINUATION_HEADER_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeEntityRecordFrame<'a> {
     pub entity: &'a [u8],
     pub metadata: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeMetadataOverflowHeader {
+    pub format_version: u32,
+    pub total_payload_bytes: u32,
+    pub next_overflow_page_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeMetadataOverflowContinuationHeader {
+    pub next_overflow_page_id: u32,
+    pub chunk_bytes: u32,
 }
 
 pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
@@ -84,6 +99,68 @@ pub fn decode_native_entity_record_frame(
     )?;
 
     Ok(Some(NativeEntityRecordFrame { entity, metadata }))
+}
+
+pub fn encode_native_metadata_overflow_header(
+    out: &mut [u8],
+    header: NativeMetadataOverflowHeader,
+) -> RdbFileResult<()> {
+    if out.len() < METADATA_OVERFLOW_HEADER_BYTES {
+        return Err(RdbFileError::InvalidOperation(
+            "metadata overflow header buffer too small".to_string(),
+        ));
+    }
+    out[0..4].copy_from_slice(METADATA_OVERFLOW_MAGIC);
+    out[4..8].copy_from_slice(&header.format_version.to_le_bytes());
+    out[8..12].copy_from_slice(&header.total_payload_bytes.to_le_bytes());
+    out[12..16].copy_from_slice(&header.next_overflow_page_id.to_le_bytes());
+    Ok(())
+}
+
+pub fn decode_native_metadata_overflow_header(
+    data: &[u8],
+) -> RdbFileResult<Option<NativeMetadataOverflowHeader>> {
+    if data.len() < 4 || &data[..4] != METADATA_OVERFLOW_MAGIC {
+        return Ok(None);
+    }
+    if data.len() < METADATA_OVERFLOW_HEADER_BYTES {
+        return Err(RdbFileError::InvalidOperation(
+            "truncated metadata overflow header".to_string(),
+        ));
+    }
+    Ok(Some(NativeMetadataOverflowHeader {
+        format_version: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+        total_payload_bytes: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+        next_overflow_page_id: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+    }))
+}
+
+pub fn encode_native_metadata_overflow_continuation_header(
+    out: &mut [u8],
+    header: NativeMetadataOverflowContinuationHeader,
+) -> RdbFileResult<()> {
+    if out.len() < METADATA_OVERFLOW_CONTINUATION_HEADER_BYTES {
+        return Err(RdbFileError::InvalidOperation(
+            "metadata overflow continuation header buffer too small".to_string(),
+        ));
+    }
+    out[0..4].copy_from_slice(&header.next_overflow_page_id.to_le_bytes());
+    out[4..8].copy_from_slice(&header.chunk_bytes.to_le_bytes());
+    Ok(())
+}
+
+pub fn decode_native_metadata_overflow_continuation_header(
+    data: &[u8],
+) -> RdbFileResult<NativeMetadataOverflowContinuationHeader> {
+    if data.len() < METADATA_OVERFLOW_CONTINUATION_HEADER_BYTES {
+        return Err(RdbFileError::InvalidOperation(
+            "truncated metadata overflow continuation header".to_string(),
+        ));
+    }
+    Ok(NativeMetadataOverflowContinuationHeader {
+        next_overflow_page_id: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+        chunk_bytes: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+    })
 }
 
 pub fn is_supported_store_version(version: u32) -> bool {
@@ -1376,6 +1453,51 @@ mod tests {
         encoded.truncate(encoded.len() - 1);
 
         assert!(decode_native_entity_record_frame(&encoded).is_err());
+    }
+
+    #[test]
+    fn native_metadata_overflow_headers_round_trip() {
+        let mut page1 = [0u8; METADATA_OVERFLOW_HEADER_BYTES];
+        encode_native_metadata_overflow_header(
+            &mut page1,
+            NativeMetadataOverflowHeader {
+                format_version: 9,
+                total_payload_bytes: 1024,
+                next_overflow_page_id: 42,
+            },
+        )
+        .expect("encode page1 header");
+        assert_eq!(
+            decode_native_metadata_overflow_header(&page1)
+                .expect("decode page1 header")
+                .expect("overflow header"),
+            NativeMetadataOverflowHeader {
+                format_version: 9,
+                total_payload_bytes: 1024,
+                next_overflow_page_id: 42,
+            }
+        );
+        assert!(decode_native_metadata_overflow_header(b"RDM2payload")
+            .expect("decode non-overflow")
+            .is_none());
+
+        let mut continuation = [0u8; METADATA_OVERFLOW_CONTINUATION_HEADER_BYTES];
+        encode_native_metadata_overflow_continuation_header(
+            &mut continuation,
+            NativeMetadataOverflowContinuationHeader {
+                next_overflow_page_id: 77,
+                chunk_bytes: 2048,
+            },
+        )
+        .expect("encode continuation header");
+        assert_eq!(
+            decode_native_metadata_overflow_continuation_header(&continuation)
+                .expect("decode continuation header"),
+            NativeMetadataOverflowContinuationHeader {
+                next_overflow_page_id: 77,
+                chunk_bytes: 2048,
+            }
+        );
     }
 
     #[test]
