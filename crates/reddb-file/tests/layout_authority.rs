@@ -1628,3 +1628,44 @@ fn server_does_not_redeclare_shm_file_format() {
         "server should reexport the SHM file contract from reddb-file"
     );
 }
+
+#[test]
+fn server_does_not_own_spill_file_format() {
+    let root = repo_root();
+    let server = read(root.join("crates/reddb-server/src/storage/cache/spill.rs"));
+    let file = read(root.join("crates/reddb-file/src/spill.rs"));
+
+    for forbidden in [
+        "b\"SPIL\"",
+        "write_all(&[2u8])",
+        "checksum.to_le_bytes()",
+        "data.len() as u64).to_le_bytes()",
+        "u32::from_le_bytes(checksum_bytes)",
+        "u64::from_le_bytes(size_bytes)",
+        "version[0]",
+        "wrapping_add(b as u32)",
+        "crc32::crc32",
+    ] {
+        assert!(
+            !server.contains(forbidden),
+            "spill file frame belongs in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "SPILL_FILE_MAGIC",
+        "SPILL_FILE_HEADER_LEN",
+        "encode_spill_file_frame",
+        "decode_spill_file_frame",
+        "spill_file_name",
+    ] {
+        assert!(
+            file.contains(required),
+            "reddb-file should own spill contract {required}"
+        );
+    }
+
+    assert!(server.contains("reddb_file::encode_spill_file_frame"));
+    assert!(server.contains("reddb_file::decode_spill_file_frame"));
+    assert!(server.contains("reddb_file::spill_file_name"));
+}

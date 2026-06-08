@@ -56,8 +56,8 @@
 //! ```
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -518,7 +518,7 @@ impl SpillManager {
         sanitize_spill_name(name)?;
 
         // Generate spill file path
-        let filename = format!("{}-{}.spill", name, std::process::id());
+        let filename = reddb_file::spill_file_name(name, std::process::id());
         let path = self.config.spill_dir.join(&filename);
 
         // Paranoia check: path must stay within spill dir
@@ -526,21 +526,7 @@ impl SpillManager {
             return Err(SpillError::InvalidName(name.to_string()));
         }
 
-        // Write data with checksum
-        let file = File::create(&path)?;
-        let mut writer = BufWriter::new(file);
-
-        // Header: magic(4) + version(1) + checksum(4) + size(8)
-        writer.write_all(b"SPIL")?; // Magic
-        writer.write_all(&[2u8])?; // Version 2 — crc32 checksum
-
-        let checksum = crate::storage::engine::crc32::crc32(data);
-        writer.write_all(&checksum.to_le_bytes())?;
-        writer.write_all(&(data.len() as u64).to_le_bytes())?;
-
-        // Write data
-        writer.write_all(data)?;
-        writer.flush()?;
+        fs::write(&path, reddb_file::encode_spill_file_frame(data))?;
 
         // Update segment state
         drop(segments);
@@ -592,41 +578,9 @@ impl SpillManager {
             .clone()
             .ok_or_else(|| SpillError::NotSpilled(name.to_string()))?;
 
-        // Read and validate
-        let file = File::open(&path)?;
-        let mut reader = BufReader::new(file);
-
-        // Read header
-        let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic)?;
-        if &magic != b"SPIL" {
-            return Err(SpillError::ChecksumMismatch);
-        }
-
-        let mut version = [0u8; 1];
-        reader.read_exact(&mut version)?;
-
-        let mut checksum_bytes = [0u8; 4];
-        reader.read_exact(&mut checksum_bytes)?;
-        let expected_checksum = u32::from_le_bytes(checksum_bytes);
-
-        let mut size_bytes = [0u8; 8];
-        reader.read_exact(&mut size_bytes)?;
-        let size = u64::from_le_bytes(size_bytes) as usize;
-
-        // Read data
-        let mut data = vec![0u8; size];
-        reader.read_exact(&mut data)?;
-
-        // Validate checksum — v1 used wrapping-add fold, v2 uses crc32
-        let actual_checksum = match version[0] {
-            1 => data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32)),
-            2 => crate::storage::engine::crc32::crc32(&data),
-            _ => return Err(SpillError::ChecksumMismatch),
-        };
-        if actual_checksum != expected_checksum {
-            return Err(SpillError::ChecksumMismatch);
-        }
+        let raw = fs::read(&path)?;
+        let data =
+            reddb_file::decode_spill_file_frame(&raw).map_err(|_| SpillError::ChecksumMismatch)?;
 
         // Update segment state
         drop(segments);
@@ -965,9 +919,6 @@ mod tests {
         assert!((util - 0.5).abs() < 0.001);
     }
 
-    // Data section starts at byte 17: 4 (magic) + 1 (version) + 4 (checksum) + 8 (size)
-    const HEADER_LEN: usize = 17;
-
     #[test]
     fn test_v2_round_trip() {
         let manager = SpillManager::new(test_config());
@@ -987,7 +938,7 @@ mod tests {
 
         // Flip a byte in the data section
         let mut raw = std::fs::read(&path).unwrap();
-        raw[HEADER_LEN] ^= 0xFF;
+        raw[reddb_file::SPILL_FILE_HEADER_LEN] ^= 0xFF;
         std::fs::write(&path, &raw).unwrap();
 
         let result = manager.reload("mut_seg");
@@ -1009,7 +960,10 @@ mod tests {
 
         // Swap two bytes in the data section
         let mut raw = std::fs::read(&path).unwrap();
-        raw.swap(HEADER_LEN, HEADER_LEN + 1);
+        raw.swap(
+            reddb_file::SPILL_FILE_HEADER_LEN,
+            reddb_file::SPILL_FILE_HEADER_LEN + 1,
+        );
         std::fs::write(&path, &raw).unwrap();
 
         let result = manager.reload("perm_seg");
