@@ -119,6 +119,36 @@ pub fn decode_delete_payload(bytes: &[u8]) -> Result<KeyPayload, OperationPayloa
     decode_key_payload("Delete", bytes)
 }
 
+pub fn encode_query_result_summary_payload(statement: &str, affected: u64) -> Vec<u8> {
+    let mut obj = JsonMap::new();
+    obj.insert("ok".into(), JsonValue::Bool(true));
+    obj.insert("statement".into(), JsonValue::String(statement.to_string()));
+    obj.insert("affected".into(), JsonValue::Number(affected.into()));
+    serde_json::to_vec(&JsonValue::Object(obj)).expect("query result payload JSON is serializable")
+}
+
+pub fn encode_get_result_payload(found: bool) -> Vec<u8> {
+    let mut obj = JsonMap::new();
+    obj.insert("ok".into(), JsonValue::Bool(true));
+    obj.insert("found".into(), JsonValue::Bool(found));
+    serde_json::to_vec(&JsonValue::Object(obj)).expect("get result payload JSON is serializable")
+}
+
+pub fn encode_bulk_ok_payload(affected: u64, ids: Vec<JsonValue>) -> Vec<u8> {
+    let mut obj = JsonMap::new();
+    obj.insert("affected".into(), JsonValue::Number(affected.into()));
+    obj.insert("ids".into(), JsonValue::Array(ids));
+    serde_json::to_vec(&JsonValue::Object(obj)).expect("bulk ok payload JSON is serializable")
+}
+
+pub fn encode_bulk_ok_payload_from_json_ids_bytes(affected: u64, ids: &[u8]) -> Vec<u8> {
+    let ids = match serde_json::from_slice::<JsonValue>(ids) {
+        Ok(JsonValue::Array(items)) => items,
+        _ => Vec::new(),
+    };
+    encode_bulk_ok_payload(affected, ids)
+}
+
 pub fn decode_bulk_ok_payload(bytes: &[u8]) -> Result<BulkOkPayload, OperationPayloadError> {
     let obj = object_from_payload("BulkOk", bytes)?;
     let affected = obj.get("affected").and_then(JsonValue::as_u64).unwrap_or(0);
@@ -156,6 +186,12 @@ pub fn decode_bulk_ok_count_payload(bytes: &[u8]) -> Result<u64, OperationPayloa
 pub fn decode_delete_ok_affected(bytes: &[u8]) -> Result<u64, OperationPayloadError> {
     let obj = object_from_payload("DeleteOk", bytes)?;
     Ok(obj.get("affected").and_then(JsonValue::as_u64).unwrap_or(0))
+}
+
+pub fn encode_delete_ok_payload(affected: u64) -> Vec<u8> {
+    let mut obj = JsonMap::new();
+    obj.insert("affected".into(), JsonValue::Number(affected.into()));
+    serde_json::to_vec(&JsonValue::Object(obj)).expect("delete ok payload JSON is serializable")
 }
 
 fn decode_key_payload(op: &'static str, bytes: &[u8]) -> Result<KeyPayload, OperationPayloadError> {
@@ -246,14 +282,36 @@ mod tests {
 
     #[test]
     fn bulk_ok_decodes_ids_and_affected_count() {
-        let payload = br#"{"affected":2,"ids":[1,"2"]}"#;
+        let payload = encode_bulk_ok_payload(2, vec![JsonValue::Number(1.into()), "2".into()]);
         assert_eq!(
-            decode_bulk_ok_payload(payload).unwrap(),
+            decode_bulk_ok_payload(&payload).unwrap(),
             BulkOkPayload {
                 affected: 2,
                 rids: vec!["1".into(), "2".into()],
                 ids: vec!["1".into(), "2".into()],
             }
+        );
+
+        let payload = encode_bulk_ok_payload_from_json_ids_bytes(2, br#"[1,"2"]"#);
+        assert_eq!(decode_bulk_ok_payload(&payload).unwrap().ids.len(), 2);
+    }
+
+    #[test]
+    fn operation_reply_payloads_encode_wire_visible_json_contracts() {
+        let query =
+            serde_json::from_slice::<JsonValue>(&encode_query_result_summary_payload("INSERT", 3))
+                .unwrap();
+        assert_eq!(query["ok"], JsonValue::Bool(true));
+        assert_eq!(query["statement"], JsonValue::String("INSERT".into()));
+        assert_eq!(query["affected"], JsonValue::Number(3.into()));
+
+        let get = serde_json::from_slice::<JsonValue>(&encode_get_result_payload(false)).unwrap();
+        assert_eq!(get["ok"], JsonValue::Bool(true));
+        assert_eq!(get["found"], JsonValue::Bool(false));
+
+        assert_eq!(
+            decode_delete_ok_affected(&encode_delete_ok_payload(7)).unwrap(),
+            7
         );
     }
 

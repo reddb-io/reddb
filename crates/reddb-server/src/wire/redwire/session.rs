@@ -24,6 +24,8 @@ use reddb_wire::query_with_params::{
 };
 use reddb_wire::redwire::operations::{
     decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
+    encode_bulk_ok_payload_from_json_ids_bytes, encode_delete_ok_payload,
+    encode_get_result_payload, encode_query_result_summary_payload,
 };
 
 use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
@@ -1118,17 +1120,10 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     };
     match runtime.execute_query(sql) {
         Ok(result) => {
-            let mut obj = crate::serde_json::Map::new();
-            obj.insert("ok".to_string(), JsonValue::Bool(true));
-            obj.insert(
-                "statement".to_string(),
-                JsonValue::String(result.statement_type.to_string()),
+            let payload = encode_query_result_summary_payload(
+                &result.statement_type.to_string(),
+                result.affected_rows,
             );
-            obj.insert(
-                "affected".to_string(),
-                JsonValue::Number(result.affected_rows as f64),
-            );
-            let payload = serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default();
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
         Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
@@ -1289,10 +1284,8 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                 Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
             }
         }
-        let mut out = crate::serde_json::Map::new();
-        out.insert("affected".to_string(), JsonValue::Number(affected as f64));
-        out.insert("ids".to_string(), JsonValue::Array(ids));
-        let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
+        let ids = serde_json::to_vec(&JsonValue::Array(ids)).unwrap_or_default();
+        let payload = encode_bulk_ok_payload_from_json_ids_bytes(affected, &ids);
         return build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload);
     }
 
@@ -1410,15 +1403,8 @@ fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     );
     match runtime.execute_query(&sql) {
         Ok(qr) => {
-            let mut out = crate::serde_json::Map::new();
-            out.insert("ok".to_string(), JsonValue::Bool(true));
-            out.insert(
-                "found".to_string(),
-                JsonValue::Bool(!qr.result.records.is_empty()),
-            );
-            // Records pass through as-is; the JS / Rust clients
-            // pick the shape they want from the JSON envelope.
-            let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
+            // Preserve the existing Get envelope: presence only.
+            let payload = encode_get_result_payload(!qr.result.records.is_empty());
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
         Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
@@ -1437,12 +1423,7 @@ fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let sql = format!("DELETE FROM {} WHERE _id = {id_lit}", request.collection);
     match runtime.execute_query(&sql) {
         Ok(qr) => {
-            let mut out = crate::serde_json::Map::new();
-            out.insert(
-                "affected".to_string(),
-                JsonValue::Number(qr.affected_rows as f64),
-            );
-            let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
+            let payload = encode_delete_ok_payload(qr.affected_rows);
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::DeleteOk, payload)
         }
         Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
