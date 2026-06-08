@@ -26,6 +26,7 @@ pub mod primary_replica;
 pub mod profile;
 pub mod serverless;
 pub mod shm;
+pub mod spill;
 pub mod store_wal;
 pub mod turboquant_snapshot;
 pub mod vector_btree_page_format;
@@ -217,6 +218,10 @@ pub use serverless::{
     SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
 };
 pub use shm::{ShmHeader, SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION};
+pub use spill::{
+    decode_spill_file_frame, encode_spill_file_frame, spill_file_name, SpillFileFrameError,
+    SPILL_FILE_HEADER_LEN, SPILL_FILE_MAGIC, SPILL_FILE_VERSION_V1, SPILL_FILE_VERSION_V2,
+};
 pub use store_wal::{
     decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
     STORE_WAL_ACTION_VERSION,
