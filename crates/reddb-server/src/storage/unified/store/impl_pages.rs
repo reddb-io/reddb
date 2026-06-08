@@ -1002,13 +1002,11 @@ fn deserialize_metadata(data: &[u8]) -> Result<Metadata, StoreError> {
 }
 
 fn write_string(buf: &mut Vec<u8>, value: &str) {
-    buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
-    buf.extend_from_slice(value.as_bytes());
+    reddb_file::encode_native_len_prefixed_str(buf, value);
 }
 
 fn write_bytes(buf: &mut Vec<u8>, value: &[u8]) {
-    buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
-    buf.extend_from_slice(value);
+    reddb_file::encode_native_len_prefixed_bytes(buf, value);
 }
 
 fn write_ref_target(buf: &mut Vec<u8>, target: &crate::storage::unified::RefTarget) {
@@ -1167,14 +1165,14 @@ fn read_u8(data: &[u8], pos: &mut usize) -> Result<u8, StoreError> {
 }
 
 fn read_string(data: &[u8], pos: &mut usize) -> Result<String, StoreError> {
-    let len = read_u32(data, pos)? as usize;
-    let bytes = read_exact_slice(data, pos, len)?;
-    String::from_utf8(bytes.to_vec()).map_err(|err| StoreError::Serialization(err.to_string()))
+    reddb_file::decode_native_len_prefixed_string(data, pos)
+        .map_err(|err| StoreError::Serialization(err.to_string()))
 }
 
 fn read_bytes(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, StoreError> {
-    let len = read_u32(data, pos)? as usize;
-    Ok(read_exact_slice(data, pos, len)?.to_vec())
+    reddb_file::decode_native_len_prefixed_bytes(data, pos)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|err| StoreError::Serialization(err.to_string()))
 }
 
 fn read_ref_target(

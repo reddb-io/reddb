@@ -389,6 +389,10 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub fn decode_native_metadata_overflow_continuation_header",
         "pub fn encode_native_paged_metadata_header",
         "pub fn decode_native_paged_metadata_header",
+        "pub fn encode_native_len_prefixed_bytes",
+        "pub fn encode_native_len_prefixed_str",
+        "pub fn decode_native_len_prefixed_bytes",
+        "pub fn decode_native_len_prefixed_string",
         "pub fn append_native_store_crc32_footer",
         "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
@@ -503,10 +507,26 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "reddb_file::decode_native_metadata_overflow_continuation_header",
         "reddb_file::encode_native_paged_metadata_header",
         "reddb_file::decode_native_paged_metadata_header",
+        "reddb_file::encode_native_len_prefixed_bytes",
+        "reddb_file::encode_native_len_prefixed_str",
+        "reddb_file::decode_native_len_prefixed_bytes",
+        "reddb_file::decode_native_len_prefixed_string",
     ] {
         assert!(
             impl_pages.contains(required),
             "UnifiedStore entity record framing should route through {required}"
+        );
+    }
+
+    for forbidden in [
+        "fn write_string(buf: &mut Vec<u8>, value: &str) {\n    buf.extend_from_slice",
+        "fn write_bytes(buf: &mut Vec<u8>, value: &[u8]) {\n    buf.extend_from_slice",
+        "fn read_string(data: &[u8], pos: &mut usize) -> Result<String, StoreError> {\n    let len = read_u32",
+        "fn read_bytes(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, StoreError> {\n    let len = read_u32",
+    ] {
+        assert!(
+            !impl_pages.contains(forbidden),
+            "metadata length-prefixed primitives should route through reddb-file, found {forbidden:?}"
         );
     }
 }

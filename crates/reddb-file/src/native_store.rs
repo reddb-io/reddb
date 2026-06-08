@@ -193,6 +193,28 @@ pub fn decode_native_paged_metadata_header(
     }))
 }
 
+pub fn encode_native_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+pub fn encode_native_len_prefixed_str(out: &mut Vec<u8>, value: &str) {
+    encode_native_len_prefixed_bytes(out, value.as_bytes());
+}
+
+pub fn decode_native_len_prefixed_bytes<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+) -> RdbFileResult<&'a [u8]> {
+    let len = read_native_u32(data, pos, "truncated native length-prefixed length")? as usize;
+    read_native_bytes(data, pos, len, "truncated native length-prefixed payload")
+}
+
+pub fn decode_native_len_prefixed_string(data: &[u8], pos: &mut usize) -> RdbFileResult<String> {
+    let bytes = decode_native_len_prefixed_bytes(data, pos)?;
+    String::from_utf8(bytes.to_vec()).map_err(|err| RdbFileError::InvalidOperation(err.to_string()))
+}
+
 pub fn is_supported_store_version(version: u32) -> bool {
     matches!(
         version,
@@ -1555,6 +1577,30 @@ mod tests {
             .is_none());
 
         assert!(decode_native_paged_metadata_header(b"RDM2").is_err());
+    }
+
+    #[test]
+    fn native_len_prefixed_string_and_bytes_round_trip() {
+        let mut bytes = Vec::new();
+        encode_native_len_prefixed_str(&mut bytes, "collection");
+        encode_native_len_prefixed_bytes(&mut bytes, b"\0payload");
+
+        let mut pos = 0;
+        assert_eq!(
+            decode_native_len_prefixed_string(&bytes, &mut pos).expect("decode string"),
+            "collection"
+        );
+        assert_eq!(
+            decode_native_len_prefixed_bytes(&bytes, &mut pos).expect("decode bytes"),
+            b"\0payload"
+        );
+        assert_eq!(pos, bytes.len());
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        let mut pos = 0;
+        decode_native_len_prefixed_string(&truncated, &mut pos).expect("decode first string");
+        assert!(decode_native_len_prefixed_bytes(&truncated, &mut pos).is_err());
     }
 
     #[test]
