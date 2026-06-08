@@ -1508,6 +1508,17 @@ fn server_does_not_redeclare_blob_cache_l2_file_format() {
         }
     }
 
+    let runtime = read(root.join("crates/reddb-server/src/runtime/impl_core.rs"));
+    assert!(
+        !runtime.contains("with_extension(\"result-cache.l2\")")
+            && !runtime.contains("\"result-cache.l2\""),
+        "result cache L2 path belongs in reddb-file layout"
+    );
+    assert!(
+        runtime.contains("reddb_file::layout::result_cache_l2_path"),
+        "runtime should route result cache L2 path through reddb-file"
+    );
+
     let l2 = read(root.join("crates/reddb-server/src/storage/cache/blob/l2.rs"));
     for required in [
         "reddb_file::{",
