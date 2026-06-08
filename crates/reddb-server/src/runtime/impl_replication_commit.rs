@@ -50,7 +50,7 @@ impl RedDBRuntime {
 
     pub fn enforce_primary_replica_retention_limits(
         &self,
-    ) -> Vec<(String, crate::replication::primary::SlotInvalidationCause)> {
+    ) -> Vec<(String, reddb_file::ReplicationSlotInvalidationCause)> {
         self.inner
             .db
             .replication

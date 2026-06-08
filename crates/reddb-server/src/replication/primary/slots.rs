@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
+use reddb_file::{ReplicationSlot, ReplicationSlotInvalidationCause};
 use tracing::warn;
-
-pub use reddb_file::{ReplicationSlot, ReplicationSlotInvalidationCause as SlotInvalidationCause};
 
 pub(super) fn load_replication_slots(
     path: Option<&Path>,
@@ -65,7 +64,7 @@ pub(super) fn load_replication_slot_catalog(
                 slot.last_seen_at_unix_ms = now_ms;
             }
             if !slot.active && slot.invalidation_reason.is_none() {
-                slot.invalidation_reason = Some(SlotInvalidationCause::Horizon);
+                slot.invalidation_reason = Some(ReplicationSlotInvalidationCause::Horizon);
                 slot.invalidated_at_unix_ms = Some(now_ms);
             }
             (slot.replica_id.clone(), slot)
