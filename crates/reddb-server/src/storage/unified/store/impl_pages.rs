@@ -4,13 +4,13 @@ use parking_lot::RwLock;
 
 // ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
 // When the serialized collection registry + cross-refs exceed a single page,
-// page 1 carries a "RDM3" wrapper header pointing at an overflow chain of
+// page 1 carries a native metadata-overflow header pointing at an overflow chain of
 // `PageType::Overflow` pages. Single-page metadata keeps the historical
 // bit-identical layout (`METADATA_MAGIC = "RDM2"` written directly at the
 // content offset).
 //
 // Page 1 (overflow form), starting at `HEADER_SIZE`:
-//   [0..4]   magic = "RDM3"
+//   [0..4]   native metadata-overflow magic
 //   [4..8]   format_version (u32, mirrors inner payload version for debug)
 //   [8..12]  total_payload_bytes (u32)
 //   [12..16] next_overflow_page_id (u32, > 0)
@@ -22,8 +22,8 @@ use parking_lot::RwLock;
 //   [8..]    chunk payload (up to META_V3_OVERFLOW_PAYLOAD_CAP bytes)
 const META_PAGE_CONTENT_CAP: usize =
     crate::storage::engine::PAGE_SIZE - crate::storage::engine::HEADER_SIZE;
-const META_V3_PAGE1_HEADER: usize = 16;
-const META_V3_OVERFLOW_HEADER: usize = 8;
+const META_V3_PAGE1_HEADER: usize = reddb_file::METADATA_OVERFLOW_HEADER_BYTES;
+const META_V3_OVERFLOW_HEADER: usize = reddb_file::METADATA_OVERFLOW_CONTINUATION_HEADER_BYTES;
 const META_V3_FIRST_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_PAGE1_HEADER;
 const META_V3_OVERFLOW_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_OVERFLOW_HEADER;
 
@@ -37,22 +37,24 @@ fn free_existing_overflow_chain(pager: &Pager) -> Result<(), PagerError> {
     if bytes.len() < cs + META_V3_PAGE1_HEADER {
         return Ok(());
     }
-    if &bytes[cs..cs + 4] != METADATA_OVERFLOW_MAGIC {
+    let Some(header) =
+        reddb_file::decode_native_metadata_overflow_header(&bytes[cs..]).map_err(|err| {
+            PagerError::InvalidDatabase(format!("invalid metadata overflow header: {err}"))
+        })?
+    else {
         return Ok(());
-    }
-    let mut next = u32::from_le_bytes([
-        bytes[cs + 12],
-        bytes[cs + 13],
-        bytes[cs + 14],
-        bytes[cs + 15],
-    ]);
+    };
+    let mut next = header.next_overflow_page_id;
     while next != 0 {
         let ov = match pager.read_page(next) {
             Ok(p) => p,
             Err(_) => break,
         };
         let ob = ov.as_bytes();
-        let nn = u32::from_le_bytes([ob[cs], ob[cs + 1], ob[cs + 2], ob[cs + 3]]);
+        let nn = match reddb_file::decode_native_metadata_overflow_continuation_header(&ob[cs..]) {
+            Ok(header) => header.next_overflow_page_id,
+            Err(_) => 0,
+        };
         let _ = pager.free_page(next);
         next = nn;
     }
@@ -104,8 +106,14 @@ fn build_meta_page1_with_overflow(
         };
         let len = chunks[i].len() as u32;
         let buf = overflow_pages[i].as_bytes_mut();
-        buf[cs..cs + 4].copy_from_slice(&next.to_le_bytes());
-        buf[cs + 4..cs + 8].copy_from_slice(&len.to_le_bytes());
+        reddb_file::encode_native_metadata_overflow_continuation_header(
+            &mut buf[cs..cs + META_V3_OVERFLOW_HEADER],
+            reddb_file::NativeMetadataOverflowContinuationHeader {
+                next_overflow_page_id: next,
+                chunk_bytes: len,
+            },
+        )
+        .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
         buf[cs + 8..cs + 8 + chunks[i].len()].copy_from_slice(chunks[i]);
     }
     for (idx, page) in overflow_pages.into_iter().enumerate() {
@@ -121,10 +129,15 @@ fn build_meta_page1_with_overflow(
     };
 
     let buf = page1.as_bytes_mut();
-    buf[cs..cs + 4].copy_from_slice(METADATA_OVERFLOW_MAGIC);
-    buf[cs + 4..cs + 8].copy_from_slice(&format_version.to_le_bytes());
-    buf[cs + 8..cs + 12].copy_from_slice(&(meta_data.len() as u32).to_le_bytes());
-    buf[cs + 12..cs + 16].copy_from_slice(&overflow_ids[0].to_le_bytes());
+    reddb_file::encode_native_metadata_overflow_header(
+        &mut buf[cs..cs + META_V3_PAGE1_HEADER],
+        reddb_file::NativeMetadataOverflowHeader {
+            format_version,
+            total_payload_bytes: meta_data.len() as u32,
+            next_overflow_page_id: overflow_ids[0],
+        },
+    )
+    .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
     buf[cs + META_V3_PAGE1_HEADER..cs + META_V3_PAGE1_HEADER + first_chunk.len()]
         .copy_from_slice(first_chunk);
 
@@ -132,10 +145,10 @@ fn build_meta_page1_with_overflow(
 }
 
 /// Assemble the full metadata payload from page 1 (plus its overflow chain
-/// when the `RDM3` wrapper is present). Returns the bytes that the metadata
-/// parser would see starting from the content offset of page 1. Single-page
-/// metadata returns the raw page content (including trailing zero-pad), so
-/// the legacy parser sees the same bytes it always saw.
+/// when the native overflow wrapper is present). Returns the bytes that the
+/// metadata parser would see starting from the content offset of page 1.
+/// Single-page metadata returns the raw page content (including trailing
+/// zero-pad), so the legacy parser sees the same bytes it always saw.
 fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
     let cs = crate::storage::engine::HEADER_SIZE;
     let meta_page = pager
@@ -146,20 +159,17 @@ fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
     if bytes.len() < cs + 4 {
         return Some(bytes.get(cs..).unwrap_or(&[]).to_vec());
     }
-    if &bytes[cs..cs + 4] != METADATA_OVERFLOW_MAGIC {
-        return Some(bytes[cs..].to_vec());
-    }
+    let header = match reddb_file::decode_native_metadata_overflow_header(&bytes[cs..]).ok()? {
+        Some(header) => header,
+        None => {
+            return Some(bytes[cs..].to_vec());
+        }
+    };
     if bytes.len() < cs + META_V3_PAGE1_HEADER {
         return None;
     }
-    let total =
-        u32::from_le_bytes([bytes[cs + 8], bytes[cs + 9], bytes[cs + 10], bytes[cs + 11]]) as usize;
-    let mut next = u32::from_le_bytes([
-        bytes[cs + 12],
-        bytes[cs + 13],
-        bytes[cs + 14],
-        bytes[cs + 15],
-    ]);
+    let total = header.total_payload_bytes as usize;
+    let mut next = header.next_overflow_page_id;
     let mut payload: Vec<u8> = Vec::with_capacity(total);
     let first_take = total.min(META_V3_FIRST_PAYLOAD_CAP);
     payload.extend_from_slice(
@@ -171,8 +181,10 @@ fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
         if ob.len() < cs + META_V3_OVERFLOW_HEADER {
             return None;
         }
-        let nn = u32::from_le_bytes([ob[cs], ob[cs + 1], ob[cs + 2], ob[cs + 3]]);
-        let len = u32::from_le_bytes([ob[cs + 4], ob[cs + 5], ob[cs + 6], ob[cs + 7]]) as usize;
+        let continuation =
+            reddb_file::decode_native_metadata_overflow_continuation_header(&ob[cs..]).ok()?;
+        let nn = continuation.next_overflow_page_id;
+        let len = continuation.chunk_bytes as usize;
         let remaining = total - payload.len();
         let take = len.min(remaining).min(META_V3_OVERFLOW_PAYLOAD_CAP);
         payload.extend_from_slice(
