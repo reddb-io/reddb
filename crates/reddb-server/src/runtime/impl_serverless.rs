@@ -110,16 +110,8 @@ impl RedDBRuntime {
             let offset = collection_data.len() as u64;
             collection_data.extend_from_slice(&payload);
             extent_index.push(
-                reddb_file::ServerlessExtentRef::new(
-                    collection,
-                    Vec::<u8>::new(),
-                    Vec::<u8>::new(),
-                    "collection-data.redpack",
-                    offset,
-                    &payload,
-                    true,
-                )
-                .map_err(|err| RedDBError::Internal(err.to_string()))?,
+                plan.collection_data_extent_ref(collection, offset, &payload, true)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?,
             );
         }
         let secondary_index =

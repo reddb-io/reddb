@@ -1428,6 +1428,7 @@ fn server_uses_reddb_file_for_serverless_roots_and_cache() {
         "with_extension(\"serverless\")",
         "file_stem()",
         ".join(\"cache\")",
+        "collection-data.redpack",
     ] {
         assert!(
             !text.contains(forbidden),
@@ -1439,6 +1440,7 @@ fn server_uses_reddb_file_for_serverless_roots_and_cache() {
         "reddb_file::ServerlessFilePlan::for_data_path",
         ".for_generation(generation)",
         ".local_cache()",
+        ".collection_data_extent_ref(",
     ] {
         assert!(
             text.contains(required),

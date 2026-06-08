@@ -411,6 +411,24 @@ mod tests {
     }
 
     #[test]
+    fn collection_data_extent_ref_uses_canonical_pack_path() {
+        let plan = ServerlessFilePlan::new("/tmp/reddb", "db", 9);
+        let payload = b"collection snapshot bytes";
+        let extent = plan
+            .collection_data_extent_ref("events", 12, payload, true)
+            .expect("extent ref");
+
+        assert_eq!(extent.collection, "events");
+        assert_eq!(
+            extent.relative_path,
+            PathBuf::from("collection-data.redpack")
+        );
+        assert_eq!(extent.offset, 12);
+        assert_eq!(extent.bytes, payload.len() as u64);
+        assert!(extent.hot);
+    }
+
+    #[test]
     fn manifest_rejects_trailing_payload_bytes() {
         let manifest = ServerlessManifest::new("tenant/db", 11);
         let mut encoded = manifest.encode();

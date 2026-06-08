@@ -73,6 +73,24 @@ impl ServerlessFilePlan {
         self.artifact_path(ServerlessPackKind::CollectionData)
     }
 
+    pub fn collection_data_extent_ref(
+        &self,
+        collection: impl Into<String>,
+        offset: u64,
+        payload: &[u8],
+        hot: bool,
+    ) -> RdbFileResult<ServerlessExtentRef> {
+        ServerlessExtentRef::new(
+            collection,
+            Vec::<u8>::new(),
+            Vec::<u8>::new(),
+            relative_to_generation_dir(&self.collection_data_path()),
+            offset,
+            payload,
+            hot,
+        )
+    }
+
     pub fn secondary_index_path(&self) -> PathBuf {
         self.artifact_path(ServerlessPackKind::SecondaryIndex)
     }
