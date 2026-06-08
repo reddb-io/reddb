@@ -190,6 +190,35 @@ pub struct PhysicalMetadataDocumentEnvelope {
     pub snapshots_json: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhysicalSchemaOptions {
+    pub mode: String,
+    pub data_path: Option<String>,
+    pub read_only: bool,
+    pub create_if_missing: bool,
+    pub verify_checksums: bool,
+    pub durability_mode: Option<String>,
+    pub group_commit_window_ms: Option<u64>,
+    pub group_commit_max_statements: Option<usize>,
+    pub group_commit_max_wal_bytes: Option<u64>,
+    pub auto_checkpoint_pages: u32,
+    pub cache_pages: usize,
+    pub snapshot_retention: Option<usize>,
+    pub export_retention: Option<usize>,
+    pub force_create: bool,
+    pub capabilities: Vec<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhysicalSchemaManifest {
+    pub format_version: u32,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+    pub collection_count: usize,
+    pub options: PhysicalSchemaOptions,
+}
+
 pub fn encode_physical_metadata_document_root_json(
     document: &PhysicalMetadataDocumentEnvelope,
     pretty: bool,
@@ -332,6 +361,17 @@ pub fn decode_physical_metadata_document_root_json(
         superblock_json: required_json_fragment(root, "superblock")?,
         snapshots_json: required_json_fragment_array(root, "snapshots")?,
     })
+}
+
+pub fn encode_physical_schema_manifest_json(
+    manifest: &PhysicalSchemaManifest,
+) -> RdbFileResult<String> {
+    Ok(schema_manifest_json_value(manifest).to_string())
+}
+
+pub fn decode_physical_schema_manifest_json(json: &str) -> RdbFileResult<PhysicalSchemaManifest> {
+    let value = parse_json_value(json, "physical schema manifest")?;
+    schema_manifest_from_json_value(&value)
 }
 
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
@@ -631,6 +671,211 @@ fn block_reference_from_json_value(value: &serde_json::Value) -> RdbFileResult<B
     Ok(BlockReference {
         index: json_u64_required(object, "index")?,
         checksum: json_u128_required(object, "checksum")?,
+    })
+}
+
+fn schema_manifest_json_value(manifest: &PhysicalSchemaManifest) -> serde_json::Value {
+    let mut options = serde_json::Map::new();
+    options.insert(
+        "mode".to_string(),
+        serde_json::Value::String(manifest.options.mode.clone()),
+    );
+    options.insert(
+        "data_path".to_string(),
+        manifest
+            .options
+            .data_path
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    options.insert(
+        "read_only".to_string(),
+        serde_json::Value::Bool(manifest.options.read_only),
+    );
+    options.insert(
+        "create_if_missing".to_string(),
+        serde_json::Value::Bool(manifest.options.create_if_missing),
+    );
+    options.insert(
+        "verify_checksums".to_string(),
+        serde_json::Value::Bool(manifest.options.verify_checksums),
+    );
+    options.insert(
+        "durability_mode".to_string(),
+        manifest
+            .options
+            .durability_mode
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    options.insert(
+        "group_commit_window_ms".to_string(),
+        manifest
+            .options
+            .group_commit_window_ms
+            .map(|value| serde_json::Value::Number(value.into()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    options.insert(
+        "group_commit_max_statements".to_string(),
+        manifest
+            .options
+            .group_commit_max_statements
+            .map(json_usize)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    options.insert(
+        "group_commit_max_wal_bytes".to_string(),
+        manifest
+            .options
+            .group_commit_max_wal_bytes
+            .map(|value| serde_json::Value::Number(value.into()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    options.insert(
+        "auto_checkpoint_pages".to_string(),
+        serde_json::Value::Number(manifest.options.auto_checkpoint_pages.into()),
+    );
+    options.insert(
+        "cache_pages".to_string(),
+        json_usize(manifest.options.cache_pages),
+    );
+    options.insert(
+        "snapshot_retention".to_string(),
+        manifest
+            .options
+            .snapshot_retention
+            .map(json_usize)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    options.insert(
+        "export_retention".to_string(),
+        manifest
+            .options
+            .export_retention
+            .map(json_usize)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    options.insert(
+        "force_create".to_string(),
+        serde_json::Value::Bool(manifest.options.force_create),
+    );
+    options.insert(
+        "capabilities".to_string(),
+        string_array_json(&manifest.options.capabilities),
+    );
+    options.insert(
+        "metadata".to_string(),
+        serde_json::Value::Object(
+            manifest
+                .options
+                .metadata
+                .iter()
+                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+                .collect(),
+        ),
+    );
+
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "format_version".to_string(),
+        serde_json::Value::Number(manifest.format_version.into()),
+    );
+    object.insert(
+        "created_at_unix_ms".to_string(),
+        json_u128(manifest.created_at_unix_ms),
+    );
+    object.insert(
+        "updated_at_unix_ms".to_string(),
+        json_u128(manifest.updated_at_unix_ms),
+    );
+    object.insert(
+        "collection_count".to_string(),
+        json_usize(manifest.collection_count),
+    );
+    object.insert("options".to_string(), serde_json::Value::Object(options));
+    serde_json::Value::Object(object)
+}
+
+fn schema_manifest_from_json_value(
+    value: &serde_json::Value,
+) -> RdbFileResult<PhysicalSchemaManifest> {
+    let object = expect_object(value, "manifest")?;
+    let options_object = expect_object(required(object, "options")?, "manifest.options")?;
+    let options = PhysicalSchemaOptions {
+        mode: json_string_required(options_object, "mode")?,
+        data_path: options_object
+            .get("data_path")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        read_only: json_bool_required(options_object, "read_only")?,
+        create_if_missing: json_bool_required(options_object, "create_if_missing")?,
+        verify_checksums: json_bool_required(options_object, "verify_checksums")?,
+        durability_mode: options_object
+            .get("durability_mode")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        group_commit_window_ms: options_object
+            .get("group_commit_window_ms")
+            .filter(|value| !value.is_null())
+            .map(json_u64_value)
+            .transpose()?,
+        group_commit_max_statements: options_object
+            .get("group_commit_max_statements")
+            .filter(|value| !value.is_null())
+            .map(json_usize_value)
+            .transpose()?,
+        group_commit_max_wal_bytes: options_object
+            .get("group_commit_max_wal_bytes")
+            .filter(|value| !value.is_null())
+            .map(json_u64_value)
+            .transpose()?,
+        auto_checkpoint_pages: json_u32_required(options_object, "auto_checkpoint_pages")?,
+        cache_pages: json_usize_required(options_object, "cache_pages")?,
+        snapshot_retention: options_object
+            .get("snapshot_retention")
+            .filter(|value| !value.is_null())
+            .map(json_usize_value)
+            .transpose()?,
+        export_retention: options_object
+            .get("export_retention")
+            .filter(|value| !value.is_null())
+            .map(json_usize_value)
+            .transpose()?,
+        force_create: json_bool_required(options_object, "force_create")?,
+        capabilities: options_object
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        metadata: options_object
+            .get("metadata")
+            .and_then(serde_json::Value::as_object)
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key.clone(), value.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+
+    Ok(PhysicalSchemaManifest {
+        format_version: json_u32_required(object, "format_version")?,
+        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
+        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
+        collection_count: json_usize_required(object, "collection_count")?,
+        options,
     })
 }
 
@@ -1382,6 +1627,18 @@ fn json_u128_value(value: &serde_json::Value) -> RdbFileResult<u128> {
         .ok_or_else(|| invalid("invalid u128 value"))
 }
 
+fn json_usize_value(value: &serde_json::Value) -> RdbFileResult<usize> {
+    if let Some(text) = value.as_str() {
+        return text
+            .parse::<usize>()
+            .map_err(|_| invalid("invalid usize string value"));
+    }
+    value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| invalid("invalid usize value"))
+}
+
 fn json_u64(value: u64) -> serde_json::Value {
     serde_json::Value::String(value.to_string())
 }
@@ -1478,6 +1735,43 @@ mod tests {
             Some(&86_400_000)
         );
         assert_eq!(decoded.snapshots_json.len(), 1);
+    }
+
+    #[test]
+    fn physical_schema_manifest_round_trips() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("owner".to_string(), "ops".to_string());
+        let manifest = PhysicalSchemaManifest {
+            format_version: 9,
+            created_at_unix_ms: 123,
+            updated_at_unix_ms: 456,
+            collection_count: 7,
+            options: PhysicalSchemaOptions {
+                mode: "persistent".to_string(),
+                data_path: Some("/var/lib/reddb/main.rdb".to_string()),
+                read_only: false,
+                create_if_missing: true,
+                verify_checksums: true,
+                durability_mode: Some("wal_durable_grouped".to_string()),
+                group_commit_window_ms: Some(8),
+                group_commit_max_statements: Some(9),
+                group_commit_max_wal_bytes: Some(10),
+                auto_checkpoint_pages: 11,
+                cache_pages: 12,
+                snapshot_retention: Some(13),
+                export_retention: Some(14),
+                force_create: false,
+                capabilities: vec!["table".to_string(), "graph".to_string()],
+                metadata,
+            },
+        };
+
+        let json = encode_physical_schema_manifest_json(&manifest).unwrap();
+        assert!(json.contains("\"capabilities\""));
+        assert!(json.contains("\"group_commit_window_ms\""));
+
+        let decoded = decode_physical_schema_manifest_json(&json).unwrap();
+        assert_eq!(decoded, manifest);
     }
 
     #[test]
