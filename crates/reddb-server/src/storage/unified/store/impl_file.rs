@@ -70,40 +70,13 @@ impl UnifiedStore {
         config: UnifiedStoreConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut buf = buf.to_vec();
-        // Verify magic bytes "RDST" (RedDB Store)
-        if buf.len() < 8 {
-            return Err("File too small".into());
-        }
-        if &buf[0..4] != STORE_MAGIC {
-            return Err("Invalid magic bytes - expected RDST".into());
-        }
-        let mut pos = 4;
-
-        // Version check
-        let version = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
-        pos += 4;
-        if !is_supported_store_version(version) {
-            return Err(format!("Unsupported version: {}", version).into());
-        }
+        let version =
+            reddb_file::decode_native_store_header(&buf).map_err(|err| err.to_string())?;
+        let mut pos = 8;
 
         // V3+ has CRC32 footer — verify integrity before parsing
-        if version >= STORE_VERSION_V3 {
-            if buf.len() < 12 {
-                return Err("File too small for CRC32 verification".into());
-            }
-            let stored_crc = u32::from_le_bytes([
-                buf[buf.len() - 4],
-                buf[buf.len() - 3],
-                buf[buf.len() - 2],
-                buf[buf.len() - 1],
-            ]);
-            let computed_crc = crate::storage::engine::crc32::crc32(&buf[..buf.len() - 4]);
-            if stored_crc != computed_crc {
-                return Err("Binary store CRC32 mismatch — file corrupted".into());
-            }
-            // Trim the CRC footer so parsing doesn't read into it
-            buf.truncate(buf.len() - 4);
-        }
+        reddb_file::verify_native_store_crc32_footer(&mut buf, version)
+            .map_err(|err| err.to_string())?;
 
         let store = Self::with_config(config);
         store.set_format_version(version);
@@ -236,12 +209,11 @@ impl UnifiedStore {
     pub(crate) fn to_binary_dump_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Magic bytes "RDST"
-        buf.extend_from_slice(STORE_MAGIC);
-
-        // Version (9 — includes explicit table-row logical identity
-        // plus MVCC xmin/xmax alongside the V7 metadata envelope).
-        buf.extend_from_slice(&STORE_VERSION_CURRENT.to_le_bytes());
+        // Version 9 includes explicit table-row logical identity plus MVCC
+        // xmin/xmax alongside the V7 metadata envelope.
+        buf.extend_from_slice(&reddb_file::encode_native_store_header(
+            STORE_VERSION_CURRENT,
+        ));
 
         // Get all collections
         let collections = self.collections.read();
@@ -284,9 +256,7 @@ impl UnifiedStore {
 
         self.set_format_version(STORE_VERSION_CURRENT);
 
-        // Append CRC32 footer over entire content
-        let checksum = crate::storage::engine::crc32::crc32(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
+        reddb_file::append_native_store_crc32_footer(&mut buf);
         buf
     }
 

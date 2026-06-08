@@ -52,6 +52,68 @@ pub fn is_supported_store_version(version: u32) -> bool {
     )
 }
 
+pub fn encode_native_store_header(version: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8);
+    out.extend_from_slice(STORE_MAGIC);
+    out.extend_from_slice(&version.to_le_bytes());
+    out
+}
+
+pub fn decode_native_store_header(bytes: &[u8]) -> RdbFileResult<u32> {
+    if bytes.len() < 8 {
+        return Err(RdbFileError::InvalidOperation("File too small".to_string()));
+    }
+    if &bytes[0..4] != STORE_MAGIC {
+        return Err(RdbFileError::InvalidOperation(
+            "Invalid magic bytes - expected RDST".to_string(),
+        ));
+    }
+    let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    if !is_supported_store_version(version) {
+        return Err(RdbFileError::InvalidOperation(format!(
+            "Unsupported version: {version}"
+        )));
+    }
+    Ok(version)
+}
+
+pub fn append_native_store_crc32_footer(bytes: &mut Vec<u8>) {
+    let checksum = native_store_dump_crc32(bytes);
+    bytes.extend_from_slice(&checksum.to_le_bytes());
+}
+
+pub fn verify_native_store_crc32_footer(bytes: &mut Vec<u8>, version: u32) -> RdbFileResult<()> {
+    if version < STORE_VERSION_V3 {
+        return Ok(());
+    }
+    if bytes.len() < 12 {
+        return Err(RdbFileError::InvalidOperation(
+            "File too small for CRC32 verification".to_string(),
+        ));
+    }
+    let footer_at = bytes.len() - 4;
+    let stored_crc = u32::from_le_bytes([
+        bytes[footer_at],
+        bytes[footer_at + 1],
+        bytes[footer_at + 2],
+        bytes[footer_at + 3],
+    ]);
+    let computed_crc = native_store_dump_crc32(&bytes[..footer_at]);
+    if stored_crc != computed_crc {
+        return Err(RdbFileError::InvalidOperation(
+            "Binary store CRC32 mismatch — file corrupted".to_string(),
+        ));
+    }
+    bytes.truncate(footer_at);
+    Ok(())
+}
+
+fn native_store_dump_crc32(bytes: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
 #[derive(Debug, Clone)]
 pub struct NativeManifestEntrySummary {
     pub collection: String,
@@ -1180,6 +1242,28 @@ fn native_manifest_kind_from_byte(byte: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::physical_metadata::BlockReference;
+
+    #[test]
+    fn native_store_dump_header_and_crc_footer_are_canonical() {
+        let mut bytes = encode_native_store_header(STORE_VERSION_CURRENT);
+        bytes.extend_from_slice(b"payload");
+        append_native_store_crc32_footer(&mut bytes);
+
+        let version = decode_native_store_header(&bytes).unwrap();
+        assert_eq!(version, STORE_VERSION_CURRENT);
+
+        let original_len = bytes.len();
+        verify_native_store_crc32_footer(&mut bytes, version).unwrap();
+        assert_eq!(bytes.len(), original_len - 4);
+        assert_eq!(&bytes[0..4], STORE_MAGIC);
+        assert_eq!(&bytes[8..], b"payload");
+
+        let mut corrupt = encode_native_store_header(STORE_VERSION_CURRENT);
+        corrupt.extend_from_slice(b"payload");
+        append_native_store_crc32_footer(&mut corrupt);
+        corrupt[8] ^= 0xff;
+        assert!(verify_native_store_crc32_footer(&mut corrupt, STORE_VERSION_CURRENT).is_err());
+    }
 
     #[test]
     fn native_collection_roots_page_round_trips() {
