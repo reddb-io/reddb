@@ -65,6 +65,12 @@ pub struct NativePagedMetadataHeader {
     pub collection_count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativePagedCollectionRoot {
+    pub collection: String,
+    pub root_page: u32,
+}
+
 pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
     bytes.len() >= STORE_MAGIC.len() && &bytes[..STORE_MAGIC.len()] == STORE_MAGIC
 }
@@ -213,6 +219,23 @@ pub fn decode_native_len_prefixed_bytes<'a>(
 pub fn decode_native_len_prefixed_string(data: &[u8], pos: &mut usize) -> RdbFileResult<String> {
     let bytes = decode_native_len_prefixed_bytes(data, pos)?;
     String::from_utf8(bytes.to_vec()).map_err(|err| RdbFileError::InvalidOperation(err.to_string()))
+}
+
+pub fn encode_native_paged_collection_root(out: &mut Vec<u8>, collection: &str, root_page: u32) {
+    encode_native_len_prefixed_str(out, collection);
+    out.extend_from_slice(&root_page.to_le_bytes());
+}
+
+pub fn decode_native_paged_collection_root(
+    data: &[u8],
+    pos: &mut usize,
+) -> RdbFileResult<NativePagedCollectionRoot> {
+    let collection = decode_native_len_prefixed_string(data, pos)?;
+    let root_page = read_native_u32(data, pos, "truncated native paged collection root")?;
+    Ok(NativePagedCollectionRoot {
+        collection,
+        root_page,
+    })
 }
 
 pub fn is_supported_store_version(version: u32) -> bool {
@@ -1601,6 +1624,27 @@ mod tests {
         let mut pos = 0;
         decode_native_len_prefixed_string(&truncated, &mut pos).expect("decode first string");
         assert!(decode_native_len_prefixed_bytes(&truncated, &mut pos).is_err());
+    }
+
+    #[test]
+    fn native_paged_collection_root_round_trips() {
+        let mut bytes = Vec::new();
+        encode_native_paged_collection_root(&mut bytes, "events", 42);
+
+        let mut pos = 0;
+        assert_eq!(
+            decode_native_paged_collection_root(&bytes, &mut pos).expect("decode root"),
+            NativePagedCollectionRoot {
+                collection: "events".to_string(),
+                root_page: 42,
+            }
+        );
+        assert_eq!(pos, bytes.len());
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        let mut pos = 0;
+        assert!(decode_native_paged_collection_root(&truncated, &mut pos).is_err());
     }
 
     #[test]

@@ -277,9 +277,7 @@ impl UnifiedStore {
             },
         );
         for (name, root_page) in &collection_roots {
-            meta_data.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            meta_data.extend_from_slice(name.as_bytes());
-            meta_data.extend_from_slice(&root_page.to_le_bytes());
+            reddb_file::encode_native_paged_collection_root(&mut meta_data, name, *root_page);
         }
 
         let cross_refs = self.cross_refs.read();
@@ -537,33 +535,12 @@ impl UnifiedStore {
 
                 // Read collection names and their B-tree root pages
                 for _ in 0..collection_count {
-                    if pos + 4 > content.len() {
-                        break;
-                    }
-
-                    let name_len = u32::from_le_bytes([
-                        content[pos],
-                        content[pos + 1],
-                        content[pos + 2],
-                        content[pos + 3],
-                    ]) as usize;
-                    pos += 4;
-
-                    if pos + name_len + 4 > content.len() {
-                        break;
-                    }
-
-                    if let Ok(name) = String::from_utf8(content[pos..pos + name_len].to_vec()) {
-                        pos += name_len;
-
+                    if let Ok(root) =
+                        reddb_file::decode_native_paged_collection_root(content, &mut pos)
+                    {
                         // Root page ID for this collection's B-tree
-                        let root_page = u32::from_le_bytes([
-                            content[pos],
-                            content[pos + 1],
-                            content[pos + 2],
-                            content[pos + 3],
-                        ]);
-                        pos += 4;
+                        let root_page = root.root_page;
+                        let name = root.collection;
 
                         // Hydrate the collection in memory only. Loading must
                         // not emit WAL entries or rewrite the on-disk registry
@@ -608,7 +585,7 @@ impl UnifiedStore {
                             self.btree_indices.write().insert(name, Arc::new(btree));
                         }
                     } else {
-                        pos += name_len + 4;
+                        break;
                     }
                 }
 
@@ -899,12 +876,7 @@ impl UnifiedStore {
 
         // Write each collection's name and B-tree root page
         for (name, root_page) in &collection_roots {
-            // Name length
-            meta_data.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            // Name
-            meta_data.extend_from_slice(name.as_bytes());
-            // Root page ID from actual B-tree
-            meta_data.extend_from_slice(&root_page.to_le_bytes());
+            reddb_file::encode_native_paged_collection_root(&mut meta_data, name, *root_page);
         }
 
         // Write cross-reference metadata
