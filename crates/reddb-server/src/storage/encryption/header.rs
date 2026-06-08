@@ -13,11 +13,13 @@
 //! We will implement serialization for this header so it can be embedded in Page 0 after the main header.
 
 use super::key::SecureKey;
-use super::page_encryptor::{PageEncryptor, NONCE_SIZE, TAG_SIZE};
+use super::page_encryptor::PageEncryptor;
 use crate::crypto::uuid::Uuid;
 
-pub const SALT_SIZE: usize = 32;
-pub const KEY_CHECK_LEN: usize = 32; // Length of known value to encrypt
+pub use reddb_file::{
+    PAGED_ENCRYPTION_KEY_CHECK_PLAINTEXT_SIZE as KEY_CHECK_LEN,
+    PAGED_ENCRYPTION_SALT_SIZE as SALT_SIZE,
+};
 
 /// Header containing encryption parameters
 #[derive(Debug, Clone)]
@@ -72,30 +74,20 @@ impl EncryptionHeader {
 
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&self.salt);
-        // Length of key check is dynamic or fixed?
-        // NONCE(12) + KEY_CHECK_LEN(32) + TAG(16) = 60 bytes.
-        // It's fixed.
-        buf.extend_from_slice(&self.key_check);
-        buf
+        reddb_file::encode_paged_encryption_header(&reddb_file::PagedEncryptionHeader {
+            salt: self.salt,
+            key_check: self.key_check.clone(),
+        })
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        let check_size = NONCE_SIZE + KEY_CHECK_LEN + TAG_SIZE;
-        let expected_len = SALT_SIZE + check_size;
-
-        if data.len() < expected_len {
-            return Err("Data too short for EncryptionHeader".to_string());
-        }
-
-        let mut salt = [0u8; SALT_SIZE];
-        salt.copy_from_slice(&data[0..SALT_SIZE]);
-
-        let key_check = data[SALT_SIZE..SALT_SIZE + check_size].to_vec();
-
-        Ok(Self { salt, key_check })
+        let raw = reddb_file::decode_paged_encryption_header(data)
+            .map_err(|err| format!("Data too short for EncryptionHeader: {err}"))?;
+        Ok(Self {
+            salt: raw.salt,
+            key_check: raw.key_check,
+        })
     }
 }
 

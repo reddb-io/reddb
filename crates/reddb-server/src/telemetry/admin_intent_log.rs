@@ -384,6 +384,7 @@ impl AdminIntentLog {
         struct ScanEntry {
             op: IntentOp,
             started_at_ms: u64,
+            actor: String,
             phase: IntentPhase,
             args: Map<String, JsonValue>,
             last_progress: Option<Map<String, JsonValue>>,
@@ -424,6 +425,11 @@ impl AdminIntentLog {
                 continue;
             };
             let ts = v.get("ts").and_then(|x| x.as_f64()).unwrap_or(0.0) as u64;
+            let actor = v
+                .get("actor")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
 
             let args_map = v
                 .get("args")
@@ -444,6 +450,7 @@ impl AdminIntentLog {
                 .or_insert(ScanEntry {
                     op,
                     started_at_ms: ts,
+                    actor,
                     phase,
                     args: args_map,
                     last_progress: progress_map,
@@ -459,12 +466,31 @@ impl AdminIntentLog {
                     id,
                     op: e.op,
                     started_at_ms: e.started_at_ms,
+                    actor: e.actor,
                     last_phase: e.phase,
                     args: e.args,
                     last_progress: e.last_progress,
                 }
             })
             .collect()
+    }
+
+    /// Recreate a linear handle for an unfinished intent after process restart.
+    ///
+    /// This deliberately does not write a new `running` record: future
+    /// checkpoints and completion records are appended under the original id,
+    /// so a resumed operation does not leave a permanent dangling intent.
+    pub fn resume_unfinished<'a>(&'a self, item: &UnfinishedIntent) -> IntentHandle<'a> {
+        IntentHandle {
+            log: self,
+            id: item.id,
+            op: item.op,
+            actor: item.actor.clone(),
+            args_json: JsonValue::Object(item.args.clone()),
+            started_at_ms: item.started_at_ms,
+            last_phase: item.last_phase.clone(),
+            done: false,
+        }
     }
 }
 
@@ -476,6 +502,7 @@ pub struct UnfinishedIntent {
     pub id: Uuid,
     pub op: IntentOp,
     pub started_at_ms: u64,
+    pub actor: String,
     pub last_phase: IntentPhase,
     /// Args from the opening `running` record. Used by consumers to filter by
     /// owner fields (e.g., `replica_id`) and implement single-resumer policy.

@@ -13,28 +13,20 @@
 //!   - `listener` — TCP / TLS / Unix accept
 
 pub mod auth;
-pub mod codec;
-pub mod frame;
 pub mod input_stream;
 pub mod listener;
 pub mod output_stream;
 pub mod queue_wait;
 pub mod session;
 
-pub use codec::{decode_frame, encode_frame, FrameError};
-pub use frame::{Flags, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};
 #[cfg(unix)]
 pub use listener::start_redwire_unix_listener;
 pub use listener::{
     start_redwire_listener, start_redwire_listener_on, start_redwire_tls_listener, RedWireConfig,
 };
 
-// Constants live in the shared `reddb-wire` crate; re-exported here
-// so existing `crate::wire::redwire::REDWIRE_MAGIC` paths continue
-// to resolve.
-pub use reddb_wire::redwire::{DEFAULT_REDWIRE_PORT, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
-
-// FrameBuilder owns server-side frame-construction discipline (see
-// `crates/reddb-wire/src/redwire/builder.rs`). Re-exported here so
-// dispatch sites can `use crate::wire::redwire::FrameBuilder`.
-pub use reddb_wire::redwire::{BuildError, FrameBuilder};
+pub use reddb_wire::redwire::{
+    decode_frame, encode_frame, BuildError, Flags, Frame, FrameBuilder, FrameError, MessageKind,
+    DEFAULT_REDWIRE_PORT, FRAME_HEADER_SIZE, MAX_FRAME_SIZE, MAX_KNOWN_MINOR_VERSION,
+    REDWIRE_MAGIC,
+};

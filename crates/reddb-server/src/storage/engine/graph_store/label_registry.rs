@@ -21,9 +21,8 @@
 //!
 //! # Persistence
 //!
-//! Encode: `[entry_count: u32 LE]` followed by `entry_count` records of:
-//! `[id: u32 LE][namespace: u8][label_len: u16 LE][label_bytes…]`.
-//! Decode tolerates trailing garbage (returns the prefix it understood).
+//! The persisted byte frame lives in `reddb-file`; this module owns allocation,
+//! lookup, legacy seeds, and concurrency.
 //!
 //! Persisting the registry is the caller's job — `GraphStore` writes it as
 //! a sidecar page; embedded users can call [`LabelRegistry::encode`] /
@@ -116,7 +115,7 @@ impl std::fmt::Display for LabelRegistryError {
 impl std::error::Error for LabelRegistryError {}
 
 /// Hard cap on label string length. Matches `MAX_LABEL_SIZE` in `graph_store.rs`.
-pub const MAX_LABEL_LEN: usize = 512;
+pub const MAX_LABEL_LEN: usize = reddb_file::GRAPH_LABEL_REGISTRY_MAX_LABEL_LEN;
 
 /// Bidirectional `label ↔ LabelId` catalog with concurrent access.
 ///
@@ -260,33 +259,27 @@ impl LabelRegistry {
         }
     }
 
-    /// Serialize the catalog to a self-describing byte buffer. Format:
-    /// `[count: u32 LE]([id: u32 LE][ns: u8][len: u16 LE][label_bytes])*`
+    /// Serialize the catalog to the canonical `reddb-file` label-registry frame.
     pub fn encode(&self) -> Result<Vec<u8>, LabelRegistryError> {
         let g = self
             .inner
             .read()
             .map_err(|_| LabelRegistryError::LockPoisoned)?;
         // Count only populated slots.
-        let entries: Vec<(LabelId, Namespace, &str)> = g
+        let entries: Vec<reddb_file::GraphLabelRegistryEntry> = g
             .by_id
             .iter()
             .enumerate()
             .filter_map(|(i, slot)| {
                 slot.as_ref()
-                    .map(|(ns, label)| (LabelId(i as u32), *ns, label.as_str()))
+                    .map(|(ns, label)| reddb_file::GraphLabelRegistryEntry {
+                        id: i as u32,
+                        namespace: *ns as u8,
+                        label: label.clone(),
+                    })
             })
             .collect();
-        let mut buf = Vec::with_capacity(4 + entries.len() * 16);
-        buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-        for (id, ns, label) in entries {
-            buf.extend_from_slice(&id.0.to_le_bytes());
-            buf.push(ns as u8);
-            let bytes = label.as_bytes();
-            buf.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-            buf.extend_from_slice(bytes);
-        }
-        Ok(buf)
+        reddb_file::encode_graph_label_registry_frame(&entries).map_err(Self::map_frame_error)
     }
 
     /// Inverse of [`encode`]. Returns a fresh registry; the legacy seed is
@@ -294,42 +287,14 @@ impl LabelRegistry {
     /// contain the legacy entries).
     pub fn decode(data: &[u8]) -> Result<Self, LabelRegistryError> {
         let reg = Self::empty();
-        if data.len() < 4 {
-            return Err(LabelRegistryError::Malformed {
+        let entries =
+            reddb_file::decode_graph_label_registry_frame(data).map_err(Self::map_frame_error)?;
+        for entry in entries {
+            let ns = Namespace::from_u8(entry.namespace).ok_or(LabelRegistryError::Malformed {
                 offset: 0,
-                reason: "header truncated",
-            });
-        }
-        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        let mut off = 4;
-        for _ in 0..count {
-            if data.len() < off + 7 {
-                return Err(LabelRegistryError::Malformed {
-                    offset: off,
-                    reason: "entry header truncated",
-                });
-            }
-            let id = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-            let ns = Namespace::from_u8(data[off + 4]).ok_or(LabelRegistryError::Malformed {
-                offset: off + 4,
                 reason: "unknown namespace",
             })?;
-            let len = u16::from_le_bytes([data[off + 5], data[off + 6]]) as usize;
-            off += 7;
-            if data.len() < off + len {
-                return Err(LabelRegistryError::Malformed {
-                    offset: off,
-                    reason: "label bytes truncated",
-                });
-            }
-            let label = std::str::from_utf8(&data[off..off + len]).map_err(|_| {
-                LabelRegistryError::Malformed {
-                    offset: off,
-                    reason: "label not utf8",
-                }
-            })?;
-            reg.intern_with_id(ns, label, LabelId(id))?;
-            off += len;
+            reg.intern_with_id(ns, &entry.label, LabelId(entry.id))?;
         }
         // Bump next_id to one past the highest ID seen so subsequent
         // intern() calls do not collide with restored entries.
@@ -344,6 +309,17 @@ impl LabelRegistry {
             g.next_id = max_id.saturating_add(1).max(FIRST_USER_LABEL_ID);
         }
         Ok(reg)
+    }
+
+    fn map_frame_error(e: reddb_file::GraphLabelRegistryFrameError) -> LabelRegistryError {
+        match e {
+            reddb_file::GraphLabelRegistryFrameError::LabelTooLong { len, max } => {
+                LabelRegistryError::LabelTooLong { len, max }
+            }
+            reddb_file::GraphLabelRegistryFrameError::Malformed { offset, reason } => {
+                LabelRegistryError::Malformed { offset, reason }
+            }
+        }
     }
 
     /// Insert at a specific ID. Used by [`with_legacy_seed`] and [`decode`].

@@ -64,7 +64,7 @@
 
 use std::time::Duration;
 
-use crate::serde_json::{self, Value as JsonValue};
+pub use reddb_file::FileLastVoteStore;
 
 // ---------------------------------------------------------------
 // Membership model
@@ -173,37 +173,15 @@ pub struct LastVote {
 }
 
 impl LastVote {
-    fn to_json(&self) -> JsonValue {
-        let mut obj = serde_json::Map::new();
-        obj.insert("term".to_string(), JsonValue::Number(self.term as f64));
-        obj.insert(
-            "voted_for".to_string(),
-            match &self.voted_for {
-                Some(id) => JsonValue::String(id.clone()),
-                None => JsonValue::Null,
-            },
-        );
-        JsonValue::Object(obj)
+    fn from_file(value: reddb_file::DurableLastVote) -> Self {
+        Self {
+            term: value.term,
+            voted_for: value.voted_for,
+        }
     }
 
-    fn from_json(value: &JsonValue) -> Result<Self, LastVoteError> {
-        let obj = value.as_object().ok_or_else(|| {
-            LastVoteError::InvalidFormat("last-vote json is not an object".into())
-        })?;
-        let term = obj
-            .get("term")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| LastVoteError::InvalidFormat("missing term".into()))?;
-        let voted_for = match obj.get("voted_for") {
-            None | Some(JsonValue::Null) => None,
-            Some(JsonValue::String(s)) => Some(s.clone()),
-            Some(_) => {
-                return Err(LastVoteError::InvalidFormat(
-                    "voted_for must be a string or null".into(),
-                ))
-            }
-        };
-        Ok(Self { term, voted_for })
+    fn to_file(&self) -> reddb_file::DurableLastVote {
+        reddb_file::DurableLastVote::new(self.term, self.voted_for.clone())
     }
 }
 
@@ -223,6 +201,15 @@ impl std::fmt::Display for LastVoteError {
 }
 
 impl std::error::Error for LastVoteError {}
+
+impl From<reddb_file::RdbFileError> for LastVoteError {
+    fn from(value: reddb_file::RdbFileError) -> Self {
+        match value {
+            reddb_file::RdbFileError::Io(err) => Self::Io(err),
+            reddb_file::RdbFileError::InvalidOperation(msg) => Self::InvalidFormat(msg),
+        }
+    }
+}
 
 /// Durable store for a node's last vote. The contract is narrow on purpose:
 /// `load` returns the persisted record (or the default `term 0, voted_for
@@ -266,57 +253,16 @@ impl LastVoteStore for MemoryLastVoteStore {
     }
 }
 
-/// File-backed last-vote store. Persists the record alongside the node's
-/// other durable replication state. The write is atomic (temp file +
-/// rename) so a crash mid-write never yields a torn record — either the
-/// old vote or the new one survives, never a half of each.
-pub struct FileLastVoteStore {
-    path: std::path::PathBuf,
-}
-
-impl FileLastVoteStore {
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-}
-
 impl LastVoteStore for FileLastVoteStore {
     fn load(&self) -> Result<LastVote, LastVoteError> {
-        match std::fs::read(&self.path) {
-            Ok(bytes) => {
-                let json: JsonValue = serde_json::from_slice(&bytes)
-                    .map_err(|err| LastVoteError::InvalidFormat(format!("parse: {err}")))?;
-                LastVote::from_json(&json)
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(LastVote::default()),
-            Err(err) => Err(LastVoteError::Io(err)),
-        }
+        self.load_file()
+            .map(LastVote::from_file)
+            .map_err(LastVoteError::from)
     }
 
     fn persist(&self, vote: &LastVote) -> Result<(), LastVoteError> {
-        let bytes = serde_json::to_vec(&vote.to_json())
-            .map_err(|err| LastVoteError::InvalidFormat(format!("serialize: {err}")))?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(LastVoteError::Io)?;
-        }
-        let tmp = self.path.with_extension("lastvote.tmp");
-        std::fs::write(&tmp, &bytes).map_err(LastVoteError::Io)?;
-        // Atomic publish: rename over the live file. fsync the file before
-        // rename so the bytes are durable, not just in the page cache.
-        if let Ok(f) = std::fs::File::open(&tmp) {
-            let _ = f.sync_all();
-        }
-        std::fs::rename(&tmp, &self.path).map_err(LastVoteError::Io)?;
-        // fsync the parent directory so the rename itself is durable. Without
-        // this, a crash after the rename could leave the directory entry still
-        // pointing at the old record — which would let a restarted voter
-        // double-vote, the exact failure the durable last-vote forbids.
-        if let Some(parent) = self.path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-        Ok(())
+        self.persist_file(&vote.to_file())
+            .map_err(LastVoteError::from)
     }
 }
 

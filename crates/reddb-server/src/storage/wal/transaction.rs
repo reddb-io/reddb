@@ -771,7 +771,8 @@ mod tests {
         // Snapshot file size after WAL header.
         let size_before = std::fs::metadata(&wal_path).unwrap().len();
         assert_eq!(
-            size_before, 8,
+            size_before,
+            reddb_file::WAL_FILE_HEADER_BYTES as u64,
             "fresh WAL must be exactly the 8-byte header"
         );
 

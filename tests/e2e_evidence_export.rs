@@ -24,6 +24,10 @@ fn evidence_export_policy(id: &str) -> Policy {
                 "effect": "allow",
                 "actions": ["evidence:export"],
                 "resources": ["evidence:control_events"]
+            }}, {{
+                "effect": "allow",
+                "actions": ["select"],
+                "resources": ["table:__red_schema_control_events"]
             }}]
         }}"#
     ))

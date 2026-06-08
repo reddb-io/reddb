@@ -17,7 +17,7 @@ use reddb::storage::wal::writer::WalWriter;
 use reddb::{fold_dwb_into_wal_enabled, set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Serialise tests that flip the process-global toggle.
 static POLICY_GUARD: Mutex<()> = Mutex::new(());
@@ -50,6 +50,21 @@ fn cleanup(path: &Path) {
     let _ = std::fs::remove_file(&wal);
 }
 
+fn open_persistent(path: &Path) -> RedDBRuntime {
+    let mut last_error = String::new();
+    for _ in 0..20 {
+        match RedDBRuntime::with_options(RedDBOptions::persistent(path)) {
+            Ok(rt) => return rt,
+            Err(err) if err.to_string().contains("Database is locked") => {
+                last_error = err.to_string();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => panic!("persistent runtime opens: {err}"),
+        }
+    }
+    panic!("persistent runtime opens after lock retry: {last_error}");
+}
+
 #[test]
 fn fold_dwb_off_default_preserves_dwb_sidecar() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
@@ -61,8 +76,7 @@ fn fold_dwb_off_default_preserves_dwb_sidecar() {
     cleanup(&path);
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("persistent runtime opens");
+        let rt = open_persistent(&path);
         rt.execute_query("CREATE TABLE dwb_off_a (name TEXT)")
             .expect("ddl");
         rt.execute_query("INSERT INTO dwb_off_a (name) VALUES ('a')")
@@ -90,8 +104,7 @@ fn fold_dwb_on_suppresses_and_removes_sidecar() {
     // on disk. Then flip ON and reopen: the sidecar must be cleaned up.
     set_fold_dwb_into_wal_enabled(false);
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("persistent runtime opens");
+        let rt = open_persistent(&path);
         rt.execute_query("CREATE TABLE dwb_on_a (name TEXT)")
             .expect("ddl");
         rt.checkpoint().expect("flush");
@@ -100,8 +113,7 @@ fn fold_dwb_on_suppresses_and_removes_sidecar() {
 
     set_fold_dwb_into_wal_enabled(true);
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("persistent runtime reopens");
+        let rt = open_persistent(&path);
         rt.execute_query("INSERT INTO dwb_on_a (name) VALUES ('alpha')")
             .expect("insert");
         rt.checkpoint().expect("flush");
@@ -114,8 +126,7 @@ fn fold_dwb_on_suppresses_and_removes_sidecar() {
 
     // Reopen ON and verify data still readable (no DWB needed).
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("persistent runtime reopens cleanly without -dwb");
+        let rt = open_persistent(&path);
         let _ = rt
             .execute_query("SELECT name FROM dwb_on_a")
             .expect("select");

@@ -1,11 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::application::ExecuteQueryInput;
 use reddb::auth::{AuthConfig, AuthStore};
-use reddb::catalog::{CollectionModel, SchemaMode};
-use reddb::physical::{CollectionContract, ContractOrigin};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
@@ -14,12 +12,25 @@ fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
 }
 
+fn ddl_drop_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn temp_db_path(name: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
+}
+
+fn unique_ident(prefix: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{prefix}_{unique}")
 }
 
 fn cleanup_related(path: &Path) {
@@ -84,70 +95,79 @@ fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
     }
 }
 
-fn register_collection(rt: &RedDBRuntime, name: &str, model: CollectionModel) {
-    rt.db()
-        .store()
-        .create_collection(name)
-        .unwrap_or_else(|err| panic!("create {name}: {err}"));
-    rt.db()
-        .save_collection_contract(CollectionContract {
-            name: name.to_string(),
-            declared_model: model,
-            schema_mode: SchemaMode::Dynamic,
-            origin: ContractOrigin::Explicit,
-            version: 1,
-            created_at_unix_ms: 0,
-            updated_at_unix_ms: 0,
-            default_ttl_ms: None,
-            vector_dimension: None,
-            vector_metric: None,
-            context_index_fields: Vec::new(),
-            declared_columns: Vec::new(),
-            table_def: None,
-            timestamps_enabled: false,
-            context_index_enabled: false,
-            metrics_raw_retention_ms: None,
-            metrics_rollup_policies: Vec::new(),
-            metrics_tenant_identity: None,
-            metrics_namespace: None,
-            append_only: false,
-            subscriptions: Vec::new(),
-            session_key: None,
-            session_gap_ms: None,
-            retention_duration_ms: None,
-            analytical_storage: None,
-        })
-        .unwrap_or_else(|err| panic!("contract {name}: {err}"));
-}
-
 #[test]
 fn typed_drop_removes_non_table_models() {
-    let rt = rt();
-    for (name, model, sql) in [
-        ("identity", CollectionModel::Graph, "DROP GRAPH identity"),
-        ("notes", CollectionModel::Vector, "DROP VECTOR notes"),
-        ("logs", CollectionModel::Document, "DROP DOCUMENT logs"),
-        ("settings", CollectionModel::Kv, "DROP KV settings"),
-        (
-            "app_settings",
-            CollectionModel::Config,
-            "DROP CONFIG app_settings",
-        ),
-        ("secrets", CollectionModel::Vault, "DROP VAULT secrets"),
+    let _guard = ddl_drop_test_lock().lock().unwrap();
+    let path = temp_db_path("ddl_drop_typed_models");
+    cleanup_related(&path);
+    let rt = rt_with_vault(&path);
+    for (name, create_sql, drop_sql) in [
+        {
+            let name = unique_ident("identity");
+            (
+                name.clone(),
+                format!("CREATE GRAPH {name}"),
+                format!("DROP GRAPH {name}"),
+            )
+        },
+        {
+            let name = unique_ident("notes");
+            (
+                name.clone(),
+                format!("CREATE VECTOR {name} DIM 3"),
+                format!("DROP VECTOR {name}"),
+            )
+        },
+        {
+            let name = unique_ident("logs");
+            (
+                name.clone(),
+                format!("CREATE DOCUMENT {name}"),
+                format!("DROP DOCUMENT {name}"),
+            )
+        },
+        {
+            let name = unique_ident("settings");
+            (
+                name.clone(),
+                format!("CREATE KV {name}"),
+                format!("DROP KV {name}"),
+            )
+        },
+        {
+            let name = unique_ident("app_settings");
+            (
+                name.clone(),
+                format!("CREATE CONFIG {name}"),
+                format!("DROP CONFIG {name}"),
+            )
+        },
+        {
+            let name = unique_ident("secrets");
+            (
+                name.clone(),
+                format!("CREATE VAULT {name}"),
+                format!("DROP VAULT {name}"),
+            )
+        },
     ] {
-        register_collection(&rt, name, model);
-        exec(&rt, sql);
-        assert!(rt.db().store().get_collection(name).is_none(), "{name}");
-        assert!(rt.db().collection_contract(name).is_none(), "{name}");
+        exec(&rt, &create_sql);
+        exec(&rt, &drop_sql);
+        assert!(rt.db().store().get_collection(&name).is_none(), "{name}");
+        assert!(rt.db().collection_contract(&name).is_none(), "{name}");
     }
+    drop(rt);
+    cleanup_related(&path);
 }
 
 #[test]
 fn drop_collection_dispatches_polymorphically_and_if_exists_is_idempotent() {
+    let _guard = ddl_drop_test_lock().lock().unwrap();
     let rt = rt();
-    exec(&rt, "CREATE TABLE users (id INT)");
-    exec(&rt, "DROP COLLECTION users");
-    assert!(rt.db().store().get_collection("users").is_none());
+    let users = unique_ident("users");
+    exec(&rt, &format!("CREATE TABLE {users} (id INT)"));
+    exec(&rt, &format!("DROP COLLECTION {users}"));
+    assert!(rt.db().store().get_collection(&users).is_none());
 
     exec(&rt, "DROP TABLE IF EXISTS missing_table");
     exec(&rt, "DROP COLLECTION IF EXISTS missing_collection");
@@ -155,17 +175,21 @@ fn drop_collection_dispatches_polymorphically_and_if_exists_is_idempotent() {
 
 #[test]
 fn create_keyed_models_are_visible_in_typed_show_filters() {
+    let _guard = ddl_drop_test_lock().lock().unwrap();
     let path = temp_db_path("ddl_drop_foundation_vault");
     cleanup_related(&path);
     let rt = rt_with_vault(&path);
-    exec(&rt, "CREATE KV sessions");
-    exec(&rt, "CREATE CONFIG app_settings");
-    exec(&rt, "CREATE VAULT secrets");
+    let sessions = unique_ident("sessions");
+    let app_settings = unique_ident("app_settings");
+    let secrets = unique_ident("secrets");
+    exec(&rt, &format!("CREATE KV {sessions}"));
+    exec(&rt, &format!("CREATE CONFIG {app_settings}"));
+    exec(&rt, &format!("CREATE VAULT {secrets}"));
 
     for (sql, expected_name, expected_model) in [
-        ("SHOW KVS", "sessions", "kv"),
-        ("SHOW CONFIGS", "app_settings", "config"),
-        ("SHOW VAULTS", "secrets", "vault"),
+        ("SHOW KVS", sessions.as_str(), "kv"),
+        ("SHOW CONFIGS", app_settings.as_str(), "config"),
+        ("SHOW VAULTS", secrets.as_str(), "vault"),
     ] {
         let result = rt
             .execute_query(sql)
@@ -192,17 +216,20 @@ fn create_keyed_models_are_visible_in_typed_show_filters() {
 
 #[test]
 fn drop_model_mismatch_and_system_schema_are_rejected() {
+    let _guard = ddl_drop_test_lock().lock().unwrap();
     let rt = rt();
-    exec(&rt, "CREATE QUEUE jobs");
+    let jobs = unique_ident("jobs");
+    let app_settings = unique_ident("app_settings");
+    exec(&rt, &format!("CREATE QUEUE {jobs}"));
 
-    let err = exec_err(&rt, "DROP TABLE jobs");
+    let err = exec_err(&rt, &format!("DROP TABLE {jobs}"));
     assert!(
         err.contains("model mismatch: expected table, got queue"),
         "unexpected error: {err}"
     );
 
-    exec(&rt, "CREATE CONFIG app_settings");
-    let err = exec_err(&rt, "DROP KV app_settings");
+    exec(&rt, &format!("CREATE CONFIG {app_settings}"));
+    let err = exec_err(&rt, &format!("DROP KV {app_settings}"));
     assert!(
         err.contains("INVALID_OPERATION")
             && err.contains("model mismatch: expected kv, got config"),

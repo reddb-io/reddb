@@ -159,7 +159,13 @@ impl PointInTimeRecovery {
         match &plan.snapshot_sha256 {
             Some(expected) => {
                 let computed =
-                    crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(dest_path)?;
+                    crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(dest_path)
+                        .map_err(|err| {
+                            BackendError::Internal(format!(
+                                "snapshot integrity hash failed for '{}': {err}",
+                                plan.snapshot_key
+                            ))
+                        })?;
                 if !computed.eq_ignore_ascii_case(expected) {
                     return Err(BackendError::Internal(format!(
                         "snapshot integrity check failed for '{}': manifest sha256 {} != computed sha256 {}; \
@@ -523,7 +529,7 @@ mod tests {
         tag: &str,
         mutate: impl FnOnce(&LocalBackend, &[crate::storage::wal::WalSegmentMeta]),
     ) -> Result<RecoveryResult, BackendError> {
-        use crate::replication::cdc::ChangeRecord;
+        use crate::replication::cdc::{change_record_from_entity, ChangeRecord};
         use crate::storage::schema::Value;
         use crate::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
         let temp_dir = std::env::temp_dir().join(format!(
@@ -579,7 +585,7 @@ mod tests {
             entity.created_at = timestamp;
             entity.updated_at = timestamp;
             entity.sequence_id = lsn;
-            ChangeRecord::from_entity(
+            change_record_from_entity(
                 lsn,
                 timestamp,
                 crate::replication::cdc::ChangeOperation::Insert,

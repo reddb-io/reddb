@@ -15,102 +15,22 @@
 //! connection.
 
 use crate::serde_json::{self, Value as JsonValue};
-use reddb_wire::redwire::frame::{Frame, MessageKind};
-
-use super::FrameBuilder;
-
-/// Parsed `QueueWaitOpen` payload. Shape:
-///
-/// ```json
-/// { "queue": "jobs", "group": "g?", "consumer": "w1",
-///   "count": 1, "wait_ms": 5000 }
-/// ```
-///
-/// `group` is optional (the runtime resolves the default work / fanout
-/// group when absent, matching the SQL `QUEUE READ` path). `count`
-/// defaults to 1 and `wait_ms` to 0 (a single re-probe of current
-/// state) when omitted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueueWaitOpenRequest {
-    pub queue: String,
-    pub group: Option<String>,
-    pub consumer: String,
-    pub count: usize,
-    pub wait_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueueWaitParseError {
-    NotJson,
-    NotObject,
-    MissingQueue,
-    MissingConsumer,
-}
-
-impl QueueWaitParseError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::NotJson | Self::NotObject => "queue_wait_invalid_payload",
-            Self::MissingQueue => "queue_wait_missing_queue",
-            Self::MissingConsumer => "queue_wait_missing_consumer",
-        }
-    }
-    pub fn message(&self) -> &'static str {
-        match self {
-            Self::NotJson => "QueueWaitOpen payload must be JSON",
-            Self::NotObject => "QueueWaitOpen payload must be a JSON object",
-            Self::MissingQueue => "QueueWaitOpen payload missing 'queue' string field",
-            Self::MissingConsumer => "QueueWaitOpen payload missing 'consumer' string field",
-        }
-    }
-}
+pub use reddb_wire::redwire::queue::{
+    QueueWaitOpenRequest, QueueWaitParseError, WAIT_CANCELLED_CODE, WAIT_EXCEEDS_CAP_CODE,
+    WAIT_FAILED_CODE,
+};
+use reddb_wire::redwire::Frame;
 
 pub fn parse_queue_wait_open(payload: &[u8]) -> Result<QueueWaitOpenRequest, QueueWaitParseError> {
-    let v: JsonValue = serde_json::from_slice(payload).map_err(|_| QueueWaitParseError::NotJson)?;
-    let obj = v.as_object().ok_or(QueueWaitParseError::NotObject)?;
-    let queue = obj
-        .get("queue")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or(QueueWaitParseError::MissingQueue)?
-        .to_string();
-    let consumer = obj
-        .get("consumer")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or(QueueWaitParseError::MissingConsumer)?
-        .to_string();
-    let group = obj
-        .get("group")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    // `count` defaults to 1; clamp to at least 1 so a wait always asks
-    // for a deliverable message.
-    let count = obj
-        .get("count")
-        .and_then(|x| x.as_f64())
-        .map(|n| (n as usize).max(1))
-        .unwrap_or(1);
-    let wait_ms = obj
-        .get("wait_ms")
-        .and_then(|x| x.as_f64())
-        .map(|n| n.max(0.0) as u64)
-        .unwrap_or(0);
-    Ok(QueueWaitOpenRequest {
-        queue,
-        group,
-        consumer,
-        count,
-        wait_ms,
-    })
+    reddb_wire::redwire::queue::parse_queue_wait_open(payload)
 }
 
 /// Build the `QueueEventPush` payload for one delivered message. The
 /// `message` value is the JSON object rendered by the runtime
 /// (`message_id` / `payload` / `consumer` / `delivery_count`).
 pub fn build_event_push_payload(message: &JsonValue) -> Vec<u8> {
-    serde_json::to_vec(message).unwrap_or_default()
+    let bytes = serde_json::to_vec(message).unwrap_or_default();
+    reddb_wire::redwire::queue::build_event_push_payload_from_json_bytes(&bytes)
 }
 
 /// Build a `QueueEventPush` frame echoing the open request's
@@ -121,11 +41,12 @@ pub fn build_event_push_frame(
     stream_id: u16,
     message: &JsonValue,
 ) -> Result<Frame, super::BuildError> {
-    FrameBuilder::reply_to(correlation_id)
-        .kind(MessageKind::QueueEventPush)
-        .stream_id(stream_id)
-        .payload(build_event_push_payload(message))
-        .build()
+    let bytes = serde_json::to_vec(message).unwrap_or_default();
+    reddb_wire::redwire::queue::build_queue_event_push_frame_from_json_bytes(
+        correlation_id,
+        stream_id,
+        &bytes,
+    )
 }
 
 /// Build a `QueueWaitTimeout` frame for an elapsed wait (issue #919).
@@ -144,34 +65,13 @@ pub fn build_queue_wait_timeout_frame(
     queue: &str,
     wait_ms: u64,
 ) -> Result<Frame, super::BuildError> {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "outcome".to_string(),
-        JsonValue::String("timeout".to_string()),
-    );
-    obj.insert("queue".to_string(), JsonValue::String(queue.to_string()));
-    obj.insert("wait_ms".to_string(), JsonValue::Number(wait_ms as f64));
-    FrameBuilder::reply_to(correlation_id)
-        .kind(MessageKind::QueueWaitTimeout)
-        .stream_id(stream_id)
-        .payload(serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default())
-        .build()
+    reddb_wire::redwire::queue::build_queue_wait_timeout_frame(
+        correlation_id,
+        stream_id,
+        queue,
+        wait_ms,
+    )
 }
-
-/// `StreamError` code for a live queue-wait terminated by server-side
-/// cancellation (registry `cancel_all`, e.g. shutdown). Distinct from
-/// [`WAIT_FAILED_CODE`] (a genuine runtime error) and from the timeout
-/// frame, so the three non-delivery outcomes never alias on the wire.
-pub const WAIT_CANCELLED_CODE: &str = "queue_wait_cancelled";
-
-/// `StreamError` code for a wait open whose requested budget exceeds the
-/// server's maximum wait cap (issue #919). The accompanying message
-/// names the `red.config` key so an operator can act on it.
-pub const WAIT_EXCEEDS_CAP_CODE: &str = "queue_wait_exceeds_cap";
-
-/// `StreamError` code for a runtime failure while servicing a wait
-/// (e.g. the queue read errored). Non-fatal at the connection level.
-pub const WAIT_FAILED_CODE: &str = "queue_wait_failed";
 
 /// Build a `StreamError` frame carrying a queue-wait parse/validation
 /// failure for a specific `stream_id`. Non-fatal at the connection
@@ -182,22 +82,18 @@ pub fn build_queue_wait_error_frame(
     code: &str,
     message: &str,
 ) -> Result<Frame, super::BuildError> {
-    let mut obj = serde_json::Map::new();
-    obj.insert("code".to_string(), JsonValue::String(code.to_string()));
-    obj.insert(
-        "message".to_string(),
-        JsonValue::String(message.to_string()),
-    );
-    FrameBuilder::reply_to(correlation_id)
-        .kind(MessageKind::StreamError)
-        .stream_id(stream_id)
-        .payload(serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default())
-        .build()
+    reddb_wire::redwire::queue::build_queue_wait_error_frame(
+        correlation_id,
+        stream_id,
+        code,
+        message,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reddb_wire::redwire::MessageKind;
 
     #[test]
     fn parse_minimal_request_applies_defaults() {

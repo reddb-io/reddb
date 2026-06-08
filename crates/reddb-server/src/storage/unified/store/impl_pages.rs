@@ -2,8 +2,6 @@ use super::*;
 use crate::storage::unified::entity_cache::EntityCache;
 use parking_lot::RwLock;
 
-const ENTITY_RECORD_MAGIC: &[u8; 4] = b"RER1";
-
 // ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
 // When the serialized collection registry + cross-refs exceed a single page,
 // page 1 carries a "RDM3" wrapper header pointing at an overflow chain of
@@ -22,7 +20,6 @@ const ENTITY_RECORD_MAGIC: &[u8; 4] = b"RER1";
 //   [0..4]   next_overflow_page_id (u32, 0 if last)
 //   [4..8]   chunk_bytes (u32)
 //   [8..]    chunk payload (up to META_V3_OVERFLOW_PAYLOAD_CAP bytes)
-const METADATA_OVERFLOW_MAGIC: &[u8; 4] = b"RDM3";
 const META_PAGE_CONTENT_CAP: usize =
     crate::storage::engine::PAGE_SIZE - crate::storage::engine::HEADER_SIZE;
 const META_V3_PAGE1_HEADER: usize = 16;
@@ -316,7 +313,6 @@ impl UnifiedStore {
             config,
             format_version: AtomicU32::new(STORE_VERSION_V9),
             next_entity_id: AtomicU64::new(1),
-            next_collection_id: AtomicU64::new(1),
             collections: RwLock::new(HashMap::new()),
             cross_refs: RwLock::new(HashMap::new()),
             reverse_refs: RwLock::new(HashMap::new()),
@@ -330,7 +326,6 @@ impl UnifiedStore {
             commit: None,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
-            collection_ranges: RwLock::new(HashMap::new()),
         }
     }
 
@@ -377,7 +372,7 @@ impl UnifiedStore {
         let pager = Pager::open(path, pager_config)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
-        let wal_path = Self::wal_path_for_db(path);
+        let wal_path = reddb_file::layout::unified_wal_path(path);
         let commit = if StoreCommitCoordinator::should_open(&wal_path, config.durability_mode) {
             Some(Arc::new(
                 StoreCommitCoordinator::open(wal_path, config.durability_mode, config.group_commit)
@@ -391,7 +386,6 @@ impl UnifiedStore {
             config,
             format_version: AtomicU32::new(STORE_VERSION_V9),
             next_entity_id: AtomicU64::new(1),
-            next_collection_id: AtomicU64::new(1),
             collections: RwLock::new(HashMap::new()),
             cross_refs: RwLock::new(HashMap::new()),
             reverse_refs: RwLock::new(HashMap::new()),
@@ -405,7 +399,6 @@ impl UnifiedStore {
             commit,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
-            collection_ranges: RwLock::new(HashMap::new()),
         };
 
         // Load existing data from pages if database exists

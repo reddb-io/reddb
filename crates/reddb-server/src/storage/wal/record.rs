@@ -1,97 +1,12 @@
-use crate::storage::engine::crc32::{crc32, crc32_update};
+use reddb_file::{
+    decode_main_wal_record_frame, encode_main_wal_record_frame_into, MainWalRecordFrame,
+    WAL_FILE_VERSION,
+};
 use std::io::{self, Read};
 
-/// WAL file magic bytes (RDBW)
-pub const WAL_MAGIC: &[u8; 4] = b"RDBW";
-
-/// WAL file format version
-pub const WAL_VERSION: u8 = 3;
-pub const WAL_VERSION_V2: u8 = 2;
 pub const WAL_DEFAULT_TERM: u64 = crate::replication::DEFAULT_REPLICATION_TERM;
 
-/// Minimum payload size (bytes) to attempt zstd compression.
-/// Smaller records pay more overhead than benefit from compression.
-const COMPRESS_THRESHOLD: usize = 256;
-
-/// Compression algorithm tag embedded in `PageWriteCompressed` records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Compression {
-    None = 0,
-    Zstd = 1,
-}
-
-impl Compression {
-    fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Compression::None),
-            1 => Some(Compression::Zstd),
-            _ => None,
-        }
-    }
-}
-
-/// Type of WAL record
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum RecordType {
-    Begin = 1,
-    Commit = 2,
-    Rollback = 3,
-    /// Legacy uncompressed page write (v1 format — still written for
-    /// small payloads to avoid compression overhead).
-    PageWrite = 4,
-    Checkpoint = 5,
-    /// Compressed page write (v2 format).
-    ///
-    /// Layout (after the type byte):
-    /// ```text
-    /// [TxID: 8][PageID: 4][Compression: 1][OrigLen: 4][DataLen: 4][Data: N][CRC: 4]
-    /// ```
-    /// `OrigLen` is the original (uncompressed) size; needed to pre-allocate
-    /// the decompression buffer.
-    PageWriteCompressed = 6,
-    /// Logical autocommit transaction commit batch (v2 format).
-    ///
-    /// Layout (after the type byte):
-    /// ```text
-    /// [TxID: 8][ActionCount: 4][[DataLen: 4][Data: N]...][CRC: 4]
-    /// ```
-    TxCommitBatch = 7,
-    /// Full-page image (FPI). Captures a complete page before its first
-    /// modification within a checkpoint cycle so torn-page recovery can
-    /// replay the pristine image before redo replays subsequent
-    /// `PageWrite`s. Enables `fold_dwb_into_wal` to retire the `-dwb`
-    /// sidecar (gh-478).
-    ///
-    /// Layout (after the type byte):
-    /// ```text
-    /// [TxID: 8][PageID: 4][CkptEpoch: 8][DataLen: 4][Data: N][CRC: 4]
-    /// ```
-    FullPageImage = 8,
-    /// Logical vector insert for vector-turbo WAL replay.
-    VectorInsert = 9,
-    /// Cluster range-scoped logical commit batch.
-    RangeCommitBatch = 10,
-}
-
-impl RecordType {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            1 => Some(RecordType::Begin),
-            2 => Some(RecordType::Commit),
-            3 => Some(RecordType::Rollback),
-            4 => Some(RecordType::PageWrite),
-            5 => Some(RecordType::Checkpoint),
-            6 => Some(RecordType::PageWriteCompressed),
-            7 => Some(RecordType::TxCommitBatch),
-            8 => Some(RecordType::FullPageImage),
-            9 => Some(RecordType::VectorInsert),
-            10 => Some(RecordType::RangeCommitBatch),
-            _ => None,
-        }
-    }
-}
+pub use reddb_file::MainWalRecordType as RecordType;
 
 /// A single entry in the write-ahead log
 #[derive(Debug, Clone, PartialEq)]
@@ -112,12 +27,6 @@ pub enum WalRecord {
     /// Atomic logical commit batch. Recovery applies all actions in
     /// order iff this complete record and checksum are present.
     TxCommitBatch { tx_id: u64, actions: Vec<Vec<u8>> },
-    /// Atomic logical commit batch stamped with the owning range.
-    RangeCommitBatch {
-        tx_id: u64,
-        range_id: String,
-        actions: Vec<Vec<u8>>,
-    },
     /// Full-page image — pristine page bytes captured before the first
     /// modification per checkpoint cycle. Recovery applies these before
     /// redo so torn writes are healed without the `-dwb` sidecar.
@@ -141,9 +50,7 @@ pub enum WalRecord {
 impl WalRecord {
     /// Serialize record to bytes (including checksum).
     ///
-    /// `PageWrite` records whose payload is ≥ `COMPRESS_THRESHOLD` bytes are
-    /// compressed with zstd level 3 and emitted as `PageWriteCompressed`.
-    /// Smaller payloads use the plain `PageWrite` encoding (no overhead).
+    /// `PageWrite` compression and physical framing are owned by `reddb-file`.
     pub fn encode(&self) -> Vec<u8> {
         self.encode_with_term(WAL_DEFAULT_TERM)
     }
@@ -177,141 +84,8 @@ impl WalRecord {
     /// starting at the buffer's prior length), so appending after existing
     /// records leaves them untouched and keeps each record's CRC self-contained.
     pub fn encode_with_term_into(&self, out: &mut Vec<u8>, term: u64) {
-        // Offset where this record begins; the checksum covers only `out[start..]`
-        // so a reused scratch buffer's earlier records are excluded.
-        let start = out.len();
-        let buf = out;
-
-        // Layout (non-PageWrite):
-        // [Type: 1]
-        // [Term: 8]
-        // [TxID/LSN: 8]
-        // [Checksum: 4]
-        //
-        // PageWrite (uncompressed):
-        // [Type: 1][TxID: 8][PageID: 4][DataLen: 4][Data: N][CRC: 4]
-        //
-        // PageWriteCompressed:
-        // [Type: 1][TxID: 8][PageID: 4][Compression: 1][OrigLen: 4][DataLen: 4][Data: N][CRC: 4]
-        //
-        // TxCommitBatch:
-        // [Type: 1][TxID: 8][ActionCount: 4][[DataLen: 4][Data: N]...][CRC: 4]
-
-        match self {
-            WalRecord::Begin { tx_id } => {
-                buf.push(RecordType::Begin as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&tx_id.to_le_bytes());
-            }
-            WalRecord::Commit { tx_id } => {
-                buf.push(RecordType::Commit as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&tx_id.to_le_bytes());
-            }
-            WalRecord::Rollback { tx_id } => {
-                buf.push(RecordType::Rollback as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&tx_id.to_le_bytes());
-            }
-            WalRecord::PageWrite {
-                tx_id,
-                page_id,
-                data,
-            } => {
-                if data.len() >= COMPRESS_THRESHOLD {
-                    // Try zstd compression; fall back to uncompressed if it expands.
-                    if let Ok(compressed) =
-                        zstd::bulk::compress(data.as_slice(), /* level */ 3)
-                    {
-                        if compressed.len() < data.len() {
-                            // Compressed is smaller — use compressed format.
-                            buf.push(RecordType::PageWriteCompressed as u8);
-                            buf.extend_from_slice(&term.to_le_bytes());
-                            buf.extend_from_slice(&tx_id.to_le_bytes());
-                            buf.extend_from_slice(&page_id.to_le_bytes());
-                            buf.push(Compression::Zstd as u8);
-                            buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // orig_len
-                            buf.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
-                            buf.extend_from_slice(&compressed);
-                            let checksum = crc32(&buf[start..]);
-                            buf.extend_from_slice(&checksum.to_le_bytes());
-                            return;
-                        }
-                    }
-                }
-                // Uncompressed path (small payload or compression expanded).
-                buf.push(RecordType::PageWrite as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&tx_id.to_le_bytes());
-                buf.extend_from_slice(&page_id.to_le_bytes());
-                buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                buf.extend_from_slice(data);
-            }
-            WalRecord::TxCommitBatch { tx_id, actions } => {
-                buf.push(RecordType::TxCommitBatch as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&tx_id.to_le_bytes());
-                buf.extend_from_slice(&(actions.len() as u32).to_le_bytes());
-                for action in actions {
-                    buf.extend_from_slice(&(action.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(action);
-                }
-            }
-            WalRecord::RangeCommitBatch {
-                tx_id,
-                range_id,
-                actions,
-            } => {
-                buf.push(RecordType::RangeCommitBatch as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&tx_id.to_le_bytes());
-                buf.extend_from_slice(&(range_id.len() as u32).to_le_bytes());
-                buf.extend_from_slice(range_id.as_bytes());
-                buf.extend_from_slice(&(actions.len() as u32).to_le_bytes());
-                for action in actions {
-                    buf.extend_from_slice(&(action.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(action);
-                }
-            }
-            WalRecord::FullPageImage {
-                tx_id,
-                page_id,
-                ckpt_epoch,
-                data,
-            } => {
-                buf.push(RecordType::FullPageImage as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&tx_id.to_le_bytes());
-                buf.extend_from_slice(&page_id.to_le_bytes());
-                buf.extend_from_slice(&ckpt_epoch.to_le_bytes());
-                buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                buf.extend_from_slice(data);
-            }
-            WalRecord::VectorInsert {
-                collection,
-                entity_id,
-                vector,
-            } => {
-                buf.push(RecordType::VectorInsert as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&(collection.len() as u32).to_le_bytes());
-                buf.extend_from_slice(collection.as_bytes());
-                buf.extend_from_slice(&entity_id.to_le_bytes());
-                buf.extend_from_slice(&(vector.len() as u32).to_le_bytes());
-                for value in vector {
-                    buf.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-            WalRecord::Checkpoint { lsn } => {
-                buf.push(RecordType::Checkpoint as u8);
-                buf.extend_from_slice(&term.to_le_bytes());
-                buf.extend_from_slice(&lsn.to_le_bytes());
-            }
-        }
-
-        // Calculate and append checksum over only this record's bytes.
-        let checksum = crc32(&buf[start..]);
-        buf.extend_from_slice(&checksum.to_le_bytes());
+        encode_main_wal_record_frame_into(&self.to_file_frame(), term, out)
+            .expect("main WAL record cannot be encoded");
     }
 
     /// Read a record from a reader.
@@ -324,319 +98,109 @@ impl WalRecord {
 
     /// Read a record and return the term stamped into its physical envelope.
     pub fn read_with_term<R: Read>(reader: &mut R) -> io::Result<Option<(u64, WalRecord)>> {
-        Self::read_with_format_version(reader, WAL_VERSION)
+        Self::read_with_format_version(reader, WAL_FILE_VERSION)
     }
 
     pub(crate) fn read_with_format_version<R: Read>(
         reader: &mut R,
         format_version: u8,
     ) -> io::Result<Option<(u64, WalRecord)>> {
-        // Read type byte
-        let mut type_buf = [0u8; 1];
-        match reader.read_exact(&mut type_buf) {
-            Ok(_) => (),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e),
-        };
+        Ok(
+            decode_main_wal_record_frame(reader, format_version, WAL_DEFAULT_TERM)?
+                .map(|(term, frame)| (term, WalRecord::from_file_frame(frame))),
+        )
+    }
+}
 
-        let record_type = RecordType::from_u8(type_buf[0])
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid record type"))?;
+impl WalRecord {
+    fn to_file_frame(&self) -> MainWalRecordFrame {
+        match self {
+            WalRecord::Begin { tx_id } => MainWalRecordFrame::Begin { tx_id: *tx_id },
+            WalRecord::Commit { tx_id } => MainWalRecordFrame::Commit { tx_id: *tx_id },
+            WalRecord::Rollback { tx_id } => MainWalRecordFrame::Rollback { tx_id: *tx_id },
+            WalRecord::PageWrite {
+                tx_id,
+                page_id,
+                data,
+            } => MainWalRecordFrame::PageWrite {
+                tx_id: *tx_id,
+                page_id: *page_id,
+                data: data.clone(),
+            },
+            WalRecord::TxCommitBatch { tx_id, actions } => MainWalRecordFrame::TxCommitBatch {
+                tx_id: *tx_id,
+                actions: actions.clone(),
+            },
+            WalRecord::FullPageImage {
+                tx_id,
+                page_id,
+                ckpt_epoch,
+                data,
+            } => MainWalRecordFrame::FullPageImage {
+                tx_id: *tx_id,
+                page_id: *page_id,
+                ckpt_epoch: *ckpt_epoch,
+                data: data.clone(),
+            },
+            WalRecord::VectorInsert {
+                collection,
+                entity_id,
+                vector,
+            } => MainWalRecordFrame::VectorInsert {
+                collection: collection.clone(),
+                entity_id: *entity_id,
+                vector: vector.clone(),
+            },
+            WalRecord::Checkpoint { lsn } => MainWalRecordFrame::Checkpoint { lsn: *lsn },
+        }
+    }
 
-        // Start checksum calculation
-        let mut running_crc = crc32_update(0, &type_buf);
-        let term = match format_version {
-            WAL_VERSION => {
-                let mut term_buf = [0u8; 8];
-                reader.read_exact(&mut term_buf)?;
-                running_crc = crc32_update(running_crc, &term_buf);
-                u64::from_le_bytes(term_buf)
-            }
-            WAL_VERSION_V2 => WAL_DEFAULT_TERM,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Unsupported WAL version: {format_version}"),
-                ));
-            }
-        };
-
-        let record = match record_type {
-            RecordType::Begin | RecordType::Commit | RecordType::Rollback => {
-                let mut buf = [0u8; 8];
-                reader.read_exact(&mut buf)?;
-                running_crc = crc32_update(running_crc, &buf);
-                let tx_id = u64::from_le_bytes(buf);
-
-                match record_type {
-                    RecordType::Begin => WalRecord::Begin { tx_id },
-                    RecordType::Commit => WalRecord::Commit { tx_id },
-                    RecordType::Rollback => WalRecord::Rollback { tx_id },
-                    _ => unreachable!(),
-                }
-            }
-            RecordType::PageWrite => {
-                // Read TxID
-                let mut tx_buf = [0u8; 8];
-                reader.read_exact(&mut tx_buf)?;
-                running_crc = crc32_update(running_crc, &tx_buf);
-                let tx_id = u64::from_le_bytes(tx_buf);
-
-                // Read PageID
-                let mut page_buf = [0u8; 4];
-                reader.read_exact(&mut page_buf)?;
-                running_crc = crc32_update(running_crc, &page_buf);
-                let page_id = u32::from_le_bytes(page_buf);
-
-                // Read Length
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf)?;
-                running_crc = crc32_update(running_crc, &len_buf);
-                let len = u32::from_le_bytes(len_buf) as usize;
-
-                // Read Data
-                let mut data = vec![0u8; len];
-                reader.read_exact(&mut data)?;
-                running_crc = crc32_update(running_crc, &data);
-
-                WalRecord::PageWrite {
-                    tx_id,
-                    page_id,
-                    data,
-                }
-            }
-            RecordType::PageWriteCompressed => {
-                // Read TxID
-                let mut tx_buf = [0u8; 8];
-                reader.read_exact(&mut tx_buf)?;
-                running_crc = crc32_update(running_crc, &tx_buf);
-                let tx_id = u64::from_le_bytes(tx_buf);
-
-                // Read PageID
-                let mut page_buf = [0u8; 4];
-                reader.read_exact(&mut page_buf)?;
-                running_crc = crc32_update(running_crc, &page_buf);
-                let page_id = u32::from_le_bytes(page_buf);
-
-                // Read Compression algorithm byte
-                let mut comp_buf = [0u8; 1];
-                reader.read_exact(&mut comp_buf)?;
-                running_crc = crc32_update(running_crc, &comp_buf);
-                let compression = Compression::from_u8(comp_buf[0]).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Unknown WAL compression algorithm: {}", comp_buf[0]),
-                    )
-                })?;
-
-                // Read original (uncompressed) length — used to pre-allocate decompression buffer
-                let mut orig_len_buf = [0u8; 4];
-                reader.read_exact(&mut orig_len_buf)?;
-                running_crc = crc32_update(running_crc, &orig_len_buf);
-                let orig_len = u32::from_le_bytes(orig_len_buf) as usize;
-
-                // Read compressed data length
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf)?;
-                running_crc = crc32_update(running_crc, &len_buf);
-                let len = u32::from_le_bytes(len_buf) as usize;
-
-                // Read compressed data
-                let mut compressed = vec![0u8; len];
-                reader.read_exact(&mut compressed)?;
-                running_crc = crc32_update(running_crc, &compressed);
-
-                // Decompress
-                let data = match compression {
-                    Compression::Zstd => {
-                        let mut out = vec![0u8; orig_len];
-                        zstd::bulk::decompress_to_buffer(&compressed, &mut out).map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("WAL zstd decompress failed: {e}"),
-                            )
-                        })?;
-                        out
-                    }
-                    Compression::None => compressed,
-                };
-
-                WalRecord::PageWrite {
-                    tx_id,
-                    page_id,
-                    data,
-                }
-            }
-            RecordType::TxCommitBatch => {
-                let mut tx_buf = [0u8; 8];
-                reader.read_exact(&mut tx_buf)?;
-                running_crc = crc32_update(running_crc, &tx_buf);
-                let tx_id = u64::from_le_bytes(tx_buf);
-
-                let mut count_buf = [0u8; 4];
-                reader.read_exact(&mut count_buf)?;
-                running_crc = crc32_update(running_crc, &count_buf);
-                let count = u32::from_le_bytes(count_buf) as usize;
-
-                let mut actions = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let mut len_buf = [0u8; 4];
-                    reader.read_exact(&mut len_buf)?;
-                    running_crc = crc32_update(running_crc, &len_buf);
-                    let len = u32::from_le_bytes(len_buf) as usize;
-
-                    let mut action = vec![0u8; len];
-                    reader.read_exact(&mut action)?;
-                    running_crc = crc32_update(running_crc, &action);
-                    actions.push(action);
-                }
-
+    fn from_file_frame(frame: MainWalRecordFrame) -> Self {
+        match frame {
+            MainWalRecordFrame::Begin { tx_id } => WalRecord::Begin { tx_id },
+            MainWalRecordFrame::Commit { tx_id } => WalRecord::Commit { tx_id },
+            MainWalRecordFrame::Rollback { tx_id } => WalRecord::Rollback { tx_id },
+            MainWalRecordFrame::PageWrite {
+                tx_id,
+                page_id,
+                data,
+            } => WalRecord::PageWrite {
+                tx_id,
+                page_id,
+                data,
+            },
+            MainWalRecordFrame::TxCommitBatch { tx_id, actions } => {
                 WalRecord::TxCommitBatch { tx_id, actions }
             }
-            RecordType::RangeCommitBatch => {
-                let mut tx_buf = [0u8; 8];
-                reader.read_exact(&mut tx_buf)?;
-                running_crc = crc32_update(running_crc, &tx_buf);
-                let tx_id = u64::from_le_bytes(tx_buf);
-
-                let mut range_len_buf = [0u8; 4];
-                reader.read_exact(&mut range_len_buf)?;
-                running_crc = crc32_update(running_crc, &range_len_buf);
-                let range_len = u32::from_le_bytes(range_len_buf) as usize;
-
-                let mut range_buf = vec![0u8; range_len];
-                reader.read_exact(&mut range_buf)?;
-                running_crc = crc32_update(running_crc, &range_buf);
-                let range_id = String::from_utf8(range_buf).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid range id utf8: {err}"),
-                    )
-                })?;
-
-                let mut count_buf = [0u8; 4];
-                reader.read_exact(&mut count_buf)?;
-                running_crc = crc32_update(running_crc, &count_buf);
-                let count = u32::from_le_bytes(count_buf) as usize;
-
-                let mut actions = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let mut len_buf = [0u8; 4];
-                    reader.read_exact(&mut len_buf)?;
-                    running_crc = crc32_update(running_crc, &len_buf);
-                    let len = u32::from_le_bytes(len_buf) as usize;
-
-                    let mut action = vec![0u8; len];
-                    reader.read_exact(&mut action)?;
-                    running_crc = crc32_update(running_crc, &action);
-                    actions.push(action);
-                }
-
-                WalRecord::RangeCommitBatch {
-                    tx_id,
-                    range_id,
-                    actions,
-                }
-            }
-            RecordType::VectorInsert => {
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf)?;
-                running_crc = crc32_update(running_crc, &len_buf);
-                let collection_len = u32::from_le_bytes(len_buf) as usize;
-
-                let mut collection_buf = vec![0u8; collection_len];
-                reader.read_exact(&mut collection_buf)?;
-                running_crc = crc32_update(running_crc, &collection_buf);
-                let collection = String::from_utf8(collection_buf).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid collection utf8: {err}"),
-                    )
-                })?;
-
-                let mut entity_buf = [0u8; 8];
-                reader.read_exact(&mut entity_buf)?;
-                running_crc = crc32_update(running_crc, &entity_buf);
-                let entity_id = u64::from_le_bytes(entity_buf);
-
-                let mut count_buf = [0u8; 4];
-                reader.read_exact(&mut count_buf)?;
-                running_crc = crc32_update(running_crc, &count_buf);
-                let count = u32::from_le_bytes(count_buf) as usize;
-
-                let mut vector = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let mut value_buf = [0u8; 4];
-                    reader.read_exact(&mut value_buf)?;
-                    running_crc = crc32_update(running_crc, &value_buf);
-                    vector.push(f32::from_le_bytes(value_buf));
-                }
-
-                WalRecord::VectorInsert {
-                    collection,
-                    entity_id,
-                    vector,
-                }
-            }
-            RecordType::FullPageImage => {
-                let mut tx_buf = [0u8; 8];
-                reader.read_exact(&mut tx_buf)?;
-                running_crc = crc32_update(running_crc, &tx_buf);
-                let tx_id = u64::from_le_bytes(tx_buf);
-
-                let mut page_buf = [0u8; 4];
-                reader.read_exact(&mut page_buf)?;
-                running_crc = crc32_update(running_crc, &page_buf);
-                let page_id = u32::from_le_bytes(page_buf);
-
-                let mut epoch_buf = [0u8; 8];
-                reader.read_exact(&mut epoch_buf)?;
-                running_crc = crc32_update(running_crc, &epoch_buf);
-                let ckpt_epoch = u64::from_le_bytes(epoch_buf);
-
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf)?;
-                running_crc = crc32_update(running_crc, &len_buf);
-                let len = u32::from_le_bytes(len_buf) as usize;
-
-                let mut data = vec![0u8; len];
-                reader.read_exact(&mut data)?;
-                running_crc = crc32_update(running_crc, &data);
-
-                WalRecord::FullPageImage {
-                    tx_id,
-                    page_id,
-                    ckpt_epoch,
-                    data,
-                }
-            }
-            RecordType::Checkpoint => {
-                let mut buf = [0u8; 8];
-                reader.read_exact(&mut buf)?;
-                running_crc = crc32_update(running_crc, &buf);
-                let lsn = u64::from_le_bytes(buf);
-                WalRecord::Checkpoint { lsn }
-            }
-        };
-
-        // Verify checksum
-        let mut crc_buf = [0u8; 4];
-        reader.read_exact(&mut crc_buf)?;
-        let stored_crc = u32::from_le_bytes(crc_buf);
-
-        if running_crc != stored_crc {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "WAL record checksum mismatch",
-            ));
+            MainWalRecordFrame::FullPageImage {
+                tx_id,
+                page_id,
+                ckpt_epoch,
+                data,
+            } => WalRecord::FullPageImage {
+                tx_id,
+                page_id,
+                ckpt_epoch,
+                data,
+            },
+            MainWalRecordFrame::VectorInsert {
+                collection,
+                entity_id,
+                vector,
+            } => WalRecord::VectorInsert {
+                collection,
+                entity_id,
+                vector,
+            },
+            MainWalRecordFrame::Checkpoint { lsn } => WalRecord::Checkpoint { lsn },
         }
-
-        Ok(Some((term, record)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reddb_file::WAL_FILE_VERSION_V2;
     use std::io::Cursor;
 
     // ==================== RecordType Tests ====================
@@ -655,13 +219,12 @@ mod tests {
         assert_eq!(RecordType::from_u8(7), Some(RecordType::TxCommitBatch));
         assert_eq!(RecordType::from_u8(8), Some(RecordType::FullPageImage));
         assert_eq!(RecordType::from_u8(9), Some(RecordType::VectorInsert));
-        assert_eq!(RecordType::from_u8(10), Some(RecordType::RangeCommitBatch));
     }
 
     #[test]
     fn test_record_type_invalid() {
         assert_eq!(RecordType::from_u8(0), None);
-        assert_eq!(RecordType::from_u8(11), None);
+        assert_eq!(RecordType::from_u8(10), None);
         assert_eq!(RecordType::from_u8(255), None);
     }
 
@@ -744,18 +307,6 @@ mod tests {
         assert_eq!(encoded[0], RecordType::TxCommitBatch as u8);
     }
 
-    #[test]
-    fn test_encode_range_commit_batch() {
-        let record = WalRecord::RangeCommitBatch {
-            tx_id: 7,
-            range_id: "range-0000000000000007".to_string(),
-            actions: vec![b"insert".to_vec(), b"update".to_vec()],
-        };
-        let encoded = record.encode();
-
-        assert_eq!(encoded[0], RecordType::RangeCommitBatch as u8);
-    }
-
     // ==================== WalRecord::read Tests ====================
 
     #[test]
@@ -787,11 +338,13 @@ mod tests {
         let mut encoded = Vec::new();
         encoded.push(RecordType::Begin as u8);
         encoded.extend_from_slice(&tx_id.to_le_bytes());
-        let checksum = crc32(&encoded);
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&encoded);
+        let checksum = hasher.finalize();
         encoded.extend_from_slice(&checksum.to_le_bytes());
 
         let mut cursor = Cursor::new(encoded);
-        let (term, decoded) = WalRecord::read_with_format_version(&mut cursor, WAL_VERSION_V2)
+        let (term, decoded) = WalRecord::read_with_format_version(&mut cursor, WAL_FILE_VERSION_V2)
             .unwrap()
             .unwrap();
 
@@ -851,21 +404,6 @@ mod tests {
     fn test_read_tx_commit_batch_roundtrip() {
         let original = WalRecord::TxCommitBatch {
             tx_id: 42,
-            actions: vec![b"old-version".to_vec(), b"new-version".to_vec()],
-        };
-        let encoded = original.encode();
-
-        let mut cursor = Cursor::new(encoded);
-        let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
-
-        assert_eq!(decoded, original);
-    }
-
-    #[test]
-    fn test_read_range_commit_batch_roundtrip() {
-        let original = WalRecord::RangeCommitBatch {
-            tx_id: 42,
-            range_id: "range-000000000000002a".to_string(),
             actions: vec![b"old-version".to_vec(), b"new-version".to_vec()],
         };
         let encoded = original.encode();
@@ -1080,11 +618,6 @@ mod tests {
                 tx_id: 7,
                 actions: vec![b"insert".to_vec(), b"update".to_vec()],
             },
-            WalRecord::RangeCommitBatch {
-                tx_id: 8,
-                range_id: "range-0000000000000008".to_string(),
-                actions: vec![b"insert".to_vec(), b"update".to_vec()],
-            },
             WalRecord::FullPageImage {
                 tx_id: 11,
                 page_id: 9,
@@ -1160,11 +693,11 @@ mod tests {
 
     #[test]
     fn test_wal_magic() {
-        assert_eq!(WAL_MAGIC, b"RDBW");
+        assert_eq!(reddb_file::WAL_FILE_MAGIC, b"RDBW");
     }
 
     #[test]
     fn test_wal_version() {
-        assert_eq!(WAL_VERSION, 3);
+        assert_eq!(WAL_FILE_VERSION, 3);
     }
 }

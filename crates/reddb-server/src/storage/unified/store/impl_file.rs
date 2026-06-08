@@ -19,26 +19,6 @@ impl UnifiedStore {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
     }
 
-    pub(crate) fn next_collection_id(&self) -> u64 {
-        self.next_collection_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    pub(crate) fn register_collection_id(&self, id: u64) {
-        let candidate = id.saturating_add(1);
-        let mut current = self.next_collection_id.load(Ordering::SeqCst);
-        while candidate > current {
-            match self.next_collection_id.compare_exchange(
-                current,
-                candidate,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(updated) => current = updated,
-            }
-        }
-    }
-
     /// Reserve `n` contiguous global entity IDs with one fetch_add.
     /// Caller assigns `id = EntityId::new(start + i)` per entity.
     pub fn reserve_entity_ids(&self, n: u64) -> std::ops::Range<u64> {
@@ -78,7 +58,18 @@ impl UnifiedStore {
         let mut reader = BufReader::new(file);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf)?;
+        Self::load_from_bytes(&buf)
+    }
 
+    pub(crate) fn load_from_bytes(buf: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_from_bytes_with_config(buf, UnifiedStoreConfig::default())
+    }
+
+    pub(crate) fn load_from_bytes_with_config(
+        buf: &[u8],
+        config: UnifiedStoreConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut buf = buf.to_vec();
         // Verify magic bytes "RDST" (RedDB Store)
         if buf.len() < 8 {
             return Err("File too small".into());
@@ -91,16 +82,7 @@ impl UnifiedStore {
         // Version check
         let version = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
         pos += 4;
-        if version != STORE_VERSION_V1
-            && version != STORE_VERSION_V2
-            && version != STORE_VERSION_V3
-            && version != STORE_VERSION_V4
-            && version != STORE_VERSION_V5
-            && version != STORE_VERSION_V6
-            && version != STORE_VERSION_V7
-            && version != STORE_VERSION_V8
-            && version != STORE_VERSION_V9
-        {
+        if !is_supported_store_version(version) {
             return Err(format!("Unsupported version: {}", version).into());
         }
 
@@ -123,7 +105,7 @@ impl UnifiedStore {
             buf.truncate(buf.len() - 4);
         }
 
-        let store = Self::with_config(UnifiedStoreConfig::default());
+        let store = Self::with_config(config);
         store.set_format_version(version);
 
         // Read collection count
@@ -215,8 +197,8 @@ impl UnifiedStore {
             }
         }
 
-        if store.format_version() < STORE_VERSION_V9 {
-            store.set_format_version(STORE_VERSION_V9);
+        if store.format_version() < STORE_VERSION_CURRENT {
+            store.set_format_version(STORE_VERSION_CURRENT);
         }
 
         Ok(store)
@@ -228,9 +210,30 @@ impl UnifiedStore {
     /// No JSON - pure binary with pages and indices.
     pub fn save_to_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         // Write to temp file first, then atomic rename
-        let tmp_path = path.with_extension("rdb-tmp");
+        let tmp_path = reddb_file::temp_path(path);
         let file = File::create(&tmp_path)?;
         let mut writer = BufWriter::new(file);
+        let buf = self.to_binary_dump_bytes();
+
+        writer.write_all(&buf)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+
+        // Atomic rename: tmp → final
+        std::fs::rename(&tmp_path, path)?;
+
+        // fsync parent directory for rename durability
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn to_binary_dump_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
         // Magic bytes "RDST"
@@ -238,13 +241,13 @@ impl UnifiedStore {
 
         // Version (9 — includes explicit table-row logical identity
         // plus MVCC xmin/xmax alongside the V7 metadata envelope).
-        buf.extend_from_slice(&STORE_VERSION_V9.to_le_bytes());
+        buf.extend_from_slice(&STORE_VERSION_CURRENT.to_le_bytes());
 
         // Get all collections
         let collections = self.collections.read();
         write_varu32(&mut buf, collections.len() as u32);
 
-        let fv = STORE_VERSION_V9;
+        let fv = STORE_VERSION_CURRENT;
         for (name, manager) in collections.iter() {
             // Collection name
             write_varu32(&mut buf, name.len() as u32);
@@ -279,28 +282,12 @@ impl UnifiedStore {
             }
         }
 
-        self.set_format_version(STORE_VERSION_V9);
+        self.set_format_version(STORE_VERSION_CURRENT);
 
         // Append CRC32 footer over entire content
         let checksum = crate::storage::engine::crc32::crc32(&buf);
         buf.extend_from_slice(&checksum.to_le_bytes());
-
-        writer.write_all(&buf)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-        drop(writer);
-
-        // Atomic rename: tmp → final
-        std::fs::rename(&tmp_path, path)?;
-
-        // fsync parent directory for rename durability
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-
-        Ok(())
+        buf
     }
 
     /// Read entity from binary buffer

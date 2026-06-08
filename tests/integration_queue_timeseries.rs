@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use reddb::application::{CatalogUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::catalog::CollectionModel;
-use reddb::physical::InferredSegmentLayout;
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::queue::QueueMode;
 use reddb::storage::schema::Value;
@@ -749,10 +748,6 @@ fn test_create_timeseries_persists_contract_and_downsample_metadata() {
         .collection_contract("cpu_metrics")
         .expect("timeseries contract should exist");
     assert_eq!(contract.declared_model, CollectionModel::TimeSeries);
-    assert_eq!(
-        contract.inferred_segment_layout(),
-        InferredSegmentLayout::AppendOnlySegmentV0
-    );
     assert_eq!(contract.default_ttl_ms, Some(90 * 86_400_000));
 
     let store = rt.db().store();

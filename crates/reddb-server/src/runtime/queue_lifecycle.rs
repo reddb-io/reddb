@@ -214,7 +214,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
             let deadline = now + self.config.lock_duration;
             let delivery_id = self
                 .store
-                .mark_pending(txn, queue, message_id, group, deadline)?;
+                .mark_pending(txn, queue, message_id, group, "", deadline)?;
             let payload = self
                 .store
                 .read_message(queue, message_id)
@@ -286,7 +286,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
             let deadline = now + self.config.lock_duration;
             let delivery_id = self
                 .store
-                .mark_pending(txn, queue, message_id, group, deadline)?;
+                .mark_pending(txn, queue, message_id, group, consumer, deadline)?;
             // WORK counts every (re)delivery against the persistent
             // attempt budget; FANOUT hands each group its own first copy.
             let delivery_count = match self.config.mode {
@@ -344,7 +344,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// it. Callers never see the decision — observe outcomes via the test
     /// tap.
     pub(crate) fn nack(&self, txn: &QueueTxn, delivery_id: &str) -> Result<RetirementOutcome> {
-        let bumped = self.store.bump_attempt(txn, delivery_id)?;
+        let bumped = self.store.read_pending_attempt(delivery_id)?;
         let max_attempts = self
             .store
             .read_max_attempts(&bumped.queue, bumped.message_id);
@@ -524,19 +524,17 @@ impl<S: QueueStore> QueueLifecycle<S> {
     ) -> Result<Vec<ClaimedDelivery>> {
         let now = self.clock.now();
         let threshold = Duration::from_millis(min_idle_ms);
-        // "Expired beyond `min_idle_ms`" means `now >= deadline + threshold`.
-        // Phrasing it as an addition on the deadline (rather than a
-        // subtraction at `now`) avoids the `saturating_duration_since`
-        // pitfall where a deadline strictly in the future returns a
-        // zero gap and a `threshold == 0` would accept it.
         let mut candidates: Vec<PendingDeliveryView> = self
             .store
             .pending_deliveries_for_queue(queue)
             .into_iter()
-            .filter(|p| p.deadline + threshold <= now)
+            .filter(|p| {
+                let delivered_at = p.deadline - self.config.lock_duration;
+                delivered_at + threshold <= now
+            })
             .collect();
-        // Stable ordering by deadline so the oldest-stuck-first invariant
-        // from `queue_delivery::claim_messages` carries through.
+        // Stable ordering by deadline keeps the oldest delivery first
+        // because all rows in a queue share the same lock duration.
         candidates.sort_by_key(|p| p.deadline);
 
         let mut claimed = Vec::with_capacity(candidates.len());
@@ -562,6 +560,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 &entry.queue,
                 entry.message_id,
                 &entry.group,
+                new_consumer,
                 new_deadline,
             )?;
             claimed.push(ClaimedDelivery {

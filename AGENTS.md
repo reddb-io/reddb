@@ -85,3 +85,17 @@ Recent commits follow Conventional Commit style such as `feat(views): ...`, `fix
 ## Security & Configuration
 
 Never commit provider secrets or local credentials. Use environment variables such as `REDDB_AI_PROVIDER` and `REDDB_{PROVIDER}_API_KEY`. Avoid editing generated or runtime artifacts like `target/`, `wal/`, and ad hoc local database files unless the task explicitly requires it.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live as GitHub issues for `reddb-io/reddb`. Use `gh` CLI. See `.red/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical labels include lifecycle states, `blocked:dependency`, and typed `/afk` blocker labels. See `.red/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `.red/CONTEXT.md` + `.red/adr/` at the repository root. See `.red/agents/domain.md`.

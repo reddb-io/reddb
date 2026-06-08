@@ -1,0 +1,43 @@
+# Persistence — RedDB Domain Glossary
+
+Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **every** deployment profile (standalone, primary-replica, cluster). Profile-specific packaging lives in the sibling files; this file owns the engine underneath them.
+
+## Cache
+
+- **Blob Cache** — the native tiered (L1 RAM + L2 disk) byte-oriented cache module living under `crates/reddb-server/src/storage/cache/`. Operates by `(namespace, key)` lookup. Distinct from the page cache (which caches database pages, not user-visible blobs) and the result cache (which caches SQL result rows; itself now a Blob Cache adapter per #143).
+- **L1** — in-memory, sharded SIEVE-evicted hot tier of the Blob Cache. Default 256 MiB, 64 shards.
+- **L2** — durable on-disk tier of the Blob Cache. Default 4 GiB. Uses B+ tree metadata + native blob chains. WAL-ordered metadata-last.
+- **Synopsis** — per-namespace negative-only Bloom filter for fast L2 misses. Default ~12 KB/namespace at 1% FPR. Returns `MaybePresent` on hit (caller must verify against L2 metadata for an authoritative answer).
+- **CachePresence** — three-valued return type from `BlobCache::exists`: `Present`, `Absent`, `MaybePresent`. The synopsis can return `MaybePresent`; only the metadata B+ tree can return `Present` authoritatively.
+- **Namespace** — top-level partition in Blob Cache, capped at 256 in MVP. Separate quota, separate generation counter (for O(1) flush), separate synopsis filter.
+- **Generation counter** — per-namespace u64 used to invalidate all entries in a namespace in O(1) by bumping the counter; old entries become invisible without walking each key.
+- **L1Admission** — policy enum (`Always`, `Auto`, `Never`) deciding whether a put inserts into L1 or skips straight to L2.
+- **AsyncPromotionPool** — bounded background task pool that runs L1 promotion when an L2 hit happens, so the read caller doesn't pay the promotion cost in their latency budget.
+- **L2BlobCompressor** — content-type-aware zstd wrapper that compresses L2 blobs above a size threshold. Two on-disk variants: `Raw` (tag=0) and `Zstd` (tag=1 + 4-byte original_len).
+- **ExtendedTtlPolicy** — opt-in extension to the cache policy carrying `idle_ttl_ms`, `stale_serve_ms`, and `jitter_pct`. Off by default; per-entry rather than global.
+- **Page cache** — internal sharded SIEVE cache of database pages. Distinct from the Blob Cache. Lives at `storage/engine/page_cache.rs`.
+
+## Files & layout (operational directory)
+
+- **File/protocol ownership boundary** — per [ADR 0046](../adr/0046-wire-file-crate-authority-boundary.md), `reddb-file` is the authority for file contracts: names, paths, sidecars, manifests, superblocks, WAL artifacts, checkpoint artifacts, and recovery metadata. `reddb-wire` is the authority for communication contracts: frames, codecs, payloads, topology, connection strings, sanitizers, and replication wire messages. `reddb-server` orchestrates runtime, SQL, auth, storage engine policy, and calls into those crates; it must not introduce new persistent file formats or protocol payload formats directly.
+- **Mutable collection file layout** — operational directory layout where ordinary mutable collections and indexes are stored in stable physical files such as `collection_id.rdb` and `collection_index_id.rdb`, following a WiredTiger/Postgres-like separation of logical objects into independently managed files. The operational layout uses a single physical WAL per node/store with record-level collection, index, range, transaction, and LSN identity rather than one WAL per collection.
+- **Stable physical file identity** — operational storage naming rule where physical collection, index, range, and segment files use stable internal IDs rather than human names. Human collection/index names live in manifest/catalog metadata so renames do not move files and filesystem naming edge cases do not affect correctness. Logical IDs may be compact/sequential for catalog and WAL efficiency, while physical `file_id`s use globally unique identifiers to avoid collisions across restore, import/export, migration, and orphan quarantine.
+- **Append-only segment layout** — collection storage layout for append-only tables, timeseries, event-shaped data, and similar models where immutable table/segment files plus compaction/retention are a better fit than in-place mutable pages. Native append-shaped models such as timeseries may infer this layout, while ordinary tables must declare append-only intent explicitly. Once closed, append-only segments are immutable; compaction and retention create replacement segments and retire old ones rather than patching closed segments in place. The first contract is append-only in the strict sense: no logical `UPDATE` or `DELETE`; data retirement happens through retention, TTL, or compaction policy.
+- **Append-only segment** — immutable closed storage unit containing data, primary index, min/max statistics, checksum coverage, manifest metadata, and optional lookup accelerators such as bloom filters or summaries.
+- **Append-only segment chunk** — fixed-size 512 KiB block inside an append-only segment. Segment indexes/manifests point to chunks and store their expected checksums, supporting predictable prefetch, validation, multipart copy, and future fine-grained repair.
+- **Append-only segment compression** — initial compression boundary for RedDB storage. Compression is supported first at immutable append-only segment granularity, while mutable collection files avoid page/block compression in the initial design. The default segment codec is zstd, with `none` available for already-compressed or CPU-bound workloads.
+- **Operational manifest** — authoritative, versioned, checksummed manifest for operational directory layouts. It maps logical collection, index, range, and append-only segment identities to physical files and records the checkpoint boundary required for backup, recovery, repair, and range movement. The first update strategy is copy-on-write atomic replace: write the next manifest with generation/checksum, fsync it, atomically rename, then fsync the directory.
+- **Storage checksum coverage** — minimum corruption-detection boundary for RedDB storage. Mutable pages carry checksums in their page headers; append-only segment blocks/chunks are verified against checksums stored in segment index/manifest metadata; manifests/checkpoint metadata are checksummed as well.
+
+## DDL & recovery
+
+- **Operational DDL create order** — crash-safe create flow for operational collection/index files: create and fsync the physical file first, then publish it in the operational manifest. If a crash happens before manifest publication, recovery treats the unpublished file as an orphan candidate.
+- **Operational DDL drop order** — crash-safe drop flow for operational collection/index files: mark the manifest entry `drop_pending`, fsync/atomically publish the manifest, delete or quarantine the physical file, then publish a manifest version that removes the entry. Recovery can distinguish interrupted drops from unrelated orphan files.
+- **Operational orphan quarantine** — repair policy for physical files found in an operational directory but absent from the manifest. RedDB quarantines them under `lost+found/` with recovery metadata rather than deleting or reattaching them automatically.
+
+## Backup, restore & WAL
+
+- **Operational backup boundary** — initial backup contract for operational layouts: create a consistent checkpoint, copy manifest/data/index/segment files covered by that checkpoint, and retain/copy WAL from the checkpoint boundary forward. The first contract targets local and primary-replica stores; coordinated cluster-wide backup is a separate distributed protocol.
+- **Operational restore boundary** — initial restore contract for operational layouts: restore a consistent checkpoint, validate manifest and file checksums, then replay retained WAL up to the requested target LSN before opening the store.
+- **Operational WAL retention floor** — WAL pruning boundary for operational primary-replica stores. It is the maximum safety requirement across backup/PITR retention and the slowest replica's durable restart LSN, so pruning cannot break point-in-time recovery or force unnecessary replica rebootstrap.
+- **WAL spool** — versioned (v2) write-ahead log records used for replication streaming. Includes magic, version byte, lsn, timestamp, payload-len, payload, crc32. `sync_all` after every append. (The replica-side consumer is the **logical change applier** — see [Primary-replica](primary-replica.md) / [Clustering](clustering.md).)

@@ -403,6 +403,12 @@ impl RedDB {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(());
         }
+        if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
+            && self.options.storage_profile.packaging
+                == crate::storage::StoragePackaging::SingleFile
+        {
+            return Ok(());
+        }
         let Some(path) = self.path() else {
             return Ok(());
         };
@@ -795,9 +801,6 @@ impl RedDB {
             collection_contracts: previous
                 .map(|metadata| metadata.collection_contracts.clone())
                 .unwrap_or_default(),
-            collection_layouts: previous
-                .map(|metadata| metadata.collection_layouts.clone())
-                .unwrap_or_default(),
             hypertables: previous
                 .map(|metadata| metadata.hypertables.clone())
                 .unwrap_or_default(),
@@ -966,10 +969,6 @@ impl RedDB {
             };
             fresh.push(PhysicalIndexState {
                 name: native.name.clone(),
-                logical_id: 0,
-                physical_file_id: String::new(),
-                physical_file_name: String::new(),
-                collection_logical_id: None,
                 kind,
                 collection: native.collection.clone(),
                 enabled: native.enabled,
@@ -1361,7 +1360,8 @@ impl RedDB {
             entity.data.as_row().is_some_and(|row| {
                 matches!(
                     row.get_field("kind"),
-                    Some(crate::storage::schema::Value::Text(kind)) if &**kind == "queue_pending"
+                    Some(crate::storage::schema::Value::Text(kind))
+                        if matches!(&**kind, "queue_pending" | "queue_pending_lc")
                 )
             })
         });

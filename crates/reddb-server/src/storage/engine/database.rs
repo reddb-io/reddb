@@ -32,7 +32,7 @@
 //!
 //! ```text
 //! mydata.rdb     - Main database file (pages)
-//! mydata.rdb-wal - Write-ahead log
+//! engine WAL sidecar - Write-ahead log
 //! ```
 //!
 //! # References
@@ -209,7 +209,7 @@ impl Database {
         config: DatabaseConfig,
     ) -> Result<Self, DatabaseError> {
         let path = path.as_ref().to_path_buf();
-        let wal_path = path.with_extension("rdb-wal");
+        let wal_path = reddb_file::layout::engine_wal_path(&path);
 
         // Create pager config
         let pager_config = PagerConfig {
@@ -471,7 +471,7 @@ mod tests {
 
     fn cleanup(path: &Path) {
         let _ = fs::remove_file(path);
-        let wal_path = path.with_extension("rdb-wal");
+        let wal_path = reddb_file::layout::engine_wal_path(path);
         let _ = fs::remove_file(wal_path);
     }
 

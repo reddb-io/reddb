@@ -170,6 +170,10 @@ impl<'a, P: RuntimeNativePort + ?Sized> NativeUseCases<'a, P> {
         self.runtime.physical_authority_status()
     }
 
+    pub fn validate_current_serverless_generation(&self) -> RedDBResult<()> {
+        self.runtime.validate_current_serverless_generation()
+    }
+
     pub fn readiness(&self) -> RuntimeReadiness {
         RuntimeReadiness {
             query: self.runtime.readiness_for_query(),

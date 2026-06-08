@@ -39,9 +39,9 @@ impl UnifiedStore {
         if entities.is_empty() {
             return Ok(());
         }
-        let Some(pager) = &self.pager else {
+        if self.pager.is_none() && self.config.embedded_wal_path.is_none() {
             return Ok(());
-        };
+        }
         let fv = self.format_version();
         let manager = self
             .get_collection(collection)
@@ -59,6 +59,15 @@ impl UnifiedStore {
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
         if !skip_btree {
+            let Some(pager) = &self.pager else {
+                let records: Vec<Vec<u8>> =
+                    serialized.into_iter().map(|(_id, record)| record).collect();
+                self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
+                    collection: collection.to_string(),
+                    records,
+                }])?;
+                return Ok(());
+            };
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
@@ -110,9 +119,9 @@ impl UnifiedStore {
             return Ok(());
         }
 
-        let Some(pager) = &self.pager else {
+        if self.pager.is_none() && self.config.embedded_wal_path.is_none() {
             return Ok(());
-        };
+        }
 
         let fv = self.format_version();
         let manager = self
@@ -132,6 +141,15 @@ impl UnifiedStore {
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
         if !skip_btree {
+            let Some(pager) = &self.pager else {
+                let records: Vec<Vec<u8>> =
+                    serialized.into_iter().map(|(_id, record)| record).collect();
+                self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
+                    collection: collection.to_string(),
+                    records,
+                }])?;
+                return Ok(());
+            };
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
@@ -245,15 +263,8 @@ impl UnifiedStore {
             return Err(err);
         }
 
-        let collection_id = self.next_collection_id();
-        let physical_file_id = format!("collection-{collection_id:016x}");
-        self.register_collection_range(&name, collection_id, &physical_file_id)?;
         self.mark_paged_registry_dirty();
-        self.finish_paged_write([StoreWalAction::CreateCollection {
-            name,
-            collection_id,
-            physical_file_id,
-        }])?;
+        self.finish_paged_write([StoreWalAction::CreateCollection { name }])?;
 
         Ok(())
     }
@@ -286,35 +297,6 @@ impl UnifiedStore {
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
         self.collections.read().get(name).map(Arc::clone)
-    }
-
-    pub(crate) fn register_collection_range(
-        &self,
-        collection: &str,
-        collection_id: u64,
-        physical_file_id: &str,
-    ) -> Result<Option<RangeMetadata>, StoreError> {
-        let Some(layout) = &self.config.cluster_range_layout else {
-            return Ok(None);
-        };
-        let metadata = layout.metadata_for(collection, collection_id, physical_file_id);
-        layout.prepare_range(&metadata)?;
-        self.collection_ranges
-            .write()
-            .insert(collection.to_string(), metadata.clone());
-        Ok(Some(metadata))
-    }
-
-    pub fn collection_range_metadata(&self, collection: &str) -> Option<RangeMetadata> {
-        if let Some(metadata) = self.collection_ranges.read().get(collection).cloned() {
-            return Some(metadata);
-        }
-        let layout = self.config.cluster_range_layout.as_ref()?;
-        let metadata = layout.load_collection_range(collection).ok().flatten()?;
-        self.collection_ranges
-            .write()
-            .insert(collection.to_string(), metadata.clone());
-        Some(metadata)
     }
 
     /// Get the context index for cross-structure search.
@@ -511,7 +493,7 @@ impl UnifiedStore {
         // Perf: skip WAL-action construction when the store is
         // pagerless. For in-memory benchmarks this saved another
         // `manager.get(id)` + `serialize_entity_record` per call.
-        if self.pager.is_some() {
+        if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
             let actions = manager
                 .get(id)
                 .map(|entity| {
@@ -619,28 +601,29 @@ impl UnifiedStore {
         // smaller batches, stay serial — micro-batches pay more in
         // work-stealing overhead than they save.
         let t0 = std::time::Instant::now();
-        let serialized: Option<Vec<(Vec<u8>, Vec<u8>)>> = if self.pager.is_some() {
-            let fv = self.format_version();
-            let serial_map = |e: &UnifiedEntity| {
-                (
-                    e.id.raw().to_be_bytes().to_vec(),
-                    Self::serialize_entity_record(e, None, fv),
-                )
-            };
-            // Gate chosen to match the bench's `BULK_BATCH_SIZE=1000`.
-            // Rayon's dispatch overhead is ~30µs/batch — on a 15-col
-            // row serializing for ~40µs the break-even is around
-            // 200-300 rows on a 16-core host. Keep a safety margin
-            // at 512.
-            if entities.len() >= 512 {
-                use rayon::prelude::*;
-                Some(entities.par_iter().map(serial_map).collect())
+        let serialized: Option<Vec<(Vec<u8>, Vec<u8>)>> =
+            if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
+                let fv = self.format_version();
+                let serial_map = |e: &UnifiedEntity| {
+                    (
+                        e.id.raw().to_be_bytes().to_vec(),
+                        Self::serialize_entity_record(e, None, fv),
+                    )
+                };
+                // Gate chosen to match the bench's `BULK_BATCH_SIZE=1000`.
+                // Rayon's dispatch overhead is ~30µs/batch — on a 15-col
+                // row serializing for ~40µs the break-even is around
+                // 200-300 rows on a 16-core host. Keep a safety margin
+                // at 512.
+                if entities.len() >= 512 {
+                    use rayon::prelude::*;
+                    Some(entities.par_iter().map(serial_map).collect())
+                } else {
+                    Some(entities.iter().map(serial_map).collect())
+                }
             } else {
-                Some(entities.iter().map(serial_map).collect())
-            }
-        } else {
-            None
-        };
+                None
+            };
         let t_serialize = t0.elapsed();
 
         // Move entities into segment
@@ -806,15 +789,16 @@ impl UnifiedStore {
         // Strings). Per `docs/perf/insert_sequential-2026-05-05.md` P2 this
         // was the dominant clone in the insert_sequential hot path.
         let id_for_serialize = entity.id;
-        let serialized_record: Option<Vec<u8>> = if self.pager.is_some() {
-            Some(Self::serialize_entity_record(
-                &entity,
-                None,
-                self.format_version(),
-            ))
-        } else {
-            None
-        };
+        let serialized_record: Option<Vec<u8>> =
+            if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
+                Some(Self::serialize_entity_record(
+                    &entity,
+                    None,
+                    self.format_version(),
+                ))
+            } else {
+                None
+            };
         if self.config.auto_index_refs {
             self.index_cross_refs(&entity, collection)?;
         }
@@ -850,7 +834,7 @@ impl UnifiedStore {
         // Perf: pagerless → skip WAL-action construction (saves a
         // third manager.get + entity serialize per insert). For
         // in-memory runtimes finish_paged_write is a no-op.
-        if self.pager.is_some() {
+        if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
             let actions = serialized_record
                 .map(|record| {
                     vec![StoreWalAction::UpsertEntityRecord {

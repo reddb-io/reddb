@@ -9,40 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{Map, Value as JsonValue};
 
-/// Type of change operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeOperation {
-    Insert,
-    Update,
-    Delete,
-    /// Issue #596 slice 9d — atomic full-collection replace.
-    /// Carries a list of serialized entity records in
-    /// [`ChangeRecord::refresh_records`]; the replica applier
-    /// calls `UnifiedStore::refresh_collection` to apply the
-    /// swap atomically (no partial state visible to readers).
-    Refresh,
-}
-
-impl ChangeOperation {
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "insert" => Some(Self::Insert),
-            "update" => Some(Self::Update),
-            "delete" => Some(Self::Delete),
-            "refresh" => Some(Self::Refresh),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Insert => "insert",
-            Self::Update => "update",
-            Self::Delete => "delete",
-            Self::Refresh => "refresh",
-        }
-    }
-}
+pub use reddb_wire::replication::{public_item_kind, ChangeOperation, ChangeRecord};
 
 /// A single change event.
 #[derive(Debug, Clone)]
@@ -123,209 +90,49 @@ impl KvWatchEvent {
     }
 }
 
-/// Structured logical WAL record serialized into the replication buffer and
-/// archived segments.
-#[derive(Debug, Clone)]
-pub struct ChangeRecord {
-    pub term: u64,
-    pub lsn: u64,
-    pub timestamp: u64,
-    pub operation: ChangeOperation,
-    pub collection: String,
-    pub entity_id: u64,
-    pub entity_kind: String,
-    pub entity_bytes: Option<Vec<u8>>,
-    pub metadata: Option<JsonValue>,
-    /// Issue #596 slice 9d — payload for [`ChangeOperation::Refresh`].
-    /// Each element is a serialized entity record (the same
-    /// `serialize_entity_record` payload the store's `RefreshCollection`
-    /// WAL action uses), in the order the replica should `bulk_insert`
-    /// after dropping the prior backing-collection contents.
-    pub refresh_records: Option<Vec<Vec<u8>>>,
-}
+pub fn change_record_from_entity(
+    lsn: u64,
+    timestamp: u64,
+    operation: ChangeOperation,
+    collection: impl Into<String>,
+    entity_kind: impl Into<String>,
+    entity: &crate::storage::UnifiedEntity,
+    format_version: u32,
+    metadata: Option<JsonValue>,
+) -> ChangeRecord {
+    let entity_bytes = match operation {
+        ChangeOperation::Delete | ChangeOperation::Refresh => None,
+        ChangeOperation::Insert | ChangeOperation::Update => Some(
+            crate::storage::UnifiedStore::serialize_entity(entity, format_version),
+        ),
+    };
 
-impl ChangeRecord {
-    pub fn from_entity(
-        lsn: u64,
-        timestamp: u64,
-        operation: ChangeOperation,
-        collection: impl Into<String>,
-        entity_kind: impl Into<String>,
-        entity: &crate::storage::UnifiedEntity,
-        format_version: u32,
-        metadata: Option<JsonValue>,
-    ) -> Self {
-        let entity_bytes = match operation {
-            ChangeOperation::Delete | ChangeOperation::Refresh => None,
-            ChangeOperation::Insert | ChangeOperation::Update => Some(
-                crate::storage::UnifiedStore::serialize_entity(entity, format_version),
-            ),
-        };
-
-        Self {
-            term: crate::replication::DEFAULT_REPLICATION_TERM,
-            lsn,
-            timestamp,
-            operation,
-            collection: collection.into(),
-            entity_id: entity.id.raw(),
-            entity_kind: entity_kind.into(),
-            entity_bytes,
-            metadata,
-            refresh_records: None,
-        }
-    }
-
-    /// Build a refresh change record carrying the new contents for a
-    /// `REFRESH MATERIALIZED VIEW` replay on the replica. Issue #596
-    /// slice 9d.
-    pub fn for_refresh(
-        lsn: u64,
-        timestamp: u64,
-        collection: impl Into<String>,
-        records: Vec<Vec<u8>>,
-    ) -> Self {
-        Self {
-            term: crate::replication::DEFAULT_REPLICATION_TERM,
-            lsn,
-            timestamp,
-            operation: ChangeOperation::Refresh,
-            collection: collection.into(),
-            entity_id: 0,
-            entity_kind: "refresh".to_string(),
-            entity_bytes: None,
-            metadata: None,
-            refresh_records: Some(records),
-        }
-    }
-
-    pub fn to_json_value(&self) -> JsonValue {
-        let mut object = Map::new();
-        object.insert("term".to_string(), JsonValue::Number(self.term as f64));
-        object.insert("lsn".to_string(), JsonValue::Number(self.lsn as f64));
-        object.insert(
-            "timestamp".to_string(),
-            JsonValue::Number(self.timestamp as f64),
-        );
-        object.insert(
-            "operation".to_string(),
-            JsonValue::String(self.operation.as_str().to_string()),
-        );
-        object.insert(
-            "collection".to_string(),
-            JsonValue::String(self.collection.clone()),
-        );
-        object.insert("rid".to_string(), JsonValue::Number(self.entity_id as f64));
-        object.insert(
-            "kind".to_string(),
-            JsonValue::String(public_item_kind(&self.entity_kind).to_string()),
-        );
-        if let Some(bytes) = &self.entity_bytes {
-            object.insert(
-                "entity_bytes_hex".to_string(),
-                JsonValue::String(hex::encode(bytes)),
-            );
-        }
-        if let Some(metadata) = &self.metadata {
-            object.insert("metadata".to_string(), metadata.clone());
-        }
-        if let Some(records) = &self.refresh_records {
-            let arr = records
-                .iter()
-                .map(|bytes| JsonValue::String(hex::encode(bytes)))
-                .collect();
-            object.insert("refresh_records_hex".to_string(), JsonValue::Array(arr));
-        }
-        JsonValue::Object(object)
-    }
-
-    pub fn encode(&self) -> Vec<u8> {
-        crate::json::to_string(&self.to_json_value())
-            .unwrap_or_else(|_| "{}".to_string())
-            .into_bytes()
-    }
-
-    pub fn with_term(mut self, term: u64) -> Self {
-        self.term = term;
-        self
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
-        let value = crate::json::from_str::<JsonValue>(text).map_err(|err| err.to_string())?;
-        let operation = value
-            .get("operation")
-            .and_then(JsonValue::as_str)
-            .and_then(ChangeOperation::from_str)
-            .ok_or_else(|| "invalid replication operation".to_string())?;
-        let entity_bytes = value
-            .get("entity_bytes_hex")
-            .and_then(JsonValue::as_str)
-            .map(hex::decode)
-            .transpose()
-            .map_err(|err| err.to_string())?;
-
-        Ok(Self {
-            term: value
-                .get("term")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(crate::replication::DEFAULT_REPLICATION_TERM),
-            lsn: value.get("lsn").and_then(JsonValue::as_u64).unwrap_or(0),
-            timestamp: value
-                .get("timestamp")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            operation,
-            collection: value
-                .get("collection")
-                .and_then(JsonValue::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            entity_id: value
-                .get("rid")
-                .or_else(|| value.get("entity_id"))
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            entity_kind: value
-                .get("kind")
-                .or_else(|| value.get("entity_kind"))
-                .and_then(JsonValue::as_str)
-                .unwrap_or("entity")
-                .to_string(),
-            entity_bytes,
-            metadata: value.get("metadata").cloned(),
-            refresh_records: match value.get("refresh_records_hex") {
-                Some(JsonValue::Array(items)) => {
-                    let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let hex_str = item
-                            .as_str()
-                            .ok_or_else(|| "refresh_records_hex entry not a string".to_string())?;
-                        let bytes = hex::decode(hex_str).map_err(|err| err.to_string())?;
-                        out.push(bytes);
-                    }
-                    Some(out)
-                }
-                None | Some(JsonValue::Null) => None,
-                _ => return Err("refresh_records_hex is not an array".to_string()),
-            },
-        })
+    ChangeRecord {
+        term: crate::replication::DEFAULT_REPLICATION_TERM,
+        lsn,
+        timestamp,
+        operation,
+        collection: collection.into(),
+        entity_id: entity.id.raw(),
+        entity_kind: entity_kind.into(),
+        entity_bytes,
+        metadata: metadata.map(server_json_to_wire_json),
+        refresh_records: None,
     }
 }
 
-pub fn public_item_kind(entity_kind: &str) -> &'static str {
-    match entity_kind {
-        "table" | "entity" | "row" => "row",
-        "graph_node" | "node" => "node",
-        "graph_edge" | "edge" => "edge",
-        "kv" => "kv",
-        "document" => "document",
-        "vector" => "vector",
-        other if other.contains("kv") => "kv",
-        other if other.contains("document") => "document",
-        other if other.contains("vector") => "vector",
-        _ => "item",
-    }
+pub fn server_json_to_wire_json(
+    value: JsonValue,
+) -> reddb_wire::replication::ChangeRecordJsonValue {
+    reddb_wire::replication::parse_change_record_json_value(&value.to_string_compact())
+        .unwrap_or(reddb_wire::replication::ChangeRecordJsonValue::Null)
+}
+
+pub fn wire_json_to_server_json(
+    value: &reddb_wire::replication::ChangeRecordJsonValue,
+) -> JsonValue {
+    crate::json::from_str(&reddb_wire::replication::change_record_json_value_to_string(value))
+        .unwrap_or(JsonValue::Null)
 }
 
 /// CDC event buffer — circular buffer of change events.
@@ -711,7 +518,7 @@ mod tests {
             entity_id: 42,
             entity_kind: "row".to_string(),
             entity_bytes: Some(vec![1, 2, 3]),
-            metadata: Some(crate::json!({"role": "admin"})),
+            metadata: Some(server_json_to_wire_json(crate::json!({"role": "admin"}))),
             refresh_records: None,
         };
 

@@ -13,12 +13,26 @@
 
 use std::sync::Arc;
 
-use super::protocol::*;
+use super::protocol::encode_value;
 use crate::application::ports::RuntimeEntityPort;
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityId};
+use reddb_wire::legacy::{
+    encode_column_name, write_frame_header, MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED,
+    MSG_BULK_OK, MSG_BULK_STREAM_ACK, MSG_BULK_STREAM_COMMIT, MSG_BULK_STREAM_ROWS,
+    MSG_BULK_STREAM_START, MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR, MSG_PREPARED_OK, MSG_QUERY,
+    MSG_QUERY_BINARY, MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
+};
+use reddb_wire::redwire::{
+    decode_bulk_binary_payload, decode_bulk_json_payload, decode_bulk_ok_count_payload,
+    decode_bulk_stream_rows_payload, decode_bulk_stream_start_payload, decode_close_cursor_payload,
+    decode_deallocate_payload, decode_declare_cursor_payload, decode_execute_prepared_payload,
+    decode_fetch_payload, decode_prepare_payload, encode_bulk_ok_count_payload,
+    encode_cursor_batch_payload, encode_cursor_ok_payload, encode_prepared_ok_payload,
+    BulkBinaryFlavor,
+};
 
 pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let sql = match std::str::from_utf8(payload) {
@@ -52,9 +66,8 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             // accepting non-durable writes.
             let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
             if is_mutation {
-                let post_lsn = runtime.cdc_current_lsn();
-                if let Err(err) = runtime.enforce_commit_policy(post_lsn) {
-                    return make_error(err.to_string().as_bytes());
+                if let Err(response) = enforce_wire_commit_policy_after_write(runtime) {
+                    return response;
                 }
             }
 
@@ -143,61 +156,19 @@ fn encode_empty_result() -> Vec<u8> {
 }
 
 pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
-    let mut pos = 0;
-
-    // Collection name
-    if payload.len() < 2 {
-        return make_error(b"bulk insert: payload too short");
-    }
-    let coll_len = match read_u16(payload, &mut pos, "bulk insert: missing collection length") {
-        Ok(len) => len as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-    let collection = match read_string(
-        payload,
-        &mut pos,
-        coll_len,
-        "bulk insert: truncated collection name",
-        "bulk insert: invalid collection name",
-    ) {
-        Ok(s) => s,
-        Err(msg) => return make_error(msg.as_bytes()),
+    let decoded = match decode_bulk_json_payload(payload) {
+        Ok(decoded) => decoded,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
 
-    // Number of rows
-    let nrows = match read_u32(payload, &mut pos, "bulk insert: missing row count") {
-        Ok(rows) => rows as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-
-    // Parse JSON payloads
-    let mut json_payloads = Vec::with_capacity(nrows);
-    for _ in 0..nrows {
-        let json_len = match read_u32(payload, &mut pos, "bulk insert: missing JSON length") {
-            Ok(len) => len as usize,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        let json_str = match read_string(
-            payload,
-            &mut pos,
-            json_len,
-            "bulk insert: truncated JSON payload",
-            "bulk insert: invalid JSON payload",
-        ) {
-            Ok(s) => s,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        json_payloads.push(json_str);
-    }
-
-    let mut rows = Vec::with_capacity(nrows);
-    for json_str in &json_payloads {
+    let mut rows = Vec::with_capacity(decoded.json_payloads.len());
+    for json_str in &decoded.json_payloads {
         let parsed: crate::json::Value = match crate::json::from_str(json_str) {
             Ok(v) => v,
             Err(e) => return make_error(format!("JSON parse: {e}").as_bytes()),
         };
         let input = match crate::application::entity_payload::parse_create_row_input(
-            collection.clone(),
+            decoded.collection.clone(),
             &parsed,
         ) {
             Ok(input) => input,
@@ -207,15 +178,21 @@ pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<
     }
 
     match runtime.create_rows_batch(crate::application::CreateRowsBatchInput {
-        collection,
+        collection: decoded.collection,
         rows,
         suppress_events: false,
     }) {
         Ok(outputs) => {
             let count = outputs.len() as u64;
-            let mut resp = Vec::with_capacity(13);
-            write_frame_header(&mut resp, MSG_BULK_OK, 8);
-            resp.extend_from_slice(&count.to_le_bytes());
+            if count > 0 {
+                if let Err(response) = enforce_wire_commit_policy_after_write(runtime) {
+                    return response;
+                }
+            }
+            let payload = encode_bulk_ok_count_payload(count);
+            let mut resp = Vec::with_capacity(5 + payload.len());
+            write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
+            resp.extend_from_slice(&payload);
             resp
         }
         Err(e) => make_error(format!("bulk insert: {e}").as_bytes()),
@@ -361,83 +338,35 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
 /// to the prevalidated columnar kernel when the collection carries no
 /// contract — same shape `MSG_BULK_INSERT_PREVALIDATED` already uses.
 pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
-    let mut pos = 0;
-
-    if payload.len() < 6 {
-        return make_error(b"binary bulk: payload too short");
-    }
-
-    // Collection name — allocated once.
-    let coll_len = match read_u16(payload, &mut pos, "binary bulk: missing collection length") {
-        Ok(len) => len as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
+    let decoded = match decode_bulk_binary_payload(payload, BulkBinaryFlavor::Binary) {
+        Ok(decoded) => decoded,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    let collection = match read_string(
-        payload,
-        &mut pos,
-        coll_len,
-        "binary bulk: truncated collection name",
-        "binary bulk: invalid collection name",
-    ) {
-        Ok(s) => s,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-
-    // Column names — allocated once at the head, shared across every
-    // row via `Arc<Vec<String>>`.
-    let ncols = match read_u16(payload, &mut pos, "binary bulk: missing column count") {
-        Ok(cols) => cols as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-    let mut col_names = Vec::with_capacity(ncols);
-    for _ in 0..ncols {
-        let name_len = match read_u16(payload, &mut pos, "binary bulk: missing column name length")
-        {
-            Ok(len) => len as usize,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        let name = match read_string(
-            payload,
-            &mut pos,
-            name_len,
-            "binary bulk: truncated column name",
-            "binary bulk: invalid column name",
-        ) {
-            Ok(s) => s,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        col_names.push(name);
-    }
-    let column_names = std::sync::Arc::new(col_names);
-
-    // Number of rows
-    let nrows = match read_u32(payload, &mut pos, "binary bulk: missing row count") {
-        Ok(rows) => rows as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-
-    // Per-row hot loop: only emits `Vec<Value>`. No `String::new`,
-    // `to_string`, or `to_owned` per row — column names + collection
-    // are allocated at the top of the function and reused via the
-    // shared `Arc`.
-    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(nrows);
-    for _ in 0..nrows {
-        let mut values = Vec::with_capacity(ncols);
-        for _ in 0..ncols {
-            let value = match try_decode_value(payload, &mut pos) {
-                Ok(value) => value,
+    let collection = decoded.collection;
+    let column_names = std::sync::Arc::new(decoded.columns);
+    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(decoded.rows.len());
+    for row in decoded.rows {
+        let mut values = Vec::with_capacity(row.len());
+        for value in row {
+            match crate::storage::schema::Value::try_from(value) {
+                Ok(value) => values.push(value),
                 Err(err) => return make_error(format!("binary bulk: {err}").as_bytes()),
-            };
-            values.push(value);
+            }
         }
         rows.push(values);
     }
 
     match runtime.create_rows_batch_columnar(collection, column_names, rows) {
         Ok(count) => {
-            let mut resp = Vec::with_capacity(13);
-            write_frame_header(&mut resp, MSG_BULK_OK, 8);
-            resp.extend_from_slice(&(count as u64).to_le_bytes());
+            if count > 0 {
+                if let Err(response) = enforce_wire_commit_policy_after_write(runtime) {
+                    return response;
+                }
+            }
+            let payload = encode_bulk_ok_count_payload(count as u64);
+            let mut resp = Vec::with_capacity(5 + payload.len());
+            write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
+            resp.extend_from_slice(&payload);
             resp
         }
         Err(e) => make_error(format!("bulk insert: {e}").as_bytes()),
@@ -453,81 +382,35 @@ pub(crate) fn handle_bulk_insert_binary_prevalidated(
     runtime: &RedDBRuntime,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut pos = 0;
-
-    if payload.len() < 6 {
-        return make_error(b"binary bulk prevalidated: payload too short");
-    }
-
-    let coll_len = match read_u16(payload, &mut pos, "prevalidated: missing collection length") {
-        Ok(len) => len as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
+    let decoded = match decode_bulk_binary_payload(payload, BulkBinaryFlavor::Prevalidated) {
+        Ok(decoded) => decoded,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    let collection = match read_string(
-        payload,
-        &mut pos,
-        coll_len,
-        "prevalidated: truncated collection name",
-        "prevalidated: invalid collection name",
-    ) {
-        Ok(s) => s,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-
-    let ncols = match read_u16(payload, &mut pos, "prevalidated: missing column count") {
-        Ok(cols) => cols as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-    let mut col_names = Vec::with_capacity(ncols);
-    for _ in 0..ncols {
-        let name_len = match read_u16(
-            payload,
-            &mut pos,
-            "prevalidated: missing column name length",
-        ) {
-            Ok(len) => len as usize,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        let name = match read_string(
-            payload,
-            &mut pos,
-            name_len,
-            "prevalidated: truncated column name",
-            "prevalidated: invalid column name",
-        ) {
-            Ok(s) => s,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        col_names.push(name);
-    }
-
-    let nrows = match read_u32(payload, &mut pos, "prevalidated: missing row count") {
-        Ok(rows) => rows as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-
-    // Columnar decode: one `Vec<Value>` per row, one shared
-    // `Arc<Vec<String>>` for the schema. Skips the N × ncols
-    // String clones + HashMap builds the tuple-based path did.
-    let schema = std::sync::Arc::new(col_names);
-    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(nrows);
-    for _ in 0..nrows {
-        let mut values = Vec::with_capacity(ncols);
-        for _ in 0..ncols {
-            let value = match try_decode_value(payload, &mut pos) {
-                Ok(v) => v,
+    let collection = decoded.collection;
+    let schema = std::sync::Arc::new(decoded.columns);
+    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(decoded.rows.len());
+    for row in decoded.rows {
+        let mut values = Vec::with_capacity(row.len());
+        for value in row {
+            match crate::storage::schema::Value::try_from(value) {
+                Ok(value) => values.push(value),
                 Err(err) => return make_error(format!("prevalidated: {err}").as_bytes()),
-            };
-            values.push(value);
+            }
         }
         rows.push(values);
     }
 
     match runtime.create_rows_batch_prevalidated_columnar(collection, schema, rows) {
         Ok(count) => {
-            let mut resp = Vec::with_capacity(13);
-            write_frame_header(&mut resp, MSG_BULK_OK, 8);
-            resp.extend_from_slice(&(count as u64).to_le_bytes());
+            if count > 0 {
+                if let Err(response) = enforce_wire_commit_policy_after_write(runtime) {
+                    return response;
+                }
+            }
+            let payload = encode_bulk_ok_count_payload(count as u64);
+            let mut resp = Vec::with_capacity(5 + payload.len());
+            write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
+            resp.extend_from_slice(&payload);
             resp
         }
         Err(e) => make_error(format!("prevalidated bulk insert: {e}").as_bytes()),
@@ -633,53 +516,15 @@ pub(crate) fn handle_stream_start(
     payload: &[u8],
     session: &mut Option<BulkStreamSession>,
 ) -> Vec<u8> {
-    let mut pos = 0;
-    let coll_len = match read_u16(payload, &mut pos, "stream start: missing collection length") {
-        Ok(len) => len as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
+    let decoded = match decode_bulk_stream_start_payload(payload) {
+        Ok(decoded) => decoded,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    let collection = match read_string(
-        payload,
-        &mut pos,
-        coll_len,
-        "stream start: truncated collection name",
-        "stream start: invalid collection name",
-    ) {
-        Ok(s) => s,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-
-    let ncols = match read_u16(payload, &mut pos, "stream start: missing column count") {
-        Ok(c) => c as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
-    let mut names = Vec::with_capacity(ncols);
-    for _ in 0..ncols {
-        let name_len = match read_u16(
-            payload,
-            &mut pos,
-            "stream start: missing column name length",
-        ) {
-            Ok(l) => l as usize,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        let name = match read_string(
-            payload,
-            &mut pos,
-            name_len,
-            "stream start: truncated column name",
-            "stream start: invalid column name",
-        ) {
-            Ok(s) => s,
-            Err(msg) => return make_error(msg.as_bytes()),
-        };
-        names.push(name);
-    }
 
     let (flush_row_threshold, flush_byte_threshold) = bulk_stream_flush_thresholds();
     *session = Some(BulkStreamSession {
-        collection,
-        schema: std::sync::Arc::new(names),
+        collection: decoded.collection,
+        schema: std::sync::Arc::new(decoded.columns),
         pending: Vec::new(),
         pending_bytes: 0,
         total_flushed: 0,
@@ -705,19 +550,18 @@ pub(crate) fn handle_stream_rows(
             b"stream rows: no active stream session (send MSG_BULK_STREAM_START first)",
         );
     };
-    let mut pos = 0;
-    let nrows = match read_u32(payload, &mut pos, "stream rows: missing row count") {
-        Ok(n) => n as usize,
-        Err(msg) => return make_error(msg.as_bytes()),
-    };
     let ncols = state.schema.len();
-    state.pending.reserve(nrows);
-    for _ in 0..nrows {
-        let mut values = Vec::with_capacity(ncols);
+    let decoded = match decode_bulk_stream_rows_payload(payload, ncols) {
+        Ok(decoded) => decoded,
+        Err(err) => return make_error(err.to_string().as_bytes()),
+    };
+    state.pending.reserve(decoded.rows.len());
+    for row in decoded.rows {
+        let mut values = Vec::with_capacity(row.len());
         let mut row_bytes = 0usize;
-        for _ in 0..ncols {
-            let value = match try_decode_value(payload, &mut pos) {
-                Ok(v) => v,
+        for value in row {
+            let value = match crate::storage::schema::Value::try_from(value) {
+                Ok(value) => value,
                 Err(err) => return make_error(format!("stream rows: {err}").as_bytes()),
             };
             row_bytes += value_bytes_estimate(&value);
@@ -766,9 +610,10 @@ pub(crate) fn handle_stream_commit(
             return make_error(format!("stream commit: {msg}").as_bytes());
         }
     }
-    let mut resp = Vec::with_capacity(13);
-    write_frame_header(&mut resp, MSG_BULK_OK, 8);
-    resp.extend_from_slice(&state.total_flushed.to_le_bytes());
+    let payload = encode_bulk_ok_count_payload(state.total_flushed);
+    let mut resp = Vec::with_capacity(5 + payload.len());
+    write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
+    resp.extend_from_slice(&payload);
     resp
 }
 
@@ -777,44 +622,6 @@ fn make_error(msg: &[u8]) -> Vec<u8> {
     write_frame_header(&mut resp, MSG_ERROR, msg.len() as u32);
     resp.extend_from_slice(msg);
     resp
-}
-
-fn read_u16(payload: &[u8], pos: &mut usize, err: &'static str) -> Result<u16, &'static str> {
-    let bytes = read_bytes(payload, pos, 2, err)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_u32(payload: &[u8], pos: &mut usize, err: &'static str) -> Result<u32, &'static str> {
-    let bytes = read_bytes(payload, pos, 4, err)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-fn read_string(
-    payload: &[u8],
-    pos: &mut usize,
-    len: usize,
-    truncated_err: &'static str,
-    utf8_err: &'static str,
-) -> Result<String, &'static str> {
-    let bytes = read_bytes(payload, pos, len, truncated_err)?;
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| utf8_err)
-}
-
-fn read_bytes<'a>(
-    payload: &'a [u8],
-    pos: &mut usize,
-    len: usize,
-    err: &'static str,
-) -> Result<&'a [u8], &'static str> {
-    let end = pos.saturating_add(len);
-    if end > payload.len() {
-        return Err(err);
-    }
-    let bytes = &payload[*pos..end];
-    *pos = end;
-    Ok(bytes)
 }
 
 // ── Prepared statements ───────────────────────────────────────────
@@ -858,26 +665,12 @@ pub(crate) fn handle_prepare(
     if prepared_disabled() {
         return make_error(b"prepared statements disabled");
     }
-    // Payload: [stmt_id u32][sql_len u32][sql bytes]
-    let mut pos = 0usize;
-    let stmt_id = match read_array::<4>(payload, &mut pos, "truncated prepare stmt_id") {
-        Ok(b) => u32::from_le_bytes(b),
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let sql_len = match read_array::<4>(payload, &mut pos, "truncated prepare sql_len") {
-        Ok(b) => u32::from_le_bytes(b) as usize,
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let sql_bytes = match read_bytes(payload, &mut pos, sql_len, "truncated prepare sql") {
-        Ok(b) => b,
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let sql = match std::str::from_utf8(sql_bytes) {
-        Ok(s) => s,
-        Err(_) => return make_error(b"invalid UTF-8 in prepare sql"),
+    let request = match decode_prepare_payload(payload) {
+        Ok(request) => request,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
 
-    let parsed = match crate::storage::query::modes::parse_multi(sql) {
+    let parsed = match crate::storage::query::modes::parse_multi(&request.sql) {
         Ok(e) => e,
         Err(err) => return make_error(err.to_string().as_bytes()),
     };
@@ -897,20 +690,22 @@ pub(crate) fn handle_prepare(
     let _ = runtime; // silence unused when cfg'd down
 
     stmts.insert(
-        stmt_id,
+        request.stmt_id,
         PreparedStmt {
             shape,
             parameter_count,
             epoch: runtime.ddl_epoch(),
-            _sql: sql.to_string(),
+            _sql: request.sql,
         },
     );
 
-    // Response: [stmt_id u32][param_count u16]
-    let mut resp = Vec::with_capacity(5 + 4 + 2);
-    write_frame_header(&mut resp, MSG_PREPARED_OK, 4 + 2);
-    resp.extend_from_slice(&stmt_id.to_le_bytes());
-    resp.extend_from_slice(&(parameter_count as u16).to_le_bytes());
+    let payload_body = match encode_prepared_ok_payload(request.stmt_id, parameter_count) {
+        Ok(payload_body) => payload_body,
+        Err(err) => return make_error(err.to_string().as_bytes()),
+    };
+    let mut resp = Vec::with_capacity(5 + payload_body.len());
+    write_frame_header(&mut resp, MSG_PREPARED_OK, payload_body.len() as u32);
+    resp.extend_from_slice(&payload_body);
     resp
 }
 
@@ -922,18 +717,12 @@ pub(crate) fn handle_execute_prepared(
     if prepared_disabled() {
         return make_error(b"prepared statements disabled");
     }
-    // Payload: [stmt_id u32][nparams u16]([val_tag u8][val_data])*
-    let mut pos = 0usize;
-    let stmt_id = match read_array::<4>(payload, &mut pos, "truncated execute stmt_id") {
-        Ok(b) => u32::from_le_bytes(b),
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let nparams = match read_array::<2>(payload, &mut pos, "truncated execute nparams") {
-        Ok(b) => u16::from_le_bytes(b) as usize,
-        Err(e) => return make_error(e.as_bytes()),
+    let request = match decode_execute_prepared_payload(payload) {
+        Ok(request) => request,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
 
-    let prepared = match stmts.get(&stmt_id) {
+    let prepared = match stmts.get(&request.stmt_id) {
         Some(p) => p,
         None => return make_error(b"unknown prepared stmt_id"),
     };
@@ -944,13 +733,13 @@ pub(crate) fn handle_execute_prepared(
         // stale plan that yields wrong rows or surprise errors.
         return make_error(b"prepared_needs_replan");
     }
-    if nparams != prepared.parameter_count {
+    if request.params.len() != prepared.parameter_count {
         return make_error(b"prepared param count mismatch");
     }
 
-    let mut binds: Vec<Value> = Vec::with_capacity(nparams);
-    for _ in 0..nparams {
-        match crate::wire::protocol::try_decode_value(payload, &mut pos) {
+    let mut binds: Vec<Value> = Vec::with_capacity(request.params.len());
+    for param in request.params {
+        match Value::try_from(param) {
             Ok(v) => binds.push(v),
             Err(e) => return make_error(e.as_bytes()),
         }
@@ -990,6 +779,12 @@ pub(crate) fn handle_execute_prepared(
 
     match runtime.execute_query_expr(bound_expr) {
         Ok(result) => {
+            let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
+            if is_mutation {
+                if let Err(response) = enforce_wire_commit_policy_after_write(runtime) {
+                    return response;
+                }
+            }
             if let Some(ref json) = result.result.pre_serialized_json {
                 let bytes = json.as_bytes();
                 let mut resp = Vec::with_capacity(5 + bytes.len());
@@ -1003,6 +798,14 @@ pub(crate) fn handle_execute_prepared(
     }
 }
 
+fn enforce_wire_commit_policy_after_write(runtime: &RedDBRuntime) -> Result<(), Vec<u8>> {
+    let post_lsn = runtime.cdc_current_lsn();
+    runtime
+        .enforce_commit_policy(post_lsn)
+        .map(|_| ())
+        .map_err(|err| make_error(err.to_string().as_bytes()))
+}
+
 pub(crate) fn handle_deallocate(
     payload: &[u8],
     stmts: &mut std::collections::HashMap<u32, PreparedStmt>,
@@ -1010,25 +813,12 @@ pub(crate) fn handle_deallocate(
     if prepared_disabled() {
         return make_error(b"prepared statements disabled");
     }
-    let mut pos = 0usize;
-    let stmt_id = match read_array::<4>(payload, &mut pos, "truncated deallocate stmt_id") {
-        Ok(b) => u32::from_le_bytes(b),
-        Err(e) => return make_error(e.as_bytes()),
+    let request = match decode_deallocate_payload(payload) {
+        Ok(request) => request,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    stmts.remove(&stmt_id);
+    stmts.remove(&request.stmt_id);
     Vec::new() // empty response — like STREAM_ROWS success path
-}
-
-#[inline]
-fn read_array<const N: usize>(
-    payload: &[u8],
-    pos: &mut usize,
-    err: &'static str,
-) -> Result<[u8; N], &'static str> {
-    let bytes = read_bytes(payload, pos, N, err)?;
-    let mut out = [0u8; N];
-    out.copy_from_slice(bytes);
-    Ok(out)
 }
 
 // ── Cursors ───────────────────────────────────────────────────────
@@ -1079,28 +869,14 @@ fn handle_declare_cursor(
         return make_error(b"cursor limit exceeded");
     }
 
-    // Payload: [cursor_id u32][sql_len u32][sql bytes]
-    let mut pos = 0usize;
-    let cursor_id = match read_array::<4>(payload, &mut pos, "truncated declare cursor_id") {
-        Ok(b) => u32::from_le_bytes(b),
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let sql_len = match read_array::<4>(payload, &mut pos, "truncated declare sql_len") {
-        Ok(b) => u32::from_le_bytes(b) as usize,
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let sql_bytes = match read_bytes(payload, &mut pos, sql_len, "truncated declare sql") {
-        Ok(b) => b,
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let sql = match std::str::from_utf8(sql_bytes) {
-        Ok(s) => s,
-        Err(_) => return make_error(b"invalid UTF-8 in declare sql"),
+    let request = match decode_declare_cursor_payload(payload) {
+        Ok(request) => request,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
 
     // Reuse the same entry MSG_QUERY uses — every planner path, RLS
     // injection and snapshot guard applies identically.
-    let result = match runtime.execute_query(sql) {
+    let result = match runtime.execute_query(&request.sql) {
         Ok(r) => r,
         Err(e) => return make_error(e.to_string().as_bytes()),
     };
@@ -1129,7 +905,7 @@ fn handle_declare_cursor(
     let total_rows = records.len() as u64;
 
     cursors.insert(
-        cursor_id,
+        request.cursor_id,
         CursorState {
             columns: columns.clone(),
             records,
@@ -1138,14 +914,12 @@ fn handle_declare_cursor(
         },
     );
 
-    // Response: [cursor_id u32][ncols u16]([col_len u16][col_name])* [total_rows u64]
-    let mut payload_body: Vec<u8> = Vec::with_capacity(4 + 2 + 8 + columns.len() * 16);
-    payload_body.extend_from_slice(&cursor_id.to_le_bytes());
-    payload_body.extend_from_slice(&(columns.len() as u16).to_le_bytes());
-    for col in &columns {
-        encode_column_name(&mut payload_body, col);
-    }
-    payload_body.extend_from_slice(&total_rows.to_le_bytes());
+    let column_names: Vec<&str> = columns.iter().map(|col| col.as_ref()).collect();
+    let payload_body = match encode_cursor_ok_payload(request.cursor_id, &column_names, total_rows)
+    {
+        Ok(payload_body) => payload_body,
+        Err(err) => return make_error(err.to_string().as_bytes()),
+    };
 
     let mut resp = Vec::with_capacity(5 + payload_body.len());
     write_frame_header(&mut resp, MSG_CURSOR_OK, payload_body.len() as u32);
@@ -1160,31 +934,22 @@ fn handle_fetch(
     if cursor_disabled() {
         return make_error(b"cursors disabled");
     }
-    let mut pos = 0usize;
-    let cursor_id = match read_array::<4>(payload, &mut pos, "truncated fetch cursor_id") {
-        Ok(b) => u32::from_le_bytes(b),
-        Err(e) => return make_error(e.as_bytes()),
-    };
-    let max_rows = match read_array::<4>(payload, &mut pos, "truncated fetch max_rows") {
-        Ok(b) => u32::from_le_bytes(b) as usize,
-        Err(e) => return make_error(e.as_bytes()),
+    let request = match decode_fetch_payload(payload) {
+        Ok(request) => request,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
 
-    let state = match cursors.get_mut(&cursor_id) {
+    let state = match cursors.get_mut(&request.cursor_id) {
         Some(s) => s,
         None => return make_error(b"unknown cursor_id"),
     };
 
     let remaining = state.records.len().saturating_sub(state.pos);
-    let take = max_rows.min(remaining);
+    let take = (request.max_rows as usize).min(remaining);
     let end = state.pos + take;
     let has_more = end < state.records.len();
 
-    // Response: [cursor_id u32][nrows u32][has_more u8]([val_tag u8][val_data])* per row/col
-    let mut body: Vec<u8> = Vec::with_capacity(4 + 4 + 1 + take * state.columns.len() * 16);
-    body.extend_from_slice(&cursor_id.to_le_bytes());
-    body.extend_from_slice(&(take as u32).to_le_bytes());
-    body.push(if has_more { 1 } else { 0 });
+    let mut rows: Vec<Vec<reddb_wire::legacy::WireValue>> = Vec::with_capacity(take);
 
     // Reinstall the bundle captured at DECLARE so any value resolution
     // path (`record.get` under columnar fallback, document-column
@@ -1192,14 +957,20 @@ fn handle_fetch(
     // MVCC + identity view, not the worker thread's current state.
     crate::runtime::mvcc::with_snapshot_bundle(&state.bundle, || {
         for record in &state.records[state.pos..end] {
+            let mut row = Vec::with_capacity(state.columns.len());
             for col in &state.columns {
                 let val = record.get(col.as_ref()).unwrap_or(&Value::Null);
-                encode_value(&mut body, val);
+                row.push(reddb_wire::legacy::WireValue::from(val));
             }
+            rows.push(row);
         }
     });
     state.pos = end;
 
+    let body = match encode_cursor_batch_payload(request.cursor_id, &rows, has_more) {
+        Ok(body) => body,
+        Err(err) => return make_error(err.to_string().as_bytes()),
+    };
     let mut resp = Vec::with_capacity(5 + body.len());
     write_frame_header(&mut resp, MSG_CURSOR_BATCH, body.len() as u32);
     resp.extend_from_slice(&body);
@@ -1213,12 +984,11 @@ fn handle_close_cursor(
     if cursor_disabled() {
         return make_error(b"cursors disabled");
     }
-    let mut pos = 0usize;
-    let cursor_id = match read_array::<4>(payload, &mut pos, "truncated close cursor_id") {
-        Ok(b) => u32::from_le_bytes(b),
-        Err(e) => return make_error(e.as_bytes()),
+    let request = match decode_close_cursor_payload(payload) {
+        Ok(request) => request,
+        Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    match cursors.remove(&cursor_id) {
+    match cursors.remove(&request.cursor_id) {
         Some(_) => Vec::new(), // silent success
         None => make_error(b"unknown cursor_id"),
     }
@@ -1230,6 +1000,83 @@ mod tests {
 
     fn create_runtime() -> RedDBRuntime {
         RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
+    }
+
+    fn create_primary_runtime(data_path: &std::path::Path) -> RedDBRuntime {
+        RedDBRuntime::with_options(
+            crate::api::RedDBOptions::persistent(data_path)
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("failed to create primary runtime")
+    }
+
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &'static str)]) -> Self {
+            let previous = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var(key).ok()))
+                .collect();
+            for (key, value) in vars {
+                std::env::set_var(key, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.iter().rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn temp_data_path(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("reddb_{name}_{suffix}.rdb"))
+    }
+
+    fn cleanup(data_path: &std::path::Path) {
+        let _ = std::fs::remove_file(data_path);
+        let _ = std::fs::remove_file(
+            crate::replication::primary::PrimaryReplication::slot_path_for(data_path),
+        );
+        let _ = std::fs::remove_file(crate::replication::primary::LogicalWalSpool::path_for(
+            data_path,
+        ));
+        let _ = std::fs::remove_dir_all(
+            crate::replication::primary::PrimaryReplication::primary_replica_root_for(data_path),
+        );
+        let _ = std::fs::remove_dir_all(crate::replication::replica::rebootstrap_staging_root_for(
+            data_path,
+        ));
+        let _ = std::fs::remove_file(crate::replication::replica::rebootstrap_pending_path_for(
+            data_path,
+        ));
+        let _ = std::fs::remove_file(
+            crate::replication::replica::rebootstrap_ready_marker_path_for(data_path),
+        );
+        let _ = std::fs::remove_file(
+            crate::replication::replica::rebootstrap_intent_log_path_for(data_path),
+        );
+        let _ = std::fs::remove_file(crate::replication::replica::rebootstrap_previous_path_for(
+            data_path,
+        ));
     }
 
     fn decode_error_message(response: &[u8]) -> String {
@@ -1249,7 +1096,7 @@ mod tests {
         let response = handle_bulk_insert(&runtime, &payload);
         assert_eq!(
             decode_error_message(&response),
-            "bulk insert: truncated JSON payload"
+            ["bulk insert: truncated ", "JSON payload"].concat()
         );
     }
 
@@ -1277,21 +1124,16 @@ mod tests {
     // server. End-to-end TCP round-trips are covered elsewhere.
 
     fn prepare_payload(stmt_id: u32, sql: &str) -> Vec<u8> {
-        let mut p = Vec::with_capacity(4 + 4 + sql.len());
-        p.extend_from_slice(&stmt_id.to_le_bytes());
-        p.extend_from_slice(&(sql.len() as u32).to_le_bytes());
-        p.extend_from_slice(sql.as_bytes());
-        p
+        reddb_wire::redwire::encode_prepare_payload(stmt_id, sql).expect("encode prepare payload")
     }
 
     fn execute_payload(stmt_id: u32, binds: &[Value]) -> Vec<u8> {
-        let mut p = Vec::new();
-        p.extend_from_slice(&stmt_id.to_le_bytes());
-        p.extend_from_slice(&(binds.len() as u16).to_le_bytes());
-        for v in binds {
-            crate::wire::protocol::encode_value(&mut p, v);
-        }
-        p
+        let params: Vec<reddb_wire::legacy::WireValue> = binds
+            .iter()
+            .map(reddb_wire::legacy::WireValue::from)
+            .collect();
+        reddb_wire::redwire::encode_execute_prepared_payload(stmt_id, &params)
+            .expect("encode execute payload")
     }
 
     fn seed_users_table(rt: &RedDBRuntime) {
@@ -1359,6 +1201,43 @@ mod tests {
         // for this trivial point lookup.
         let inline = handle_query(&runtime, b"SELECT * FROM users WHERE id = 5");
         assert_eq!(prepared_resp, inline, "prepared result must match inline");
+    }
+
+    #[test]
+    fn execute_prepared_insert_enforces_ack_n_commit_policy_fail_closed() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[
+            ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
+            ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ]);
+        let data_path = temp_data_path("wire_prepared_ack_n_timeout");
+        cleanup(&data_path);
+        let runtime = create_primary_runtime(&data_path);
+        let mut stmts = std::collections::HashMap::new();
+
+        let prepare = handle_prepare(
+            &runtime,
+            &prepare_payload(
+                77,
+                "INSERT INTO wire_prepared_ack (id, name) VALUES (1, 'alpha')",
+            ),
+            &mut stmts,
+        );
+        assert_eq!(prepare.get(4), Some(&MSG_PREPARED_OK));
+        let body = &prepare[5..];
+        let parameter_count = u16::from_le_bytes([body[4], body[5]]);
+        let binds = vec![Value::Integer(1); parameter_count as usize];
+        let response = handle_execute_prepared(&runtime, &execute_payload(77, &binds), &stmts);
+        let message = decode_error_message(&response);
+        assert!(
+            message.contains("commit policy timed out")
+                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+            "prepared write should identify commit timeout, got {message}"
+        );
+        assert!(runtime.cdc_current_lsn() > 0);
+
+        cleanup(&data_path);
     }
 
     #[test]
@@ -1459,9 +1338,8 @@ mod tests {
         );
         assert!(stmts.contains_key(&3));
 
-        let mut p = Vec::new();
-        p.extend_from_slice(&3u32.to_le_bytes());
-        let resp = handle_deallocate(&p, &mut stmts);
+        let payload = reddb_wire::redwire::encode_deallocate_payload(3);
+        let resp = handle_deallocate(&payload, &mut stmts);
         assert!(resp.is_empty(), "deallocate success sends no response");
         assert!(!stmts.contains_key(&3));
     }
@@ -1491,28 +1369,25 @@ mod tests {
         let mut stmts = std::collections::HashMap::new();
         // Only 3 bytes — can't even read the stmt_id.
         let resp = handle_prepare(&runtime, &[0, 0, 0], &mut stmts);
-        assert_eq!(decode_error_message(&resp), "truncated prepare stmt_id");
+        assert_eq!(
+            decode_error_message(&resp),
+            ["truncated prepare ", "stmt_id"].concat()
+        );
     }
 
     // ── Cursor handler tests ─────────────────────────────────────
 
     fn declare_cursor_payload(cursor_id: u32, sql: &str) -> Vec<u8> {
-        let mut p = Vec::with_capacity(4 + 4 + sql.len());
-        p.extend_from_slice(&cursor_id.to_le_bytes());
-        p.extend_from_slice(&(sql.len() as u32).to_le_bytes());
-        p.extend_from_slice(sql.as_bytes());
-        p
+        reddb_wire::redwire::encode_declare_cursor_payload(cursor_id, sql)
+            .expect("encode declare cursor payload")
     }
 
     fn fetch_payload(cursor_id: u32, max_rows: u32) -> Vec<u8> {
-        let mut p = Vec::with_capacity(8);
-        p.extend_from_slice(&cursor_id.to_le_bytes());
-        p.extend_from_slice(&max_rows.to_le_bytes());
-        p
+        reddb_wire::redwire::encode_fetch_payload(cursor_id, max_rows)
     }
 
     fn close_cursor_payload(cursor_id: u32) -> Vec<u8> {
-        cursor_id.to_le_bytes().to_vec()
+        reddb_wire::redwire::encode_close_cursor_payload(cursor_id)
     }
 
     /// Parse MSG_CURSOR_BATCH frame: returns (nrows, has_more).
@@ -1908,10 +1783,7 @@ mod tests {
             response
         );
         let body = &response[5..];
-        assert!(body.len() >= 8, "BulkOk body too short: {body:?}");
-        let mut n = [0u8; 8];
-        n.copy_from_slice(&body[..8]);
-        u64::from_le_bytes(n)
+        decode_bulk_ok_count_payload(body).expect("decode MSG_BULK_OK count")
     }
 
     #[test]
@@ -1935,6 +1807,78 @@ mod tests {
         let response = handle_bulk_insert_binary(&runtime, &payload);
         let count = decode_bulk_ok_count(&response);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn binary_bulk_enforces_ack_n_commit_policy_fail_closed() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[
+            ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
+            ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ]);
+        let data_path = temp_data_path("wire_binary_bulk_ack_n_timeout");
+        cleanup(&data_path);
+        let runtime = create_primary_runtime(&data_path);
+        let payload = build_user_payload(
+            "wire_bulk_ack",
+            &[(
+                1u64,
+                "alice",
+                "alice@example.com",
+                30i64,
+                "NYC",
+                1.5f64,
+                "2026-05-04T00:00:00Z",
+            )],
+        );
+
+        let response = handle_bulk_insert_binary(&runtime, &payload);
+        let message = decode_error_message(&response);
+        assert!(
+            message.contains("commit policy timed out")
+                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+            "binary bulk write should identify commit timeout, got {message}"
+        );
+        assert!(runtime.cdc_current_lsn() > 0);
+
+        cleanup(&data_path);
+    }
+
+    #[test]
+    fn prevalidated_binary_bulk_enforces_ack_n_commit_policy_fail_closed() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[
+            ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
+            ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ]);
+        let data_path = temp_data_path("wire_prevalidated_bulk_ack_n_timeout");
+        cleanup(&data_path);
+        let runtime = create_primary_runtime(&data_path);
+        let payload = build_user_payload(
+            "wire_prevalidated_ack",
+            &[(
+                1u64,
+                "alice",
+                "alice@example.com",
+                30i64,
+                "NYC",
+                1.5f64,
+                "2026-05-04T00:00:00Z",
+            )],
+        );
+
+        let response = handle_bulk_insert_binary_prevalidated(&runtime, &payload);
+        let message = decode_error_message(&response);
+        assert!(
+            message.contains("commit policy timed out")
+                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+            "prevalidated bulk write should identify commit timeout, got {message}"
+        );
+        assert!(runtime.cdc_current_lsn() > 0);
+
+        cleanup(&data_path);
     }
 
     #[test]

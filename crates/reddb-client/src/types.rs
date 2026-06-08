@@ -223,7 +223,6 @@ pub struct KvWatchEvent {
     pub dropped_event_count: u64,
 }
 
-#[cfg(any(feature = "redwire", feature = "http"))]
 impl QueryResult {
     /// Build a `QueryResult` from the JSON envelope the server
     /// emits in a `Result` frame.
@@ -278,7 +277,6 @@ impl QueryResult {
     }
 }
 
-#[cfg(any(feature = "redwire", feature = "http"))]
 fn parse_record(record: &serde_json::Value, columns: &[String]) -> Vec<(String, ValueOut)> {
     let Some(record_obj) = record.as_object() else {
         return Vec::new();
@@ -307,7 +305,6 @@ fn parse_record(record: &serde_json::Value, columns: &[String]) -> Vec<(String, 
         .collect()
 }
 
-#[cfg(any(feature = "redwire", feature = "http"))]
 fn json_to_value_out(value: &serde_json::Value) -> ValueOut {
     match value {
         serde_json::Value::Null => ValueOut::Null,

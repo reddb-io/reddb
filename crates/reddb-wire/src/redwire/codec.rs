@@ -48,6 +48,14 @@ impl std::fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
+pub fn frame_len_from_header(header: &[u8; FRAME_HEADER_SIZE]) -> Result<usize, FrameError> {
+    let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    if length < FRAME_HEADER_SIZE as u32 || length > MAX_FRAME_SIZE {
+        return Err(FrameError::InvalidLength(length));
+    }
+    Ok(length as usize)
+}
+
 pub fn encode_frame(frame: &Frame) -> Vec<u8> {
     // The frame's `payload` is always the plaintext form. If the
     // COMPRESSED flag is set we compress on the wire and rewrite
@@ -102,10 +110,9 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(Frame, usize), FrameError> {
     if bytes.len() < FRAME_HEADER_SIZE {
         return Err(FrameError::Truncated);
     }
-    let length = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    if length < FRAME_HEADER_SIZE as u32 || length > MAX_FRAME_SIZE {
-        return Err(FrameError::InvalidLength(length));
-    }
+    let mut header = [0u8; FRAME_HEADER_SIZE];
+    header.copy_from_slice(&bytes[..FRAME_HEADER_SIZE]);
+    let length = frame_len_from_header(&header)? as u32;
     if (bytes.len() as u32) < length {
         return Err(FrameError::PayloadTruncated {
             expected: length,
@@ -182,6 +189,25 @@ mod tests {
     #[test]
     fn round_trip_empty_payload() {
         round_trip(Frame::new(MessageKind::Ping, 1, vec![]));
+    }
+
+    #[test]
+    fn frame_len_from_header_validates_bounds() {
+        let mut header = [0u8; FRAME_HEADER_SIZE];
+        header[..4].copy_from_slice(&(FRAME_HEADER_SIZE as u32).to_le_bytes());
+        assert_eq!(frame_len_from_header(&header).unwrap(), FRAME_HEADER_SIZE);
+
+        header[..4].copy_from_slice(&15u32.to_le_bytes());
+        assert_eq!(
+            frame_len_from_header(&header),
+            Err(FrameError::InvalidLength(15))
+        );
+
+        header[..4].copy_from_slice(&(MAX_FRAME_SIZE + 1).to_le_bytes());
+        assert_eq!(
+            frame_len_from_header(&header),
+            Err(FrameError::InvalidLength(MAX_FRAME_SIZE + 1))
+        );
     }
 
     #[test]

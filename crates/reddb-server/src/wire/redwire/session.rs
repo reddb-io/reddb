@@ -22,14 +22,16 @@ use crate::serde_json::{self, Value as JsonValue};
 use reddb_wire::query_with_params::{
     decode_query_with_params, ParamValue as RedWireParamValue, FEATURE_PARAMS,
 };
-
-use super::auth::{
-    build_auth_fail, build_auth_ok, build_hello_ack, pick_auth_method, validate_auth_response,
-    AuthOutcome, Hello,
+use reddb_wire::redwire::operations::{
+    decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
 };
-use super::codec::{decode_frame, encode_frame};
-use super::frame::{Frame, MessageDirection, MessageKind, FRAME_HEADER_SIZE};
-use super::{FrameBuilder, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
+
+use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
+use reddb_wire::redwire::handshake::{build_auth_fail_payload, build_hello_ack, Hello};
+use reddb_wire::redwire::{
+    decode_frame, encode_frame, frame_len_from_header, Frame, FrameBuilder, MessageDirection,
+    MessageKind, FRAME_HEADER_SIZE, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
+};
 
 #[derive(Debug)]
 struct AuthedSession {
@@ -132,10 +134,10 @@ where
             }
             return Err(err);
         }
-        let length = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        if length < FRAME_HEADER_SIZE || length > super::frame::MAX_FRAME_SIZE as usize {
-            return Err(io::Error::other(format!("invalid frame length {length}")));
-        }
+        let mut header = [0u8; FRAME_HEADER_SIZE];
+        header.copy_from_slice(&buf[..FRAME_HEADER_SIZE]);
+        let length = frame_len_from_header(&header)
+            .map_err(|err| io::Error::other(format!("invalid frame length: {err}")))?;
         if buf.len() < length {
             buf.resize(length, 0);
         }
@@ -684,7 +686,7 @@ where
         let fail = encode_frame(&build_reply(
             hello.correlation_id,
             MessageKind::AuthFail,
-            build_auth_fail("first frame after magic must be Hello"),
+            build_auth_fail_payload("first frame after magic must be Hello"),
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
@@ -695,7 +697,7 @@ where
             let fail = encode_frame(&build_reply(
                 hello.correlation_id,
                 MessageKind::AuthFail,
-                build_auth_fail(&e),
+                build_auth_fail_payload(&e),
             )?);
             let _ = stream.write_all(&fail).await;
             return Ok(None);
@@ -713,7 +715,7 @@ where
         let fail = encode_frame(&build_reply(
             hello.correlation_id,
             MessageKind::AuthFail,
-            build_auth_fail("no overlapping protocol version"),
+            build_auth_fail_payload("no overlapping protocol version"),
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
@@ -726,7 +728,7 @@ where
             let fail = encode_frame(&build_reply(
                 hello.correlation_id,
                 MessageKind::AuthFail,
-                build_auth_fail("no overlapping auth method"),
+                build_auth_fail_payload("no overlapping auth method"),
             )?);
             let _ = stream.write_all(&fail).await;
             return Ok(None);
@@ -771,7 +773,7 @@ where
         let fail = encode_frame(&build_reply(
             resp.correlation_id,
             MessageKind::AuthFail,
-            build_auth_fail("expected AuthResponse"),
+            build_auth_fail_payload("expected AuthResponse"),
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
@@ -797,7 +799,7 @@ where
                 let fail = encode_frame(&build_reply(
                     resp.correlation_id,
                     MessageKind::AuthFail,
-                    build_auth_fail("oauth-jwt: AuthResponse missing 'jwt' string"),
+                    build_auth_fail_payload("oauth-jwt: AuthResponse missing 'jwt' string"),
                 )?);
                 let _ = stream.write_all(&fail).await;
                 return Ok(None);
@@ -848,7 +850,7 @@ where
                 let fail = encode_frame(&build_reply(
                     resp.correlation_id,
                     MessageKind::AuthFail,
-                    build_auth_fail(
+                    build_auth_fail_payload(
                         "oauth-jwt: token rejected (no browser-token authority or OAuth validator accepted it)",
                     ),
                 )?);
@@ -876,7 +878,7 @@ where
                 let fail = encode_frame(&build_reply(
                     resp.correlation_id,
                     MessageKind::AuthFail,
-                    build_auth_fail(&format!("oauth-jwt: {reason}")),
+                    build_auth_fail_payload(&format!("oauth-jwt: {reason}")),
                 )?);
                 let _ = stream.write_all(&fail).await;
                 return Ok(None);
@@ -909,7 +911,7 @@ where
             let fail = encode_frame(&build_reply(
                 resp.correlation_id,
                 MessageKind::AuthFail,
-                build_auth_fail(&reason),
+                build_auth_fail_payload(&reason),
             )?);
             let _ = stream.write_all(&fail).await;
             Ok(None)
@@ -938,7 +940,7 @@ where
             let fail = encode_frame(&build_reply(
                 initial_correlation,
                 MessageKind::AuthFail,
-                build_auth_fail("scram-sha-256 requires an AuthStore"),
+                build_auth_fail_payload("scram-sha-256 requires an AuthStore"),
             )?);
             let _ = stream.write_all(&fail).await;
             return Ok(None);
@@ -951,19 +953,19 @@ where
         let fail = encode_frame(&build_reply(
             cf.correlation_id,
             MessageKind::AuthFail,
-            build_auth_fail("expected AuthResponse(client-first-message)"),
+            build_auth_fail_payload("expected AuthResponse(client-first-message)"),
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
     }
     let (username, client_nonce, client_first_bare) =
-        match super::auth::parse_scram_client_first(&cf.payload) {
+        match reddb_wire::redwire::handshake::parse_scram_client_first(&cf.payload) {
             Ok(t) => t,
             Err(e) => {
                 let fail = encode_frame(&build_reply(
                     cf.correlation_id,
                     MessageKind::AuthFail,
-                    build_auth_fail(&format!("scram client-first: {e}")),
+                    build_auth_fail_payload(&format!("scram client-first: {e}")),
                 )?);
                 let _ = stream.write_all(&fail).await;
                 return Ok(None);
@@ -992,8 +994,12 @@ where
 
     // 3. Server-first.
     let server_nonce = super::auth::new_server_nonce();
-    let server_first =
-        super::auth::build_scram_server_first(&client_nonce, &server_nonce, &salt, iter);
+    let server_first = reddb_wire::redwire::handshake::build_scram_server_first(
+        &client_nonce,
+        &server_nonce,
+        &salt,
+        iter,
+    );
     let req = encode_frame(&build_reply(
         cf.correlation_id,
         MessageKind::AuthRequest,
@@ -1007,19 +1013,19 @@ where
         let fail = encode_frame(&build_reply(
             cfinal.correlation_id,
             MessageKind::AuthFail,
-            build_auth_fail("expected AuthResponse(client-final-message)"),
+            build_auth_fail_payload("expected AuthResponse(client-final-message)"),
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
     }
     let (combined_nonce, presented_proof, client_final_no_proof) =
-        match super::auth::parse_scram_client_final(&cfinal.payload) {
+        match reddb_wire::redwire::handshake::parse_scram_client_final(&cfinal.payload) {
             Ok(t) => t,
             Err(e) => {
                 let fail = encode_frame(&build_reply(
                     cfinal.correlation_id,
                     MessageKind::AuthFail,
-                    build_auth_fail(&format!("scram client-final: {e}")),
+                    build_auth_fail_payload(&format!("scram client-final: {e}")),
                 )?);
                 let _ = stream.write_all(&fail).await;
                 return Ok(None);
@@ -1030,7 +1036,7 @@ where
         let fail = encode_frame(&build_reply(
             cfinal.correlation_id,
             MessageKind::AuthFail,
-            build_auth_fail("scram nonce mismatch — replay protection failed"),
+            build_auth_fail_payload("scram nonce mismatch — replay protection failed"),
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
@@ -1054,7 +1060,7 @@ where
         let fail = encode_frame(&build_reply(
             cfinal.correlation_id,
             MessageKind::AuthFail,
-            build_auth_fail("invalid SCRAM proof"),
+            build_auth_fail_payload("invalid SCRAM proof"),
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
@@ -1098,12 +1104,8 @@ where
 {
     let mut header = [0u8; FRAME_HEADER_SIZE];
     stream.read_exact(&mut header).await?;
-    let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    if length < FRAME_HEADER_SIZE || length > super::frame::MAX_FRAME_SIZE as usize {
-        return Err(io::Error::other(format!(
-            "redwire frame length {length} out of range"
-        )));
-    }
+    let length = frame_len_from_header(&header)
+        .map_err(|err| io::Error::other(format!("decode frame header: {err}")))?;
     let mut buf = vec![0u8; length];
     buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
     if length > FRAME_HEADER_SIZE {
@@ -1212,33 +1214,26 @@ fn param_to_schema_value(value: RedWireParamValue) -> crate::storage::schema::Va
 /// Mirrors the JSON-RPC `insert` / `bulk_insert` method shapes
 /// from `rpc_stdio.rs` so both transports agree on the payload.
 fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
-    let v: JsonValue = match serde_json::from_slice(&frame.payload) {
-        Ok(v) => v,
-        Err(e) => return error_frame(frame.correlation_id, &format!("Insert: invalid JSON: {e}")),
+    let request = match decode_insert_dispatch_payload(&frame.payload) {
+        Ok(request) => request,
+        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
     };
-    let obj = match v.as_object() {
-        Some(o) => o,
-        None => {
-            return error_frame(
-                frame.correlation_id,
-                "Insert: payload must be a JSON object",
-            )
-        }
-    };
-    let collection = match obj.get("collection").and_then(|x| x.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return error_frame(frame.correlation_id, "Insert: missing 'collection' string"),
-    };
+    let collection = request.collection.as_str();
+    let payload = request.payload.map(wire_json_to_server_json);
+    let payloads = request.payloads.map(|rows| {
+        rows.into_iter()
+            .map(wire_json_to_server_json)
+            .collect::<Vec<_>>()
+    });
 
     // Analytics batch-insert path (issue #587). Either field flips the
     // dispatch — the brief carries `idempotency_key` as the canonical
     // signal; the optional `batch: true` boolean exists for callers
     // that want the validation contract without committing to a
     // replay window.
-    let idempotency_key = obj.get("idempotency_key").and_then(|x| x.as_str());
-    let batch_flag = obj.get("batch").and_then(|x| x.as_bool()).unwrap_or(false);
-    if idempotency_key.is_some() || batch_flag {
-        let items = match obj.get("payloads").and_then(|x| x.as_array()) {
+    let idempotency_key = request.idempotency_key.as_deref();
+    if idempotency_key.is_some() || request.batch {
+        let items = match payloads.as_deref() {
             Some(rows) => rows,
             None => {
                 return error_frame(
@@ -1265,7 +1260,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         return build_dispatch_reply(frame.correlation_id, kind, outcome.body);
     }
 
-    if let Some(rows) = obj.get("payloads").and_then(|x| x.as_array()) {
+    if let Some(rows) = payloads.as_ref() {
         let mut objects = Vec::with_capacity(rows.len());
         for entry in rows {
             objects.push(match entry.as_object() {
@@ -1310,7 +1305,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         return build_dispatch_reply(frame.correlation_id, MessageKind::BulkOk, payload);
     }
 
-    let row = match obj.get("payload").and_then(|x| x.as_object()) {
+    let row = match payload.as_ref().and_then(|x| x.as_object()) {
         Some(o) => o,
         None => {
             return error_frame(
@@ -1412,6 +1407,10 @@ fn build_dispatch_reply(correlation_id: u64, kind: MessageKind, payload: Vec<u8>
         .unwrap_or_else(|e| error_frame(correlation_id, &e.to_string()))
 }
 
+fn wire_json_to_server_json(value: impl std::fmt::Display) -> JsonValue {
+    serde_json::from_str::<JsonValue>(&value.to_string()).unwrap_or(JsonValue::Null)
+}
+
 /// Adapt a binary-fast-path handler response into a RedWire frame.
 ///
 /// The fast-path handlers (`handle_bulk_insert_binary`,
@@ -1440,26 +1439,17 @@ fn rewrap_handler_response(raw_bytes: &[u8], req: &Frame) -> Frame {
 /// Bridges to `SELECT * FROM <coll> WHERE _id = '<id>' LIMIT 1`.
 /// Reply: Result frame with the row, or empty `{}` when not found.
 fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
-    let v: JsonValue = match serde_json::from_slice(&frame.payload) {
-        Ok(v) => v,
-        Err(e) => return error_frame(frame.correlation_id, &format!("Get: invalid JSON: {e}")),
-    };
-    let obj = match v.as_object() {
-        Some(o) => o,
-        None => return error_frame(frame.correlation_id, "Get: payload must be a JSON object"),
-    };
-    let collection = match obj.get("collection").and_then(|x| x.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return error_frame(frame.correlation_id, "Get: missing 'collection' string"),
-    };
-    let id = match obj.get("id").and_then(|x| x.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return error_frame(frame.correlation_id, "Get: missing 'id' string"),
+    let request = match decode_get_payload(&frame.payload) {
+        Ok(request) => request,
+        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
     };
     // Sanitise the id by treating it as a string literal — same
     // approach as build_insert_sql for arbitrary input.
-    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(id.to_string()));
-    let sql = format!("SELECT * FROM {collection} WHERE _id = {id_lit} LIMIT 1");
+    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(request.id));
+    let sql = format!(
+        "SELECT * FROM {} WHERE _id = {id_lit} LIMIT 1",
+        request.collection
+    );
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             let mut out = crate::serde_json::Map::new();
@@ -1481,29 +1471,12 @@ fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 /// Bridges to `DELETE FROM <coll> WHERE _id = '<id>'`.
 /// Reply: DeleteOk frame with `{ affected }`.
 fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
-    let v: JsonValue = match serde_json::from_slice(&frame.payload) {
-        Ok(v) => v,
-        Err(e) => return error_frame(frame.correlation_id, &format!("Delete: invalid JSON: {e}")),
+    let request = match decode_delete_payload(&frame.payload) {
+        Ok(request) => request,
+        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
     };
-    let obj = match v.as_object() {
-        Some(o) => o,
-        None => {
-            return error_frame(
-                frame.correlation_id,
-                "Delete: payload must be a JSON object",
-            )
-        }
-    };
-    let collection = match obj.get("collection").and_then(|x| x.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return error_frame(frame.correlation_id, "Delete: missing 'collection' string"),
-    };
-    let id = match obj.get("id").and_then(|x| x.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return error_frame(frame.correlation_id, "Delete: missing 'id' string"),
-    };
-    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(id.to_string()));
-    let sql = format!("DELETE FROM {collection} WHERE _id = {id_lit}");
+    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(request.id));
+    let sql = format!("DELETE FROM {} WHERE _id = {id_lit}", request.collection);
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             let mut out = crate::serde_json::Map::new();
@@ -1955,7 +1928,7 @@ mod tests {
     async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Frame {
         let mut header = [0u8; FRAME_HEADER_SIZE];
         r.read_exact(&mut header).await.expect("read header");
-        let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let length = frame_len_from_header(&header).expect("valid frame header");
         let mut buf = vec![0u8; length];
         buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
         if length > FRAME_HEADER_SIZE {

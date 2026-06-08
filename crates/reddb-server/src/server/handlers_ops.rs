@@ -35,6 +35,12 @@ impl RedDBServer {
             Ok(required) => required,
             Err(error) => return json_error(400, error),
         };
+        if let Err(err) = self
+            .native_use_cases()
+            .validate_current_serverless_generation()
+        {
+            return json_error(503, err.to_string());
+        }
 
         let readiness = self.native_use_cases().readiness();
         let (query_ready, write_ready, repair_ready) = (
@@ -139,6 +145,12 @@ impl RedDBServer {
                 ),
             );
             return json_response(503, JsonValue::Object(object));
+        }
+        if let Err(err) = self
+            .native_use_cases()
+            .validate_current_serverless_generation()
+        {
+            return json_error(503, err.to_string());
         }
 
         let plan = self.admin_use_cases().build_serverless_warmup_plan(

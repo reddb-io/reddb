@@ -70,12 +70,9 @@ impl UnifiedStore {
                 .map_err(|err| StoreError::Serialization(err.to_string()))?;
             let bytes = page.as_bytes();
             let content = &bytes[crate::storage::engine::HEADER_SIZE..];
-            if content.len() < 12 || &content[0..4] != NATIVE_BLOB_MAGIC {
-                return Err(StoreError::Serialization(
-                    "invalid native blob page".to_string(),
-                ));
-            }
-            current = u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
+            let (next_page, _) = reddb_file::decode_native_blob_page(content)
+                .map_err(|err| StoreError::Serialization(err.to_string()))?;
+            current = next_page;
         }
         Ok(pages)
     }
@@ -92,8 +89,10 @@ impl UnifiedStore {
             return Ok((0, 0, 0));
         }
 
-        let chunk_capacity =
-            crate::storage::engine::PAGE_SIZE - crate::storage::engine::HEADER_SIZE - 12;
+        let chunk_capacity = reddb_file::native_blob_chunk_capacity(
+            crate::storage::engine::PAGE_SIZE,
+            crate::storage::engine::HEADER_SIZE,
+        );
         let page_count = payload.len().div_ceil(chunk_capacity) as u32;
         let mut page_ids = existing_root
             .map(|root| self.read_native_blob_chain_page_ids(root))
@@ -111,11 +110,7 @@ impl UnifiedStore {
         for (index, chunk) in payload.chunks(chunk_capacity).enumerate() {
             let page_id = page_ids[index];
             let next_page = page_ids.get(index + 1).copied().unwrap_or(0);
-            let mut data = Vec::with_capacity(chunk.len() + 12);
-            data.extend_from_slice(NATIVE_BLOB_MAGIC);
-            data.extend_from_slice(&next_page.to_le_bytes());
-            data.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
-            data.extend_from_slice(chunk);
+            let data = reddb_file::encode_native_blob_page(next_page, chunk);
 
             let mut page = crate::storage::engine::Page::new(
                 crate::storage::engine::PageType::NativeMeta,
@@ -154,20 +149,9 @@ impl UnifiedStore {
                 .map_err(|err| StoreError::Serialization(err.to_string()))?;
             let bytes = page.as_bytes();
             let content = &bytes[crate::storage::engine::HEADER_SIZE..];
-            if content.len() < 12 || &content[0..4] != NATIVE_BLOB_MAGIC {
-                return Err(StoreError::Serialization(
-                    "invalid native blob page".to_string(),
-                ));
-            }
-            let next_page = u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
-            let chunk_len =
-                u32::from_le_bytes([content[8], content[9], content[10], content[11]]) as usize;
-            if 12 + chunk_len > content.len() {
-                return Err(StoreError::Serialization(
-                    "truncated native blob page".to_string(),
-                ));
-            }
-            payload.extend_from_slice(&content[12..12 + chunk_len]);
+            let (next_page, chunk) = reddb_file::decode_native_blob_page(content)
+                .map_err(|err| StoreError::Serialization(err.to_string()))?;
+            payload.extend_from_slice(&chunk);
             current = next_page;
         }
         Ok(payload)
@@ -214,19 +198,8 @@ impl UnifiedStore {
             });
         }
 
-        let mut data = Vec::with_capacity(1024 + summaries.len() * 64);
-        data.extend_from_slice(NATIVE_VECTOR_ARTIFACT_MAGIC);
-        data.extend_from_slice(&(summaries.len() as u32).to_le_bytes());
-        for summary in &summaries {
-            push_native_string(&mut data, &summary.collection);
-            push_native_string(&mut data, &summary.artifact_kind);
-            data.extend_from_slice(&summary.root_page.to_le_bytes());
-            data.extend_from_slice(&summary.page_count.to_le_bytes());
-            data.extend_from_slice(&summary.byte_len.to_le_bytes());
-            data.extend_from_slice(&summary.checksum.to_le_bytes());
-        }
-
-        let checksum = crate::storage::engine::crc32(&data) as u64;
+        let data = reddb_file::encode_native_vector_artifact_store_page(&summaries);
+        let checksum = reddb_file::native_store_page_checksum(&data);
         let mut page = crate::storage::engine::Page::new(
             crate::storage::engine::PageType::NativeMeta,
             page_id,
@@ -258,66 +231,8 @@ impl UnifiedStore {
             .map_err(|err| StoreError::Serialization(err.to_string()))?;
         let bytes = page.as_bytes();
         let content = &bytes[crate::storage::engine::HEADER_SIZE..];
-        if content.len() < 8 || &content[0..4] != NATIVE_VECTOR_ARTIFACT_MAGIC {
-            return Err(StoreError::Serialization(
-                "invalid native vector artifact store page".to_string(),
-            ));
-        }
-        let count = u32::from_le_bytes([content[4], content[5], content[6], content[7]]) as usize;
-        let mut pos = 8usize;
-        let mut summaries = Vec::with_capacity(count);
-        for _ in 0..count {
-            let collection = read_native_string(content, &mut pos)?;
-            let artifact_kind = read_native_string(content, &mut pos)?;
-            if pos + 24 > content.len() {
-                break;
-            }
-            let root_page = u32::from_le_bytes([
-                content[pos],
-                content[pos + 1],
-                content[pos + 2],
-                content[pos + 3],
-            ]);
-            pos += 4;
-            let page_count = u32::from_le_bytes([
-                content[pos],
-                content[pos + 1],
-                content[pos + 2],
-                content[pos + 3],
-            ]);
-            pos += 4;
-            let byte_len = u64::from_le_bytes([
-                content[pos],
-                content[pos + 1],
-                content[pos + 2],
-                content[pos + 3],
-                content[pos + 4],
-                content[pos + 5],
-                content[pos + 6],
-                content[pos + 7],
-            ]);
-            pos += 8;
-            let checksum = u64::from_le_bytes([
-                content[pos],
-                content[pos + 1],
-                content[pos + 2],
-                content[pos + 3],
-                content[pos + 4],
-                content[pos + 5],
-                content[pos + 6],
-                content[pos + 7],
-            ]);
-            pos += 8;
-            summaries.push(NativeVectorArtifactPageSummary {
-                collection,
-                artifact_kind,
-                root_page,
-                page_count,
-                byte_len,
-                checksum,
-            });
-        }
-        Ok(summaries)
+        reddb_file::decode_native_vector_artifact_store_page(content)
+            .map_err(|err| StoreError::Serialization(err.to_string()))
     }
 
     pub fn read_native_vector_artifact_blob(

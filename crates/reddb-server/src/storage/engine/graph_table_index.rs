@@ -69,10 +69,10 @@ impl RowKey {
 
     /// Convert to bytes for hashing
     fn to_bytes(&self) -> [u8; 10] {
-        let mut buf = [0u8; 10];
-        buf[0..2].copy_from_slice(&self.table_id.to_le_bytes());
-        buf[2..10].copy_from_slice(&self.row_id.to_le_bytes());
-        buf
+        reddb_file::encode_graph_table_ref(reddb_file::GraphTableRef {
+            table_id: self.table_id,
+            row_id: self.row_id,
+        })
     }
 }
 
@@ -328,67 +328,36 @@ impl GraphTableIndex {
 
     /// Serialize to bytes for persistence
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        // Collect all mappings
         let mut mappings = Vec::new();
         for shard in &self.node_to_row.shards {
             if let Ok(map) = shard.read() {
                 for (node_id, table_ref) in map.iter() {
-                    mappings.push((node_id.clone(), *table_ref));
+                    mappings.push(reddb_file::GraphTableIndexEntry {
+                        node_id: node_id.clone(),
+                        table_ref: reddb_file::GraphTableRef {
+                            table_id: table_ref.table_id,
+                            row_id: table_ref.row_id,
+                        },
+                    });
                 }
             }
         }
 
-        // Write count
-        buf.extend_from_slice(&(mappings.len() as u32).to_le_bytes());
-
-        // Write each mapping: node_id_len(2) + node_id + table_ref(10)
-        for (node_id, table_ref) in mappings {
-            let id_bytes = node_id.as_bytes();
-            buf.extend_from_slice(&(id_bytes.len() as u16).to_le_bytes());
-            buf.extend_from_slice(id_bytes);
-            buf.extend_from_slice(&table_ref.encode());
-        }
-
-        buf
+        reddb_file::encode_graph_table_index_frame(&mappings)
+            .expect("in-memory graph-table index should encode")
     }
 
     /// Deserialize from bytes
     pub fn deserialize(data: &[u8]) -> Result<Self, GraphTableIndexError> {
-        if data.len() < 4 {
-            return Err(GraphTableIndexError::InvalidData("Too short".to_string()));
-        }
-
         let index = Self::new();
-        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        let mut offset = 4;
-
-        for _ in 0..count {
-            if offset + 2 > data.len() {
-                return Err(GraphTableIndexError::InvalidData(
-                    "Truncated node_id length".to_string(),
-                ));
-            }
-
-            let id_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-            offset += 2;
-
-            if offset + id_len + 10 > data.len() {
-                return Err(GraphTableIndexError::InvalidData(
-                    "Truncated mapping".to_string(),
-                ));
-            }
-
-            let node_id = String::from_utf8_lossy(&data[offset..offset + id_len]).to_string();
-            offset += id_len;
-
-            let table_ref = TableRef::decode(&data[offset..]).ok_or_else(|| {
-                GraphTableIndexError::InvalidData("Invalid table ref".to_string())
-            })?;
-            offset += 10;
-
-            index.link(&node_id, table_ref.table_id, table_ref.row_id);
+        let mappings = reddb_file::decode_graph_table_index_frame(data)
+            .map_err(|err| GraphTableIndexError::InvalidData(err.to_string()))?;
+        for mapping in mappings {
+            index.link(
+                &mapping.node_id,
+                mapping.table_ref.table_id,
+                mapping.table_ref.row_id,
+            );
         }
 
         Ok(index)

@@ -333,6 +333,7 @@ pub trait RuntimeNativePort {
     fn repair_native_physical_state_from_metadata(&self) -> RedDBResult<bool>;
     fn native_metadata_state_summary(&self) -> RedDBResult<NativeMetadataStateSummary>;
     fn physical_authority_status(&self) -> PhysicalAuthorityStatus;
+    fn validate_current_serverless_generation(&self) -> RedDBResult<()>;
     fn readiness_for_query(&self) -> bool;
     fn readiness_for_query_serverless(&self) -> bool;
     fn readiness_for_write(&self) -> bool;

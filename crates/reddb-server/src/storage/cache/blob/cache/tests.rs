@@ -611,7 +611,7 @@ fn l2_rehydrates_after_reopen_without_json_rows() {
         assert_eq!(cache.stats().l2_bytes_in_use, 7);
     }
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -636,7 +636,7 @@ fn l2_expired_entry_does_not_rehydrate_on_reopen() {
         assert_eq!(cache.stats().l2_bytes_in_use, 0);
     }
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -655,7 +655,7 @@ fn l2_invalidated_entry_does_not_resurrect_after_reopen() {
         assert!(cache.get("n", "k").is_none());
     }
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -676,7 +676,7 @@ fn l2_rejects_put_when_hard_byte_cap_is_exceeded() {
     assert_eq!(err, CacheError::L2Full { size: 3, max: 2 });
     assert_eq!(cache.stats().l2_full_rejections, 1);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -699,7 +699,7 @@ fn l2_metadata_last_hides_partial_blob_after_fault() {
         assert_eq!(cache.stats().l2_bytes_in_use, 0);
     }
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -714,7 +714,7 @@ fn l2_synopsis_negative_skip_avoids_metadata_read() {
     assert_eq!(stats.l2_metadata_reads, 0);
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -730,7 +730,7 @@ fn l2_synopsis_maybe_present_verifies_authoritative_metadata() {
     assert_eq!(stats.l2_metadata_reads, 1);
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -759,7 +759,7 @@ fn stale_synopsis_bits_after_delete_cannot_produce_present() {
     assert_eq!(stats.synopsis_metadata_reads, 1);
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -793,7 +793,7 @@ fn stale_synopsis_bits_after_expiry_cannot_produce_present() {
     assert_eq!(stats.l2_bytes_in_use, 0);
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -819,7 +819,7 @@ fn l2_synopsis_rebuilds_from_metadata_on_reopen() {
         assert_eq!(stats.l2_metadata_reads, 1);
     }
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -854,7 +854,7 @@ fn deleted_l2_entries_never_return_present_under_repeated_stale_synopsis() {
     // sizing (10K capacity / 1% FPR) means most lookups hit fast.
     assert_eq!(cache.stats().l2_metadata_reads, 1_000);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -1092,7 +1092,7 @@ fn blob_cache_is_send_and_sync_across_thread_boundary() {
 
 fn cleanup_l2(path: &Path) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
     let _ = std::fs::remove_file(path.with_extension("dwb"));
 }
 
@@ -1874,7 +1874,7 @@ fn extended_off_skips_effective_expiry_compute() {
 fn open_with_l2_returns_err_on_corrupt_control_sidecar() {
     let path = l2_path("corrupt-ctl");
     // Write garbage to the control sidecar so L2Control::read returns Err.
-    let ctl = path.with_extension("blob-cache.ctl");
+    let ctl = reddb_file::blob_cache_control_path(&path);
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     std::fs::write(&ctl, b"not-a-valid-control-file").unwrap();
 

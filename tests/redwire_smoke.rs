@@ -187,7 +187,7 @@ async fn binary_bulk_insert_fast_path() {
 
 #[tokio::test]
 async fn frame_round_trip_with_zstd_compression() {
-    use reddb_client::redwire::codec::{decode_frame, encode_frame};
+    use reddb_wire::redwire::{decode_frame, encode_frame};
     // Highly compressible payload — zstd level 1 should cut this
     // by ~80% even on a tiny dataset.
     let payload = b"abcabc".repeat(500);
@@ -228,7 +228,6 @@ async fn scram_sha_256_end_to_end() {
     // Drive the SCRAM exchange manually so we exercise every
     // frame the server expects. Driver-side helper landing in
     // the next Phase 3c bump.
-    use reddb_client::redwire::codec::{decode_frame, encode_frame};
     use reddb_client::redwire::scram;
     use std::io::Cursor;
 
@@ -243,12 +242,12 @@ async fn scram_sha_256_end_to_end() {
         .unwrap();
 
     async fn send_frame(s: &mut tokio::net::TcpStream, frame: reddb_client::redwire::Frame) {
-        use reddb_client::redwire::codec::encode_frame;
+        use reddb_wire::redwire::encode_frame;
         let bytes = encode_frame(&frame);
         s.write_all(&bytes).await.unwrap();
     }
     async fn read_frame(s: &mut tokio::net::TcpStream) -> reddb_client::redwire::Frame {
-        use reddb_client::redwire::codec::decode_frame;
+        use reddb_wire::redwire::decode_frame;
         let mut header = [0u8; 16];
         s.read_exact(&mut header).await.unwrap();
         let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;

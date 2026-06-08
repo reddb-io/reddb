@@ -1,11 +1,15 @@
 //! Replica-side replication: connects to primary, consumes WAL records.
 
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::json::Value as JsonValue;
 use crate::telemetry::admin_intent_log::{
-    AdminIntentLog, IntentArgs, IntentHandle, IntentLogError, IntentOp, IntentProgress,
-    IntentSummary,
+    AdminIntentLog, IntentArgs, IntentHandle, IntentLogError, IntentOp, IntentPhase,
+    IntentProgress, IntentSummary,
 };
 
 /// Replica replication state.
@@ -14,6 +18,188 @@ pub struct ReplicaReplication {
     pub last_applied_lsn: u64,
     pub poll_interval: Duration,
     pub connected: bool,
+}
+
+/// Result of staging one basebackup response from `replication_snapshot`.
+#[derive(Debug, Clone)]
+pub struct StagedBaseBackupChunk {
+    pub manifest: reddb_file::PrimaryReplicaBaseBackupManifest,
+    pub chunk_ordinal: Option<u32>,
+    pub snapshot_offset: u64,
+    pub next_snapshot_offset: Option<u64>,
+    pub snapshot_complete: bool,
+}
+
+pub use reddb_file::ReplicaRebootstrapReadyMarker as ReplicaRebootstrapReady;
+
+#[derive(Debug)]
+pub enum ReplicaBaseBackupError {
+    MissingField(&'static str),
+    InvalidField(&'static str),
+    Decode(String),
+    File(reddb_file::RdbFileError),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for ReplicaBaseBackupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(f, "missing basebackup field {field}"),
+            Self::InvalidField(field) => write!(f, "invalid basebackup field {field}"),
+            Self::Decode(err) => write!(f, "decode basebackup payload: {err}"),
+            Self::File(err) => write!(f, "{err}"),
+            Self::Io(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ReplicaBaseBackupError {}
+
+impl From<reddb_file::RdbFileError> for ReplicaBaseBackupError {
+    fn from(value: reddb_file::RdbFileError) -> Self {
+        Self::File(value)
+    }
+}
+
+impl From<std::io::Error> for ReplicaBaseBackupError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+/// Stage the basebackup chunk carried by one `replication_snapshot` response.
+///
+/// The wire payload carries a binary manifest plus at most one matching chunk
+/// for the requested snapshot offset. This helper centralizes the validation:
+/// manifest checksum, relative paths, per-chunk CRC, and atomic chunk write.
+pub fn stage_basebackup_snapshot_chunk(
+    payload: &reddb_wire::replication::BaseBackupChunk,
+    parts_root: impl AsRef<Path>,
+) -> Result<Option<StagedBaseBackupChunk>, ReplicaBaseBackupError> {
+    if !payload.basebackup_available {
+        return Ok(None);
+    }
+
+    let manifest_bytes =
+        payload
+            .basebackup_manifest
+            .as_deref()
+            .ok_or(ReplicaBaseBackupError::MissingField(
+                "basebackup_manifest_hex",
+            ))?;
+    let manifest = reddb_file::PrimaryReplicaBaseBackupManifest::decode(&manifest_bytes)?;
+    manifest.validate()?;
+
+    let snapshot_offset = payload.snapshot_offset;
+    let next_snapshot_offset = payload.next_snapshot_offset;
+    let snapshot_complete = payload.snapshot_complete;
+
+    let chunk_ordinal = match (payload.basebackup_chunk_ordinal, &payload.basebackup_chunk) {
+        (Some(ordinal), Some(bytes)) => {
+            let chunk = manifest
+                .chunks
+                .iter()
+                .find(|chunk| chunk.ordinal == ordinal)
+                .ok_or(ReplicaBaseBackupError::InvalidField(
+                    "basebackup_chunk_ordinal",
+                ))?;
+            manifest.verify_chunk_bytes(chunk, &bytes)?;
+            write_chunk_atomically(parts_root.as_ref().join(&chunk.relative_path), &bytes)?;
+            Some(ordinal)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(ReplicaBaseBackupError::InvalidField(
+                "basebackup_chunk_ordinal/basebackup_chunk_hex",
+            ));
+        }
+    };
+
+    Ok(Some(StagedBaseBackupChunk {
+        manifest,
+        chunk_ordinal,
+        snapshot_offset,
+        next_snapshot_offset,
+        snapshot_complete,
+    }))
+}
+
+pub fn recover_staged_basebackup_chunks(
+    manifest: &reddb_file::PrimaryReplicaBaseBackupManifest,
+    parts_root: impl AsRef<Path>,
+) -> Result<std::collections::BTreeSet<u32>, ReplicaBaseBackupError> {
+    let parts_root = parts_root.as_ref();
+    let mut recovered = std::collections::BTreeSet::new();
+    for chunk in &manifest.chunks {
+        let path = parts_root.join(&chunk.relative_path);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        if manifest.verify_chunk_bytes(chunk, &bytes).is_ok() {
+            recovered.insert(chunk.ordinal);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(recovered)
+}
+
+pub fn rebootstrap_staging_root_for(data_path: &Path) -> PathBuf {
+    reddb_file::layout::rebootstrap_staging_root(data_path)
+}
+
+pub fn rebootstrap_pending_path_for(data_path: &Path) -> PathBuf {
+    reddb_file::layout::rebootstrap_pending_path(data_path)
+}
+
+pub fn rebootstrap_ready_marker_path_for(data_path: &Path) -> PathBuf {
+    reddb_file::layout::rebootstrap_ready_marker_path(data_path)
+}
+
+pub fn rebootstrap_intent_log_path_for(data_path: &Path) -> PathBuf {
+    reddb_file::layout::rebootstrap_intent_log_path(data_path)
+}
+
+pub fn rebootstrap_previous_path_for(data_path: &Path) -> PathBuf {
+    reddb_file::layout::rebootstrap_previous_path(data_path)
+}
+
+pub fn write_rebootstrap_ready_marker(
+    data_path: &Path,
+    ready: &ReplicaRebootstrapReady,
+) -> Result<(), ReplicaBaseBackupError> {
+    reddb_file::write_rebootstrap_ready_marker(data_path, ready).map_err(Into::into)
+}
+
+pub fn read_rebootstrap_ready_marker(
+    data_path: &Path,
+) -> Result<ReplicaRebootstrapReady, ReplicaBaseBackupError> {
+    reddb_file::read_rebootstrap_ready_marker(data_path).map_err(Into::into)
+}
+
+fn write_chunk_atomically(path: PathBuf, bytes: &[u8]) -> Result<(), ReplicaBaseBackupError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = reddb_file::layout::atomic_temp_path(&path);
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, &path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 impl ReplicaReplication {
@@ -32,6 +218,7 @@ impl ReplicaReplication {
 // ---------------------------------------------------------------------------
 
 /// Resume point recovered from a previously checkpointed bootstrap intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumePoint {
     pub last_applied_lsn: u64,
     pub snapshot_token: Option<String>,
@@ -66,6 +253,33 @@ impl ReplicaBootstrapper {
     /// exists with at least one checkpoint record carrying `last_applied_lsn`.
     pub fn scan_for_resume(&self, log: &AdminIntentLog) -> Option<ResumePoint> {
         log.scan_and_report();
+        let mut mine: Vec<_> = log
+            .list_unfinished()
+            .into_iter()
+            .filter(|u| {
+                u.op == IntentOp::ReplicaBootstrap
+                    && u.args.get("replica_id").and_then(|v| v.as_str())
+                        == Some(self.node_id.as_str())
+            })
+            .collect();
+
+        if mine.len() != 1 {
+            return None;
+        }
+
+        let item = mine.remove(0);
+        item.last_progress
+            .as_ref()
+            .and_then(resume_point_from_progress)
+    }
+
+    /// Resume one unfinished bootstrap intent and return a handle that appends
+    /// progress to the original intent id.
+    pub fn resume<'a>(
+        &self,
+        log: &'a AdminIntentLog,
+    ) -> Option<(ResumePoint, BootstrapHandle<'a>)> {
+        log.scan_and_report();
 
         let mut mine: Vec<_> = log
             .list_unfinished()
@@ -82,30 +296,52 @@ impl ReplicaBootstrapper {
         }
 
         let item = mine.remove(0);
-        let progress = item.last_progress?;
-        let lsn = progress
-            .get("last_applied_lsn")
-            .and_then(|v| v.as_f64())
-            .map(|f| f as u64)
-            .unwrap_or(0);
-        let snapshot_token = progress
-            .get("snapshot_cursor")
-            .or_else(|| progress.get("snapshot_token"))
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned);
-        let snapshot_offset = progress
-            .get("snapshot_offset")
-            .and_then(|v| v.as_f64())
-            .map(|f| f as u64)
-            .unwrap_or(0);
+        let progress = item.last_progress.as_ref()?;
+        let resume = resume_point_from_progress(progress)?;
+        let checkpoint_n = match item.last_phase {
+            IntentPhase::Checkpoint(n) => n,
+            _ => 0,
+        };
+        let handle = log.resume_unfinished(&item);
 
-        Some(ResumePoint {
-            last_applied_lsn: lsn,
-            snapshot_token,
-            snapshot_offset,
-        })
+        Some((
+            resume.clone(),
+            BootstrapHandle {
+                handle,
+                checkpoint_n,
+                last_applied_lsn: resume.last_applied_lsn,
+            },
+        ))
     }
+}
 
+fn resume_point_from_progress(
+    progress: &crate::json::Map<String, JsonValue>,
+) -> Option<ResumePoint> {
+    let lsn = progress
+        .get("last_applied_lsn")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as u64)
+        .unwrap_or(0);
+    let snapshot_token = progress
+        .get("snapshot_cursor")
+        .or_else(|| progress.get("snapshot_token"))
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+    let snapshot_offset = progress
+        .get("snapshot_offset")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as u64)
+        .unwrap_or(0);
+
+    Some(ResumePoint {
+        last_applied_lsn: lsn,
+        snapshot_token,
+        snapshot_offset,
+    })
+}
+
+impl ReplicaBootstrapper {
     /// Begin a fresh bootstrap intent.
     ///
     /// `source_lsn`: LSN at the primary when bootstrap starts.
@@ -224,6 +460,50 @@ mod tests {
         AdminIntentLog::open(path).expect("open intent log")
     }
 
+    #[test]
+    fn rebootstrap_ready_marker_write_is_atomic_and_readable() {
+        let mut data_path = std::env::temp_dir();
+        data_path.push(format!(
+            "reddb-rebootstrap-marker-{}.rdb",
+            std::process::id()
+        ));
+        let marker_path = rebootstrap_ready_marker_path_for(&data_path);
+        let tmp_path = reddb_file::layout::atomic_temp_path(&marker_path);
+        let pending_path = rebootstrap_pending_path_for(&data_path);
+        let _ = fs::remove_file(&marker_path);
+        let _ = fs::remove_file(&tmp_path);
+
+        write_rebootstrap_ready_marker(
+            &data_path,
+            &ReplicaRebootstrapReady {
+                pending_path: pending_path.clone(),
+                checkpoint_lsn: 7,
+                timeline: reddb_file::TimelineId::initial(),
+            },
+        )
+        .expect("write marker");
+        let ready = read_rebootstrap_ready_marker(&data_path).expect("read marker");
+        assert_eq!(ready.checkpoint_lsn, 7);
+        assert_eq!(ready.pending_path, pending_path);
+
+        fs::write(&tmp_path, b"stale tmp").expect("write stale tmp");
+        write_rebootstrap_ready_marker(
+            &data_path,
+            &ReplicaRebootstrapReady {
+                pending_path: rebootstrap_pending_path_for(&data_path),
+                checkpoint_lsn: 8,
+                timeline: reddb_file::TimelineId(3),
+            },
+        )
+        .expect("replace marker");
+        let ready = read_rebootstrap_ready_marker(&data_path).expect("read replaced marker");
+        assert_eq!(ready.checkpoint_lsn, 8);
+        assert_eq!(ready.timeline, reddb_file::TimelineId(3));
+
+        let _ = fs::remove_file(&marker_path);
+        let _ = fs::remove_file(&tmp_path);
+    }
+
     // -----------------------------------------------------------------------
     // 1. From-scratch: no unfinished intent → scan_for_resume returns None
     // -----------------------------------------------------------------------
@@ -328,6 +608,42 @@ mod tests {
             assert_eq!(resume.snapshot_token.as_deref(), Some("snapshot-token-10"));
             assert_eq!(resume.snapshot_offset, 4096);
         }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resume_snapshot_transfer_completes_original_intent() {
+        let path = tmp_path("snapshot-resume-complete");
+        let bootstrapper = ReplicaBootstrapper::new("replica-snapshot-complete");
+
+        {
+            let log = open_log(&path);
+            let mut handle = bootstrapper.begin(&log, 10, 1000).unwrap();
+            handle
+                .checkpoint_snapshot_transfer("snapshot-token-10", 4096, 10, 1)
+                .unwrap();
+            std::mem::forget(handle);
+        }
+
+        {
+            let log = open_log(&path);
+            let (resume, mut handle) = bootstrapper.resume(&log).expect("resume handle");
+            assert_eq!(resume.last_applied_lsn, 10);
+            assert_eq!(resume.snapshot_token.as_deref(), Some("snapshot-token-10"));
+            assert_eq!(resume.snapshot_offset, 4096);
+
+            handle
+                .checkpoint_snapshot_transfer("snapshot-token-10", 8192, 10, 2)
+                .unwrap();
+            handle.complete(2, 25).unwrap();
+        }
+
+        let log = open_log(&path);
+        assert!(
+            log.list_unfinished().is_empty(),
+            "resumed handle must complete the original dangling intent"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

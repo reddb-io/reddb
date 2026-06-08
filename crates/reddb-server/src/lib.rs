@@ -158,5 +158,6 @@ pub use crate::runtime::{
     RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
 pub use crate::server::{RedDBServer, ServerOptions, ServerReplicationState};
+pub use reddb_file::{TimelineHistory, TimelineId};
 
 pub use crate::storage::*;

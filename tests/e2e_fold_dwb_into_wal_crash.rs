@@ -9,7 +9,7 @@
 //! by post-hoc file mutation, which is the same shape as
 //! `e2e_seqn_journal_policy::recovery_handles_present_absent_and_corrupt_binary`.
 
-use reddb::{set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime};
+use reddb::{set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime, StorageDeployPreset};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -32,18 +32,18 @@ fn persistent_path(prefix: &str) -> PathBuf {
 
 fn cleanup(path: &Path) {
     let _ = std::fs::remove_file(path);
-    let mut p = path.to_path_buf().into_os_string();
-    p.push("-dwb");
-    let _ = std::fs::remove_file(PathBuf::from(p));
-    let mut p = path.to_path_buf().into_os_string();
-    p.push("-hdr");
-    let _ = std::fs::remove_file(PathBuf::from(p));
-    let mut p = path.to_path_buf().into_os_string();
-    p.push("-meta");
-    let _ = std::fs::remove_file(PathBuf::from(p));
-    let mut wal = path.to_path_buf();
-    wal.set_extension("wal");
-    let _ = std::fs::remove_file(&wal);
+    let _ = std::fs::remove_file(reddb_file::pager_dwb_path(path));
+    let _ = std::fs::remove_file(reddb_file::pager_header_path(path));
+    let _ = std::fs::remove_file(reddb_file::pager_meta_path(path));
+    let _ = std::fs::remove_file(reddb_file::pager_legacy_wal_path(path));
+    let _ = std::fs::remove_file(reddb_file::unified_wal_path(path));
+    let _ = std::fs::remove_dir_all(reddb_file::support_dir_for(path));
+}
+
+fn operational_options(path: &Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+        .expect("primary-replica operational profile")
 }
 
 /// Populate a fresh DB with `ROWS` rows in its own table and run a
@@ -53,8 +53,8 @@ fn populate(prefix: &str) -> PathBuf {
     let path = persistent_path(prefix);
     cleanup(&path);
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("persistent runtime opens");
+    let rt =
+        RedDBRuntime::with_options(operational_options(&path)).expect("persistent runtime opens");
     rt.execute_query("CREATE TABLE crash_rows (n INTEGER, label TEXT)")
         .expect("ddl");
     for i in 0..ROWS {
@@ -90,7 +90,7 @@ fn corrupt_last_page(path: &Path) {
 }
 
 fn reopen_and_count(path: &Path) -> usize {
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
+    let rt = RedDBRuntime::with_options(operational_options(path))
         .expect("runtime reopens after corruption");
     let result = rt
         .execute_query("SELECT n FROM crash_rows")

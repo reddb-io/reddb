@@ -148,6 +148,17 @@ pub struct RedDB {
 
 impl Drop for RedDB {
     fn drop(&mut self) {
+        if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
+            && self.options.storage_profile.packaging
+                == crate::storage::StoragePackaging::SingleFile
+            && !self.options.read_only
+        {
+            if let Some(path) = &self.path {
+                let snapshot = self.store.to_binary_dump_bytes();
+                let _ = crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot);
+            }
+        }
+
         // Issue #673 — wait for every `vector.turbo` background
         // rebuild worker to exit before our `Arc<UnifiedStore>` is
         // released. The worker holds a strong handle to the store

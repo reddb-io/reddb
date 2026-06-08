@@ -4,6 +4,28 @@ use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_
 
 const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
 
+fn mark_table_scan_as_index_seek(
+    node: &mut crate::storage::query::planner::CanonicalLogicalNode,
+    index_name: &str,
+) -> bool {
+    if node.operator == "table_scan" {
+        node.operator = "index_seek".to_string();
+        node.details
+            .insert("index".to_string(), index_name.to_string());
+        node.details.insert(
+            "reason".to_string(),
+            "runtime index registry has a usable index".to_string(),
+        );
+        return true;
+    }
+    for child in &mut node.children {
+        if mark_table_scan_as_index_seek(child, index_name) {
+            return true;
+        }
+    }
+    false
+}
+
 impl RedDBRuntime {
     pub fn explain_query(&self, query: &str) -> RedDBResult<RuntimeQueryExplain> {
         let mode = detect_mode(query);
@@ -53,6 +75,9 @@ impl RedDBRuntime {
             QueryExpr::Table(t) => is_universal_query_source(&t.table),
             _ => false,
         };
+        let mut logical_plan = CanonicalPlanner::new(&self.inner.db).build(&plan.optimized);
+        self.apply_runtime_index_explain_hint(&plan.optimized, &mut logical_plan.root);
+
         Ok(RuntimeQueryExplain {
             query: query.to_string(),
             mode,
@@ -63,9 +88,32 @@ impl RedDBRuntime {
             estimated_selectivity: cardinality.selectivity,
             estimated_confidence: cardinality.confidence,
             passes_applied: plan.passes_applied,
-            logical_plan: CanonicalPlanner::new(&self.inner.db).build(&plan.optimized),
+            logical_plan,
             cte_materializations: cte_names,
         })
+    }
+
+    fn apply_runtime_index_explain_hint(
+        &self,
+        expr: &QueryExpr,
+        node: &mut crate::storage::query::planner::CanonicalLogicalNode,
+    ) {
+        let QueryExpr::Table(table) = expr else {
+            return;
+        };
+        if table.filter.is_none() && table.where_expr.is_none() {
+            return;
+        }
+        let Some(index) = self
+            .inner
+            .index_store
+            .list_indices(&table.table)
+            .into_iter()
+            .next()
+        else {
+            return;
+        };
+        mark_table_scan_as_index_seek(node, &index.name);
     }
 
     pub fn search_similar(

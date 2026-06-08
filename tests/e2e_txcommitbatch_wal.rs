@@ -6,7 +6,7 @@ use reddb::api::DurabilityMode;
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::schema::Value;
 use reddb::storage::wal::{WalReader, WalRecord};
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 struct DbPath {
     path: PathBuf,
@@ -31,18 +31,25 @@ impl DbPath {
     fn open(&self) -> RedDBRuntime {
         RedDBRuntime::with_options(
             RedDBOptions::persistent(&self.path)
-                .with_durability_mode(DurabilityMode::WalDurableGrouped),
+                .with_durability_mode(DurabilityMode::WalDurableGrouped)
+                .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+                .expect("primary-replica operational profile"),
         )
         .expect("persistent runtime")
     }
 
     fn wal_path(&self) -> PathBuf {
-        self.path.with_extension("rdb-uwal")
+        reddb_file::unified_wal_path(&self.path)
     }
 
     fn cleanup(&self) {
         let _ = std::fs::remove_file(&self.path);
         let _ = std::fs::remove_file(self.wal_path());
+        let _ = std::fs::remove_file(reddb_file::pager_dwb_path(&self.path));
+        let _ = std::fs::remove_file(reddb_file::pager_header_path(&self.path));
+        let _ = std::fs::remove_file(reddb_file::pager_meta_path(&self.path));
+        let _ = std::fs::remove_file(reddb_file::pager_legacy_wal_path(&self.path));
+        let _ = std::fs::remove_dir_all(reddb_file::support_dir_for(&self.path));
     }
 }
 

@@ -17,6 +17,7 @@ name = "reddb_wire"
 path = "src/lib.rs"
 
 [dependencies]
+serde_json = "1"
 url = "2"
 zstd = { version = "0.13", default-features = false }
 
@@ -30,6 +31,5 @@ zstd = { version = "0.13", default-features = false }
 proptest = "1"
 insta = { version = "1", features = ["filters"] }
 regex = "1"
-serde_json = "1"
 prost = "0.14"
 reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }

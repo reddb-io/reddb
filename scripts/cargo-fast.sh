@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+CARGO_BIN="${REDDB_CARGO_BIN:-cargo}"
+RUSTC_BIN="${RUSTC:-rustc}"
+
 if [ "$#" -eq 0 ]; then
   set -- build
 fi
@@ -46,7 +49,7 @@ if command -v sccache >/dev/null 2>&1; then
   esac
 fi
 
-HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+HOST_TRIPLE="$("$RUSTC_BIN" -vV | sed -n 's/^host: //p')"
 LINKER_CHOICE=""
 if command -v mold >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
   LINKER_CHOICE="mold"
@@ -67,4 +70,4 @@ if [ -n "${LINKER_CHOICE}" ]; then
   note "using ${LINKER_CHOICE} via clang"
 fi
 
-exec cargo "$@"
+exec "$CARGO_BIN" "$@"

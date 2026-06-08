@@ -4238,7 +4238,7 @@ mod tests {
     fn with_events_autocommit_persists_mutation_and_event_in_one_wal_batch() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("events_dual_write.rdb");
-        let wal_path = db_path.with_extension("rdb-uwal");
+        let wal_path = reddb_file::layout::unified_wal_path(&db_path);
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
 
         rt.execute_query("CREATE TABLE users (id INT, email TEXT) WITH EVENTS")
@@ -4256,7 +4256,7 @@ mod tests {
     fn with_events_autocommit_update_persists_mutation_and_event_in_one_wal_batch() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("events_update_atomic.rdb");
-        let wal_path = db_path.with_extension("rdb-uwal");
+        let wal_path = reddb_file::layout::unified_wal_path(&db_path);
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
 
         rt.execute_query(
@@ -4279,7 +4279,7 @@ mod tests {
     fn with_events_autocommit_delete_persists_mutation_and_event_in_one_wal_batch() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("events_delete_atomic.rdb");
-        let wal_path = db_path.with_extension("rdb-uwal");
+        let wal_path = reddb_file::layout::unified_wal_path(&db_path);
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
 
         rt.execute_query(

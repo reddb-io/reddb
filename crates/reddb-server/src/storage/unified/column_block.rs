@@ -73,18 +73,13 @@
 use super::segment_codec::{
     decode_bytes, encode_bytes, select_codecs, CodecError, ColumnCodec, ColumnSemantics,
 };
-use crate::storage::engine::crc32::crc32;
 use crate::storage::primitives::split_block_bloom::{hash_bytes_u32, SplitBlockBloom};
 
-/// `b"RDCC"` — RedDB Columnar Chunk. Opens and closes every block.
-pub const COLUMN_BLOCK_MAGIC: [u8; 4] = *b"RDCC";
-/// On-disk format version. Bumped only on a breaking layout change;
-/// #853–#856 extend the reserved directory fields without a bump.
-pub const COLUMN_BLOCK_VERSION_V1: u16 = 1;
+pub use reddb_file::{COLUMN_BLOCK_MAGIC, COLUMN_BLOCK_VERSION_V1};
 
-const HEADER_LEN: usize = 52;
-const DIR_ENTRY_LEN: usize = 54;
-const FOOTER_LEN: usize = 24;
+const HEADER_LEN: usize = reddb_file::COLUMN_BLOCK_HEADER_LEN;
+const DIR_ENTRY_LEN: usize = reddb_file::COLUMN_BLOCK_DIR_ENTRY_LEN;
+const FOOTER_LEN: usize = reddb_file::COLUMN_BLOCK_FOOTER_LEN;
 
 /// A logical column handed to [`write_column_block`]. `data` is the
 /// column's raw, uncompressed, little-endian value bytes; the writer runs
@@ -178,6 +173,23 @@ impl From<CodecError> for ColumnBlockError {
     }
 }
 
+impl From<reddb_file::ColumnBlockFrameError> for ColumnBlockError {
+    fn from(e: reddb_file::ColumnBlockFrameError) -> Self {
+        match e {
+            reddb_file::ColumnBlockFrameError::Truncated => Self::Truncated,
+            reddb_file::ColumnBlockFrameError::BadMagic(magic) => Self::BadMagic(magic),
+            reddb_file::ColumnBlockFrameError::BadTailMagic(magic) => Self::BadTailMagic(magic),
+            reddb_file::ColumnBlockFrameError::UnsupportedVersion(version) => {
+                Self::UnsupportedVersion(version)
+            }
+            reddb_file::ColumnBlockFrameError::BadDirectory => Self::BadDirectory,
+            reddb_file::ColumnBlockFrameError::ChecksumMismatch { expected, actual } => {
+                Self::ChecksumMismatch { expected, actual }
+            }
+        }
+    }
+}
+
 /// Per-granule min/max statistics for one column. `min`/`max` are raw
 /// value bytes in the *same* little-endian encoding as the column data,
 /// so a reader interprets them with the column's logical type — the index
@@ -234,16 +246,19 @@ impl GranuleIndex {
 
     /// Serialize to the self-describing blob the column directory points at.
     fn serialize(&self) -> Vec<u8> {
-        let w = self.value_width as usize;
-        let mut out = Vec::with_capacity(12 + self.granules.len() * w * 2);
-        out.extend_from_slice(&self.granule_size.to_le_bytes());
-        out.extend_from_slice(&self.value_width.to_le_bytes());
-        out.extend_from_slice(&(self.granules.len() as u32).to_le_bytes());
-        for g in &self.granules {
-            out.extend_from_slice(&g.min);
-            out.extend_from_slice(&g.max);
-        }
-        out
+        let granules = self
+            .granules
+            .iter()
+            .map(|g| reddb_file::ColumnBlockGranuleStats {
+                min: g.min.clone(),
+                max: g.max.clone(),
+            })
+            .collect();
+        reddb_file::encode_column_block_granule_index_blob(&reddb_file::ColumnBlockGranuleIndex {
+            granule_size: self.granule_size,
+            value_width: self.value_width,
+            granules,
+        })
     }
 
     /// Inverse of [`GranuleIndex::serialize`]. A malformed blob is reported
@@ -251,38 +266,18 @@ impl GranuleIndex {
     /// CRC-covered region, so corruption is caught upstream; this guards
     /// only against internally-inconsistent lengths.
     fn deserialize(bytes: &[u8]) -> Result<GranuleIndex, ColumnBlockError> {
-        if bytes.len() < 12 {
-            return Err(ColumnBlockError::BadDirectory);
-        }
-        let granule_size = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        let value_width = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let w = value_width as usize;
-        if w == 0 {
-            return Err(ColumnBlockError::BadDirectory);
-        }
-        let need = 12usize
-            .checked_add(
-                count
-                    .checked_mul(w * 2)
-                    .ok_or(ColumnBlockError::BadDirectory)?,
-            )
-            .ok_or(ColumnBlockError::BadDirectory)?;
-        if bytes.len() < need {
-            return Err(ColumnBlockError::BadDirectory);
-        }
-        let mut granules = Vec::with_capacity(count);
-        let mut cur = 12;
-        for _ in 0..count {
-            let min = bytes[cur..cur + w].to_vec();
-            cur += w;
-            let max = bytes[cur..cur + w].to_vec();
-            cur += w;
-            granules.push(GranuleStats { min, max });
-        }
+        let decoded = reddb_file::decode_column_block_granule_index_blob(bytes)?;
+        let granules = decoded
+            .granules
+            .into_iter()
+            .map(|g| GranuleStats {
+                min: g.min,
+                max: g.max,
+            })
+            .collect();
         Ok(GranuleIndex {
-            granule_size,
-            value_width,
+            granule_size: decoded.granule_size,
+            value_width: decoded.value_width,
             granules,
         })
     }
@@ -336,13 +331,9 @@ impl GranuleBloom {
     /// Each granule's bloom carries its own block count, so granules of
     /// different row spans (e.g. a short final granule) serialize cleanly.
     fn serialize(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(8 + self.blooms.len() * 36);
-        out.extend_from_slice(&self.granule_size.to_le_bytes());
-        out.extend_from_slice(&(self.blooms.len() as u32).to_le_bytes());
-        for bloom in &self.blooms {
-            out.extend_from_slice(&bloom.to_bytes());
-        }
-        out
+        let bloom_bytes: Vec<Vec<u8>> = self.blooms.iter().map(SplitBlockBloom::to_bytes).collect();
+        let bloom_refs: Vec<&[u8]> = bloom_bytes.iter().map(Vec::as_slice).collect();
+        reddb_file::encode_column_block_granule_bloom_blob(self.granule_size, &bloom_refs)
     }
 
     /// Inverse of [`GranuleBloom::serialize`]. Like the granule index it
@@ -350,40 +341,15 @@ impl GranuleBloom {
     /// internally-inconsistent lengths, reported as
     /// [`ColumnBlockError::BadDirectory`].
     fn deserialize(bytes: &[u8]) -> Result<GranuleBloom, ColumnBlockError> {
-        if bytes.len() < 8 {
-            return Err(ColumnBlockError::BadDirectory);
-        }
-        let granule_size = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        let count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
-        let mut blooms = Vec::with_capacity(count);
-        let mut cur = 8;
-        for _ in 0..count {
-            // Each bloom's leading u32 is its block count; reconstruct it and
-            // advance the cursor by the bytes it consumed.
-            if cur + 4 > bytes.len() {
-                return Err(ColumnBlockError::BadDirectory);
-            }
-            let num_blocks = u32::from_le_bytes(bytes[cur..cur + 4].try_into().unwrap()) as usize;
-            let bloom_len = 4usize
-                .checked_add(
-                    num_blocks
-                        .checked_mul(32)
-                        .ok_or(ColumnBlockError::BadDirectory)?,
-                )
-                .ok_or(ColumnBlockError::BadDirectory)?;
-            let end = cur
-                .checked_add(bloom_len)
-                .ok_or(ColumnBlockError::BadDirectory)?;
-            if end > bytes.len() {
-                return Err(ColumnBlockError::BadDirectory);
-            }
-            let bloom = SplitBlockBloom::from_bytes(&bytes[cur..end])
-                .ok_or(ColumnBlockError::BadDirectory)?;
+        let decoded = reddb_file::decode_column_block_granule_bloom_blob(bytes)?;
+        let mut blooms = Vec::with_capacity(decoded.blooms.len());
+        for bloom_bytes in decoded.blooms {
+            let bloom =
+                SplitBlockBloom::from_bytes(bloom_bytes).ok_or(ColumnBlockError::BadDirectory)?;
             blooms.push(bloom);
-            cur = end;
         }
         Ok(GranuleBloom {
-            granule_size,
+            granule_size: decoded.granule_size,
             blooms,
         })
     }
@@ -565,95 +531,27 @@ pub fn write_column_block(
         );
     }
 
-    // Granule indexes are laid back-to-back after all streams, then the
-    // granule blooms back-to-back after the indexes. Compute each region's
-    // start so directory offsets can be filled in one pass.
-    let granule_region_off =
-        streams_off as u64 + streams.iter().map(|s| s.len() as u64).sum::<u64>();
-    let bloom_region_off =
-        granule_region_off + granule_blobs.iter().map(|s| s.len() as u64).sum::<u64>();
-
-    let mut out = Vec::with_capacity(
-        streams_off
-            + streams.iter().map(Vec::len).sum::<usize>()
-            + granule_blobs.iter().map(Vec::len).sum::<usize>()
-            + bloom_blobs.iter().map(Vec::len).sum::<usize>()
-            + FOOTER_LEN,
-    );
-
-    // --- Header ---
-    out.extend_from_slice(&COLUMN_BLOCK_MAGIC);
-    out.extend_from_slice(&COLUMN_BLOCK_VERSION_V1.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // flags (reserved)
-    out.extend_from_slice(&chunk_id.to_le_bytes());
-    out.extend_from_slice(&schema_ref.to_le_bytes());
-    out.extend_from_slice(&row_count.to_le_bytes());
-    out.extend_from_slice(&(column_count as u32).to_le_bytes());
-    out.extend_from_slice(&min_ts_ns.to_le_bytes());
-    out.extend_from_slice(&max_ts_ns.to_le_bytes());
-    debug_assert_eq!(out.len(), HEADER_LEN);
-
-    // --- Column directory ---
-    let mut cursor = streams_off as u64;
-    let mut granule_cursor = granule_region_off;
-    let mut bloom_cursor = bloom_region_off;
-    for ((((col, stream), codec_tag), granule), bloom) in columns
+    let parts: Vec<reddb_file::ColumnBlockPart<'_>> = columns
         .iter()
         .zip(streams.iter())
         .zip(codec_tags.iter())
         .zip(granule_blobs.iter())
         .zip(bloom_blobs.iter())
-    {
-        out.extend_from_slice(&col.column_id.to_le_bytes());
-        out.push(col.logical_type);
-        out.push(*codec_tag);
-        out.extend_from_slice(&cursor.to_le_bytes()); // stream_offset
-        out.extend_from_slice(&(stream.len() as u64).to_le_bytes()); // stream_len
-        if granule.is_empty() {
-            out.extend_from_slice(&0u64.to_le_bytes()); // granule_index_off (none)
-            out.extend_from_slice(&0u64.to_le_bytes()); // granule_index_len
-        } else {
-            out.extend_from_slice(&granule_cursor.to_le_bytes()); // granule_index_off (#854)
-            out.extend_from_slice(&(granule.len() as u64).to_le_bytes()); // granule_index_len
-            granule_cursor += granule.len() as u64;
-        }
-        if bloom.is_empty() {
-            out.extend_from_slice(&0u64.to_le_bytes()); // bloom_off (none)
-            out.extend_from_slice(&0u64.to_le_bytes()); // bloom_len
-        } else {
-            out.extend_from_slice(&bloom_cursor.to_le_bytes()); // bloom_off (#855)
-            out.extend_from_slice(&(bloom.len() as u64).to_le_bytes()); // bloom_len
-            bloom_cursor += bloom.len() as u64;
-        }
-        cursor += stream.len() as u64;
-    }
-    debug_assert_eq!(out.len(), streams_off);
+        .map(
+            |((((col, stream), codec_tag), granule), bloom)| reddb_file::ColumnBlockPart {
+                column_id: col.column_id,
+                logical_type: col.logical_type,
+                codec_tag: *codec_tag,
+                stream,
+                granule_index: granule,
+                granule_bloom: bloom,
+            },
+        )
+        .collect();
 
-    // --- Column streams ---
-    for stream in &streams {
-        out.extend_from_slice(stream);
-    }
-    debug_assert_eq!(out.len() as u64, granule_region_off);
-
-    // --- Granule indexes (#854) ---
-    for granule in &granule_blobs {
-        out.extend_from_slice(granule);
-    }
-    debug_assert_eq!(out.len() as u64, bloom_region_off);
-
-    // --- Granule blooms (#855) ---
-    for bloom in &bloom_blobs {
-        out.extend_from_slice(bloom);
-    }
-
-    // --- Footer ---
-    let crc = crc32(&out); // over header+directory+streams
-    out.extend_from_slice(&(dir_off as u64).to_le_bytes());
-    out.extend_from_slice(&(dir_len as u64).to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&COLUMN_BLOCK_MAGIC);
-
-    Ok(out)
+    Ok(reddb_file::encode_column_block_frame(
+        chunk_id, schema_ref, row_count, min_ts_ns, max_ts_ns, &parts,
+    ))
 }
 
 /// Peek the RDCC **format version** from a column-block buffer without
@@ -667,14 +565,7 @@ pub fn write_column_block(
 /// rejected rather than misread. It touches only the 6-byte magic+version
 /// prefix; no CRC, directory, or stream work.
 pub fn peek_column_block_version(bytes: &[u8]) -> Option<u16> {
-    if bytes.len() < HEADER_LEN + FOOTER_LEN {
-        return None;
-    }
-    let magic: [u8; 4] = bytes[0..4].try_into().unwrap();
-    if magic != COLUMN_BLOCK_MAGIC {
-        return None;
-    }
-    Some(u16::from_le_bytes([bytes[4], bytes[5]]))
+    reddb_file::peek_column_block_version(bytes)
 }
 
 /// Decode a v1 `RDCC` block: verify both magics, the version, and the
@@ -706,124 +597,36 @@ fn read_column_block_filtered(
     bytes: &[u8],
     want: Option<&[u32]>,
 ) -> Result<DecodedColumnBlock, ColumnBlockError> {
-    if bytes.len() < HEADER_LEN + FOOTER_LEN {
-        return Err(ColumnBlockError::Truncated);
-    }
-    let magic: [u8; 4] = bytes[0..4].try_into().unwrap();
-    if magic != COLUMN_BLOCK_MAGIC {
-        return Err(ColumnBlockError::BadMagic(magic));
-    }
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != COLUMN_BLOCK_VERSION_V1 {
-        return Err(ColumnBlockError::UnsupportedVersion(version));
-    }
+    let frame = reddb_file::decode_column_block_frame(bytes)?;
 
-    // --- Footer (fixed, at the tail) ---
-    let footer_start = bytes.len() - FOOTER_LEN;
-    let tail_magic: [u8; 4] = bytes[bytes.len() - 4..].try_into().unwrap();
-    if tail_magic != COLUMN_BLOCK_MAGIC {
-        return Err(ColumnBlockError::BadTailMagic(tail_magic));
-    }
-    let dir_off = u64::from_le_bytes(bytes[footer_start..footer_start + 8].try_into().unwrap());
-    let dir_len = u64::from_le_bytes(
-        bytes[footer_start + 8..footer_start + 16]
-            .try_into()
-            .unwrap(),
-    );
-    let stored_crc = u32::from_le_bytes(
-        bytes[footer_start + 16..footer_start + 20]
-            .try_into()
-            .unwrap(),
-    );
-    let actual_crc = crc32(&bytes[..footer_start]);
-    if actual_crc != stored_crc {
-        return Err(ColumnBlockError::ChecksumMismatch {
-            expected: stored_crc,
-            actual: actual_crc,
-        });
-    }
-
-    // --- Header fields needed for reconstruction ---
-    let chunk_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-    let schema_ref = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-    let row_count = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
-    let column_count = u32::from_le_bytes(bytes[32..36].try_into().unwrap()) as usize;
-    let min_ts_ns = u64::from_le_bytes(bytes[36..44].try_into().unwrap());
-    let max_ts_ns = u64::from_le_bytes(bytes[44..52].try_into().unwrap());
-
-    let dir_off = dir_off as usize;
-    let dir_len = dir_len as usize;
-    if dir_off != HEADER_LEN
-        || dir_len != column_count * DIR_ENTRY_LEN
-        || dir_off + dir_len > footer_start
-    {
-        return Err(ColumnBlockError::BadDirectory);
-    }
-
-    let mut columns = Vec::with_capacity(column_count);
-    for i in 0..column_count {
-        let base = dir_off + i * DIR_ENTRY_LEN;
-        let column_id = u32::from_le_bytes(bytes[base..base + 4].try_into().unwrap());
-        let logical_type = bytes[base + 4];
-        let codec_tag = bytes[base + 5];
-        let stream_offset =
-            u64::from_le_bytes(bytes[base + 6..base + 14].try_into().unwrap()) as usize;
-        let stream_len =
-            u64::from_le_bytes(bytes[base + 14..base + 22].try_into().unwrap()) as usize;
-        let granule_off =
-            u64::from_le_bytes(bytes[base + 22..base + 30].try_into().unwrap()) as usize;
-        let granule_len =
-            u64::from_le_bytes(bytes[base + 30..base + 38].try_into().unwrap()) as usize;
-        let bloom_off =
-            u64::from_le_bytes(bytes[base + 38..base + 46].try_into().unwrap()) as usize;
-        let bloom_len =
-            u64::from_le_bytes(bytes[base + 46..base + 54].try_into().unwrap()) as usize;
-        let end = stream_offset
-            .checked_add(stream_len)
-            .ok_or(ColumnBlockError::BadDirectory)?;
-        if stream_offset < dir_off + dir_len || end > footer_start {
-            return Err(ColumnBlockError::BadDirectory);
-        }
+    let mut columns = Vec::with_capacity(frame.columns.len());
+    for col in frame.columns {
         // Projection pushdown (#856): skip columns the caller did not ask
         // for *before* the expensive `decode_bytes` / granule / bloom parse.
         // Offset bounds are still validated above so a malformed directory is
         // rejected whether or not the column is wanted.
-        if want.is_some_and(|ids| !ids.contains(&column_id)) {
+        if want.is_some_and(|ids| !ids.contains(&col.column_id)) {
             continue;
         }
         // Decode by the recorded stream (its own segment_codec header
         // carries the codec); the directory tag is bookkeeping for #853.
-        let data = decode_bytes(&bytes[stream_offset..end])?;
+        let data = decode_bytes(col.stream)?;
         // Parse the sparse granule index (#854) when present. A
         // zero-length slice means the column was written without an index.
-        let granule_index = if granule_len == 0 {
-            None
-        } else {
-            let g_end = granule_off
-                .checked_add(granule_len)
-                .ok_or(ColumnBlockError::BadDirectory)?;
-            if granule_off < dir_off + dir_len || g_end > footer_start {
-                return Err(ColumnBlockError::BadDirectory);
-            }
-            Some(GranuleIndex::deserialize(&bytes[granule_off..g_end])?)
-        };
+        let granule_index = col
+            .granule_index
+            .map(GranuleIndex::deserialize)
+            .transpose()?;
         // Parse the per-granule bloom skip index (#855) when present. A
         // zero-length slice means the column was written without a bloom.
-        let granule_bloom = if bloom_len == 0 {
-            None
-        } else {
-            let b_end = bloom_off
-                .checked_add(bloom_len)
-                .ok_or(ColumnBlockError::BadDirectory)?;
-            if bloom_off < dir_off + dir_len || b_end > footer_start {
-                return Err(ColumnBlockError::BadDirectory);
-            }
-            Some(GranuleBloom::deserialize(&bytes[bloom_off..b_end])?)
-        };
+        let granule_bloom = col
+            .granule_bloom
+            .map(GranuleBloom::deserialize)
+            .transpose()?;
         columns.push(DecodedColumn {
-            column_id,
-            logical_type,
-            codec_tag,
+            column_id: col.column_id,
+            logical_type: col.logical_type,
+            codec_tag: col.codec_tag,
             data,
             granule_index,
             granule_bloom,
@@ -831,11 +634,11 @@ fn read_column_block_filtered(
     }
 
     Ok(DecodedColumnBlock {
-        chunk_id,
-        schema_ref,
-        row_count,
-        min_ts_ns,
-        max_ts_ns,
+        chunk_id: frame.chunk_id,
+        schema_ref: frame.schema_ref,
+        row_count: frame.row_count,
+        min_ts_ns: frame.min_ts_ns,
+        max_ts_ns: frame.max_ts_ns,
         columns,
     })
 }

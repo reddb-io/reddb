@@ -129,19 +129,54 @@ impl RedDBServer {
                             JsonValue::Number(floor as f64),
                         );
                     }
+                    match self.runtime.primary_replica_wal_retention_plan() {
+                        Ok(Some(retention)) => {
+                            object.insert(
+                                "wal_oldest_required_lsn".to_string(),
+                                JsonValue::Number(
+                                    retention.oldest_required_lsn.unwrap_or(0) as f64,
+                                ),
+                            );
+                            object.insert(
+                                "wal_retained_bytes".to_string(),
+                                JsonValue::Number(retention.retained_bytes_before_prune as f64),
+                            );
+                            object.insert(
+                                "wal_retained_after_prune_bytes".to_string(),
+                                JsonValue::Number(retention.retained_bytes_after_prune as f64),
+                            );
+                            object.insert(
+                                "wal_removable_segment_count".to_string(),
+                                JsonValue::Number(retention.removable_segments.len() as f64),
+                            );
+                            object
+                                .insert("wal_retention_error".to_string(), JsonValue::Bool(false));
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            object.insert("wal_retention_error".to_string(), JsonValue::Bool(true));
+                            object.insert(
+                                "wal_retention_error_message".to_string(),
+                                JsonValue::String(err.to_string()),
+                            );
+                        }
+                    }
                     let slots = primary
                         .slot_snapshots()
                         .into_iter()
                         .map(|slot| {
                             let mut slot_json = Map::new();
-                            slot_json.insert("id".to_string(), JsonValue::String(slot.id));
+                            slot_json.insert(
+                                "id".to_string(),
+                                JsonValue::String(slot.replica_id.clone()),
+                            );
                             slot_json.insert(
                                 "restart_lsn".to_string(),
                                 JsonValue::Number(slot.restart_lsn as f64),
                             );
                             slot_json.insert(
                                 "confirmed_lsn".to_string(),
-                                JsonValue::Number(slot.confirmed_lsn as f64),
+                                JsonValue::Number(slot.confirmed_lsn() as f64),
                             );
                             slot_json.insert(
                                 "invalidated".to_string(),
@@ -206,9 +241,111 @@ impl RedDBServer {
                             as f64,
                     ),
                 );
+                object.insert(
+                    "rejoin_target_timeline".to_string(),
+                    JsonValue::Number(
+                        self.runtime
+                            .config_u64("red.replication.rejoin_target_timeline", 0)
+                            as f64,
+                    ),
+                );
+                object.insert(
+                    "rejoin_rewind_to_lsn".to_string(),
+                    JsonValue::Number(
+                        self.runtime
+                            .config_u64("red.replication.rejoin_rewind_to_lsn", 0)
+                            as f64,
+                    ),
+                );
+                object.insert(
+                    "rejoin_rewind_confirmed_timeline".to_string(),
+                    JsonValue::Number(
+                        self.runtime
+                            .config_u64("red.replication.rejoin_rewind_confirmed_timeline", 0)
+                            as f64,
+                    ),
+                );
+                object.insert(
+                    "rejoin_rewind_confirmed_lsn".to_string(),
+                    JsonValue::Number(
+                        self.runtime
+                            .config_u64("red.replication.rejoin_rewind_confirmed_lsn", 0)
+                            as f64,
+                    ),
+                );
             }
         }
 
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// `POST /admin/replication/rejoin/confirm-rewind`
+    ///
+    /// Records that an external operator/system already performed the physical
+    /// rewind required by the current rejoin plan. This does not rewind data by
+    /// itself; it only lets startup continue when the confirmation exactly
+    /// matches the plan stored on the replica.
+    pub(crate) fn handle_admin_replication_confirm_rewind(&self, body: Vec<u8>) -> HttpResponse {
+        if !matches!(
+            self.runtime.write_gate().role(),
+            crate::replication::ReplicationRole::Replica { .. }
+        ) {
+            return json_error(409, "rejoin rewind confirmation only allowed on a replica");
+        }
+
+        if self.runtime.config_string("red.replication.state", "") != "rejoin_rewind_required" {
+            return json_error(409, "replica is not waiting for a confirmed rejoin rewind");
+        }
+
+        let payload = match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
+            Ok(payload) => payload,
+            Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+        };
+        let Some(target_timeline) = payload.get("target_timeline").and_then(|v| v.as_u64()) else {
+            return json_error(400, "target_timeline must be a positive integer");
+        };
+        let Some(rewind_to_lsn) = payload.get("rewind_to_lsn").and_then(|v| v.as_u64()) else {
+            return json_error(400, "rewind_to_lsn must be a positive integer");
+        };
+        if target_timeline == 0 || rewind_to_lsn == 0 {
+            return json_error(
+                400,
+                "target_timeline and rewind_to_lsn must be greater than zero",
+            );
+        }
+
+        let planned_timeline = self
+            .runtime
+            .config_u64("red.replication.rejoin_target_timeline", 0);
+        let planned_lsn = self
+            .runtime
+            .config_u64("red.replication.rejoin_rewind_to_lsn", 0);
+        if target_timeline != planned_timeline || rewind_to_lsn != planned_lsn {
+            return json_error(
+                409,
+                format!(
+                    "rewind confirmation does not match current plan: expected timeline {planned_timeline} at LSN {planned_lsn}"
+                ),
+            );
+        }
+
+        self.runtime
+            .mark_replica_rejoin_rewind_confirmed(target_timeline, rewind_to_lsn);
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert(
+            "target_timeline".to_string(),
+            JsonValue::Number(target_timeline as f64),
+        );
+        object.insert(
+            "rewind_to_lsn".to_string(),
+            JsonValue::Number(rewind_to_lsn as f64),
+        );
+        object.insert(
+            "next_step".to_string(),
+            JsonValue::String("restart or resume replica apply from the confirmed LSN".to_string()),
+        );
         json_response(200, JsonValue::Object(object))
     }
 
@@ -237,6 +374,49 @@ mod tests {
     use crate::replication::ReplicationConfig;
     use crate::runtime::RedDBRuntime;
     use crate::RedDBOptions;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_data_path(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("reddb_handlers_replication_{name}_{suffix}.rdb"))
+    }
+
+    fn cleanup_data_path(data_path: &Path) {
+        let _ = std::fs::remove_file(data_path);
+        let _ = std::fs::remove_file(
+            crate::replication::primary::PrimaryReplication::slot_path_for(data_path),
+        );
+        let _ = std::fs::remove_file(crate::replication::primary::LogicalWalSpool::path_for(
+            data_path,
+        ));
+        let _ = std::fs::remove_dir_all(
+            crate::replication::primary::PrimaryReplication::primary_replica_root_for(data_path),
+        );
+    }
+
+    fn replica_waiting_for_rejoin_rewind() -> RedDBRuntime {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(ReplicationConfig::replica("http://primary:5050")),
+        )
+        .expect("runtime");
+        runtime.db().store().set_config_tree(
+            "red.replication",
+            &crate::json!({
+                "state": "rejoin_rewind_required",
+                "rejoin_target_timeline": 3,
+                "rejoin_rewind_to_lsn": 42,
+                "rejoin_rewind_confirmed_timeline": 0,
+                "rejoin_rewind_confirmed_lsn": 0,
+                "last_applied_lsn": 100,
+            }),
+        );
+        runtime
+    }
 
     #[test]
     fn replication_status_surfaces_slot_invalidation_reason() {
@@ -299,6 +479,54 @@ mod tests {
     }
 
     #[test]
+    fn replication_status_surfaces_primary_replica_wal_retention_metrics() {
+        let data_path = temp_data_path("wal_retention_status");
+        cleanup_data_path(&data_path);
+
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&data_path).with_replication(ReplicationConfig::primary()),
+        )
+        .expect("runtime");
+        let plan = runtime
+            .primary_replica_file_plan()
+            .expect("primary-replica file plan");
+        let mut catalog =
+            reddb_file::ReplicationSlotCatalog::new(reddb_file::TimelineId::initial());
+        catalog
+            .upsert(reddb_file::ReplicationSlot::new(
+                "replica-a",
+                reddb_file::TimelineId::initial(),
+                0,
+            ))
+            .expect("upsert slot");
+        catalog
+            .write_to_path(plan.slots_path())
+            .expect("write slot catalog");
+        let wal_path = plan.wal_segment_path(0);
+        std::fs::create_dir_all(wal_path.parent().expect("wal parent")).expect("create wal dir");
+        std::fs::write(&wal_path, b"segment").expect("write fake wal segment");
+
+        let server = RedDBServer::new(runtime);
+        let response = server.handle_replication_status();
+        let body = String::from_utf8(response.body).expect("status body is utf8");
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains(r#""wal_oldest_required_lsn":0"#), "{body}");
+        assert!(body.contains(r#""wal_retained_bytes":7"#), "{body}");
+        assert!(
+            body.contains(r#""wal_retained_after_prune_bytes":7"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#""wal_removable_segment_count":0"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""wal_retention_error":false"#), "{body}");
+
+        cleanup_data_path(&data_path);
+    }
+
+    #[test]
     fn replication_status_surfaces_per_replica_lag_offset_and_wall_clock() {
         // Issue #839 acceptance: per-replica lag in both LSN-offset and
         // wall-clock appears in the status payload.
@@ -335,5 +563,95 @@ mod tests {
         // Wall-clock lag is surfaced as `lag_seconds`; the replica was just
         // acked, so the value is small but the field must be present.
         assert!(body.contains(r#""lag_seconds":"#), "{body}");
+    }
+
+    #[test]
+    fn replication_status_surfaces_rejoin_rewind_plan_and_confirmation() {
+        let runtime = replica_waiting_for_rejoin_rewind();
+        let server = RedDBServer::new(runtime);
+
+        let response = server.handle_replication_status();
+        let body = String::from_utf8(response.body).expect("status body is utf8");
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains(r#""role":"replica""#), "{body}");
+        assert!(
+            body.contains(r#""state":"rejoin_rewind_required""#),
+            "{body}"
+        );
+        assert!(body.contains(r#""rejoin_target_timeline":3"#), "{body}");
+        assert!(body.contains(r#""rejoin_rewind_to_lsn":42"#), "{body}");
+        assert!(
+            body.contains(r#""rejoin_rewind_confirmed_timeline":0"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#""rejoin_rewind_confirmed_lsn":0"#),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn admin_replication_confirm_rewind_records_exact_current_plan() {
+        let runtime = replica_waiting_for_rejoin_rewind();
+        let server = RedDBServer::new(runtime);
+
+        let response = server.handle_admin_replication_confirm_rewind(
+            br#"{"target_timeline":3,"rewind_to_lsn":42}"#.to_vec(),
+        );
+        let body = String::from_utf8(response.body).expect("confirm body is utf8");
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains(r#""ok":true"#), "{body}");
+        assert_eq!(
+            server
+                .runtime
+                .config_u64("red.replication.rejoin_rewind_confirmed_timeline", 0),
+            3
+        );
+        assert_eq!(
+            server
+                .runtime
+                .config_u64("red.replication.rejoin_rewind_confirmed_lsn", 0),
+            42
+        );
+        assert_eq!(
+            server
+                .runtime
+                .config_u64("red.replication.last_applied_lsn", 0),
+            42
+        );
+    }
+
+    #[test]
+    fn admin_replication_confirm_rewind_rejects_mismatched_plan_without_writing() {
+        let runtime = replica_waiting_for_rejoin_rewind();
+        let server = RedDBServer::new(runtime);
+
+        let response = server.handle_admin_replication_confirm_rewind(
+            br#"{"target_timeline":3,"rewind_to_lsn":41}"#.to_vec(),
+        );
+        let body = String::from_utf8(response.body).expect("confirm body is utf8");
+
+        assert_eq!(response.status, 409);
+        assert!(body.contains("does not match current plan"), "{body}");
+        assert_eq!(
+            server
+                .runtime
+                .config_u64("red.replication.rejoin_rewind_confirmed_timeline", 0),
+            0
+        );
+        assert_eq!(
+            server
+                .runtime
+                .config_u64("red.replication.rejoin_rewind_confirmed_lsn", 0),
+            0
+        );
+        assert_eq!(
+            server
+                .runtime
+                .config_u64("red.replication.last_applied_lsn", 0),
+            100
+        );
     }
 }

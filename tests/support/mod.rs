@@ -16,7 +16,7 @@ use reddb::application::{
     SchemaUseCases,
 };
 use reddb::json::{from_slice as json_from_slice, json, Value as JsonValue};
-use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
+use reddb::replication::cdc::{change_record_from_entity, ChangeOperation, ChangeRecord};
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
@@ -95,10 +95,6 @@ impl PersistentDbPath {
         let path = self.path_string();
         RedDBRuntime::with_options(RedDBOptions::persistent(&path))
             .unwrap_or_else(|err| panic!("failed to open persistent runtime at {path}: {err:?}"))
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        &self.base
     }
 
     fn path_string(&self) -> String {
@@ -332,7 +328,7 @@ pub fn logical_insert_record(
     entity.created_at = timestamp;
     entity.updated_at = timestamp;
     entity.sequence_id = lsn;
-    ChangeRecord::from_entity(
+    change_record_from_entity(
         lsn,
         timestamp,
         ChangeOperation::Insert,

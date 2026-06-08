@@ -1,25 +1,24 @@
 //! Physical storage design primitives for RedDB's deterministic on-disk layout.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::{
-    CatalogSnapshot, CollectionStats, RedDBOptions, SchemaManifest, StorageMode,
-    REDDB_FORMAT_VERSION,
-};
+use crate::api::{CatalogSnapshot, CollectionStats, RedDBOptions, SchemaManifest, StorageMode};
 use crate::index::IndexKind;
-use crate::json::{from_slice, parse_json, to_vec};
+use crate::json::parse_json;
 use crate::serde_json::{Map, Value as JsonValue};
 
 pub const DEFAULT_GRID_BLOCK_SIZE: usize = 512 * 1024;
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
-pub const DEFAULT_SUPERBLOCK_COPIES: u8 = 4;
-pub const PHYSICAL_METADATA_PROTOCOL_VERSION: &str = "reddb-physical-v1";
-pub const PHYSICAL_METADATA_BINARY_EXTENSION: &str = "meta.rdbx";
+pub use reddb_file::layout::PHYSICAL_METADATA_BINARY_EXTENSION;
+pub use reddb_file::{
+    BlockReference, ExportDescriptor, ManifestEvent, ManifestEventKind, ManifestPointers,
+    PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalTreeDefinition, SnapshotDescriptor,
+    SuperblockHeader, DEFAULT_SUPERBLOCK_COPIES, PHYSICAL_METADATA_PROTOCOL_VERSION,
+};
 pub const DEFAULT_MANIFEST_EVENT_HISTORY: usize = 256;
 /// Retention applied when the seq-N catalog journal is enabled at the `Max`
 /// tier. See [`seqn_journal_retention`].
@@ -185,59 +184,6 @@ impl PhysicalMetadataSource {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BlockReference {
-    pub index: u64,
-    pub checksum: u128,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ManifestPointers {
-    pub oldest: BlockReference,
-    pub newest: BlockReference,
-}
-
-#[derive(Debug, Clone)]
-pub struct SuperblockHeader {
-    pub format_version: u32,
-    pub sequence: u64,
-    pub copies: u8,
-    pub manifest: ManifestPointers,
-    pub free_set: BlockReference,
-    pub collection_roots: BTreeMap<String, u64>,
-}
-
-impl Default for SuperblockHeader {
-    fn default() -> Self {
-        Self {
-            format_version: crate::api::REDDB_FORMAT_VERSION,
-            sequence: 0,
-            copies: DEFAULT_SUPERBLOCK_COPIES,
-            manifest: ManifestPointers::default(),
-            free_set: BlockReference::default(),
-            collection_roots: BTreeMap::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManifestEventKind {
-    Insert,
-    Update,
-    Remove,
-    Checkpoint,
-}
-
-#[derive(Debug, Clone)]
-pub struct ManifestEvent {
-    pub collection: String,
-    pub object_key: String,
-    pub kind: ManifestEventKind,
-    pub block: BlockReference,
-    pub snapshot_min: u64,
-    pub snapshot_max: Option<u64>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionPolicy {
     Incremental,
@@ -304,15 +250,6 @@ impl PhysicalLayout {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SnapshotDescriptor {
-    pub snapshot_id: u64,
-    pub created_at_unix_ms: u128,
-    pub superblock_sequence: u64,
-    pub collection_count: usize,
-    pub total_entities: usize,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractOrigin {
     Explicit,
@@ -326,21 +263,6 @@ impl ContractOrigin {
             Self::Explicit => "explicit",
             Self::Implicit => "implicit",
             Self::Migrated => "migrated",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InferredSegmentLayout {
-    Row,
-    AppendOnlySegmentV0,
-}
-
-impl InferredSegmentLayout {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Row => "row",
-            Self::AppendOnlySegmentV0 => "append_only_segment_v0",
         }
     }
 }
@@ -444,35 +366,6 @@ pub struct CollectionContract {
     pub analytical_storage: Option<crate::catalog::AnalyticalStorageConfig>,
 }
 
-impl CollectionContract {
-    /// Physical layout inferred from durable collection intent.
-    ///
-    /// Native timeseries always use the append-only segment layout. Plain
-    /// tables only do so when the contract carries explicit append-only intent;
-    /// mutable tables stay on the row layout.
-    pub fn inferred_segment_layout(&self) -> InferredSegmentLayout {
-        match self.declared_model {
-            crate::catalog::CollectionModel::TimeSeries => {
-                InferredSegmentLayout::AppendOnlySegmentV0
-            }
-            crate::catalog::CollectionModel::Table if self.append_only => {
-                InferredSegmentLayout::AppendOnlySegmentV0
-            }
-            _ => InferredSegmentLayout::Row,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PhysicalCollectionLayout {
-    pub name: String,
-    pub logical_id: u64,
-    pub physical_file_id: String,
-    pub physical_file_name: String,
-    pub created_at_unix_ms: u128,
-    pub updated_at_unix_ms: u128,
-}
-
 /// Canonical artifact lifecycle states.
 ///
 /// State machine transitions:
@@ -561,10 +454,6 @@ impl std::fmt::Display for ArtifactState {
 #[derive(Debug, Clone)]
 pub struct PhysicalIndexState {
     pub name: String,
-    pub logical_id: u64,
-    pub physical_file_id: String,
-    pub physical_file_name: String,
-    pub collection_logical_id: Option<u64>,
     pub kind: IndexKind,
     pub collection: Option<String>,
     pub enabled: bool,
@@ -583,56 +472,6 @@ impl PhysicalIndexState {
     pub fn artifact_state(&self) -> ArtifactState {
         ArtifactState::from_build_state(&self.build_state, self.enabled)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExportDescriptor {
-    pub name: String,
-    pub created_at_unix_ms: u128,
-    pub snapshot_id: Option<u64>,
-    pub superblock_sequence: u64,
-    pub data_path: String,
-    pub metadata_path: String,
-    pub collection_count: usize,
-    pub total_entities: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct PhysicalGraphProjection {
-    pub name: String,
-    pub created_at_unix_ms: u128,
-    pub updated_at_unix_ms: u128,
-    pub state: String,
-    pub source: String,
-    pub node_labels: Vec<String>,
-    pub node_types: Vec<String>,
-    pub edge_labels: Vec<String>,
-    pub last_materialized_sequence: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PhysicalAnalyticsJob {
-    pub id: String,
-    pub kind: String,
-    pub state: String,
-    pub projection: Option<String>,
-    pub created_at_unix_ms: u128,
-    pub updated_at_unix_ms: u128,
-    pub last_run_sequence: Option<u64>,
-    pub metadata: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PhysicalTreeDefinition {
-    pub collection: String,
-    pub name: String,
-    pub root_id: u64,
-    pub default_max_children: usize,
-    pub ordered_children: bool,
-    pub ownership: String,
-    pub auto_fix_mode: String,
-    pub created_at_unix_ms: u128,
-    pub updated_at_unix_ms: u128,
 }
 
 /// A single persisted hypertable chunk. Mirror of
@@ -685,7 +524,6 @@ pub struct PhysicalMetadataFile {
     pub tree_definitions: Vec<PhysicalTreeDefinition>,
     pub collection_ttl_defaults_ms: BTreeMap<String, u64>,
     pub collection_contracts: Vec<CollectionContract>,
-    pub collection_layouts: Vec<PhysicalCollectionLayout>,
     /// Persisted hypertable chunk spine (issue #866). Empty on legacy
     /// sidecars written before the feature and for non-hypertable
     /// databases.

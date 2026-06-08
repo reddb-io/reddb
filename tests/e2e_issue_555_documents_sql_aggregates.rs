@@ -72,7 +72,7 @@ fn sql_count_star_over_document_collection() {
         .expect("SELECT COUNT(*) FROM doc_collection should succeed");
     assert_eq!(page.result.records.len(), 1);
     let record = &page.result.records[0];
-    let count = first_numeric_for(record, &["COUNT(*)", "COUNT", "count"]);
+    let count = first_numeric_for(record, &["COUNT(*)", "count(*)", "COUNT", "count"]);
     assert_eq!(count, 5.0);
 }
 

@@ -133,14 +133,39 @@ These exist for filtering and don't drive lifecycle transitions:
 | `priority:high` | Urgent / high-impact — `/afk` drains these first | `/triage` or maintainer        |
 | `priority:low`  | Everything else                                  | `/triage` or maintainer        |
 | `prd:{N}`      | Issue belongs to PRD #N                         | `/to-issues` when splitting a PRD |
+| `runner-error` | `/afk` fleet supervisor parked a slot after fast-death streak; affected issues were restored to `ready-for-agent` after the runner was discarded | `/afk` fleet supervisor on circuit trip |
 | `slice:hitl`   | Slice that needs human-in-the-loop              | `/to-issues`                     |
 | `slice:afk`    | Slice that can run unattended                   | `/to-issues`                     |
+
+`runner-error` is the only auxiliary label `/afk` may create autonomously: the fleet supervisor calls `gh label create runner-error` when it trips the circuit breaker, so the cleanup never fails just because the label has not been provisioned. Provision it up front via `/setup-red-skills` to keep colour/description consistent across repos.
+
+## Blocked Reasons (`blocked:<reason>`) — typed, auto-classified
+
+`/afk` already computes a precise terminal outcome for every iteration; instead of flattening every failure to one `blocked`, it tags the issue with the matching **`blocked:<reason>`** label so the backlog is filterable by *what kind* of block it is. The reason is derived automatically from the outcome — **no human classification**.
+
+| Outcome (runtime) | Label | Recovery | Retry cap (env) |
+| ----------------- | ----- | -------- | --------------- |
+| runner quota / both exhausted | `blocked:quota` | **auto-retry** → ready-for-agent | 3 (`RED_AFK_RETRY_QUOTA`) |
+| runner transport/setup failed | `blocked:runner-transient` | **auto-retry** → ready-for-agent | 3 (`RED_AFK_RETRY_RUNNER_TRANSIENT`) |
+| couldn't integrate or land | `blocked:merge-conflict` | **auto-retry** (base settles) | 3 (`RED_AFK_RETRY_MERGE`) |
+| agent exited without a sentinel | `blocked:crashed` | **auto-retry once** (transient) | 1 (`RED_AFK_RETRY_CRASH`) |
+| a user `pre_*` guard hook rejected it | `blocked:policy` | **auto-retry once** | 1 (`RED_AFK_RETRY_POLICY`) |
+| agent emitted `<promise>BLOCKED</promise>` | `blocked:spec` | **pages** → ready-for-human (decide/clarify) | — (never auto) |
+| feedback gate failed (test/lint/build) | `blocked:validation` | **pages** → ready-for-human (review diff) | — (never auto) |
+| stall-reaper killed a hung worker | `blocked:stalled` | restores ready-for-agent (uncapped — follow-up) | — |
+| worktree/base/push setup failed | `blocked:infra` | pages → ready-for-human (ops) | — |
+
+**Bounded auto-recovery (live).** The five recoverable reasons loop back to `ready-for-agent` and are retried, up to their per-reason cap (counting real attempt-ledger attempts); on the cap they **escalate** to `ready-for-human` with a `🤖 /afk escalating … retry budget exhausted (attempt N/cap)` comment. So a transient hiccup self-heals and never pages, but a persistent one still surfaces — bounded, no runaway loop. Caps are env-tunable (non-numeric/0 → default). `spec` and `validation` **always page** (a human must decide / review the diff); `dependency` waits on its `req:N` edges (never pages). The typed `blocked:<reason>` label is added in every case, so the backlog stays filterable by reason regardless of routing.
+
+> Not yet wired: time-based backoff (today the re-queue is immediate; the cap is what prevents runaway) and a cap on the supervisor stall-reaper's `blocked:stalled` restore.
+
+All `blocked:*` labels are created on the fly when first applied (mirroring `runner-error`) and provisioned by `/setup-red-skills`.
 
 ## Naming Convention
 
 All labels follow one of two shapes:
 
 - **kebab-case** — `needs-triage`, `ready-for-agent`, `running`, `wontfix`, `bug`.
-- **`prefix:value`** — `priority:high`, `slice:afk`, `prd:42`.
+- **`prefix:value`** — `priority:high`, `slice:afk`, `prd:42`, `blocked:validation`.
 
 No uppercase, CamelCase, snake_case, or spaces. GitHub matches labels case-insensitively for filtering but stores the case you create them with — keep the tracker clean by normalising on creation. `/setup-red-skills` surfaces non-conforming labels and offers to rename via `gh label edit "Old Name" --name "new-name"`.

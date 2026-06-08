@@ -35,30 +35,30 @@ use std::sync::RwLock;
 use super::page::{Page, PageType, PAGE_SIZE};
 
 /// Maximum key size for node/edge IDs
-pub const MAX_ID_SIZE: usize = 256;
+pub const MAX_ID_SIZE: usize = reddb_file::GRAPH_MAX_ID_SIZE;
 
 /// Maximum label size
-pub const MAX_LABEL_SIZE: usize = 512;
+pub const MAX_LABEL_SIZE: usize = reddb_file::GRAPH_MAX_LABEL_SIZE;
 
 /// V1 node record header size: id_len(2) + label_len(2) + type(1) + flags(1) + edge_count(4).
 /// Kept for [`StoredNode::decode_v1`]; new writes use [`NODE_HEADER_SIZE`].
-pub const NODE_HEADER_SIZE_V1: usize = 10;
+pub const NODE_HEADER_SIZE_V1: usize = reddb_file::GRAPH_NODE_HEADER_SIZE_V1;
 
 /// Node record header size: id_len(2) + label_len(2) + label_id(4) + flags(1) + edge_count(4).
 /// The 1-byte legacy `node_type` discriminant has been replaced by a 4-byte
 /// dynamic [`LabelId`] resolved through [`LabelRegistry`].
-pub const NODE_HEADER_SIZE: usize = 13;
+pub const NODE_HEADER_SIZE: usize = reddb_file::GRAPH_NODE_HEADER_SIZE;
 
 /// TableRef size: table_id(2) + row_id(8)
-pub const TABLE_REF_SIZE: usize = 10;
+pub const TABLE_REF_SIZE: usize = reddb_file::GRAPH_TABLE_REF_SIZE;
 
 /// Node flag: has table reference
-pub const NODE_FLAG_HAS_TABLE_REF: u8 = 0x01;
+pub const NODE_FLAG_HAS_TABLE_REF: u8 = reddb_file::GRAPH_NODE_FLAG_HAS_TABLE_REF;
 /// Node flag: has vector embedding reference
-pub const NODE_FLAG_HAS_VECTOR_REF: u8 = 0x02;
+pub const NODE_FLAG_HAS_VECTOR_REF: u8 = reddb_file::GRAPH_NODE_FLAG_HAS_VECTOR_REF;
 
 /// VectorRef size: collection_len(2) + vector_id(8) = 10 bytes header + variable collection name
-pub const VECTOR_REF_HEADER_SIZE: usize = 10;
+pub const VECTOR_REF_HEADER_SIZE: usize = reddb_file::GRAPH_VECTOR_REF_HEADER_SIZE;
 
 /// Reference to a table row (for linking graph nodes to tabular data)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,34 +77,30 @@ impl TableRef {
 
     /// Encode to bytes (10 bytes total)
     pub fn encode(&self) -> [u8; TABLE_REF_SIZE] {
-        let mut buf = [0u8; TABLE_REF_SIZE];
-        buf[0..2].copy_from_slice(&self.table_id.to_le_bytes());
-        buf[2..10].copy_from_slice(&self.row_id.to_le_bytes());
-        buf
+        reddb_file::encode_graph_table_ref(reddb_file::GraphTableRef {
+            table_id: self.table_id,
+            row_id: self.row_id,
+        })
     }
 
     /// Decode from bytes
     pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() < TABLE_REF_SIZE {
-            return None;
-        }
+        let decoded = reddb_file::decode_graph_table_ref(data)?;
         Some(Self {
-            table_id: u16::from_le_bytes([data[0], data[1]]),
-            row_id: u64::from_le_bytes([
-                data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
-            ]),
+            table_id: decoded.table_id,
+            row_id: decoded.row_id,
         })
     }
 }
 
 /// V1 edge record header size: source_len(2) + target_len(2) + type(1) + weight(4).
 /// Kept for [`StoredEdge::decode_v1`]; new writes use [`EDGE_HEADER_SIZE`].
-pub const EDGE_HEADER_SIZE_V1: usize = 9;
+pub const EDGE_HEADER_SIZE_V1: usize = reddb_file::GRAPH_EDGE_HEADER_SIZE_V1;
 
 /// Edge record header size: source_len(2) + target_len(2) + label_id(4) + weight(4).
 /// The 1-byte legacy `edge_type` discriminant has been replaced by a 4-byte
 /// dynamic [`LabelId`] resolved through [`LabelRegistry`].
-pub const EDGE_HEADER_SIZE: usize = 12;
+pub const EDGE_HEADER_SIZE: usize = reddb_file::GRAPH_EDGE_HEADER_SIZE;
 
 /// A graph node stored on disk
 #[derive(Debug, Clone)]
@@ -134,88 +130,19 @@ pub struct StoredNode {
 impl StoredNode {
     /// Encode node to bytes in v2 format (label_id replaces node_type).
     pub fn encode(&self) -> Vec<u8> {
-        let id_bytes = self.id.as_bytes();
-        let label_bytes = self.label.as_bytes();
-        let has_table_ref = self.table_ref.is_some();
-        let has_vector_ref = self.vector_ref.is_some();
-
-        // Compute flags with table_ref and vector_ref indicators
-        let mut flags = self.flags & !(NODE_FLAG_HAS_TABLE_REF | NODE_FLAG_HAS_VECTOR_REF);
-        if has_table_ref {
-            flags |= NODE_FLAG_HAS_TABLE_REF;
-        }
-        if has_vector_ref {
-            flags |= NODE_FLAG_HAS_VECTOR_REF;
-        }
-
-        let table_ref_size = if has_table_ref { TABLE_REF_SIZE } else { 0 };
-        let vector_ref_size = if let Some((ref coll, _)) = self.vector_ref {
-            2 + coll.len() + 8
-        } else {
-            0
-        };
-        let mut buf = Vec::with_capacity(
-            NODE_HEADER_SIZE
-                + id_bytes.len()
-                + label_bytes.len()
-                + table_ref_size
-                + vector_ref_size,
-        );
-
-        // V2 header: id_len(2) + label_len(2) + label_id(4) + flags(1) + out_edges(2) + in_edges(2)
-        buf.extend_from_slice(&(id_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&(label_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&self.label_id.as_u32().to_le_bytes());
-        buf.push(flags);
-        buf.extend_from_slice(&(self.out_edge_count as u16).to_le_bytes());
-        buf.extend_from_slice(&(self.in_edge_count as u16).to_le_bytes());
-
-        buf.extend_from_slice(id_bytes);
-        buf.extend_from_slice(label_bytes);
-
-        if let Some(ref tref) = self.table_ref {
-            buf.extend_from_slice(&tref.encode());
-        }
-
-        if let Some((ref collection, vector_id)) = self.vector_ref {
-            let coll_bytes = collection.as_bytes();
-            buf.extend_from_slice(&(coll_bytes.len() as u16).to_le_bytes());
-            buf.extend_from_slice(coll_bytes);
-            buf.extend_from_slice(&vector_id.to_le_bytes());
-        }
-
-        buf
+        reddb_file::encode_graph_node_record_v2(&self.as_file_record())
     }
 
     /// Decode node from bytes (v2 format). For v1 records use [`decode_v1`].
     pub fn decode(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
-        if data.len() < NODE_HEADER_SIZE {
-            return None;
-        }
-
-        let id_len = u16::from_le_bytes([data[0], data[1]]) as usize;
-        let label_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let label_id = LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
-        let flags = data[8];
-        let out_edge_count = u16::from_le_bytes([data[9], data[10]]) as u32;
-        let in_edge_count = u16::from_le_bytes([data[11], data[12]]) as u32;
+        let record = reddb_file::decode_graph_node_record_v2(data)?;
+        let label_id = LabelId::new(record.label_id);
         // Derive legacy node_type from label_id for back-compat with callers
         // that still read the field. PR3 removes this field entirely.
         let node_type = label_id_to_node_label(label_id);
-
-        Self::decode_payload(
-            data,
-            page_id,
-            slot,
-            NODE_HEADER_SIZE,
-            id_len,
-            label_len,
-            flags,
-            out_edge_count,
-            in_edge_count,
-            node_type,
-            label_id,
-        )
+        Some(Self::from_file_record(
+            record, page_id, slot, node_type, label_id,
+        ))
     }
 
     /// Decode a v1 (legacy) node record. The caller must supply a
@@ -223,118 +150,92 @@ impl StoredNode {
     /// the legacy `node_type` discriminant maps to the correct reserved
     /// [`LabelId`].
     pub fn decode_v1(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
-        if data.len() < NODE_HEADER_SIZE_V1 {
-            return None;
-        }
-        let id_len = u16::from_le_bytes([data[0], data[1]]) as usize;
-        let label_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+        let record = reddb_file::decode_graph_node_record_v1(data)?;
         // V1 records carry the legacy enum discriminant; reject any byte
         // outside the 9-variant range so we do not silently misinterpret
         // unrelated bytes as a node-type.
-        if data[4] > 8 {
+        if record.legacy_type > 8 {
             return None;
         }
-        let flags = data[5];
-        let out_edge_count = u16::from_le_bytes([data[6], data[7]]) as u32;
-        let in_edge_count = u16::from_le_bytes([data[8], data[9]]) as u32;
-        let label_id = LabelRegistry::legacy_node_label_id(data[4]);
+        let label_id = LabelRegistry::legacy_node_label_id(record.legacy_type);
         let node_type = label_id_to_node_label(label_id);
-        Self::decode_payload(
-            data,
-            page_id,
-            slot,
-            NODE_HEADER_SIZE_V1,
-            id_len,
-            label_len,
-            flags,
-            out_edge_count,
-            in_edge_count,
-            node_type,
-            label_id,
-        )
+        Some(Self::from_legacy_file_record(
+            record, page_id, slot, node_type, label_id,
+        ))
     }
 
-    /// Shared payload (id, label, table_ref, vector_ref) decoder for v1/v2.
-    #[allow(clippy::too_many_arguments)]
-    fn decode_payload(
-        data: &[u8],
+    fn as_file_record(&self) -> reddb_file::GraphNodeRecord {
+        reddb_file::GraphNodeRecord {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            label_id: self.label_id.as_u32(),
+            flags: self.flags,
+            out_edge_count: self.out_edge_count,
+            in_edge_count: self.in_edge_count,
+            table_ref: self.table_ref.map(|t| reddb_file::GraphTableRef {
+                table_id: t.table_id,
+                row_id: t.row_id,
+            }),
+            vector_ref: self.vector_ref.as_ref().map(|(collection, vector_id)| {
+                reddb_file::GraphVectorRef {
+                    collection: collection.clone(),
+                    vector_id: *vector_id,
+                }
+            }),
+        }
+    }
+
+    fn from_file_record(
+        record: reddb_file::GraphNodeRecord,
         page_id: u32,
         slot: u16,
-        header_size: usize,
-        id_len: usize,
-        label_len: usize,
-        flags: u8,
-        out_edge_count: u32,
-        in_edge_count: u32,
         node_type: String,
         label_id: LabelId,
-    ) -> Option<Self> {
-        let has_table_ref = (flags & NODE_FLAG_HAS_TABLE_REF) != 0;
-        let has_vector_ref = (flags & NODE_FLAG_HAS_VECTOR_REF) != 0;
-        let table_ref_size = if has_table_ref { TABLE_REF_SIZE } else { 0 };
-
-        let mut offset = header_size + id_len + label_len + table_ref_size;
-        if data.len() < offset {
-            return None;
-        }
-
-        let id = String::from_utf8_lossy(&data[header_size..header_size + id_len]).to_string();
-        let label =
-            String::from_utf8_lossy(&data[header_size + id_len..header_size + id_len + label_len])
-                .to_string();
-
-        let table_ref = if has_table_ref {
-            let ref_start = header_size + id_len + label_len;
-            TableRef::decode(&data[ref_start..])
-        } else {
-            None
-        };
-
-        let vector_ref = if has_vector_ref {
-            if data.len() < offset + 2 {
-                return None;
-            }
-            let coll_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-            offset += 2;
-            if data.len() < offset + coll_len + 8 {
-                return None;
-            }
-            let collection = String::from_utf8_lossy(&data[offset..offset + coll_len]).to_string();
-            offset += coll_len;
-            let vector_id = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
-            Some((collection, vector_id))
-        } else {
-            None
-        };
-
-        Some(Self {
-            id,
-            label,
+    ) -> Self {
+        Self {
+            id: record.id,
+            label: record.label,
             node_type,
             label_id,
-            flags,
-            out_edge_count,
-            in_edge_count,
+            flags: record.flags,
+            out_edge_count: record.out_edge_count,
+            in_edge_count: record.in_edge_count,
             page_id,
             slot,
-            table_ref,
-            vector_ref,
-        })
+            table_ref: record
+                .table_ref
+                .map(|t| TableRef::new(t.table_id, t.row_id)),
+            vector_ref: record.vector_ref.map(|v| (v.collection, v.vector_id)),
+        }
+    }
+
+    fn from_legacy_file_record(
+        record: reddb_file::LegacyGraphNodeRecord,
+        page_id: u32,
+        slot: u16,
+        node_type: String,
+        label_id: LabelId,
+    ) -> Self {
+        Self {
+            id: record.id,
+            label: record.label,
+            node_type,
+            label_id,
+            flags: record.flags,
+            out_edge_count: record.out_edge_count,
+            in_edge_count: record.in_edge_count,
+            page_id,
+            slot,
+            table_ref: record
+                .table_ref
+                .map(|t| TableRef::new(t.table_id, t.row_id)),
+            vector_ref: record.vector_ref.map(|v| (v.collection, v.vector_id)),
+        }
     }
 
     /// Calculate encoded size
     pub fn encoded_size(&self) -> usize {
-        let table_ref_size = if self.table_ref.is_some() {
-            TABLE_REF_SIZE
-        } else {
-            0
-        };
-        let vector_ref_size = if let Some((ref coll, _)) = self.vector_ref {
-            2 + coll.len() + 8
-        } else {
-            0
-        };
-        NODE_HEADER_SIZE + self.id.len() + self.label.len() + table_ref_size + vector_ref_size
+        reddb_file::graph_node_record_v2_encoded_size(&self.as_file_record())
     }
 
     /// Link this node to a table row
@@ -382,100 +283,82 @@ pub struct StoredEdge {
 impl StoredEdge {
     /// Encode edge to bytes (v2 format).
     pub fn encode(&self) -> Vec<u8> {
-        let source_bytes = self.source_id.as_bytes();
-        let target_bytes = self.target_id.as_bytes();
-
-        let mut buf =
-            Vec::with_capacity(EDGE_HEADER_SIZE + source_bytes.len() + target_bytes.len());
-
-        // V2 header: source_len(2) + target_len(2) + label_id(4) + weight(4)
-        buf.extend_from_slice(&(source_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&(target_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&self.label_id.as_u32().to_le_bytes());
-        buf.extend_from_slice(&self.weight.to_le_bytes());
-
-        buf.extend_from_slice(source_bytes);
-        buf.extend_from_slice(target_bytes);
-
-        buf
+        reddb_file::encode_graph_edge_record_v2(&self.as_file_record())
     }
 
     /// Decode edge from bytes (v2 format). For v1 records use [`decode_v1`].
     pub fn decode(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
-        if data.len() < EDGE_HEADER_SIZE {
-            return None;
-        }
-
-        let source_len = u16::from_le_bytes([data[0], data[1]]) as usize;
-        let target_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let label_id = LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
-        let weight = f32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let record = reddb_file::decode_graph_edge_record_v2(data)?;
+        let label_id = LabelId::new(record.label_id);
         let edge_type = label_id_to_edge_label(label_id);
-
-        if data.len() < EDGE_HEADER_SIZE + source_len + target_len {
-            return None;
-        }
-
-        let source_id =
-            String::from_utf8_lossy(&data[EDGE_HEADER_SIZE..EDGE_HEADER_SIZE + source_len])
-                .to_string();
-        let target_id = String::from_utf8_lossy(
-            &data[EDGE_HEADER_SIZE + source_len..EDGE_HEADER_SIZE + source_len + target_len],
-        )
-        .to_string();
-
-        Some(Self {
-            source_id,
-            target_id,
-            edge_type,
-            label_id,
-            weight,
-            page_id,
-            slot,
-        })
+        Some(Self::from_file_record(
+            record, page_id, slot, edge_type, label_id,
+        ))
     }
 
     /// Decode a v1 (legacy) edge record. The 1-byte enum discriminant maps
     /// to the legacy reserved [`LabelId`] range via
     /// [`LabelRegistry::legacy_edge_label_id`].
     pub fn decode_v1(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
-        if data.len() < EDGE_HEADER_SIZE_V1 {
+        let record = reddb_file::decode_graph_edge_record_v1(data)?;
+        if record.legacy_type > 9 {
             return None;
         }
-        let source_len = u16::from_le_bytes([data[0], data[1]]) as usize;
-        let target_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-        if data[4] > 9 {
-            return None;
-        }
-        let weight = f32::from_le_bytes([data[5], data[6], data[7], data[8]]);
-        let label_id = LabelRegistry::legacy_edge_label_id(data[4]);
+        let label_id = LabelRegistry::legacy_edge_label_id(record.legacy_type);
         let edge_type = label_id_to_edge_label(label_id);
-
-        if data.len() < EDGE_HEADER_SIZE_V1 + source_len + target_len {
-            return None;
-        }
-        let source_id =
-            String::from_utf8_lossy(&data[EDGE_HEADER_SIZE_V1..EDGE_HEADER_SIZE_V1 + source_len])
-                .to_string();
-        let target_id = String::from_utf8_lossy(
-            &data[EDGE_HEADER_SIZE_V1 + source_len..EDGE_HEADER_SIZE_V1 + source_len + target_len],
-        )
-        .to_string();
-
-        Some(Self {
-            source_id,
-            target_id,
-            edge_type,
-            label_id,
-            weight,
-            page_id,
-            slot,
-        })
+        Some(Self::from_legacy_file_record(
+            record, page_id, slot, edge_type, label_id,
+        ))
     }
 
     /// Calculate encoded size (v2)
     pub fn encoded_size(&self) -> usize {
-        EDGE_HEADER_SIZE + self.source_id.len() + self.target_id.len()
+        reddb_file::graph_edge_record_v2_encoded_size(&self.as_file_record())
+    }
+
+    fn as_file_record(&self) -> reddb_file::GraphEdgeRecord {
+        reddb_file::GraphEdgeRecord {
+            source_id: self.source_id.clone(),
+            target_id: self.target_id.clone(),
+            label_id: self.label_id.as_u32(),
+            weight: self.weight,
+        }
+    }
+
+    fn from_file_record(
+        record: reddb_file::GraphEdgeRecord,
+        page_id: u32,
+        slot: u16,
+        edge_type: String,
+        label_id: LabelId,
+    ) -> Self {
+        Self {
+            source_id: record.source_id,
+            target_id: record.target_id,
+            edge_type,
+            label_id,
+            weight: record.weight,
+            page_id,
+            slot,
+        }
+    }
+
+    fn from_legacy_file_record(
+        record: reddb_file::LegacyGraphEdgeRecord,
+        page_id: u32,
+        slot: u16,
+        edge_type: String,
+        label_id: LabelId,
+    ) -> Self {
+        Self {
+            source_id: record.source_id,
+            target_id: record.target_id,
+            edge_type,
+            label_id,
+            weight: record.weight,
+            page_id,
+            slot,
+        }
     }
 }
 
@@ -1058,12 +941,8 @@ mod tests {
             .unwrap();
 
         let bytes = store.serialize();
-        // V2 magic + version
-        assert_eq!(&bytes[0..4], b"RBGR");
-        assert_eq!(
-            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-            2
-        );
+        let frame = reddb_file::decode_graph_store_frame(&bytes, PAGE_SIZE).unwrap();
+        assert_eq!(frame.version, reddb_file::GRAPH_STORE_VERSION_V2);
 
         let restored = GraphStore::deserialize(&bytes).unwrap();
         // Registry survived.
@@ -1124,16 +1003,15 @@ mod tests {
         v1_edge.extend_from_slice(b"n1");
         edge_page.insert_cell(b"n1|0|n1", &v1_edge).unwrap();
 
-        // Assemble v1 file: header + node-page-count + node-pages + edge-page-count + edge-pages.
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RBGR");
-        bytes.extend_from_slice(&1u32.to_le_bytes()); // version=1
-        bytes.extend_from_slice(&1u64.to_le_bytes()); // node_count
-        bytes.extend_from_slice(&1u64.to_le_bytes()); // edge_count
-        bytes.extend_from_slice(&1u32.to_le_bytes()); // node_page_count
-        bytes.extend_from_slice(node_page.as_bytes());
-        bytes.extend_from_slice(&1u32.to_le_bytes()); // edge_page_count
-        bytes.extend_from_slice(edge_page.as_bytes());
+        let bytes = reddb_file::encode_graph_store_frame(&reddb_file::GraphStoreFrame {
+            version: reddb_file::GRAPH_STORE_VERSION_V1,
+            node_count: 1,
+            edge_count: 1,
+            registry_bytes: None,
+            node_pages: vec![node_page.as_bytes().to_vec()],
+            edge_pages: vec![edge_page.as_bytes().to_vec()],
+        })
+        .unwrap();
 
         let store = GraphStore::deserialize(&bytes).expect("v1 blob deserializes");
         // Node decoded via legacy path → label_id mapped to reserved ID 1 ("host").
@@ -1148,13 +1026,11 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_unknown_version() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RBGR");
-        bytes.extend_from_slice(&999u32.to_le_bytes()); // bogus version
-        bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&0u64.to_le_bytes());
+        let mut bytes = [0u8; reddb_file::GRAPH_STORE_HEADER_LEN];
+        bytes[0..4].copy_from_slice(&reddb_file::GRAPH_STORE_MAGIC);
+        bytes[4..8].copy_from_slice(&999u32.to_le_bytes());
         match GraphStore::deserialize(&bytes) {
-            Err(GraphStoreError::InvalidData(msg)) => assert!(msg.contains("Unsupported")),
+            Err(GraphStoreError::InvalidData(msg)) => assert!(msg.contains("unsupported")),
             Err(other) => panic!("unexpected error: {:?}", other),
             Ok(_) => panic!("expected error for unknown version"),
         }

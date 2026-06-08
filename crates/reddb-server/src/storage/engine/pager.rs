@@ -33,7 +33,7 @@
 //! - Turso `core/storage/pager.rs:120` - pager.add_dirty(&page)
 
 use super::freelist::FreeList;
-use super::page::{Page, PageError, PageType, DB_VERSION, HEADER_SIZE, MAGIC_BYTES, PAGE_SIZE};
+use super::page::{Page, PageError, PageType, PAGE_SIZE};
 use super::page_cache::PageCache;
 use crate::storage::wal::writer::WalWriter;
 use fs2::FileExt;
@@ -43,6 +43,8 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+
+pub use reddb_file::{DatabaseHeader, PhysicalFileHeader};
 
 /// Default cache size (pages)
 const DEFAULT_CACHE_SIZE: usize = 10_000;
@@ -161,78 +163,6 @@ impl Default for PagerConfig {
     }
 }
 
-/// Database file header information
-#[derive(Debug, Clone)]
-pub struct DatabaseHeader {
-    /// Database version
-    pub version: u32,
-    /// Page size (always 4096)
-    pub page_size: u32,
-    /// Total number of pages
-    pub page_count: u32,
-    /// First freelist trunk page ID (0 = no free pages)
-    pub freelist_head: u32,
-    /// Schema version (for migrations)
-    pub schema_version: u32,
-    /// Last checkpoint LSN
-    pub checkpoint_lsn: u64,
-    /// Whether a checkpoint is currently in progress (two-phase)
-    pub checkpoint_in_progress: bool,
-    /// Target LSN for the in-progress checkpoint
-    pub checkpoint_target_lsn: u64,
-    /// Physical layout header mirrored into page 0
-    pub physical: PhysicalFileHeader,
-}
-
-/// Minimal physical state published into page 0 for paged databases.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PhysicalFileHeader {
-    pub format_version: u32,
-    pub sequence: u64,
-    pub manifest_oldest_root: u64,
-    pub manifest_root: u64,
-    pub free_set_root: u64,
-    pub manifest_page: u32,
-    pub manifest_checksum: u64,
-    pub collection_roots_page: u32,
-    pub collection_roots_checksum: u64,
-    pub collection_root_count: u32,
-    pub snapshot_count: u32,
-    pub index_count: u32,
-    pub catalog_collection_count: u32,
-    pub catalog_total_entities: u64,
-    pub export_count: u32,
-    pub graph_projection_count: u32,
-    pub analytics_job_count: u32,
-    pub manifest_event_count: u32,
-    pub registry_page: u32,
-    pub registry_checksum: u64,
-    pub recovery_page: u32,
-    pub recovery_checksum: u64,
-    pub catalog_page: u32,
-    pub catalog_checksum: u64,
-    pub metadata_state_page: u32,
-    pub metadata_state_checksum: u64,
-    pub vector_artifact_page: u32,
-    pub vector_artifact_checksum: u64,
-}
-
-impl Default for DatabaseHeader {
-    fn default() -> Self {
-        Self {
-            version: DB_VERSION,
-            page_size: PAGE_SIZE as u32,
-            page_count: 1, // Header page
-            freelist_head: 0,
-            schema_version: 0,
-            checkpoint_lsn: 0,
-            checkpoint_in_progress: false,
-            checkpoint_target_lsn: 0,
-            physical: PhysicalFileHeader::default(),
-        }
-    }
-}
-
 /// Page I/O Manager
 ///
 /// Handles reading/writing pages and manages the page cache.
@@ -243,7 +173,7 @@ pub struct Pager {
     file: Mutex<File>,
     /// Exclusive file lock (held for lifetime, released on drop)
     _lock_file: Option<File>,
-    /// Double-write buffer file (.rdb-dwb)
+    /// Double-write buffer file.
     dwb_file: Option<Mutex<File>>,
     /// Page cache
     cache: PageCache,
@@ -349,24 +279,19 @@ mod tests {
     }
 
     fn write_dwb_fixture(path: &Path, pages: &[(u32, Page)]) {
-        let entry_size = 4 + PAGE_SIZE;
-        let header_len = 12;
-        let total = header_len + pages.len() * entry_size;
-        let mut buf = Vec::with_capacity(total);
-
-        buf.extend_from_slice(&[0x52, 0x44, 0x44, 0x57]); // "RDDW"
-        buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&[0u8; 4]);
-
-        for (page_id, page) in pages {
-            let mut page = page.clone();
-            page.update_checksum();
-            buf.extend_from_slice(&page_id.to_le_bytes());
-            buf.extend_from_slice(page.as_bytes());
-        }
-
-        let checksum = crate::storage::engine::crc32::crc32(&buf[header_len..]);
-        buf[8..12].copy_from_slice(&checksum.to_le_bytes());
+        let pages: Vec<_> = pages
+            .iter()
+            .map(|(page_id, page)| {
+                let mut page = page.clone();
+                page.update_checksum();
+                (*page_id, page)
+            })
+            .collect();
+        let buf = reddb_file::encode_paged_dwb_frame(
+            pages
+                .iter()
+                .map(|(page_id, page)| (*page_id, page.as_bytes())),
+        );
 
         let dwb_path = dwb_path_for(path);
         let mut file = fs::File::create(&dwb_path).unwrap();
@@ -874,8 +799,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let db_path = temp_db_path();
-        let mut wal_path = db_path.clone();
-        wal_path.set_extension("wal");
+        let wal_path = reddb_file::layout::pager_legacy_wal_path(&db_path);
         let _ = fs::remove_file(&wal_path);
 
         let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
@@ -902,8 +826,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let db_path = temp_db_path();
-        let mut wal_path = db_path.clone();
-        wal_path.set_extension("wal");
+        let wal_path = reddb_file::layout::pager_legacy_wal_path(&db_path);
         let _ = fs::remove_file(&wal_path);
 
         let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
@@ -944,8 +867,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let db_path = temp_db_path();
-        let mut wal_path = db_path.clone();
-        wal_path.set_extension("wal");
+        let wal_path = reddb_file::layout::pager_legacy_wal_path(&db_path);
         let _ = fs::remove_file(&wal_path);
 
         let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
