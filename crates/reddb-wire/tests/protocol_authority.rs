@@ -683,6 +683,8 @@ fn redwire_queue_wait_payload_and_frame_builders_live_in_reddb_wire() {
         "kind(MessageKind::StreamError)",
         "obj.insert(\"code\"",
         "obj.insert(\"message\"",
+        "pub fn build_event_push_payload",
+        "build_event_push_payload_from_json_bytes",
         "build_queue_wait_timeout_payload(queue, wait_ms)",
     ] {
         assert!(
