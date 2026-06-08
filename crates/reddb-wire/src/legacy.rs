@@ -61,6 +61,21 @@ pub fn write_frame_header(buf: &mut Vec<u8>, msg_type: u8, payload_len: u32) {
     buf.push(msg_type);
 }
 
+pub fn build_legacy_frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + payload.len());
+    write_frame_header(&mut out, msg_type, payload.len() as u32);
+    out.extend_from_slice(payload);
+    out
+}
+
+pub fn build_legacy_result_frame(payload: &[u8]) -> Vec<u8> {
+    build_legacy_frame(MSG_RESULT, payload)
+}
+
+pub fn build_legacy_error_frame(message: &[u8]) -> Vec<u8> {
+    build_legacy_frame(MSG_ERROR, message)
+}
+
 #[inline]
 pub fn encode_value(buf: &mut Vec<u8>, value: &WireValue) {
     match value {
@@ -180,6 +195,18 @@ mod tests {
         let mut out = Vec::new();
         write_frame_header(&mut out, MSG_RESULT, 10);
         assert_eq!(out, [11, 0, 0, 0, MSG_RESULT]);
+    }
+
+    #[test]
+    fn legacy_frame_builders_wrap_payloads() {
+        assert_eq!(
+            build_legacy_result_frame(b"ok"),
+            [3, 0, 0, 0, MSG_RESULT, b'o', b'k']
+        );
+        assert_eq!(
+            build_legacy_error_frame(b"no"),
+            [3, 0, 0, 0, MSG_ERROR, b'n', b'o']
+        );
     }
 
     #[test]
