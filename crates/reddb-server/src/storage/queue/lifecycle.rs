@@ -208,6 +208,7 @@ pub(crate) trait QueueStore {
         queue: &str,
         message_id: MessageId,
         group: &str,
+        consumer: &str,
         deadline: Instant,
     ) -> Result<DeliveryId>;
 
@@ -247,6 +248,10 @@ pub(crate) trait QueueStore {
     /// second pending-row lookup. Pending row is left in place; only the
     /// attempts counter mutates.
     fn bump_attempt(&self, txn: &QueueTxn, delivery_id: &str) -> Result<BumpedAttempt>;
+
+    /// Read the current attempt count for `delivery_id` without
+    /// mutating pending state.
+    fn read_pending_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt>;
 
     /// Per-message retry budget — the value the lifecycle compares the
     /// `bump_attempt` return against to decide retire-vs-requeue. Sourced
@@ -361,6 +366,7 @@ struct PendingDelivery {
     queue: QueueId,
     message_id: MessageId,
     group: ConsumerGroupId,
+    consumer: String,
     deadline: Instant,
     attempts: u32,
 }
@@ -507,6 +513,7 @@ impl QueueStore for InMemoryQueueStore {
         queue: &str,
         message_id: MessageId,
         group: &str,
+        consumer: &str,
         deadline: Instant,
     ) -> Result<DeliveryId> {
         let key = (queue.to_string(), message_id, group.to_string());
@@ -517,6 +524,7 @@ impl QueueStore for InMemoryQueueStore {
             }
             if let Some(existing) = state.by_key.get(&key).cloned() {
                 if let Some(entry) = state.pending.get_mut(&existing) {
+                    entry.consumer = consumer.to_string();
                     entry.deadline = deadline;
                 }
                 return Ok(existing);
@@ -531,6 +539,7 @@ impl QueueStore for InMemoryQueueStore {
                 queue: queue.to_string(),
                 message_id,
                 group: group.to_string(),
+                consumer: consumer.to_string(),
                 deadline,
                 attempts,
             },
@@ -647,6 +656,19 @@ impl QueueStore for InMemoryQueueStore {
             attempts: count,
             queue,
             message_id,
+        })
+    }
+
+    fn read_pending_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt> {
+        let state = self.state.lock().expect("state poisoned");
+        let entry = state
+            .pending
+            .get(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        Ok(BumpedAttempt {
+            attempts: entry.attempts,
+            queue: entry.queue.clone(),
+            message_id: entry.message_id,
         })
     }
 
@@ -965,7 +987,7 @@ mod tests {
         let t = txn();
         // Lock id=10 as pending — pop must skip it.
         store
-            .mark_pending(&t, "q", 10, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 10, "g", "c", deadline_in(1000))
             .unwrap();
         let popped = store.pop_available(&t, "q", QueueSide::Left, 10).unwrap();
         assert_eq!(
@@ -1027,7 +1049,7 @@ mod tests {
         store.seed_queue("q", vec![1]);
         let t = txn();
         let id = store
-            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 1, "g", "c", deadline_in(1000))
             .expect("mark");
         assert!(!id.is_empty(), "delivery_id is empty");
         assert!(
@@ -1042,10 +1064,10 @@ mod tests {
         store.seed_queue("q", vec![1, 2]);
         let t = txn();
         let a = store
-            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 1, "g", "c", deadline_in(1000))
             .unwrap();
         let b = store
-            .mark_pending(&t, "q", 2, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 2, "g", "c", deadline_in(1000))
             .unwrap();
         assert_ne!(a, b);
     }
@@ -1056,10 +1078,10 @@ mod tests {
         store.seed_queue("q", vec![1]);
         let t = txn();
         let a = store
-            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 1, "g", "c", deadline_in(1000))
             .unwrap();
         let b = store
-            .mark_pending(&t, "q", 1, "g", deadline_in(2000))
+            .mark_pending(&t, "q", 1, "g", "c", deadline_in(2000))
             .unwrap();
         assert_eq!(
             a, b,
@@ -1080,7 +1102,7 @@ mod tests {
         store.seed_queue("q", vec![1]);
         let t = txn();
         let id = store
-            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 1, "g", "c", deadline_in(1000))
             .unwrap();
         let first = store.bump_attempt(&t, &id).unwrap();
         assert_eq!(first.attempts, 1);
@@ -1108,13 +1130,13 @@ mod tests {
 
         // mark_pending alone does not tombstone.
         let d1 = store
-            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 1, "g", "c", deadline_in(1000))
             .unwrap();
         let d2 = store
-            .mark_pending(&t, "q", 2, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 2, "g", "c", deadline_in(1000))
             .unwrap();
         let d3 = store
-            .mark_pending(&t, "q", 3, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 3, "g", "c", deadline_in(1000))
             .unwrap();
         assert!(
             t.recorded_tombstones().is_empty(),
@@ -1148,7 +1170,7 @@ mod tests {
             "release_pending must not record"
         );
         let d3 = store
-            .mark_pending(&t, "q", 3, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 3, "g", "c", deadline_in(1000))
             .unwrap();
         store.bump_attempt(&t, &d3).unwrap();
         assert_eq!(
@@ -1228,7 +1250,7 @@ mod tests {
         store.seed_queue("q", vec![1, 2, 3]);
         let t = txn();
         let _ = store
-            .mark_pending(&t, "q", 2, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 2, "g", "c", deadline_in(1000))
             .unwrap();
         let avail = store.available_messages("q", QueueSide::Left);
         assert_eq!(avail, vec![1, 3]);
@@ -1242,7 +1264,7 @@ mod tests {
         store.seed_queue("q", vec![1]);
         let t = txn();
         let id = store
-            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 1, "g", "c", deadline_in(1000))
             .unwrap();
         assert!(store.available_messages("q", QueueSide::Left).is_empty());
         store.release_pending(&t, &id).unwrap();
@@ -1255,7 +1277,7 @@ mod tests {
         store.seed_queue("q", vec![1]);
         let t = txn();
         let dl = deadline_in(1000);
-        let id = store.mark_pending(&t, "q", 1, "g", dl).unwrap();
+        let id = store.mark_pending(&t, "q", 1, "g", "c", dl).unwrap();
         assert_eq!(store.read_lock_deadline(&id), Some(dl));
         store.release_pending(&t, &id).unwrap();
         assert_eq!(store.read_lock_deadline(&id), None);
@@ -1268,8 +1290,8 @@ mod tests {
         let t = txn();
         let d1 = deadline_in(1000);
         let d2 = deadline_in(5000);
-        let id = store.mark_pending(&t, "q", 1, "g", d1).unwrap();
-        let id2 = store.mark_pending(&t, "q", 1, "g", d2).unwrap();
+        let id = store.mark_pending(&t, "q", 1, "g", "c", d1).unwrap();
+        let id2 = store.mark_pending(&t, "q", 1, "g", "c", d2).unwrap();
         assert_eq!(id, id2);
         assert_eq!(store.read_lock_deadline(&id), Some(d2));
     }
@@ -1279,7 +1301,7 @@ mod tests {
         let store = InMemoryQueueStore::new();
         let t = txn();
         let err = store
-            .mark_pending(&t, "missing", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "missing", 1, "g", "c", deadline_in(1000))
             .unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownQueue(_)));
     }

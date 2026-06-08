@@ -444,7 +444,9 @@ fn execute_grpc_query_with_optional_params(
     }
 
     if params.is_empty() {
-        return runtime.execute_query(&query).map_err(to_status);
+        let result = runtime.execute_query(&query).map_err(to_status)?;
+        enforce_grpc_commit_policy_after_query_result(runtime, &result)?;
+        return Ok(result);
     }
 
     let binds = params
@@ -455,7 +457,24 @@ fn execute_grpc_query_with_optional_params(
         .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
     let bound = crate::storage::query::user_params::bind(&parsed, &binds)
         .map_err(|e| Status::invalid_argument(format!("bind error: {e}")))?;
-    runtime.execute_query_expr(bound).map_err(to_status)
+    let result = runtime.execute_query_expr(bound).map_err(to_status)?;
+    enforce_grpc_commit_policy_after_query_result(runtime, &result)?;
+    Ok(result)
+}
+
+fn enforce_grpc_commit_policy_after_query_result(
+    runtime: &RedDBRuntime,
+    result: &RuntimeQueryResult,
+) -> Result<(), Status> {
+    let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
+    if !is_mutation {
+        return Ok(());
+    }
+    let post_lsn = runtime.cdc_current_lsn();
+    runtime
+        .enforce_commit_policy(post_lsn)
+        .map(|_| ())
+        .map_err(|err| Status::deadline_exceeded(err.to_string()))
 }
 
 #[cfg(test)]
@@ -574,6 +593,44 @@ mod grpc_query_value_tests {
         assert_eq!(result.result.records.len(), 1);
     }
 
+    #[test]
+    fn grpc_query_enforces_ack_n_commit_policy_fail_closed() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[
+            ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
+            ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ]);
+        let data_path = temp_data_path("grpc_ack_n_timeout");
+        cleanup(&data_path);
+
+        let runtime = RedDBRuntime::with_options(
+            crate::api::RedDBOptions::persistent(&data_path)
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("runtime");
+
+        let err = execute_grpc_query_with_optional_params(
+            &runtime,
+            "INSERT INTO grpc_ack_items (id, name) VALUES (1, 'alpha')".to_string(),
+            Vec::new(),
+        )
+        .expect_err("ack_n without replica ack must fail closed");
+
+        assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
+        assert!(
+            err.message().contains("commit policy timed out")
+                && err.message().contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+            "error should identify commit policy timeout, got {err:?}"
+        );
+        assert!(
+            runtime.cdc_current_lsn() > 0,
+            "local mutation should advance CDC before gRPC response fails"
+        );
+
+        cleanup(&data_path);
+    }
+
     #[tokio::test]
     async fn grpc_query_rpc_binds_query_request_params() {
         let runtime =
@@ -625,6 +682,75 @@ mod grpc_query_value_tests {
                 kind: Some(Kind::TextValue("Alice".to_string())),
             },
         ]
+    }
+
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &'static str)]) -> Self {
+            let previous = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var(key).ok()))
+                .collect();
+            for (key, value) in vars {
+                std::env::set_var(key, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.iter().rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn temp_data_path(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("reddb_{name}_{suffix}.rdb"))
+    }
+
+    fn cleanup(data_path: &std::path::Path) {
+        let _ = std::fs::remove_file(data_path);
+        let _ = std::fs::remove_file(
+            crate::replication::primary::PrimaryReplication::slot_path_for(data_path),
+        );
+        let _ = std::fs::remove_file(crate::replication::primary::LogicalWalSpool::path_for(
+            data_path,
+        ));
+        let _ = std::fs::remove_dir_all(
+            crate::replication::primary::PrimaryReplication::primary_replica_root_for(data_path),
+        );
+        let _ = std::fs::remove_dir_all(crate::replication::replica::rebootstrap_staging_root_for(
+            data_path,
+        ));
+        let _ = std::fs::remove_file(crate::replication::replica::rebootstrap_pending_path_for(
+            data_path,
+        ));
+        let _ = std::fs::remove_file(
+            crate::replication::replica::rebootstrap_ready_marker_path_for(data_path),
+        );
+        let _ = std::fs::remove_file(
+            crate::replication::replica::rebootstrap_intent_log_path_for(data_path),
+        );
+        let _ = std::fs::remove_file(crate::replication::replica::rebootstrap_previous_path_for(
+            data_path,
+        ));
     }
 }
 

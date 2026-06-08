@@ -38,28 +38,13 @@
 
 use std::time::Duration;
 
+use reddb_wire::replication::CausalBookmark;
 use reddb_wire::topology::{Endpoint, ReplicaInfo};
 
 use crate::topology::ClusterMembership;
 
-/// A causal bookmark target the routing table reasons about.
-///
-/// Mirrors the server's `CausalBookmark` `(term, commit_lsn)` shape
-/// without depending on the engine crate — the driver only needs the
-/// two numbers to decide eligibility and routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BookmarkTarget {
-    /// Replication term the bookmark was minted under.
-    pub term: u64,
-    /// Commit LSN a read must observe to be causally consistent.
-    pub commit_lsn: u64,
-}
-
-impl BookmarkTarget {
-    pub fn new(term: u64, commit_lsn: u64) -> Self {
-        Self { term, commit_lsn }
-    }
-}
+/// Backwards-compatible client name for the wire causal bookmark token.
+pub type BookmarkTarget = CausalBookmark;
 
 /// The write-path endpoint: the current primary, tagged with the
 /// replication term it is serving.
@@ -115,7 +100,7 @@ impl ReadEndpoint {
         // covers the bookmark: that frontier describes data it is about
         // to throw away on the atomic swap (issue #837).
         let eligible =
-            info.healthy && !info.rebootstrapping && info.last_applied_lsn >= bookmark.commit_lsn;
+            info.healthy && !info.rebootstrapping && info.last_applied_lsn >= bookmark.commit_lsn();
         Self {
             addr: info.addr.clone(),
             region: info.region.clone(),
@@ -138,9 +123,6 @@ impl ReadEndpoint {
 /// Why a causal read landed on the endpoint it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteKind {
-    /// Eventual read routed to a healthy replica without a freshness
-    /// requirement.
-    EventualReplica,
     /// The chosen target replica's snapshot frontier already covered
     /// the bookmark — no wait was needed.
     EligibleTarget,
@@ -296,59 +278,6 @@ impl RoutingTable {
             .position(|r| r.healthy && !r.rebootstrapping)
     }
 
-    /// Pick a replica for an ordinary eventual read.
-    ///
-    /// Eventual reads have no required LSN, so any healthy replica is
-    /// eligible. Re-bootstrapping replicas are included here: they may
-    /// keep serving their old snapshot for non-causal reads while
-    /// rebuilding, but they remain excluded from freshness-required
-    /// routes.
-    pub fn route_eventual_read(&self, preferred_region: Option<&str>) -> RouteDecision {
-        let replica = preferred_region
-            .and_then(|region| {
-                self.replicas
-                    .iter()
-                    .find(|r| r.healthy && r.region == region)
-            })
-            .or_else(|| self.replicas.iter().find(|r| r.healthy));
-
-        match replica {
-            Some(r) => RouteDecision {
-                endpoint: Endpoint {
-                    addr: r.addr.clone(),
-                    region: r.region.clone(),
-                },
-                kind: RouteKind::EventualReplica,
-                waited: Duration::ZERO,
-            },
-            None => RouteDecision {
-                endpoint: self.write.endpoint(),
-                kind: RouteKind::FallbackPrimary,
-                waited: Duration::ZERO,
-            },
-        }
-    }
-
-    /// Resolve a freshness-required read using a required contiguous
-    /// applied LSN rather than an opaque bookmark token.
-    ///
-    /// This is the same routing rule causal bookmarks use after the
-    /// token is decoded: only replicas whose contiguous applied
-    /// frontier reaches `required_lsn` may serve the read; the chosen
-    /// target gets a bounded chance to catch up before fallback.
-    pub fn route_required_lsn_read(
-        &self,
-        required_lsn: u64,
-        opts: &CausalReadOptions,
-        waiter: &mut dyn BookmarkWaiter,
-    ) -> RouteDecision {
-        self.route_causal_read(
-            BookmarkTarget::new(self.write.term, required_lsn),
-            opts,
-            waiter,
-        )
-    }
-
     /// Resolve a causal read with bounded-wait-then-fallback.
     ///
     /// Never errors: a lagging target degrades to a fallback hop
@@ -366,7 +295,7 @@ impl RoutingTable {
 
             // Fast path: the snapshot already shows the target past the
             // bookmark — route immediately, no wait.
-            if target.last_applied_lsn >= bookmark.commit_lsn {
+            if target.last_applied_lsn >= bookmark.commit_lsn() {
                 return RouteDecision {
                     endpoint: Endpoint {
                         addr: target.addr.clone(),
@@ -383,7 +312,7 @@ impl RoutingTable {
             let region = target.region.clone();
             while waiter.elapsed() < opts.deadline {
                 let frontier = waiter.poll(&addr);
-                if frontier >= bookmark.commit_lsn {
+                if frontier >= bookmark.commit_lsn() {
                     return RouteDecision {
                         endpoint: Endpoint { addr, region },
                         kind: RouteKind::CaughtUpTarget,
@@ -412,7 +341,7 @@ impl RoutingTable {
             Some(*i) != exclude
                 && r.healthy
                 && !r.rebootstrapping
-                && r.last_applied_lsn >= bookmark.commit_lsn
+                && r.last_applied_lsn >= bookmark.commit_lsn()
         });
         match caught_up {
             Some((_, r)) => RouteDecision {

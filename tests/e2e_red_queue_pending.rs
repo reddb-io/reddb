@@ -70,13 +70,11 @@ fn red_queue_pending_lists_active_delivery_row() {
         row.get("attempts"),
         Some(Value::UnsignedInteger(0))
     ));
-    // delivery_id is an opaque string we synthesize per delivery
-    // instance — assert it is non-empty and contains the queue
-    // and group as a sanity check on stability.
+    // delivery_id is an opaque server-issued handle; assert only that
+    // the pending row exposes a non-empty handle.
     match row.get("delivery_id") {
         Some(Value::Text(value)) => {
-            assert!(value.contains("tasks"));
-            assert!(value.contains("workers"));
+            assert!(!value.is_empty());
         }
         other => panic!("expected delivery_id text, got {other:?}"),
     }

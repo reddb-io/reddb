@@ -145,6 +145,9 @@ async fn serverless_attach(
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let required =
         grpc_parse_serverless_readiness_requirements(&payload).map_err(Status::invalid_argument)?;
+    self.native_use_cases()
+        .validate_current_serverless_generation()
+        .map_err(to_status)?;
     let readiness = self.native_use_cases().readiness();
     let (query_ready, write_ready, repair_ready) = (
         readiness.query_serverless,
@@ -203,6 +206,9 @@ async fn serverless_warmup(
             missing.join(", ")
         )));
     }
+    self.native_use_cases()
+        .validate_current_serverless_generation()
+        .map_err(to_status)?;
     let plan = self.admin_use_cases().build_serverless_warmup_plan(
         &self.catalog_use_cases().index_statuses(),
         &self.catalog_use_cases().graph_projection_statuses(),

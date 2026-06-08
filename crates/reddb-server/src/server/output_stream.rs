@@ -278,7 +278,7 @@ fn base64url_decode_padded(input: &str) -> Option<Vec<u8>> {
     while !s.len().is_multiple_of(4) {
         s.push('=');
     }
-    crate::wire::redwire::auth::base64_std_decode(&s)
+    reddb_wire::redwire::handshake::base64_std_decode(&s)
 }
 
 /// Issue #767 / S8 — wire-visible reason for `stream.closed`. The

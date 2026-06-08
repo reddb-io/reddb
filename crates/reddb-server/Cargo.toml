@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "../reddb-wire" }
 reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
+reddb-file = { package = "reddb-io-file", version = "1.0", path = "../reddb-file" }
 # rpc_stdio's Remote backend wraps the same gRPC client that the
 # `red` binary uses for the `red rpc` subcommand. Single-direction
 # dep — the client crate does not depend on the server.

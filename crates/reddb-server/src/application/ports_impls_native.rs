@@ -132,6 +132,10 @@ impl RuntimeNativePort for RedDBRuntime {
         RedDBRuntime::physical_authority_status(self)
     }
 
+    fn validate_current_serverless_generation(&self) -> RedDBResult<()> {
+        RedDBRuntime::read_current_serverless_generation_verified(self).map(|_| ())
+    }
+
     fn readiness_for_query(&self) -> bool {
         RedDBRuntime::readiness_for_query(self)
     }

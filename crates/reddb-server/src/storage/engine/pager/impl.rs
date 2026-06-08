@@ -1,7 +1,5 @@
 use super::*;
 
-/// DWB file magic: "RDDW"
-const DWB_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x57];
 pub(super) const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
@@ -328,28 +326,24 @@ impl Pager {
     /// | no     | yes          | `PlainDatabaseRefusesKey`           |
     /// | no     | no           | Plain pager — no binding needed     |
     fn bind_encryption_for_existing(&mut self) -> Result<(), PagerError> {
-        const ENCRYPTION_MARKER_OFFSET: usize = HEADER_SIZE + 32;
-        const ENCRYPTION_MARKER: &[u8; 4] = b"RDBE";
-
         if self.page_count().unwrap_or(0) == 0 {
             return self.bind_encryption_for_new();
         }
         let header_page = self.read_page_no_checksum(0)?;
         let data = header_page.as_bytes();
-        let has_marker = data.len() > ENCRYPTION_MARKER_OFFSET + 4
-            && &data[ENCRYPTION_MARKER_OFFSET..ENCRYPTION_MARKER_OFFSET + 4] == ENCRYPTION_MARKER;
+        let has_marker = reddb_file::paged_encryption_marker_present(data);
 
         let key = self.config.encryption.clone();
         match (has_marker, key) {
             (true, Some(key)) => {
-                let header_start = ENCRYPTION_MARKER_OFFSET + 4;
-                let header =
-                    crate::storage::encryption::EncryptionHeader::from_bytes(&data[header_start..])
-                        .map_err(|e| {
-                            PagerError::InvalidDatabase(format!(
-                                "encryption header parse failed: {e}"
-                            ))
-                        })?;
+                let header_bytes =
+                    reddb_file::paged_encryption_header_bytes(data).ok_or_else(|| {
+                        PagerError::InvalidDatabase("encryption header parse failed".to_string())
+                    })?;
+                let header = crate::storage::encryption::EncryptionHeader::from_bytes(header_bytes)
+                    .map_err(|e| {
+                        PagerError::InvalidDatabase(format!("encryption header parse failed: {e}"))
+                    })?;
                 if !header.validate(&key) {
                     return Err(PagerError::InvalidKey);
                 }
@@ -366,9 +360,6 @@ impl Pager {
     /// New DB: if a key is configured, write the marker + header to
     /// page 0 so subsequent opens detect encryption.
     fn bind_encryption_for_new(&mut self) -> Result<(), PagerError> {
-        const ENCRYPTION_MARKER_OFFSET: usize = HEADER_SIZE + 32;
-        const ENCRYPTION_MARKER: &[u8; 4] = b"RDBE";
-
         let Some(key) = self.config.encryption.clone() else {
             return Ok(());
         };
@@ -380,11 +371,9 @@ impl Pager {
         if self.page_count().unwrap_or(0) > 0 {
             let mut page = self.read_page_no_checksum(0)?;
             let data = page.as_bytes_mut();
-            data[ENCRYPTION_MARKER_OFFSET..ENCRYPTION_MARKER_OFFSET + 4]
-                .copy_from_slice(ENCRYPTION_MARKER);
             let header_bytes = header.to_bytes();
-            let header_start = ENCRYPTION_MARKER_OFFSET + 4;
-            data[header_start..header_start + header_bytes.len()].copy_from_slice(&header_bytes);
+            reddb_file::write_paged_encryption_marker_and_header(data, &header_bytes)
+                .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
             self.write_page_no_checksum(0, page)?;
         }
         self.encryption = Some((encryptor, header));
@@ -458,8 +447,7 @@ impl Pager {
         let header_page = match self.read_page_raw(0) {
             Ok(page) => {
                 // Verify magic bytes
-                let magic = &page.as_bytes()[HEADER_SIZE..HEADER_SIZE + 4];
-                if magic == MAGIC_BYTES {
+                if reddb_file::database_header_magic_matches(page.as_bytes()) {
                     page
                 } else {
                     // Page 0 corrupted — try shadow
@@ -469,336 +457,13 @@ impl Pager {
             Err(_) => self.recover_header_from_shadow()?,
         };
 
-        // Read header fields
-        let data = header_page.as_bytes();
-        let version = u32::from_le_bytes([
-            data[HEADER_SIZE + 4],
-            data[HEADER_SIZE + 5],
-            data[HEADER_SIZE + 6],
-            data[HEADER_SIZE + 7],
-        ]);
+        let decoded_header = reddb_file::decode_database_header(header_page.as_bytes())
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        let freelist_head = decoded_header.freelist_head;
 
-        let page_size = u32::from_le_bytes([
-            data[HEADER_SIZE + 8],
-            data[HEADER_SIZE + 9],
-            data[HEADER_SIZE + 10],
-            data[HEADER_SIZE + 11],
-        ]);
-
-        if page_size != PAGE_SIZE as u32 {
-            return Err(PagerError::InvalidDatabase(format!(
-                "Unsupported page size: {}",
-                page_size
-            )));
-        }
-        if version > DB_VERSION {
-            return Err(PagerError::InvalidDatabase(format!(
-                "Unsupported database version: file version {version} is newer than supported {DB_VERSION}"
-            )));
-        }
-
-        let page_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 12],
-            data[HEADER_SIZE + 13],
-            data[HEADER_SIZE + 14],
-            data[HEADER_SIZE + 15],
-        ]);
-
-        let freelist_head = u32::from_le_bytes([
-            data[HEADER_SIZE + 16],
-            data[HEADER_SIZE + 17],
-            data[HEADER_SIZE + 18],
-            data[HEADER_SIZE + 19],
-        ]);
-
-        let schema_version = u32::from_le_bytes([
-            data[HEADER_SIZE + 20],
-            data[HEADER_SIZE + 21],
-            data[HEADER_SIZE + 22],
-            data[HEADER_SIZE + 23],
-        ]);
-
-        let checkpoint_lsn = u64::from_le_bytes([
-            data[HEADER_SIZE + 24],
-            data[HEADER_SIZE + 25],
-            data[HEADER_SIZE + 26],
-            data[HEADER_SIZE + 27],
-            data[HEADER_SIZE + 28],
-            data[HEADER_SIZE + 29],
-            data[HEADER_SIZE + 30],
-            data[HEADER_SIZE + 31],
-        ]);
-        let physical_format_version = u32::from_le_bytes([
-            data[HEADER_SIZE + 32],
-            data[HEADER_SIZE + 33],
-            data[HEADER_SIZE + 34],
-            data[HEADER_SIZE + 35],
-        ]);
-        let physical_sequence = u64::from_le_bytes([
-            data[HEADER_SIZE + 36],
-            data[HEADER_SIZE + 37],
-            data[HEADER_SIZE + 38],
-            data[HEADER_SIZE + 39],
-            data[HEADER_SIZE + 40],
-            data[HEADER_SIZE + 41],
-            data[HEADER_SIZE + 42],
-            data[HEADER_SIZE + 43],
-        ]);
-        let manifest_root = u64::from_le_bytes([
-            data[HEADER_SIZE + 44],
-            data[HEADER_SIZE + 45],
-            data[HEADER_SIZE + 46],
-            data[HEADER_SIZE + 47],
-            data[HEADER_SIZE + 48],
-            data[HEADER_SIZE + 49],
-            data[HEADER_SIZE + 50],
-            data[HEADER_SIZE + 51],
-        ]);
-        let manifest_oldest_root = u64::from_le_bytes([
-            data[HEADER_SIZE + 52],
-            data[HEADER_SIZE + 53],
-            data[HEADER_SIZE + 54],
-            data[HEADER_SIZE + 55],
-            data[HEADER_SIZE + 56],
-            data[HEADER_SIZE + 57],
-            data[HEADER_SIZE + 58],
-            data[HEADER_SIZE + 59],
-        ]);
-        let free_set_root = u64::from_le_bytes([
-            data[HEADER_SIZE + 60],
-            data[HEADER_SIZE + 61],
-            data[HEADER_SIZE + 62],
-            data[HEADER_SIZE + 63],
-            data[HEADER_SIZE + 64],
-            data[HEADER_SIZE + 65],
-            data[HEADER_SIZE + 66],
-            data[HEADER_SIZE + 67],
-        ]);
-        let manifest_page = u32::from_le_bytes([
-            data[HEADER_SIZE + 68],
-            data[HEADER_SIZE + 69],
-            data[HEADER_SIZE + 70],
-            data[HEADER_SIZE + 71],
-        ]);
-        let manifest_checksum = u64::from_le_bytes([
-            data[HEADER_SIZE + 72],
-            data[HEADER_SIZE + 73],
-            data[HEADER_SIZE + 74],
-            data[HEADER_SIZE + 75],
-            data[HEADER_SIZE + 76],
-            data[HEADER_SIZE + 77],
-            data[HEADER_SIZE + 78],
-            data[HEADER_SIZE + 79],
-        ]);
-        let collection_roots_page = u32::from_le_bytes([
-            data[HEADER_SIZE + 80],
-            data[HEADER_SIZE + 81],
-            data[HEADER_SIZE + 82],
-            data[HEADER_SIZE + 83],
-        ]);
-        let collection_roots_checksum = u64::from_le_bytes([
-            data[HEADER_SIZE + 84],
-            data[HEADER_SIZE + 85],
-            data[HEADER_SIZE + 86],
-            data[HEADER_SIZE + 87],
-            data[HEADER_SIZE + 88],
-            data[HEADER_SIZE + 89],
-            data[HEADER_SIZE + 90],
-            data[HEADER_SIZE + 91],
-        ]);
-        let collection_root_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 92],
-            data[HEADER_SIZE + 93],
-            data[HEADER_SIZE + 94],
-            data[HEADER_SIZE + 95],
-        ]);
-        let snapshot_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 96],
-            data[HEADER_SIZE + 97],
-            data[HEADER_SIZE + 98],
-            data[HEADER_SIZE + 99],
-        ]);
-        let index_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 100],
-            data[HEADER_SIZE + 101],
-            data[HEADER_SIZE + 102],
-            data[HEADER_SIZE + 103],
-        ]);
-        let catalog_collection_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 104],
-            data[HEADER_SIZE + 105],
-            data[HEADER_SIZE + 106],
-            data[HEADER_SIZE + 107],
-        ]);
-        let catalog_total_entities = u64::from_le_bytes([
-            data[HEADER_SIZE + 108],
-            data[HEADER_SIZE + 109],
-            data[HEADER_SIZE + 110],
-            data[HEADER_SIZE + 111],
-            data[HEADER_SIZE + 112],
-            data[HEADER_SIZE + 113],
-            data[HEADER_SIZE + 114],
-            data[HEADER_SIZE + 115],
-        ]);
-        let export_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 116],
-            data[HEADER_SIZE + 117],
-            data[HEADER_SIZE + 118],
-            data[HEADER_SIZE + 119],
-        ]);
-        let graph_projection_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 120],
-            data[HEADER_SIZE + 121],
-            data[HEADER_SIZE + 122],
-            data[HEADER_SIZE + 123],
-        ]);
-        let analytics_job_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 124],
-            data[HEADER_SIZE + 125],
-            data[HEADER_SIZE + 126],
-            data[HEADER_SIZE + 127],
-        ]);
-        let manifest_event_count = u32::from_le_bytes([
-            data[HEADER_SIZE + 128],
-            data[HEADER_SIZE + 129],
-            data[HEADER_SIZE + 130],
-            data[HEADER_SIZE + 131],
-        ]);
-        let registry_page = u32::from_le_bytes([
-            data[HEADER_SIZE + 132],
-            data[HEADER_SIZE + 133],
-            data[HEADER_SIZE + 134],
-            data[HEADER_SIZE + 135],
-        ]);
-        let registry_checksum = u64::from_le_bytes([
-            data[HEADER_SIZE + 136],
-            data[HEADER_SIZE + 137],
-            data[HEADER_SIZE + 138],
-            data[HEADER_SIZE + 139],
-            data[HEADER_SIZE + 140],
-            data[HEADER_SIZE + 141],
-            data[HEADER_SIZE + 142],
-            data[HEADER_SIZE + 143],
-        ]);
-        let recovery_page = u32::from_le_bytes([
-            data[HEADER_SIZE + 144],
-            data[HEADER_SIZE + 145],
-            data[HEADER_SIZE + 146],
-            data[HEADER_SIZE + 147],
-        ]);
-        let recovery_checksum = u64::from_le_bytes([
-            data[HEADER_SIZE + 148],
-            data[HEADER_SIZE + 149],
-            data[HEADER_SIZE + 150],
-            data[HEADER_SIZE + 151],
-            data[HEADER_SIZE + 152],
-            data[HEADER_SIZE + 153],
-            data[HEADER_SIZE + 154],
-            data[HEADER_SIZE + 155],
-        ]);
-        let catalog_page = u32::from_le_bytes([
-            data[HEADER_SIZE + 156],
-            data[HEADER_SIZE + 157],
-            data[HEADER_SIZE + 158],
-            data[HEADER_SIZE + 159],
-        ]);
-        let catalog_checksum = u64::from_le_bytes([
-            data[HEADER_SIZE + 160],
-            data[HEADER_SIZE + 161],
-            data[HEADER_SIZE + 162],
-            data[HEADER_SIZE + 163],
-            data[HEADER_SIZE + 164],
-            data[HEADER_SIZE + 165],
-            data[HEADER_SIZE + 166],
-            data[HEADER_SIZE + 167],
-        ]);
-        let metadata_state_page = u32::from_le_bytes([
-            data[HEADER_SIZE + 168],
-            data[HEADER_SIZE + 169],
-            data[HEADER_SIZE + 170],
-            data[HEADER_SIZE + 171],
-        ]);
-        let metadata_state_checksum = u64::from_le_bytes([
-            data[HEADER_SIZE + 172],
-            data[HEADER_SIZE + 173],
-            data[HEADER_SIZE + 174],
-            data[HEADER_SIZE + 175],
-            data[HEADER_SIZE + 176],
-            data[HEADER_SIZE + 177],
-            data[HEADER_SIZE + 178],
-            data[HEADER_SIZE + 179],
-        ]);
-        let vector_artifact_page = u32::from_le_bytes([
-            data[HEADER_SIZE + 180],
-            data[HEADER_SIZE + 181],
-            data[HEADER_SIZE + 182],
-            data[HEADER_SIZE + 183],
-        ]);
-        let vector_artifact_checksum = u64::from_le_bytes([
-            data[HEADER_SIZE + 184],
-            data[HEADER_SIZE + 185],
-            data[HEADER_SIZE + 186],
-            data[HEADER_SIZE + 187],
-            data[HEADER_SIZE + 188],
-            data[HEADER_SIZE + 189],
-            data[HEADER_SIZE + 190],
-            data[HEADER_SIZE + 191],
-        ]);
-
-        // Two-phase checkpoint fields (offset 192-200)
-        let checkpoint_in_progress = data[HEADER_SIZE + 192] != 0;
-        let checkpoint_target_lsn = u64::from_le_bytes([
-            data[HEADER_SIZE + 193],
-            data[HEADER_SIZE + 194],
-            data[HEADER_SIZE + 195],
-            data[HEADER_SIZE + 196],
-            data[HEADER_SIZE + 197],
-            data[HEADER_SIZE + 198],
-            data[HEADER_SIZE + 199],
-            data[HEADER_SIZE + 200],
-        ]);
-
-        // Update header
         {
             let mut header = self.header_write()?;
-            header.version = version;
-            header.page_size = page_size;
-            header.page_count = page_count;
-            header.freelist_head = freelist_head;
-            header.schema_version = schema_version;
-            header.checkpoint_lsn = checkpoint_lsn;
-            header.checkpoint_in_progress = checkpoint_in_progress;
-            header.checkpoint_target_lsn = checkpoint_target_lsn;
-            header.physical = PhysicalFileHeader {
-                format_version: physical_format_version,
-                sequence: physical_sequence,
-                manifest_oldest_root,
-                manifest_root,
-                free_set_root,
-                manifest_page,
-                manifest_checksum,
-                collection_roots_page,
-                collection_roots_checksum,
-                collection_root_count,
-                snapshot_count,
-                index_count,
-                catalog_collection_count,
-                catalog_total_entities,
-                export_count,
-                graph_projection_count,
-                analytics_job_count,
-                manifest_event_count,
-                registry_page,
-                registry_checksum,
-                recovery_page,
-                recovery_checksum,
-                catalog_page,
-                catalog_checksum,
-                metadata_state_page,
-                metadata_state_checksum,
-                vector_artifact_page,
-                vector_artifact_checksum,
-            };
+            *header = decoded_header;
         }
 
         // Initialize freelist
@@ -841,80 +506,8 @@ impl Pager {
 
         let data = page.as_bytes_mut();
 
-        // Write magic
-        data[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&MAGIC_BYTES);
-
-        // Write fields (at fixed offsets in the DB header area)
-        data[HEADER_SIZE + 4..HEADER_SIZE + 8].copy_from_slice(&header.version.to_le_bytes());
-        data[HEADER_SIZE + 8..HEADER_SIZE + 12].copy_from_slice(&header.page_size.to_le_bytes());
-        data[HEADER_SIZE + 12..HEADER_SIZE + 16].copy_from_slice(&header.page_count.to_le_bytes());
-        data[HEADER_SIZE + 16..HEADER_SIZE + 20]
-            .copy_from_slice(&header.freelist_head.to_le_bytes());
-        data[HEADER_SIZE + 20..HEADER_SIZE + 24]
-            .copy_from_slice(&header.schema_version.to_le_bytes());
-        data[HEADER_SIZE + 24..HEADER_SIZE + 32]
-            .copy_from_slice(&header.checkpoint_lsn.to_le_bytes());
-        data[HEADER_SIZE + 32..HEADER_SIZE + 36]
-            .copy_from_slice(&header.physical.format_version.to_le_bytes());
-        data[HEADER_SIZE + 36..HEADER_SIZE + 44]
-            .copy_from_slice(&header.physical.sequence.to_le_bytes());
-        data[HEADER_SIZE + 44..HEADER_SIZE + 52]
-            .copy_from_slice(&header.physical.manifest_root.to_le_bytes());
-        data[HEADER_SIZE + 52..HEADER_SIZE + 60]
-            .copy_from_slice(&header.physical.manifest_oldest_root.to_le_bytes());
-        data[HEADER_SIZE + 60..HEADER_SIZE + 68]
-            .copy_from_slice(&header.physical.free_set_root.to_le_bytes());
-        data[HEADER_SIZE + 68..HEADER_SIZE + 72]
-            .copy_from_slice(&header.physical.manifest_page.to_le_bytes());
-        data[HEADER_SIZE + 72..HEADER_SIZE + 80]
-            .copy_from_slice(&header.physical.manifest_checksum.to_le_bytes());
-        data[HEADER_SIZE + 80..HEADER_SIZE + 84]
-            .copy_from_slice(&header.physical.collection_roots_page.to_le_bytes());
-        data[HEADER_SIZE + 84..HEADER_SIZE + 92]
-            .copy_from_slice(&header.physical.collection_roots_checksum.to_le_bytes());
-        data[HEADER_SIZE + 92..HEADER_SIZE + 96]
-            .copy_from_slice(&header.physical.collection_root_count.to_le_bytes());
-        data[HEADER_SIZE + 96..HEADER_SIZE + 100]
-            .copy_from_slice(&header.physical.snapshot_count.to_le_bytes());
-        data[HEADER_SIZE + 100..HEADER_SIZE + 104]
-            .copy_from_slice(&header.physical.index_count.to_le_bytes());
-        data[HEADER_SIZE + 104..HEADER_SIZE + 108]
-            .copy_from_slice(&header.physical.catalog_collection_count.to_le_bytes());
-        data[HEADER_SIZE + 108..HEADER_SIZE + 116]
-            .copy_from_slice(&header.physical.catalog_total_entities.to_le_bytes());
-        data[HEADER_SIZE + 116..HEADER_SIZE + 120]
-            .copy_from_slice(&header.physical.export_count.to_le_bytes());
-        data[HEADER_SIZE + 120..HEADER_SIZE + 124]
-            .copy_from_slice(&header.physical.graph_projection_count.to_le_bytes());
-        data[HEADER_SIZE + 124..HEADER_SIZE + 128]
-            .copy_from_slice(&header.physical.analytics_job_count.to_le_bytes());
-        data[HEADER_SIZE + 128..HEADER_SIZE + 132]
-            .copy_from_slice(&header.physical.manifest_event_count.to_le_bytes());
-        data[HEADER_SIZE + 132..HEADER_SIZE + 136]
-            .copy_from_slice(&header.physical.registry_page.to_le_bytes());
-        data[HEADER_SIZE + 136..HEADER_SIZE + 144]
-            .copy_from_slice(&header.physical.registry_checksum.to_le_bytes());
-        data[HEADER_SIZE + 144..HEADER_SIZE + 148]
-            .copy_from_slice(&header.physical.recovery_page.to_le_bytes());
-        data[HEADER_SIZE + 148..HEADER_SIZE + 156]
-            .copy_from_slice(&header.physical.recovery_checksum.to_le_bytes());
-        data[HEADER_SIZE + 156..HEADER_SIZE + 160]
-            .copy_from_slice(&header.physical.catalog_page.to_le_bytes());
-        data[HEADER_SIZE + 160..HEADER_SIZE + 168]
-            .copy_from_slice(&header.physical.catalog_checksum.to_le_bytes());
-        data[HEADER_SIZE + 168..HEADER_SIZE + 172]
-            .copy_from_slice(&header.physical.metadata_state_page.to_le_bytes());
-        data[HEADER_SIZE + 172..HEADER_SIZE + 180]
-            .copy_from_slice(&header.physical.metadata_state_checksum.to_le_bytes());
-        data[HEADER_SIZE + 180..HEADER_SIZE + 184]
-            .copy_from_slice(&header.physical.vector_artifact_page.to_le_bytes());
-        data[HEADER_SIZE + 184..HEADER_SIZE + 192]
-            .copy_from_slice(&header.physical.vector_artifact_checksum.to_le_bytes());
-
-        // Two-phase checkpoint fields (offset 192-200)
-        data[HEADER_SIZE + 192] = if header.checkpoint_in_progress { 1 } else { 0 };
-        data[HEADER_SIZE + 193..HEADER_SIZE + 201]
-            .copy_from_slice(&header.checkpoint_target_lsn.to_le_bytes());
+        reddb_file::encode_database_header(data, &header)
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
 
         page.update_checksum();
 
@@ -1471,7 +1064,7 @@ impl Pager {
         Ok(())
     }
 
-    /// Write a shadow copy of the header page to .rdb-hdr
+    /// Write a shadow copy of the header page.
     fn write_header_shadow(&self, page: &Page) -> Result<(), PagerError> {
         if self.config.read_only {
             return Ok(());
@@ -1497,8 +1090,7 @@ impl Pager {
         let page = Page::from_bytes(buf);
 
         // Verify shadow is valid
-        let magic = &page.as_bytes()[HEADER_SIZE..HEADER_SIZE + 4];
-        if magic != MAGIC_BYTES {
+        if !reddb_file::database_header_magic_matches(page.as_bytes()) {
             return Err(PagerError::InvalidDatabase(
                 "Header shadow also corrupted".into(),
             ));
@@ -1514,7 +1106,7 @@ impl Pager {
         Ok(page)
     }
 
-    /// Write a shadow copy of the metadata page to .rdb-meta.
+    /// Write a shadow copy of the metadata page.
     ///
     /// When the process-global `fold_pager_meta` policy is enabled (see
     /// [`crate::physical::fold_pager_meta_enabled`]) the shadow is suppressed:
@@ -1573,27 +1165,11 @@ impl Pager {
         if let Some(dwb_mutex) = &self.dwb_file {
             let mut dwb = dwb_mutex.lock().map_err(|_| PagerError::LockPoisoned)?;
 
-            // Build DWB content: [magic:4][count:u32][checksum:u32][pages...]
-            // Each page entry: [page_id:u32][page_data:4096]
-            let entry_size = 4 + PAGE_SIZE; // page_id + data
-            let header_len = 4 + 4 + 4; // magic + count + checksum
-            let total = header_len + pages.len() * entry_size;
-            let mut buf = Vec::with_capacity(total);
-
-            // Header
-            buf.extend_from_slice(&DWB_MAGIC);
-            buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&[0u8; 4]); // placeholder for checksum
-
-            // Page entries
-            for (page_id, page) in pages {
-                buf.extend_from_slice(&page_id.to_le_bytes());
-                buf.extend_from_slice(page.as_bytes());
-            }
-
-            // Compute and write checksum over all data after the header
-            let checksum = super::super::crc32::crc32(&buf[header_len..]);
-            buf[8..12].copy_from_slice(&checksum.to_le_bytes());
+            let buf = reddb_file::encode_paged_dwb_frame(
+                pages
+                    .iter()
+                    .map(|(page_id, page)| (*page_id, page.as_bytes())),
+            );
 
             // Write DWB and fsync
             dwb.seek(SeekFrom::Start(0))?;
@@ -1641,56 +1217,18 @@ impl Pager {
     fn recover_from_dwb_file(&self, file: &mut File) -> Result<(), PagerError> {
         file.seek(SeekFrom::Start(0))?;
         let len = file.metadata()?.len();
-        if len < 12 {
-            // Empty or incomplete header — keep the DWB file but clear stale bytes.
-            return Self::clear_dwb_file(file);
-        }
-
         let mut buf = vec![0u8; len as usize];
         file.read_exact(&mut buf)?;
 
-        // Verify magic
-        if buf[0..4] != DWB_MAGIC {
-            // Not a valid DWB — clear it in place so the same file can be reused.
-            return Self::clear_dwb_file(file);
-        }
-
-        let count = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
-        let stored_checksum = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
-
-        let header_len = 12;
-        let entry_size = 4 + PAGE_SIZE;
-        let expected_len = header_len + count * entry_size;
-
-        if buf.len() < expected_len {
-            // Incomplete DWB write — discard it in place.
-            return Self::clear_dwb_file(file);
-        }
-
-        // Verify checksum
-        let computed = super::super::crc32::crc32(&buf[header_len..expected_len]);
-        if computed != stored_checksum {
-            // Corrupted DWB — discard it in place.
-            return Self::clear_dwb_file(file);
-        }
+        let entries = match reddb_file::decode_paged_dwb_frame(&buf) {
+            Ok(entries) => entries,
+            Err(_) => return Self::clear_dwb_file(file),
+        };
 
         // DWB is valid — re-apply pages to main file
-        let mut offset = header_len;
-        for _ in 0..count {
-            let page_id = u32::from_le_bytes([
-                buf[offset],
-                buf[offset + 1],
-                buf[offset + 2],
-                buf[offset + 3],
-            ]);
-            offset += 4;
-
-            let mut page_data = [0u8; PAGE_SIZE];
-            page_data.copy_from_slice(&buf[offset..offset + PAGE_SIZE]);
-            offset += PAGE_SIZE;
-
-            let page = Page::from_bytes(page_data);
-            self.write_page_raw(page_id, &page)?;
+        for entry in entries {
+            let page = Page::from_bytes(entry.page);
+            self.write_page_raw(entry.page_id, &page)?;
         }
 
         // Sync and clean up
@@ -1756,8 +1294,11 @@ mod tests {
         drop(pager);
 
         let mut future_header = Page::new_header_page(1);
-        future_header.as_bytes_mut()[HEADER_SIZE + 4..HEADER_SIZE + 8]
-            .copy_from_slice(&(DB_VERSION + 1).to_le_bytes());
+        reddb_file::set_database_header_version(
+            future_header.as_bytes_mut(),
+            reddb_file::PAGE_FILE_VERSION + 1,
+        )
+        .unwrap();
         future_header.update_checksum();
 
         let mut file = OpenOptions::new().write(true).open(&path).unwrap();

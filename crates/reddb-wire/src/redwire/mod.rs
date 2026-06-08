@@ -8,12 +8,75 @@
 //! these types.
 
 pub mod builder;
+pub mod bulk_binary;
+pub mod bulk_json;
+pub mod bulk_stream;
 pub mod codec;
+pub mod cursor;
 pub mod frame;
+pub mod handshake;
+pub mod operations;
+pub mod prepared;
+pub mod queue;
+pub mod stream;
 
 pub use builder::{BuildError, FrameBuilder};
-pub use codec::{decode_frame, encode_frame, FrameError};
-pub use frame::{Flags, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};
+pub use bulk_binary::{
+    decode_bulk_binary_payload, encode_bulk_binary_payload, BulkBinaryError, BulkBinaryFlavor,
+    BulkBinaryPayload,
+};
+pub use bulk_json::{
+    decode_bulk_json_payload, encode_bulk_json_payload, BulkJsonError, BulkJsonPayload,
+};
+pub use bulk_stream::{
+    decode_bulk_stream_rows_payload, decode_bulk_stream_start_payload,
+    encode_bulk_stream_rows_payload, encode_bulk_stream_start_payload, BulkStreamError,
+    BulkStreamRowsPayload, BulkStreamStartPayload,
+};
+pub use codec::{decode_frame, encode_frame, frame_len_from_header, FrameError};
+pub use cursor::{
+    decode_close_cursor_payload, decode_declare_cursor_payload, decode_fetch_payload,
+    encode_close_cursor_payload, encode_cursor_batch_payload, encode_cursor_ok_payload,
+    encode_declare_cursor_payload, encode_fetch_payload, CloseCursorPayload, CursorPayloadError,
+    DeclareCursorPayload, FetchPayload,
+};
+pub use frame::{
+    Flags, Frame, MessageClass, MessageDirection, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE,
+};
+pub use handshake::{
+    build_auth_fail_payload, build_auth_ok_payload, build_auth_response_anonymous_payload,
+    build_auth_response_bearer_payload, build_auth_response_oauth_jwt_payload, build_hello_ack,
+    build_hello_payload, AuthFail, AuthOk, Hello, HelloAck, SUPPORTED_METHODS,
+};
+pub use operations::{
+    decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
+    decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
+    encode_bulk_insert_payload, encode_bulk_ok_count_payload, encode_insert_payload,
+    encode_key_payload, BulkOkPayload, InsertDispatchPayload, KeyPayload, OperationPayloadError,
+};
+pub use prepared::{
+    decode_deallocate_payload, decode_execute_prepared_payload, decode_prepare_payload,
+    encode_deallocate_payload, encode_execute_prepared_payload, encode_prepare_payload,
+    encode_prepared_ok_payload, DeallocatePayload, ExecutePreparedPayload, PreparePayload,
+    PreparedOkPayload, PreparedPayloadError,
+};
+pub use queue::{
+    build_event_push_payload, build_event_push_payload_from_json_bytes,
+    build_queue_event_push_frame_from_json_bytes, build_queue_wait_error_frame,
+    build_queue_wait_error_payload, build_queue_wait_timeout_frame,
+    build_queue_wait_timeout_payload, parse_queue_wait_open, QueueWaitOpenRequest,
+    QueueWaitParseError, WAIT_CANCELLED_CODE, WAIT_EXCEEDS_CAP_CODE, WAIT_FAILED_CODE,
+};
+pub use stream::{
+    build_input_stream_end_frame, build_input_stream_end_payload, build_input_stream_error_frame,
+    build_input_stream_error_payload, build_open_ack_frame, build_open_ack_payload,
+    build_stream_chunk_frame_from_json_bytes, build_stream_chunk_payload,
+    build_stream_chunk_payload_from_json_bytes, build_stream_end_frame, build_stream_end_payload,
+    build_stream_error_frame, build_stream_error_payload, open_stream_is_input, parse_input_chunk,
+    parse_input_chunk_json, parse_open_input, parse_open_stream, parse_stream_cancel,
+    ChunkParseError, InputChunk, InputChunkJson, OpenInputParseError, OpenInputRequest,
+    OpenStreamParseError, OpenStreamRequest, StreamCancelRequest,
+};
 
 /// Discriminator byte every RedWire client sends as the very first
 /// byte off the wire. The service-router detector keys off this

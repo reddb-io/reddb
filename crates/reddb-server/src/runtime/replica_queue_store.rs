@@ -198,6 +198,7 @@ impl ReplicaQueueStore {
 #[derive(Debug, Clone)]
 struct PendingRow {
     queue: String,
+    group: String,
     message_id: MessageId,
     lock_deadline_ns: u64,
 }
@@ -206,6 +207,7 @@ impl PendingRow {
     fn from_row(row: &RowData) -> Option<Self> {
         Some(Self {
             queue: row_text(row, "queue")?,
+            group: row_text(row, "group")?,
             message_id: row_u64(row, "message_id")?,
             lock_deadline_ns: row_u64(row, "lock_deadline_ns")?,
         })
@@ -283,6 +285,7 @@ impl QueueStore for ReplicaQueueStore {
         _queue: &str,
         _message_id: MessageId,
         _group: &str,
+        _consumer: &str,
         _deadline: Instant,
     ) -> Result<DeliveryId> {
         Err(QueueStoreError::ReplicaImmutable)
@@ -302,6 +305,17 @@ impl QueueStore for ReplicaQueueStore {
 
     fn bump_attempt(&self, _txn: &QueueTxn, _delivery_id: &str) -> Result<BumpedAttempt> {
         Err(QueueStoreError::ReplicaImmutable)
+    }
+
+    fn read_pending_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt> {
+        let row = self
+            .pending_for_delivery(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        Ok(BumpedAttempt {
+            attempts: self.read_attempts(&row.queue, row.message_id, &row.group),
+            queue: row.queue,
+            message_id: row.message_id,
+        })
     }
 
     fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32 {
@@ -470,7 +484,7 @@ fn now_unix_ns() -> u64 {
 mod tests {
     use super::*;
     use crate::api::{RedDBOptions, REDDB_FORMAT_VERSION};
-    use crate::replication::cdc::{ChangeOperation, ChangeRecord};
+    use crate::replication::cdc::{change_record_from_entity, ChangeOperation, ChangeRecord};
     use crate::replication::logical::{ApplyMode, ApplyOutcome, LogicalChangeApplier};
     use crate::runtime::primary_queue_store::PrimaryQueueStore;
     use crate::runtime::queue_lifecycle::{QueueLifecycle, RetirementOutcome};
@@ -517,7 +531,7 @@ mod tests {
                     EntityKind::QueueMessage { .. } => "queue_message",
                     _ => "entity",
                 };
-                ChangeRecord::from_entity(
+                change_record_from_entity(
                     lsn,
                     lsn,
                     ChangeOperation::Insert,
@@ -559,7 +573,14 @@ mod tests {
         let t = QueueTxn::new();
 
         let err = replica
-            .mark_pending(&t, "q", 1, "g", Instant::now() + Duration::from_secs(1))
+            .mark_pending(
+                &t,
+                "q",
+                1,
+                "g",
+                "c",
+                Instant::now() + Duration::from_secs(1),
+            )
             .unwrap_err();
         assert!(matches!(err, QueueStoreError::ReplicaImmutable));
         assert!(matches!(
@@ -771,7 +792,7 @@ mod tests {
         let mem = InMemoryQueueStore::new();
         mem.seed_queue("q", vec![1, 2]);
         let mem_id = mem
-            .mark_pending(&t, "q", 1, "g", deadline)
+            .mark_pending(&t, "q", 1, "g", "c", deadline)
             .expect("mem mark");
         assert_eq!(
             mem.find_pending_by_key("q", 1, "g"),
@@ -808,7 +829,7 @@ mod tests {
             })
             .expect("seeded message");
         let primary_id = primary_store
-            .mark_pending(&t, "qpk", msg_id, "workers", deadline)
+            .mark_pending(&t, "qpk", msg_id, "workers", "worker-1", deadline)
             .expect("primary mark");
         assert_eq!(
             primary_store.find_pending_by_key("qpk", msg_id, "workers"),

@@ -1,70 +1,8 @@
 use super::*;
-use crate::application::entity::metadata_to_json;
 use crate::auth::column_policy_gate::ColumnAccessRequest;
 use crate::auth::UserId;
 use crate::replication::cdc::ChangeRecord;
-use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 use crate::storage::query::ast::TableSource;
-
-thread_local! {
-    /// Current connection id for the executing statement. Set by the
-    /// per-connection wrapper (stdio/gRPC handlers) before dispatching
-    /// into `execute_query`; falls back to `0` for embedded callers.
-    static CURRENT_CONN_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-
-    /// Authenticated user + role for the executing statement (Phase 2.5.2
-    /// RLS enforcement). Set by the transport middleware after validating
-    /// credentials (password / cert / oauth); unset means "anonymous" /
-    /// "embedded" — RLS policies degrade to the role-agnostic subset.
-    ///
-    /// `None` skips RLS injection entirely; `Some((username, role))`
-    /// passes `role` to `matching_rls_policies(table, Some(role), action)`.
-    static CURRENT_AUTH_IDENTITY: std::cell::RefCell<Option<(String, crate::auth::Role)>> =
-        const { std::cell::RefCell::new(None) };
-
-    /// MVCC snapshot scoped to the currently-executing statement (Phase
-    /// 2.3.2d PG parity). `execute_query` captures it on entry and drops
-    /// it on exit; every scan consults it via
-    /// `entity_visible_under_current_snapshot` to hide tuples whose xmin
-    /// hasn't committed or whose xmax already has.
-    ///
-    /// `None` means "pre-MVCC semantics" — the read path returns every
-    /// tuple regardless of xmin/xmax. All embedded callers that bypass
-    /// `execute_query` see this default.
-    static CURRENT_SNAPSHOT: std::cell::RefCell<Option<SnapshotContext>> =
-        const { std::cell::RefCell::new(None) };
-
-    /// Cheap presence flag for `CURRENT_SNAPSHOT`. Scan hot paths
-    /// poll this instead of `borrow()`-ing the RefCell on every
-    /// row — the common case (autocommit / no MVCC session) reads
-    /// one atomic `Cell<bool>` and short-circuits, saving ~10ns × N
-    /// rows on aggregate_group / select_range scans.
-    static HAS_SNAPSHOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
-    /// Session-scoped tenant id for the current connection (Phase 2.5.3
-    /// multi-tenancy). Populated by `SET TENANT 'id'` or by transport
-    /// middleware after resolving tenant from auth claims. Read by the
-    /// `CURRENT_TENANT()` scalar function — RLS policies typically
-    /// combine it as `USING (tenant_id = CURRENT_TENANT())` to scope
-    /// every query to one tenant.
-    ///
-    /// `None` means "no tenant bound" — `CURRENT_TENANT()` returns
-    /// NULL, and RLS policies that gate on it hide every row.
-    static CURRENT_TENANT_ID: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-
-    /// Statement-local config resolver. SQL expressions materialize the
-    /// `red_config` snapshot lazily on the first `$config.*`/`CONFIG()`
-    /// access, keeping ordinary statements on the zero-scan path.
-    static CURRENT_CONFIG_RESOLVER: std::cell::RefCell<Option<ConfigResolver>> =
-        const { std::cell::RefCell::new(None) };
-
-    /// Statement-local secret resolver. SQL expressions materialize the
-    /// vault KV snapshot lazily on first `$secret.*` access, then use
-    /// lock-free map reads for the rest of the statement.
-    static CURRENT_SECRET_RESOLVER: std::cell::RefCell<Option<SecretResolver>> =
-        const { std::cell::RefCell::new(None) };
-}
 
 /// Read a numeric score column out of a result record as `f64`, matching
 /// the column name case-insensitively. Used by the leaderboard-rank head
@@ -207,6 +145,8 @@ fn push_query_audit_collection(collections: &mut Vec<String>, name: &str) {
         collections.push(name.to_string());
     }
 }
+
+const RUNTIME_INDEX_REGISTRY_COLLECTION: &str = "red_index_registry";
 
 impl RedDBRuntime {
     fn execute_create_metric(
@@ -839,7 +779,9 @@ fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
     specs
 }
 
-fn control_event_outcome_for_error(err: &RedDBError) -> crate::runtime::control_events::Outcome {
+pub(crate) fn control_event_outcome_for_error(
+    err: &RedDBError,
+) -> crate::runtime::control_events::Outcome {
     match err {
         RedDBError::ReadOnly(_) => crate::runtime::control_events::Outcome::Denied,
         RedDBError::Query(msg)
@@ -925,656 +867,21 @@ fn system_keyed_collection_contract(
     }
 }
 
-/// Snapshot + manager pair used for read-path visibility checks.
-///
-/// The manager is needed in addition to the snapshot because `aborted`
-/// state mutates after the snapshot is captured — a ROLLBACK by a
-/// committed-at-capture-time writer must still hide its tuples. Keeping
-/// the Arc around is O(pointer) and the RwLock reads on `is_aborted`
-/// are cheap (HashSet lookup under a parking_lot read guard).
-///
-/// `own_xids` (Phase 2.3.2e) lists the xids belonging to the current
-/// connection's transaction — the parent xid plus open and released
-/// savepoint sub-xids. The visibility rule promotes rows stamped with
-/// these xids to "always visible (unless aborted)" so the writer sees
-/// its own nested-savepoint writes even though their xids exceed
-/// `snapshot.xid`.
-#[derive(Clone)]
-pub struct SnapshotContext {
-    pub snapshot: crate::storage::transaction::snapshot::Snapshot,
-    pub manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
-    pub own_xids: std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
-    pub requires_index_fallback: bool,
-}
-
-/// Install a connection id on the current thread for the duration of a
-/// statement. Transaction state (`RuntimeInner::tx_contexts`) is keyed
-/// by this id so different connections can hold independent BEGINs.
-///
-/// Pub so transports (PG wire, gRPC, HTTP per-request spawners) and
-/// tests can emulate per-connection isolation. Call it once when
-/// binding the connection's worker thread; pair with
-/// `clear_current_connection_id` on teardown.
-pub fn set_current_connection_id(id: u64) {
-    CURRENT_CONN_ID.with(|c| c.set(id));
-}
-
-/// Reset the thread's connection id back to `0` (autocommit).
-pub fn clear_current_connection_id() {
-    CURRENT_CONN_ID.with(|c| c.set(0));
-}
-
-/// Read the connection id set by `set_current_connection_id`. Returns
-/// `0` when no wrapper installed one — auto-commit path.
-pub fn current_connection_id() -> u64 {
-    CURRENT_CONN_ID.with(|c| c.get())
-}
-
-/// Install the authenticated identity for the current thread (Phase 2.5.2
-/// RLS enforcement). Transport layers call this right after resolving
-/// auth so the query dispatch can fold RLS policies into the filter.
-pub fn set_current_auth_identity(username: String, role: crate::auth::Role) {
-    CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = Some((username, role)));
-}
-
-/// Clear the thread-local auth identity. Transports call this after the
-/// statement completes so pooled threads don't leak identities across
-/// requests.
-pub fn clear_current_auth_identity() {
-    CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = None);
-}
-
-/// Read the current-thread auth identity. `None` when no transport
-/// installed one (embedded mode / anonymous access).
-pub(crate) fn current_auth_identity() -> Option<(String, crate::auth::Role)> {
-    CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone())
-}
-
-/// Public probe of the thread-local auth identity for callers outside
-/// the `runtime` module (e.g. the AI credential resolver, which audits
-/// who triggered a secret read on behalf of a query).
-pub fn current_auth_identity_for_audit() -> Option<(String, crate::auth::Role)> {
-    current_auth_identity()
-}
-
-/// Install the session tenant id for the current thread (Phase 2.5.3
-/// multi-tenancy). Called by `SET TENANT 'id'` dispatch and by
-/// transport middleware that resolves tenant from auth claims (e.g.
-/// JWT `tenant` claim, HTTP header, subdomain).
-pub fn set_current_tenant(tenant_id: String) {
-    CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = Some(tenant_id));
-}
-
-/// Clear the current-thread tenant — `CURRENT_TENANT()` will then
-/// return NULL and any RLS policy gated on it will hide every row.
-pub fn clear_current_tenant() {
-    CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = None);
-}
-
-/// Read the current-thread tenant id, applying overrides in priority order:
-///   1. `WITHIN TENANT '<id>' …` per-statement override (highest)
-///   2. `SET LOCAL TENANT '<id>'` transaction-local override (consulted
-///      only when the current connection has an open transaction)
-///   3. `SET TENANT '<id>'` session-level thread-local
-///   4. `None` (deny-default for RLS).
-///
-/// The transaction-local layer is read through the runtime; an embedded
-/// helper crate that has no `RedDBRuntime` access still gets correct
-/// behaviour for layers 1, 3, and 4.
-pub fn current_tenant() -> Option<String> {
-    let inherited = CURRENT_TENANT_ID.with(|cell| cell.borrow().clone());
-    if let Some(over) = current_scope_override() {
-        if over.tenant.is_active() {
-            return over.tenant.resolve(inherited);
-        }
-    }
-    if let Some(tx_local) = current_tx_local_tenant() {
-        return tx_local;
-    }
-    inherited
-}
-
-thread_local! {
-    /// Snapshot of the active connection's `tx_local_tenants` entry for
-    /// the current `execute_query` call. Outer `Some(_)` means "a
-    /// transaction-local tenant override is active for this call";
-    /// inner is the override's value (`Some(s)` overrides to `s`,
-    /// `None` overrides to NULL/cleared). Refreshed at the top of every
-    /// `execute_query` invocation and cleared by the RAII guard on
-    /// return so pooled connections cannot leak the override past the
-    /// statement that owns it.
-    static TX_LOCAL_TENANT: std::cell::RefCell<Option<Option<String>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn current_tx_local_tenant() -> Option<Option<String>> {
-    TX_LOCAL_TENANT.with(|cell| cell.borrow().clone())
-}
-
-/// Recognise `SET LOCAL TENANT '<id>'` / `SET LOCAL TENANT NULL` —
-/// returns `Ok(Some(Some(id)))` for an explicit value, `Ok(Some(None))`
-/// for an explicit NULL clear, `Ok(None)` when the input is not a
-/// `SET LOCAL TENANT` statement at all, and `Err` when the prefix
-/// matches but the value is malformed.
-fn parse_set_local_tenant(query: &str) -> RedDBResult<Option<Option<String>>> {
-    let mut tokens = query.split_ascii_whitespace();
-    let Some(w1) = tokens.next() else {
-        return Ok(None);
-    };
-    if !w1.eq_ignore_ascii_case("SET") {
-        return Ok(None);
-    }
-    let Some(w2) = tokens.next() else {
-        return Ok(None);
-    };
-    if !w2.eq_ignore_ascii_case("LOCAL") {
-        return Ok(None);
-    }
-    let Some(w3) = tokens.next() else {
-        return Ok(None);
-    };
-    if !w3.eq_ignore_ascii_case("TENANT") {
-        return Ok(None);
-    }
-    let rest: String = tokens.collect::<Vec<_>>().join(" ");
-    let rest = rest.trim().trim_end_matches(';').trim();
-    let value_str = rest.strip_prefix('=').map(|s| s.trim()).unwrap_or(rest);
-    if value_str.is_empty() {
-        return Err(RedDBError::Query(
-            "SET LOCAL TENANT expects a string literal or NULL".to_string(),
-        ));
-    }
-    if value_str.eq_ignore_ascii_case("NULL") {
-        return Ok(Some(None));
-    }
-    if value_str.starts_with('\'') && value_str.ends_with('\'') && value_str.len() >= 2 {
-        let inner = &value_str[1..value_str.len() - 1];
-        return Ok(Some(Some(inner.to_string())));
-    }
-    Err(RedDBError::Query(format!(
-        "SET LOCAL TENANT expects a string literal or NULL, got `{value_str}`"
-    )))
-}
-
-pub(crate) struct TxLocalTenantGuard;
-
-impl TxLocalTenantGuard {
-    pub fn install(value: Option<Option<String>>) -> Self {
-        TX_LOCAL_TENANT.with(|cell| *cell.borrow_mut() = value);
-        Self
-    }
-}
-
-impl Drop for TxLocalTenantGuard {
-    fn drop(&mut self) {
-        TX_LOCAL_TENANT.with(|cell| *cell.borrow_mut() = None);
-    }
-}
-
-thread_local! {
-    /// Stack of `WITHIN ... <stmt>` overrides active on the current
-    /// thread. Every entry corresponds to one in-flight `execute_query`
-    /// call that started with a `WITHIN` prefix; the entry is pushed
-    /// before dispatch and popped before the call returns. The stack
-    /// shape supports nested invocations (e.g. a view body that itself
-    /// re-enters execute_query).
-    static SCOPE_OVERRIDES: std::cell::RefCell<Vec<crate::runtime::within_clause::ScopeOverride>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub(crate) fn push_scope_override(over: crate::runtime::within_clause::ScopeOverride) {
-    SCOPE_OVERRIDES.with(|cell| cell.borrow_mut().push(over));
-}
-
-pub(crate) fn pop_scope_override() {
-    SCOPE_OVERRIDES.with(|cell| {
-        cell.borrow_mut().pop();
-    });
-}
-
-pub(crate) fn current_scope_override() -> Option<crate::runtime::within_clause::ScopeOverride> {
-    SCOPE_OVERRIDES.with(|cell| cell.borrow().last().cloned())
-}
-
-/// Cheap probe: is any `WITHIN …` scope override active on this
-/// thread? The fast-path needs to know without paying for the full
-/// `.last().cloned()` allocation — just peek at stack length.
-pub(crate) fn has_scope_override_active() -> bool {
-    SCOPE_OVERRIDES.with(|cell| !cell.borrow().is_empty())
-}
-
-/// RAII guard pairing `push_scope_override` with the matching pop, so
-/// the stack stays balanced even when the inner `execute_query` returns
-/// early via `?`.
-pub(crate) struct ScopeOverrideGuard;
-
-impl ScopeOverrideGuard {
-    pub fn install(over: crate::runtime::within_clause::ScopeOverride) -> Self {
-        push_scope_override(over);
-        Self
-    }
-}
-
-impl Drop for ScopeOverrideGuard {
-    fn drop(&mut self) {
-        pop_scope_override();
-    }
-}
-
-/// Read the current-thread auth identity, honouring per-statement
-/// `WITHIN ... USER '<u>' AS ROLE '<r>'` overrides. The override only
-/// supplies projected strings — it never grants additional privilege —
-/// so callers that need to make authorisation decisions must read from
-/// the underlying `current_auth_identity()` directly.
-pub(crate) fn current_user_projected() -> Option<String> {
-    let inherited = current_auth_identity().map(|(u, _)| u);
-    if let Some(over) = current_scope_override() {
-        if over.user.is_active() {
-            return over.user.resolve(inherited);
-        }
-    }
-    inherited
-}
-
-pub(crate) fn current_role_projected() -> Option<String> {
-    let inherited = current_auth_identity().map(|(_, r)| format!("{r:?}").to_lowercase());
-    if let Some(over) = current_scope_override() {
-        if over.role.is_active() {
-            return over.role.resolve(inherited);
-        }
-    }
-    inherited
-}
-
-pub(crate) fn current_secret_value(path: &str) -> Option<String> {
-    let key = path.to_ascii_lowercase();
-    CURRENT_SECRET_RESOLVER.with(|cell| {
-        let mut resolver = cell.borrow_mut();
-        let resolver = resolver.as_mut()?;
-        if resolver.values.is_none() {
-            resolver.values = resolver
-                .store
-                .as_ref()
-                .map(|store| store.vault_kv_snapshot());
-        }
-        let values = resolver.values.as_ref()?;
-        values.get(&key).cloned().or_else(|| {
-            key.strip_prefix("red.vault/").and_then(|rest| {
-                values
-                    .get(rest)
-                    .cloned()
-                    .or_else(|| values.get(&format!("red.secret.{rest}")).cloned())
-            })
-        })
-    })
-}
-
-struct SecretResolver {
-    store: Option<Arc<crate::auth::store::AuthStore>>,
-    values: Option<HashMap<String, String>>,
-}
-
-pub(super) struct SecretStoreGuard {
-    previous: Option<SecretResolver>,
-}
-
-impl SecretStoreGuard {
-    pub(super) fn install(store: Option<Arc<crate::auth::store::AuthStore>>) -> Self {
-        let previous = CURRENT_SECRET_RESOLVER.with(|cell| {
-            cell.replace(Some(SecretResolver {
-                store,
-                values: None,
-            }))
-        });
-        Self { previous }
-    }
-}
-
-impl Drop for SecretStoreGuard {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        CURRENT_SECRET_RESOLVER.with(|cell| {
-            cell.replace(previous);
-        });
-    }
-}
-
-pub(crate) fn current_config_value(path: &str) -> Option<Value> {
-    let key = path.to_ascii_lowercase();
-    CURRENT_CONFIG_RESOLVER.with(|cell| {
-        let mut resolver = cell.borrow_mut();
-        let resolver = resolver.as_mut()?;
-        if resolver.values.is_none() {
-            resolver.values = Some(latest_config_snapshot(&resolver.db));
-        }
-        let values = resolver.values.as_ref()?;
-        values.get(&key).cloned().or_else(|| {
-            key.strip_prefix("red.config/")
-                .and_then(|rest| values.get(&format!("red.config.{rest}")).cloned())
-        })
-    })
-}
-
-fn update_current_config_value(path: &str, value: Value) {
-    let key = path.to_ascii_lowercase();
-    CURRENT_CONFIG_RESOLVER.with(|cell| {
-        if let Some(resolver) = cell.borrow_mut().as_mut() {
-            if let Some(values) = resolver.values.as_mut() {
-                values.insert(key, value);
-            }
-        }
-    });
-}
-
-fn update_current_secret_value(path: &str, value: Option<String>) {
-    let key = path.to_ascii_lowercase();
-    CURRENT_SECRET_RESOLVER.with(|cell| {
-        if let Some(resolver) = cell.borrow_mut().as_mut() {
-            let Some(values) = resolver.values.as_mut() else {
-                return;
-            };
-            match value {
-                Some(value) => {
-                    values.insert(key, value);
-                }
-                None => {
-                    values.remove(&key);
-                }
-            }
-        }
-    });
-}
-
-fn latest_config_snapshot(db: &RedDB) -> HashMap<String, Value> {
-    let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
-
-    if let Some(manager) = db.store().get_collection("red_config") {
-        manager.for_each_entity(|entity| {
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
-            let Some(Value::Text(key)) = row.get_field("key") else {
-                return true;
-            };
-            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-            let id = entity.id.raw();
-            let key = key.to_ascii_lowercase();
-            insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
-            if let Some(rest) = key.strip_prefix("red.config.") {
-                insert_latest_config_value(&mut latest, format!("red.config/{rest}"), id, value);
-            }
-            true
-        });
-    }
-
-    if let Some(manager) = db.store().get_collection("red.config") {
-        manager.for_each_entity(|entity| {
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
-            if matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
-                return true;
-            }
-            let Some(Value::Text(key)) = row.get_field("key") else {
-                return true;
-            };
-            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-            insert_latest_config_value(
-                &mut latest,
-                format!("red.config/{}", key.to_ascii_lowercase()),
-                entity.id.raw(),
-                value,
-            );
-            true
-        });
-    }
-
-    latest
-        .into_iter()
-        .map(|(key, (_, value))| (key, value))
-        .collect()
-}
-
-fn insert_latest_config_value(
-    latest: &mut HashMap<String, (u64, Value)>,
-    key: String,
-    id: u64,
-    value: Value,
-) {
-    match latest.get(&key) {
-        Some((prev_id, _)) if *prev_id > id => {}
-        _ => {
-            latest.insert(key, (id, value));
-        }
-    }
-}
-
-struct ConfigResolver {
-    db: Arc<RedDB>,
-    values: Option<HashMap<String, Value>>,
-}
-
-pub(super) struct ConfigSnapshotGuard {
-    previous: Option<ConfigResolver>,
-}
-
-impl ConfigSnapshotGuard {
-    pub(super) fn install(db: Arc<RedDB>) -> Self {
-        let previous = CURRENT_CONFIG_RESOLVER
-            .with(|cell| cell.replace(Some(ConfigResolver { db, values: None })));
-        Self { previous }
-    }
-}
-
-impl Drop for ConfigSnapshotGuard {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        CURRENT_CONFIG_RESOLVER.with(|cell| {
-            cell.replace(previous);
-        });
-    }
-}
-
-/// Install the MVCC snapshot used by the current thread for the duration
-/// of one statement. Paired with `clear_current_snapshot()` — callers
-/// should prefer the `CurrentSnapshotGuard` RAII wrapper so early returns
-/// still clean up.
-pub fn set_current_snapshot(ctx: SnapshotContext) {
-    CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(ctx));
-    HAS_SNAPSHOT.with(|c| c.set(true));
-}
-
-pub fn clear_current_snapshot() {
-    CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = None);
-    HAS_SNAPSHOT.with(|c| c.set(false));
-}
-
-/// Drop-guard that restores the previous snapshot on scope exit. Safe to
-/// nest — each statement saves the caller's snapshot and puts it back
-/// instead of blindly clearing, so a top-level `execute_query` called
-/// from inside another statement dispatch (e.g. vector source subqueries)
-/// doesn't strip visibility from the outer scan.
-pub(crate) struct CurrentSnapshotGuard {
-    previous: Option<SnapshotContext>,
-}
-
-impl CurrentSnapshotGuard {
-    pub(crate) fn install(ctx: SnapshotContext) -> Self {
-        let previous = CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone());
-        set_current_snapshot(ctx);
-        Self { previous }
-    }
-}
-
-impl Drop for CurrentSnapshotGuard {
-    fn drop(&mut self) {
-        let prev = self.previous.take();
-        let has = prev.is_some();
-        CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = prev);
-        HAS_SNAPSHOT.with(|c| c.set(has));
-    }
-}
-
-/// Is this entity visible under the current thread's MVCC snapshot?
-///
-/// Returns `true` (no filtering) when no snapshot is installed — that
-/// path is used by embedded callers and by operations that intentionally
-/// bypass MVCC (VACUUM, snapshot export, admin introspection).
-///
-/// When a snapshot is installed the result is
-///   `snapshot.sees(xmin, xmax) && !mgr.is_aborted(xmin) && !xmax_half_abort`
-/// where `xmax_half_abort` re-grants visibility for tuples whose
-/// deleting transaction rolled back.
-#[inline]
-pub fn entity_visible_under_current_snapshot(
-    entity: &crate::storage::unified::entity::UnifiedEntity,
-) -> bool {
-    // Fast path — one `Cell<bool>` read, no RefCell borrow. Autocommit
-    // reads (no active MVCC transaction) still hide superseded physical
-    // versions while avoiding a full snapshot-context lookup.
-    // This runs on every row of every scan; the slow path only fires
-    // inside an explicit transaction.
-    if !HAS_SNAPSHOT.with(|c| c.get()) {
-        return entity.xmax == 0;
-    }
-    CURRENT_SNAPSHOT.with(|cell| {
-        let guard = cell.borrow();
-        let Some(ctx) = guard.as_ref() else {
-            return true;
-        };
-        visibility_check(ctx, entity.xmin, entity.xmax)
-    })
-}
-
-/// Direct visibility check from raw `(xmin, xmax)` — bypasses the
-/// entity borrow for callers that already decomposed the tuple (e.g.
-/// pre-materialized scan caches). Same semantics as
-/// `entity_visible_under_current_snapshot`.
-#[inline]
-pub(crate) fn xids_visible_under_current_snapshot(xmin: u64, xmax: u64) -> bool {
-    if !HAS_SNAPSHOT.with(|c| c.get()) {
-        return true;
-    }
-    CURRENT_SNAPSHOT.with(|cell| {
-        let guard = cell.borrow();
-        let Some(ctx) = guard.as_ref() else {
-            return true;
-        };
-        visibility_check(ctx, xmin, xmax)
-    })
-}
-
-/// Clone the current thread's snapshot context. Parallel scan paths
-/// (`query_all_zoned` with `std::thread::scope`) call this on the main
-/// thread *before* spawning workers so the captured `SnapshotContext`
-/// can be moved into every worker closure. Worker threads do not
-/// inherit thread-locals, so calling `entity_visible_under_current_snapshot`
-/// from inside a spawned closure would silently skip the filter.
-pub fn capture_current_snapshot() -> Option<SnapshotContext> {
-    CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
-}
-
-/// Whether the active read snapshot may need historical tuple versions
-/// that the current secondary indexes cannot prove. Index paths can still
-/// recheck visible candidates, but only a heap scan can discover versions
-/// whose indexed value was changed or deleted after this snapshot.
-pub(crate) fn current_snapshot_requires_index_fallback() -> bool {
-    if !HAS_SNAPSHOT.with(|c| c.get()) {
-        return false;
-    }
-    CURRENT_SNAPSHOT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .is_some_and(|ctx| ctx.requires_index_fallback)
-    })
-}
-
-/// Frozen MVCC + identity context for callers that need to reinstall
-/// the same view across thread-local boundaries — long-lived cursors,
-/// background batchers, anything that detaches from the dispatch path
-/// and re-enters later.
-///
-/// The bundle bakes in the three thread-locals every read path
-/// consults: `SnapshotContext` (MVCC visibility), the auth identity
-/// (RLS policy gate), and the tenant id (RLS scope). A FETCH that
-/// reinstalls the bundle sees exactly the same rows as the DECLARE
-/// would have, regardless of writes that landed in between.
-///
-/// Cheap to clone — `SnapshotContext` is a clone of three
-/// `Arc`-backed fields, identity is a `(String, Role)`, tenant is a
-/// `String`. None of these contend with the read path.
-#[derive(Clone, Default)]
-pub struct SnapshotBundle {
-    pub snapshot: Option<SnapshotContext>,
-    pub auth: Option<(String, crate::auth::Role)>,
-    pub tenant: Option<String>,
-}
-
-/// Capture the three read-path thread-locals into a `SnapshotBundle`.
-/// Pairs with `with_snapshot_bundle` for re-entry.
-pub fn snapshot_bundle() -> SnapshotBundle {
-    SnapshotBundle {
-        snapshot: capture_current_snapshot(),
-        auth: current_auth_identity(),
-        tenant: CURRENT_TENANT_ID.with(|cell| cell.borrow().clone()),
-    }
-}
-
-/// Reinstall a captured `SnapshotBundle` for the duration of `f`.
-/// Restores the caller's previous thread-locals on exit (panic-safe via
-/// the explicit guard struct so a panic in `f` cannot leak the
-/// installed identity into the worker's next request).
-pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -> R {
-    struct Guard {
-        prev_snapshot: Option<SnapshotContext>,
-        prev_auth: Option<(String, crate::auth::Role)>,
-        prev_tenant: Option<String>,
-    }
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            let snap = self.prev_snapshot.take();
-            let has = snap.is_some();
-            CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = snap);
-            HAS_SNAPSHOT.with(|c| c.set(has));
-            CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = self.prev_auth.take());
-            CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = self.prev_tenant.take());
-        }
-    }
-
-    let _guard = {
-        let prev_snapshot = CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone());
-        let prev_auth = CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone());
-        let prev_tenant = CURRENT_TENANT_ID.with(|cell| cell.borrow().clone());
-
-        match bundle.snapshot.clone() {
-            Some(ctx) => set_current_snapshot(ctx),
-            None => clear_current_snapshot(),
-        }
-        CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = bundle.auth.clone());
-        CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = bundle.tenant.clone());
-
-        Guard {
-            prev_snapshot,
-            prev_auth,
-            prev_tenant,
-        }
-    };
-    f()
-}
-
-/// Apply the same visibility rules used by the thread-local helpers
-/// against a caller-provided context. Intended for parallel workers
-/// that captured the snapshot with `capture_current_snapshot()`.
-#[inline]
-pub fn entity_visible_with_context(
-    ctx: Option<&SnapshotContext>,
-    entity: &crate::storage::unified::entity::UnifiedEntity,
-) -> bool {
-    match ctx {
-        Some(ctx) => visibility_check(ctx, entity.xmin, entity.xmax),
-        None => true,
-    }
-}
+pub use super::execution_context::{
+    capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
+    clear_current_snapshot, clear_current_tenant, current_auth_identity_for_audit,
+    current_connection_id, current_tenant, entity_visible_under_current_snapshot,
+    entity_visible_with_context, set_current_auth_identity, set_current_connection_id,
+    set_current_snapshot, set_current_tenant, snapshot_bundle, with_snapshot_bundle,
+    SnapshotBundle, SnapshotContext,
+};
+pub(crate) use super::execution_context::{
+    current_auth_identity, current_config_value, current_role_projected, current_scope_override,
+    current_secret_value, current_snapshot_requires_index_fallback, current_user_projected,
+    has_scope_override_active, parse_set_local_tenant, update_current_config_value,
+    update_current_secret_value, xids_visible_under_current_snapshot, ConfigSnapshotGuard,
+    CurrentSnapshotGuard, ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
+};
 
 fn table_row_index_fields(
     entity: &crate::storage::unified::entity::UnifiedEntity,
@@ -1598,33 +905,43 @@ fn table_row_index_fields(
     Vec::new()
 }
 
-#[inline]
-fn visibility_check(ctx: &SnapshotContext, xmin: u64, xmax: u64) -> bool {
-    // Writer aborted → tuple never existed from any future reader's view.
-    // Checked *before* the own-xids fast path so an aborted own-sub-xid
-    // (rolled-back savepoint) stays hidden from the parent.
-    if xmin != 0 && ctx.manager.is_aborted(xmin) {
-        return false;
+fn named_text(
+    named: &std::collections::HashMap<String, crate::storage::schema::Value>,
+    key: &str,
+) -> Option<String> {
+    match named.get(key) {
+        Some(crate::storage::schema::Value::Text(value)) => Some(value.to_string()),
+        _ => None,
     }
-    // Deleter aborted → treat xmax as unset; fall back to xmin-only check.
-    let effective_xmax = if xmax != 0 && ctx.manager.is_aborted(xmax) {
-        0
-    } else {
-        xmax
-    };
-    // Phase 2.3.2e: own-tx writes are always visible to the connection
-    // that stamped them, even when xmin/xmax exceed `snapshot.xid` (as
-    // happens for sub-xids allocated by SAVEPOINT after BEGIN).
-    let own_xmin = xmin != 0 && ctx.own_xids.contains(&xmin);
-    let own_xmax = effective_xmax != 0 && ctx.own_xids.contains(&effective_xmax);
-    if own_xmax {
-        // This connection deleted the row via this xid — hide it from self.
-        return false;
+}
+
+fn named_bool(
+    named: &std::collections::HashMap<String, crate::storage::schema::Value>,
+    key: &str,
+) -> Option<bool> {
+    match named.get(key) {
+        Some(crate::storage::schema::Value::Boolean(value)) => Some(*value),
+        _ => None,
     }
-    if own_xmin {
-        return true;
+}
+
+fn index_method_kind_as_str(method: super::index_store::IndexMethodKind) -> &'static str {
+    match method {
+        super::index_store::IndexMethodKind::Hash => "hash",
+        super::index_store::IndexMethodKind::Bitmap => "bitmap",
+        super::index_store::IndexMethodKind::Spatial => "spatial",
+        super::index_store::IndexMethodKind::BTree => "btree",
     }
-    ctx.snapshot.sees(xmin, effective_xmax)
+}
+
+fn index_method_kind_from_str(raw: &str) -> Option<super::index_store::IndexMethodKind> {
+    match raw {
+        "hash" => Some(super::index_store::IndexMethodKind::Hash),
+        "bitmap" => Some(super::index_store::IndexMethodKind::Bitmap),
+        "spatial" | "rtree" => Some(super::index_store::IndexMethodKind::Spatial),
+        "btree" => Some(super::index_store::IndexMethodKind::BTree),
+        _ => None,
+    }
 }
 
 fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolState> {
@@ -2532,291 +1849,6 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
     scopes
 }
 
-const RESULT_CACHE_BACKEND_KEY: &str = "runtime.result_cache.backend";
-const RESULT_CACHE_DEFAULT_BACKEND: &str = "legacy";
-const RESULT_CACHE_BLOB_NAMESPACE: &str = "runtime.result_cache";
-// Issue #802: TTL / capacity are now read from config at call time; these
-// constants are the defaults the config falls back to (and match the
-// `runtime.result_cache.*` matrix entries).
-const RESULT_CACHE_TTL_SECS: u64 = 30;
-const RESULT_CACHE_MAX_ENTRIES: usize = 1000;
-const RESULT_CACHE_ENABLED_KEY: &str = "runtime.result_cache.enabled";
-const RESULT_CACHE_TTL_KEY: &str = "runtime.result_cache.ttl_seconds";
-const RESULT_CACHE_CAPACITY_KEY: &str = "runtime.result_cache.capacity_entries";
-const RESULT_CACHE_PAYLOAD_MAGIC: &[u8; 8] = b"RDRC0001";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeResultCacheBackend {
-    Legacy,
-    BlobCache,
-    Shadow,
-}
-
-/// Evict oldest entries until `map` fits in `max_entries`. Returns the
-/// number of entries evicted so callers can bump the eviction metric
-/// (issue #802).
-fn trim_result_cache(
-    map: &mut HashMap<String, RuntimeResultCacheEntry>,
-    order: &mut std::collections::VecDeque<String>,
-    max_entries: usize,
-) -> u64 {
-    let mut evicted = 0u64;
-    while map.len() > max_entries {
-        if let Some(oldest) = order.pop_front() {
-            if map.remove(&oldest).is_some() {
-                evicted += 1;
-            }
-        } else {
-            break;
-        }
-    }
-    evicted
-}
-
-fn result_cache_fingerprint(result: &RuntimeQueryResult) -> String {
-    format!(
-        "{:?}|{}|{}|{}|{}|{:?}",
-        result.result,
-        result.query,
-        result.statement,
-        result.engine,
-        result.affected_rows,
-        result.statement_type
-    )
-}
-
-fn mode_to_byte(mode: crate::storage::query::modes::QueryMode) -> u8 {
-    match mode {
-        crate::storage::query::modes::QueryMode::Sql => 0,
-        crate::storage::query::modes::QueryMode::Gremlin => 1,
-        crate::storage::query::modes::QueryMode::Cypher => 2,
-        crate::storage::query::modes::QueryMode::Sparql => 3,
-        crate::storage::query::modes::QueryMode::Path => 4,
-        crate::storage::query::modes::QueryMode::Natural => 5,
-        crate::storage::query::modes::QueryMode::Unknown => 255,
-    }
-}
-
-fn mode_from_byte(byte: u8) -> Option<crate::storage::query::modes::QueryMode> {
-    match byte {
-        0 => Some(crate::storage::query::modes::QueryMode::Sql),
-        1 => Some(crate::storage::query::modes::QueryMode::Gremlin),
-        2 => Some(crate::storage::query::modes::QueryMode::Cypher),
-        3 => Some(crate::storage::query::modes::QueryMode::Sparql),
-        4 => Some(crate::storage::query::modes::QueryMode::Path),
-        5 => Some(crate::storage::query::modes::QueryMode::Natural),
-        255 => Some(crate::storage::query::modes::QueryMode::Unknown),
-        _ => None,
-    }
-}
-
-fn result_cache_static_str(value: &str) -> Option<&'static str> {
-    match value {
-        "select" => Some("select"),
-        "materialized-graph" => Some("materialized-graph"),
-        "runtime-red-schema" => Some("runtime-red-schema"),
-        "runtime-fdw" => Some("runtime-fdw"),
-        "runtime-table-rls" => Some("runtime-table-rls"),
-        "runtime-table" => Some("runtime-table"),
-        "runtime-join-rls" => Some("runtime-join-rls"),
-        "runtime-join" => Some("runtime-join"),
-        "runtime-vector" => Some("runtime-vector"),
-        "runtime-hybrid" => Some("runtime-hybrid"),
-        "runtime-secret" => Some("runtime-secret"),
-        "runtime-config" => Some("runtime-config"),
-        "runtime-tenant" => Some("runtime-tenant"),
-        "runtime-explain" => Some("runtime-explain"),
-        "runtime-tree" => Some("runtime-tree"),
-        "runtime-kv" => Some("runtime-kv"),
-        "runtime-queue" => Some("runtime-queue"),
-        _ => None,
-    }
-}
-
-fn write_u32(out: &mut Vec<u8>, value: usize) -> Option<()> {
-    let value = u32::try_from(value).ok()?;
-    out.extend_from_slice(&value.to_le_bytes());
-    Some(())
-}
-
-fn write_string(out: &mut Vec<u8>, value: &str) -> Option<()> {
-    write_u32(out, value.len())?;
-    out.extend_from_slice(value.as_bytes());
-    Some(())
-}
-
-fn write_bytes(out: &mut Vec<u8>, value: &[u8]) -> Option<()> {
-    write_u32(out, value.len())?;
-    out.extend_from_slice(value);
-    Some(())
-}
-
-fn read_u8(input: &mut &[u8]) -> Option<u8> {
-    let (&value, rest) = input.split_first()?;
-    *input = rest;
-    Some(value)
-}
-
-fn read_u32(input: &mut &[u8]) -> Option<usize> {
-    if input.len() < 4 {
-        return None;
-    }
-    let value = u32::from_le_bytes(input[..4].try_into().ok()?) as usize;
-    *input = &input[4..];
-    Some(value)
-}
-
-fn read_u64(input: &mut &[u8]) -> Option<u64> {
-    if input.len() < 8 {
-        return None;
-    }
-    let value = u64::from_le_bytes(input[..8].try_into().ok()?);
-    *input = &input[8..];
-    Some(value)
-}
-
-fn read_string(input: &mut &[u8]) -> Option<String> {
-    let len = read_u32(input)?;
-    if input.len() < len {
-        return None;
-    }
-    let value = String::from_utf8(input[..len].to_vec()).ok()?;
-    *input = &input[len..];
-    Some(value)
-}
-
-fn read_bytes<'a>(input: &mut &'a [u8]) -> Option<&'a [u8]> {
-    let len = read_u32(input)?;
-    if input.len() < len {
-        return None;
-    }
-    let value = &input[..len];
-    *input = &input[len..];
-    Some(value)
-}
-
-fn encode_result_cache_payload(entry: &RuntimeResultCacheEntry) -> Option<Vec<u8>> {
-    let result = &entry.result;
-    if result.result.pre_serialized_json.is_some()
-        || result_cache_static_str(result.statement).is_none()
-        || result_cache_static_str(result.engine).is_none()
-        || result_cache_static_str(result.statement_type).is_none()
-        || result.result.records.iter().any(|record| {
-            !record.nodes.is_empty()
-                || !record.edges.is_empty()
-                || !record.paths.is_empty()
-                || !record.vector_results.is_empty()
-        })
-    {
-        return None;
-    }
-
-    let mut out = Vec::new();
-    out.extend_from_slice(RESULT_CACHE_PAYLOAD_MAGIC);
-    write_string(&mut out, &result.query)?;
-    out.push(mode_to_byte(result.mode));
-    write_string(&mut out, result.statement)?;
-    write_string(&mut out, result.engine)?;
-    out.extend_from_slice(&result.affected_rows.to_le_bytes());
-    write_string(&mut out, result.statement_type)?;
-
-    write_u32(&mut out, result.result.columns.len())?;
-    for column in &result.result.columns {
-        write_string(&mut out, column)?;
-    }
-    out.extend_from_slice(&result.result.stats.nodes_scanned.to_le_bytes());
-    out.extend_from_slice(&result.result.stats.edges_scanned.to_le_bytes());
-    out.extend_from_slice(&result.result.stats.rows_scanned.to_le_bytes());
-    out.extend_from_slice(&result.result.stats.exec_time_us.to_le_bytes());
-
-    write_u32(&mut out, result.result.records.len())?;
-    for record in &result.result.records {
-        let fields = record.iter_fields().collect::<Vec<_>>();
-        write_u32(&mut out, fields.len())?;
-        for (name, value) in fields {
-            write_string(&mut out, name)?;
-            let mut encoded = Vec::new();
-            crate::storage::schema::value_codec::encode(value, &mut encoded);
-            write_bytes(&mut out, &encoded)?;
-        }
-    }
-
-    write_u32(&mut out, entry.scopes.len())?;
-    for scope in &entry.scopes {
-        write_string(&mut out, scope)?;
-    }
-    Some(out)
-}
-
-fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, HashSet<String>)> {
-    if input.len() < RESULT_CACHE_PAYLOAD_MAGIC.len()
-        || &input[..RESULT_CACHE_PAYLOAD_MAGIC.len()] != RESULT_CACHE_PAYLOAD_MAGIC
-    {
-        return None;
-    }
-    input = &input[RESULT_CACHE_PAYLOAD_MAGIC.len()..];
-
-    let query = read_string(&mut input)?;
-    let mode = mode_from_byte(read_u8(&mut input)?)?;
-    let statement = result_cache_static_str(&read_string(&mut input)?)?;
-    let engine = result_cache_static_str(&read_string(&mut input)?)?;
-    let affected_rows = read_u64(&mut input)?;
-    let statement_type = result_cache_static_str(&read_string(&mut input)?)?;
-
-    let mut columns = Vec::new();
-    for _ in 0..read_u32(&mut input)? {
-        columns.push(read_string(&mut input)?);
-    }
-    let stats = crate::storage::query::unified::QueryStats {
-        nodes_scanned: read_u64(&mut input)?,
-        edges_scanned: read_u64(&mut input)?,
-        rows_scanned: read_u64(&mut input)?,
-        exec_time_us: read_u64(&mut input)?,
-    };
-
-    let mut records = Vec::new();
-    for _ in 0..read_u32(&mut input)? {
-        let mut record = crate::storage::query::unified::UnifiedRecord::new();
-        for _ in 0..read_u32(&mut input)? {
-            let name = read_string(&mut input)?;
-            let bytes = read_bytes(&mut input)?;
-            let (value, used) = crate::storage::schema::value_codec::decode(bytes).ok()?;
-            if used != bytes.len() {
-                return None;
-            }
-            record.set_owned(name, value);
-        }
-        records.push(record);
-    }
-
-    let mut scopes = HashSet::new();
-    for _ in 0..read_u32(&mut input)? {
-        scopes.insert(read_string(&mut input)?);
-    }
-    if !input.is_empty() {
-        return None;
-    }
-
-    Some((
-        RuntimeQueryResult {
-            query,
-            mode,
-            statement,
-            engine,
-            result: crate::storage::query::unified::UnifiedResult {
-                columns,
-                records,
-                stats,
-                pre_serialized_json: None,
-            },
-            affected_rows,
-            statement_type,
-            bookmark: None,
-        },
-        scopes,
-    ))
-}
-
 /// Heuristic: does the raw SQL reference a built-in whose output
 /// varies by connection, clock, or randomness? Such queries must
 /// skip the 30s result cache — see the call site for rationale.
@@ -3120,6 +2152,13 @@ impl RedDBRuntime {
         Self::with_options(RedDBOptions::in_memory())
     }
 
+    pub fn flush(&self) -> RedDBResult<()> {
+        self.inner
+            .db
+            .flush()
+            .map_err(|err| RedDBError::Internal(err.to_string()))
+    }
+
     /// Handle to the intent-lock manager for tests + introspection.
     /// Production code acquires via `LockerGuard::new(rt.lock_manager())`
     /// rather than touching the manager directly.
@@ -3178,20 +2217,26 @@ impl RedDBRuntime {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let embedded_single_file = options.storage_profile.deploy_profile
+            == crate::storage::DeployProfile::Embedded
+            && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile;
         let db = Arc::new(
             RedDB::open_with_options(&options)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?,
         );
-        let result_blob_cache = crate::storage::cache::BlobCache::open_with_l2(
+        let result_blob_cache_config = if embedded_single_file {
+            crate::storage::cache::BlobCacheConfig::default()
+        } else {
             crate::storage::cache::BlobCacheConfig::default().with_l2_path(
                 options
                     .resolved_path("data.rdb")
                     .with_extension("result-cache.l2"),
-            ),
-        )
-        .map_err(|err| {
-            RedDBError::Internal(format!("open result Blob Cache L2 failed: {err:?}"))
-        })?;
+            )
+        };
+        let result_blob_cache =
+            crate::storage::cache::BlobCache::open_with_l2(result_blob_cache_config).map_err(
+                |err| RedDBError::Internal(format!("open result Blob Cache L2 failed: {err:?}")),
+            )?;
         let storage_ready_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -3201,6 +2246,7 @@ impl RedDBRuntime {
             inner: Arc::new(RuntimeInner {
                 db: db.clone(),
                 layout: PhysicalLayout::from_options(&options),
+                embedded_single_file,
                 indices: IndexCatalog::register_default_vector_graph(
                     options.has_capability(crate::api::Capability::Table),
                     options.has_capability(crate::api::Capability::Graph),
@@ -3309,10 +2355,16 @@ impl RedDBRuntime {
                     // `File(...)` under `<dbname>.rdb.red/logs/`;
                     // lower tiers / ephemeral runs report `Stderr`
                     // and we keep the legacy file-next-to-data sink.
-                    let data_path = options
-                        .data_path
-                        .clone()
-                        .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
+                    let data_path = if embedded_single_file {
+                        std::env::temp_dir()
+                            .join("reddb-embedded-runtime")
+                            .join(format!("audit-{}", std::process::id()))
+                    } else {
+                        options
+                            .data_path
+                            .clone()
+                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
+                    };
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
                     Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
                         &audit_dest,
@@ -3348,11 +2400,17 @@ impl RedDBRuntime {
                     // lands under `<dbname>.rdb.red/logs/slow.log`;
                     // lower tiers fall back to `red-slow.log` in the
                     // data directory.
-                    let fallback_dir = options
-                        .data_path
-                        .as_ref()
-                        .and_then(|p| p.parent().map(std::path::PathBuf::from))
-                        .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
+                    let fallback_dir = if embedded_single_file {
+                        std::env::temp_dir()
+                            .join("reddb-embedded-runtime")
+                            .join(format!("slow-{}", std::process::id()))
+                    } else {
+                        options
+                            .data_path
+                            .as_ref()
+                            .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
+                    };
                     let threshold_ms = std::env::var("RED_SLOW_QUERY_THRESHOLD_MS")
                         .ok()
                         .and_then(|s| s.parse::<u64>().ok())
@@ -3438,9 +2496,14 @@ impl RedDBRuntime {
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime.rehydrate_snapshot_xid_floor();
-        runtime.bootstrap_system_keyed_collections()?;
+        runtime
+            .bootstrap_system_keyed_collections()
+            .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
-        runtime.load_probabilistic_state()?;
+        runtime.rehydrate_runtime_index_registry()?;
+        runtime
+            .load_probabilistic_state()
+            .map_err(|err| RedDBError::Internal(format!("load probabilistic state: {err}")))?;
 
         // Phase 2.5.4: replay `tenant_tables.{table}.column` markers so
         // tables declared via `TENANT BY (col)` survive restart. Each
@@ -4260,71 +3323,6 @@ impl RedDBRuntime {
         result
     }
 
-    fn latest_metadata_for(
-        &self,
-        collection: &str,
-        entity_id: u64,
-    ) -> Option<crate::serde_json::Value> {
-        self.inner
-            .db
-            .store()
-            .get_metadata(collection, EntityId::new(entity_id))
-            .map(|metadata| metadata_to_json(&metadata))
-    }
-
-    fn persist_replica_lsn(&self, lsn: u64) {
-        self.inner.db.store().set_config_tree(
-            "red.replication",
-            &crate::json!({
-                "last_applied_lsn": lsn,
-                "last_durable_lsn": lsn
-            }),
-        );
-    }
-
-    /// Resolve this replica's stable identity (issue #812). The primary keys
-    /// per-replica progress off this id, so it MUST be stable across reboots
-    /// — a changing id would make the primary treat every restart as a brand
-    /// new replica. Honours an operator-configured `red.replication.replica_id`
-    /// first; otherwise generates one once and persists it so the next boot
-    /// reuses the same value.
-    fn resolve_replica_id(&self) -> String {
-        let configured = self.config_string("red.replication.replica_id", "");
-        if !configured.is_empty() {
-            return configured;
-        }
-        let generated = crate::crypto::uuid::Uuid::new_v4().to_string();
-        self.inner.db.store().set_config_tree(
-            "red.replication",
-            &crate::json!({
-                "replica_id": generated.clone()
-            }),
-        );
-        generated
-    }
-
-    fn persist_replication_health(
-        &self,
-        state: &str,
-        last_error: &str,
-        primary_lsn: Option<u64>,
-        oldest_available_lsn: Option<u64>,
-    ) {
-        self.inner.db.store().set_config_tree(
-            "red.replication",
-            &crate::json!({
-                "state": state,
-                "last_error": last_error,
-                "last_seen_primary_lsn": primary_lsn.unwrap_or(0),
-                "last_seen_oldest_lsn": oldest_available_lsn.unwrap_or(0),
-                "updated_at_unix_ms": SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64
-            }),
-        );
-    }
-
     /// Whether `SECRET('...')` literals should be encrypted with the
     /// vault AES key on INSERT. Default `true`.
     pub(crate) fn secret_auto_encrypt(&self) -> bool {
@@ -4805,1010 +3803,10 @@ impl RedDBRuntime {
         Ok(report)
     }
 
-    /// Emit a CDC record without invalidating the result cache.
-    ///
-    /// Used by `MutationEngine::append_batch` which calls
-    /// `invalidate_result_cache` once for the whole batch before this
-    /// loop, avoiding N write-lock acquisitions.
-    pub(crate) fn cdc_emit_no_cache_invalidate(
-        &self,
-        operation: crate::replication::cdc::ChangeOperation,
-        collection: &str,
-        entity_id: u64,
-        entity_kind: &str,
-    ) -> u64 {
-        let lsn = self
-            .inner
-            .cdc
-            .emit(operation, collection, entity_id, entity_kind);
-
-        // Append to logical WAL replication buffer (if primary mode)
-        if let Some(ref primary) = self.inner.db.replication {
-            let store = self.inner.db.store();
-            let entity = if operation == crate::replication::cdc::ChangeOperation::Delete {
-                None
-            } else {
-                store.get(collection, EntityId::new(entity_id))
-            };
-            let record = ChangeRecord {
-                term: self.current_replication_term(),
-                lsn,
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                operation,
-                collection: collection.to_string(),
-                entity_id,
-                entity_kind: entity_kind.to_string(),
-                entity_bytes: entity
-                    .as_ref()
-                    .map(|e| UnifiedStore::serialize_entity(e, store.format_version())),
-                metadata: self.latest_metadata_for(collection, entity_id),
-                refresh_records: None,
-            };
-            let encoded = record.encode();
-            primary.append_logical_record(record.lsn, encoded);
-        }
-        lsn
-    }
-
-    pub(crate) fn cdc_emit_insert_batch_no_cache_invalidate(
-        &self,
-        collection: &str,
-        ids: &[EntityId],
-        entity_kind: &str,
-    ) -> Vec<u64> {
-        if ids.is_empty() {
-            return Vec::new();
-        }
-
-        // Without logical replication, CDC only needs the in-memory event
-        // ring. Reserve all LSNs and push the batch under one mutex instead
-        // of taking the ring lock once per inserted row.
-        if self.inner.db.replication.is_none() {
-            return self.inner.cdc.emit_batch_same_collection(
-                crate::replication::cdc::ChangeOperation::Insert,
-                collection,
-                entity_kind,
-                ids.iter().map(|id| id.raw()),
-            );
-        }
-
-        // Replication needs one logical-WAL record per entity with the
-        // serialized entity bytes, so keep the existing per-row path.
-        ids.iter()
-            .map(|id| {
-                self.cdc_emit_no_cache_invalidate(
-                    crate::replication::cdc::ChangeOperation::Insert,
-                    collection,
-                    id.raw(),
-                    entity_kind,
-                )
-            })
-            .collect()
-    }
-
-    pub fn cdc_emit(
-        &self,
-        operation: crate::replication::cdc::ChangeOperation,
-        collection: &str,
-        entity_id: u64,
-        entity_kind: &str,
-    ) -> u64 {
-        let lsn = self
-            .inner
-            .cdc
-            .emit(operation, collection, entity_id, entity_kind);
-        // Perf: prior to this we called `invalidate_result_cache()`
-        // which wipes EVERY cached query, across every table, under
-        // a write lock — turning each INSERT into a serialisation
-        // point for all readers. Swap to the per-table variant so
-        // unrelated query caches survive.
-        self.invalidate_result_cache_for_table(collection);
-
-        // Append to logical WAL replication buffer (if primary mode)
-        if let Some(ref primary) = self.inner.db.replication {
-            let store = self.inner.db.store();
-            let entity = if operation == crate::replication::cdc::ChangeOperation::Delete {
-                None
-            } else {
-                store.get(collection, EntityId::new(entity_id))
-            };
-            let record = ChangeRecord {
-                term: self.current_replication_term(),
-                lsn,
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                operation,
-                collection: collection.to_string(),
-                entity_id,
-                entity_kind: entity_kind.to_string(),
-                entity_bytes: entity
-                    .as_ref()
-                    .map(|entity| UnifiedStore::serialize_entity(entity, store.format_version())),
-                metadata: self.latest_metadata_for(collection, entity_id),
-                refresh_records: None,
-            };
-            let encoded = record.encode();
-            primary.append_logical_record(record.lsn, encoded);
-        }
-        lsn
-    }
-
-    pub(crate) fn cdc_emit_kv(
-        &self,
-        operation: crate::replication::cdc::ChangeOperation,
-        collection: &str,
-        key: &str,
-        entity_id: u64,
-        before: Option<crate::json::Value>,
-        after: Option<crate::json::Value>,
-    ) -> u64 {
-        let lsn = self
-            .inner
-            .cdc
-            .emit_kv(operation, collection, key, entity_id, before, after);
-        self.inner.kv_stats.incr_watch_events_emitted();
-        self.invalidate_result_cache_for_table(collection);
-        lsn
-    }
-
-    pub(crate) fn record_kv_watch_event(
-        &self,
-        operation: crate::replication::cdc::ChangeOperation,
-        collection: &str,
-        key: &str,
-        entity_id: u64,
-        before: Option<crate::json::Value>,
-        after: Option<crate::json::Value>,
-    ) {
-        if self.current_xid().is_some() {
-            let conn_id = current_connection_id();
-            let event = crate::replication::cdc::KvWatchEvent {
-                collection: collection.to_string(),
-                key: key.to_string(),
-                op: operation,
-                before,
-                after,
-                lsn: 0,
-                committed_at: 0,
-                dropped_event_count: 0,
-            };
-            self.inner
-                .pending_kv_watch_events
-                .write()
-                .entry(conn_id)
-                .or_default()
-                .push(event);
-            return;
-        }
-
-        self.cdc_emit_kv(operation, collection, key, entity_id, before, after);
-    }
-
-    pub(crate) fn cdc_emit_prebuilt(
-        &self,
-        operation: crate::replication::cdc::ChangeOperation,
-        collection: &str,
-        entity: &UnifiedEntity,
-        entity_kind: &str,
-        metadata: Option<&crate::storage::Metadata>,
-        invalidate_cache: bool,
-    ) -> u64 {
-        self.cdc_emit_prebuilt_with_columns(
-            operation,
-            collection,
-            entity,
-            entity_kind,
-            metadata,
-            invalidate_cache,
-            None,
-        )
-    }
-
-    /// `cdc_emit_prebuilt` plus the list of column names whose values
-    /// changed on this update. Callers that have already computed a
-    /// `RowDamageVector` pass it here so downstream CDC consumers can
-    /// filter events by touched column without re-diffing.
-    /// `changed_columns` is only meaningful for `Update` operations —
-    /// insert and delete events ignore it.
-    pub(crate) fn cdc_emit_prebuilt_with_columns(
-        &self,
-        operation: crate::replication::cdc::ChangeOperation,
-        collection: &str,
-        entity: &UnifiedEntity,
-        entity_kind: &str,
-        metadata: Option<&crate::storage::Metadata>,
-        invalidate_cache: bool,
-        changed_columns: Option<Vec<String>>,
-    ) -> u64 {
-        if invalidate_cache {
-            self.invalidate_result_cache();
-        }
-
-        let public_id = entity.logical_id().raw();
-        let lsn = self.inner.cdc.emit_with_columns(
-            operation,
-            collection,
-            public_id,
-            entity_kind,
-            changed_columns,
-        );
-
-        if let Some(ref primary) = self.inner.db.replication {
-            let store = self.inner.db.store();
-            let record = ChangeRecord {
-                term: self.current_replication_term(),
-                lsn,
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                operation,
-                collection: collection.to_string(),
-                entity_id: entity.id.raw(),
-                entity_kind: entity_kind.to_string(),
-                entity_bytes: Some(UnifiedStore::serialize_entity(
-                    entity,
-                    store.format_version(),
-                )),
-                metadata: metadata
-                    .map(metadata_to_json)
-                    .or_else(|| self.latest_metadata_for(collection, entity.id.raw())),
-                refresh_records: None,
-            };
-            let encoded = record.encode();
-            primary.append_logical_record(record.lsn, encoded);
-        }
-
-        lsn
-    }
-
-    pub(crate) fn current_replication_term(&self) -> u64 {
-        self.inner.db.options().replication.term
-    }
-
-    pub(crate) fn cdc_emit_prebuilt_batch<'a, I>(
-        &self,
-        operation: crate::replication::cdc::ChangeOperation,
-        entity_kind: &str,
-        items: I,
-        invalidate_cache: bool,
-    ) where
-        I: IntoIterator<
-            Item = (
-                &'a str,
-                &'a UnifiedEntity,
-                Option<&'a crate::storage::Metadata>,
-            ),
-        >,
-    {
-        let items: Vec<(&str, &UnifiedEntity, Option<&crate::storage::Metadata>)> =
-            items.into_iter().collect();
-        if items.is_empty() {
-            return;
-        }
-
-        if invalidate_cache {
-            self.invalidate_result_cache();
-        }
-
-        for (collection, entity, metadata) in items {
-            self.cdc_emit_prebuilt(operation, collection, entity, entity_kind, metadata, false);
-        }
-    }
-
-    fn run_replica_loop(&self, primary_addr: String) {
-        let endpoint = if primary_addr.starts_with("http") {
-            primary_addr
-        } else {
-            format!("http://{primary_addr}")
-        };
-        let poll_ms = self.inner.db.options().replication.poll_interval_ms;
-        let max_count = self.inner.db.options().replication.max_batch_size;
-        let mut since_lsn = self.config_u64("red.replication.last_applied_lsn", 0);
-        // Issue #812 — stable identity sent on every WAL pull so the primary
-        // can self-register this replica and attribute pulls to it.
-        let replica_id = self.resolve_replica_id();
-
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
-
-        runtime.block_on(async move {
-            use crate::grpc::proto::red_db_client::RedDbClient;
-            use crate::grpc::proto::JsonPayloadRequest;
-
-            let mut client = loop {
-                match RedDbClient::connect(endpoint.clone()).await {
-                    Ok(client) => {
-                        self.persist_replication_health("connecting", "", None, None);
-                        break client;
-                    }
-                    Err(_) => {
-                        self.persist_replication_health(
-                            "connecting",
-                            "waiting for primary connection",
-                            None,
-                            None,
-                        );
-                        std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)))
-                    }
-                }
-            };
-
-            // PLAN.md Phase 11.5 — stateful applier guards LSN
-            // monotonicity across pulls. Seed with the persisted
-            // `last_applied_lsn` so reboots don't lose the chain
-            // pointer.
-            let applier = crate::replication::logical::LogicalChangeApplier::with_metrics(
-                since_lsn,
-                self.inner.replica_apply_metrics.clone(),
-            );
-
-            loop {
-                let payload = crate::json!({
-                    "since_lsn": since_lsn,
-                    "max_count": max_count,
-                    "replica_id": replica_id,
-                    "await_data": true,
-                    "await_timeout_ms": 30_000
-                });
-                let request = tonic::Request::new(JsonPayloadRequest {
-                    payload_json: crate::json::to_string(&payload)
-                        .unwrap_or_else(|_| "{}".to_string()),
-                });
-
-                if let Ok(response) = client.pull_wal_records(request).await {
-                    if let Ok(value) =
-                        crate::json::from_str::<crate::json::Value>(&response.into_inner().payload)
-                    {
-                        let current_lsn =
-                            value.get("current_lsn").and_then(crate::json::Value::as_u64);
-                        let oldest_available_lsn = value
-                            .get("oldest_available_lsn")
-                            .and_then(crate::json::Value::as_u64);
-                        if value
-                            .get("needs_rebootstrap")
-                            .and_then(crate::json::Value::as_bool)
-                            .unwrap_or(false)
-                        {
-                            let reason = value
-                                .get("invalidation_reason")
-                                .and_then(crate::json::Value::as_str)
-                                .unwrap_or("unknown");
-                            self.persist_replication_health(
-                                "rebootstrap_required",
-                                &format!("replication slot invalidated ({reason}); re-bootstrap required"),
-                                current_lsn,
-                                oldest_available_lsn,
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
-                            continue;
-                        }
-                        if since_lsn > 0
-                            && oldest_available_lsn
-                                .map(|oldest| oldest > since_lsn.saturating_add(1))
-                                .unwrap_or(false)
-                        {
-                            self.persist_replication_health(
-                                "rebootstrap_required",
-                                "replica is behind the oldest logical WAL available on primary; re-bootstrap required",
-                                current_lsn,
-                                oldest_available_lsn,
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
-                            continue;
-                        }
-                        if let Some(records) =
-                            value.get("records").and_then(crate::json::Value::as_array)
-                        {
-                            let mut batch_applied_lsn = None;
-                            let mut ack_failed = false;
-                            for record in records {
-                                let Some(data_hex) =
-                                    record.get("data").and_then(crate::json::Value::as_str)
-                                else {
-                                    continue;
-                                };
-                                let Ok(data) = hex::decode(data_hex) else {
-                                    self.inner.replica_apply_metrics.record(
-                                        crate::replication::logical::ApplyErrorKind::Decode,
-                                    );
-                                    self.persist_replication_health(
-                                        "apply_error",
-                                        "failed to decode WAL record hex payload",
-                                        current_lsn,
-                                        oldest_available_lsn,
-                                    );
-                                    continue;
-                                };
-                                let Ok(change) = ChangeRecord::decode(&data) else {
-                                    self.inner.replica_apply_metrics.record(
-                                        crate::replication::logical::ApplyErrorKind::Decode,
-                                    );
-                                    self.persist_replication_health(
-                                        "apply_error",
-                                        "failed to decode logical WAL record",
-                                        current_lsn,
-                                        oldest_available_lsn,
-                                    );
-                                    continue;
-                                };
-                                match applier.apply_with_index_store(
-                                    self.inner.db.as_ref(),
-                                    self.index_store_ref(),
-                                    &change,
-                                    ApplyMode::Replica,
-                                ) {
-                                    Ok(crate::replication::logical::ApplyOutcome::Applied) => {
-                                        self.invalidate_result_cache_for_table(&change.collection);
-                                        since_lsn = since_lsn.max(change.lsn);
-                                        self.persist_replica_lsn(since_lsn);
-                                        batch_applied_lsn = Some(since_lsn);
-                                    }
-                                    Ok(_) => {
-                                        // Idempotent / Skipped: no advance, no error.
-                                    }
-                                    Err(err) => {
-                                        self.inner.replica_apply_metrics.record(err.kind());
-                                        // Issue #205 — emit operator-grade event
-                                        // for the two replication-fatal kinds. `Gap`
-                                        // / `Apply` / `Decode` already persist via
-                                        // `persist_replication_health`; the
-                                        // OperatorEvent variants only cover the
-                                        // two "stream is broken" / "follower
-                                        // diverged" conditions an operator must act
-                                        // on out-of-band.
-                                        match &err {
-                                            crate::replication::logical::LogicalApplyError::Divergence { lsn, expected: _, got: _, .. } => {
-                                                crate::telemetry::operator_event::OperatorEvent::Divergence {
-                                                    peer: "primary".to_string(),
-                                                    leader_lsn: *lsn,
-                                                    follower_lsn: since_lsn,
-                                                }
-                                                .emit_global();
-                                            }
-                                            crate::replication::logical::LogicalApplyError::Gap { last, next } => {
-                                                crate::telemetry::operator_event::OperatorEvent::ReplicationBroken {
-                                                    peer: "primary".to_string(),
-                                                    reason: format!("stalled gap last={last} next={next}"),
-                                                }
-                                                .emit_global();
-                                            }
-                                            _ => {}
-                                        }
-                                        let kind = match &err {
-                                            crate::replication::logical::LogicalApplyError::Gap { .. } => "stalled_gap",
-                                            crate::replication::logical::LogicalApplyError::Divergence { .. } => "divergence",
-                                            // Issue #835 — a stale-term record from a
-                                            // returning ex-primary was fenced. The
-                                            // replica stays put (no apply, no watermark
-                                            // advance) until the legitimate primary's
-                                            // current-term stream resumes.
-                                            crate::replication::logical::LogicalApplyError::StaleTermFenced { .. } => "stale_term_fenced",
-                                            _ => "apply_error",
-                                        };
-                                        self.persist_replication_health(
-                                            kind,
-                                            &format!("replica apply rejected: {err}"),
-                                            current_lsn,
-                                            oldest_available_lsn,
-                                        );
-                                        // Stop applying this batch. The
-                                        // outer loop will retry on next
-                                        // pull, which on a real Gap will
-                                        // not magically heal — operator
-                                        // must rebootstrap. For
-                                        // Divergence, we explicitly do
-                                        // not advance; this keeps the
-                                        // replica visibly unhealthy
-                                        // instead of silently swallowing
-                                        // corruption.
-                                        break;
-                                    }
-                                }
-                            }
-                            if let Some(applied_lsn) = batch_applied_lsn {
-                                let apply_errors = self.replica_apply_error_counts();
-                                let apply_errors_total =
-                                    apply_errors.iter().map(|(_, count)| *count).sum::<u64>();
-                                let divergence_total = apply_errors
-                                    .iter()
-                                    .find(|(kind, _)| {
-                                        matches!(
-                                            kind,
-                                            crate::replication::logical::ApplyErrorKind::Divergence
-                                        )
-                                    })
-                                    .map(|(_, count)| *count)
-                                    .unwrap_or(0);
-                                let ack_payload = crate::json!({
-                                    "replica_id": replica_id.clone(),
-                                    "applied_lsn": applied_lsn,
-                                    "durable_lsn": applied_lsn,
-                                    "apply_errors_total": apply_errors_total,
-                                    "divergence_total": divergence_total
-                                });
-                                let ack_request = tonic::Request::new(JsonPayloadRequest {
-                                    payload_json: crate::json::to_string(&ack_payload)
-                                        .unwrap_or_else(|_| "{}".to_string()),
-                                });
-                                if client.ack_replica_lsn(ack_request).await.is_err() {
-                                    ack_failed = true;
-                                    self.persist_replication_health(
-                                        "ack_error",
-                                        "primary ack_replica_lsn request failed",
-                                        current_lsn,
-                                        oldest_available_lsn,
-                                    );
-                                }
-                            }
-                            if ack_failed {
-                                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
-                                continue;
-                            }
-                        }
-                        self.persist_replication_health(
-                            "healthy",
-                            "",
-                            current_lsn,
-                            oldest_available_lsn,
-                        );
-                    } else {
-                        self.persist_replication_health(
-                            "apply_error",
-                            "failed to parse pull_wal_records response",
-                            None,
-                            None,
-                        );
-                    }
-                } else {
-                    self.persist_replication_health(
-                        "connecting",
-                        "primary pull_wal_records request failed",
-                        None,
-                        None,
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
-                }
-            }
-        });
-    }
-
-    /// Poll CDC events since a given LSN.
-    pub fn cdc_poll(
-        &self,
-        since_lsn: u64,
-        max_count: usize,
-    ) -> Vec<crate::replication::cdc::ChangeEvent> {
-        self.inner.cdc.poll(since_lsn, max_count)
-    }
-
-    /// PLAN.md Phase 11.4 — current CDC LSN. Public mutation
-    /// surfaces (HTTP query, gRPC entity ops) call this immediately
-    /// after a successful write to feed `enforce_commit_policy`.
-    pub fn cdc_current_lsn(&self) -> u64 {
-        self.inner.cdc.current_lsn()
-    }
-
-    pub fn kv_watch_events_since(
-        &self,
-        collection: &str,
-        key: &str,
-        since_lsn: u64,
-        max_count: usize,
-    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
-        self.inner
-            .cdc
-            .poll(since_lsn, max_count)
-            .into_iter()
-            .filter_map(|event| event.kv)
-            .filter(|event| event.collection == collection && event.key == key)
-            .collect()
-    }
-
-    pub fn kv_watch_events_since_prefix(
-        &self,
-        collection: &str,
-        prefix: &str,
-        since_lsn: u64,
-        max_count: usize,
-    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
-        self.inner
-            .cdc
-            .poll(since_lsn, max_count)
-            .into_iter()
-            .filter_map(|event| event.kv)
-            .filter(|event| event.collection == collection && event.key.starts_with(prefix))
-            .collect()
-    }
-
-    pub(crate) fn kv_watch_subscribe<'a>(
-        &'a self,
-        collection: impl Into<String>,
-        key: impl Into<String>,
-        from_lsn: Option<u64>,
-    ) -> crate::runtime::kv_watch::KvWatchStream<'a> {
-        crate::runtime::kv_watch::KvWatchStream::subscribe(
-            &self.inner.cdc,
-            &self.inner.kv_stats,
-            collection,
-            key,
-            from_lsn,
-            self.kv_watch_idle_timeout_ms(),
-        )
-    }
-
-    pub(crate) fn kv_watch_subscribe_prefix<'a>(
-        &'a self,
-        collection: impl Into<String>,
-        prefix: impl Into<String>,
-        from_lsn: Option<u64>,
-    ) -> crate::runtime::kv_watch::KvWatchStream<'a> {
-        crate::runtime::kv_watch::KvWatchStream::subscribe_prefix(
-            &self.inner.cdc,
-            &self.inner.kv_stats,
-            collection,
-            prefix,
-            from_lsn,
-            self.kv_watch_idle_timeout_ms(),
-        )
-    }
-
-    pub(crate) fn kv_watch_idle_timeout_ms(&self) -> u64 {
-        self.config_u64("red.config.kv.watch.idle_timeout_ms", 60_000)
-    }
-
-    /// Get backup scheduler status.
-    pub fn backup_status(&self) -> crate::replication::scheduler::BackupStatus {
-        self.inner.backup_scheduler.status()
-    }
-
-    /// Borrow the runtime's result Blob Cache.
-    ///
-    /// Wired for the `/admin/blob_cache/sweep` and
-    /// `/admin/blob_cache/flush_namespace` HTTP handlers (issue #148
-    /// follow-up): both delegate to
-    /// `crate::storage::cache::sweeper::BlobCacheSweeper`, which takes a
-    /// `&BlobCache`. Also used by `trigger_backup` when
-    /// `red.config.backup.include_blob_cache=true` to locate the L2
-    /// directory for archival.
-    pub fn result_blob_cache(&self) -> &crate::storage::cache::BlobCache {
-        &self.inner.result_blob_cache
-    }
-
-    /// PLAN.md Phase 11.4 — owned snapshot of every registered
-    /// replica's state on this primary. Returns empty vec on
-    /// non-primary instances or when no replicas are registered yet.
-    pub fn primary_replica_snapshots(&self) -> Vec<crate::replication::primary::ReplicaState> {
-        self.inner
-            .db
-            .replication
-            .as_ref()
-            .map(|repl| repl.replica_snapshots())
-            .unwrap_or_default()
-    }
-
-    /// Issue #839 — the primary's current logical-WAL head LSN, used as
-    /// the reference point for per-replica lag. `0` on non-primary
-    /// instances or before the logical spool has any records.
-    pub fn primary_logical_head_lsn(&self) -> u64 {
-        self.inner
-            .db
-            .replication
-            .as_ref()
-            .map(|repl| repl.current_logical_lsn())
-            .unwrap_or(0)
-    }
-
-    /// Issue #839 — count of pulls that forced a full re-bootstrap since
-    /// process start. The primary operator alert signal; always `0` on a
-    /// non-primary instance.
-    pub fn replication_full_resync_count(&self) -> u64 {
-        self.inner
-            .db
-            .replication
-            .as_ref()
-            .map(|repl| repl.full_resync_count())
-            .unwrap_or(0)
-    }
-
-    /// Issue #839 — count of pulls served as a partial (incremental)
-    /// resync since process start. Always `0` on a non-primary instance.
-    pub fn replication_partial_resync_count(&self) -> u64 {
-        self.inner
-            .db
-            .replication
-            .as_ref()
-            .map(|repl| repl.partial_resync_count())
-            .unwrap_or(0)
-    }
-
-    /// Issue #839 — this node's stable identity, surfaced as the leader
-    /// identity in `/replication/status` when the node is the primary.
-    /// Reuses the same persisted id a replica advertises to the primary,
-    /// so a cluster has one stable name per node regardless of role.
-    pub fn node_id(&self) -> String {
-        self.resolve_replica_id()
-    }
-
-    /// Issue #826 — re-evaluate write-admission flow control from the
-    /// live primary replica registry and return the resulting throttle
-    /// state. Computes the max lag across in-quorum replicas (async
-    /// read-replicas excluded) against the primary's current LSN and
-    /// engages/releases the `WriteGate` throttle accordingly.
-    ///
-    /// No-op (returns `false`) on non-primary instances or when flow
-    /// control is disabled (soft target `0`). Cheap enough to call on
-    /// the replica-ack path and from `/metrics` scrapes so the throttle
-    /// tracks lag without a dedicated background loop.
-    pub fn refresh_replication_flow_control(&self) -> bool {
-        let flow = self.inner.write_gate.flow_control();
-        if !flow.is_enabled() {
-            return false;
-        }
-        let Some(repl) = self.inner.db.replication.as_ref() else {
-            return false;
-        };
-        let primary_lsn = repl.current_logical_lsn();
-        let replicas = repl.replica_snapshots();
-        flow.observe(&replicas, primary_lsn)
-    }
-
-    /// PLAN.md Phase 11.4 — active commit policy. Reads
-    /// `RED_PRIMARY_COMMIT_POLICY` once at runtime construction;
-    /// future env reloads will need a reload endpoint. Default is
-    /// `Local` — current behavior, no replica blocking.
-    pub fn commit_policy(&self) -> crate::replication::CommitPolicy {
-        crate::replication::CommitPolicy::from_env()
-    }
-
-    /// Replica-side durable logical-stream progress. The current apply
-    /// loop persists this immediately after applying an LSN and before
-    /// acking the primary, so it is the local promotion safety watermark.
-    pub fn replica_durable_lsn(&self) -> u64 {
-        self.config_u64(
-            "red.replication.last_durable_lsn",
-            self.config_u64("red.replication.last_applied_lsn", 0),
-        )
-    }
-
-    /// Primary frontier most recently observed by this replica while
-    /// pulling the semantic logical stream.
-    pub fn replica_required_promotion_lsn(&self) -> u64 {
-        self.config_u64("red.replication.last_seen_primary_lsn", 0)
-    }
-
-    /// PLAN.md Phase 11.5 — accessor for replica-side apply error
-    /// counters (gap / divergence / apply / decode / apply_miss). Returned
-    /// snapshot is consistent across the counters; the labels match
-    /// `reddb_replica_apply_errors_total{kind}`. Issue #814 adds the
-    /// `apply_miss` kind for deletes against a missing target.
-    pub fn replica_apply_error_counts(
-        &self,
-    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 6] {
-        self.inner.replica_apply_metrics.snapshot()
-    }
-
     /// PLAN.md Phase 4.4 — per-caller quota bucket. Always
     /// returned; `is_configured()` lets callers short-circuit.
     pub fn quota_bucket(&self) -> &crate::runtime::quota_bucket::QuotaBucket {
         &self.inner.quota_bucket
-    }
-
-    /// PLAN.md Phase 11.4 — observability snapshot of every
-    /// replica's durable LSN as known to the commit waiter. Empty
-    /// vec on non-primary instances or when no replica has acked.
-    pub fn commit_waiter_snapshot(&self) -> Vec<(String, u64)> {
-        self.inner
-            .db
-            .replication
-            .as_ref()
-            .map(|repl| repl.commit_waiter.snapshot())
-            .unwrap_or_default()
-    }
-
-    /// PLAN.md Phase 11.4 — `(reached, timed_out, not_required, last_micros)`
-    /// counters for /metrics. Always-zero on non-primary instances.
-    pub fn commit_waiter_metrics_snapshot(&self) -> (u64, u64, u64, u64) {
-        self.inner
-            .db
-            .replication
-            .as_ref()
-            .map(|repl| repl.commit_waiter.metrics_snapshot())
-            .unwrap_or((0, 0, 0, 0))
-    }
-
-    /// Named commit watermark: highest LSN durable on the active
-    /// synchronous commit quorum. Returns 0 when the active policy does
-    /// not require replica durability.
-    pub fn commit_watermark(&self) -> u64 {
-        match self.commit_policy() {
-            crate::replication::CommitPolicy::AckN(n) if n > 0 => self
-                .inner
-                .db
-                .replication
-                .as_ref()
-                .map(|repl| repl.commit_waiter.commit_watermark(n))
-                .unwrap_or(0),
-            crate::replication::CommitPolicy::Quorum => self
-                .inner
-                .db
-                .quorum
-                .as_ref()
-                .map(|q| q.commit_watermark())
-                .unwrap_or(0),
-            _ => 0,
-        }
-    }
-
-    /// PLAN.md Phase 11.4 — block until at least `count` replicas
-    /// have durably applied through `target_lsn`, or `timeout`
-    /// elapses. Returns the `AwaitOutcome` so the caller can decide
-    /// whether to surface a timeout error to the client or continue
-    /// (the policy mapping lives in the commit dispatcher).
-    ///
-    /// Used by the `ack_n` commit policy once the operator flips
-    /// `RED_PRIMARY_COMMIT_POLICY` away from `local`.
-    pub fn await_replica_acks(
-        &self,
-        target_lsn: u64,
-        count: u32,
-        timeout: std::time::Duration,
-    ) -> crate::replication::AwaitOutcome {
-        match &self.inner.db.replication {
-            Some(repl) => repl.commit_waiter.await_acks(target_lsn, count, timeout),
-            None => {
-                // No replication configured: policy must be `Local`.
-                // Treat as immediate `NotRequired` so callers don't
-                // block on a degenerate setup.
-                crate::replication::AwaitOutcome::NotRequired
-            }
-        }
-    }
-
-    /// PLAN.md Phase 11.4 — enforce the configured commit policy
-    /// against `post_lsn` (the LSN of the just-completed write).
-    /// Returns `Ok(AwaitOutcome)` on every successful enforcement
-    /// (including `Reached` and `TimedOut` when fail-on-timeout is
-    /// off). Returns `Err(ReadOnly)` only when a synchronous policy
-    /// misses its threshold and `RED_COMMIT_FAIL_ON_TIMEOUT=true` is
-    /// set.
-    ///
-    /// The HTTP / gRPC / wire surfaces map the error to 504 / wire
-    /// backoff. Default behaviour (env unset) logs warn and returns
-    /// success — matches PLAN.md "default v1 stays local" semantics
-    /// while still letting the operator opt into hard-blocking.
-    pub fn enforce_commit_policy(
-        &self,
-        post_lsn: u64,
-    ) -> RedDBResult<crate::replication::AwaitOutcome> {
-        let policy = self.commit_policy();
-        if matches!(policy, crate::replication::CommitPolicy::Quorum) {
-            return match self.inner.db.wait_for_replication_quorum(post_lsn) {
-                Ok(()) => Ok(crate::replication::AwaitOutcome::Reached(0)),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "reddb::commit",
-                        post_lsn,
-                        error = %err,
-                        "quorum: timed out waiting for commit watermark"
-                    );
-                    let fail = std::env::var("RED_COMMIT_FAIL_ON_TIMEOUT")
-                        .ok()
-                        .map(|v| {
-                            let t = v.trim();
-                            t.eq_ignore_ascii_case("true")
-                                || t == "1"
-                                || t.eq_ignore_ascii_case("yes")
-                        })
-                        .unwrap_or(false);
-                    if fail {
-                        return Err(RedDBError::ReadOnly(format!(
-                            "commit policy timed out at lsn {post_lsn}: {err} (RED_COMMIT_FAIL_ON_TIMEOUT=true)"
-                        )));
-                    }
-                    Ok(crate::replication::AwaitOutcome::TimedOut {
-                        observed: 0,
-                        required: 1,
-                    })
-                }
-            };
-        }
-
-        let n = match policy {
-            crate::replication::CommitPolicy::AckN(n) if n > 0 => n,
-            _ => return Ok(crate::replication::AwaitOutcome::NotRequired),
-        };
-        let timeout_ms = std::env::var("RED_REPLICATION_ACK_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(5_000);
-        let outcome =
-            self.await_replica_acks(post_lsn, n, std::time::Duration::from_millis(timeout_ms));
-        {
-            use crate::runtime::control_events::{EventKind, Outcome, Sensitivity};
-            let (event_outcome, fields) = match &outcome {
-                crate::replication::AwaitOutcome::Reached(count) => (
-                    Outcome::Allowed,
-                    vec![
-                        (
-                            "post_lsn".to_string(),
-                            Sensitivity::raw(post_lsn.to_string()),
-                        ),
-                        ("required".to_string(), Sensitivity::raw(n.to_string())),
-                        ("observed".to_string(), Sensitivity::raw(count.to_string())),
-                        (
-                            "timeout_ms".to_string(),
-                            Sensitivity::raw(timeout_ms.to_string()),
-                        ),
-                    ],
-                ),
-                crate::replication::AwaitOutcome::TimedOut { observed, required } => (
-                    Outcome::Error,
-                    vec![
-                        (
-                            "post_lsn".to_string(),
-                            Sensitivity::raw(post_lsn.to_string()),
-                        ),
-                        (
-                            "required".to_string(),
-                            Sensitivity::raw(required.to_string()),
-                        ),
-                        (
-                            "observed".to_string(),
-                            Sensitivity::raw(observed.to_string()),
-                        ),
-                        (
-                            "timeout_ms".to_string(),
-                            Sensitivity::raw(timeout_ms.to_string()),
-                        ),
-                    ],
-                ),
-                crate::replication::AwaitOutcome::NotRequired => (Outcome::Allowed, Vec::new()),
-            };
-            if !fields.is_empty() {
-                self.emit_control_event(
-                    EventKind::ReplicationSafety,
-                    event_outcome,
-                    "replication_commit_policy",
-                    Some(format!("replication:lsn:{post_lsn}")),
-                    None,
-                    fields,
-                )?;
-            }
-        }
-        if let crate::replication::AwaitOutcome::TimedOut { observed, required } = &outcome {
-            tracing::warn!(
-                target: "reddb::commit",
-                post_lsn,
-                observed = *observed,
-                required = *required,
-                timeout_ms,
-                "ack_n: timed out waiting for replicas"
-            );
-            let fail = std::env::var("RED_COMMIT_FAIL_ON_TIMEOUT")
-                .ok()
-                .map(|v| {
-                    let t = v.trim();
-                    t.eq_ignore_ascii_case("true") || t == "1" || t.eq_ignore_ascii_case("yes")
-                })
-                .unwrap_or(false);
-            if fail {
-                return Err(RedDBError::ReadOnly(format!(
-                    "commit policy timed out at lsn {post_lsn}: observed={observed} required={required} (RED_COMMIT_FAIL_ON_TIMEOUT=true)"
-                )));
-            }
-        }
-        Ok(outcome)
     }
 
     /// PLAN.md Phase 6.3 — whether at-rest encryption is configured.
@@ -5838,361 +3836,6 @@ impl RedDBRuntime {
         } else {
             Some(state)
         }
-    }
-
-    /// Current local LSN paired with the LSN of the most recently
-    /// archived WAL segment. The difference is the replication /
-    /// archive lag operators alert on (PLAN.md Phase 5.1). Returns
-    /// `(0, 0)` when neither replication nor archiving is configured.
-    pub fn wal_archive_progress(&self) -> (u64, u64) {
-        let current_lsn = self
-            .inner
-            .db
-            .replication
-            .as_ref()
-            .map(|repl| {
-                repl.logical_wal_spool
-                    .as_ref()
-                    .map(|spool| spool.current_lsn())
-                    .unwrap_or_else(|| repl.wal_buffer.current_lsn())
-            })
-            .unwrap_or_else(|| self.inner.cdc.current_lsn());
-        let last_archived_lsn = self.config_u64("red.config.timeline.last_archived_lsn", 0);
-        (current_lsn, last_archived_lsn)
-    }
-
-    /// Trigger an immediate backup.
-    pub fn trigger_backup(&self) -> RedDBResult<crate::replication::scheduler::BackupResult> {
-        let result = (|| {
-            self.check_write(crate::runtime::write_gate::WriteKind::Backup)?;
-            // Defense in depth — check_write above already rejects when
-            // the lease is NotHeld, but log + audit the lease angle here
-            // explicitly so dashboards distinguish "lease lost" from a
-            // generic read-only refusal.
-            self.assert_remote_write_allowed("admin/backup")?;
-            let started = std::time::Instant::now();
-            let snapshot = self.create_snapshot()?;
-            let mut uploaded = false;
-
-            if let (Some(backend), Some(path)) =
-                (&self.inner.db.remote_backend, self.inner.db.path())
-            {
-                let default_snapshot_prefix = self.inner.db.options().default_snapshot_prefix();
-                let default_wal_prefix = self.inner.db.options().default_wal_archive_prefix();
-                let default_head_key = self.inner.db.options().default_backup_head_key();
-                let snapshot_prefix = self.config_string(
-                    "red.config.backup.snapshot_prefix",
-                    &default_snapshot_prefix,
-                );
-                let wal_prefix =
-                    self.config_string("red.config.wal.archive.prefix", &default_wal_prefix);
-                let head_key = self.config_string("red.config.backup.head_key", &default_head_key);
-                let timeline_id = self.config_string("red.config.timeline.id", "main");
-                let snapshot_key = crate::storage::wal::archive_snapshot(
-                    backend.as_ref(),
-                    path,
-                    snapshot.snapshot_id,
-                    &snapshot_prefix,
-                )
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                let current_lsn = self
-                    .inner
-                    .db
-                    .replication
-                    .as_ref()
-                    .map(|repl| {
-                        repl.logical_wal_spool
-                            .as_ref()
-                            .map(|spool| spool.current_lsn())
-                            .unwrap_or_else(|| repl.wal_buffer.current_lsn())
-                    })
-                    .unwrap_or_else(|| self.inner.cdc.current_lsn());
-                let last_archived_lsn = self.config_u64("red.config.timeline.last_archived_lsn", 0);
-                // Hash the local snapshot bytes so the manifest can carry
-                // the digest for restore-side verification (PLAN.md
-                // Phase 4). Failure to hash is non-fatal — we still
-                // publish the manifest, just without a checksum, so a
-                // future fix can backfill rather than losing the backup.
-                let snapshot_sha256 =
-                    crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(path)
-                        .map_err(|err| {
-                            tracing::warn!(
-                                target: "reddb::backup",
-                                error = %err,
-                                snapshot_id = snapshot.snapshot_id,
-                                "snapshot hash failed; manifest will lack checksum"
-                            );
-                        })
-                        .ok();
-                let manifest = crate::storage::wal::SnapshotManifest {
-                    timeline_id: timeline_id.clone(),
-                    snapshot_key: snapshot_key.clone(),
-                    snapshot_id: snapshot.snapshot_id,
-                    snapshot_time: snapshot.created_at_unix_ms as u64,
-                    base_lsn: current_lsn,
-                    schema_version: crate::api::REDDB_FORMAT_VERSION,
-                    format_version: crate::api::REDDB_FORMAT_VERSION,
-                    snapshot_sha256,
-                };
-                crate::storage::wal::publish_snapshot_manifest(backend.as_ref(), &manifest)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
-
-                // PLAN.md Phase 11.3 — read the head of the WAL hash chain
-                // so the new segment can link back. `None` means we're
-                // starting a fresh timeline (after a clean restore or on
-                // first archive ever); the segment's `prev_hash` will be
-                // `None` and restore-side validation accepts that only for
-                // the first segment in `plan.wal_segments`.
-                let prev_segment_hash =
-                    self.config_string("red.config.timeline.last_segment_hash", "");
-                let prev_hash_arg = if prev_segment_hash.is_empty() {
-                    None
-                } else {
-                    Some(prev_segment_hash)
-                };
-
-                let archived_lsn = if let Some(primary) = &self.inner.db.replication {
-                    let oldest = primary
-                        .logical_wal_spool
-                        .as_ref()
-                        .and_then(|spool| spool.oldest_lsn().ok().flatten())
-                        .or_else(|| primary.wal_buffer.oldest_lsn())
-                        .unwrap_or(last_archived_lsn);
-                    if last_archived_lsn > 0 && last_archived_lsn < oldest.saturating_sub(1) {
-                        return Err(RedDBError::Internal(format!(
-                        "logical WAL gap detected: last_archived_lsn={last_archived_lsn}, oldest_available_lsn={oldest}"
-                    )));
-                    }
-                    let records = if let Some(spool) = &primary.logical_wal_spool {
-                        spool
-                            .read_since(last_archived_lsn, usize::MAX)
-                            .map_err(|err| RedDBError::Internal(err.to_string()))?
-                    } else {
-                        primary.wal_buffer.read_since(last_archived_lsn, usize::MAX)
-                    };
-                    if let Some(meta) = crate::storage::wal::archive_change_records(
-                        backend.as_ref(),
-                        &wal_prefix,
-                        &records,
-                        prev_hash_arg,
-                    )
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?
-                    {
-                        let backup_floor_lsn = crate::storage::wal::backup_wal_retention_floor_lsn(
-                            backend.as_ref(),
-                            &snapshot_prefix,
-                        )
-                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                        let boundary = crate::storage::wal::WalPruneBoundary::new(meta.lsn_end)
-                            .with_backup_floor_lsn(backup_floor_lsn);
-                        let _ = primary.prune_retained_wal(boundary);
-                        // Advance the chain head so the next archive call
-                        // links to this segment's hash. If the segment has
-                        // no sha256 (legacy / hashing failed) we leave the
-                        // head as-is — the next segment then carries the
-                        // prior chain head, preserving continuity.
-                        if let Some(sha) = &meta.sha256 {
-                            self.inner.db.store().set_config_tree(
-                                "red.config.timeline",
-                                &crate::json!({ "last_segment_hash": sha }),
-                            );
-                        }
-                        meta.lsn_end
-                    } else {
-                        last_archived_lsn
-                    }
-                } else {
-                    last_archived_lsn
-                };
-
-                let head = crate::storage::wal::BackupHead {
-                    timeline_id,
-                    snapshot_key,
-                    snapshot_id: snapshot.snapshot_id,
-                    snapshot_time: snapshot.created_at_unix_ms as u64,
-                    current_lsn,
-                    last_archived_lsn: archived_lsn,
-                    wal_prefix,
-                };
-                crate::storage::wal::publish_backup_head(backend.as_ref(), &head_key, &head)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                self.inner.db.store().set_config_tree(
-                    "red.config.timeline",
-                    &crate::json!({
-                        "last_archived_lsn": archived_lsn,
-                        "id": head.timeline_id
-                    }),
-                );
-
-                // PLAN.md Phase 2.4 — refresh the unified `MANIFEST.json`
-                // at the prefix root so external tooling sees a single
-                // catalog of every snapshot + WAL segment with their
-                // checksums. Best-effort: a manifest publish failure
-                // doesn't fail the backup (the per-artifact sidecars
-                // already give restore-side integrity), but it does log
-                // so dashboards can flag stale catalogs.
-                if let Err(err) = crate::storage::wal::publish_unified_manifest_for_prefix(
-                    backend.as_ref(),
-                    &snapshot_prefix,
-                ) {
-                    tracing::warn!(
-                        target: "reddb::backup",
-                        error = %err,
-                        snapshot_prefix = %snapshot_prefix,
-                        "unified MANIFEST.json refresh failed; per-artifact sidecars unaffected"
-                    );
-                }
-
-                // PLAN.md Phase 11.4 — when the operator picked a
-                // commit policy that demands replica durability, block
-                // until the configured count of replicas has acked the
-                // archived LSN (or the timeout fires). For backup the
-                // policy decides the *DR posture* — `local` returns
-                // immediately, `ack_n` ensures at least N replicas saw
-                // the new tail before we report success to the
-                // operator. A `TimedOut` is logged but does NOT fail
-                // the backup: the local WAL + remote upload are durable
-                // regardless; the missing acks are reported via
-                // /metrics and /admin/status so the operator can decide.
-                match self.commit_policy() {
-                    crate::replication::CommitPolicy::AckN(n) if n > 0 => {
-                        let timeout = std::env::var("RED_REPLICATION_ACK_TIMEOUT_MS")
-                            .ok()
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(5_000);
-                        let outcome = self.await_replica_acks(
-                            archived_lsn,
-                            n,
-                            std::time::Duration::from_millis(timeout),
-                        );
-                        match outcome {
-                            crate::replication::AwaitOutcome::Reached(count) => {
-                                tracing::debug!(
-                                    target: "reddb::backup",
-                                    archived_lsn,
-                                    n,
-                                    count,
-                                    "ack_n: replicas synced before backup return"
-                                );
-                            }
-                            crate::replication::AwaitOutcome::TimedOut { observed, required } => {
-                                tracing::warn!(
-                                    target: "reddb::backup",
-                                    archived_lsn,
-                                    observed,
-                                    required,
-                                    timeout_ms = timeout,
-                                    "ack_n: timed out waiting for replicas; backup uploaded but DR posture degraded"
-                                );
-                            }
-                            crate::replication::AwaitOutcome::NotRequired => {}
-                        }
-                    }
-                    _ => {} // Local / RemoteWal / Quorum: no blocking yet
-                }
-
-                // Issue #148 follow-up — opt-in archive of the L2 Blob Cache
-                // directory tree. Default off so a standard backup stays
-                // small; flip via `red.config.backup.include_blob_cache=true`
-                // when warm-cache restore is required (per
-                // docs/operations/blob-cache-backup-restore.md §1).
-                //
-                // The L2 tree is *derived* state (ADR 0006) — its absence
-                // never causes data loss; it only affects post-restore
-                // p99 latency until the cache re-warms. We therefore log
-                // (not fail) on per-file upload errors so a partial L2
-                // upload never aborts a healthy snapshot+WAL backup.
-                if self.config_bool("red.config.backup.include_blob_cache", false) {
-                    let blob_cache_prefix = self.config_string(
-                        "red.config.backup.blob_cache_prefix",
-                        &format!("{snapshot_prefix}blob_cache/"),
-                    );
-                    if let Some(l2_path) = self.inner.result_blob_cache.l2_path() {
-                        match crate::storage::cache::archive_blob_cache_l2(
-                            backend.as_ref(),
-                            l2_path,
-                            &blob_cache_prefix,
-                        ) {
-                            Ok(count) => {
-                                tracing::info!(
-                                    target: "reddb::backup",
-                                    files_uploaded = count,
-                                    blob_cache_prefix = %blob_cache_prefix,
-                                    "include_blob_cache: archived L2 directory"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    target: "reddb::backup",
-                                    error = %err,
-                                    blob_cache_prefix = %blob_cache_prefix,
-                                    "include_blob_cache: L2 archive failed; backup proceeding (cache is derived state)"
-                                );
-                            }
-                        }
-                    } else {
-                        tracing::debug!(
-                            target: "reddb::backup",
-                            "include_blob_cache=true but no L2 path configured; nothing to archive"
-                        );
-                    }
-                }
-
-                uploaded = true;
-            }
-
-            Ok(crate::replication::scheduler::BackupResult {
-                snapshot_id: snapshot.snapshot_id,
-                uploaded,
-                duration_ms: started.elapsed().as_millis() as u64,
-                timestamp: snapshot.created_at_unix_ms as u64,
-            })
-        })();
-
-        use crate::runtime::control_events::{EventKind, Outcome, Sensitivity};
-        let (current_lsn, last_archived_lsn) = self.wal_archive_progress();
-        let mut fields = vec![
-            (
-                "current_lsn".to_string(),
-                Sensitivity::raw(current_lsn.to_string()),
-            ),
-            (
-                "last_archived_lsn".to_string(),
-                Sensitivity::raw(last_archived_lsn.to_string()),
-            ),
-        ];
-        if let Ok(backup) = &result {
-            fields.push((
-                "snapshot_id".to_string(),
-                Sensitivity::raw(backup.snapshot_id.to_string()),
-            ));
-            fields.push((
-                "uploaded".to_string(),
-                Sensitivity::raw(backup.uploaded.to_string()),
-            ));
-            fields.push((
-                "duration_ms".to_string(),
-                Sensitivity::raw(backup.duration_ms.to_string()),
-            ));
-            fields.push((
-                "snapshot_time".to_string(),
-                Sensitivity::raw(backup.timestamp.to_string()),
-            ));
-        }
-        let outcome = match &result {
-            Ok(_) => Outcome::Allowed,
-            Err(err) => control_event_outcome_for_error(err),
-        };
-        let reason = result.as_ref().err().map(|err| err.to_string());
-        self.emit_control_event(
-            EventKind::BackupRun,
-            outcome,
-            "backup_trigger",
-            Some("backup:trigger".to_string()),
-            reason,
-            fields,
-        )?;
-        result
     }
 
     pub fn acquire(&self) -> RedDBResult<RuntimeConnection> {
@@ -9969,269 +7612,6 @@ impl RedDBRuntime {
         }))
     }
 
-    fn result_cache_backend(&self) -> RuntimeResultCacheBackend {
-        match self
-            .config_string(RESULT_CACHE_BACKEND_KEY, RESULT_CACHE_DEFAULT_BACKEND)
-            .as_str()
-        {
-            "blob_cache" => RuntimeResultCacheBackend::BlobCache,
-            "shadow" => RuntimeResultCacheBackend::Shadow,
-            _ => RuntimeResultCacheBackend::Legacy,
-        }
-    }
-
-    /// Result-cache kill-switch (issue #802). When `false`, reads and
-    /// writes are short-circuited so every query recomputes — used for
-    /// debugging and to bound staleness without a restart.
-    fn result_cache_enabled(&self) -> bool {
-        self.config_bool(RESULT_CACHE_ENABLED_KEY, true)
-    }
-
-    /// Configurable per-entry TTL in seconds (issue #802), defaulting to
-    /// the former `RESULT_CACHE_TTL_SECS` constant.
-    fn result_cache_ttl_secs(&self) -> u64 {
-        self.config_u64(RESULT_CACHE_TTL_KEY, RESULT_CACHE_TTL_SECS)
-    }
-
-    /// Configurable LRU capacity in entries (issue #802), defaulting to
-    /// the former `RESULT_CACHE_MAX_ENTRIES` constant. Zero is treated as
-    /// "no cached entries retained".
-    fn result_cache_capacity(&self) -> usize {
-        self.config_u64(RESULT_CACHE_CAPACITY_KEY, RESULT_CACHE_MAX_ENTRIES as u64) as usize
-    }
-
-    /// Snapshot of the result-cache observability counters (issue #802):
-    /// `(hits, misses, evictions)`. Surfaced under `red.metrics`.
-    pub fn result_cache_metrics(&self) -> (u64, u64, u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        (
-            self.inner.result_cache_hits.load(Relaxed),
-            self.inner.result_cache_misses.load(Relaxed),
-            self.inner.result_cache_evictions.load(Relaxed),
-        )
-    }
-
-    fn record_result_cache_evictions(&self, evicted: u64) {
-        if evicted > 0 {
-            self.inner
-                .result_cache_evictions
-                .fetch_add(evicted, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    pub(super) fn get_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
-        if !self.result_cache_enabled() {
-            return None;
-        }
-        let hit = self.get_result_cache_entry_inner(key);
-        let counter = if hit.is_some() {
-            &self.inner.result_cache_hits
-        } else {
-            &self.inner.result_cache_misses
-        };
-        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        hit
-    }
-
-    fn get_result_cache_entry_inner(&self, key: &str) -> Option<RuntimeQueryResult> {
-        match self.result_cache_backend() {
-            RuntimeResultCacheBackend::Legacy => self.get_legacy_result_cache_entry(key),
-            RuntimeResultCacheBackend::BlobCache => self.get_blob_result_cache_entry(key),
-            RuntimeResultCacheBackend::Shadow => {
-                let legacy = self.get_legacy_result_cache_entry(key);
-                let blob = self.get_blob_result_cache_entry(key);
-                if let (Some(ref legacy), Some(ref blob)) = (&legacy, &blob) {
-                    if result_cache_fingerprint(legacy) != result_cache_fingerprint(blob) {
-                        self.inner
-                            .result_cache_shadow_divergences
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::warn!(
-                            key,
-                            metric = crate::runtime::METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL,
-                            "result cache shadow backend diverged from legacy"
-                        );
-                    }
-                }
-                legacy
-            }
-        }
-    }
-
-    fn get_legacy_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
-        let ttl = self.result_cache_ttl_secs();
-        let cache = self.inner.result_cache.read();
-        cache.0.get(key).and_then(|entry| {
-            if entry.cached_at.elapsed().as_secs() < ttl {
-                Some(entry.result.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn get_blob_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
-        let hit = self
-            .inner
-            .result_blob_cache
-            .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
-        {
-            let cache = self.inner.result_blob_entries.read();
-            if let Some(entry) = cache.0.get(key) {
-                return Some(entry.result.clone());
-            }
-        }
-
-        let (result, scopes) = decode_result_cache_payload(hit.value())?;
-        let mut cache = self.inner.result_blob_entries.write();
-        let (ref mut map, ref mut order) = *cache;
-        if !map.contains_key(key) {
-            order.push_back(key.to_string());
-        }
-        map.insert(
-            key.to_string(),
-            RuntimeResultCacheEntry {
-                result: result.clone(),
-                cached_at: std::time::Instant::now(),
-                scopes,
-            },
-        );
-        let evicted = trim_result_cache(map, order, self.result_cache_capacity());
-        drop(cache);
-        self.record_result_cache_evictions(evicted);
-        Some(result)
-    }
-
-    pub(super) fn put_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
-        if !self.result_cache_enabled() {
-            return;
-        }
-        match self.result_cache_backend() {
-            RuntimeResultCacheBackend::Legacy => self.put_legacy_result_cache_entry(key, entry),
-            RuntimeResultCacheBackend::BlobCache => self.put_blob_result_cache_entry(key, entry),
-            RuntimeResultCacheBackend::Shadow => {
-                self.put_legacy_result_cache_entry(key, entry.clone());
-                self.put_blob_result_cache_entry(key, entry);
-            }
-        }
-    }
-
-    fn put_legacy_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
-        let capacity = self.result_cache_capacity();
-        let mut cache = self.inner.result_cache.write();
-        let (ref mut map, ref mut order) = *cache;
-        if !map.contains_key(key) {
-            order.push_back(key.to_string());
-        }
-        map.insert(key.to_string(), entry);
-        let evicted = trim_result_cache(map, order, capacity);
-        drop(cache);
-        self.record_result_cache_evictions(evicted);
-    }
-
-    fn put_blob_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
-        let policy = crate::storage::cache::BlobCachePolicy::default()
-            .ttl_ms(self.result_cache_ttl_secs() * 1000)
-            .priority(200);
-        let dependencies = entry.scopes.iter().cloned().collect::<Vec<_>>();
-        let bytes = encode_result_cache_payload(&entry)
-            .unwrap_or_else(|| result_cache_fingerprint(&entry.result).into_bytes());
-        let put = crate::storage::cache::BlobCachePut::new(bytes)
-            .with_dependencies(dependencies)
-            .with_policy(policy);
-        if self
-            .inner
-            .result_blob_cache
-            .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
-            .is_err()
-        {
-            return;
-        }
-
-        let capacity = self.result_cache_capacity();
-        let mut cache = self.inner.result_blob_entries.write();
-        let (ref mut map, ref mut order) = *cache;
-        if !map.contains_key(key) {
-            order.push_back(key.to_string());
-        }
-        map.insert(key.to_string(), entry);
-        let evicted = trim_result_cache(map, order, capacity);
-        drop(cache);
-        self.record_result_cache_evictions(evicted);
-    }
-
-    pub fn result_cache_shadow_divergences(&self) -> u64 {
-        self.inner
-            .result_cache_shadow_divergences
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Invalidate the result cache (call after any write operation).
-    /// Full clear — use for DDL (DROP TABLE, schema changes) or when table is unknown.
-    pub fn invalidate_result_cache(&self) {
-        let mut cache = self.inner.result_cache.write();
-        cache.0.clear();
-        cache.1.clear();
-        let mut blob_entries = self.inner.result_blob_entries.write();
-        blob_entries.0.clear();
-        blob_entries.1.clear();
-        self.inner
-            .result_blob_cache
-            .invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE);
-        let mut ask_entries = self.inner.ask_answer_cache_entries.write();
-        ask_entries.0.clear();
-        ask_entries.1.clear();
-        self.inner
-            .result_blob_cache
-            .invalidate_namespace(ASK_ANSWER_CACHE_NAMESPACE);
-    }
-
-    /// Invalidate only result cache entries that declared a dependency on `table`.
-    /// Cheaper than a full clear: unrelated tables keep their cached results.
-    pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
-        // Hot-path probe both backends before taking write locks. The blob
-        // backend is node-local, same as the legacy result cache.
-        let legacy_has_match = {
-            let cache = self.inner.result_cache.read();
-            let (ref map, _) = *cache;
-            !map.is_empty() && map.values().any(|entry| entry.scopes.contains(table))
-        };
-        let blob_has_match = {
-            let cache = self.inner.result_blob_entries.read();
-            let (ref map, _) = *cache;
-            !map.is_empty() && map.values().any(|entry| entry.scopes.contains(table))
-        };
-        if legacy_has_match {
-            let mut cache = self.inner.result_cache.write();
-            let (ref mut map, ref mut order) = *cache;
-            map.retain(|_, entry| !entry.scopes.contains(table));
-            order.retain(|key| map.contains_key(key));
-        }
-
-        if matches!(
-            self.result_cache_backend(),
-            RuntimeResultCacheBackend::BlobCache | RuntimeResultCacheBackend::Shadow
-        ) {
-            let mut blob_entries = self.inner.result_blob_entries.write();
-            let (ref mut blob_map, ref mut blob_order) = *blob_entries;
-            blob_map.clear();
-            blob_order.clear();
-            self.inner
-                .result_blob_cache
-                .invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE);
-        } else if blob_has_match {
-            let mut blob_entries = self.inner.result_blob_entries.write();
-            let (ref mut blob_map, ref mut blob_order) = *blob_entries;
-            blob_map.retain(|_, entry| !entry.scopes.contains(table));
-            blob_order.retain(|key| blob_map.contains_key(key));
-        }
-        let mut ask_entries = self.inner.ask_answer_cache_entries.write();
-        ask_entries.0.clear();
-        ask_entries.1.clear();
-        self.inner
-            .result_blob_cache
-            .invalidate_namespace(ASK_ANSWER_CACHE_NAMESPACE);
-    }
-
     pub(crate) fn invalidate_plan_cache(&self) {
         self.inner.query_cache.write().clear();
         self.inner
@@ -10547,13 +7927,13 @@ impl RedDBRuntime {
         }
         self.inner
             .index_store
-            .register(super::index_store::RegisteredIndex::replicated(
-                index_name,
-                table.to_string(),
+            .register(super::index_store::RegisteredIndex {
+                name: index_name,
+                collection: table.to_string(),
                 columns,
-                super::index_store::IndexMethodKind::Hash,
-                false,
-            ));
+                method: super::index_store::IndexMethodKind::Hash,
+                unique: false,
+            });
         self.invalidate_plan_cache();
     }
 
@@ -11363,6 +8743,187 @@ impl RedDBRuntime {
                 .create_index(
                     &index.name,
                     table,
+                    &index.columns,
+                    index.method,
+                    index.unique,
+                    &entity_fields,
+                )
+                .map_err(RedDBError::Internal)?;
+            self.inner.index_store.register(index);
+        }
+        self.invalidate_plan_cache();
+        Ok(())
+    }
+
+    pub(crate) fn persist_runtime_index_descriptor(
+        &self,
+        index: super::index_store::RegisteredIndex,
+    ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let _ = store.get_or_create_collection(RUNTIME_INDEX_REGISTRY_COLLECTION);
+        let entity = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::TableRow {
+                table: std::sync::Arc::from(RUNTIME_INDEX_REGISTRY_COLLECTION),
+                row_id: 0,
+            },
+            crate::storage::EntityData::Row(crate::storage::RowData {
+                columns: Vec::new(),
+                named: Some(
+                    [
+                        (
+                            "collection".to_string(),
+                            crate::storage::schema::Value::text(index.collection.clone()),
+                        ),
+                        (
+                            "name".to_string(),
+                            crate::storage::schema::Value::text(index.name.clone()),
+                        ),
+                        (
+                            "columns".to_string(),
+                            crate::storage::schema::Value::text(index.columns.join("\u{1f}")),
+                        ),
+                        (
+                            "method".to_string(),
+                            crate::storage::schema::Value::text(index_method_kind_as_str(
+                                index.method,
+                            )),
+                        ),
+                        (
+                            "unique".to_string(),
+                            crate::storage::schema::Value::Boolean(index.unique),
+                        ),
+                        (
+                            "dropped".to_string(),
+                            crate::storage::schema::Value::Boolean(false),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                schema: None,
+            }),
+        );
+        store
+            .insert_auto(RUNTIME_INDEX_REGISTRY_COLLECTION, entity)
+            .map(|_| ())
+            .map_err(|err| RedDBError::Internal(format!("{err:?}")))
+    }
+
+    pub(crate) fn persist_runtime_index_drop(
+        &self,
+        collection: &str,
+        name: &str,
+    ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let _ = store.get_or_create_collection(RUNTIME_INDEX_REGISTRY_COLLECTION);
+        let entity = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::TableRow {
+                table: std::sync::Arc::from(RUNTIME_INDEX_REGISTRY_COLLECTION),
+                row_id: 0,
+            },
+            crate::storage::EntityData::Row(crate::storage::RowData {
+                columns: Vec::new(),
+                named: Some(
+                    [
+                        (
+                            "collection".to_string(),
+                            crate::storage::schema::Value::text(collection.to_string()),
+                        ),
+                        (
+                            "name".to_string(),
+                            crate::storage::schema::Value::text(name.to_string()),
+                        ),
+                        (
+                            "dropped".to_string(),
+                            crate::storage::schema::Value::Boolean(true),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                schema: None,
+            }),
+        );
+        store
+            .insert_auto(RUNTIME_INDEX_REGISTRY_COLLECTION, entity)
+            .map(|_| ())
+            .map_err(|err| RedDBError::Internal(format!("{err:?}")))
+    }
+
+    fn rehydrate_runtime_index_registry(&self) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(RUNTIME_INDEX_REGISTRY_COLLECTION) else {
+            return Ok(());
+        };
+        let mut rows = manager.query_all(|_| true);
+        rows.sort_by_key(|entity| entity.id.raw());
+
+        let mut latest = std::collections::HashMap::<
+            (String, String),
+            Option<super::index_store::RegisteredIndex>,
+        >::new();
+        for entity in rows {
+            let crate::storage::EntityData::Row(row) = &entity.data else {
+                continue;
+            };
+            let Some(named) = &row.named else {
+                continue;
+            };
+            let Some(collection) = named_text(named, "collection") else {
+                continue;
+            };
+            let Some(name) = named_text(named, "name") else {
+                continue;
+            };
+            let dropped = named_bool(named, "dropped").unwrap_or(false);
+            let key = (collection.clone(), name.clone());
+            if dropped {
+                latest.insert(key, None);
+                continue;
+            }
+            let columns = named_text(named, "columns")
+                .map(|raw| {
+                    raw.split('\u{1f}')
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let Some(method) =
+                named_text(named, "method").and_then(|raw| index_method_kind_from_str(&raw))
+            else {
+                continue;
+            };
+            latest.insert(
+                key,
+                Some(super::index_store::RegisteredIndex {
+                    name,
+                    collection,
+                    columns,
+                    method,
+                    unique: named_bool(named, "unique").unwrap_or(false),
+                }),
+            );
+        }
+
+        for index in latest.into_values().flatten() {
+            let Some(manager) = store.get_collection(&index.collection) else {
+                continue;
+            };
+            let entity_fields = manager
+                .query_all(|entity| {
+                    matches!(entity.kind, crate::storage::EntityKind::TableRow { .. })
+                })
+                .into_iter()
+                .map(|entity| (entity.id, table_row_index_fields(&entity)))
+                .collect::<Vec<_>>();
+            self.inner
+                .index_store
+                .create_index(
+                    &index.name,
+                    &index.collection,
                     &index.columns,
                     index.method,
                     index.unique,

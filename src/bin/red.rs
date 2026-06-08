@@ -999,10 +999,6 @@ fn main() {
             run_inspect_command(&result.flags, remaining);
         }
 
-        "storage-validate" => {
-            run_storage_validate_command(&result.flags);
-        }
-
         "mcp" => {
             let path = result
                 .flags
@@ -3339,68 +3335,6 @@ fn build_tick_payload(operations: Option<&str>, dry_run: bool) -> String {
 
 fn json_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn run_storage_validate_command(flags: &HashMap<String, FlagValue>) {
-    let json_mode = wants_json(flags);
-    let path = match flag_string(flags, "path").filter(|p| !p.is_empty()) {
-        Some(p) => p,
-        None => {
-            let msg = "storage-validate requires --path <FILE>";
-            if json_mode {
-                json_error("storage-validate", msg);
-            }
-            eprintln!("error: {msg}");
-            std::process::exit(1);
-        }
-    };
-
-    let report = reddb::storage::validate_storage(&path);
-    if json_mode {
-        let failures = report
-            .failures()
-            .into_iter()
-            .map(|failure| format!("\"{}\"", json_escape(failure)))
-            .collect::<Vec<_>>()
-            .join(",");
-        json_ok(
-            "storage-validate",
-            &format!(
-                "{{\"path\":\"{}\",\"clean\":{},\"checks\":{{\"embedded_superblock\":\"{}\",\"embedded_manifest\":\"{}\",\"operational_manifest\":\"{}\",\"mutable_pages\":\"{}\",\"append_only_segments\":\"{}\"}},\"failures\":[{}]}}",
-                json_escape(&path),
-                report.is_clean(),
-                json_escape(report.embedded_superblock.message()),
-                json_escape(report.embedded_manifest.message()),
-                json_escape(report.operational_manifest.message()),
-                json_escape(report.mutable_pages.message()),
-                json_escape(report.append_only_segments.message()),
-                failures
-            ),
-        );
-    } else {
-        println!(
-            "storage validation: {}",
-            if report.is_clean() { "clean" } else { "failed" }
-        );
-        println!("path: {}", report.path.display());
-        println!(
-            "embedded_superblock: {}",
-            report.embedded_superblock.message()
-        );
-        println!("embedded_manifest: {}", report.embedded_manifest.message());
-        println!(
-            "operational_manifest: {}",
-            report.operational_manifest.message()
-        );
-        println!("mutable_pages: {}", report.mutable_pages.message());
-        println!(
-            "append_only_segments: {}",
-            report.append_only_segments.message()
-        );
-    }
-    if !report.is_clean() {
-        std::process::exit(1);
-    }
 }
 
 // ---------------------------------------------------------------------------

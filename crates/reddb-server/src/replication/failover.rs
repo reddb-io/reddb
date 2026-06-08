@@ -40,61 +40,6 @@
 
 use std::time::Duration;
 
-use crate::replication::CommitPolicy;
-
-/// Promotion-time view of the local replica's durable progress.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PromotionProgress {
-    /// Highest logical stream LSN applied and durably checkpointed locally.
-    pub durable_lsn: u64,
-    /// Primary frontier the replica must cover before normal promotion.
-    pub required_lsn: u64,
-    /// Commit policy active for the cluster.
-    pub policy: CommitPolicy,
-}
-
-/// Why a normal replica promotion is unsafe.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PromotionRefusal {
-    BelowRequiredDurableWatermark(PromotionProgress),
-}
-
-impl std::fmt::Display for PromotionRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BelowRequiredDurableWatermark(progress) => write!(
-                f,
-                "promotion refused: replica durable_lsn {} is below required {} for commit policy {}",
-                progress.durable_lsn,
-                progress.required_lsn,
-                progress.policy.label()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PromotionRefusal {}
-
-/// Normal promotion is only safe when the replica has durably applied
-/// the primary frontier it is being asked to assume. The frontier is a
-/// semantic logical-stream LSN, not a physical page/file WAL offset.
-pub fn check_promotion_watermark(
-    durable_lsn: u64,
-    required_lsn: u64,
-    policy: CommitPolicy,
-) -> Result<PromotionProgress, PromotionRefusal> {
-    let progress = PromotionProgress {
-        durable_lsn,
-        required_lsn,
-        policy,
-    };
-    if durable_lsn < required_lsn {
-        Err(PromotionRefusal::BelowRequiredDurableWatermark(progress))
-    } else {
-        Ok(progress)
-    }
-}
-
 /// The replication role a node plays after a failover step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeRole {
@@ -167,6 +112,10 @@ pub struct FailoverRequest {
     /// registry). Lets the coordinator take a no-wait fast path when the
     /// target is already caught up at freeze time.
     pub target_frontier_hint: u64,
+    /// Current primary-replica timeline ancestry. A successful handover
+    /// forks this history at the target's reached LSN and returns the new
+    /// history in [`FailoverOutcome::timeline_history`].
+    pub timeline_history: reddb_file::TimelineHistory,
     /// Coordinated vs. forced execution.
     pub mode: FailoverMode,
 }
@@ -223,6 +172,8 @@ pub struct FailoverOutcome {
     pub waited: Duration,
     /// Post-handover roles of the two nodes.
     pub roles: RoleAssignment,
+    /// Timeline ancestry after the promoted target became primary.
+    pub timeline_history: reddb_file::TimelineHistory,
 }
 
 impl FailoverOutcome {
@@ -245,6 +196,9 @@ pub enum FailoverError {
         reached_lsn: u64,
         waited: Duration,
     },
+    /// The term/role swap was otherwise ready, but the timeline fork could
+    /// not be represented safely. No handover is committed in this case.
+    TimelineHistory(String),
 }
 
 impl std::fmt::Display for FailoverError {
@@ -259,6 +213,9 @@ impl std::fmt::Display for FailoverError {
                 "coordinated failover aborted: target reached LSN {reached_lsn} of {frontier_lsn} \
                  after {waited:?}; writes resumed on the old primary, no write lost",
             ),
+            FailoverError::TimelineHistory(message) => {
+                write!(f, "failover timeline history error: {message}")
+            }
         }
     }
 }
@@ -320,8 +277,15 @@ impl FailoverCoordinator {
         // Fast path: the target was already at/past the frontier when we
         // froze. Hand over immediately, no wait.
         if req.target_frontier_hint >= frontier {
+            let timeline_history = Self::promoted_timeline_history(req, frontier)?;
             tx.commit_handover(new_term);
-            return Ok(Self::clean_outcome(req, frontier, frontier, Duration::ZERO));
+            return Ok(Self::clean_outcome(
+                req,
+                frontier,
+                frontier,
+                Duration::ZERO,
+                timeline_history,
+            ));
         }
 
         // Bounded wait: poll the target's live frontier until it covers
@@ -332,8 +296,15 @@ impl FailoverCoordinator {
             reached = tx.poll_target_frontier();
             if reached >= frontier {
                 let waited = tx.elapsed();
+                let timeline_history = Self::promoted_timeline_history(req, reached)?;
                 tx.commit_handover(new_term);
-                return Ok(Self::clean_outcome(req, frontier, reached, waited));
+                return Ok(Self::clean_outcome(
+                    req,
+                    frontier,
+                    reached,
+                    waited,
+                    timeline_history,
+                ));
             }
         }
 
@@ -342,6 +313,7 @@ impl FailoverCoordinator {
         // skipped catch-up.
         let waited = tx.elapsed();
         if req.mode.is_force() {
+            let timeline_history = Self::promoted_timeline_history(req, reached)?;
             tx.commit_handover(new_term);
             Ok(FailoverOutcome {
                 new_term,
@@ -351,6 +323,7 @@ impl FailoverCoordinator {
                 forced: true,
                 waited,
                 roles: RoleAssignment::swap(req),
+                timeline_history,
             })
         } else {
             tx.resume_primary();
@@ -367,6 +340,7 @@ impl FailoverCoordinator {
         frontier: u64,
         reached: u64,
         waited: Duration,
+        timeline_history: reddb_file::TimelineHistory,
     ) -> FailoverOutcome {
         FailoverOutcome {
             new_term: req.new_term(),
@@ -376,7 +350,28 @@ impl FailoverCoordinator {
             forced: false,
             waited,
             roles: RoleAssignment::swap(req),
+            timeline_history,
         }
+    }
+
+    fn promoted_timeline_history(
+        req: &FailoverRequest,
+        reached_lsn: u64,
+    ) -> Result<reddb_file::TimelineHistory, FailoverError> {
+        let parent = req
+            .timeline_history
+            .current()
+            .unwrap_or_else(reddb_file::TimelineId::initial);
+        let candidate = reddb_file::PromotionCandidate {
+            replica_id: req.target.id.clone(),
+            timeline: parent,
+            received_lsn: reached_lsn,
+            flushed_lsn: reached_lsn,
+            applied_lsn: reached_lsn,
+        };
+        req.timeline_history
+            .promotion_history(&candidate, parent.next(), crate::utils::now_unix_millis())
+            .map_err(|err| FailoverError::TimelineHistory(err.to_string()))
     }
 }
 
@@ -443,6 +438,7 @@ mod tests {
             target: FailoverNode::new("n2", "http://n2:50051", "us-west"),
             current_term: 4,
             target_frontier_hint: hint,
+            timeline_history: reddb_file::TimelineHistory::new(10),
             mode,
         }
     }
@@ -465,6 +461,16 @@ mod tests {
         assert_eq!(outcome.waited, Duration::ZERO, "fast path does not wait");
         assert!(outcome.is_zero_rpo());
         assert_eq!(outcome.skipped_lsn, 0);
+        assert_eq!(
+            outcome.timeline_history.current(),
+            Some(reddb_file::TimelineId(2))
+        );
+        assert_eq!(
+            outcome
+                .timeline_history
+                .ancestor_lsn(reddb_file::TimelineId(2)),
+            Some(100)
+        );
     }
 
     #[test]
@@ -503,6 +509,54 @@ mod tests {
     }
 
     #[test]
+    fn coordinated_handover_appends_second_timeline_promotion() {
+        let mut tx = FakeTransport::new(200, vec![], Duration::from_millis(10));
+        let mut req = request(
+            FailoverMode::Coordinated {
+                catch_up_deadline: Duration::from_secs(5),
+            },
+            200,
+        );
+        req.current_term = 5;
+        req.timeline_history
+            .fork(
+                reddb_file::TimelineId(2),
+                reddb_file::TimelineId(1),
+                100,
+                20,
+                "promote replica-a",
+            )
+            .expect("seed previous promotion");
+
+        let outcome = FailoverCoordinator::run(&req, &mut tx).expect("second handover");
+
+        assert_eq!(outcome.new_term, 6);
+        assert_eq!(
+            outcome.timeline_history.current(),
+            Some(reddb_file::TimelineId(3))
+        );
+        assert_eq!(
+            outcome
+                .timeline_history
+                .ancestor_lsn(reddb_file::TimelineId(2)),
+            Some(100)
+        );
+        assert_eq!(
+            outcome
+                .timeline_history
+                .ancestor_lsn(reddb_file::TimelineId(3)),
+            Some(200)
+        );
+        let chain = outcome
+            .timeline_history
+            .descendant_chain_from(reddb_file::TimelineId(1))
+            .expect("chain from initial timeline");
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].timeline, reddb_file::TimelineId(2));
+        assert_eq!(chain[1].timeline, reddb_file::TimelineId(3));
+    }
+
+    #[test]
     fn coordinated_aborts_and_resumes_when_target_never_catches_up() {
         // Target stalls at 70, never reaching the frontier of 100 before
         // the 50ms deadline (5 polls at 10ms).
@@ -527,6 +581,7 @@ mod tests {
                 assert_eq!(frontier_lsn, 100);
                 assert_eq!(reached_lsn, 70);
             }
+            FailoverError::TimelineHistory(err) => panic!("unexpected timeline error: {err}"),
         }
     }
 
@@ -550,6 +605,13 @@ mod tests {
         assert_eq!(outcome.reached_lsn, 70);
         assert_eq!(outcome.skipped_lsn, 30, "skipped catch-up surfaced");
         assert!(!outcome.is_zero_rpo());
+        assert_eq!(
+            outcome
+                .timeline_history
+                .ancestor_lsn(reddb_file::TimelineId(2)),
+            Some(70),
+            "forced promotion forks where the target actually reached"
+        );
         assert!(
             outcome.waited <= Duration::from_millis(60),
             "completes within the timeout window",
@@ -589,27 +651,5 @@ mod tests {
         assert!(!outcome.forced);
         assert_eq!(outcome.skipped_lsn, 0);
         assert!(outcome.is_zero_rpo());
-    }
-
-    #[test]
-    fn normal_promotion_rejects_replica_below_required_durable_watermark() {
-        let err =
-            check_promotion_watermark(41, 42, CommitPolicy::AckN(1)).expect_err("must reject");
-        match err {
-            PromotionRefusal::BelowRequiredDurableWatermark(progress) => {
-                assert_eq!(progress.durable_lsn, 41);
-                assert_eq!(progress.required_lsn, 42);
-                assert_eq!(progress.policy, CommitPolicy::AckN(1));
-            }
-        }
-    }
-
-    #[test]
-    fn normal_promotion_accepts_replica_at_required_durable_watermark() {
-        let progress =
-            check_promotion_watermark(42, 42, CommitPolicy::Quorum).expect("must accept");
-        assert_eq!(progress.durable_lsn, 42);
-        assert_eq!(progress.required_lsn, 42);
-        assert_eq!(progress.policy, CommitPolicy::Quorum);
     }
 }

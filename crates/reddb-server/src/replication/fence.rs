@@ -31,7 +31,7 @@
 //! file-backed store alongside the node's other durable replication state;
 //! tests use the in-memory store.
 
-use crate::serde_json::{self, Value as JsonValue};
+pub use reddb_file::FileTermStore;
 
 /// The boundary at which a term-stamped message is being admitted. Only
 /// affects diagnostics — the term rule is identical at both.
@@ -118,6 +118,15 @@ impl std::fmt::Display for TermStoreError {
 
 impl std::error::Error for TermStoreError {}
 
+impl From<reddb_file::RdbFileError> for TermStoreError {
+    fn from(value: reddb_file::RdbFileError) -> Self {
+        match value {
+            reddb_file::RdbFileError::Io(err) => Self::Io(err),
+            reddb_file::RdbFileError::InvalidOperation(msg) => Self::InvalidFormat(msg),
+        }
+    }
+}
+
 /// Durable store for a node's current replication term. The default (when
 /// nothing was ever written) is
 /// [`DEFAULT_REPLICATION_TERM`](crate::replication::DEFAULT_REPLICATION_TERM),
@@ -166,60 +175,13 @@ impl TermStore for MemoryTermStore {
     }
 }
 
-/// File-backed term store. Persisted with the atomic temp-file + rename +
-/// parent-dir fsync discipline used for the durable last-vote
-/// ([`super::FileLastVoteStore`]) so a crash mid-write never yields a torn
-/// record and an adopted term cannot be silently lost.
-pub struct FileTermStore {
-    path: std::path::PathBuf,
-}
-
-impl FileTermStore {
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-}
-
 impl TermStore for FileTermStore {
     fn load(&self) -> Result<u64, TermStoreError> {
-        match std::fs::read(&self.path) {
-            Ok(bytes) => {
-                let json: JsonValue = serde_json::from_slice(&bytes)
-                    .map_err(|err| TermStoreError::InvalidFormat(format!("parse: {err}")))?;
-                json.get("term")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| TermStoreError::InvalidFormat("missing term".into()))
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Ok(crate::replication::DEFAULT_REPLICATION_TERM)
-            }
-            Err(err) => Err(TermStoreError::Io(err)),
-        }
+        self.load_file().map_err(TermStoreError::from)
     }
 
     fn persist(&self, term: u64) -> Result<(), TermStoreError> {
-        let mut obj = serde_json::Map::new();
-        obj.insert("term".to_string(), JsonValue::Number(term as f64));
-        let bytes = serde_json::to_vec(&JsonValue::Object(obj))
-            .map_err(|err| TermStoreError::InvalidFormat(format!("serialize: {err}")))?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(TermStoreError::Io)?;
-        }
-        let tmp = self.path.with_extension("term.tmp");
-        std::fs::write(&tmp, &bytes).map_err(TermStoreError::Io)?;
-        if let Ok(f) = std::fs::File::open(&tmp) {
-            let _ = f.sync_all();
-        }
-        std::fs::rename(&tmp, &self.path).map_err(TermStoreError::Io)?;
-        // fsync the parent dir so the rename itself is durable — otherwise a
-        // crash could leave the directory entry pointing at the old term and
-        // let the node briefly accept records it had already fenced.
-        if let Some(parent) = self.path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-        Ok(())
+        self.persist_file(term).map_err(TermStoreError::from)
     }
 }
 

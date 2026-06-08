@@ -1,4 +1,4 @@
-use super::record::{WalRecord, WAL_MAGIC, WAL_VERSION, WAL_VERSION_V2};
+use super::record::WalRecord;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
@@ -17,27 +17,14 @@ impl WalReader {
         let mut reader = BufReader::new(file);
 
         // Check header
-        let mut header = [0u8; 8];
+        let mut header = [0u8; reddb_file::WAL_FILE_HEADER_BYTES];
         reader.read_exact(&mut header)?;
-
-        if &header[0..4] != WAL_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid WAL magic bytes",
-            ));
-        }
-
-        if header[4] != WAL_VERSION && header[4] != WAL_VERSION_V2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Unsupported WAL version: {}", header[4]),
-            ));
-        }
+        let decoded = reddb_file::decode_wal_file_header(&header)?;
 
         Ok(Self {
             reader,
-            position: 8,
-            format_version: header[4],
+            position: reddb_file::WAL_FILE_HEADER_BYTES as u64,
+            format_version: decoded.version,
         })
     }
 
@@ -277,11 +264,9 @@ mod tests {
         let (_guard, path) = temp_wal("badver");
 
         // Write header with wrong version
-        let mut header = Vec::new();
-        header.extend_from_slice(WAL_MAGIC);
-        header.push(99); // Wrong version
-        header.extend_from_slice(&[0u8; 3]);
-        std::fs::write(&path, &header).unwrap();
+        let mut header = reddb_file::encode_wal_file_header();
+        header[4] = 99; // Wrong version
+        std::fs::write(&path, header).unwrap();
 
         let result = WalReader::open(&path);
         assert!(result.is_err());

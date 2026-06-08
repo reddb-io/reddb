@@ -2239,6 +2239,7 @@ dependencies = [
  "prost",
  "rcgen",
  "reddb-io-client",
+ "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-server",
  "reddb-io-wire",
@@ -2287,6 +2288,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-file"
+version = "1.0.0"
+dependencies = [
+ "blake3",
+ "crc32fast",
+ "fs2",
+ "lz4_flex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "zstd",
+]
+
+[[package]]
 name = "reddb-io-grpc-proto"
 version = "1.10.0"
 dependencies = [
@@ -2329,6 +2344,7 @@ dependencies = [
  "rayon",
  "rcgen",
  "reddb-io-client-connector",
+ "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-wire",
  "regex",

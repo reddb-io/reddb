@@ -27,9 +27,8 @@ use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
 
-use super::protocol::{
-    encode_column_name, encode_value, write_frame_header, MSG_RESULT, VAL_NULL, VAL_U64,
-};
+use super::protocol::encode_value;
+use reddb_wire::legacy::{encode_column_name, write_frame_header, MSG_RESULT, VAL_NULL, VAL_U64};
 
 /// Try to serve a binary SELECT via the zero-copy scan path.
 ///

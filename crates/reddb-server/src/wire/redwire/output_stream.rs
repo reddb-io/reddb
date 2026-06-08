@@ -33,127 +33,33 @@ use crate::serde_json::{self, Value as JsonValue};
 use crate::server::output_stream::{
     self as outs, Clock, OpenStreamError, StreamConfig, SystemClock,
 };
-use reddb_wire::redwire::frame::{Frame, MessageKind};
-
-use super::codec::encode_frame;
-use super::FrameBuilder;
-
-/// Parsed `OpenStream` payload. Shape:
-///
-/// ```json
-/// { "sql": "SELECT …", "opts": { … } }
-/// ```
-///
-/// `opts` is captured opaque so future slices (resume hash, etc.)
-/// can grow the shape without touching the dispatch helper.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenStreamRequest {
-    pub sql: String,
-    pub opts_raw: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OpenStreamParseError {
-    NotJson,
-    NotObject,
-    MissingSql,
-    EmptySql,
-}
-
-impl OpenStreamParseError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::NotJson | Self::NotObject => "open_stream_invalid_payload",
-            Self::MissingSql | Self::EmptySql => "open_stream_missing_sql",
-        }
-    }
-    pub fn message(&self) -> &'static str {
-        match self {
-            Self::NotJson => "OpenStream payload must be JSON",
-            Self::NotObject => "OpenStream payload must be a JSON object",
-            Self::MissingSql => "OpenStream payload missing 'sql' string field",
-            Self::EmptySql => "OpenStream payload 'sql' must be non-empty",
-        }
-    }
-}
+pub use reddb_wire::redwire::stream::{
+    OpenStreamParseError, OpenStreamRequest, StreamCancelRequest,
+};
+use reddb_wire::redwire::{encode_frame, Frame};
 
 pub fn parse_open_stream(payload: &[u8]) -> Result<OpenStreamRequest, OpenStreamParseError> {
-    let v: JsonValue =
-        serde_json::from_slice(payload).map_err(|_| OpenStreamParseError::NotJson)?;
-    let obj = v.as_object().ok_or(OpenStreamParseError::NotObject)?;
-    let sql = obj
-        .get("sql")
-        .and_then(|x| x.as_str())
-        .ok_or(OpenStreamParseError::MissingSql)?;
-    if sql.is_empty() {
-        return Err(OpenStreamParseError::EmptySql);
-    }
-    let opts_raw = obj
-        .get("opts")
-        .map(|v| serde_json::to_vec(v).unwrap_or_default())
-        .unwrap_or_default();
-    Ok(OpenStreamRequest {
-        sql: sql.to_string(),
-        opts_raw,
-    })
-}
-
-/// Parsed `StreamCancel` payload. The body is optional — clients
-/// may send an empty payload to cancel without a reason.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StreamCancelRequest {
-    pub reason: Option<String>,
+    reddb_wire::redwire::stream::parse_open_stream(payload)
 }
 
 pub fn parse_stream_cancel(payload: &[u8]) -> StreamCancelRequest {
-    if payload.is_empty() {
-        return StreamCancelRequest::default();
-    }
-    let v: JsonValue = match serde_json::from_slice(payload) {
-        Ok(v) => v,
-        Err(_) => return StreamCancelRequest::default(),
-    };
-    let reason = v
-        .as_object()
-        .and_then(|o| o.get("reason"))
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    StreamCancelRequest { reason }
+    reddb_wire::redwire::stream::parse_stream_cancel(payload)
 }
 
 pub fn build_open_ack_payload(lease_id: u64, snapshot_lsn: u64, resumable: bool) -> Vec<u8> {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "lease_handle".to_string(),
-        JsonValue::String(lease_id.to_string()),
-    );
-    obj.insert("resumable".to_string(), JsonValue::Bool(resumable));
-    obj.insert(
-        "snapshot_lsn".to_string(),
-        JsonValue::Number(snapshot_lsn as f64),
-    );
-    serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    reddb_wire::redwire::stream::build_open_ack_payload(lease_id, snapshot_lsn, resumable)
 }
 
 pub fn build_stream_chunk_payload(seq: u64, rows: Vec<JsonValue>, terminal: bool) -> Vec<u8> {
-    let mut obj = serde_json::Map::new();
-    obj.insert("seq".to_string(), JsonValue::Number(seq as f64));
-    obj.insert("rows".to_string(), JsonValue::Array(rows));
-    obj.insert("terminal".to_string(), JsonValue::Bool(terminal));
-    serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    let rows = rows
+        .into_iter()
+        .map(|row| serde_json::to_vec(&row).unwrap_or_default())
+        .collect();
+    reddb_wire::redwire::stream::build_stream_chunk_payload_from_json_bytes(seq, rows, terminal)
 }
 
 pub fn build_stream_error_payload(seq: Option<u64>, code: &str, message: &str) -> Vec<u8> {
-    let mut obj = serde_json::Map::new();
-    if let Some(s) = seq {
-        obj.insert("seq".to_string(), JsonValue::Number(s as f64));
-    }
-    obj.insert("code".to_string(), JsonValue::String(code.to_string()));
-    obj.insert(
-        "message".to_string(),
-        JsonValue::String(message.to_string()),
-    );
-    serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    reddb_wire::redwire::stream::build_stream_error_payload(seq, code, message)
 }
 
 pub fn build_stream_end_payload(
@@ -162,17 +68,12 @@ pub fn build_stream_end_payload(
     snapshot_lsn: u64,
     cancelled: bool,
 ) -> Vec<u8> {
-    let mut obj = serde_json::Map::new();
-    let mut stats = serde_json::Map::new();
-    stats.insert("row_count".to_string(), JsonValue::Number(row_count as f64));
-    stats.insert("lease_id".to_string(), JsonValue::Number(lease_id as f64));
-    stats.insert(
-        "snapshot_lsn".to_string(),
-        JsonValue::Number(snapshot_lsn as f64),
-    );
-    stats.insert("cancelled".to_string(), JsonValue::Bool(cancelled));
-    obj.insert("stats".to_string(), JsonValue::Object(stats));
-    serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    reddb_wire::redwire::stream::build_stream_end_payload(
+        row_count,
+        lease_id,
+        snapshot_lsn,
+        cancelled,
+    )
 }
 
 /// Per-connection registry of in-flight output streams. Keyed by
@@ -263,12 +164,14 @@ pub fn build_stream_error_frame(
     code: &str,
     message: &str,
 ) -> std::io::Result<Frame> {
-    FrameBuilder::reply_to(correlation_id)
-        .kind(MessageKind::StreamError)
-        .stream_id(stream_id)
-        .payload(build_stream_error_payload(None, code, message))
-        .build()
-        .map_err(|e| std::io::Error::other(format!("build StreamError: {e}")))
+    reddb_wire::redwire::stream::build_stream_error_frame(
+        correlation_id,
+        stream_id,
+        None,
+        code,
+        message,
+    )
+    .map_err(|e| std::io::Error::other(format!("build StreamError: {e}")))
 }
 
 /// Run an output stream end-to-end. Emits OpenAck → StreamChunk*
@@ -312,12 +215,13 @@ pub async fn run_output_stream(
     };
 
     // OpenAck — always first.
-    let ack = match FrameBuilder::reply_to(correlation_id)
-        .kind(MessageKind::OpenAck)
-        .stream_id(stream_id)
-        .payload(build_open_ack_payload(lease.id, lease.snapshot_lsn, false))
-        .build()
-    {
+    let ack = match reddb_wire::redwire::stream::build_open_ack_frame(
+        correlation_id,
+        stream_id,
+        lease.id,
+        lease.snapshot_lsn,
+        false,
+    ) {
         Ok(f) => f,
         Err(_) => return,
     };
@@ -362,16 +266,18 @@ pub async fn run_output_stream(
                     ));
                     break;
                 }
-                let payload = build_stream_chunk_payload(seq, vec![row], false);
-                let frame = match FrameBuilder::reply_to(correlation_id)
-                    .kind(MessageKind::StreamChunk)
-                    .stream_id(stream_id)
-                    .payload(payload)
-                    .build()
-                {
-                    Ok(f) => f,
-                    Err(_) => break,
-                };
+                let row_bytes = serde_json::to_vec(&row).unwrap_or_default();
+                let frame =
+                    match reddb_wire::redwire::stream::build_stream_chunk_frame_from_json_bytes(
+                        correlation_id,
+                        stream_id,
+                        seq,
+                        vec![row_bytes],
+                        false,
+                    ) {
+                        Ok(f) => f,
+                        Err(_) => break,
+                    };
                 send.send_frame(frame);
                 seq += 1;
                 row_count += 1;
@@ -387,13 +293,13 @@ pub async fn run_output_stream(
     }
 
     if let Some((code, message)) = had_error {
-        let payload = build_stream_error_payload(Some(seq), &code, &message);
-        if let Ok(frame) = FrameBuilder::reply_to(correlation_id)
-            .kind(MessageKind::StreamError)
-            .stream_id(stream_id)
-            .payload(payload)
-            .build()
-        {
+        if let Ok(frame) = reddb_wire::redwire::stream::build_stream_error_frame(
+            correlation_id,
+            stream_id,
+            Some(seq),
+            &code,
+            &message,
+        ) {
             send.send_frame(frame);
         }
     }
@@ -401,13 +307,14 @@ pub async fn run_output_stream(
     // StreamEnd is always emitted — including after error or
     // cancel — so the client can drop bookkeeping on `StreamEnd`
     // rather than on connection EOF.
-    let end_payload = build_stream_end_payload(row_count, lease.id, lease.snapshot_lsn, cancelled);
-    if let Ok(frame) = FrameBuilder::reply_to(correlation_id)
-        .kind(MessageKind::StreamEnd)
-        .stream_id(stream_id)
-        .payload(end_payload)
-        .build()
-    {
+    if let Ok(frame) = reddb_wire::redwire::stream::build_stream_end_frame(
+        correlation_id,
+        stream_id,
+        row_count,
+        lease.id,
+        lease.snapshot_lsn,
+        cancelled,
+    ) {
         send.send_frame(frame);
     }
 }
@@ -439,6 +346,7 @@ impl FrameTx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reddb_wire::redwire::MessageKind;
 
     #[test]
     fn parse_open_stream_accepts_minimal_payload() {

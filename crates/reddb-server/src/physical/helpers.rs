@@ -133,24 +133,6 @@ pub(super) fn unix_ms_now() -> u128 {
         .as_millis()
 }
 
-pub(super) fn sanitize_export_name(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "export".to_string()
-    } else {
-        sanitized
-    }
-}
-
 pub(super) fn trim_snapshot_history(snapshots: &mut Vec<SnapshotDescriptor>, retention: usize) {
     let retention = retention.max(1);
     if snapshots.len() > retention {

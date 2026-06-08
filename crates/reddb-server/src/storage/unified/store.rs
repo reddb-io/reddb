@@ -42,177 +42,20 @@ use crate::storage::engine::pager::PagerError;
 use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
 use crate::storage::primitives::encoding::{read_varu32, read_varu64, write_varu32, write_varu64};
 use crate::storage::schema::types::Value;
-use crate::storage::{ClusterRangeLayout, RangeMetadata};
 
-const STORE_MAGIC: &[u8; 4] = b"RDST";
-const STORE_VERSION_V1: u32 = 1;
-const STORE_VERSION_V2: u32 = 2;
-const STORE_VERSION_V3: u32 = 3;
-const STORE_VERSION_V4: u32 = 4;
-const STORE_VERSION_V5: u32 = 5;
-const STORE_VERSION_V6: u32 = 6;
-const STORE_VERSION_V7: u32 = 7; // entity records include metadata (serialize_entity_record format)
-const STORE_VERSION_V8: u32 = 8; // table rows may carry explicit logical identity
-const STORE_VERSION_V9: u32 = 9; // entity records persist MVCC xmin/xmax
-const METADATA_MAGIC: &[u8; 4] = b"RDM2";
-const NATIVE_COLLECTION_ROOTS_MAGIC: &[u8; 4] = b"RDRT";
-const NATIVE_MANIFEST_MAGIC: &[u8; 4] = b"RDMF";
-const NATIVE_REGISTRY_MAGIC: &[u8; 4] = b"RDRG";
-const NATIVE_RECOVERY_MAGIC: &[u8; 4] = b"RDRV";
-const NATIVE_CATALOG_MAGIC: &[u8; 4] = b"RDCL";
-const NATIVE_METADATA_STATE_MAGIC: &[u8; 4] = b"RDMS";
-const NATIVE_VECTOR_ARTIFACT_MAGIC: &[u8; 4] = b"RDVA";
-const NATIVE_BLOB_MAGIC: &[u8; 4] = b"RDBL";
-const NATIVE_MANIFEST_SAMPLE_LIMIT: usize = 16;
-
-#[derive(Debug, Clone)]
-pub struct NativeManifestEntrySummary {
-    pub collection: String,
-    pub object_key: String,
-    pub kind: String,
-    pub block_index: u64,
-    pub block_checksum: u128,
-    pub snapshot_min: u64,
-    pub snapshot_max: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NativeManifestSummary {
-    pub sequence: u64,
-    pub event_count: u32,
-    pub events_complete: bool,
-    pub omitted_event_count: u32,
-    pub recent_events: Vec<NativeManifestEntrySummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeRegistryIndexSummary {
-    pub name: String,
-    pub kind: String,
-    pub collection: Option<String>,
-    pub enabled: bool,
-    pub entries: u64,
-    pub estimated_memory_bytes: u64,
-    pub last_refresh_ms: Option<u128>,
-    pub backend: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeRegistryProjectionSummary {
-    pub name: String,
-    pub source: String,
-    pub created_at_unix_ms: u128,
-    pub updated_at_unix_ms: u128,
-    pub node_labels: Vec<String>,
-    pub node_types: Vec<String>,
-    pub edge_labels: Vec<String>,
-    pub last_materialized_sequence: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeRegistryJobSummary {
-    pub id: String,
-    pub kind: String,
-    pub projection: Option<String>,
-    pub state: String,
-    pub created_at_unix_ms: u128,
-    pub updated_at_unix_ms: u128,
-    pub last_run_sequence: Option<u64>,
-    pub metadata: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeVectorArtifactSummary {
-    pub collection: String,
-    pub artifact_kind: String,
-    pub vector_count: u64,
-    pub dimension: u32,
-    pub max_layer: u32,
-    pub serialized_bytes: u64,
-    pub checksum: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeVectorArtifactPageSummary {
-    pub collection: String,
-    pub artifact_kind: String,
-    pub root_page: u32,
-    pub page_count: u32,
-    pub byte_len: u64,
-    pub checksum: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeRegistrySummary {
-    pub collection_count: u32,
-    pub index_count: u32,
-    pub graph_projection_count: u32,
-    pub analytics_job_count: u32,
-    pub vector_artifact_count: u32,
-    pub collections_complete: bool,
-    pub indexes_complete: bool,
-    pub graph_projections_complete: bool,
-    pub analytics_jobs_complete: bool,
-    pub vector_artifacts_complete: bool,
-    pub omitted_collection_count: u32,
-    pub omitted_index_count: u32,
-    pub omitted_graph_projection_count: u32,
-    pub omitted_analytics_job_count: u32,
-    pub omitted_vector_artifact_count: u32,
-    pub collection_names: Vec<String>,
-    pub indexes: Vec<NativeRegistryIndexSummary>,
-    pub graph_projections: Vec<NativeRegistryProjectionSummary>,
-    pub analytics_jobs: Vec<NativeRegistryJobSummary>,
-    pub vector_artifacts: Vec<NativeVectorArtifactSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeSnapshotSummary {
-    pub snapshot_id: u64,
-    pub created_at_unix_ms: u128,
-    pub superblock_sequence: u64,
-    pub collection_count: u32,
-    pub total_entities: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeExportSummary {
-    pub name: String,
-    pub created_at_unix_ms: u128,
-    pub snapshot_id: Option<u64>,
-    pub superblock_sequence: u64,
-    pub collection_count: u32,
-    pub total_entities: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeRecoverySummary {
-    pub snapshot_count: u32,
-    pub export_count: u32,
-    pub snapshots_complete: bool,
-    pub exports_complete: bool,
-    pub omitted_snapshot_count: u32,
-    pub omitted_export_count: u32,
-    pub snapshots: Vec<NativeSnapshotSummary>,
-    pub exports: Vec<NativeExportSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeCatalogCollectionSummary {
-    pub name: String,
-    pub entities: u64,
-    pub cross_refs: u64,
-    pub segments: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeCatalogSummary {
-    pub collection_count: u32,
-    pub total_entities: u64,
-    pub collections_complete: bool,
-    pub omitted_collection_count: u32,
-    pub collections: Vec<NativeCatalogCollectionSummary>,
-}
+pub use reddb_file::{
+    is_supported_store_version, NativeCatalogCollectionSummary, NativeCatalogSummary,
+    NativeExportSummary, NativeManifestEntrySummary, NativeManifestSummary,
+    NativeMetadataStateSummary, NativeRecoverySummary, NativeRegistryIndexSummary,
+    NativeRegistryJobSummary, NativeRegistryProjectionSummary, NativeRegistrySummary,
+    NativeSnapshotSummary, NativeVectorArtifactPageSummary, NativeVectorArtifactSummary,
+    ENTITY_RECORD_MAGIC, METADATA_MAGIC, METADATA_OVERFLOW_MAGIC, NATIVE_BLOB_MAGIC,
+    NATIVE_CATALOG_MAGIC, NATIVE_COLLECTION_ROOTS_MAGIC, NATIVE_MANIFEST_MAGIC,
+    NATIVE_MANIFEST_SAMPLE_LIMIT, NATIVE_METADATA_STATE_MAGIC, NATIVE_RECOVERY_MAGIC,
+    NATIVE_REGISTRY_MAGIC, NATIVE_VECTOR_ARTIFACT_MAGIC, STORE_MAGIC, STORE_VERSION_CURRENT,
+    STORE_VERSION_V1, STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5,
+    STORE_VERSION_V6, STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MvccVacuumStats {
@@ -235,14 +78,6 @@ impl MvccVacuumStats {
         self.retained_tombstones += other.retained_tombstones;
         self.reclaimed_tombstones += other.reclaimed_tombstones;
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeMetadataStateSummary {
-    pub protocol_version: String,
-    pub generated_at_unix_ms: u128,
-    pub last_loaded_from: Option<String>,
-    pub last_healed_at_unix_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone)]
@@ -287,9 +122,8 @@ pub struct UnifiedStoreConfig {
     pub group_commit: GroupCommitOptions,
     /// Data directory path
     pub data_dir: Option<std::path::PathBuf>,
-    /// Cluster range-directory tracer layout. `None` keeps embedded /
-    /// primary-replica storage on the existing single-store physical layout.
-    pub cluster_range_layout: Option<ClusterRangeLayout>,
+    /// Embedded single-file artifact used for the internal WAL stream.
+    pub embedded_wal_path: Option<std::path::PathBuf>,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -305,7 +139,7 @@ impl Default for UnifiedStoreConfig {
             durability_mode: DurabilityMode::WalDurableGrouped,
             group_commit: GroupCommitOptions::default(),
             data_dir: None,
-            cluster_range_layout: None,
+            embedded_wal_path: None,
         }
     }
 }
@@ -330,6 +164,11 @@ impl UnifiedStoreConfig {
 
     pub fn with_group_commit(mut self, options: GroupCommitOptions) -> Self {
         self.group_commit = options;
+        self
+    }
+
+    pub fn with_embedded_wal_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.embedded_wal_path = Some(path.into());
         self
     }
 
@@ -472,8 +311,6 @@ pub struct UnifiedStore {
     format_version: AtomicU32,
     /// Global entity ID counter
     next_entity_id: AtomicU64,
-    /// Compact logical collection ID counter for store-WAL object identity.
-    next_collection_id: AtomicU64,
     /// Collections by name
     collections: RwLock<HashMap<String, Arc<SegmentManager>>>,
     /// Forward cross-references: source_id → [(target_id, ref_type, target_collection)]
@@ -516,9 +353,6 @@ pub struct UnifiedStore {
     /// rebuilt state is byte-deterministic against the pre-restart
     /// state under a fixed codec seed.
     pub(crate) replayed_turbo_inserts: parking_lot::Mutex<HashMap<String, Vec<(u64, Vec<f32>)>>>,
-    /// Logical collection/range ownership metadata for the cluster
-    /// range-directory tracer.
-    collection_ranges: RwLock<HashMap<String, RangeMetadata>>,
 }
 
 mod builder;

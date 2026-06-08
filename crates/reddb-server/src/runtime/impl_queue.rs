@@ -1947,11 +1947,36 @@ pub(super) fn load_pending_entries(
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return Ok(Vec::new());
     };
+    let lock_deadline_ns = load_queue_config(store, queue)
+        .lock_deadline_ms
+        .saturating_mul(1_000_000);
+    let attempts_by_key: HashMap<(String, String, u64), u64> = manager
+        .query_all(|entity| {
+            entity.data.as_row().is_some_and(|row| {
+                row_text(row, "kind").as_deref() == Some("queue_attempts_lc")
+                    && row_text(row, "queue").as_deref() == Some(queue)
+            })
+        })
+        .into_iter()
+        .filter_map(|entity| {
+            let row = entity.data.as_row()?;
+            Some((
+                (
+                    row_text(row, "queue")?,
+                    row_text(row, "group")?,
+                    row_u64(row, "message_id")?,
+                ),
+                row_u64(row, "attempts").unwrap_or(1),
+            ))
+        })
+        .collect();
     Ok(manager
         .query_all(|entity| {
             entity.data.as_row().is_some_and(|row| {
-                row_text(row, "kind").as_deref() == Some("queue_pending")
-                    && row_text(row, "queue").as_deref() == Some(queue)
+                matches!(
+                    row_text(row, "kind").as_deref(),
+                    Some("queue_pending") | Some("queue_pending_lc")
+                ) && row_text(row, "queue").as_deref() == Some(queue)
                     && group
                         .map(|group_name| row_text(row, "group").as_deref() == Some(group_name))
                         .unwrap_or(true)
@@ -1963,15 +1988,31 @@ pub(super) fn load_pending_entries(
         .into_iter()
         .filter_map(|entity| {
             let row = entity.data.as_row()?;
+            let group = row_text(row, "group")?;
+            let message_id = row_u64(row, "message_id")?;
+            let kind = row_text(row, "kind")?;
+            let delivered_at_ns = if kind == "queue_pending_lc" {
+                row_u64(row, "lock_deadline_ns")
+                    .unwrap_or(0)
+                    .saturating_sub(lock_deadline_ns)
+            } else {
+                row_u64(row, "delivered_at_ns")?
+            };
+            let delivery_count = if kind == "queue_pending_lc" {
+                attempts_by_key
+                    .get(&(queue.to_string(), group.clone(), message_id))
+                    .copied()
+                    .unwrap_or(1)
+            } else {
+                row_u64(row, "delivery_count").unwrap_or(1)
+            };
             Some(QueuePendingEntry {
                 entity_id: entity.id,
-                group: row_text(row, "group")?,
-                message_id: EntityId::new(row_u64(row, "message_id")?),
-                consumer: row_text(row, "consumer")?,
-                delivered_at_ns: row_u64(row, "delivered_at_ns")?,
-                delivery_count: row_u64(row, "delivery_count")
-                    .map(|value| value as u32)
-                    .unwrap_or(1),
+                group,
+                message_id: EntityId::new(message_id),
+                consumer: row_text(row, "consumer").unwrap_or_default(),
+                delivered_at_ns,
+                delivery_count: delivery_count as u32,
             })
         })
         .collect())

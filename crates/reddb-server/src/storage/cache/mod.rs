@@ -67,11 +67,10 @@ pub use strategy::BufferAccessStrategy;
 // ---------------------------------------------------------------------------
 //
 // `BlobCache` writes the L2 metadata B+ tree and blob chains into a
-// single pager file at `cache.blob.l2_path` plus a sidecar control file
-// at `<l2_path>.blob-cache.ctl` (see
-// `cache/blob/l2.rs::BlobCacheL2::open`). Both files are required for a
-// usable restore — the pager file holds the data, the control file
-// holds the root-page pointer + bytes-in-use.
+// single pager file at `cache.blob.l2_path` plus the reddb-file control
+// sidecar. Both files are required for a usable restore — the pager file
+// holds the data, the control file holds the root-page pointer +
+// bytes-in-use.
 //
 // When the operator opts into `include_blob_cache=true` on a backup
 // (`red.config.backup.include_blob_cache`), we upload both files to
@@ -79,37 +78,20 @@ pub use strategy::BufferAccessStrategy;
 //
 // Shape contract:
 //
-// - Two remote keys: `{prefix}l2.pager` (the pager file) and
-//   `{prefix}l2.ctl` (the control sidecar).
+// - Two remote keys derived by `reddb-file`: one for the pager file and one
+//   for the control sidecar.
 // - The cache is *derived* state (ADR 0006). On any per-file failure
 //   we surface the error to the caller — `trigger_backup` logs and
 //   proceeds so a partial L2 archive never aborts the rest of the
 //   backup.
 //
 // Restore is the symmetric mirror: download both keys back into
-// `l2_path` (and its `.blob-cache.ctl` sibling). The cold-start
-// synopsis rebuild in `BlobCache::new` then re-indexes the metadata
-// B+ tree (per `cache/blob/l2.rs::BlobCacheL2::rebuild_l2_synopsis`).
+// `l2_path` and its reddb-file control sidecar. The cold-start synopsis
+// rebuild in `BlobCache::new` then re-indexes the metadata B+ tree (per
+// `cache/blob/l2.rs::BlobCacheL2::rebuild_l2_synopsis`).
 
-const L2_BACKUP_PAGER_SUFFIX: &str = "l2.pager";
-const L2_BACKUP_CONTROL_SUFFIX: &str = "l2.ctl";
-const L2_CONTROL_EXTENSION: &str = "blob-cache.ctl";
-
-fn normalize_prefix(prefix: &str) -> String {
-    if prefix.is_empty() || prefix.ends_with('/') {
-        prefix.to_string()
-    } else {
-        format!("{prefix}/")
-    }
-}
-
-fn control_sidecar_for(l2_path: &std::path::Path) -> std::path::PathBuf {
-    l2_path.with_extension(L2_CONTROL_EXTENSION)
-}
-
-/// Archive the L2 pager file + control sidecar to `backend` under
-/// `{prefix}l2.pager` and `{prefix}l2.ctl`. Returns the number of
-/// files uploaded (0..=2).
+/// Archive the L2 pager file + control sidecar to `backend`. Returns
+/// the number of files uploaded (0..=2).
 ///
 /// Caller (`trigger_backup`) decides what to do on error — the cache is
 /// derived state so a partial upload is logged, not fatal.
@@ -118,24 +100,25 @@ pub fn archive_blob_cache_l2(
     l2_path: &std::path::Path,
     prefix: &str,
 ) -> Result<usize, crate::storage::backend::BackendError> {
-    let prefix = normalize_prefix(prefix);
     let mut count = 0usize;
     if l2_path.is_file() {
-        backend.upload(l2_path, &format!("{prefix}{L2_BACKUP_PAGER_SUFFIX}"))?;
+        backend.upload(l2_path, &reddb_file::blob_cache_l2_backup_pager_key(prefix))?;
         count += 1;
     }
-    let control = control_sidecar_for(l2_path);
+    let control = reddb_file::blob_cache_control_path(l2_path);
     if control.is_file() {
-        backend.upload(&control, &format!("{prefix}{L2_BACKUP_CONTROL_SUFFIX}"))?;
+        backend.upload(
+            &control,
+            &reddb_file::blob_cache_l2_backup_control_key(prefix),
+        )?;
         count += 1;
     }
     Ok(count)
 }
 
-/// Restore the L2 pager file + control sidecar from `backend`'s
-/// `{prefix}l2.pager` and `{prefix}l2.ctl` keys into `l2_path` (and its
-/// `<l2_path>.blob-cache.ctl` sibling). Returns the number of files
-/// downloaded.
+/// Restore the L2 pager file + control sidecar from `backend` into
+/// `l2_path` and its reddb-file control sidecar. Returns the number of
+/// files downloaded.
 ///
 /// Cold-start synopsis rebuild on next `BlobCache::new` re-indexes the
 /// metadata. Surfaced for the documented restore procedure
@@ -146,7 +129,6 @@ pub fn restore_blob_cache_l2(
     prefix: &str,
     l2_path: &std::path::Path,
 ) -> Result<usize, crate::storage::backend::BackendError> {
-    let prefix = normalize_prefix(prefix);
     if let Some(parent) = l2_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -154,11 +136,14 @@ pub fn restore_blob_cache_l2(
         }
     }
     let mut count = 0usize;
-    if backend.download(&format!("{prefix}{L2_BACKUP_PAGER_SUFFIX}"), l2_path)? {
+    if backend.download(&reddb_file::blob_cache_l2_backup_pager_key(prefix), l2_path)? {
         count += 1;
     }
-    let control = control_sidecar_for(l2_path);
-    if backend.download(&format!("{prefix}{L2_BACKUP_CONTROL_SUFFIX}"), &control)? {
+    let control = reddb_file::blob_cache_control_path(l2_path);
+    if backend.download(
+        &reddb_file::blob_cache_l2_backup_control_key(prefix),
+        &control,
+    )? {
         count += 1;
     }
     Ok(count)
@@ -202,7 +187,10 @@ mod backup_helpers_tests {
         let scratch_dir = scratch("pair-src");
         let l2_src = scratch_dir.join("cache.rdb");
         write_file(&l2_src, b"pager-bytes-on-disk");
-        write_file(&control_sidecar_for(&l2_src), b"control-sidecar-bytes");
+        write_file(
+            &reddb_file::blob_cache_control_path(&l2_src),
+            b"control-sidecar-bytes",
+        );
 
         let backend_root = scratch("pair-be");
         let prefix = format!("{}/blob_cache/", backend_root.display());
@@ -219,7 +207,7 @@ mod backup_helpers_tests {
 
         assert_eq!(std::fs::read(&l2_dst).unwrap(), b"pager-bytes-on-disk");
         assert_eq!(
-            std::fs::read(control_sidecar_for(&l2_dst)).unwrap(),
+            std::fs::read(reddb_file::blob_cache_control_path(&l2_dst)).unwrap(),
             b"control-sidecar-bytes"
         );
 

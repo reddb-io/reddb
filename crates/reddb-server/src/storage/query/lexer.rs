@@ -616,7 +616,7 @@ impl std::error::Error for LexerError {}
 /// Maximum byte size of a raw JSON object literal. Mirrors the redwire
 /// frame ceiling (`MAX_FRAME_SIZE` = 16 MiB) so a single SQL statement
 /// can never embed a JSON literal larger than the wire payload limit.
-/// Wire-side limit lives in `crate::wire::redwire::frame::MAX_FRAME_SIZE`;
+/// Wire-side limit lives in `reddb_wire::redwire::MAX_FRAME_SIZE`;
 /// duplicated here as a parser-side guard so the lexer can fail fast
 /// without depending on the wire crate.
 pub const JSON_LITERAL_MAX_BYTES: usize = 16 * 1024 * 1024;

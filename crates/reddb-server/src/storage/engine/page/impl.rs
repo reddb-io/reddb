@@ -55,12 +55,13 @@ impl Page {
 
     /// Get page type
     pub fn page_type(&self) -> Result<PageType, PageError> {
-        PageType::from_u8(self.data[0]).ok_or(PageError::InvalidPageType(self.data[0]))
+        let page_type = reddb_file::paged_page_type(&self.data);
+        PageType::from_u8(page_type).ok_or(PageError::InvalidPageType(page_type))
     }
 
     /// Get page ID
     pub fn page_id(&self) -> u32 {
-        u32::from_le_bytes([self.data[8], self.data[9], self.data[10], self.data[11]])
+        reddb_file::paged_page_id(&self.data)
     }
 
     /// Get the WAL Log Sequence Number stamped on this page.
@@ -72,16 +73,7 @@ impl Page {
     ///
     /// See `src/storage/engine/btree/README.md` § Invariant 3.
     pub fn lsn(&self) -> u64 {
-        u64::from_le_bytes([
-            self.data[20],
-            self.data[21],
-            self.data[22],
-            self.data[23],
-            self.data[24],
-            self.data[25],
-            self.data[26],
-            self.data[27],
-        ])
+        reddb_file::paged_page_lsn(&self.data)
     }
 
     /// Stamp the WAL LSN of the record describing the most recent
@@ -93,57 +85,57 @@ impl Page {
     /// for the change record. Pass `0` only on legacy / non-WAL
     /// write paths (DWB-protected freelist + header writes).
     pub fn set_lsn(&mut self, lsn: u64) {
-        self.data[20..28].copy_from_slice(&lsn.to_le_bytes());
+        reddb_file::set_paged_page_lsn(&mut self.data, lsn);
     }
 
     /// Get cell count
     pub fn cell_count(&self) -> u16 {
-        u16::from_le_bytes([self.data[2], self.data[3]])
+        reddb_file::paged_page_cell_count(&self.data)
     }
 
     /// Set cell count
     pub fn set_cell_count(&mut self, count: u16) {
-        self.data[2..4].copy_from_slice(&count.to_le_bytes());
+        reddb_file::set_paged_page_cell_count(&mut self.data, count);
     }
 
     /// Get parent page ID
     pub fn parent_id(&self) -> u32 {
-        u32::from_le_bytes([self.data[12], self.data[13], self.data[14], self.data[15]])
+        reddb_file::paged_page_parent_id(&self.data)
     }
 
     /// Set parent page ID
     pub fn set_parent_id(&mut self, parent_id: u32) {
-        self.data[12..16].copy_from_slice(&parent_id.to_le_bytes());
+        reddb_file::set_paged_page_parent_id(&mut self.data, parent_id);
     }
 
     /// Get right child page ID (for interior nodes)
     pub fn right_child(&self) -> u32 {
-        u32::from_le_bytes([self.data[16], self.data[17], self.data[18], self.data[19]])
+        reddb_file::paged_page_right_child(&self.data)
     }
 
     /// Set right child page ID (for interior nodes)
     pub fn set_right_child(&mut self, child_id: u32) {
-        self.data[16..20].copy_from_slice(&child_id.to_le_bytes());
+        reddb_file::set_paged_page_right_child(&mut self.data, child_id);
     }
 
     /// Get free_start offset
     pub fn free_start(&self) -> u16 {
-        u16::from_le_bytes([self.data[4], self.data[5]])
+        reddb_file::paged_page_free_start(&self.data)
     }
 
     /// Set free_start offset
     pub fn set_free_start(&mut self, offset: u16) {
-        self.data[4..6].copy_from_slice(&offset.to_le_bytes());
+        reddb_file::set_paged_page_free_start(&mut self.data, offset);
     }
 
     /// Get free_end offset
     pub fn free_end(&self) -> u16 {
-        u16::from_le_bytes([self.data[6], self.data[7]])
+        reddb_file::paged_page_free_end(&self.data)
     }
 
     /// Set free_end offset
     pub fn set_free_end(&mut self, offset: u16) {
-        self.data[6..8].copy_from_slice(&offset.to_le_bytes());
+        reddb_file::set_paged_page_free_end(&mut self.data, offset);
     }
 
     /// Get content area (everything after header)
@@ -161,21 +153,20 @@ impl Page {
     /// Calculate and update checksum
     pub fn update_checksum(&mut self) {
         // Zero out checksum field before calculating
-        self.data[28..32].copy_from_slice(&[0u8; 4]);
+        reddb_file::clear_paged_page_checksum(&mut self.data);
         // Calculate CRC32 of entire page
         let checksum = crc32(&self.data);
         // Store checksum
-        self.data[28..32].copy_from_slice(&checksum.to_le_bytes());
+        reddb_file::set_paged_page_checksum(&mut self.data, checksum);
     }
 
     /// Verify page checksum
     pub fn verify_checksum(&self) -> Result<(), PageError> {
-        let stored =
-            u32::from_le_bytes([self.data[28], self.data[29], self.data[30], self.data[31]]);
+        let stored = reddb_file::paged_page_checksum(&self.data);
 
         // Calculate checksum with stored value zeroed
         let mut temp = self.data;
-        temp[28..32].copy_from_slice(&[0u8; 4]);
+        reddb_file::clear_paged_page_checksum(&mut temp);
         let calculated = crc32(&temp);
 
         if stored != calculated {
@@ -197,21 +188,18 @@ impl Page {
             return Err(PageError::CellOutOfBounds(index));
         }
 
-        let offset = HEADER_SIZE + index * 2;
-        Ok(u16::from_le_bytes([
-            self.data[offset],
-            self.data[offset + 1],
-        ]))
+        reddb_file::paged_cell_pointer(&self.data, index).ok_or(PageError::CellOutOfBounds(index))
     }
 
     /// Set cell pointer at index
     pub fn set_cell_pointer(&mut self, index: usize, pointer: u16) -> Result<(), PageError> {
-        if pointer < HEADER_SIZE as u16 || pointer >= PAGE_SIZE as u16 {
+        if !reddb_file::paged_cell_pointer_is_valid(pointer) {
             return Err(PageError::InvalidCellPointer(pointer));
         }
 
-        let offset = HEADER_SIZE + index * 2;
-        self.data[offset..offset + 2].copy_from_slice(&pointer.to_le_bytes());
+        if !reddb_file::set_paged_cell_pointer(&mut self.data, index, pointer) {
+            return Err(PageError::CellOutOfBounds(index));
+        }
         Ok(())
     }
 
@@ -219,26 +207,8 @@ impl Page {
     pub fn get_cell(&self, index: usize) -> Result<&[u8], PageError> {
         let pointer = self.get_cell_pointer(index)? as usize;
 
-        // Read cell header to determine size
-        // Cell format: [key_len: u16][value_len: u32][key][value]
-        if pointer + 6 > PAGE_SIZE {
-            return Err(PageError::InvalidCellPointer(pointer as u16));
-        }
-
-        let key_len = u16::from_le_bytes([self.data[pointer], self.data[pointer + 1]]) as usize;
-        let value_len = u32::from_le_bytes([
-            self.data[pointer + 2],
-            self.data[pointer + 3],
-            self.data[pointer + 4],
-            self.data[pointer + 5],
-        ]) as usize;
-
-        let total_len = 6 + key_len + value_len;
-        if pointer + total_len > PAGE_SIZE {
-            return Err(PageError::InvalidCellPointer(pointer as u16));
-        }
-
-        Ok(&self.data[pointer..pointer + total_len])
+        reddb_file::paged_cell_bytes(&self.data, pointer as u16)
+            .ok_or(PageError::InvalidCellPointer(pointer as u16))
     }
 
     /// Insert a new cell (key-value pair) into the page
@@ -253,8 +223,8 @@ impl Page {
             return Err(PageError::OverflowRequired);
         }
 
-        // Cell format: [key_len: u16][value_len: u32][key][value]
-        let cell_size = 6 + key_len + value_len;
+        let cell_size =
+            reddb_file::paged_cell_len(key_len, value_len).ok_or(PageError::OverflowRequired)?;
 
         // Check if we need overflow
         if cell_size > CONTENT_SIZE - 2 {
@@ -274,18 +244,15 @@ impl Page {
         let cell_offset = header.free_end as usize - cell_size;
 
         // Write cell data
-        self.data[cell_offset..cell_offset + 2].copy_from_slice(&(key_len as u16).to_le_bytes());
-        self.data[cell_offset + 2..cell_offset + 6]
-            .copy_from_slice(&(value_len as u32).to_le_bytes());
-        self.data[cell_offset + 6..cell_offset + 6 + key_len].copy_from_slice(key);
-        self.data[cell_offset + 6 + key_len..cell_offset + 6 + key_len + value_len]
-            .copy_from_slice(value);
+        if !reddb_file::write_paged_cell(&mut self.data, cell_offset as u16, key, value) {
+            return Err(PageError::InvalidCellPointer(cell_offset as u16));
+        }
 
         // Write cell pointer
         let cell_index = header.cell_count as usize;
-        let pointer_offset = HEADER_SIZE + cell_index * 2;
-        self.data[pointer_offset..pointer_offset + 2]
-            .copy_from_slice(&(cell_offset as u16).to_le_bytes());
+        if !reddb_file::set_paged_cell_pointer(&mut self.data, cell_index, cell_offset as u16) {
+            return Err(PageError::CellOutOfBounds(cell_index));
+        }
 
         // Update header
         header.cell_count += 1;
@@ -301,13 +268,10 @@ impl Page {
     pub fn read_cell(&self, index: usize) -> Result<(Vec<u8>, Vec<u8>), PageError> {
         let cell = self.get_cell(index)?;
 
-        let key_len = u16::from_le_bytes([cell[0], cell[1]]) as usize;
-        let value_len = u32::from_le_bytes([cell[2], cell[3], cell[4], cell[5]]) as usize;
+        let (key, value) =
+            reddb_file::paged_cell_key_value(cell).ok_or(PageError::InvalidCellPointer(0))?;
 
-        let key = cell[6..6 + key_len].to_vec();
-        let value = cell[6 + key_len..6 + key_len + value_len].to_vec();
-
-        Ok((key, value))
+        Ok((key.to_vec(), value.to_vec()))
     }
 
     /// Binary search for key in sorted cell array
@@ -340,21 +304,8 @@ impl Page {
     pub fn new_header_page(page_count: u32) -> Self {
         let mut page = Self::new(PageType::Header, 0);
 
-        // Write magic bytes at start of content
-        page.data[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&MAGIC_BYTES);
-
-        // Write version
-        page.data[HEADER_SIZE + 4..HEADER_SIZE + 8].copy_from_slice(&DB_VERSION.to_le_bytes());
-
-        // Write page size
-        page.data[HEADER_SIZE + 8..HEADER_SIZE + 12]
-            .copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
-
-        // Write page count
-        page.data[HEADER_SIZE + 12..HEADER_SIZE + 16].copy_from_slice(&page_count.to_le_bytes());
-
-        // Write freelist head (0 = no free pages)
-        page.data[HEADER_SIZE + 16..HEADER_SIZE + 20].copy_from_slice(&0u32.to_le_bytes());
+        reddb_file::init_database_header_page(&mut page.data, page_count)
+            .expect("fixed-size page can hold database header");
 
         page.update_checksum();
         page
@@ -362,48 +313,38 @@ impl Page {
 
     /// Read page count from header page
     pub fn read_page_count(&self) -> u32 {
-        u32::from_le_bytes([
-            self.data[HEADER_SIZE + 12],
-            self.data[HEADER_SIZE + 13],
-            self.data[HEADER_SIZE + 14],
-            self.data[HEADER_SIZE + 15],
-        ])
+        reddb_file::database_header_page_count(&self.data).expect("fixed-size page has page count")
     }
 
     /// Write page count to header page
     pub fn write_page_count(&mut self, count: u32) {
-        self.data[HEADER_SIZE + 12..HEADER_SIZE + 16].copy_from_slice(&count.to_le_bytes());
+        reddb_file::set_database_header_page_count(&mut self.data, count)
+            .expect("fixed-size page has page count");
     }
 
     /// Read freelist head from header page
     pub fn read_freelist_head(&self) -> u32 {
-        u32::from_le_bytes([
-            self.data[HEADER_SIZE + 16],
-            self.data[HEADER_SIZE + 17],
-            self.data[HEADER_SIZE + 18],
-            self.data[HEADER_SIZE + 19],
-        ])
+        reddb_file::database_header_freelist_head(&self.data)
+            .expect("fixed-size page has freelist head")
     }
 
     /// Write freelist head to header page
     pub fn write_freelist_head(&mut self, page_id: u32) {
-        self.data[HEADER_SIZE + 16..HEADER_SIZE + 20].copy_from_slice(&page_id.to_le_bytes());
+        reddb_file::set_database_header_freelist_head(&mut self.data, page_id)
+            .expect("fixed-size page has freelist head");
     }
 
     /// Verify this is a valid header page
     pub fn verify_header_page(&self) -> Result<(), PageError> {
         // Check magic bytes
-        if self.data[HEADER_SIZE..HEADER_SIZE + 4] != MAGIC_BYTES {
+        if !reddb_file::database_header_magic_matches(&self.data) {
             return Err(PageError::InvalidPageType(self.data[0]));
         }
 
         // Check page size
-        let stored_page_size = u32::from_le_bytes([
-            self.data[HEADER_SIZE + 8],
-            self.data[HEADER_SIZE + 9],
-            self.data[HEADER_SIZE + 10],
-            self.data[HEADER_SIZE + 11],
-        ]) as usize;
+        let stored_page_size = reddb_file::database_header_page_size(&self.data)
+            .map_err(|_| PageError::InvalidSize(self.data.len()))?
+            as usize;
 
         if stored_page_size != PAGE_SIZE {
             return Err(PageError::InvalidSize(stored_page_size));

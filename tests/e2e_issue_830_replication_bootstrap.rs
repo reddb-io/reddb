@@ -9,7 +9,7 @@ use reddb::auth::policies::Policy;
 use reddb::auth::store::PrincipalRef;
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::grpc::proto::red_db_client::RedDbClient;
-use reddb::grpc::proto::Empty;
+use reddb::grpc::proto::{Empty, JsonPayloadRequest};
 use reddb::replication::ReplicationConfig;
 use reddb::{GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBRuntime};
 use tonic::metadata::MetadataValue;
@@ -89,6 +89,29 @@ fn bearer_snapshot_chunk(
     request
 }
 
+fn bearer_payload(
+    token: &str,
+    payload_json: impl Into<String>,
+) -> tonic::Request<JsonPayloadRequest> {
+    let mut request = tonic::Request::new(JsonPayloadRequest {
+        payload_json: payload_json.into(),
+    });
+    let value: MetadataValue<_> = format!("Bearer {token}").parse().unwrap();
+    request.metadata_mut().insert("authorization", value);
+    request
+}
+
+fn temp_data_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "reddb-{name}-{}-{}.rdb",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
 #[tokio::test]
 async fn replication_snapshot_pins_authenticated_replica_slot_at_bootstrap_start() {
     let primary = RedDBRuntime::with_options(
@@ -143,6 +166,25 @@ async fn replication_snapshot_pins_authenticated_replica_slot_at_bootstrap_start
         snapshot_body["slot_restart_lsn"].as_u64(),
         Some(snapshot_lsn)
     );
+    assert_eq!(snapshot_body["basebackup_available"].as_bool(), Some(true));
+    assert_eq!(
+        snapshot_body["basebackup_checkpoint_lsn"].as_u64(),
+        Some(snapshot_lsn)
+    );
+    assert!(
+        snapshot_body["basebackup_manifest_hex"]
+            .as_str()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
+        "basebackup manifest must be shipped in snapshot payload: {snapshot_body}"
+    );
+    assert!(
+        snapshot_body["basebackup_chunks"]
+            .as_array()
+            .map(|chunks| !chunks.is_empty())
+            .unwrap_or(false),
+        "basebackup chunks must be advertised: {snapshot_body}"
+    );
 
     let status = client
         .replication_status(bearer_empty(&replica_key.key))
@@ -159,6 +201,101 @@ async fn replication_snapshot_pins_authenticated_replica_slot_at_bootstrap_start
     assert_eq!(slot["invalidated"].as_bool(), Some(false));
 
     handle.abort();
+}
+
+#[tokio::test]
+async fn pull_wal_records_reports_basebackup_catchup_mode_for_invalidated_slot() {
+    let data_path = temp_data_path("issue-830-catchup-mode");
+    let _ = std::fs::remove_file(&data_path);
+    let _ = std::fs::remove_dir_all(data_path.with_extension("primary-replica"));
+
+    let primary = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&data_path)
+            .with_replication(ReplicationConfig::primary().with_slot_retention_max_lag_lsn(1)),
+    )
+    .expect("primary runtime");
+
+    let store = Arc::new(AuthStore::new(AuthConfig {
+        enabled: true,
+        require_auth: true,
+        ..AuthConfig::default()
+    }));
+    store.create_user("replica_c", "p", Role::Read).unwrap();
+    let replica_key = store
+        .create_api_key("replica_c", "replication-c", Role::Read)
+        .unwrap();
+    install_replication_policy(&store, "replica_c");
+
+    let port = pick_port();
+    let server = RedDBGrpcServer::with_options(
+        primary.clone(),
+        GrpcServerOptions {
+            bind_addr: format!("127.0.0.1:{port}"),
+            tls: None,
+        },
+        store,
+    );
+    let handle = tokio::spawn(async move {
+        let _ = server.serve().await;
+    });
+    wait_for_port(port).await;
+
+    let mut client = connect_client(port).await;
+    let initial = client
+        .pull_wal_records(bearer_payload(
+            &replica_key.key,
+            r#"{"replica_id":"replica_c","since_lsn":0,"max_count":10}"#,
+        ))
+        .await
+        .expect("initial pull registers replica")
+        .into_inner();
+    let initial_body: serde_json::Value =
+        serde_json::from_str(&initial.payload).expect("initial pull body");
+    assert_ne!(initial_body["needs_rebootstrap"].as_bool(), Some(true));
+
+    primary
+        .execute_query("CREATE TABLE issue_830_catchup (id INTEGER, name TEXT)")
+        .expect("create table");
+    for id in 0..5 {
+        primary
+            .execute_query(&format!(
+                "INSERT INTO issue_830_catchup (id, name) VALUES ({id}, 'row-{id}')"
+            ))
+            .expect("insert row");
+    }
+    let manifest = primary
+        .create_primary_replica_basebackup(64)
+        .expect("create basebackup")
+        .expect("basebackup manifest");
+    assert!(manifest.checkpoint_lsn > 1);
+    let invalidated = primary.enforce_primary_replica_retention_limits();
+    assert!(
+        invalidated
+            .iter()
+            .any(|(replica, _)| replica == "replica_c"),
+        "replica_c slot should be invalidated after falling behind retention"
+    );
+
+    let response = client
+        .pull_wal_records(bearer_payload(
+            &replica_key.key,
+            r#"{"replica_id":"replica_c","since_lsn":0,"max_count":10}"#,
+        ))
+        .await
+        .expect("pull wal")
+        .into_inner();
+    let body: serde_json::Value = serde_json::from_str(&response.payload).expect("pull body");
+    assert_eq!(body["needs_rebootstrap"].as_bool(), Some(true));
+    assert_eq!(body["invalidation_reason"].as_str(), Some("horizon"));
+    assert_eq!(
+        body["catchup_mode"].as_str(),
+        Some("basebackup-then-wal"),
+        "invalidated replica should be directed to basebackup then WAL when a usable basebackup exists: {body}"
+    );
+
+    handle.abort();
+    let _ = std::fs::remove_file(&data_path);
+    let _ = std::fs::remove_dir_all(data_path.with_extension("primary-replica"));
 }
 
 #[tokio::test]
@@ -190,8 +327,9 @@ async fn replication_snapshot_resumes_from_checkpoint_token_offset() {
     install_replication_policy(&store, "replica_b");
 
     let port = pick_port();
+    let primary_for_server = primary.clone();
     let server = RedDBGrpcServer::with_options(
-        primary,
+        primary_for_server,
         GrpcServerOptions {
             bind_addr: format!("127.0.0.1:{port}"),
             tls: None,
@@ -218,11 +356,30 @@ async fn replication_snapshot_resumes_from_checkpoint_token_offset() {
         .as_u64()
         .expect("next offset");
     assert_eq!(first_body["snapshot_offset"].as_u64(), Some(0));
+    assert_eq!(first_body["basebackup_available"].as_bool(), Some(true));
+    assert_eq!(first_body["basebackup_chunk_ordinal"].as_u64(), Some(0));
+    let first_manifest_hex = first_body["basebackup_manifest_hex"]
+        .as_str()
+        .expect("first basebackup manifest")
+        .to_string();
+    assert!(
+        first_body["basebackup_chunk_hex"]
+            .as_str()
+            .map(|chunk| !chunk.is_empty())
+            .unwrap_or(false),
+        "first response must carry matching basebackup chunk"
+    );
     assert!(
         next_offset > 0,
         "first chunk must advance the resumable offset"
     );
     assert_eq!(first_body["snapshot_complete"].as_bool(), Some(false));
+
+    primary
+        .execute_query(
+            "INSERT INTO issue_830_snapshot_resume (id, name) VALUES (99, 'after-token')",
+        )
+        .expect("insert after snapshot token");
 
     let resumed = client
         .replication_snapshot(bearer_snapshot_chunk(
@@ -241,6 +398,13 @@ async fn replication_snapshot_resumes_from_checkpoint_token_offset() {
         Some(snapshot_token.as_str())
     );
     assert_eq!(resumed_body["snapshot_offset"].as_u64(), Some(next_offset));
+    assert_eq!(resumed_body["basebackup_available"].as_bool(), Some(true));
+    assert_eq!(
+        resumed_body["basebackup_manifest_hex"].as_str(),
+        Some(first_manifest_hex.as_str()),
+        "resumed basebackup must reuse the token-pinned manifest"
+    );
+    assert_eq!(resumed_body["basebackup_chunk_ordinal"].as_u64(), Some(1));
     assert!(
         resumed_body["snapshot_chunk_hex"]
             .as_str()

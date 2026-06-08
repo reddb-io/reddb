@@ -244,7 +244,7 @@ impl PrimaryQueueStore {
     ) -> Option<(EntityId, PendingRow)> {
         let queue_owned = queue.to_string();
         let group_owned = group.to_string();
-        let (legacy_eid, delivered_at_ns, delivery_count) = self
+        let (legacy_eid, delivered_at_ns, delivery_count, consumer) = self
             .meta_rows(|row| {
                 row_text(row, "kind").as_deref() == Some(KIND_PENDING_LEGACY)
                     && row_text(row, "queue").as_deref() == Some(&queue_owned)
@@ -256,7 +256,8 @@ impl PrimaryQueueStore {
             .map(|(eid, row)| {
                 let delivered = row_u64(&row, "delivered_at_ns").unwrap_or_else(now_unix_ns);
                 let count = row_u64(&row, "delivery_count").unwrap_or(1) as u32;
-                (eid, delivered, count)
+                let consumer = row_text(&row, "consumer").unwrap_or_default();
+                (eid, delivered, count, consumer)
             })?;
 
         let delivery_id = new_delivery_id();
@@ -269,6 +270,7 @@ impl PrimaryQueueStore {
         fields.insert("group".into(), Value::text(group.to_string()));
         fields.insert("message_id".into(), Value::UnsignedInteger(message_id));
         fields.insert("delivery_id".into(), Value::text(delivery_id.clone()));
+        fields.insert("consumer".into(), Value::text(consumer));
         fields.insert(
             "lock_deadline_ns".into(),
             Value::UnsignedInteger(deadline_ns),
@@ -343,7 +345,18 @@ impl PrimaryQueueStore {
         fields.insert("group".into(), Value::text(group.to_string()));
         fields.insert("message_id".into(), Value::UnsignedInteger(message_id));
         fields.insert("attempts".into(), Value::UnsignedInteger(attempts as u64));
-        self.insert_meta_row(fields)
+        self.insert_meta_row(fields)?;
+
+        let store = self.store();
+        if let Some(manager) = store.get_collection(queue) {
+            if let Some(mut entity) = manager.get(EntityId::new(message_id)) {
+                if let EntityData::QueueMessage(message) = &mut entity.data {
+                    message.attempts = attempts;
+                    let _ = manager.update(entity);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn clear_attempts(&self, queue: &str, message_id: MessageId, group: &str) {
@@ -503,6 +516,7 @@ struct PendingRow {
     group: String,
     message_id: MessageId,
     delivery_id: DeliveryId,
+    consumer: String,
     lock_deadline_ns: u64,
 }
 
@@ -513,6 +527,7 @@ impl PendingRow {
             group: row_text(row, "group")?,
             message_id: row_u64(row, "message_id")?,
             delivery_id: row_text(row, "delivery_id")?,
+            consumer: row_text(row, "consumer").unwrap_or_default(),
             lock_deadline_ns: row_u64(row, "lock_deadline_ns")?,
         })
     }
@@ -603,6 +618,7 @@ impl QueueStore for PrimaryQueueStore {
         queue: &str,
         message_id: MessageId,
         group: &str,
+        consumer: &str,
         deadline: Instant,
     ) -> Result<DeliveryId> {
         if !self.queue_exists(queue) {
@@ -624,6 +640,7 @@ impl QueueStore for PrimaryQueueStore {
                 "delivery_id".into(),
                 Value::text(existing.delivery_id.clone()),
             );
+            fields.insert("consumer".into(), Value::text(consumer.to_string()));
             fields.insert(
                 "lock_deadline_ns".into(),
                 Value::UnsignedInteger(deadline_ns),
@@ -639,6 +656,7 @@ impl QueueStore for PrimaryQueueStore {
         fields.insert("group".into(), Value::text(group.to_string()));
         fields.insert("message_id".into(), Value::UnsignedInteger(message_id));
         fields.insert("delivery_id".into(), Value::text(delivery_id.clone()));
+        fields.insert("consumer".into(), Value::text(consumer.to_string()));
         fields.insert(
             "lock_deadline_ns".into(),
             Value::UnsignedInteger(deadline_ns),
@@ -696,6 +714,17 @@ impl QueueStore for PrimaryQueueStore {
         self.write_attempts(&row.queue, row.message_id, &row.group, next)?;
         Ok(BumpedAttempt {
             attempts: next,
+            queue: row.queue,
+            message_id: row.message_id,
+        })
+    }
+
+    fn read_pending_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt> {
+        let (_, row) = self
+            .find_pending_by_delivery(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        Ok(BumpedAttempt {
+            attempts: self.read_attempts(&row.queue, row.message_id, &row.group),
             queue: row.queue,
             message_id: row.message_id,
         })
@@ -1199,7 +1228,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_millis(1500);
         let t = QueueTxn::new();
         let id = ps
-            .mark_pending(&t, "qpersist", mid, "g", deadline)
+            .mark_pending(&t, "qpersist", mid, "g", "c", deadline)
             .expect("mark");
         assert!(!id.is_empty());
         // Persisted delivery_id is base32-lower.
@@ -1221,6 +1250,7 @@ mod tests {
                 "qpersist",
                 mid,
                 "g",
+                "c",
                 deadline + Duration::from_millis(500),
             )
             .expect("mark-2");
@@ -1233,7 +1263,14 @@ mod tests {
         let ps = PrimaryQueueStore::new(rt);
         let t = QueueTxn::new();
         let err = ps
-            .mark_pending(&t, "nope", 1, "g", Instant::now() + Duration::from_secs(1))
+            .mark_pending(
+                &t,
+                "nope",
+                1,
+                "g",
+                "c",
+                Instant::now() + Duration::from_secs(1),
+            )
             .unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownQueue(_)));
     }
@@ -1368,6 +1405,7 @@ mod tests {
                 "qrollback",
                 mid,
                 "g",
+                "c",
                 Instant::now() + Duration::from_secs(30),
             )
             .expect("reserve");
@@ -1402,6 +1440,7 @@ mod tests {
                 "qcommit",
                 mid,
                 "g",
+                "c",
                 Instant::now() + Duration::from_secs(30),
             )
             .expect("reserve");

@@ -1140,721 +1140,251 @@ fn contract_origin_from_str(value: &str) -> io::Result<ContractOrigin> {
 }
 
 pub(super) fn superblock_to_json(superblock: &SuperblockHeader) -> JsonValue {
-    let mut collection_roots = Map::new();
-    for (name, root) in &superblock.collection_roots {
-        collection_roots.insert(name.clone(), json_u64(*root));
-    }
-
-    let mut object = Map::new();
-    object.insert(
-        "format_version".to_string(),
-        JsonValue::Number(superblock.format_version as f64),
-    );
-    object.insert("sequence".to_string(), json_u64(superblock.sequence));
-    object.insert(
-        "copies".to_string(),
-        JsonValue::Number(superblock.copies as f64),
-    );
-    object.insert(
-        "manifest".to_string(),
-        manifest_pointers_to_json(&superblock.manifest),
-    );
-    object.insert(
-        "free_set".to_string(),
-        block_reference_to_json(superblock.free_set),
-    );
-    object.insert(
-        "collection_roots".to_string(),
-        JsonValue::Object(collection_roots),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_superblock_json(superblock)
+            .expect("reddb-file must encode physical superblock JSON"),
+    )
 }
 
 pub(super) fn superblock_from_json(value: &JsonValue) -> io::Result<SuperblockHeader> {
-    let object = expect_object(value, "superblock")?;
-    let roots = expect_object(
-        json_required(object, "collection_roots")?,
-        "superblock.roots",
-    )?;
-    let mut collection_roots = BTreeMap::new();
-    for (name, root) in roots {
-        collection_roots.insert(name.clone(), json_u64_value(root)?);
-    }
-
-    Ok(SuperblockHeader {
-        format_version: json_u32_required(object, "format_version")?,
-        sequence: json_u64_required(object, "sequence")?,
-        copies: json_u8_required(object, "copies")?,
-        manifest: manifest_pointers_from_json(json_required(object, "manifest")?)?,
-        free_set: block_reference_from_json(json_required(object, "free_set")?)?,
-        collection_roots,
-    })
+    reddb_file::decode_physical_superblock_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical superblock: {err}")))
 }
 
 pub(super) fn manifest_event_to_json(event: &ManifestEvent) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "collection".to_string(),
-        JsonValue::String(event.collection.clone()),
-    );
-    object.insert(
-        "object_key".to_string(),
-        JsonValue::String(event.object_key.clone()),
-    );
-    object.insert(
-        "kind".to_string(),
-        JsonValue::String(
-            match event.kind {
-                ManifestEventKind::Insert => "insert",
-                ManifestEventKind::Update => "update",
-                ManifestEventKind::Remove => "remove",
-                ManifestEventKind::Checkpoint => "checkpoint",
-            }
-            .to_string(),
-        ),
-    );
-    object.insert("block".to_string(), block_reference_to_json(event.block));
-    object.insert("snapshot_min".to_string(), json_u64(event.snapshot_min));
-    object.insert(
-        "snapshot_max".to_string(),
-        match event.snapshot_max {
-            Some(value) => json_u64(value),
-            None => JsonValue::Null,
-        },
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_manifest_event_json(event)
+            .expect("reddb-file must encode physical manifest event JSON"),
+    )
 }
 
 pub(super) fn manifest_event_from_json(value: &JsonValue) -> io::Result<ManifestEvent> {
-    let object = expect_object(value, "manifest event")?;
-    Ok(ManifestEvent {
-        collection: json_string_required(object, "collection")?,
-        object_key: json_string_required(object, "object_key")?,
-        kind: match json_string_required(object, "kind")?.as_str() {
-            "insert" => ManifestEventKind::Insert,
-            "update" => ManifestEventKind::Update,
-            "remove" => ManifestEventKind::Remove,
-            "checkpoint" => ManifestEventKind::Checkpoint,
-            other => {
-                return Err(invalid_data(format!(
-                    "unsupported manifest event kind '{other}'"
-                )))
-            }
-        },
-        block: block_reference_from_json(json_required(object, "block")?)?,
-        snapshot_min: json_u64_required(object, "snapshot_min")?,
-        snapshot_max: object
-            .get("snapshot_max")
-            .and_then(|value| json_u64_value(value).ok()),
-    })
+    reddb_file::decode_physical_manifest_event_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical manifest event: {err}")))
 }
 
 pub(super) fn manifest_pointers_to_json(pointers: &ManifestPointers) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "oldest".to_string(),
-        block_reference_to_json(pointers.oldest),
-    );
-    object.insert(
-        "newest".to_string(),
-        block_reference_to_json(pointers.newest),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_manifest_pointers_json(pointers)
+            .expect("reddb-file must encode physical manifest pointers JSON"),
+    )
 }
 
 pub(super) fn manifest_pointers_from_json(value: &JsonValue) -> io::Result<ManifestPointers> {
-    let object = expect_object(value, "manifest pointers")?;
-    Ok(ManifestPointers {
-        oldest: block_reference_from_json(json_required(object, "oldest")?)?,
-        newest: block_reference_from_json(json_required(object, "newest")?)?,
-    })
+    reddb_file::decode_physical_manifest_pointers_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical manifest pointers: {err}")))
 }
 
 pub(super) fn block_reference_to_json(reference: BlockReference) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("index".to_string(), json_u64(reference.index));
-    object.insert("checksum".to_string(), json_u128(reference.checksum));
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_block_reference_json(reference)
+            .expect("reddb-file must encode physical block reference JSON"),
+    )
 }
 
 pub(super) fn block_reference_from_json(value: &JsonValue) -> io::Result<BlockReference> {
-    let object = expect_object(value, "block reference")?;
-    Ok(BlockReference {
-        index: json_u64_required(object, "index")?,
-        checksum: json_u128_required(object, "checksum")?,
-    })
+    reddb_file::decode_physical_block_reference_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical block reference: {err}")))
+}
+
+fn file_json_to_server_json(json: String) -> JsonValue {
+    crate::serde_json::from_str(&json).expect("reddb-file emitted JSON the server can parse")
 }
 
 pub(super) fn snapshot_descriptor_to_json(snapshot: &SnapshotDescriptor) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("snapshot_id".to_string(), json_u64(snapshot.snapshot_id));
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(snapshot.created_at_unix_ms),
-    );
-    object.insert(
-        "superblock_sequence".to_string(),
-        json_u64(snapshot.superblock_sequence),
-    );
-    object.insert(
-        "collection_count".to_string(),
-        JsonValue::Number(snapshot.collection_count as f64),
-    );
-    object.insert(
-        "total_entities".to_string(),
-        JsonValue::Number(snapshot.total_entities as f64),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_snapshot_descriptor_json(snapshot)
+            .expect("reddb-file must encode physical snapshot descriptor JSON"),
+    )
 }
 
 pub(super) fn snapshot_descriptor_from_json(value: &JsonValue) -> io::Result<SnapshotDescriptor> {
-    let object = expect_object(value, "snapshot descriptor")?;
-    Ok(SnapshotDescriptor {
-        snapshot_id: json_u64_required(object, "snapshot_id")?,
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        superblock_sequence: json_u64_required(object, "superblock_sequence")?,
-        collection_count: json_usize_required(object, "collection_count")?,
-        total_entities: json_usize_required(object, "total_entities")?,
-    })
+    reddb_file::decode_physical_snapshot_descriptor_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical snapshot descriptor: {err}")))
 }
 
 pub(super) fn index_state_to_json(index: &PhysicalIndexState) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(index.name.clone()));
-    object.insert("logical_id".to_string(), json_u64(index.logical_id));
-    object.insert(
-        "physical_file_id".to_string(),
-        JsonValue::String(index.physical_file_id.clone()),
-    );
-    object.insert(
-        "physical_file_name".to_string(),
-        JsonValue::String(index.physical_file_name.clone()),
-    );
-    object.insert(
-        "collection_logical_id".to_string(),
-        index
-            .collection_logical_id
-            .map(json_u64)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "kind".to_string(),
-        JsonValue::String(index.kind.as_str().to_string()),
-    );
-    object.insert(
-        "collection".to_string(),
-        match &index.collection {
-            Some(collection) => JsonValue::String(collection.clone()),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert("enabled".to_string(), JsonValue::Bool(index.enabled));
-    object.insert(
-        "entries".to_string(),
-        JsonValue::Number(index.entries as f64),
-    );
-    object.insert(
-        "estimated_memory_bytes".to_string(),
-        json_u64(index.estimated_memory_bytes),
-    );
-    object.insert(
-        "last_refresh_ms".to_string(),
-        match index.last_refresh_ms {
-            Some(value) => json_u128(value),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert(
-        "backend".to_string(),
-        JsonValue::String(index.backend.clone()),
-    );
-    object.insert(
-        "artifact_kind".to_string(),
-        match &index.artifact_kind {
-            Some(value) => JsonValue::String(value.clone()),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert(
-        "artifact_root_page".to_string(),
-        match index.artifact_root_page {
-            Some(value) => JsonValue::Number(value as f64),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert(
-        "artifact_checksum".to_string(),
-        match index.artifact_checksum {
-            Some(value) => json_u64(value),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert(
-        "build_state".to_string(),
-        JsonValue::String(index.build_state.clone()),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_persisted_physical_index_state_json(&index_state_to_persisted(index))
+            .expect("reddb-file must encode physical index state JSON"),
+    )
 }
 
 pub(super) fn index_state_from_json(value: &JsonValue) -> io::Result<PhysicalIndexState> {
-    let object = expect_object(value, "physical index state")?;
+    let persisted =
+        reddb_file::decode_persisted_physical_index_state_json(&value.to_string_compact())
+            .map_err(|err| invalid_data(format!("decode physical index state: {err}")))?;
     Ok(PhysicalIndexState {
-        name: json_string_required(object, "name")?,
-        logical_id: object
-            .get("logical_id")
-            .and_then(|value| json_u64_value(value).ok())
-            .unwrap_or(0),
-        physical_file_id: object
-            .get("physical_file_id")
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        physical_file_name: object
-            .get("physical_file_name")
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        collection_logical_id: object
-            .get("collection_logical_id")
-            .and_then(|value| json_u64_value(value).ok()),
-        kind: index_kind_from_str(&json_string_required(object, "kind")?)?,
-        collection: object
-            .get("collection")
-            .and_then(JsonValue::as_str)
-            .map(|value| value.to_string()),
-        enabled: json_bool_required(object, "enabled")?,
-        entries: json_usize_required(object, "entries")?,
-        estimated_memory_bytes: json_u64_required(object, "estimated_memory_bytes")?,
-        last_refresh_ms: object
-            .get("last_refresh_ms")
-            .and_then(|value| json_u128_value(value).ok()),
-        backend: json_string_required(object, "backend")?,
-        artifact_kind: object
-            .get("artifact_kind")
-            .and_then(JsonValue::as_str)
-            .map(|value| value.to_string()),
-        artifact_root_page: object
-            .get("artifact_root_page")
-            .and_then(JsonValue::as_u64)
-            .map(|value| value as u32),
-        artifact_checksum: object
-            .get("artifact_checksum")
-            .and_then(|value| json_u64_value(value).ok()),
-        build_state: object
-            .get("build_state")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("unknown")
-            .to_string(),
+        name: persisted.name,
+        kind: index_kind_from_str(&persisted.kind)?,
+        collection: persisted.collection,
+        enabled: persisted.enabled,
+        entries: persisted.entries,
+        estimated_memory_bytes: persisted.estimated_memory_bytes,
+        last_refresh_ms: persisted.last_refresh_ms,
+        backend: persisted.backend,
+        artifact_kind: persisted.artifact_kind,
+        artifact_root_page: persisted.artifact_root_page,
+        artifact_checksum: persisted.artifact_checksum,
+        build_state: persisted.build_state,
     })
 }
 
-pub(super) fn collection_layout_to_json(layout: &PhysicalCollectionLayout) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(layout.name.clone()));
-    object.insert("logical_id".to_string(), json_u64(layout.logical_id));
-    object.insert(
-        "physical_file_id".to_string(),
-        JsonValue::String(layout.physical_file_id.clone()),
-    );
-    object.insert(
-        "physical_file_name".to_string(),
-        JsonValue::String(layout.physical_file_name.clone()),
-    );
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(layout.created_at_unix_ms),
-    );
-    object.insert(
-        "updated_at_unix_ms".to_string(),
-        json_u128(layout.updated_at_unix_ms),
-    );
-    JsonValue::Object(object)
-}
-
-pub(super) fn collection_layout_from_json(
-    value: &JsonValue,
-) -> io::Result<PhysicalCollectionLayout> {
-    let object = expect_object(value, "physical collection layout")?;
-    Ok(PhysicalCollectionLayout {
-        name: json_string_required(object, "name")?,
-        logical_id: json_u64_required(object, "logical_id")?,
-        physical_file_id: json_string_required(object, "physical_file_id")?,
-        physical_file_name: json_string_required(object, "physical_file_name")?,
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
-    })
+fn index_state_to_persisted(index: &PhysicalIndexState) -> reddb_file::PersistedPhysicalIndexState {
+    reddb_file::PersistedPhysicalIndexState {
+        name: index.name.clone(),
+        kind: index.kind.as_str().to_string(),
+        collection: index.collection.clone(),
+        enabled: index.enabled,
+        entries: index.entries,
+        estimated_memory_bytes: index.estimated_memory_bytes,
+        last_refresh_ms: index.last_refresh_ms,
+        backend: index.backend.clone(),
+        artifact_kind: index.artifact_kind.clone(),
+        artifact_root_page: index.artifact_root_page,
+        artifact_checksum: index.artifact_checksum,
+        build_state: index.build_state.clone(),
+    }
 }
 
 pub(super) fn graph_projection_to_json(projection: &PhysicalGraphProjection) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "name".to_string(),
-        JsonValue::String(projection.name.clone()),
-    );
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(projection.created_at_unix_ms),
-    );
-    object.insert(
-        "updated_at_unix_ms".to_string(),
-        json_u128(projection.updated_at_unix_ms),
-    );
-    object.insert(
-        "state".to_string(),
-        JsonValue::String(projection.state.clone()),
-    );
-    object.insert(
-        "source".to_string(),
-        JsonValue::String(projection.source.clone()),
-    );
-    object.insert(
-        "node_labels".to_string(),
-        JsonValue::Array(
-            projection
-                .node_labels
-                .iter()
-                .cloned()
-                .map(JsonValue::String)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "node_types".to_string(),
-        JsonValue::Array(
-            projection
-                .node_types
-                .iter()
-                .cloned()
-                .map(JsonValue::String)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "edge_labels".to_string(),
-        JsonValue::Array(
-            projection
-                .edge_labels
-                .iter()
-                .cloned()
-                .map(JsonValue::String)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "last_materialized_sequence".to_string(),
-        match projection.last_materialized_sequence {
-            Some(value) => json_u64(value),
-            None => JsonValue::Null,
-        },
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_graph_projection_json(projection)
+            .expect("reddb-file must encode physical graph projection JSON"),
+    )
 }
 
 pub(super) fn graph_projection_from_json(value: &JsonValue) -> io::Result<PhysicalGraphProjection> {
-    let object = expect_object(value, "graph projection")?;
-    Ok(PhysicalGraphProjection {
-        name: json_string_required(object, "name")?,
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
-        state: object
-            .get("state")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("declared")
-            .to_string(),
-        source: json_string_required(object, "source")?,
-        node_labels: object
-            .get("node_labels")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        node_types: object
-            .get("node_types")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        edge_labels: object
-            .get("edge_labels")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        last_materialized_sequence: object
-            .get("last_materialized_sequence")
-            .and_then(|value| json_u64_value(value).ok()),
-    })
+    reddb_file::decode_physical_graph_projection_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical graph projection: {err}")))
 }
 
 pub(super) fn analytics_job_to_json(job: &PhysicalAnalyticsJob) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("id".to_string(), JsonValue::String(job.id.clone()));
-    object.insert("kind".to_string(), JsonValue::String(job.kind.clone()));
-    object.insert("state".to_string(), JsonValue::String(job.state.clone()));
-    object.insert(
-        "projection".to_string(),
-        match &job.projection {
-            Some(value) => JsonValue::String(value.clone()),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(job.created_at_unix_ms),
-    );
-    object.insert(
-        "updated_at_unix_ms".to_string(),
-        json_u128(job.updated_at_unix_ms),
-    );
-    object.insert(
-        "last_run_sequence".to_string(),
-        match job.last_run_sequence {
-            Some(value) => json_u64(value),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert(
-        "metadata".to_string(),
-        JsonValue::Object(
-            job.metadata
-                .iter()
-                .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
-                .collect(),
-        ),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_analytics_job_json(job)
+            .expect("reddb-file must encode physical analytics job JSON"),
+    )
 }
 
 pub(super) fn analytics_job_from_json(value: &JsonValue) -> io::Result<PhysicalAnalyticsJob> {
-    let object = expect_object(value, "analytics job")?;
-    Ok(PhysicalAnalyticsJob {
-        id: json_string_required(object, "id")?,
-        kind: json_string_required(object, "kind")?,
-        state: json_string_required(object, "state")?,
-        projection: object
-            .get("projection")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string),
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
-        last_run_sequence: object
-            .get("last_run_sequence")
-            .and_then(|value| json_u64_value(value).ok()),
-        metadata: object
-            .get("metadata")
-            .and_then(JsonValue::as_object)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|(key, value)| {
-                        value.as_str().map(|value| (key.clone(), value.to_string()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    })
+    reddb_file::decode_physical_analytics_job_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical analytics job: {err}")))
 }
 
 pub(super) fn tree_definition_to_json(definition: &PhysicalTreeDefinition) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "collection".to_string(),
-        JsonValue::String(definition.collection.clone()),
-    );
-    object.insert(
-        "name".to_string(),
-        JsonValue::String(definition.name.clone()),
-    );
-    object.insert("root_id".to_string(), json_u64(definition.root_id));
-    object.insert(
-        "default_max_children".to_string(),
-        JsonValue::Number(definition.default_max_children as f64),
-    );
-    object.insert(
-        "ordered_children".to_string(),
-        JsonValue::Bool(definition.ordered_children),
-    );
-    object.insert(
-        "ownership".to_string(),
-        JsonValue::String(definition.ownership.clone()),
-    );
-    object.insert(
-        "auto_fix_mode".to_string(),
-        JsonValue::String(definition.auto_fix_mode.clone()),
-    );
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(definition.created_at_unix_ms),
-    );
-    object.insert(
-        "updated_at_unix_ms".to_string(),
-        json_u128(definition.updated_at_unix_ms),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_tree_definition_json(definition)
+            .expect("reddb-file must encode physical tree definition JSON"),
+    )
 }
 
 pub(super) fn tree_definition_from_json(value: &JsonValue) -> io::Result<PhysicalTreeDefinition> {
-    let object = expect_object(value, "tree definition")?;
-    Ok(PhysicalTreeDefinition {
-        collection: json_string_required(object, "collection")?,
-        name: json_string_required(object, "name")?,
-        root_id: json_u64_required(object, "root_id")?,
-        default_max_children: json_usize_required(object, "default_max_children")?,
-        ordered_children: object
-            .get("ordered_children")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(true),
-        ownership: object
-            .get("ownership")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("owned")
-            .to_string(),
-        auto_fix_mode: object
-            .get("auto_fix_mode")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("conservative")
-            .to_string(),
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
-    })
+    reddb_file::decode_physical_tree_definition_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical tree definition: {err}")))
 }
 
 pub(super) fn hypertable_chunk_to_json(chunk: &PhysicalHypertableChunk) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("start_ns".to_string(), json_u64(chunk.start_ns));
-    object.insert(
-        "end_ns_exclusive".to_string(),
-        json_u64(chunk.end_ns_exclusive),
-    );
-    object.insert("row_count".to_string(), json_u64(chunk.row_count));
-    object.insert("min_ts_ns".to_string(), json_u64(chunk.min_ts_ns));
-    object.insert("max_ts_ns".to_string(), json_u64(chunk.max_ts_ns));
-    object.insert("sealed".to_string(), JsonValue::Bool(chunk.sealed));
-    object.insert(
-        "ttl_override_ns".to_string(),
-        chunk
-            .ttl_override_ns
-            .map(json_u64)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "columnar_page".to_string(),
-        chunk
-            .columnar_page
-            .map(page_location_to_json)
-            .unwrap_or(JsonValue::Null),
-    );
-    JsonValue::Object(object)
-}
-
-fn page_location_to_json(loc: crate::storage::engine::PageLocation) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("page_id".to_string(), json_u64(loc.page_id as u64));
-    object.insert("offset".to_string(), json_u64(loc.offset as u64));
-    object.insert("length".to_string(), json_u64(loc.length as u64));
-    JsonValue::Object(object)
-}
-
-fn page_location_from_json(value: &JsonValue) -> io::Result<crate::storage::engine::PageLocation> {
-    let object = expect_object(value, "page location")?;
-    Ok(crate::storage::engine::PageLocation {
-        page_id: json_u64_required(object, "page_id")? as u32,
-        offset: json_u64_required(object, "offset")? as u32,
-        length: json_u64_required(object, "length")? as u32,
-    })
+    file_json_to_server_json(
+        reddb_file::encode_persisted_physical_hypertable_chunk_json(
+            &hypertable_chunk_to_persisted(chunk),
+        )
+        .expect("reddb-file must encode physical hypertable chunk JSON"),
+    )
 }
 
 pub(super) fn hypertable_chunk_from_json(value: &JsonValue) -> io::Result<PhysicalHypertableChunk> {
-    let object = expect_object(value, "hypertable chunk")?;
-    Ok(PhysicalHypertableChunk {
-        start_ns: json_u64_required(object, "start_ns")?,
-        end_ns_exclusive: json_u64_required(object, "end_ns_exclusive")?,
-        row_count: json_u64_required(object, "row_count")?,
-        min_ts_ns: json_u64_required(object, "min_ts_ns")?,
-        max_ts_ns: json_u64_required(object, "max_ts_ns")?,
-        sealed: object
-            .get("sealed")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(false),
-        ttl_override_ns: match object.get("ttl_override_ns") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(json_u64_value(value)?),
-        },
-        columnar_page: match object.get("columnar_page") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(page_location_from_json(value)?),
-        },
-    })
+    let persisted =
+        reddb_file::decode_persisted_physical_hypertable_chunk_json(&value.to_string_compact())
+            .map_err(|err| invalid_data(format!("decode physical hypertable chunk: {err}")))?;
+    Ok(hypertable_chunk_from_persisted(persisted))
 }
 
 pub(super) fn hypertable_to_json(hypertable: &PhysicalHypertable) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "name".to_string(),
-        JsonValue::String(hypertable.name.clone()),
-    );
-    object.insert(
-        "time_column".to_string(),
-        JsonValue::String(hypertable.time_column.clone()),
-    );
-    object.insert(
-        "chunk_interval_ns".to_string(),
-        json_u64(hypertable.chunk_interval_ns),
-    );
-    object.insert(
-        "default_ttl_ns".to_string(),
-        hypertable
-            .default_ttl_ns
-            .map(json_u64)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "chunks".to_string(),
-        JsonValue::Array(
-            hypertable
-                .chunks
-                .iter()
-                .map(hypertable_chunk_to_json)
-                .collect(),
-        ),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_persisted_physical_hypertable_json(&hypertable_to_persisted(hypertable))
+            .expect("reddb-file must encode physical hypertable JSON"),
+    )
 }
 
 pub(super) fn hypertable_from_json(value: &JsonValue) -> io::Result<PhysicalHypertable> {
-    let object = expect_object(value, "hypertable")?;
-    Ok(PhysicalHypertable {
-        name: json_string_required(object, "name")?,
-        time_column: json_string_required(object, "time_column")?,
-        chunk_interval_ns: json_u64_required(object, "chunk_interval_ns")?,
-        default_ttl_ns: match object.get("default_ttl_ns") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(json_u64_value(value)?),
-        },
-        chunks: object
-            .get("chunks")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .map(hypertable_chunk_from_json)
-                    .collect::<io::Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default(),
-    })
+    let persisted =
+        reddb_file::decode_persisted_physical_hypertable_json(&value.to_string_compact())
+            .map_err(|err| invalid_data(format!("decode physical hypertable: {err}")))?;
+    Ok(hypertable_from_persisted(persisted))
+}
+
+fn hypertable_to_persisted(
+    hypertable: &PhysicalHypertable,
+) -> reddb_file::PersistedPhysicalHypertable {
+    reddb_file::PersistedPhysicalHypertable {
+        name: hypertable.name.clone(),
+        time_column: hypertable.time_column.clone(),
+        chunk_interval_ns: hypertable.chunk_interval_ns,
+        default_ttl_ns: hypertable.default_ttl_ns,
+        chunks: hypertable
+            .chunks
+            .iter()
+            .map(hypertable_chunk_to_persisted)
+            .collect(),
+    }
+}
+
+fn hypertable_from_persisted(
+    hypertable: reddb_file::PersistedPhysicalHypertable,
+) -> PhysicalHypertable {
+    PhysicalHypertable {
+        name: hypertable.name,
+        time_column: hypertable.time_column,
+        chunk_interval_ns: hypertable.chunk_interval_ns,
+        default_ttl_ns: hypertable.default_ttl_ns,
+        chunks: hypertable
+            .chunks
+            .into_iter()
+            .map(hypertable_chunk_from_persisted)
+            .collect(),
+    }
+}
+
+fn hypertable_chunk_to_persisted(
+    chunk: &PhysicalHypertableChunk,
+) -> reddb_file::PersistedPhysicalHypertableChunk {
+    reddb_file::PersistedPhysicalHypertableChunk {
+        start_ns: chunk.start_ns,
+        end_ns_exclusive: chunk.end_ns_exclusive,
+        row_count: chunk.row_count,
+        min_ts_ns: chunk.min_ts_ns,
+        max_ts_ns: chunk.max_ts_ns,
+        sealed: chunk.sealed,
+        ttl_override_ns: chunk.ttl_override_ns,
+        columnar_page: chunk
+            .columnar_page
+            .map(|loc| reddb_file::PhysicalPageLocation {
+                page_id: loc.page_id,
+                offset: loc.offset,
+                length: loc.length,
+            }),
+    }
+}
+
+fn hypertable_chunk_from_persisted(
+    chunk: reddb_file::PersistedPhysicalHypertableChunk,
+) -> PhysicalHypertableChunk {
+    PhysicalHypertableChunk {
+        start_ns: chunk.start_ns,
+        end_ns_exclusive: chunk.end_ns_exclusive,
+        row_count: chunk.row_count,
+        min_ts_ns: chunk.min_ts_ns,
+        max_ts_ns: chunk.max_ts_ns,
+        sealed: chunk.sealed,
+        ttl_override_ns: chunk.ttl_override_ns,
+        columnar_page: chunk
+            .columnar_page
+            .map(|loc| crate::storage::engine::PageLocation {
+                page_id: loc.page_id,
+                offset: loc.offset,
+                length: loc.length,
+            }),
+    }
 }
 
 pub(super) fn index_kind_from_str(value: &str) -> io::Result<IndexKind> {
@@ -1872,56 +1402,15 @@ pub(super) fn index_kind_from_str(value: &str) -> io::Result<IndexKind> {
 }
 
 pub(super) fn export_descriptor_to_json(export: &ExportDescriptor) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(export.name.clone()));
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(export.created_at_unix_ms),
-    );
-    object.insert(
-        "snapshot_id".to_string(),
-        match export.snapshot_id {
-            Some(snapshot_id) => json_u64(snapshot_id),
-            None => JsonValue::Null,
-        },
-    );
-    object.insert(
-        "superblock_sequence".to_string(),
-        json_u64(export.superblock_sequence),
-    );
-    object.insert(
-        "data_path".to_string(),
-        JsonValue::String(export.data_path.clone()),
-    );
-    object.insert(
-        "metadata_path".to_string(),
-        JsonValue::String(export.metadata_path.clone()),
-    );
-    object.insert(
-        "collection_count".to_string(),
-        JsonValue::Number(export.collection_count as f64),
-    );
-    object.insert(
-        "total_entities".to_string(),
-        JsonValue::Number(export.total_entities as f64),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_export_descriptor_json(export)
+            .expect("reddb-file must encode physical export descriptor JSON"),
+    )
 }
 
 pub(super) fn export_descriptor_from_json(value: &JsonValue) -> io::Result<ExportDescriptor> {
-    let object = expect_object(value, "export descriptor")?;
-    Ok(ExportDescriptor {
-        name: json_string_required(object, "name")?,
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        snapshot_id: object
-            .get("snapshot_id")
-            .and_then(|value| json_u64_value(value).ok()),
-        superblock_sequence: json_u64_required(object, "superblock_sequence")?,
-        data_path: json_string_required(object, "data_path")?,
-        metadata_path: json_string_required(object, "metadata_path")?,
-        collection_count: json_usize_required(object, "collection_count")?,
-        total_entities: json_usize_required(object, "total_entities")?,
-    })
+    reddb_file::decode_physical_export_descriptor_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical export descriptor: {err}")))
 }
 
 #[cfg(test)]

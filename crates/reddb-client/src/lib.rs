@@ -65,7 +65,6 @@ pub mod grpc;
 #[cfg(feature = "grpc")]
 pub mod router;
 
-#[cfg(feature = "redwire")]
 pub mod redwire;
 
 #[cfg(feature = "http")]

@@ -953,6 +953,7 @@ impl RmwLockTable {
 struct RuntimeInner {
     db: Arc<RedDB>,
     layout: PhysicalLayout,
+    embedded_single_file: bool,
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
@@ -1334,9 +1335,12 @@ pub(crate) mod ddl;
 pub mod disk_space_monitor;
 mod dml_target_scan;
 pub mod evidence_export;
+pub(crate) mod execution_context;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;
+mod impl_backup;
+mod impl_cdc;
 mod impl_config;
 pub(crate) mod impl_core;
 mod impl_ddl;
@@ -1349,14 +1353,18 @@ pub mod impl_kv;
 mod impl_migrations;
 mod impl_native;
 mod impl_physical;
+mod impl_primary_replica_file;
 mod impl_probabilistic;
 pub mod impl_queue;
+mod impl_replica_loop;
+mod impl_replication_commit;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 mod impl_search;
+mod impl_serverless;
 mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
-pub(crate) mod index_store;
+mod index_store;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
@@ -1383,6 +1391,7 @@ mod record_search;
 mod red_schema;
 pub(crate) mod replica_queue_store;
 pub mod resource_limits;
+mod result_cache_runtime;
 pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
 pub(crate) mod scalar_evaluator;

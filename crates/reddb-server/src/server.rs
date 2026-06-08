@@ -107,16 +107,21 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
 
 mod axum_edge;
 pub mod handlers_admin;
+mod handlers_admin_metrics;
+mod handlers_admin_status;
 mod handlers_ai;
 mod handlers_ai_model_cache;
 mod handlers_auth;
 mod handlers_backup;
 mod handlers_browser_auth;
+mod handlers_capabilities;
 mod handlers_collection_policy;
 mod handlers_ec;
 pub(crate) mod handlers_entity;
+mod handlers_failover;
 mod handlers_geo;
 mod handlers_graph;
+mod handlers_iam_policy;
 mod handlers_keyed;
 mod handlers_log;
 mod handlers_metrics;

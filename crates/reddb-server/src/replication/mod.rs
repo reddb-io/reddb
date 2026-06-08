@@ -31,10 +31,8 @@ pub mod fence;
 pub mod flow_control;
 pub mod lease;
 pub mod logical;
-pub mod move_range;
 pub mod primary;
 pub mod quorum;
-pub mod range_repair;
 pub mod replica;
 pub mod rollback;
 pub mod scheduler;
@@ -56,9 +54,8 @@ pub use election::{
     VotingState,
 };
 pub use failover::{
-    check_promotion_watermark, FailoverCoordinator, FailoverError, FailoverMode, FailoverNode,
-    FailoverOutcome, FailoverRequest, FailoverTransport, NodeRole, PromotionProgress,
-    PromotionRefusal, RoleAssignment,
+    FailoverCoordinator, FailoverError, FailoverMode, FailoverNode, FailoverOutcome,
+    FailoverRequest, FailoverTransport, NodeRole, RoleAssignment,
 };
 pub use fence::{
     FenceBoundary, FenceVerdict, FileTermStore, MemoryTermStore, StaleTermFenced, TermFence,
@@ -66,15 +63,7 @@ pub use fence::{
 };
 pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
-pub use move_range::{
-    MoveRangeCatchUp, MoveRangeCutover, MoveRangeError, MoveRangeRequest, MoveRangeTargetState,
-    MoveRangeTracer, RangeIndexedRecord, RangeOwnership,
-};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
-pub use range_repair::{
-    RangeRepairError, RangeRepairOutcome, RangeRepairReason, RangeRepairRequest, RangeRepairTracer,
-    RangeReplicaHealth, RangeReplicaRepairState,
-};
 pub use rollback::{
     DivergentTail, RollbackCoordinator, RollbackError, RollbackEvent, RollbackOutcome,
     RollbackPlan, RollbackRequest, RollbackTransport, TailRecord,
@@ -86,7 +75,7 @@ pub use topology_advertiser::{
 };
 pub use witness::{RuntimeProfile, WitnessSupervisor};
 
-pub const DEFAULT_REPLICATION_TERM: u64 = 1;
+pub const DEFAULT_REPLICATION_TERM: u64 = reddb_wire::replication::DEFAULT_REPLICATION_TERM;
 pub const DEFAULT_SLOT_RETENTION_MAX_LAG_LSN: u64 = 100_000;
 pub const DEFAULT_SLOT_IDLE_TIMEOUT_MS: u64 = 86_400_000;
 

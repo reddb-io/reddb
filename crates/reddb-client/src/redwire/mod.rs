@@ -1,9 +1,9 @@
 //! RedWire client.
 //!
-//! Mirrors the server-side codec (`reddb::wire::redwire`) but
-//! lives in the driver crate so the client doesn't drag the
-//! engine in. The framing is a stable wire contract — both sides
-//! re-implement it from the same ADR (`.red/adr/0001-redwire-tcp-protocol.md`).
+//! Uses the canonical RedWire contracts from `reddb-wire` so the
+//! client does not duplicate the engine-facing frame and payload
+//! definitions. The framing is a stable wire contract defined by
+//! ADR 0001 (`.red/adr/0001-redwire-tcp-protocol.md`).
 //!
 //! Public surface:
 //!   - [`RedWireClient::connect`][]: TCP + handshake + auth
@@ -11,22 +11,21 @@
 //!   - [`RedWireClient::ping`][]: keepalive
 //!   - [`RedWireClient::close`][]: clean shutdown via Bye
 
-pub mod codec;
-mod frame;
 mod handshake;
+mod io;
+#[cfg(feature = "redwire")]
 pub mod scram;
 #[cfg(feature = "redwire-tls")]
 mod tls;
 
-pub use codec::FrameError;
-pub use frame::{Flags, Frame, MessageKind};
+pub use reddb_wire::redwire::{Flags, Frame, FrameError, MessageKind};
 #[cfg(feature = "redwire-tls")]
 pub use tls::TlsConfig;
 
-use std::io;
+use std::io as std_io;
 use std::pin::Pin;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use reddb_wire::query_with_params::{
@@ -44,15 +43,19 @@ impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncReadWrite for T {}
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{BulkInsertResult, QueryResult};
 
-use codec::{decode_frame, encode_frame};
-use frame::FRAME_HEADER_SIZE;
 use handshake::HandshakeOutcome;
+use reddb_wire::legacy::WireValue;
+use reddb_wire::redwire::{
+    decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
+    encode_bulk_binary_payload, encode_bulk_insert_payload, encode_insert_payload,
+    encode_key_payload,
+};
 
 /// Magic byte that identifies a RedWire connection on the shared port.
-pub const MAGIC: u8 = 0xFE;
+pub const MAGIC: u8 = reddb_wire::redwire::REDWIRE_MAGIC;
 
 /// Highest minor protocol version this client implements.
-pub const SUPPORTED_VERSION: u8 = 0x01;
+pub const SUPPORTED_VERSION: u8 = reddb_wire::redwire::MAX_KNOWN_MINOR_VERSION;
 
 /// Authentication credentials for the RedWire handshake.
 #[derive(Debug, Clone)]
@@ -63,9 +66,8 @@ pub enum Auth {
     Bearer(String),
 }
 
-/// Typed value for the binary bulk-insert fast path. Tag bytes
-/// match `src/wire/protocol.rs` so the wire shape is identical to
-/// what `examples/stress_wire_client.rs` already produces.
+/// Typed value for the binary bulk-insert fast path. Encoding delegates
+/// to `reddb-wire::legacy`, which owns the byte-level value tags.
 #[derive(Debug, Clone)]
 pub enum BinaryValue {
     I64(i64),
@@ -75,35 +77,14 @@ pub enum BinaryValue {
     Null,
 }
 
-impl BinaryValue {
-    /// Tag constants — keep in sync with the engine's
-    /// `wire::protocol::VAL_*` table.
-    const TAG_I64: u8 = 1;
-    const TAG_F64: u8 = 2;
-    const TAG_TEXT: u8 = 3;
-    const TAG_BOOL: u8 = 4;
-    const TAG_NULL: u8 = 0;
-
-    pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
-        match self {
-            Self::I64(n) => {
-                buf.push(Self::TAG_I64);
-                buf.extend_from_slice(&n.to_le_bytes());
-            }
-            Self::F64(n) => {
-                buf.push(Self::TAG_F64);
-                buf.extend_from_slice(&n.to_le_bytes());
-            }
-            Self::Text(s) => {
-                buf.push(Self::TAG_TEXT);
-                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                buf.extend_from_slice(s.as_bytes());
-            }
-            Self::Bool(b) => {
-                buf.push(Self::TAG_BOOL);
-                buf.push(if *b { 1 } else { 0 });
-            }
-            Self::Null => buf.push(Self::TAG_NULL),
+impl From<&BinaryValue> for WireValue {
+    fn from(value: &BinaryValue) -> Self {
+        match value {
+            BinaryValue::I64(n) => WireValue::I64(*n),
+            BinaryValue::F64(n) => WireValue::F64(*n),
+            BinaryValue::Text(value) => WireValue::Text(value.clone()),
+            BinaryValue::Bool(value) => WireValue::Bool(*value),
+            BinaryValue::Null => WireValue::Null,
         }
     }
 }
@@ -234,25 +215,26 @@ impl RedWireClient {
     }
 
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
+        let raw = self.query_raw(sql).await?;
+        let value: serde_json::Value = serde_json::from_slice(raw.as_bytes())
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))?;
+        Ok(QueryResult::from_envelope(value))
+    }
+
+    /// Send a query and return the raw `Result` payload string. This is
+    /// used by the legacy `red_client` compatibility shim so the CLI
+    /// output stays byte-for-byte aligned with its old RedWire path.
+    pub async fn query_raw(&mut self, sql: &str) -> Result<String> {
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::Query, corr, sql.as_bytes().to_vec());
-        self.stream
-            .write_all(&encode_frame(&req))
-            .await
-            .map_err(io_err)?;
+        io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
-            MessageKind::Result => {
-                let value: serde_json::Value =
-                    serde_json::from_slice(&resp.payload).map_err(|e| {
-                        ClientError::new(ErrorCode::Protocol, format!("decode result: {e}"))
-                    })?;
-                Ok(QueryResult::from_envelope(value))
-            }
-            MessageKind::Error => {
-                let msg = String::from_utf8_lossy(&resp.payload).to_string();
-                Err(ClientError::new(ErrorCode::Engine, msg))
-            }
+            MessageKind::Result => Ok(String::from_utf8_lossy(&resp.payload).to_string()),
+            MessageKind::Error => Err(ClientError::new(
+                ErrorCode::Engine,
+                String::from_utf8_lossy(&resp.payload).to_string(),
+            )),
             other => Err(ClientError::new(
                 ErrorCode::Protocol,
                 format!("expected Result/Error, got {other:?}"),
@@ -280,10 +262,7 @@ impl RedWireClient {
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::QueryWithParams, corr, payload);
-        self.stream
-            .write_all(&encode_frame(&req))
-            .await
-            .map_err(io_err)?;
+        io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::Result => {
@@ -307,13 +286,7 @@ impl RedWireClient {
     /// Insert a single row. `payload` is a JSON object with column
     /// → value pairs. Returns the engine's affected-rows count.
     pub async fn insert(&mut self, collection: &str, payload: serde_json::Value) -> Result<u64> {
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "collection".into(),
-            serde_json::Value::String(collection.to_string()),
-        );
-        obj.insert("payload".into(), payload);
-        self.send_insert_frame(serde_json::Value::Object(obj))
+        self.send_insert_frame(encode_insert_payload(collection, payload))
             .await
             .map(|result| result.affected)
     }
@@ -324,31 +297,25 @@ impl RedWireClient {
         collection: &str,
         payloads: Vec<serde_json::Value>,
     ) -> Result<BulkInsertResult> {
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "collection".into(),
-            serde_json::Value::String(collection.to_string()),
-        );
-        obj.insert("payloads".into(), serde_json::Value::Array(payloads));
-        self.send_insert_frame(serde_json::Value::Object(obj)).await
+        self.send_insert_frame(encode_bulk_insert_payload(collection, payloads))
+            .await
     }
 
-    async fn send_insert_frame(&mut self, body: serde_json::Value) -> Result<BulkInsertResult> {
-        let bytes = serde_json::to_vec(&body)
-            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode insert: {e}")))?;
+    async fn send_insert_frame(&mut self, bytes: Vec<u8>) -> Result<BulkInsertResult> {
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::BulkInsert, corr, bytes);
-        self.stream
-            .write_all(&encode_frame(&req))
-            .await
-            .map_err(io_err)?;
+        io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::BulkOk => {
-                let v: serde_json::Value = serde_json::from_slice(&resp.payload).map_err(|e| {
+                let payload = decode_bulk_ok_payload(&resp.payload).map_err(|e| {
                     ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}"))
                 })?;
-                Ok(bulk_insert_result_from_json(v))
+                Ok(BulkInsertResult {
+                    affected: payload.affected,
+                    rids: payload.rids,
+                    ids: payload.ids,
+                })
             }
             MessageKind::Error => {
                 let msg = String::from_utf8_lossy(&resp.payload).to_string();
@@ -364,20 +331,9 @@ impl RedWireClient {
     /// Fetch one row by primary id. Returns the JSON envelope the
     /// server emits on a `Get` frame: `{ ok, found, ... }`.
     pub async fn get(&mut self, collection: &str, id: &str) -> Result<serde_json::Value> {
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "collection".into(),
-            serde_json::Value::String(collection.to_string()),
-        );
-        obj.insert("id".into(), serde_json::Value::String(id.to_string()));
-        let bytes = serde_json::to_vec(&serde_json::Value::Object(obj))
-            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode get: {e}")))?;
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::Get, corr, bytes);
-        self.stream
-            .write_all(&encode_frame(&req))
-            .await
-            .map_err(io_err)?;
+        let req = Frame::new(MessageKind::Get, corr, encode_key_payload(collection, id));
+        io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::Result => serde_json::from_slice(&resp.payload)
@@ -395,31 +351,18 @@ impl RedWireClient {
 
     /// Delete by primary id. Returns the affected count.
     pub async fn delete(&mut self, collection: &str, id: &str) -> Result<u64> {
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "collection".into(),
-            serde_json::Value::String(collection.to_string()),
-        );
-        obj.insert("id".into(), serde_json::Value::String(id.to_string()));
-        let bytes = serde_json::to_vec(&serde_json::Value::Object(obj))
-            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode delete: {e}")))?;
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::Delete, corr, bytes);
-        self.stream
-            .write_all(&encode_frame(&req))
-            .await
-            .map_err(io_err)?;
+        let req = Frame::new(
+            MessageKind::Delete,
+            corr,
+            encode_key_payload(collection, id),
+        );
+        io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
-            MessageKind::DeleteOk => {
-                let v: serde_json::Value = serde_json::from_slice(&resp.payload).map_err(|e| {
-                    ClientError::new(ErrorCode::Protocol, format!("decode delete_ok: {e}"))
-                })?;
-                Ok(v.as_object()
-                    .and_then(|o| o.get("affected"))
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(0))
-            }
+            MessageKind::DeleteOk => decode_delete_ok_affected(&resp.payload).map_err(|e| {
+                ClientError::new(ErrorCode::Protocol, format!("decode delete_ok: {e}"))
+            }),
             MessageKind::Error => Err(ClientError::new(
                 ErrorCode::Engine,
                 String::from_utf8_lossy(&resp.payload).to_string(),
@@ -445,56 +388,20 @@ impl RedWireClient {
         columns: &[&str],
         rows: &[Vec<BinaryValue>],
     ) -> Result<u64> {
-        let mut payload = Vec::with_capacity(64 + rows.len() * columns.len() * 16);
-        // Collection name
-        payload.extend_from_slice(&(collection.len() as u16).to_le_bytes());
-        payload.extend_from_slice(collection.as_bytes());
-        // Column count + names
-        payload.extend_from_slice(&(columns.len() as u16).to_le_bytes());
-        for c in columns {
-            payload.extend_from_slice(&(c.len() as u16).to_le_bytes());
-            payload.extend_from_slice(c.as_bytes());
-        }
-        // Row count + rows
-        payload.extend_from_slice(&(rows.len() as u32).to_le_bytes());
-        for row in rows {
-            if row.len() != columns.len() {
-                return Err(ClientError::new(
-                    ErrorCode::Protocol,
-                    format!("row had {} values for {} columns", row.len(), columns.len()),
-                ));
-            }
-            for v in row {
-                v.encode(&mut payload);
-            }
-        }
+        let wire_rows = rows
+            .iter()
+            .map(|row| row.iter().map(WireValue::from).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let payload = encode_bulk_binary_payload(collection, columns, &wire_rows)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, e.to_string()))?;
 
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::BulkInsertBinary, corr, payload);
-        self.stream
-            .write_all(&encode_frame(&req))
-            .await
-            .map_err(io_err)?;
+        io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
-            MessageKind::BulkOk => {
-                if resp.payload.len() < 8 {
-                    return Err(ClientError::new(
-                        ErrorCode::Protocol,
-                        "BulkOk truncated: expected 8-byte count",
-                    ));
-                }
-                Ok(u64::from_le_bytes([
-                    resp.payload[0],
-                    resp.payload[1],
-                    resp.payload[2],
-                    resp.payload[3],
-                    resp.payload[4],
-                    resp.payload[5],
-                    resp.payload[6],
-                    resp.payload[7],
-                ]))
-            }
+            MessageKind::BulkOk => decode_bulk_ok_count_payload(&resp.payload)
+                .map_err(|e| ClientError::new(ErrorCode::Protocol, e.to_string())),
             MessageKind::Error => Err(ClientError::new(
                 ErrorCode::Engine,
                 String::from_utf8_lossy(&resp.payload).to_string(),
@@ -509,10 +416,7 @@ impl RedWireClient {
     pub async fn ping(&mut self) -> Result<()> {
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::Ping, corr, vec![]);
-        self.stream
-            .write_all(&encode_frame(&req))
-            .await
-            .map_err(io_err)?;
+        io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::Pong => Ok(()),
@@ -526,7 +430,7 @@ impl RedWireClient {
     pub async fn close(mut self) -> Result<()> {
         let corr = self.next_corr();
         let bye = Frame::new(MessageKind::Bye, corr, vec![]);
-        let _ = self.stream.write_all(&encode_frame(&bye)).await;
+        let _ = io::write_frame(&mut self.stream, &bye).await;
         Ok(())
     }
 
@@ -537,26 +441,7 @@ impl RedWireClient {
     }
 
     async fn read_frame(&mut self) -> Result<Frame> {
-        let mut header = [0u8; FRAME_HEADER_SIZE];
-        self.stream.read_exact(&mut header).await.map_err(io_err)?;
-        let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        if length < FRAME_HEADER_SIZE {
-            return Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("server sent a frame with length {length}"),
-            ));
-        }
-        let mut buf = vec![0u8; length];
-        buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
-        if length > FRAME_HEADER_SIZE {
-            self.stream
-                .read_exact(&mut buf[FRAME_HEADER_SIZE..length])
-                .await
-                .map_err(io_err)?;
-        }
-        let (frame, _) = decode_frame(&buf)
-            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode frame: {e}")))?;
-        Ok(frame)
+        io::read_frame(&mut self.stream).await
     }
 }
 
@@ -577,40 +462,8 @@ fn param_to_redwire(value: &crate::params::Value) -> RedWireParamValue {
     }
 }
 
-fn io_err(err: io::Error) -> ClientError {
+fn io_err(err: std_io::Error) -> ClientError {
     ClientError::new(ErrorCode::Network, err.to_string())
-}
-
-fn bulk_insert_result_from_json(value: serde_json::Value) -> BulkInsertResult {
-    let affected = value
-        .as_object()
-        .and_then(|o| o.get("affected"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let rids: Vec<String> = value
-        .as_object()
-        .and_then(|o| o.get("rids").or_else(|| o.get("ids")))
-        .and_then(|v| v.as_array())
-        .map(|items| items.iter().filter_map(json_id_to_string).collect())
-        .unwrap_or_default();
-    let ids = value
-        .as_object()
-        .and_then(|o| o.get("ids"))
-        .and_then(|v| v.as_array())
-        .map(|items| items.iter().filter_map(json_id_to_string).collect())
-        .unwrap_or_else(|| rids.clone());
-    BulkInsertResult {
-        affected,
-        rids,
-        ids,
-    }
-}
-
-fn json_id_to_string(value: &serde_json::Value) -> Option<String> {
-    value
-        .as_str()
-        .map(String::from)
-        .or_else(|| value.as_u64().map(|n| n.to_string()))
 }
 
 #[cfg(test)]

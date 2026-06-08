@@ -1107,7 +1107,6 @@ pub struct RegisteredIndex {
     pub columns: Vec<String>,
     pub method: IndexMethodKind,
     pub unique: bool,
-    pub scope: IndexScope,
 }
 
 impl RegisteredIndex {
@@ -1125,46 +1124,6 @@ impl RegisteredIndex {
             }
         }
     }
-
-    pub fn replicated(
-        name: String,
-        collection: String,
-        columns: Vec<String>,
-        method: IndexMethodKind,
-        unique: bool,
-    ) -> Self {
-        Self {
-            name,
-            collection,
-            columns,
-            method,
-            unique,
-            scope: IndexScope::Replicated,
-        }
-    }
-
-    pub fn auxiliary(
-        name: String,
-        collection: String,
-        columns: Vec<String>,
-        method: IndexMethodKind,
-        unique: bool,
-    ) -> Self {
-        Self {
-            name,
-            collection,
-            columns,
-            method,
-            unique,
-            scope: IndexScope::Auxiliary,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexScope {
-    Replicated,
-    Auxiliary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1321,60 +1280,6 @@ impl IndexStore {
         registry.insert((info.collection.clone(), info.name.clone()), info);
     }
 
-    pub fn create_auxiliary_index(
-        &self,
-        name: &str,
-        collection: &str,
-        columns: &[String],
-        method: IndexMethodKind,
-        unique: bool,
-        entities: &[(EntityId, Vec<(String, Value)>)],
-    ) -> Result<usize, String> {
-        let indexed = self.create_index(name, collection, columns, method, unique, entities)?;
-        self.register(RegisteredIndex::auxiliary(
-            name.to_string(),
-            collection.to_string(),
-            columns.to_vec(),
-            method,
-            unique,
-        ));
-        Ok(indexed)
-    }
-
-    pub fn create_auxiliary_hash_index(
-        &self,
-        name: &str,
-        collection: &str,
-        column: &str,
-    ) -> Result<usize, String> {
-        self.create_auxiliary_index(
-            name,
-            collection,
-            &[column.to_string()],
-            IndexMethodKind::Hash,
-            false,
-            &[],
-        )
-    }
-
-    pub fn discard_auxiliary_indices(&self) {
-        let indices = {
-            let registry = read_unpoisoned(&self.registry);
-            registry
-                .values()
-                .filter(|idx| idx.scope == IndexScope::Auxiliary)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        for index in indices {
-            self.drop_index(&index.name, &index.collection);
-        }
-    }
-
-    pub fn discard_auxiliary_indices_for_promotion(&self) {
-        self.discard_auxiliary_indices();
-    }
-
     /// Lookup entity IDs via hash index for a collection.column = value
     pub fn hash_lookup(
         &self,
@@ -1438,15 +1343,6 @@ impl IndexStore {
         registry
             .values()
             .filter(|idx| idx.collection == collection)
-            .cloned()
-            .collect()
-    }
-
-    pub fn list_replicated_indices(&self, collection: &str) -> Vec<RegisteredIndex> {
-        let registry = read_unpoisoned(&self.registry);
-        registry
-            .values()
-            .filter(|idx| idx.collection == collection && idx.scope == IndexScope::Replicated)
             .cloned()
             .collect()
     }
@@ -1975,13 +1871,13 @@ mod tests {
     #[test]
     fn test_index_entity_insert_errors_when_registered_hash_index_is_missing() {
         let store = IndexStore::new();
-        store.register(RegisteredIndex::replicated(
-            "idx_email".to_string(),
-            "users".to_string(),
-            vec!["email".to_string()],
-            IndexMethodKind::Hash,
-            false,
-        ));
+        store.register(RegisteredIndex {
+            name: "idx_email".to_string(),
+            collection: "users".to_string(),
+            columns: vec!["email".to_string()],
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
 
         let err = store
             .index_entity_insert(
@@ -2009,13 +1905,13 @@ mod tests {
                 &[],
             )
             .unwrap();
-        store.register(RegisteredIndex::replicated(
-            "idx_city_age".to_string(),
-            "users".to_string(),
-            columns.clone(),
-            IndexMethodKind::BTree,
-            false,
-        ));
+        store.register(RegisteredIndex {
+            name: "idx_city_age".to_string(),
+            collection: "users".to_string(),
+            columns: columns.clone(),
+            method: IndexMethodKind::BTree,
+            unique: false,
+        });
 
         let rows = vec![
             (
@@ -2071,13 +1967,13 @@ mod tests {
                 &[],
             )
             .unwrap();
-        store.register(RegisteredIndex::replicated(
-            "idx_email".to_string(),
-            "users".to_string(),
-            vec!["email".to_string()],
-            IndexMethodKind::Hash,
-            false,
-        ));
+        store.register(RegisteredIndex {
+            name: "idx_email".to_string(),
+            collection: "users".to_string(),
+            columns: vec!["email".to_string()],
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
     }
 
     #[test]
@@ -2109,13 +2005,13 @@ mod tests {
         // No backing hash index exists — delete must still return Ok
         // (deleting from a dropped index is a non-fatal no-op).
         let store = IndexStore::new();
-        store.register(RegisteredIndex::replicated(
-            "idx_email".to_string(),
-            "users".to_string(),
-            vec!["email".to_string()],
-            IndexMethodKind::Hash,
-            false,
-        ));
+        store.register(RegisteredIndex {
+            name: "idx_email".to_string(),
+            collection: "users".to_string(),
+            columns: vec!["email".to_string()],
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
         store
             .index_entity_delete(
                 "users",

@@ -440,6 +440,9 @@ impl RedDBServer {
                 self.handle_topology_graph()
             }
             ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),
+            ("POST", "/admin/replication/rejoin/confirm-rewind") => {
+                self.handle_admin_replication_confirm_rewind(body)
+            }
 
             // PLAN.md Phase 1 — universal lifecycle/health contract.
             ("GET", "/health/live") => self.handle_health_live(),
@@ -1575,6 +1578,7 @@ impl RedDBServer {
                     let policy_action = match method.as_str() {
                         "GET" => "select",
                         "PUT" => "insert",
+                        "PATCH" => "update",
                         "DELETE" => "delete",
                         _ => return json_error(405, "method not allowed for KV endpoint"),
                     };

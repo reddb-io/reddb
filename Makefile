@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-persistent test-persistent-grimms drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
+.PHONY: help build build-fast release warm test test-fast test-full test-persistent test-persistent-grimms drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -11,11 +11,12 @@ help:
 	@echo ""
 	@echo "Core:"
 	@echo "  make build         - Build debug version"
-	@echo "  make build-fast    - Build the `red` binary with the release-fast profile"
+	@echo "  make build-fast    - Build the red binary with the release-fast profile"
 	@echo "  make warm          - Prebuild the common dev artifacts (build + tests/benches check)"
 	@echo "  make release       - Build optimized release version"
-	@echo "  make test          - Run the default local test layer"
-	@echo "  make test-fast     - Run the default local test layer"
+	@echo "  make test          - Run the fast local test layer"
+	@echo "  make test-fast     - Run unit/bin tests plus curated smoke/regression integration targets"
+	@echo "  make test-full     - Run all non-ignored Rust tests"
 	@echo "  make test-persistent - Run the persistent multimodel integration layer"
 	@echo "  make test-persistent-grimms - Run the Grimms-scale persistent storage fixture"
 	@echo "  make drill-nightly - Run backup/restore drill tests and append drill history"
@@ -32,7 +33,7 @@ help:
 	@echo "  make check         - Quick compile check"
 	@echo "  make check-driver-rust - Compile-check the Rust SDK with gRPC enabled"
 	@echo "  make check-driver-python - Compile-check the Python SDK"
-	@echo "  make timings       - Generate cargo build timings for the `red` binary"
+	@echo "  make timings       - Generate cargo build timings for the red binary"
 	@echo "  make cold-start-bench - Measure cold-start P50/P95/P99 baselines"
 	@echo "  make binary-size   - Measure release-static binary size"
 	@echo "  make image-size    - Measure Docker image size"
@@ -69,6 +70,9 @@ test:
 	$(MAKE) test-fast
 
 test-fast:
+	./scripts/test-fast.sh
+
+test-full:
 	./scripts/cargo-fast.sh test --locked
 
 test-persistent:

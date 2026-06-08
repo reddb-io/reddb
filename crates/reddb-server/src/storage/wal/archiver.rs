@@ -7,304 +7,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::json::{Map, Value as JsonValue};
 use crate::replication::cdc::ChangeRecord;
 use crate::storage::backend::{BackendError, RemoteBackend};
-
-/// Metadata about an archived WAL segment.
-#[derive(Debug, Clone)]
-pub struct WalSegmentMeta {
-    /// Remote key (e.g., "wal/000000000008-000000050432.wal")
-    pub key: String,
-    /// Starting LSN of this segment
-    pub lsn_start: u64,
-    /// Ending LSN of this segment
-    pub lsn_end: u64,
-    /// When this segment was archived (unix ms)
-    pub created_at: u64,
-    /// Size in bytes
-    pub size_bytes: u64,
-    /// Hex-encoded SHA-256 of the uploaded payload bytes (PLAN.md
-    /// Phase 2.4). Restore recomputes the digest after download and
-    /// fails closed on mismatch — same fail-closed contract as
-    /// `SnapshotManifest::snapshot_sha256`. `None` for legacy
-    /// segments archived before this field was introduced; restore
-    /// tolerates absence with a warning.
-    pub sha256: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackupHead {
-    pub timeline_id: String,
-    pub snapshot_key: String,
-    pub snapshot_id: u64,
-    pub snapshot_time: u64,
-    pub current_lsn: u64,
-    pub last_archived_lsn: u64,
-    pub wal_prefix: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotManifest {
-    pub timeline_id: String,
-    pub snapshot_key: String,
-    pub snapshot_id: u64,
-    pub snapshot_time: u64,
-    pub base_lsn: u64,
-    pub schema_version: u32,
-    pub format_version: u32,
-    /// Hex-encoded SHA-256 of the snapshot bytes computed at upload
-    /// time. Restore reads this from the manifest, downloads the
-    /// snapshot, recomputes the hash, and refuses to proceed on a
-    /// mismatch. `None` for legacy manifests written before this
-    /// field was introduced — restore tolerates absence (with a
-    /// warning) but rejects a present-but-wrong value.
-    pub snapshot_sha256: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WalPruneBoundary {
-    pub archived_lsn: u64,
-    pub backup_floor_lsn: Option<u64>,
-    pub replica_restart_lsn: Option<u64>,
-}
-
-impl WalPruneBoundary {
-    pub fn new(archived_lsn: u64) -> Self {
-        Self {
-            archived_lsn,
-            backup_floor_lsn: None,
-            replica_restart_lsn: None,
-        }
-    }
-
-    pub fn with_backup_floor_lsn(mut self, floor_lsn: Option<u64>) -> Self {
-        self.backup_floor_lsn = floor_lsn;
-        self
-    }
-
-    pub fn with_replica_restart_lsn(mut self, restart_lsn: Option<u64>) -> Self {
-        self.replica_restart_lsn = restart_lsn;
-        self
-    }
-
-    pub fn prune_through_lsn(self) -> u64 {
-        [
-            Some(self.archived_lsn),
-            self.backup_floor_lsn,
-            self.replica_restart_lsn,
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(0)
-    }
-}
-
-impl BackupHead {
-    pub fn to_json_value(&self) -> JsonValue {
-        let mut object = Map::new();
-        object.insert(
-            "timeline_id".to_string(),
-            JsonValue::String(self.timeline_id.clone()),
-        );
-        object.insert(
-            "snapshot_key".to_string(),
-            JsonValue::String(self.snapshot_key.clone()),
-        );
-        object.insert(
-            "snapshot_id".to_string(),
-            JsonValue::Number(self.snapshot_id as f64),
-        );
-        object.insert(
-            "snapshot_time".to_string(),
-            JsonValue::Number(self.snapshot_time as f64),
-        );
-        object.insert(
-            "current_lsn".to_string(),
-            JsonValue::Number(self.current_lsn as f64),
-        );
-        object.insert(
-            "last_archived_lsn".to_string(),
-            JsonValue::Number(self.last_archived_lsn as f64),
-        );
-        object.insert(
-            "wal_prefix".to_string(),
-            JsonValue::String(self.wal_prefix.clone()),
-        );
-        JsonValue::Object(object)
-    }
-
-    pub fn from_json_value(value: &JsonValue) -> Result<Self, BackendError> {
-        Ok(Self {
-            timeline_id: value
-                .get("timeline_id")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("main")
-                .to_string(),
-            snapshot_key: value
-                .get("snapshot_key")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    BackendError::Internal("backup head missing snapshot_key".to_string())
-                })?
-                .to_string(),
-            snapshot_id: value
-                .get("snapshot_id")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| {
-                    BackendError::Internal("backup head missing snapshot_id".to_string())
-                })?,
-            snapshot_time: value
-                .get("snapshot_time")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| {
-                    BackendError::Internal("backup head missing snapshot_time".to_string())
-                })?,
-            current_lsn: value
-                .get("current_lsn")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            last_archived_lsn: value
-                .get("last_archived_lsn")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            wal_prefix: value
-                .get("wal_prefix")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("wal/")
-                .to_string(),
-        })
-    }
-}
-
-impl SnapshotManifest {
-    pub fn wal_retention_floor_lsn(&self) -> u64 {
-        self.base_lsn
-    }
-
-    pub fn to_json_value(&self) -> JsonValue {
-        let mut object = Map::new();
-        object.insert(
-            "timeline_id".to_string(),
-            JsonValue::String(self.timeline_id.clone()),
-        );
-        object.insert(
-            "snapshot_key".to_string(),
-            JsonValue::String(self.snapshot_key.clone()),
-        );
-        object.insert(
-            "snapshot_id".to_string(),
-            JsonValue::Number(self.snapshot_id as f64),
-        );
-        object.insert(
-            "snapshot_time".to_string(),
-            JsonValue::Number(self.snapshot_time as f64),
-        );
-        object.insert(
-            "base_lsn".to_string(),
-            JsonValue::Number(self.base_lsn as f64),
-        );
-        object.insert(
-            "schema_version".to_string(),
-            JsonValue::Number(self.schema_version as f64),
-        );
-        object.insert(
-            "format_version".to_string(),
-            JsonValue::Number(self.format_version as f64),
-        );
-        if let Some(ref sha) = self.snapshot_sha256 {
-            object.insert(
-                "snapshot_sha256".to_string(),
-                JsonValue::String(sha.clone()),
-            );
-        }
-        JsonValue::Object(object)
-    }
-
-    pub fn from_json_value(value: &JsonValue) -> Result<Self, BackendError> {
-        Ok(Self {
-            timeline_id: value
-                .get("timeline_id")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("main")
-                .to_string(),
-            snapshot_key: value
-                .get("snapshot_key")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    BackendError::Internal("snapshot manifest missing snapshot_key".to_string())
-                })?
-                .to_string(),
-            snapshot_id: value
-                .get("snapshot_id")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| {
-                    BackendError::Internal("snapshot manifest missing snapshot_id".to_string())
-                })?,
-            snapshot_time: value
-                .get("snapshot_time")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| {
-                    BackendError::Internal("snapshot manifest missing snapshot_time".to_string())
-                })?,
-            base_lsn: value
-                .get("base_lsn")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            schema_version: value
-                .get("schema_version")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(crate::api::REDDB_FORMAT_VERSION as u64)
-                as u32,
-            format_version: value
-                .get("format_version")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(crate::api::REDDB_FORMAT_VERSION as u64)
-                as u32,
-            snapshot_sha256: value
-                .get("snapshot_sha256")
-                .and_then(JsonValue::as_str)
-                .map(|s| s.to_string()),
-        })
-    }
-
-    /// Compute SHA-256 over the local snapshot file. Used at archive
-    /// time so the manifest can carry the digest for restore-side
-    /// verification. Streamed (8 KiB chunks) so very large snapshots
-    /// don't peak memory.
-    pub fn compute_snapshot_sha256(snapshot_path: &Path) -> Result<String, BackendError> {
-        sha256_file_hex(snapshot_path)
-    }
-}
+pub use reddb_file::{
+    snapshot_manifest_key, unified_manifest_key, wal_segment_manifest_key, BackupHead,
+    SnapshotManifest, UnifiedManifest, UnifiedSnapshotEntry, UnifiedWalEntry, WalSegmentManifest,
+    WalSegmentMeta,
+};
 
 /// Stream-hash a local file to a hex SHA-256. Shared by snapshot and
 /// WAL segment archival. Streamed in 8 KiB chunks so multi-GiB files
 /// don't peak memory.
 pub fn sha256_file_hex(path: &Path) -> Result<String, BackendError> {
-    use std::fs::File;
-    use std::io::Read;
-    let mut hasher = crate::crypto::sha256::Sha256::new();
-    let mut file = File::open(path)
-        .map_err(|err| BackendError::Internal(format!("open file for hash {path:?}: {err}")))?;
-    let mut buf = vec![0u8; 8 * 1024];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|err| BackendError::Internal(format!("read file for hash {path:?}: {err}")))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(crate::utils::to_hex(&hasher.finalize()))
+    reddb_file::sha256_file_hex(path)
+        .map_err(|err| BackendError::Internal(format!("hash file {path:?}: {err}")))
 }
 
 /// Compute SHA-256 over a byte slice and return the hex digest.
 /// Convenience for in-memory payloads (logical WAL segment buffer
 /// before upload).
 pub fn sha256_bytes_hex(bytes: &[u8]) -> String {
-    crate::utils::to_hex(&crate::crypto::sha256::sha256(bytes))
+    reddb_file::sha256_bytes_hex(bytes)
 }
 
 /// WAL Archiver — copies WAL segments to a remote backend.
@@ -342,7 +65,7 @@ impl WalArchiver {
         // the on-disk bytes, not whatever the backend ends up holding.
         let sha = sha256_file_hex(wal_path).ok();
 
-        let key = format!("{}{:012}-{:012}.wal", self.prefix, lsn_start, lsn_end);
+        let key = reddb_file::archived_wal_segment_key(&self.prefix, lsn_start, lsn_end);
 
         self.backend.upload(wal_path, &key)?;
 
@@ -378,7 +101,7 @@ impl WalArchiver {
         self.backend.download(segment_key, dest)
     }
 
-    /// Delete archived segments fully covered by the given LSN.
+    /// Delete archived segments older than the given LSN.
     /// Returns the number of segments deleted.
     pub fn cleanup_before(&self, lsn: u64) -> Result<usize, BackendError> {
         let keys = self.backend.list(&self.prefix)?;
@@ -388,18 +111,17 @@ impl WalArchiver {
             let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let Some((start, end)) = file_name
+            let Some((start, _end)) = file_name
                 .strip_suffix(".wal")
                 .and_then(|base| base.split_once('-'))
             else {
                 continue;
             };
-            let (Ok(_lsn_start), Ok(lsn_end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+            let Ok(lsn_start) = start.parse::<u64>() else {
                 continue;
             };
-            if lsn_end <= lsn {
+            if lsn_start < lsn {
                 self.backend.delete(&key)?;
-                let _ = self.backend.delete(&wal_segment_manifest_key(&key));
                 deleted += 1;
             }
         }
@@ -435,364 +157,6 @@ pub fn archive_snapshot(
     Ok(key)
 }
 
-pub fn snapshot_manifest_key(snapshot_key: &str) -> String {
-    format!("{snapshot_key}.manifest.json")
-}
-
-/// Per-segment manifest written next to each archived WAL segment
-/// (PLAN.md Phase 2.4 + 11.3). Holds the digest the restore side
-/// needs to verify the segment bytes after download, plus a
-/// `prev_hash` linking it to the previous segment in the timeline so
-/// the restore can detect a missing/reordered/replaced middle
-/// segment. Stored at `<segment_key>.manifest.json` so
-/// `cleanup_before` drops the pair atomically.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WalSegmentManifest {
-    pub key: String,
-    pub lsn_start: u64,
-    pub lsn_end: u64,
-    pub size_bytes: u64,
-    pub created_at: u64,
-    /// Hex SHA-256 of *this* segment's payload bytes.
-    pub sha256: Option<String>,
-    /// Hex SHA-256 of the segment immediately preceding this one in
-    /// the timeline. `None` only for the very first segment after a
-    /// fresh snapshot / PITR restore. Restore validates that
-    /// segment[i].prev_hash == segment[i-1].sha256; any break is
-    /// fail-closed (PLAN.md Phase 11.3).
-    pub prev_hash: Option<String>,
-}
-
-impl WalSegmentManifest {
-    pub fn from_meta(meta: &WalSegmentMeta, prev_hash: Option<String>) -> Self {
-        Self {
-            key: meta.key.clone(),
-            lsn_start: meta.lsn_start,
-            lsn_end: meta.lsn_end,
-            size_bytes: meta.size_bytes,
-            created_at: meta.created_at,
-            sha256: meta.sha256.clone(),
-            prev_hash,
-        }
-    }
-
-    pub fn to_json_value(&self) -> JsonValue {
-        let mut object = Map::new();
-        object.insert("key".to_string(), JsonValue::String(self.key.clone()));
-        object.insert(
-            "lsn_start".to_string(),
-            JsonValue::Number(self.lsn_start as f64),
-        );
-        object.insert(
-            "lsn_end".to_string(),
-            JsonValue::Number(self.lsn_end as f64),
-        );
-        object.insert(
-            "size_bytes".to_string(),
-            JsonValue::Number(self.size_bytes as f64),
-        );
-        object.insert(
-            "created_at".to_string(),
-            JsonValue::Number(self.created_at as f64),
-        );
-        if let Some(sha) = &self.sha256 {
-            object.insert("sha256".to_string(), JsonValue::String(sha.clone()));
-        }
-        if let Some(prev) = &self.prev_hash {
-            object.insert("prev_hash".to_string(), JsonValue::String(prev.clone()));
-        }
-        JsonValue::Object(object)
-    }
-
-    pub fn from_json_value(value: &JsonValue) -> Result<Self, BackendError> {
-        Ok(Self {
-            key: value
-                .get("key")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    BackendError::Internal("wal segment manifest missing key".to_string())
-                })?
-                .to_string(),
-            lsn_start: value
-                .get("lsn_start")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            lsn_end: value
-                .get("lsn_end")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            size_bytes: value
-                .get("size_bytes")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            created_at: value
-                .get("created_at")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            sha256: value
-                .get("sha256")
-                .and_then(JsonValue::as_str)
-                .map(|s| s.to_string()),
-            prev_hash: value
-                .get("prev_hash")
-                .and_then(JsonValue::as_str)
-                .map(|s| s.to_string()),
-        })
-    }
-}
-
-pub fn wal_segment_manifest_key(segment_key: &str) -> String {
-    format!("{segment_key}.manifest.json")
-}
-
-/// Top-level backup catalog (PLAN.md Phase 2.4). One JSON file at
-/// `<prefix>MANIFEST.json` lists every snapshot and WAL segment in a
-/// stable shape that external tooling can parse without sniffing
-/// directory listings.
-///
-/// Spec lives in `docs/spec/manifest-format.md`. Versioned via the
-/// `version` field — incompatible schema changes bump the major. The
-/// engine's own restore code reads the per-snapshot and per-segment
-/// sidecars *first*; the unified catalog is for human / orchestrator
-/// inspection, manual disaster recovery, and third-party verifiers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnifiedManifest {
-    /// Schema version. Currently `1.0`.
-    pub version: String,
-    /// `CARGO_PKG_VERSION` of the engine that wrote the manifest.
-    pub engine_version: String,
-    /// Highest LSN known across all archived WAL segments. `0` when
-    /// no WAL has been archived yet.
-    pub latest_lsn: u64,
-    /// All snapshots known to this prefix, freshest first.
-    pub snapshots: Vec<UnifiedSnapshotEntry>,
-    /// All WAL segments known to this prefix, ordered by `lsn_start`.
-    pub wal_segments: Vec<UnifiedWalEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnifiedSnapshotEntry {
-    pub id: u64,
-    pub lsn: u64,
-    pub ts: u64,
-    pub bytes: u64,
-    pub key: String,
-    pub checksum: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnifiedWalEntry {
-    pub lsn_start: u64,
-    pub lsn_end: u64,
-    pub key: String,
-    pub bytes: u64,
-    pub checksum: Option<String>,
-    /// PLAN.md Phase 11.3 — sha256 of the prior segment in the
-    /// timeline. Surfacing this in the unified manifest lets
-    /// external verifiers validate the chain end-to-end from the
-    /// catalog alone, without per-segment GETs.
-    pub prev_hash: Option<String>,
-}
-
-impl UnifiedManifest {
-    pub const VERSION: &'static str = "1.0";
-
-    pub fn new(snapshots: Vec<UnifiedSnapshotEntry>, wal_segments: Vec<UnifiedWalEntry>) -> Self {
-        let latest_lsn = wal_segments
-            .iter()
-            .map(|w| w.lsn_end)
-            .chain(snapshots.iter().map(|s| s.lsn))
-            .max()
-            .unwrap_or(0);
-        Self {
-            version: Self::VERSION.to_string(),
-            engine_version: env!("CARGO_PKG_VERSION").to_string(),
-            latest_lsn,
-            snapshots,
-            wal_segments,
-        }
-    }
-
-    pub fn to_json_value(&self) -> JsonValue {
-        let mut obj = Map::new();
-        obj.insert(
-            "version".to_string(),
-            JsonValue::String(self.version.clone()),
-        );
-        obj.insert(
-            "engine_version".to_string(),
-            JsonValue::String(self.engine_version.clone()),
-        );
-        obj.insert(
-            "latest_lsn".to_string(),
-            JsonValue::Number(self.latest_lsn as f64),
-        );
-        obj.insert(
-            "snapshots".to_string(),
-            JsonValue::Array(
-                self.snapshots
-                    .iter()
-                    .map(UnifiedSnapshotEntry::to_json_value)
-                    .collect(),
-            ),
-        );
-        obj.insert(
-            "wal_segments".to_string(),
-            JsonValue::Array(
-                self.wal_segments
-                    .iter()
-                    .map(UnifiedWalEntry::to_json_value)
-                    .collect(),
-            ),
-        );
-        JsonValue::Object(obj)
-    }
-
-    pub fn from_json_value(value: &JsonValue) -> Result<Self, BackendError> {
-        let obj = value.as_object().ok_or_else(|| {
-            BackendError::Internal("unified manifest must be a JSON object".to_string())
-        })?;
-        Ok(Self {
-            version: obj
-                .get("version")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("1.0")
-                .to_string(),
-            engine_version: obj
-                .get("engine_version")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
-            latest_lsn: obj
-                .get("latest_lsn")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            snapshots: obj
-                .get("snapshots")
-                .and_then(JsonValue::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| UnifiedSnapshotEntry::from_json_value(v).ok())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            wal_segments: obj
-                .get("wal_segments")
-                .and_then(JsonValue::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| UnifiedWalEntry::from_json_value(v).ok())
-                        .collect()
-                })
-                .unwrap_or_default(),
-        })
-    }
-}
-
-impl UnifiedSnapshotEntry {
-    pub fn to_json_value(&self) -> JsonValue {
-        let mut obj = Map::new();
-        obj.insert("id".to_string(), JsonValue::Number(self.id as f64));
-        obj.insert("lsn".to_string(), JsonValue::Number(self.lsn as f64));
-        obj.insert("ts".to_string(), JsonValue::Number(self.ts as f64));
-        obj.insert("bytes".to_string(), JsonValue::Number(self.bytes as f64));
-        obj.insert("key".to_string(), JsonValue::String(self.key.clone()));
-        if let Some(c) = &self.checksum {
-            obj.insert(
-                "checksum".to_string(),
-                JsonValue::String(format!("sha256:{c}")),
-            );
-        }
-        JsonValue::Object(obj)
-    }
-
-    pub fn from_json_value(value: &JsonValue) -> Result<Self, BackendError> {
-        let obj = value.as_object().ok_or_else(|| {
-            BackendError::Internal("snapshot entry must be a JSON object".to_string())
-        })?;
-        Ok(Self {
-            id: obj.get("id").and_then(JsonValue::as_u64).unwrap_or(0),
-            lsn: obj.get("lsn").and_then(JsonValue::as_u64).unwrap_or(0),
-            ts: obj.get("ts").and_then(JsonValue::as_u64).unwrap_or(0),
-            bytes: obj.get("bytes").and_then(JsonValue::as_u64).unwrap_or(0),
-            key: obj
-                .get("key")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| BackendError::Internal("snapshot entry missing key".to_string()))?
-                .to_string(),
-            checksum: obj
-                .get("checksum")
-                .and_then(JsonValue::as_str)
-                .map(|s| s.strip_prefix("sha256:").unwrap_or(s).to_string()),
-        })
-    }
-}
-
-impl UnifiedWalEntry {
-    pub fn to_json_value(&self) -> JsonValue {
-        let mut obj = Map::new();
-        obj.insert(
-            "lsn_start".to_string(),
-            JsonValue::Number(self.lsn_start as f64),
-        );
-        obj.insert(
-            "lsn_end".to_string(),
-            JsonValue::Number(self.lsn_end as f64),
-        );
-        obj.insert("key".to_string(), JsonValue::String(self.key.clone()));
-        obj.insert("bytes".to_string(), JsonValue::Number(self.bytes as f64));
-        if let Some(c) = &self.checksum {
-            obj.insert(
-                "checksum".to_string(),
-                JsonValue::String(format!("sha256:{c}")),
-            );
-        }
-        if let Some(p) = &self.prev_hash {
-            obj.insert(
-                "prev_hash".to_string(),
-                JsonValue::String(format!("sha256:{p}")),
-            );
-        }
-        JsonValue::Object(obj)
-    }
-
-    pub fn from_json_value(value: &JsonValue) -> Result<Self, BackendError> {
-        let obj = value.as_object().ok_or_else(|| {
-            BackendError::Internal("wal segment entry must be a JSON object".to_string())
-        })?;
-        Ok(Self {
-            lsn_start: obj
-                .get("lsn_start")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
-            lsn_end: obj.get("lsn_end").and_then(JsonValue::as_u64).unwrap_or(0),
-            key: obj
-                .get("key")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| BackendError::Internal("wal segment entry missing key".to_string()))?
-                .to_string(),
-            bytes: obj.get("bytes").and_then(JsonValue::as_u64).unwrap_or(0),
-            checksum: obj
-                .get("checksum")
-                .and_then(JsonValue::as_str)
-                .map(|s| s.strip_prefix("sha256:").unwrap_or(s).to_string()),
-            prev_hash: obj
-                .get("prev_hash")
-                .and_then(JsonValue::as_str)
-                .map(|s| s.strip_prefix("sha256:").unwrap_or(s).to_string()),
-        })
-    }
-}
-
-pub fn unified_manifest_key(prefix: &str) -> String {
-    let trimmed = prefix.trim_end_matches('/');
-    if trimmed.is_empty() {
-        "MANIFEST.json".to_string()
-    } else {
-        format!("{trimmed}/MANIFEST.json")
-    }
-}
-
 /// Atomic publish via temp+rename semantics. Per backend behaviour:
 ///   * Filesystem backend renames the temp key, so concurrent readers
 ///     see either the old manifest or the new one — never a torn one.
@@ -807,7 +171,9 @@ pub fn publish_unified_manifest(
     manifest: &UnifiedManifest,
 ) -> Result<String, BackendError> {
     let key = unified_manifest_key(prefix);
-    write_json_object(backend, &key, &manifest.to_json_value())?;
+    let body = reddb_file::encode_unified_manifest_json(manifest)
+        .map_err(|err| BackendError::Internal(format!("encode unified manifest failed: {err}")))?;
+    write_json_bytes(backend, &key, &body)?;
     Ok(key)
 }
 
@@ -816,10 +182,12 @@ pub fn load_unified_manifest(
     prefix: &str,
 ) -> Result<Option<UnifiedManifest>, BackendError> {
     let key = unified_manifest_key(prefix);
-    let Some(value) = read_json_object(backend, &key)? else {
+    let Some(bytes) = read_json_bytes(backend, &key)? else {
         return Ok(None);
     };
-    Ok(Some(UnifiedManifest::from_json_value(&value)?))
+    reddb_file::decode_unified_manifest_json(&bytes)
+        .map(Some)
+        .map_err(|err| BackendError::Internal(format!("decode unified manifest failed: {err}")))
 }
 
 /// Build the unified manifest by listing the configured backup root
@@ -840,7 +208,11 @@ pub fn publish_unified_manifest_for_prefix(
     let snapshots = collect_unified_snapshots(backend, snapshot_prefix)?;
     let wal_root = format!("{}wal/", root);
     let wal_segments = collect_unified_wal_segments(backend, &wal_root)?;
-    let manifest = UnifiedManifest::new(snapshots, wal_segments);
+    let manifest = UnifiedManifest::new_with_engine_version(
+        env!("CARGO_PKG_VERSION"),
+        snapshots,
+        wal_segments,
+    );
     publish_unified_manifest(backend, &root, &manifest)
 }
 
@@ -926,7 +298,10 @@ pub fn publish_wal_segment_manifest(
     manifest: &WalSegmentManifest,
 ) -> Result<String, BackendError> {
     let key = wal_segment_manifest_key(&manifest.key);
-    write_json_object(backend, &key, &manifest.to_json_value())?;
+    let body = reddb_file::encode_wal_segment_manifest_json(manifest).map_err(|err| {
+        BackendError::Internal(format!("encode wal segment manifest failed: {err}"))
+    })?;
+    write_json_bytes(backend, &key, &body)?;
     Ok(key)
 }
 
@@ -935,10 +310,12 @@ pub fn load_wal_segment_manifest(
     segment_key: &str,
 ) -> Result<Option<WalSegmentManifest>, BackendError> {
     let key = wal_segment_manifest_key(segment_key);
-    let Some(value) = read_json_object(backend, &key)? else {
+    let Some(bytes) = read_json_bytes(backend, &key)? else {
         return Ok(None);
     };
-    Ok(Some(WalSegmentManifest::from_json_value(&value)?))
+    reddb_file::decode_wal_segment_manifest_json(&bytes)
+        .map(Some)
+        .map_err(|err| BackendError::Internal(format!("decode wal segment manifest failed: {err}")))
 }
 
 pub fn publish_backup_head(
@@ -946,17 +323,21 @@ pub fn publish_backup_head(
     head_key: &str,
     head: &BackupHead,
 ) -> Result<(), BackendError> {
-    write_json_object(backend, head_key, &head.to_json_value())
+    let body = reddb_file::encode_backup_head_json(head)
+        .map_err(|err| BackendError::Internal(format!("encode backup head failed: {err}")))?;
+    write_json_bytes(backend, head_key, &body)
 }
 
 pub fn load_backup_head(
     backend: &dyn RemoteBackend,
     head_key: &str,
 ) -> Result<Option<BackupHead>, BackendError> {
-    let Some(value) = read_json_object(backend, head_key)? else {
+    let Some(bytes) = read_json_bytes(backend, head_key)? else {
         return Ok(None);
     };
-    Ok(Some(BackupHead::from_json_value(&value)?))
+    reddb_file::decode_backup_head_json(&bytes)
+        .map(Some)
+        .map_err(|err| BackendError::Internal(format!("decode backup head failed: {err}")))
 }
 
 pub fn publish_snapshot_manifest(
@@ -964,7 +345,9 @@ pub fn publish_snapshot_manifest(
     manifest: &SnapshotManifest,
 ) -> Result<String, BackendError> {
     let key = snapshot_manifest_key(&manifest.snapshot_key);
-    write_json_object(backend, &key, &manifest.to_json_value())?;
+    let body = reddb_file::encode_snapshot_manifest_json(manifest)
+        .map_err(|err| BackendError::Internal(format!("encode snapshot manifest failed: {err}")))?;
+    write_json_bytes(backend, &key, &body)?;
     Ok(key)
 }
 
@@ -973,20 +356,12 @@ pub fn load_snapshot_manifest(
     snapshot_key: &str,
 ) -> Result<Option<SnapshotManifest>, BackendError> {
     let key = snapshot_manifest_key(snapshot_key);
-    let Some(value) = read_json_object(backend, &key)? else {
+    let Some(bytes) = read_json_bytes(backend, &key)? else {
         return Ok(None);
     };
-    Ok(Some(SnapshotManifest::from_json_value(&value)?))
-}
-
-pub fn backup_wal_retention_floor_lsn(
-    backend: &dyn RemoteBackend,
-    snapshot_prefix: &str,
-) -> Result<Option<u64>, BackendError> {
-    Ok(collect_unified_snapshots(backend, snapshot_prefix)?
-        .into_iter()
-        .map(|snapshot| snapshot.lsn)
-        .min())
+    reddb_file::decode_snapshot_manifest_json(&bytes)
+        .map(Some)
+        .map_err(|err| BackendError::Internal(format!("decode snapshot manifest failed: {err}")))
 }
 
 pub fn archive_change_records(
@@ -1002,18 +377,7 @@ pub fn archive_change_records(
         return Ok(None);
     };
 
-    let payload = JsonValue::Array(
-        records
-            .iter()
-            .map(|(lsn, bytes)| {
-                let mut object = Map::new();
-                object.insert("lsn".to_string(), JsonValue::Number(*lsn as f64));
-                object.insert("data".to_string(), JsonValue::String(hex::encode(bytes)));
-                JsonValue::Object(object)
-            })
-            .collect(),
-    );
-    let body = crate::json::to_vec(&payload).map_err(|err| {
+    let body = reddb_file::encode_archived_logical_wal_records(records).map_err(|err| {
         BackendError::Internal(format!("encode archived logical wal failed: {err}"))
     })?;
     // Hash the encoded payload before persisting so the digest
@@ -1028,7 +392,7 @@ pub fn archive_change_records(
     std::fs::write(&temp, &body)
         .map_err(|err| BackendError::Transport(format!("write temp logical wal failed: {err}")))?;
 
-    let key = format!("{}{:012}-{:012}.wal", prefix, lsn_start, lsn_end);
+    let key = reddb_file::archived_wal_segment_key(prefix, *lsn_start, *lsn_end);
     backend.upload(&temp, &key)?;
     let size_bytes = std::fs::metadata(&temp).map(|meta| meta.len()).unwrap_or(0);
     let _ = std::fs::remove_file(&temp);
@@ -1090,50 +454,35 @@ pub fn load_archived_change_records_with_sha256(
     let _ = std::fs::remove_file(&temp);
     let digest = sha256_bytes_hex(&bytes);
 
-    let value: JsonValue = crate::json::from_slice(&bytes).map_err(|err| {
+    let archived = reddb_file::decode_archived_logical_wal_records(&bytes).map_err(|err| {
         BackendError::Internal(format!("decode archived logical wal failed: {err}"))
     })?;
-    let Some(entries) = value.as_array() else {
-        return Err(BackendError::Internal(
-            "archived logical wal must be a JSON array".to_string(),
-        ));
-    };
     let mut out = Vec::new();
-    for entry in entries {
-        let Some(data_hex) = entry.get("data").and_then(JsonValue::as_str) else {
-            continue;
-        };
-        let data = hex::decode(data_hex).map_err(|err| {
-            BackendError::Internal(format!("decode wal record hex failed: {err}"))
-        })?;
-        let record = ChangeRecord::decode(&data)
+    for entry in archived {
+        let record = ChangeRecord::decode(&entry.data)
             .map_err(|err| BackendError::Internal(format!("decode wal record failed: {err}")))?;
         out.push(record);
     }
     Ok((out, Some(digest)))
 }
 
-fn write_json_object(
+fn write_json_bytes(
     backend: &dyn RemoteBackend,
     key: &str,
-    value: &JsonValue,
+    bytes: &[u8],
 ) -> Result<(), BackendError> {
     let temp = temp_json_path("reddb-json-object", None, None);
-    std::fs::write(
-        &temp,
-        crate::json::to_vec(value)
-            .map_err(|err| BackendError::Internal(format!("encode json object failed: {err}")))?,
-    )
-    .map_err(|err| BackendError::Transport(format!("write temp json object failed: {err}")))?;
+    std::fs::write(&temp, bytes)
+        .map_err(|err| BackendError::Transport(format!("write temp json object failed: {err}")))?;
     let upload_result = backend.upload(&temp, key);
     let _ = std::fs::remove_file(&temp);
     upload_result
 }
 
-fn read_json_object(
+fn read_json_bytes(
     backend: &dyn RemoteBackend,
     key: &str,
-) -> Result<Option<JsonValue>, BackendError> {
+) -> Result<Option<Vec<u8>>, BackendError> {
     let temp = temp_json_path("reddb-json-object-read", None, None);
     let found = backend.download(key, &temp)?;
     if !found {
@@ -1142,9 +491,7 @@ fn read_json_object(
     let bytes = std::fs::read(&temp)
         .map_err(|err| BackendError::Transport(format!("read temp json object failed: {err}")))?;
     let _ = std::fs::remove_file(&temp);
-    let value = crate::json::from_slice::<JsonValue>(&bytes)
-        .map_err(|err| BackendError::Internal(format!("decode json object failed: {err}")))?;
-    Ok(Some(value))
+    Ok(Some(bytes))
 }
 
 fn temp_json_path(prefix: &str, start: Option<u64>, end: Option<u64>) -> PathBuf {
@@ -1351,8 +698,8 @@ mod tests {
             }],
         );
 
-        let json = manifest.to_json_value();
-        let parsed = UnifiedManifest::from_json_value(&json).unwrap();
+        let json = reddb_file::encode_unified_manifest_json(&manifest).unwrap();
+        let parsed = reddb_file::decode_unified_manifest_json(&json).unwrap();
         assert_eq!(parsed, manifest);
         assert_eq!(parsed.latest_lsn, 250);
 
@@ -1360,7 +707,7 @@ mod tests {
         // (PLAN.md Phase 11.3) so external verifiers can validate
         // the chain end-to-end without parsing the per-segment sidecar.
         assert_eq!(parsed.wal_segments[0].prev_hash.as_deref(), Some("9f8b"));
-        let wal_wire = parsed.wal_segments[0].to_json_value().to_string_compact();
+        let wal_wire = String::from_utf8(json.clone()).unwrap();
         assert!(
             wal_wire.contains("\"prev_hash\":\"sha256:9f8b\""),
             "wire form must include sha256: prefix on prev_hash; got: {wal_wire}"
@@ -1368,7 +715,7 @@ mod tests {
 
         // Checksum should round-trip with the `sha256:` prefix in the
         // wire form but parse back to the bare hex.
-        let body = json.to_string_compact();
+        let body = String::from_utf8(json).unwrap();
         assert!(
             body.contains("\"sha256:9f8b\""),
             "wire form must include sha256: prefix"
@@ -1458,76 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn backup_manifest_floor_uses_oldest_retained_snapshot_lsn() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("reddb_backup_floor_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let backend = LocalBackend;
-        let prefix = format!("{}/snapshots/", temp_dir.to_string_lossy());
-        std::fs::create_dir_all(&prefix).unwrap();
-
-        for (snapshot_id, base_lsn) in [(1, 10), (2, 30)] {
-            let snapshot_key = format!("{prefix}{snapshot_id:012}.snapshot");
-            std::fs::write(&snapshot_key, b"snapshot").unwrap();
-            publish_snapshot_manifest(
-                &backend,
-                &SnapshotManifest {
-                    timeline_id: "main".to_string(),
-                    snapshot_key,
-                    snapshot_id,
-                    snapshot_time: snapshot_id * 100,
-                    base_lsn,
-                    schema_version: crate::api::REDDB_FORMAT_VERSION,
-                    format_version: crate::api::REDDB_FORMAT_VERSION,
-                    snapshot_sha256: None,
-                },
-            )
-            .unwrap();
-        }
-
-        assert_eq!(
-            backup_wal_retention_floor_lsn(&backend, &prefix).unwrap(),
-            Some(10),
-            "oldest retained snapshot base_lsn is the PITR WAL floor"
-        );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
-    fn cleanup_before_keeps_segment_crossing_retention_floor() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("reddb_archive_cleanup_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let backend = Arc::new(LocalBackend);
-        let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
-        let archiver = WalArchiver::new(backend.clone(), prefix.clone());
-
-        let wal_path = temp_dir.join("segment.wal");
-        std::fs::write(&wal_path, b"segment-1").unwrap();
-        let old = archiver.archive_segment(&wal_path, 1, 3, None).unwrap();
-        std::fs::write(&wal_path, b"segment-2").unwrap();
-        let crossing = archiver
-            .archive_segment(&wal_path, 4, 6, old.sha256.clone())
-            .unwrap();
-
-        assert_eq!(archiver.cleanup_before(5).unwrap(), 1);
-        assert!(!backend.exists(&old.key).unwrap());
-        assert!(
-            !backend.exists(&wal_segment_manifest_key(&old.key)).unwrap(),
-            "cleanup removes sidecar with deleted segment"
-        );
-        assert!(
-            backend.exists(&crossing.key).unwrap(),
-            "segment containing WAL after the restore floor must remain"
-        );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
     fn wal_segment_manifest_carries_prev_hash_through_json() {
         let m = WalSegmentManifest {
             key: "wal/000000000010-000000000010.wal".to_string(),
@@ -1538,7 +815,10 @@ mod tests {
             sha256: Some("abc".to_string()),
             prev_hash: Some("def".to_string()),
         };
-        let parsed = WalSegmentManifest::from_json_value(&m.to_json_value()).unwrap();
+        let parsed = reddb_file::decode_wal_segment_manifest_json(
+            &reddb_file::encode_wal_segment_manifest_json(&m).unwrap(),
+        )
+        .unwrap();
         assert_eq!(parsed, m);
     }
 

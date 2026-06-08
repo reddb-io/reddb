@@ -104,7 +104,7 @@ fn cleanup_persistent_path(path: &PathBuf) {
     let _ = std::fs::remove_file(path);
     let l2 = path.with_extension("result-cache.l2");
     let _ = std::fs::remove_file(&l2);
-    let _ = std::fs::remove_file(l2.with_extension("blob-cache.ctl"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&l2));
 }
 
 fn seed_target_scan_fixture(rt: &RedDBRuntime) {

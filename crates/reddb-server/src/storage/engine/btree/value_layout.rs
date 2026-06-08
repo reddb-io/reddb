@@ -6,24 +6,11 @@
 //!   compressing.
 //! - [`OverflowChain`] (slice B, #699) owns the chain of dedicated overflow
 //!   pages.
-//! - [`page_format::LeafCellFlags`] (slice C, #700) pins the two-bit
-//!   `(pointer, compressed)` shape — this module uses the same bit
-//!   layout for the per-cell flag byte so the page-format decoder
-//!   stays the single source of truth for the bit positions.
+//! - `reddb-file` pins the persisted two-bit `(pointer, compressed)` cell
+//!   shape and pointer payload encoding.
 //!
-//! The function entry points are [`encode`] and [`decode`]. They share
-//! one on-disk byte layout the rest of the engine can treat as opaque
-//! stored bytes:
-//!
-//! ```text
-//! Inline raw:        [0x00][bytes...]
-//! Inline compressed: [0x02][lz4_len: u32 LE][lz4 bytes...]
-//! Pointer raw:       [0x01][head_page_id: u32 LE][total_len: u64 LE]
-//! Pointer compressed:[0x03][head_page_id: u32 LE][total_len: u64 LE]
-//! ```
-//!
-//! All four shapes are valid leaf-cell payloads; the leaf layer never
-//! decodes them — only the read path does (via [`decode`]).
+//! The function entry points are [`encode`] and [`decode`]. They persist
+//! opaque cell bytes whose on-disk shape is owned by `reddb-file`.
 //!
 //! Decision ladder applied by [`encode`]:
 //!
@@ -41,29 +28,20 @@
 use crate::storage::engine::overflow::{OverflowChain, OverflowError};
 use crate::storage::engine::pager::Pager;
 use crate::storage::engine::vector_btree::value_codec;
+use reddb_file::BTreeValueCell;
 
 /// At or below this length a value stores inline in the leaf, raw or
 /// compressed. Above it, the value spills via [`OverflowChain`]. Set per
 /// ADR 0023 — preserves leaf fanout regardless of page size.
-pub const OVERFLOW_THRESHOLD: usize = 1024;
+pub const OVERFLOW_THRESHOLD: usize = reddb_file::BTREE_VALUE_OVERFLOW_THRESHOLD;
 
 /// Hard upper bound on logical value size. Values above this are
 /// rejected before any LZ4 or overflow work runs.
 /// 2^28 = 256 MiB per ADR 0023.
-pub const MAX_VALUE_SIZE: usize = 256 * 1024 * 1024;
-
-/// Bit positions match [`crate::storage::engine::vector_btree::page_format::LeafCellFlags`]
-/// so the on-disk decoder stays the single source of truth.
-const FLAG_POINTER: u8 = 0b0000_0001;
-const FLAG_COMPRESSED: u8 = 0b0000_0010;
-const FLAG_RESERVED_MASK: u8 = !(FLAG_POINTER | FLAG_COMPRESSED);
-
-/// Length of the spill pointer payload: `head_page_id: u32 LE` then
-/// `total_len: u64 LE`.
-const POINTER_PAYLOAD_LEN: usize = 4 + 8;
+pub const MAX_VALUE_SIZE: usize = reddb_file::BTREE_VALUE_MAX_SIZE;
 
 /// Total stored bytes for a pointer cell — flag byte + payload.
-pub const POINTER_CELL_LEN: usize = 1 + POINTER_PAYLOAD_LEN;
+pub const POINTER_CELL_LEN: usize = reddb_file::BTREE_VALUE_POINTER_CELL_LEN;
 
 /// Errors returned by [`encode`] and [`decode`].
 #[derive(Debug)]
@@ -91,7 +69,8 @@ impl std::fmt::Display for ValueLayoutError {
                 write!(
                     f,
                     "pointer cell truncated: need {} bytes after flag, got {}",
-                    POINTER_PAYLOAD_LEN, got
+                    POINTER_CELL_LEN - 1,
+                    got
                 )
             }
             Self::Codec(e) => write!(f, "value codec: {}", e),
@@ -105,6 +84,17 @@ impl std::error::Error for ValueLayoutError {}
 impl From<value_codec::ValueCodecError> for ValueLayoutError {
     fn from(e: value_codec::ValueCodecError) -> Self {
         Self::Codec(e)
+    }
+}
+
+impl From<reddb_file::BTreeValueCellError> for ValueLayoutError {
+    fn from(e: reddb_file::BTreeValueCellError) -> Self {
+        match e {
+            reddb_file::BTreeValueCellError::UnknownFlag(flag) => Self::UnknownFlag(flag),
+            reddb_file::BTreeValueCellError::TruncatedPointer { got } => {
+                Self::TruncatedPointer { got }
+            }
+        }
     }
 }
 
@@ -126,10 +116,7 @@ pub fn encode(pager: &Pager, value: &[u8]) -> Result<Vec<u8>, ValueLayoutError> 
     // overflow allocation — preserves the legacy hot path for tiny
     // values like entity IDs or short JSON.
     if value.len() <= OVERFLOW_THRESHOLD {
-        let mut out = Vec::with_capacity(1 + value.len());
-        out.push(0);
-        out.extend_from_slice(value);
-        return Ok(out);
+        return Ok(reddb_file::encode_btree_inline_raw(value));
     }
 
     // Step 2: above the threshold, try LZ4. The codec returns Raw when
@@ -141,10 +128,7 @@ pub fn encode(pager: &Pager, value: &[u8]) -> Result<Vec<u8>, ValueLayoutError> 
     // actually produced Lz4 bytes — Raw bytes ≥ original length > threshold
     // by construction, so they cannot inline.
     if codec_flag == value_codec::ValueFlag::Lz4 && codec_bytes.len() <= OVERFLOW_THRESHOLD {
-        let mut out = Vec::with_capacity(1 + codec_bytes.len());
-        out.push(FLAG_COMPRESSED);
-        out.extend_from_slice(&codec_bytes);
-        return Ok(out);
+        return Ok(reddb_file::encode_btree_inline_compressed(&codec_bytes));
     }
 
     // Step 4: spill. We always store the bytes the codec produced —
@@ -155,64 +139,40 @@ pub fn encode(pager: &Pager, value: &[u8]) -> Result<Vec<u8>, ValueLayoutError> 
     let chain = OverflowChain::new(pager);
     let (head, total_len) = chain.store(&codec_bytes)?;
 
-    let mut flag = FLAG_POINTER;
-    if is_compressed {
-        flag |= FLAG_COMPRESSED;
-    }
-    let mut out = Vec::with_capacity(POINTER_CELL_LEN);
-    out.push(flag);
-    out.extend_from_slice(&head.to_le_bytes());
-    out.extend_from_slice(&total_len.to_le_bytes());
-    Ok(out)
+    Ok(reddb_file::encode_btree_pointer(
+        head,
+        total_len,
+        is_compressed,
+    ))
 }
 
 /// Inspect leaf-cell flags, follow the pointer if any, concatenate the
 /// chain, decode if compressed, return the materialised value.
 pub fn decode(pager: &Pager, stored: &[u8]) -> Result<Vec<u8>, ValueLayoutError> {
-    if stored.is_empty() {
-        // An empty cell payload encodes an empty value the same way as
-        // an inline-raw cell of length zero — there is no flag byte to
-        // read, but the materialised value is unambiguous.
-        return Ok(Vec::new());
-    }
-
-    let flag = stored[0];
-    if flag & FLAG_RESERVED_MASK != 0 {
-        return Err(ValueLayoutError::UnknownFlag(flag));
-    }
-    let is_pointer = flag & FLAG_POINTER != 0;
-    let is_compressed = flag & FLAG_COMPRESSED != 0;
-    let payload = &stored[1..];
-
-    if is_pointer {
-        if payload.len() != POINTER_PAYLOAD_LEN {
-            return Err(ValueLayoutError::TruncatedPointer { got: payload.len() });
+    match reddb_file::decode_btree_value_cell(stored)? {
+        BTreeValueCell::Pointer {
+            is_compressed,
+            head_page_id,
+            total_len,
+        } => {
+            let chain = OverflowChain::new(pager);
+            let chain_bytes = chain.read(head_page_id, total_len)?;
+            if is_compressed {
+                Ok(value_codec::decode(
+                    value_codec::ValueFlag::Lz4,
+                    &chain_bytes,
+                )?)
+            } else {
+                Ok(chain_bytes)
+            }
         }
-        let head = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-        let total_len = u64::from_le_bytes([
-            payload[4],
-            payload[5],
-            payload[6],
-            payload[7],
-            payload[8],
-            payload[9],
-            payload[10],
-            payload[11],
-        ]);
-        let chain = OverflowChain::new(pager);
-        let chain_bytes = chain.read(head, total_len)?;
-        if is_compressed {
-            Ok(value_codec::decode(
-                value_codec::ValueFlag::Lz4,
-                &chain_bytes,
-            )?)
-        } else {
-            Ok(chain_bytes)
-        }
-    } else if is_compressed {
-        Ok(value_codec::decode(value_codec::ValueFlag::Lz4, payload)?)
-    } else {
-        Ok(payload.to_vec())
+        BTreeValueCell::Inline {
+            is_compressed,
+            payload,
+        } => Ok(reddb_file::decode_btree_inline_payload(
+            is_compressed,
+            payload,
+        )?),
     }
 }
 
@@ -222,23 +182,7 @@ pub fn decode(pager: &Pager, stored: &[u8]) -> Result<Vec<u8>, ValueLayoutError>
 /// B-tree delete and shrinking-update paths (slice F of PRD #662) to
 /// free the chain before the leaf cell goes away.
 pub fn pointer_head(stored: &[u8]) -> Option<u32> {
-    if stored.is_empty() {
-        return None;
-    }
-    let flag = stored[0];
-    if flag & FLAG_RESERVED_MASK != 0 {
-        return None;
-    }
-    if flag & FLAG_POINTER == 0 {
-        return None;
-    }
-    if stored.len() < 1 + POINTER_PAYLOAD_LEN {
-        return None;
-    }
-    let payload = &stored[1..];
-    Some(u32::from_le_bytes([
-        payload[0], payload[1], payload[2], payload[3],
-    ]))
+    reddb_file::btree_value_pointer_head(stored)
 }
 
 /// `true` when [`encode`] would emit a spill pointer for a value of
@@ -247,19 +191,8 @@ pub fn pointer_head(stored: &[u8]) -> Option<u32> {
 #[inline]
 #[allow(dead_code)]
 pub fn projected_cell_len(input: &[u8]) -> usize {
-    if input.len() <= OVERFLOW_THRESHOLD {
-        return 1 + input.len();
-    }
     let codec_len = value_codec::would_encode_to(input);
-    // Track the codec's own decision: when LZ4 would not shrink the
-    // input, codec_len == input.len() and the encoded flag is Raw. In
-    // that case the encoded payload cannot fit inline (input > threshold
-    // is the entry condition) so we spill.
-    if codec_len < input.len() && codec_len <= OVERFLOW_THRESHOLD {
-        1 + codec_len
-    } else {
-        POINTER_CELL_LEN
-    }
+    reddb_file::btree_projected_cell_len(input.len(), codec_len)
 }
 
 #[cfg(test)]
@@ -302,7 +235,13 @@ mod tests {
         let (pager, path) = fresh_pager();
         let value = vec![0xABu8; OVERFLOW_THRESHOLD - 1];
         let stored = encode(&pager, &value).unwrap();
-        assert_eq!(stored[0], 0, "inline raw flag must be zero");
+        assert_eq!(
+            reddb_file::decode_btree_value_cell(&stored).unwrap(),
+            reddb_file::BTreeValueCell::Inline {
+                is_compressed: false,
+                payload: value.as_slice(),
+            }
+        );
         assert_eq!(stored.len(), 1 + value.len());
         let decoded = decode(&pager, &stored).unwrap();
         assert_eq!(decoded, value);
@@ -314,7 +253,13 @@ mod tests {
         let (pager, path) = fresh_pager();
         let value = vec![0x7Eu8; OVERFLOW_THRESHOLD];
         let stored = encode(&pager, &value).unwrap();
-        assert_eq!(stored[0], 0);
+        assert!(matches!(
+            reddb_file::decode_btree_value_cell(&stored).unwrap(),
+            reddb_file::BTreeValueCell::Inline {
+                is_compressed: false,
+                ..
+            }
+        ));
         assert_eq!(decode(&pager, &stored).unwrap(), value);
         cleanup(&path);
     }
@@ -329,10 +274,13 @@ mod tests {
             .into_bytes();
         assert!(value.len() > OVERFLOW_THRESHOLD);
         let stored = encode(&pager, &value).unwrap();
-        assert_eq!(
-            stored[0], FLAG_COMPRESSED,
-            "highly repetitive payload must inline compressed"
-        );
+        assert!(matches!(
+            reddb_file::decode_btree_value_cell(&stored).unwrap(),
+            reddb_file::BTreeValueCell::Inline {
+                is_compressed: true,
+                ..
+            }
+        ));
         assert!(
             stored.len() <= 1 + OVERFLOW_THRESHOLD,
             "compressed cell must fit inline budget"
@@ -356,16 +304,13 @@ mod tests {
             })
             .collect();
         let stored = encode(&pager, &value).unwrap();
-        assert_eq!(
-            stored[0] & FLAG_POINTER,
-            FLAG_POINTER,
-            "incompressible spill must set pointer flag"
-        );
-        assert_eq!(
-            stored[0] & FLAG_COMPRESSED,
-            0,
-            "incompressible payload must not claim to be compressed"
-        );
+        assert!(matches!(
+            reddb_file::decode_btree_value_cell(&stored).unwrap(),
+            reddb_file::BTreeValueCell::Pointer {
+                is_compressed: false,
+                ..
+            }
+        ));
         assert_eq!(stored.len(), POINTER_CELL_LEN);
         let decoded = decode(&pager, &stored).unwrap();
         assert_eq!(decoded.len(), value.len());
@@ -386,35 +331,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_reserved_flag_bits() {
-        let (pager, path) = fresh_pager();
-        let stored = vec![0b0000_0100u8];
-        let err = decode(&pager, &stored).unwrap_err();
-        assert!(matches!(err, ValueLayoutError::UnknownFlag(_)));
-        cleanup(&path);
-    }
-
-    #[test]
     fn pointer_head_extracts_head_id_only_for_pointer_cells() {
-        // Inline raw (flag 0x00) → None.
-        assert_eq!(pointer_head(&[0x00, 1, 2, 3]), None);
-        // Inline compressed (flag 0x02) → None.
-        assert_eq!(pointer_head(&[0x02, 0, 0, 0, 5, 0xff, 0xfe]), None);
-        // Empty stored bytes → None.
-        assert_eq!(pointer_head(&[]), None);
-        // Reserved bits set → None (callers must not free anything they
-        // cannot interpret).
-        assert_eq!(pointer_head(&[0b0000_0100]), None);
-        // Pointer raw with head id 0x01020304 and total_len 0 → Some(...)
-        let mut cell = vec![FLAG_POINTER];
-        cell.extend_from_slice(&0x0102_0304u32.to_le_bytes());
-        cell.extend_from_slice(&0u64.to_le_bytes());
+        let inline = reddb_file::encode_btree_inline_raw(&[1, 2, 3]);
+        assert_eq!(pointer_head(&inline), None);
+        let inline_compressed = reddb_file::encode_btree_inline_compressed(&[0, 0, 0, 5]);
+        assert_eq!(pointer_head(&inline_compressed), None);
+
+        let cell = reddb_file::encode_btree_pointer(0x0102_0304, 0, false);
         assert_eq!(pointer_head(&cell), Some(0x0102_0304));
-        // Pointer compressed flag also yields the same head.
-        cell[0] = FLAG_POINTER | FLAG_COMPRESSED;
-        assert_eq!(pointer_head(&cell), Some(0x0102_0304));
-        // Pointer flag but payload truncated → None (no UB).
-        assert_eq!(pointer_head(&[FLAG_POINTER, 1, 2]), None);
+        let compressed_cell = reddb_file::encode_btree_pointer(0x0102_0304, 0, true);
+        assert_eq!(pointer_head(&compressed_cell), Some(0x0102_0304));
     }
 
     #[test]

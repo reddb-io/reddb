@@ -59,11 +59,12 @@ pub(super) const QUEUE_PENDING_INTERNAL: &str = "__red_schema_queue_pending";
 // oldest_pending_age, dlq_target, attention, internal)`. Hot fields
 // (mode, depth, dlq_target, attention) come from the catalog
 // descriptor; total_pending / oldest_pending_age are computed via a
-// single pass over `red_queue_meta` queue_pending rows so they
-// remain consistent with the source of truth. `internal` exists so
-// the `SHOW QUEUES` desugar can hide DLQ-target queues by default
-// and surface them under `SHOW QUEUES INCLUDING INTERNAL`, mirroring
-// the `red.collections.internal` contract.
+// single pass over `red_queue_meta` pending rows (`queue_pending`
+// legacy and `queue_pending_lc` lifecycle) so they remain consistent
+// with the source of truth. `internal` exists so the `SHOW QUEUES`
+// desugar can hide DLQ-target queues by default and surface them
+// under `SHOW QUEUES INCLUDING INTERNAL`, mirroring the
+// `red.collections.internal` contract.
 pub(super) const QUEUES: &str = "red.queues";
 pub(super) const QUEUES_INTERNAL: &str = "__red_schema_queues";
 // Issue #577 — AnalyticsSchemaRegistry slice 2. Per-event-name schema
@@ -1757,10 +1758,7 @@ fn indices_snapshot(
         if !visible_collections.is_none_or(|visible| visible.contains(&collection.name)) {
             continue;
         }
-        for index in runtime
-            .index_store_ref()
-            .list_replicated_indices(&collection.name)
-        {
+        for index in runtime.index_store_ref().list_indices(&collection.name) {
             let key = (Some(index.collection.clone()), index.name.clone());
             if !seen.insert(key) {
                 continue;
@@ -1803,10 +1801,7 @@ fn show_indexes_snapshot(
         if !collection_is_visible(&collection.name, visible_collections) {
             continue;
         }
-        for index in runtime
-            .index_store_ref()
-            .list_replicated_indices(&collection.name)
-        {
+        for index in runtime.index_store_ref().list_indices(&collection.name) {
             let entries_indexed = runtime.index_store_ref().entries_indexed(&index);
             rows.push(UnifiedRecord::with_schema(
                 Arc::clone(&schema),
@@ -3651,8 +3646,9 @@ fn materialized_views_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
 /// Issue #536 — per-row pending-delivery drill-down.
 ///
 /// Reads from the `red_queue_meta` rows that the user-facing
-/// `QUEUE READ` path writes (`kind = "queue_pending"`). Cold scan,
-/// no caching: every read walks the live meta collection.
+/// `QUEUE READ` path writes (`kind = "queue_pending"` legacy and
+/// `kind = "queue_pending_lc"` lifecycle). Cold scan, no caching:
+/// every read walks the live meta collection.
 ///
 /// Field mapping from the meta-row schema to the public columns:
 /// - `consumer`            -> `locked_by`
@@ -3697,11 +3693,34 @@ fn queue_pending_snapshot(
         .collect();
 
     let mut records = Vec::new();
+    let attempts_by_key: HashMap<(String, String, u64), u64> = manager
+        .query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .is_some_and(|row| row_text(row, "kind").as_deref() == Some("queue_attempts_lc"))
+        })
+        .into_iter()
+        .filter_map(|entity| {
+            let row = entity.data.as_row()?;
+            Some((
+                (
+                    row_text(row, "queue")?,
+                    row_text(row, "group")?,
+                    row_u64(row, "message_id")?,
+                ),
+                row_u64(row, "attempts").unwrap_or(1),
+            ))
+        })
+        .collect();
+    let mut seen_pending: HashSet<(String, String, u64)> = HashSet::new();
     let entities = manager.query_all(|entity| {
-        entity
-            .data
-            .as_row()
-            .is_some_and(|row| row_text(row, "kind").as_deref() == Some("queue_pending"))
+        entity.data.as_row().is_some_and(|row| {
+            matches!(
+                row_text(row, "kind").as_deref(),
+                Some("queue_pending") | Some("queue_pending_lc")
+            )
+        })
     });
     for entity in entities {
         let Some(row) = entity.data.as_row() else {
@@ -3719,17 +3738,32 @@ fn queue_pending_snapshot(
         let Some(message_id) = row_u64(row, "message_id") else {
             continue;
         };
+        if !seen_pending.insert((queue.clone(), group.clone(), message_id)) {
+            continue;
+        }
+        let kind = row_text(row, "kind").unwrap_or_default();
         let consumer = row_text(row, "consumer").unwrap_or_default();
-        let delivered_at_ns = row_u64(row, "delivered_at_ns").unwrap_or(0);
-        let delivery_count = row_u64(row, "delivery_count").unwrap_or(1);
 
         let lock_ms = queue_lock_ms
             .get(&queue)
             .copied()
             .unwrap_or(DEFAULT_QUEUE_LOCK_DEADLINE_MS);
-        let lock_deadline_ms = (delivered_at_ns / 1_000_000).saturating_add(lock_ms);
+        let (lock_deadline_ms, delivery_count, delivery_id) = if kind == "queue_pending_lc" {
+            let deadline_ns = row_u64(row, "lock_deadline_ns").unwrap_or(0);
+            let delivery_count = attempts_by_key
+                .get(&(queue.clone(), group.clone(), message_id))
+                .copied()
+                .unwrap_or(1);
+            let delivery_id = row_text(row, "delivery_id").unwrap_or_default();
+            (deadline_ns / 1_000_000, delivery_count, delivery_id)
+        } else {
+            let delivered_at_ns = row_u64(row, "delivered_at_ns").unwrap_or(0);
+            let delivery_count = row_u64(row, "delivery_count").unwrap_or(1);
+            let lock_deadline_ms = (delivered_at_ns / 1_000_000).saturating_add(lock_ms);
+            let delivery_id = format!("{queue}:{group}:{message_id}:{delivery_count}");
+            (lock_deadline_ms, delivery_count, delivery_id)
+        };
         let attempts = delivery_count.saturating_sub(1);
-        let delivery_id = format!("{queue}:{group}:{message_id}:{delivery_count}");
 
         records.push(UnifiedRecord::with_schema(
             Arc::clone(&schema),
@@ -3762,6 +3796,8 @@ fn queues_snapshot(
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
 ) -> Vec<UnifiedRecord> {
+    use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
+
     let snapshot = runtime.db().catalog_model_snapshot();
     let schema = Arc::new(
         QUEUE_COLUMNS
@@ -3778,13 +3814,21 @@ fn queues_snapshot(
         .unwrap_or(0);
 
     // Single pass: per-queue (count, oldest delivered_at_ns).
+    let queue_lock_ms: HashMap<String, u64> = snapshot
+        .collections
+        .iter()
+        .filter_map(|c| c.queue_lock_deadline_ms.map(|ms| (c.name.clone(), ms)))
+        .collect();
     let mut per_queue: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut seen_pending: HashSet<(String, String, u64)> = HashSet::new();
     if let Some(manager) = store.get_collection("red_queue_meta") {
         let entities = manager.query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .is_some_and(|row| row_text(row, "kind").as_deref() == Some("queue_pending"))
+            entity.data.as_row().is_some_and(|row| {
+                matches!(
+                    row_text(row, "kind").as_deref(),
+                    Some("queue_pending") | Some("queue_pending_lc")
+                )
+            })
         });
         for entity in entities {
             let Some(row) = entity.data.as_row() else {
@@ -3793,7 +3837,23 @@ fn queues_snapshot(
             let Some(queue) = row_text(row, "queue") else {
                 continue;
             };
-            let delivered_at_ns = row_u64(row, "delivered_at_ns").unwrap_or(0);
+            let group = row_text(row, "group").unwrap_or_default();
+            let message_id = row_u64(row, "message_id").unwrap_or(0);
+            if !seen_pending.insert((queue.clone(), group, message_id)) {
+                continue;
+            }
+            let delivered_at_ns = match row_text(row, "kind").as_deref() {
+                Some("queue_pending_lc") => {
+                    let lock_ms = queue_lock_ms
+                        .get(&queue)
+                        .copied()
+                        .unwrap_or(DEFAULT_QUEUE_LOCK_DEADLINE_MS);
+                    row_u64(row, "lock_deadline_ns")
+                        .unwrap_or(0)
+                        .saturating_sub(lock_ms.saturating_mul(1_000_000))
+                }
+                _ => row_u64(row, "delivered_at_ns").unwrap_or(0),
+            };
             let entry = per_queue.entry(queue).or_insert((0, u64::MAX));
             entry.0 = entry.0.saturating_add(1);
             if delivered_at_ns > 0 && delivered_at_ns < entry.1 {

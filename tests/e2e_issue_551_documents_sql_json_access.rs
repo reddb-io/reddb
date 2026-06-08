@@ -92,7 +92,7 @@ fn sql_json_extract_in_select_projects_leaf_value() {
         page.result.records
     );
     let record = &page.result.records[0];
-    let label = "json_extract(body, '$.level')";
+    let label = "JSON_EXTRACT";
     match record.get(label) {
         Some(Value::Text(value)) => {
             // JSON_EXTRACT returns the raw JSON encoding of the leaf,

@@ -399,37 +399,27 @@ impl GraphStore {
     /// Serialize to bytes for persistence (file format v2: includes the
     /// embedded [`LabelRegistry`] catalog right after the fixed header).
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        // Fixed header: magic(4) + version(4) + node_count(8) + edge_count(8) = 24 bytes.
-        buf.extend_from_slice(b"RBGR"); // RedDB GRaph
-        buf.extend_from_slice(&2u32.to_le_bytes()); // file format version
-        buf.extend_from_slice(&self.node_count.load(Ordering::Relaxed).to_le_bytes());
-        buf.extend_from_slice(&self.edge_count.load(Ordering::Relaxed).to_le_bytes());
-
-        // Embedded label registry: registry_len(4) + registry_bytes.
-        // Always present in v2; empty registry encodes as a 4-byte zero count.
         let registry_bytes = self.registry.encode().unwrap_or_default();
-        buf.extend_from_slice(&(registry_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&registry_bytes);
+        let node_pages = self
+            .node_pages
+            .read()
+            .map(|pages| pages.iter().map(|page| page.as_bytes().to_vec()).collect())
+            .unwrap_or_default();
+        let edge_pages = self
+            .edge_pages
+            .read()
+            .map(|pages| pages.iter().map(|page| page.as_bytes().to_vec()).collect())
+            .unwrap_or_default();
 
-        // Node pages: count(4) + pages.
-        if let Ok(pages) = self.node_pages.read() {
-            buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
-            for page in pages.iter() {
-                buf.extend_from_slice(page.as_bytes());
-            }
-        }
-
-        // Edge pages: count(4) + pages.
-        if let Ok(pages) = self.edge_pages.read() {
-            buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
-            for page in pages.iter() {
-                buf.extend_from_slice(page.as_bytes());
-            }
-        }
-
-        buf
+        reddb_file::encode_graph_store_frame(&reddb_file::GraphStoreFrame {
+            version: reddb_file::GRAPH_STORE_VERSION_V2,
+            node_count: self.node_count.load(Ordering::Relaxed),
+            edge_count: self.edge_count.load(Ordering::Relaxed),
+            registry_bytes: Some(registry_bytes),
+            node_pages,
+            edge_pages,
+        })
+        .expect("in-memory graph store should encode")
     }
 
     /// Deserialize from bytes. Dual-path: a v1 file (no embedded registry,
@@ -438,47 +428,18 @@ impl GraphStore {
     /// registry from its embedded blob and decodes records via
     /// [`StoredNode::decode`].
     pub fn deserialize(data: &[u8]) -> Result<Self, GraphStoreError> {
-        if data.len() < 24 {
-            return Err(GraphStoreError::InvalidData("Too short".to_string()));
-        }
-        if &data[0..4] != b"RBGR" {
-            return Err(GraphStoreError::InvalidData("Invalid magic".to_string()));
-        }
-
-        let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let node_count = u64::from_le_bytes([
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-        ]);
-        let edge_count = u64::from_le_bytes([
-            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
-        ]);
-
-        let mut offset = 24;
+        let frame = reddb_file::decode_graph_store_frame(data, PAGE_SIZE)
+            .map_err(|e| GraphStoreError::InvalidData(e.to_string()))?;
 
         // V2 carries the registry blob inline. V1 has none (legacy seed).
-        let registry: Arc<LabelRegistry> = match version {
+        let registry: Arc<LabelRegistry> = match frame.version {
             1 => Arc::new(LabelRegistry::with_legacy_seed()),
             2 => {
-                if data.len() < offset + 4 {
-                    return Err(GraphStoreError::InvalidData(
-                        "Truncated v2 header".to_string(),
-                    ));
-                }
-                let reg_len = u32::from_le_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]) as usize;
-                offset += 4;
-                if data.len() < offset + reg_len {
-                    return Err(GraphStoreError::InvalidData(
-                        "Truncated registry blob".to_string(),
-                    ));
-                }
-                let reg = LabelRegistry::decode(&data[offset..offset + reg_len])
+                let registry_bytes = frame.registry_bytes.as_deref().ok_or_else(|| {
+                    GraphStoreError::InvalidData("Missing registry blob".to_string())
+                })?;
+                let reg = LabelRegistry::decode(registry_bytes)
                     .map_err(|e| GraphStoreError::InvalidData(e.to_string()))?;
-                offset += reg_len;
                 Arc::new(reg)
             }
             v => {
@@ -489,64 +450,24 @@ impl GraphStore {
             }
         };
 
-        // Node pages
-        if data.len() < offset + 4 {
-            return Err(GraphStoreError::InvalidData(
-                "Truncated before node-page count".to_string(),
-            ));
-        }
-        let node_page_count = u32::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        let mut node_pages = Vec::with_capacity(node_page_count);
-        for _ in 0..node_page_count {
-            if offset + PAGE_SIZE > data.len() {
-                return Err(GraphStoreError::InvalidData(
-                    "Truncated node pages".to_string(),
-                ));
-            }
-            let page = Page::from_slice(&data[offset..offset + PAGE_SIZE])
+        let mut node_pages = Vec::with_capacity(frame.node_pages.len());
+        for page_bytes in &frame.node_pages {
+            let page = Page::from_slice(page_bytes)
                 .map_err(|_| GraphStoreError::InvalidData("Invalid page".to_string()))?;
             node_pages.push(page);
-            offset += PAGE_SIZE;
         }
 
-        // Edge pages
-        if data.len() < offset + 4 {
-            return Err(GraphStoreError::InvalidData(
-                "Truncated before edge-page count".to_string(),
-            ));
-        }
-        let edge_page_count = u32::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        let mut edge_pages = Vec::with_capacity(edge_page_count);
-        for _ in 0..edge_page_count {
-            if offset + PAGE_SIZE > data.len() {
-                return Err(GraphStoreError::InvalidData(
-                    "Truncated edge pages".to_string(),
-                ));
-            }
-            let page = Page::from_slice(&data[offset..offset + PAGE_SIZE])
+        let mut edge_pages = Vec::with_capacity(frame.edge_pages.len());
+        for page_bytes in &frame.edge_pages {
+            let page = Page::from_slice(page_bytes)
                 .map_err(|_| GraphStoreError::InvalidData("Invalid page".to_string()))?;
             edge_pages.push(page);
-            offset += PAGE_SIZE;
         }
 
         // V1 records on disk use the legacy 1-byte enum header, which the
         // rest of GraphStore (get_node, iterators) does not understand. Migrate
         // in place: decode every v1 cell, re-insert via the v2 write path.
-        if version == 1 {
+        if frame.version == 1 {
             let store = Self::with_registry(Arc::clone(&registry));
             for (page_idx, page) in node_pages.iter().enumerate() {
                 let cell_count = page.cell_count() as usize;
@@ -586,7 +507,7 @@ impl GraphStore {
             // Sanity-check counts (v1 file headers can theoretically lie; a
             // mismatch here points at a corrupt blob, but is not fatal —
             // the store reflects what we successfully migrated).
-            let _ = (node_count, edge_count);
+            let _ = (frame.node_count, frame.edge_count);
             return Ok(store);
         }
 
@@ -600,11 +521,11 @@ impl GraphStore {
             current_node_page: AtomicU32::new(0),
             current_edge_page: AtomicU32::new(0),
             stats: GraphStats::default(),
-            node_count: AtomicU64::new(node_count),
-            edge_count: AtomicU64::new(edge_count),
+            node_count: AtomicU64::new(frame.node_count),
+            edge_count: AtomicU64::new(frame.edge_count),
         };
 
-        store.rebuild_indexes(version)?;
+        store.rebuild_indexes(frame.version)?;
 
         Ok(store)
     }

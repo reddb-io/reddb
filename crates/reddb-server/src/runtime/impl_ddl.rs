@@ -333,7 +333,7 @@ impl RedDBRuntime {
             .db
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        self.invalidate_result_cache();
+        self.invalidate_result_cache_process_only();
         Ok(())
     }
 
@@ -1426,13 +1426,20 @@ impl RedDBRuntime {
         // Register metadata
         self.inner
             .index_store
-            .register(super::index_store::RegisteredIndex::replicated(
-                query.name.clone(),
-                query.table.clone(),
-                query.columns.clone(),
-                method_kind,
-                query.unique,
-            ));
+            .register(super::index_store::RegisteredIndex {
+                name: query.name.clone(),
+                collection: query.table.clone(),
+                columns: query.columns.clone(),
+                method: method_kind,
+                unique: query.unique,
+            });
+        self.persist_runtime_index_descriptor(super::index_store::RegisteredIndex {
+            name: query.name.clone(),
+            collection: query.table.clone(),
+            columns: query.columns.clone(),
+            method: method_kind,
+            unique: query.unique,
+        })?;
         // Issue #120 — surface the index name + indexed columns in
         // the schema-vocabulary so AskPipeline (#121) can resolve
         // "the email index" back to its collection.
@@ -1484,6 +1491,7 @@ impl RedDBRuntime {
 
         // Remove from IndexStore
         self.inner.index_store.drop_index(&query.name, &query.table);
+        self.persist_runtime_index_drop(&query.table, &query.name)?;
         self.invalidate_plan_cache();
         // Issue #120 — keep the schema-vocabulary index entry in sync.
         self.schema_vocabulary_apply(crate::runtime::schema_vocabulary::DdlEvent::DropIndex {
@@ -1522,7 +1530,15 @@ impl RedDBRuntime {
             return Err(RedDBError::NotFound(format!("{label} '{name}' not found")));
         }
 
-        let actual = polymorphic_resolver::resolve(name, &self.inner.db.catalog_model_snapshot())?;
+        let actual = self
+            .inner
+            .db
+            .collection_contract(name)
+            .map(|contract| contract.declared_model)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                polymorphic_resolver::resolve(name, &self.inner.db.catalog_model_snapshot())
+            })?;
         polymorphic_resolver::ensure_model_match(expected_model, actual)?;
         self.drop_collection_storage(raw_query, name, label)
     }

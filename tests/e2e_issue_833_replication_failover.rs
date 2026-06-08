@@ -61,6 +61,7 @@ impl ClusterModel {
             target: FailoverNode::new(&self.target_id, "http://node-b:50051", "us-west"),
             current_term,
             target_frontier_hint: hint,
+            timeline_history: reddb::TimelineHistory::new(10),
             mode,
         }
     }
@@ -116,6 +117,14 @@ fn clean_handover_swaps_roles_with_no_lost_write() {
     assert_eq!(outcome.new_term, 8);
     assert_eq!(outcome.frontier_lsn, 200);
     assert_eq!(outcome.reached_lsn, 200);
+    assert_eq!(
+        outcome.timeline_history.current(),
+        Some(reddb::TimelineId(2))
+    );
+    assert_eq!(
+        outcome.timeline_history.ancestor_lsn(reddb::TimelineId(2)),
+        Some(200)
+    );
 
     // Roles swapped: new primary advertises the new term, old primary is
     // now a replica of it.
@@ -158,6 +167,7 @@ fn coordinated_handover_aborts_without_losing_writes_when_target_lags() {
             assert_eq!(frontier_lsn, 200);
             assert_eq!(reached_lsn, 160);
         }
+        FailoverError::TimelineHistory(err) => panic!("unexpected timeline error: {err}"),
     }
 
     // No handover happened: roles unchanged and writes resumed on the
@@ -187,6 +197,11 @@ fn forced_handover_completes_within_timeout_surfacing_skipped_catch_up() {
     assert_eq!(outcome.reached_lsn, 170);
     assert_eq!(outcome.skipped_lsn, 30, "skipped catch-up surfaced");
     assert!(!outcome.is_zero_rpo());
+    assert_eq!(
+        outcome.timeline_history.ancestor_lsn(reddb::TimelineId(2)),
+        Some(170),
+        "forced timeline forks where the target actually reached"
+    );
     assert!(
         outcome.waited <= Duration::from_millis(50),
         "forced handover completes within the timeout window",

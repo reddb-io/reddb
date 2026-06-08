@@ -9,7 +9,7 @@
 //! Layout on disk / inside a segment header is:
 //!
 //! ```text
-//! [ u8  magic = 0xBF ]
+//! [ u8  magic       ]
 //! [ u8  num_hashes   ]
 //! [ u32 bit_size     ]   // big-endian
 //! [ u32 inserted     ]   // monotonic counter, best-effort
@@ -21,31 +21,7 @@
 
 use crate::storage::primitives::BloomFilter;
 
-const BLOOM_SEGMENT_MAGIC: u8 = 0xBF;
-const HEADER_LEN: usize = 1 + 1 + 4 + 4; // magic + hashes + bit_size + inserted
-
-/// Error returned when parsing a bloom segment header.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BloomSegmentError {
-    /// Byte slice was shorter than the fixed header.
-    TooShort,
-    /// Magic byte did not match [`BLOOM_SEGMENT_MAGIC`].
-    BadMagic,
-    /// Declared bit size did not match payload length.
-    LengthMismatch,
-}
-
-impl std::fmt::Display for BloomSegmentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BloomSegmentError::TooShort => write!(f, "bloom header too short"),
-            BloomSegmentError::BadMagic => write!(f, "bloom header magic mismatch"),
-            BloomSegmentError::LengthMismatch => write!(f, "bloom header length mismatch"),
-        }
-    }
-}
-
-impl std::error::Error for BloomSegmentError {}
+pub use reddb_file::BloomSegmentFrameError as BloomSegmentError;
 
 /// Trait implemented by owners of a segment-level bloom filter.
 ///
@@ -144,40 +120,27 @@ impl BloomSegment {
 
     /// Serialise into the header layout documented at module level.
     pub fn encode(&self) -> Vec<u8> {
-        let bits = self.filter.as_bytes();
-        let bit_size = self.filter.bit_size();
-        let mut out = Vec::with_capacity(HEADER_LEN + bits.len());
-        out.push(BLOOM_SEGMENT_MAGIC);
-        out.push(self.filter.num_hashes());
-        out.extend_from_slice(&bit_size.to_be_bytes());
-        out.extend_from_slice(&self.inserted.to_be_bytes());
-        out.extend_from_slice(bits);
-        out
+        reddb_file::encode_bloom_segment_frame(&reddb_file::BloomSegmentFrame {
+            num_hashes: self.filter.num_hashes(),
+            bit_size: self.filter.bit_size(),
+            inserted: self.inserted,
+            bits: self.filter.as_bytes().to_vec(),
+        })
     }
 
     /// Parse a previously encoded header. Returns a fresh `BloomSegment` and
     /// the number of bytes consumed.
     pub fn decode(bytes: &[u8]) -> Result<(Self, usize), BloomSegmentError> {
-        if bytes.len() < HEADER_LEN {
-            return Err(BloomSegmentError::TooShort);
-        }
-        if bytes[0] != BLOOM_SEGMENT_MAGIC {
-            return Err(BloomSegmentError::BadMagic);
-        }
-        let num_hashes = bytes[1];
-        let bit_size = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
-        let inserted = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
-        let byte_len = (bit_size as usize).div_ceil(8);
-        let total = HEADER_LEN + byte_len;
-        if bytes.len() < total {
-            return Err(BloomSegmentError::LengthMismatch);
-        }
-        let filter = BloomFilter::from_bytes_with_size(
-            bytes[HEADER_LEN..total].to_vec(),
-            num_hashes,
-            bit_size,
-        );
-        Ok((Self { filter, inserted }, total))
+        let (frame, consumed) = reddb_file::decode_bloom_segment_frame(bytes)?;
+        let filter =
+            BloomFilter::from_bytes_with_size(frame.bits, frame.num_hashes, frame.bit_size);
+        Ok((
+            Self {
+                filter,
+                inserted: frame.inserted,
+            },
+            consumed,
+        ))
     }
 }
 
@@ -263,7 +226,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_short_buffer() {
-        let bytes = [0xBF, 3, 0, 0];
+        let bytes = [reddb_file::BLOOM_SEGMENT_MAGIC, 3, 0, 0];
         assert_eq!(
             BloomSegment::decode(&bytes).unwrap_err(),
             BloomSegmentError::TooShort

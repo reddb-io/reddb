@@ -1035,10 +1035,6 @@ impl RedDB {
                 let entries = estimate_index_entries(&collection, kind);
                 states.push(PhysicalIndexState {
                     name: format!("{}::{}", collection.name, index_name),
-                    logical_id: 0,
-                    physical_file_id: String::new(),
-                    physical_file_name: String::new(),
-                    collection_logical_id: None,
                     kind,
                     collection: Some(collection.name.clone()),
                     enabled: metric.map(|metric| metric.enabled).unwrap_or(true),

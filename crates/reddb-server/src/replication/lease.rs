@@ -6,21 +6,11 @@
 //! exactly one of them must hold a *writer lease*. Other instances may
 //! still attach as read-only replicas without acquiring a lease.
 //!
-//! ## Wire format
+//! ## Artifact format
 //!
-//! The lease is serialized as JSON under
-//! `leases/{database_key}.lease.json` on the remote backend:
-//!
-//! ```json
-//! {
-//!   "database_key": "main",
-//!   "holder_id": "instance-uuid",
-//!   "term": 3,
-//!   "generation": 7,
-//!   "acquired_at_ms": 1730000000000,
-//!   "expires_at_ms":  1730000060000
-//! }
-//! ```
+//! The lease is serialized as a serverless writer-lease artifact owned by
+//! `reddb-file`. This module only computes policy and performs backend
+//! compare-and-swap around that artifact.
 //!
 //! - `generation` increments every time a different holder acquires
 //!   the key. The holder stamps its uploads with the generation so a
@@ -49,11 +39,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::serde_json::{self, Value as JsonValue};
 use crate::storage::backend::{
     AtomicRemoteBackend, BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut,
 };
-use serde_json::Map;
+
+pub use reddb_file::ServerlessWriterLease as WriterLease;
 
 /// Per-process monotonic counter that disambiguates lease temp files
 /// when multiple threads sample `now_unix_nanos()` within the same
@@ -65,115 +55,12 @@ static LEASE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn lease_temp_path(kind: &str) -> std::path::PathBuf {
     let unique = LEASE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "reddb-lease-{kind}-{}-{}-{unique}.json",
+    reddb_file::serverless_writer_lease_temp_path(
+        kind,
         std::process::id(),
-        crate::utils::now_unix_nanos()
-    ))
-}
-
-/// One snapshot of who owns the writer lease for a database key.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WriterLease {
-    pub database_key: String,
-    pub holder_id: String,
-    /// Replication term the holder acquired the lease under (issue #835,
-    /// ADR 0030). Tying the lease to the term is what makes a deposed
-    /// primary fail closed: once a new primary acquires the lease at a
-    /// higher term, the old holder's term is behind and every term-gated
-    /// op it attempts is fenced. Defaults to
-    /// [`DEFAULT_REPLICATION_TERM`](crate::replication::DEFAULT_REPLICATION_TERM)
-    /// when read from a legacy (pre-#835) lease object that did not carry
-    /// a term, so older lease files stay readable.
-    pub term: u64,
-    pub generation: u64,
-    pub acquired_at_ms: u64,
-    pub expires_at_ms: u64,
-}
-
-impl WriterLease {
-    pub fn is_expired(&self, now_ms: u64) -> bool {
-        self.expires_at_ms <= now_ms
-    }
-
-    /// Is this lease fenced by `current_term`? A holder whose lease was
-    /// stamped under a term *behind* the cluster's current term is a
-    /// stale writer from a superseded timeline (issue #835) — it must
-    /// fail closed rather than keep mutating the new timeline.
-    pub fn fenced_by_term(&self, current_term: u64) -> bool {
-        self.term < current_term
-    }
-
-    /// The monotonic fencing token `(term, generation)`. Both components
-    /// advance forward across a legitimate handover (a new primary wins a
-    /// higher term *and* takes a fresh lease generation), so a stale
-    /// holder is ordered strictly behind on both axes (ADR 0030).
-    pub fn fencing_token(&self) -> (u64, u64) {
-        (self.term, self.generation)
-    }
-
-    fn to_json(&self) -> JsonValue {
-        let mut object = Map::new();
-        object.insert(
-            "database_key".to_string(),
-            JsonValue::String(self.database_key.clone()),
-        );
-        object.insert(
-            "holder_id".to_string(),
-            JsonValue::String(self.holder_id.clone()),
-        );
-        object.insert("term".to_string(), JsonValue::Number(self.term as f64));
-        object.insert(
-            "generation".to_string(),
-            JsonValue::Number(self.generation as f64),
-        );
-        object.insert(
-            "acquired_at_ms".to_string(),
-            JsonValue::Number(self.acquired_at_ms as f64),
-        );
-        object.insert(
-            "expires_at_ms".to_string(),
-            JsonValue::Number(self.expires_at_ms as f64),
-        );
-        JsonValue::Object(object)
-    }
-
-    fn from_json(value: &JsonValue) -> Result<Self, LeaseError> {
-        let obj = value
-            .as_object()
-            .ok_or_else(|| LeaseError::InvalidFormat("lease json is not an object".into()))?;
-        Ok(Self {
-            database_key: obj
-                .get("database_key")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| LeaseError::InvalidFormat("missing database_key".into()))?
-                .to_string(),
-            holder_id: obj
-                .get("holder_id")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| LeaseError::InvalidFormat("missing holder_id".into()))?
-                .to_string(),
-            // Legacy lease objects (pre-#835) carry no term — default to the
-            // base replication term so they stay readable and act as "never
-            // fenced" until a termed primary re-stamps them.
-            term: obj
-                .get("term")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(crate::replication::DEFAULT_REPLICATION_TERM),
-            generation: obj
-                .get("generation")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| LeaseError::InvalidFormat("missing generation".into()))?,
-            acquired_at_ms: obj
-                .get("acquired_at_ms")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| LeaseError::InvalidFormat("missing acquired_at_ms".into()))?,
-            expires_at_ms: obj
-                .get("expires_at_ms")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| LeaseError::InvalidFormat("missing expires_at_ms".into()))?,
-        })
-    }
+        crate::utils::now_unix_nanos(),
+        unique,
+    )
 }
 
 #[derive(Debug)]
@@ -303,7 +190,7 @@ impl LeaseStore {
     }
 
     fn key_for(&self, database_key: &str) -> String {
-        format!("{}{}.lease.json", self.prefix, database_key)
+        reddb_file::serverless_writer_lease_key(&self.prefix, database_key)
     }
 
     /// Read whatever lease object is currently published. `None` means
@@ -322,9 +209,7 @@ impl LeaseStore {
         let bytes = std::fs::read(&temp)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
         let _ = std::fs::remove_file(&temp);
-        let json: JsonValue = serde_json::from_slice(&bytes)
-            .map_err(|err| LeaseError::InvalidFormat(format!("lease json parse: {err}")))?;
-        WriterLease::from_json(&json).map(Some)
+        decode_writer_lease(&bytes).map(Some)
     }
 
     fn current_versioned(&self, database_key: &str) -> Result<Option<VersionedLease>, LeaseError> {
@@ -348,10 +233,8 @@ impl LeaseStore {
         let bytes = std::fs::read(&temp)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
         let _ = std::fs::remove_file(&temp);
-        let json: JsonValue = serde_json::from_slice(&bytes)
-            .map_err(|err| LeaseError::InvalidFormat(format!("lease json parse: {err}")))?;
         Ok(Some(VersionedLease {
-            lease: WriterLease::from_json(&json)?,
+            lease: decode_writer_lease(&bytes)?,
             version: before,
         }))
     }
@@ -609,10 +492,8 @@ impl LeaseStore {
         condition: ConditionalPut,
     ) -> Result<BackendObjectVersion, LeaseError> {
         let key = self.key_for(&lease.database_key);
-        let json = lease.to_json();
-        let bytes = serde_json::to_vec(&json).map_err(|err| {
-            LeaseError::Backend(BackendError::Internal(format!("serialize lease: {err}")))
-        })?;
+        let bytes = reddb_file::encode_serverless_writer_lease_json(lease)
+            .map_err(|err| LeaseError::Backend(BackendError::Internal(err.to_string())))?;
         let temp = lease_temp_path("write");
         std::fs::write(&temp, &bytes)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
@@ -620,6 +501,11 @@ impl LeaseStore {
         let _ = std::fs::remove_file(&temp);
         Ok(res?)
     }
+}
+
+fn decode_writer_lease(bytes: &[u8]) -> Result<WriterLease, LeaseError> {
+    reddb_file::decode_serverless_writer_lease_json(bytes)
+        .map_err(|err| LeaseError::InvalidFormat(err.to_string()))
 }
 
 #[cfg(test)]

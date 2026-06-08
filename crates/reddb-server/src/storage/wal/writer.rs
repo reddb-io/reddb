@@ -1,4 +1,4 @@
-use super::record::{WalRecord, WAL_MAGIC, WAL_VERSION};
+use super::record::WalRecord;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -195,16 +195,9 @@ impl WalWriter {
             .open(path)?;
 
         let current_lsn = if !exists || raw.metadata()?.len() == 0 {
-            // Write header for new file
-            // Format: Magic (4) + Version (1) + Reserved (3)
-            let mut header = Vec::with_capacity(8);
-            header.extend_from_slice(WAL_MAGIC);
-            header.push(WAL_VERSION);
-            header.extend_from_slice(&[0u8; 3]); // Reserved
-
-            raw.write_all(&header)?;
+            raw.write_all(&reddb_file::encode_wal_file_header())?;
             raw.sync_all()?;
-            8
+            reddb_file::WAL_FILE_HEADER_BYTES as u64
         } else {
             // Existing file, set LSN to current end. Append-mode files
             // ignore this seek for *writes*, but we use the returned
@@ -459,17 +452,13 @@ impl WalWriter {
         }
 
         // Rewrite header through the BufWriter then drain.
-        let mut header = Vec::with_capacity(8);
-        header.extend_from_slice(WAL_MAGIC);
-        header.push(WAL_VERSION);
-        header.extend_from_slice(&[0u8; 3]);
-        self.file.write_all(&header)?;
+        self.file.write_all(&reddb_file::encode_wal_file_header())?;
         self.file.flush()?;
         self.file.get_ref().sync_all()?;
 
-        self.current_lsn = 8;
-        self.durable_lsn = 8;
-        self.last_synced_size = 8;
+        self.current_lsn = reddb_file::WAL_FILE_HEADER_BYTES as u64;
+        self.durable_lsn = reddb_file::WAL_FILE_HEADER_BYTES as u64;
+        self.last_synced_size = reddb_file::WAL_FILE_HEADER_BYTES as u64;
         self.prealloc_metadata_dirty = false;
         #[cfg(test)]
         {

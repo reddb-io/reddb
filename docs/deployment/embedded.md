@@ -44,10 +44,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Persistence | In-memory or file-backed |
 | Operational shape | Application-owned lifecycle |
 
-Embedded mode uses the `embedded` storage profile with `single-file`
-packaging. See [Storage Profiles](storage-profiles.md#embedded-single-file)
-for the backup boundary and ADR links behind that physical contract.
-
 ## Maintenance
 
 Embedded mode does not have a long-running RedDB server process to trigger maintenance on your behalf. Call it from your application where appropriate:

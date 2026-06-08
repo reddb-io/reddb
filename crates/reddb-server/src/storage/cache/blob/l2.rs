@@ -7,12 +7,13 @@ use parking_lot::RwLock;
 
 use super::cache::{BlobCacheKey, CacheError};
 use super::config::{DEFAULT_BLOB_SYNOPSIS_CAPACITY, DEFAULT_BLOB_SYNOPSIS_FPR};
-use super::entry::{
-    decode_v2_frame, encode_l2_key, encode_v2_frame, Entry, L2Control, L2Record, L2_BLOB_MAGIC,
-    L2_FORMAT_V1_RAW, L2_FORMAT_V2_FRAMED,
-};
+use super::entry::Entry;
 use crate::storage::cache::compressor::{Compressed, L2BlobCompressor};
 use crate::storage::cache::extended_ttl::ExtendedTtlPolicy;
+use reddb_file::{
+    blob_cache_control_path, decode_l2_v2_frame, encode_l2_key, encode_l2_v2_frame, L2BlobFrame,
+    L2Control, L2Record, L2_BLOB_MAGIC, L2_FORMAT_V1_RAW, L2_FORMAT_V2_FRAMED,
+};
 
 /// Tiny in-tree Bloom filter for the L2 membership synopsis (#146).
 ///
@@ -157,8 +158,9 @@ pub(super) struct BlobCacheL2 {
 
 impl BlobCacheL2 {
     pub(super) fn open(path: PathBuf, bytes_max: u64) -> Result<Self, CacheError> {
-        let control_path = path.with_extension("blob-cache.ctl");
-        let control = L2Control::read(&control_path)?;
+        let control_path = blob_cache_control_path(&path);
+        let control =
+            L2Control::read(&control_path).map_err(|err| CacheError::L2Io(err.to_string()))?;
         let pager = Arc::new(
             crate::storage::engine::Pager::open(
                 &path,
@@ -225,7 +227,7 @@ impl BlobCacheL2 {
         let payload = match record.format_version {
             L2_FORMAT_V1_RAW => chain_bytes,
             L2_FORMAT_V2_FRAMED => {
-                let framed = decode_v2_frame(&chain_bytes).ok()?;
+                let framed = decode_compressed_l2_frame(&chain_bytes).ok()?;
                 L2BlobCompressor::decompress(&framed).ok()?
             }
             _ => return None,
@@ -268,7 +270,7 @@ impl BlobCacheL2 {
             });
         }
 
-        let framed = encode_v2_frame(&compressed);
+        let framed = encode_compressed_l2_frame(&compressed);
         let (root_page, page_count, checksum) = self.write_blob_chain(&framed)?;
         #[cfg(test)]
         if self
@@ -304,7 +306,9 @@ impl BlobCacheL2 {
         let mut control = self.control.write();
         control.metadata_root = new_root;
         control.bytes_in_use = projected;
-        control.write(&self.control_path)?;
+        control
+            .write(&self.control_path)
+            .map_err(|err| CacheError::L2Io(err.to_string()))?;
         self.add_synopsis_key(&key.namespace, &key.key);
         if was_compressed {
             self.compression_compressed_count
@@ -532,7 +536,9 @@ impl BlobCacheL2 {
         let mut control = self.control.write();
         control.metadata_root = new_root;
         control.bytes_in_use = new_bytes;
-        control.write(&self.control_path)?;
+        control
+            .write(&self.control_path)
+            .map_err(|err| CacheError::L2Io(err.to_string()))?;
         self.add_synopsis_key(&key.namespace, &key.key);
         Ok(())
     }
@@ -629,6 +635,33 @@ fn rebuild_l2_synopsis(metadata: &crate::storage::engine::BTree) -> HashMap<Stri
     synopsis
 }
 
+fn encode_compressed_l2_frame(compressed: &Compressed) -> Vec<u8> {
+    let frame = match compressed {
+        Compressed::Raw(bytes) => L2BlobFrame::Raw(bytes.clone()),
+        Compressed::Zstd {
+            bytes,
+            original_len,
+        } => L2BlobFrame::Zstd {
+            bytes: bytes.clone(),
+            original_len: *original_len,
+        },
+    };
+    encode_l2_v2_frame(&frame)
+}
+
+fn decode_compressed_l2_frame(bytes: &[u8]) -> Result<Compressed, CacheError> {
+    match decode_l2_v2_frame(bytes).map_err(|err| CacheError::L2Io(err.to_string()))? {
+        L2BlobFrame::Raw(bytes) => Ok(Compressed::Raw(bytes)),
+        L2BlobFrame::Zstd {
+            bytes,
+            original_len,
+        } => Ok(Compressed::Zstd {
+            bytes,
+            original_len,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -655,7 +688,7 @@ mod tests {
 
     fn cleanup_l2(path: &Path) {
         let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
         let _ = std::fs::remove_file(path.with_extension("dwb"));
     }
 

@@ -141,12 +141,6 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: inspect_flags(),
     },
     CommandDef {
-      name: "storage-validate",
-      summary: "Validate storage checksums and recovery metadata without opening for recovery",
-      usage: "red storage-validate --path <FILE> [--json]",
-      flags: storage_validate_flags(),
-    },
-    CommandDef {
       name: "mcp",
       summary: "Start MCP server for AI agent integration",
       usage: "red mcp [--path /data]",
@@ -671,12 +665,6 @@ fn inspect_flags() -> Vec<FlagSchema> {
         FlagSchema::new("at")
             .with_description("Catalog at snapshot sequence (requires metadata journal)"),
     ]
-}
-
-fn storage_validate_flags() -> Vec<FlagSchema> {
-    vec![FlagSchema::new("path")
-        .with_short('d')
-        .with_description("Path to the on-disk database file")]
 }
 
 fn mcp_flags() -> Vec<FlagSchema> {

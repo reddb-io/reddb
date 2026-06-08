@@ -1,72 +1,57 @@
 use super::*;
 
-pub(super) fn native_manifest_kind_to_byte(kind: ManifestEventKind) -> u8 {
-    match kind {
-        ManifestEventKind::Insert => 1,
-        ManifestEventKind::Update => 2,
-        ManifestEventKind::Remove => 3,
-        ManifestEventKind::Checkpoint => 4,
-    }
-}
+impl UnifiedStore {
+    pub(super) fn write_native_meta_page(
+        &self,
+        existing_page: Option<u32>,
+        data: &[u8],
+    ) -> Result<(u32, u64), StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok((0, 0));
+        };
 
-pub(super) fn native_manifest_kind_from_byte(value: u8) -> &'static str {
-    match value {
-        1 => "insert",
-        2 => "update",
-        3 => "remove",
-        4 => "checkpoint",
-        _ => "unknown",
-    }
-}
+        let page_id = match existing_page.filter(|page| *page != 0) {
+            Some(page) => page,
+            None => pager
+                .allocate_page(crate::storage::engine::PageType::NativeMeta)
+                .map_err(|err| StoreError::Serialization(err.to_string()))?
+                .page_id(),
+        };
 
-pub(super) fn push_native_string(data: &mut Vec<u8>, value: &str) {
-    let bytes = value.as_bytes();
-    let len = bytes.len().min(u16::MAX as usize) as u16;
-    data.extend_from_slice(&len.to_le_bytes());
-    data.extend_from_slice(&bytes[..len as usize]);
-}
+        let checksum = reddb_file::native_store_page_checksum(data);
+        let mut page = crate::storage::engine::Page::new(
+            crate::storage::engine::PageType::NativeMeta,
+            page_id,
+        );
+        let bytes = page.as_bytes_mut();
+        let content_start = crate::storage::engine::HEADER_SIZE;
+        let copy_len = data.len().min(bytes.len() - content_start);
+        bytes[content_start..content_start + copy_len].copy_from_slice(&data[..copy_len]);
+        pager
+            .write_page(page_id, page)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        Ok((page_id, checksum))
+    }
 
-pub(super) fn read_native_string(content: &[u8], pos: &mut usize) -> Result<String, StoreError> {
-    if *pos + 2 > content.len() {
-        return Err(StoreError::Serialization(
-            "truncated native string length".to_string(),
-        ));
-    }
-    let len = u16::from_le_bytes([content[*pos], content[*pos + 1]]) as usize;
-    *pos += 2;
-    if *pos + len > content.len() {
-        return Err(StoreError::Serialization(
-            "truncated native string payload".to_string(),
-        ));
-    }
-    let value = String::from_utf8(content[*pos..*pos + len].to_vec())
-        .map_err(|err| StoreError::Serialization(err.to_string()))?;
-    *pos += len;
-    Ok(value)
-}
+    pub(super) fn read_native_meta_page(
+        &self,
+        page_id: u32,
+        label: &str,
+    ) -> Result<Vec<u8>, StoreError> {
+        let Some(pager) = &self.pager else {
+            return Err(StoreError::Serialization(format!(
+                "{label} requires paged mode"
+            )));
+        };
+        if page_id == 0 {
+            return Err(StoreError::Serialization(format!(
+                "{label} page is not set"
+            )));
+        }
 
-pub(super) fn push_native_string_list(data: &mut Vec<u8>, values: &[String]) {
-    let count = values.len().min(u16::MAX as usize) as u16;
-    data.extend_from_slice(&count.to_le_bytes());
-    for value in values.iter().take(count as usize) {
-        push_native_string(data, value);
+        let page = pager
+            .read_page(page_id)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        Ok(page.as_bytes()[crate::storage::engine::HEADER_SIZE..].to_vec())
     }
-}
-
-pub(super) fn read_native_string_list(
-    content: &[u8],
-    pos: &mut usize,
-) -> Result<Vec<String>, StoreError> {
-    if *pos + 2 > content.len() {
-        return Err(StoreError::Serialization(
-            "truncated native string list count".to_string(),
-        ));
-    }
-    let count = u16::from_le_bytes([content[*pos], content[*pos + 1]]) as usize;
-    *pos += 2;
-    let mut values = Vec::with_capacity(count);
-    for _ in 0..count {
-        values.push(read_native_string(content, pos)?);
-    }
-    Ok(values)
 }

@@ -161,9 +161,24 @@ impl RedDB {
             manager.set_column_schema_if_empty(columns);
         }
 
+        if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
+            && self.options.storage_profile.packaging
+                == crate::storage::StoragePackaging::SingleFile
+        {
+            if let Ok(mut guard) = self.collection_contract_cache.write() {
+                let mut contracts = guard
+                    .as_ref()
+                    .map(|existing| existing.as_ref().clone())
+                    .unwrap_or_default();
+                contracts.insert(contract.name.clone(), std::sync::Arc::new(contract.clone()));
+                *guard = Some(std::sync::Arc::new(contracts));
+            }
+            return Ok(contract);
+        }
+
         self.invalidate_collection_contract_cache();
 
-        self.update_physical_metadata(|metadata| {
+        let saved = self.update_physical_metadata(|metadata| {
             if let Some(existing) = metadata
                 .collection_contracts
                 .iter_mut()
@@ -186,7 +201,9 @@ impl RedDB {
             }
 
             contract.clone()
-        })
+        })?;
+        self.invalidate_collection_contract_cache();
+        Ok(saved)
     }
 
     pub fn remove_collection_contract(
@@ -201,9 +218,27 @@ impl RedDB {
             .context_index()
             .set_collection_enabled(collection, false);
 
+        if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
+            && self.options.storage_profile.packaging
+                == crate::storage::StoragePackaging::SingleFile
+        {
+            let mut removed = None;
+            if let Ok(mut guard) = self.collection_contract_cache.write() {
+                let mut contracts = guard
+                    .as_ref()
+                    .map(|existing| existing.as_ref().clone())
+                    .unwrap_or_default();
+                removed = contracts
+                    .remove(collection)
+                    .map(|contract| (*contract).clone());
+                *guard = Some(std::sync::Arc::new(contracts));
+            }
+            return Ok(removed);
+        }
+
         self.invalidate_collection_contract_cache();
 
-        self.update_physical_metadata(|metadata| {
+        let removed = self.update_physical_metadata(|metadata| {
             let removed = metadata
                 .collection_contracts
                 .iter()
@@ -214,7 +249,9 @@ impl RedDB {
                 .indexes
                 .retain(|index| index.collection.as_deref() != Some(collection));
             removed
-        })
+        })?;
+        self.invalidate_collection_contract_cache();
+        Ok(removed)
     }
 
     pub(crate) fn collection_ttl_defaults_snapshot(&self) -> BTreeMap<String, u64> {

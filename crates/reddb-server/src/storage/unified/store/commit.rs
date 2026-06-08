@@ -44,14 +44,10 @@ use std::time::{Duration, Instant};
 
 static NEXT_STORE_TX_ID: AtomicU64 = AtomicU64::new(1);
 
-const STORE_WAL_VERSION: u8 = 1;
-
 #[derive(Debug, Clone)]
 pub(crate) enum StoreWalAction {
     CreateCollection {
         name: String,
-        collection_id: u64,
-        physical_file_id: String,
     },
     DropCollection {
         name: String,
@@ -136,26 +132,6 @@ fn take_deferred_store_wal_capture() -> DeferredStoreWalActions {
 }
 
 impl StoreWalAction {
-    fn collection_name(&self) -> Option<&str> {
-        match self {
-            Self::CreateCollection { name, .. } => Some(name),
-            Self::DropCollection { name } => Some(name),
-            Self::UpsertEntityRecord { collection, .. }
-            | Self::DeleteEntityRecord { collection, .. }
-            | Self::BulkUpsertEntityRecords { collection, .. }
-            | Self::RefreshCollection { collection, .. } => Some(collection),
-        }
-    }
-
-    fn create_collection_range_id(&self) -> Option<String> {
-        match self {
-            Self::CreateCollection { collection_id, .. } => {
-                Some(format!("range-{collection_id:016x}"))
-            }
-            _ => None,
-        }
-    }
-
     pub(crate) fn upsert_entity(
         collection: &str,
         entity: &UnifiedEntity,
@@ -169,179 +145,81 @@ impl StoreWalAction {
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.push(STORE_WAL_VERSION);
+        reddb_file::encode_store_wal_action_frame(&self.to_frame())
+            .expect("encode store wal action frame")
+    }
+
+    fn to_frame(&self) -> reddb_file::StoreWalActionFrame {
         match self {
-            Self::CreateCollection {
-                name,
-                collection_id,
-                physical_file_id,
-            } => {
-                out.push(7);
-                write_string(&mut out, name);
-                out.extend_from_slice(&collection_id.to_le_bytes());
-                write_string(&mut out, physical_file_id);
+            Self::CreateCollection { name } => {
+                reddb_file::StoreWalActionFrame::CreateCollection { name: name.clone() }
             }
             Self::DropCollection { name } => {
-                out.push(2);
-                write_string(&mut out, name);
+                reddb_file::StoreWalActionFrame::DropCollection { name: name.clone() }
             }
             Self::UpsertEntityRecord { collection, record } => {
-                out.push(3);
-                write_string(&mut out, collection);
-                write_bytes(&mut out, record);
+                reddb_file::StoreWalActionFrame::UpsertEntityRecord {
+                    collection: collection.clone(),
+                    record: record.clone(),
+                }
             }
             Self::DeleteEntityRecord {
                 collection,
                 entity_id,
-            } => {
-                out.push(4);
-                write_string(&mut out, collection);
-                out.extend_from_slice(&entity_id.to_le_bytes());
-            }
+            } => reddb_file::StoreWalActionFrame::DeleteEntityRecord {
+                collection: collection.clone(),
+                entity_id: *entity_id,
+            },
             Self::BulkUpsertEntityRecords {
                 collection,
                 records,
-            } => {
-                out.push(5);
-                write_string(&mut out, collection);
-                out.extend_from_slice(&(records.len() as u32).to_le_bytes());
-                for record in records {
-                    write_bytes(&mut out, record);
-                }
-            }
+            } => reddb_file::StoreWalActionFrame::BulkUpsertEntityRecords {
+                collection: collection.clone(),
+                records: records.clone(),
+            },
             Self::RefreshCollection {
                 collection,
                 records,
-            } => {
-                out.push(6);
-                write_string(&mut out, collection);
-                out.extend_from_slice(&(records.len() as u32).to_le_bytes());
-                for record in records {
-                    write_bytes(&mut out, record);
-                }
-            }
+            } => reddb_file::StoreWalActionFrame::RefreshCollection {
+                collection: collection.clone(),
+                records: records.clone(),
+            },
         }
-        out
     }
 
     fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "store wal action too short",
-            ));
-        }
-        if bytes[0] != STORE_WAL_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unsupported store wal version: {}", bytes[0]),
-            ));
-        }
-
-        let mut pos = 2usize;
-        match bytes[1] {
-            1 => {
-                let name = read_string(bytes, &mut pos)?;
-                Ok(Self::CreateCollection {
-                    physical_file_id: legacy_collection_physical_file_id(&name),
-                    collection_id: 0,
-                    name,
-                })
+        match reddb_file::decode_store_wal_action_frame(bytes)? {
+            reddb_file::StoreWalActionFrame::CreateCollection { name } => {
+                Ok(Self::CreateCollection { name })
             }
-            2 => Ok(Self::DropCollection {
-                name: read_string(bytes, &mut pos)?,
+            reddb_file::StoreWalActionFrame::DropCollection { name } => {
+                Ok(Self::DropCollection { name })
+            }
+            reddb_file::StoreWalActionFrame::UpsertEntityRecord { collection, record } => {
+                Ok(Self::UpsertEntityRecord { collection, record })
+            }
+            reddb_file::StoreWalActionFrame::DeleteEntityRecord {
+                collection,
+                entity_id,
+            } => Ok(Self::DeleteEntityRecord {
+                collection,
+                entity_id,
             }),
-            3 => Ok(Self::UpsertEntityRecord {
-                collection: read_string(bytes, &mut pos)?,
-                record: read_bytes(bytes, &mut pos)?,
+            reddb_file::StoreWalActionFrame::BulkUpsertEntityRecords {
+                collection,
+                records,
+            } => Ok(Self::BulkUpsertEntityRecords {
+                collection,
+                records,
             }),
-            4 => {
-                let collection = read_string(bytes, &mut pos)?;
-                let entity_id = read_u64(bytes, &mut pos)?;
-                Ok(Self::DeleteEntityRecord {
-                    collection,
-                    entity_id,
-                })
-            }
-            5 => {
-                let collection = read_string(bytes, &mut pos)?;
-                if pos + 4 > bytes.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "bulk upsert wal action: missing record count",
-                    ));
-                }
-                let count = u32::from_le_bytes([
-                    bytes[pos],
-                    bytes[pos + 1],
-                    bytes[pos + 2],
-                    bytes[pos + 3],
-                ]) as usize;
-                pos += 4;
-                let mut records = Vec::with_capacity(count);
-                for _ in 0..count {
-                    records.push(read_bytes(bytes, &mut pos)?);
-                }
-                Ok(Self::BulkUpsertEntityRecords {
-                    collection,
-                    records,
-                })
-            }
-            6 => {
-                let collection = read_string(bytes, &mut pos)?;
-                if pos + 4 > bytes.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "refresh collection wal action: missing record count",
-                    ));
-                }
-                let count = u32::from_le_bytes([
-                    bytes[pos],
-                    bytes[pos + 1],
-                    bytes[pos + 2],
-                    bytes[pos + 3],
-                ]) as usize;
-                pos += 4;
-                let mut records = Vec::with_capacity(count);
-                for _ in 0..count {
-                    records.push(read_bytes(bytes, &mut pos)?);
-                }
-                Ok(Self::RefreshCollection {
-                    collection,
-                    records,
-                })
-            }
-            7 => {
-                let name = read_string(bytes, &mut pos)?;
-                let collection_id = read_u64(bytes, &mut pos)?;
-                let physical_file_id = read_string(bytes, &mut pos)?;
-                Ok(Self::CreateCollection {
-                    name,
-                    collection_id,
-                    physical_file_id,
-                })
-            }
-            other => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unsupported store wal action tag: {other}"),
-            )),
+            reddb_file::StoreWalActionFrame::RefreshCollection {
+                collection,
+                records,
+            } => Ok(Self::RefreshCollection {
+                collection,
+                records,
+            }),
         }
-    }
-}
-
-fn legacy_collection_physical_file_id(name: &str) -> String {
-    format!("legacy-collection-{name}")
-}
-
-fn commit_batch_record(tx_id: u64, actions: Vec<Vec<u8>>, range_id: Option<&str>) -> WalRecord {
-    match range_id {
-        Some(range_id) => WalRecord::RangeCommitBatch {
-            tx_id,
-            range_id: range_id.to_string(),
-            actions,
-        },
-        None => WalRecord::TxCommitBatch { tx_id, actions },
     }
 }
 
@@ -581,11 +459,7 @@ impl StoreCommitCoordinator {
         self.fsync_count.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn append_actions(
-        &self,
-        actions: &[StoreWalAction],
-        range_id: Option<&str>,
-    ) -> io::Result<()> {
+    pub(crate) fn append_actions(&self, actions: &[StoreWalAction]) -> io::Result<()> {
         if actions.is_empty() {
             return Ok(());
         }
@@ -599,11 +473,10 @@ impl StoreCommitCoordinator {
         if matches!(self.mode, DurabilityMode::Strict) {
             let commit_lsn = {
                 let mut wal = self.wal.lock();
-                wal.append(&commit_batch_record(
+                wal.append(&WalRecord::TxCommitBatch {
                     tx_id,
-                    actions.iter().map(StoreWalAction::encode).collect(),
-                    range_id,
-                ))?;
+                    actions: actions.iter().map(StoreWalAction::encode).collect(),
+                })?;
                 wal.current_lsn()
             };
             self.force_sync()?;
@@ -618,7 +491,11 @@ impl StoreCommitCoordinator {
         let wal_bytes = encoded_actions.iter().fold(0u64, |total, payload| {
             total.saturating_add(payload.len() as u64)
         });
-        let blob = commit_batch_record(tx_id, encoded_actions, range_id).encode();
+        let blob = WalRecord::TxCommitBatch {
+            tx_id,
+            actions: encoded_actions,
+        }
+        .encode();
 
         let commit_lsn = self.queue.enqueue(blob);
         self.wait_until_durable(commit_lsn, wal_bytes)?;
@@ -712,14 +589,6 @@ impl StoreCommitCoordinator {
             };
             match record {
                 WalRecord::TxCommitBatch { actions, .. } => {
-                    for payload in actions {
-                        let action = StoreWalAction::decode(&payload)?;
-                        store.apply_replayed_action(&action).map_err(|err| {
-                            io::Error::other(format!("failed to replay store wal action: {err}"))
-                        })?;
-                    }
-                }
-                WalRecord::RangeCommitBatch { actions, .. } => {
                     for payload in actions {
                         let action = StoreWalAction::decode(&payload)?;
                         store.apply_replayed_action(&action).map_err(|err| {
@@ -950,23 +819,21 @@ impl UnifiedStore {
         if actions.actions.is_empty() {
             return Ok(());
         }
+        if self.config.embedded_wal_path.is_some() {
+            return self.append_embedded_store_wal_actions(&actions.actions);
+        }
         match self.config.durability_mode {
             DurabilityMode::Strict => self.flush_paged_state(),
             DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
                 if let Some(commit) = &self.commit {
-                    let range_id = self.range_id_for_actions(&actions.actions);
                     commit
-                        .append_actions(&actions.actions, range_id.as_deref())
+                        .append_actions(&actions.actions)
                         .map_err(StoreError::Io)
                 } else {
                     self.flush_paged_state()
                 }
             }
         }
-    }
-
-    pub(crate) fn wal_path_for_db(path: &Path) -> PathBuf {
-        path.with_extension("rdb-uwal")
     }
 
     /// Emit a [`WalRecord::VectorInsert`] for a `vector.turbo`
@@ -1002,14 +869,14 @@ impl UnifiedStore {
             debug_assert!(captured);
             return Ok(());
         }
+        if self.config.embedded_wal_path.is_some() {
+            return self.append_embedded_store_wal_actions(&actions);
+        }
         match self.config.durability_mode {
             DurabilityMode::Strict => self.flush_paged_state(),
             DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
                 if let Some(commit) = &self.commit {
-                    let range_id = self.range_id_for_actions(&actions);
-                    commit
-                        .append_actions(&actions, range_id.as_deref())
-                        .map_err(StoreError::Io)?;
+                    commit.append_actions(&actions).map_err(StoreError::Io)?;
                     Ok(())
                 } else {
                     self.flush_paged_state()
@@ -1018,35 +885,50 @@ impl UnifiedStore {
         }
     }
 
-    fn range_id_for_actions(&self, actions: &[StoreWalAction]) -> Option<String> {
-        let Some(_) = &self.config.cluster_range_layout else {
-            return None;
+    pub(crate) fn apply_encoded_store_wal_action(&self, payload: &[u8]) -> Result<(), StoreError> {
+        let action = StoreWalAction::decode(payload).map_err(StoreError::Io)?;
+        self.apply_replayed_action(&action)
+    }
+
+    fn append_embedded_store_wal_actions(
+        &self,
+        actions: &[StoreWalAction],
+    ) -> Result<(), StoreError> {
+        let Some(path) = self.config.embedded_wal_path.as_deref() else {
+            return Ok(());
         };
-        for action in actions {
-            if let Some(range_id) = action.create_collection_range_id() {
-                return Some(range_id);
-            }
-            if let Some(collection) = action.collection_name() {
-                if let Some(metadata) = self.collection_range_metadata(collection) {
-                    return Some(metadata.logical_range_id);
-                }
-            }
+        if actions.is_empty() {
+            return Ok(());
         }
-        None
+        let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
+        let encoded_len = crate::storage::EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads)
+            .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
+        match crate::storage::EmbeddedRdbArtifact::append_wal_payloads(path, &payloads) {
+            Ok(_) => Ok(()),
+            Err(crate::api::RedDBError::InvalidOperation(msg))
+                if msg.contains("embedded wal region full") =>
+            {
+                let snapshot = self.to_binary_dump_bytes();
+                crate::storage::EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(
+                    path,
+                    &snapshot,
+                    encoded_len,
+                )
+                .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
+                crate::storage::EmbeddedRdbArtifact::append_wal_payloads(path, &payloads)
+                    .map(|_| ())
+                    .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))
+            }
+            Err(err) => Err(StoreError::Io(std::io::Error::other(err.to_string()))),
+        }
     }
 
     pub(crate) fn apply_replayed_action(&self, action: &StoreWalAction) -> Result<(), StoreError> {
         match action {
-            StoreWalAction::CreateCollection {
-                name,
-                collection_id,
-                physical_file_id,
-            } => {
-                self.register_collection_id(*collection_id);
+            StoreWalAction::CreateCollection { name } => {
                 if self.get_collection(name).is_none() {
                     let _ = self.create_collection_in_memory(name);
                 }
-                let _ = self.register_collection_range(name, *collection_id, physical_file_id)?;
                 Ok(())
             }
             StoreWalAction::DropCollection { name } => self.drop_collection_in_memory(name),
@@ -1367,77 +1249,6 @@ impl UnifiedStore {
     }
 }
 
-fn write_string(out: &mut Vec<u8>, value: &str) {
-    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-    out.extend_from_slice(value.as_bytes());
-}
-
-fn write_bytes(out: &mut Vec<u8>, value: &[u8]) {
-    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-    out.extend_from_slice(value);
-}
-
-fn read_u32(data: &[u8], pos: &mut usize) -> io::Result<u32> {
-    if data.len().saturating_sub(*pos) < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "unexpected eof while reading u32",
-        ));
-    }
-    let value = u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-    *pos += 4;
-    Ok(value)
-}
-
-fn read_u64(data: &[u8], pos: &mut usize) -> io::Result<u64> {
-    if data.len().saturating_sub(*pos) < 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "unexpected eof while reading u64",
-        ));
-    }
-    let value = u64::from_le_bytes([
-        data[*pos],
-        data[*pos + 1],
-        data[*pos + 2],
-        data[*pos + 3],
-        data[*pos + 4],
-        data[*pos + 5],
-        data[*pos + 6],
-        data[*pos + 7],
-    ]);
-    *pos += 8;
-    Ok(value)
-}
-
-fn read_string(data: &[u8], pos: &mut usize) -> io::Result<String> {
-    let len = read_u32(data, pos)? as usize;
-    if data.len().saturating_sub(*pos) < len {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "unexpected eof while reading string",
-        ));
-    }
-    let value = std::str::from_utf8(&data[*pos..*pos + len])
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
-        .to_string();
-    *pos += len;
-    Ok(value)
-}
-
-fn read_bytes(data: &[u8], pos: &mut usize) -> io::Result<Vec<u8>> {
-    let len = read_u32(data, pos)? as usize;
-    if data.len().saturating_sub(*pos) < len {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "unexpected eof while reading bytes",
-        ));
-    }
-    let value = data[*pos..*pos + len].to_vec();
-    *pos += len;
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1459,64 +1270,14 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "rb_commit_coord_{}_{}_{}.wal",
+        let path = reddb_file::layout::store_commit_coord_temp_wal_path(
+            &std::env::temp_dir(),
             name,
             std::process::id(),
-            nanos
-        ));
+            nanos,
+        );
         let _ = std::fs::remove_file(&path);
         path
-    }
-
-    #[test]
-    fn create_collection_wal_action_carries_object_tx_and_lsn_identity() {
-        let path = temp_wal("create_identity");
-        {
-            let mut writer = WalWriter::open(&path).expect("open writer");
-            writer
-                .append(&WalRecord::TxCommitBatch {
-                    tx_id: 42,
-                    actions: vec![StoreWalAction::CreateCollection {
-                        name: "orders".to_string(),
-                        collection_id: 7,
-                        physical_file_id: "collection-0000000000000007".to_string(),
-                    }
-                    .encode()],
-                })
-                .expect("append create collection");
-            writer.sync().expect("sync wal");
-        }
-
-        let reader = WalReader::open(&path).expect("open reader");
-        let records = reader
-            .iter()
-            .collect::<io::Result<Vec<_>>>()
-            .expect("read wal");
-        assert_eq!(records.len(), 1);
-        let (lsn, record) = &records[0];
-        assert!(*lsn > 0, "WAL reader must expose the record LSN");
-        match record {
-            WalRecord::TxCommitBatch { tx_id, actions } => {
-                assert_eq!(*tx_id, 42);
-                assert_eq!(actions.len(), 1);
-                match StoreWalAction::decode(&actions[0]).expect("decode action") {
-                    StoreWalAction::CreateCollection {
-                        name,
-                        collection_id,
-                        physical_file_id,
-                    } => {
-                        assert_eq!(name, "orders");
-                        assert_eq!(collection_id, 7);
-                        assert_eq!(physical_file_id, "collection-0000000000000007");
-                    }
-                    other => panic!("expected create collection action, got {other:?}"),
-                }
-            }
-            other => panic!("expected tx commit batch, got {other:?}"),
-        }
-
-        let _ = std::fs::remove_file(&path);
     }
 
     /// Concurrent autocommits MUST coalesce into far fewer fsyncs
@@ -1559,11 +1320,9 @@ mod tests {
                 barrier_c.wait();
                 let action = StoreWalAction::CreateCollection {
                     name: format!("c{tx}"),
-                    collection_id: tx as u64 + 1,
-                    physical_file_id: format!("collection-test-c{tx}"),
                 };
                 coord_c
-                    .append_actions(std::slice::from_ref(&action), None)
+                    .append_actions(std::slice::from_ref(&action))
                     .expect("append_actions");
             }));
         }
@@ -1613,11 +1372,9 @@ mod tests {
                 barrier_c.wait();
                 let action = StoreWalAction::CreateCollection {
                     name: format!("z{tx}"),
-                    collection_id: tx as u64 + 1,
-                    physical_file_id: format!("collection-test-z{tx}"),
                 };
                 coord_c
-                    .append_actions(std::slice::from_ref(&action), None)
+                    .append_actions(std::slice::from_ref(&action))
                     .expect("append_actions");
             }));
         }

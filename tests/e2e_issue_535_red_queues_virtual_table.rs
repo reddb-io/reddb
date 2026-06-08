@@ -16,12 +16,28 @@
 
 mod support;
 
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")
+}
+
+fn red_queues_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn unique_ident(prefix: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{prefix}_{unique}")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> RuntimeQueryResult {
@@ -65,12 +81,18 @@ fn message_id_of(result: &RuntimeQueryResult) -> String {
 
 #[test]
 fn red_queues_exposes_queue_shaped_columns() {
+    let _guard = red_queues_test_lock().lock().unwrap();
     let rt = runtime();
-    exec(&rt, "CREATE QUEUE jobs");
-    exec(&rt, "CREATE QUEUE broadcasts FANOUT");
+    let jobs_name = unique_ident("jobs");
+    let broadcasts_name = unique_ident("broadcasts");
+    let tasks_name = unique_ident("tasks");
+    let failed_tasks_name = unique_ident("failed_tasks");
+
+    exec(&rt, &format!("CREATE QUEUE {jobs_name}"));
+    exec(&rt, &format!("CREATE QUEUE {broadcasts_name} FANOUT"));
     exec(
         &rt,
-        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 2",
+        &format!("CREATE QUEUE {tasks_name} WITH DLQ {failed_tasks_name} MAX_ATTEMPTS 2"),
     );
 
     let result = exec(&rt, "SELECT * FROM red.queues");
@@ -101,39 +123,43 @@ fn red_queues_exposes_queue_shaped_columns() {
     // Work-mode queue surfaces WORK and the absent DLQ target as
     // NULL — `name` matching keeps the assertion stable across
     // any test-ordering surprises.
-    let jobs = find_row(&result, "jobs").expect("jobs row should be present");
+    let jobs = find_row(&result, &jobs_name).expect("jobs row should be present");
     assert_eq!(text(jobs, "mode"), "WORK");
     assert!(matches!(jobs.get("dlq_target"), Some(Value::Null)));
 
     // Fanout-mode queue surfaces the upper-case mode literal so the
     // user-facing `SHOW QUEUES` output is faithful to the
     // `(WORK|FANOUT)` brief.
-    let broadcasts = find_row(&result, "broadcasts").expect("broadcasts row");
+    let broadcasts = find_row(&result, &broadcasts_name).expect("broadcasts row");
     assert_eq!(text(broadcasts, "mode"), "FANOUT");
 
     // `WITH DLQ failed_tasks` populates the dlq_target hot field.
-    let tasks = find_row(&result, "tasks").expect("tasks row");
-    assert_eq!(text(tasks, "dlq_target"), "failed_tasks");
+    let tasks = find_row(&result, &tasks_name).expect("tasks row");
+    assert_eq!(text(tasks, "dlq_target"), failed_tasks_name);
 }
 
 #[test]
 fn show_queues_desugar_repointed_and_hides_internal_dlq() {
+    let _guard = red_queues_test_lock().lock().unwrap();
     let rt = runtime();
+    let tasks_name = unique_ident("tasks");
+    let failed_tasks_name = unique_ident("failed_tasks");
+
     exec(
         &rt,
-        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 2",
+        &format!("CREATE QUEUE {tasks_name} WITH DLQ {failed_tasks_name} MAX_ATTEMPTS 2"),
     );
 
     // SHOW QUEUES → red.queues, internal DLQ-target queues hidden
     // by default.
     let visible = exec(&rt, "SHOW QUEUES");
     assert!(
-        find_row(&visible, "tasks").is_some(),
+        find_row(&visible, &tasks_name).is_some(),
         "user-declared queue must be visible: {:?}",
         rows(&visible)
     );
     assert!(
-        find_row(&visible, "failed_tasks").is_none(),
+        find_row(&visible, &failed_tasks_name).is_none(),
         "DLQ-target queue must be hidden by default: {:?}",
         rows(&visible)
     );
@@ -141,11 +167,11 @@ fn show_queues_desugar_repointed_and_hides_internal_dlq() {
     // INCLUDING INTERNAL surfaces the DLQ target.
     let with_internal = exec(&rt, "SHOW QUEUES INCLUDING INTERNAL");
     assert!(
-        find_row(&with_internal, "tasks").is_some(),
+        find_row(&with_internal, &tasks_name).is_some(),
         "user queue must still be present"
     );
     assert!(
-        find_row(&with_internal, "failed_tasks").is_some(),
+        find_row(&with_internal, &failed_tasks_name).is_some(),
         "INCLUDING INTERNAL must surface the DLQ target: {:?}",
         rows(&with_internal)
     );
@@ -153,26 +179,45 @@ fn show_queues_desugar_repointed_and_hides_internal_dlq() {
 
 #[test]
 fn total_pending_and_oldest_age_reflect_live_meta_state() {
+    let _guard = red_queues_test_lock().lock().unwrap();
     let rt = runtime();
-    exec(&rt, "CREATE QUEUE jobs");
-    exec(&rt, "QUEUE GROUP CREATE jobs workers");
+    let jobs_name = unique_ident("jobs");
+    let workers_name = unique_ident("workers");
+    let worker_name = unique_ident("worker");
+
+    exec(&rt, &format!("CREATE QUEUE {jobs_name}"));
+    exec(
+        &rt,
+        &format!("QUEUE GROUP CREATE {jobs_name} {workers_name}"),
+    );
 
     // Empty queue: total_pending = 0, oldest_pending_age NULL.
-    let initial = exec(&rt, "SELECT * FROM red.queues WHERE name = 'jobs'");
-    let row = find_row(&initial, "jobs").expect("jobs row");
+    let initial = exec(
+        &rt,
+        &format!("SELECT * FROM red.queues WHERE name = '{jobs_name}'"),
+    );
+    let row = find_row(&initial, &jobs_name).expect("jobs row");
     assert_eq!(uint(row, "total_pending"), 0);
     assert!(matches!(row.get("oldest_pending_age"), Some(Value::Null)));
 
-    // Push + read marks a delivery pending; the queue_pending row
-    // lives in `red_queue_meta`, which the snapshot scans.
-    exec(&rt, "QUEUE PUSH jobs 'first-job'");
-    let _ = exec(
+    // Push + read marks a delivery pending in `red_queue_meta`,
+    // which the snapshot scans.
+    exec(&rt, &format!("QUEUE PUSH {jobs_name} 'first-job'"));
+    let read = exec(
         &rt,
-        "QUEUE READ jobs GROUP workers CONSUMER worker1 COUNT 1",
+        &format!("QUEUE READ {jobs_name} GROUP {workers_name} CONSUMER {worker_name} COUNT 1"),
+    );
+    assert_eq!(
+        read.result.records.len(),
+        1,
+        "read should deliver one message"
     );
 
-    let after = exec(&rt, "SELECT * FROM red.queues WHERE name = 'jobs'");
-    let row = find_row(&after, "jobs").expect("jobs row after read");
+    let after = exec(
+        &rt,
+        &format!("SELECT * FROM red.queues WHERE name = '{jobs_name}'"),
+    );
+    let row = find_row(&after, &jobs_name).expect("jobs row after read");
     assert_eq!(
         uint(row, "total_pending"),
         1,
@@ -190,10 +235,12 @@ fn total_pending_and_oldest_age_reflect_live_meta_state() {
 
 #[test]
 fn show_queues_response_uses_red_queues_column_set() {
+    let _guard = red_queues_test_lock().lock().unwrap();
     // Belt-and-braces: pin that `SHOW QUEUES` returns the
     // queue-shaped column set, not the `red.collections` projection.
     let rt = runtime();
-    exec(&rt, "CREATE QUEUE jobs");
+    let jobs_name = unique_ident("jobs");
+    exec(&rt, &format!("CREATE QUEUE {jobs_name}"));
 
     let result = exec(&rt, "SHOW QUEUES");
     let cols: std::collections::HashSet<&str> =
@@ -215,7 +262,7 @@ fn show_queues_response_uses_red_queues_column_set() {
 
     // Read a row through to exercise the snapshot path (vs only the
     // declared schema).
-    let jobs = find_row(&result, "jobs").expect("jobs row in SHOW QUEUES");
+    let jobs = find_row(&result, &jobs_name).expect("jobs row in SHOW QUEUES");
     assert_eq!(text(jobs, "mode"), "WORK");
     // Drop unused warning suppression — message_id_of is reserved
     // for follow-up scenarios.

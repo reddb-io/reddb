@@ -57,6 +57,100 @@ fn insert_snapshot_sidecar(
     Ok(())
 }
 
+fn insert_basebackup_snapshot_fields(
+    map: &mut Map<String, JsonValue>,
+    manifest: &reddb_file::PrimaryReplicaBaseBackupManifest,
+    parts_root: &std::path::Path,
+    snapshot_offset: usize,
+) -> Result<(), Status> {
+    map.insert("basebackup_available".into(), JsonValue::Bool(true));
+    map.insert(
+        "basebackup_timeline".into(),
+        JsonValue::Number(manifest.timeline.0 as f64),
+    );
+    map.insert(
+        "basebackup_start_lsn".into(),
+        JsonValue::Number(manifest.start_lsn as f64),
+    );
+    map.insert(
+        "basebackup_checkpoint_lsn".into(),
+        JsonValue::Number(manifest.checkpoint_lsn as f64),
+    );
+    map.insert(
+        "basebackup_snapshot_bytes".into(),
+        JsonValue::Number(manifest.snapshot_bytes as f64),
+    );
+    map.insert(
+        "basebackup_snapshot_checksum".into(),
+        JsonValue::Number(manifest.snapshot_checksum as f64),
+    );
+    map.insert(
+        "basebackup_manifest_hex".into(),
+        JsonValue::String(hex::encode(manifest.encode())),
+    );
+    let chunks = manifest
+        .chunks
+        .iter()
+        .map(|chunk| {
+            let mut object = crate::json::Map::new();
+            object.insert("ordinal".into(), JsonValue::Number(chunk.ordinal as f64));
+            object.insert(
+                "snapshot_offset".into(),
+                JsonValue::Number(chunk.snapshot_offset as f64),
+            );
+            object.insert("bytes".into(), JsonValue::Number(chunk.bytes as f64));
+            object.insert("checksum".into(), JsonValue::Number(chunk.checksum as f64));
+            object.insert(
+                "relative_path".into(),
+                JsonValue::String(chunk.relative_path.display().to_string()),
+            );
+            JsonValue::Object(object)
+        })
+        .collect();
+    map.insert("basebackup_chunks".into(), JsonValue::Array(chunks));
+
+    if let Some(chunk) = manifest
+        .chunks
+        .iter()
+        .find(|chunk| chunk.snapshot_offset == snapshot_offset as u64)
+    {
+        let bytes = std::fs::read(parts_root.join(&chunk.relative_path))
+            .map_err(|err| Status::internal(err.to_string()))?;
+        manifest
+            .verify_chunk_bytes(chunk, &bytes)
+            .map_err(|err| Status::internal(err.to_string()))?;
+        map.insert(
+            "basebackup_chunk_ordinal".into(),
+            JsonValue::Number(chunk.ordinal as f64),
+        );
+        map.insert(
+            "basebackup_chunk_hex".into(),
+            JsonValue::String(hex::encode(bytes)),
+        );
+    }
+    Ok(())
+}
+
+fn replication_snapshot_token_lsn(token: &str) -> Option<u64> {
+    let mut parts = token.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("snapshot"), Some(_replica_id), Some(lsn), Some(_bytes)) => lsn.parse().ok(),
+        _ => None,
+    }
+}
+
+fn file_catchup_mode_to_wire(
+    mode: reddb_file::ReplicaCatchupMode,
+) -> reddb_wire::replication::CatchupMode {
+    match mode {
+        reddb_file::ReplicaCatchupMode::WalOnly => reddb_wire::replication::CatchupMode::Wal,
+        reddb_file::ReplicaCatchupMode::BaseBackupThenWal => {
+            reddb_wire::replication::CatchupMode::BaseBackupThenWal
+        }
+        reddb_file::ReplicaCatchupMode::Reclone => reddb_wire::replication::CatchupMode::Reclone,
+    }
+}
+
 /// Parse an optional unsigned-integer replication snapshot control header
 /// (issue #830 resumable transfer). Returns `Ok(None)` when the header is
 /// absent so callers can fall back to whole-snapshot behaviour.
@@ -415,6 +509,9 @@ impl RedDb for GrpcRuntime {
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let required = grpc_parse_serverless_readiness_requirements(&payload)
             .map_err(Status::invalid_argument)?;
+        self.native_use_cases()
+            .validate_current_serverless_generation()
+            .map_err(to_status)?;
         let readiness = self.native_use_cases().readiness();
         let (query_ready, write_ready, repair_ready) = (
             readiness.query_serverless,
@@ -475,6 +572,9 @@ impl RedDb for GrpcRuntime {
                 missing.join(", ")
             )));
         }
+        self.native_use_cases()
+            .validate_current_serverless_generation()
+            .map_err(to_status)?;
         let plan = self.admin_use_cases().build_serverless_warmup_plan(
             &self.catalog_use_cases().index_statuses(),
             &self.catalog_use_cases().graph_projection_statuses(),
@@ -1718,6 +1818,7 @@ impl RedDb for GrpcRuntime {
                 .query_use_cases()
                 .execute(ExecuteQueryInput { query: sql })
                 .map_err(to_status)?;
+            enforce_grpc_commit_policy_after_query_result(&self.runtime, &result)?;
             results.push(query_reply(result, &no_filter, &no_filter));
         }
         Ok(Response::new(BatchQueryReply { results }))
@@ -1795,6 +1896,7 @@ impl RedDb for GrpcRuntime {
         };
 
         let result = self.runtime.execute_query_expr(expr).map_err(to_status)?;
+        enforce_grpc_commit_policy_after_query_result(&self.runtime, &result)?;
         let no_filter: Option<Vec<String>> = None;
         Ok(Response::new(query_reply(result, &no_filter, &no_filter)))
     }
@@ -2612,7 +2714,9 @@ impl RedDb for GrpcRuntime {
         let runtime = self.runtime.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            runtime.execute_ask("ASK via gRPC", &ask_query).map_err(to_status)
+            runtime
+                .execute_ask("ASK via gRPC", &ask_query)
+                .map_err(to_status)
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))??;
@@ -2888,7 +2992,7 @@ impl RedDb for GrpcRuntime {
                             replica_json.insert(
                                 "lag_lsn".into(),
                                 JsonValue::Number(
-                                    head_lsn.saturating_sub(replica.last_acked_lsn) as f64,
+                                    head_lsn.saturating_sub(replica.last_acked_lsn) as f64
                                 ),
                             );
                             let lag_ms = now_ms.saturating_sub(replica.last_seen_at_unix_ms);
@@ -2922,17 +3026,20 @@ impl RedDb for GrpcRuntime {
                     }
                     let slots = repl
                         .slot_snapshots()
-                        .into_iter()
-                        .map(|slot| {
-                            let mut slot_json = crate::json::Map::new();
-                            slot_json.insert("id".into(), JsonValue::String(slot.id));
+                            .into_iter()
+                            .map(|slot| {
+                                let mut slot_json = crate::json::Map::new();
+                            slot_json.insert(
+                                "id".into(),
+                                JsonValue::String(slot.replica_id.clone()),
+                            );
                             slot_json.insert(
                                 "restart_lsn".into(),
                                 JsonValue::Number(slot.restart_lsn as f64),
                             );
                             slot_json.insert(
                                 "confirmed_lsn".into(),
-                                JsonValue::Number(slot.confirmed_lsn as f64),
+                                JsonValue::Number(slot.confirmed_lsn() as f64),
                             );
                             slot_json.insert(
                                 "invalidated".into(),
@@ -3017,13 +3124,14 @@ impl RedDb for GrpcRuntime {
             Status::failed_precondition("this instance is not a replication primary")
         })?;
 
-        let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
-        let mut since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
-        let max_count = json_usize_field(&payload, "max_count").unwrap_or(1000);
-        let await_data = json_bool_field(&payload, "await_data").unwrap_or(false);
-        let await_timeout_ms = json_usize_field(&payload, "await_timeout_ms")
-            .unwrap_or(30_000)
-            .clamp(1, 30_000) as u64;
+        let open = reddb_wire::replication::WalStreamOpen::decode_json(
+            request.into_inner().payload_json.as_bytes(),
+        )
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let mut since_lsn = open.since_lsn;
+        let max_count = open.max_count;
+        let await_data = open.await_data;
+        let await_timeout_ms = open.await_timeout_ms.clamp(1, 30_000);
         let mut current_lsn = repl
             .logical_wal_spool
             .as_ref()
@@ -3036,10 +3144,7 @@ impl RedDb for GrpcRuntime {
             .or_else(|| repl.wal_buffer.oldest_lsn());
         // PLAN.md Phase 11.4 — caller may identify itself so primary can
         // track per-replica `last_sent_lsn` and `last_seen_at_unix_ms`.
-        let replica_id = payload
-            .get("replica_id")
-            .and_then(JsonValue::as_str)
-            .map(|s| s.to_string());
+        let replica_id = open.replica_id;
 
         // A replica that fell behind within the retention window resumes
         // via a partial resync from its slot position; one past the
@@ -3049,21 +3154,32 @@ impl RedDb for GrpcRuntime {
             repl.ensure_replica_registered(id);
             match repl.plan_replica_resume(id, since_lsn, oldest_available_lsn) {
                 crate::replication::primary::ResumeMode::FullRebootstrap { cause } => {
-                    let mut map = crate::json::Map::new();
-                    map.insert("records".into(), JsonValue::Array(Vec::new()));
-                    map.insert("current_lsn".into(), JsonValue::Number(current_lsn as f64));
-                    if let Some(oldest) = oldest_available_lsn {
-                        map.insert(
-                            "oldest_available_lsn".into(),
-                            JsonValue::Number(oldest as f64),
-                        );
-                    }
-                    map.insert("needs_rebootstrap".into(), JsonValue::Bool(true));
-                    map.insert(
-                        "invalidation_reason".into(),
-                        JsonValue::String(cause.as_str().to_string()),
-                    );
-                    return Ok(Response::new(json_payload_reply(JsonValue::Object(map))));
+                    let available_from_lsn = oldest_available_lsn.unwrap_or(current_lsn);
+                    let catchup = self
+                        .runtime
+                        .primary_replica_catchup_mode(available_from_lsn, since_lsn)
+                        .map_err(to_status)?
+                        .map(|mode| reddb_wire::replication::CatchupModeReply {
+                            mode: file_catchup_mode_to_wire(mode),
+                            available_from_lsn: Some(available_from_lsn),
+                            replica_lsn: Some(since_lsn),
+                            reason: Some(cause.as_str().to_string()),
+                        });
+                    let chunk = reddb_wire::replication::WalStreamChunk {
+                        records: Vec::new(),
+                        current_lsn,
+                        oldest_available_lsn,
+                        partial_resync: false,
+                        partial_resync_count: repl.partial_resync_count(),
+                        needs_rebootstrap: true,
+                        invalidation_reason: Some(cause.as_str().to_string()),
+                        catchup,
+                    };
+                    return Ok(Response::new(PayloadReply {
+                        ok: true,
+                        payload: String::from_utf8(chunk.encode_json())
+                            .unwrap_or_else(|_| "{}".to_string()),
+                    }));
                 }
                 crate::replication::primary::ResumeMode::PartialResync { resume_lsn } => {
                     since_lsn = resume_lsn;
@@ -3110,10 +3226,10 @@ impl RedDb for GrpcRuntime {
         let mut entries = Vec::with_capacity(records.len());
         let mut max_sent_lsn = since_lsn;
         for (lsn, data) in &records {
-            let mut entry = crate::json::Map::new();
-            entry.insert("lsn".into(), JsonValue::Number(*lsn as f64));
-            entry.insert("data".into(), JsonValue::String(hex::encode(data.as_ref())));
-            entries.push(JsonValue::Object(entry));
+            entries.push(reddb_wire::replication::WalStreamRecord {
+                lsn: *lsn,
+                data: data.as_ref().to_vec(),
+            });
             if *lsn > max_sent_lsn {
                 max_sent_lsn = *lsn;
             }
@@ -3127,26 +3243,21 @@ impl RedDb for GrpcRuntime {
             repl.note_replica_pull(id, max_sent_lsn);
         }
 
-        let mut map = crate::json::Map::new();
-        map.insert("records".into(), JsonValue::Array(entries));
-        map.insert("current_lsn".into(), JsonValue::Number(current_lsn as f64));
-        if let Some(oldest) = oldest_available_lsn {
-            map.insert(
-                "oldest_available_lsn".into(),
-                JsonValue::Number(oldest as f64),
-            );
-        }
-        // Issue #832 — surface that this pull was served as a partial
-        // resync (resumed from the slot, no full re-bootstrap) plus the
-        // cumulative count, so a brief disconnect's recovery is visible
-        // in replica status/metrics.
-        map.insert("partial_resync".into(), JsonValue::Bool(partial_resync));
-        map.insert(
-            "partial_resync_count".into(),
-            JsonValue::Number(repl.partial_resync_count() as f64),
-        );
+        let chunk = reddb_wire::replication::WalStreamChunk {
+            records: entries,
+            current_lsn,
+            oldest_available_lsn,
+            partial_resync,
+            partial_resync_count: repl.partial_resync_count(),
+            needs_rebootstrap: false,
+            invalidation_reason: None,
+            catchup: None,
+        };
 
-        Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+        Ok(Response::new(PayloadReply {
+            ok: true,
+            payload: String::from_utf8(chunk.encode_json()).unwrap_or_else(|_| "{}".to_string()),
+        }))
     }
 
     /// PLAN.md Phase 11.4 — replica reports applied + durable LSN to the
@@ -3160,49 +3271,34 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         let authenticated_replica_id = self.authorize_replication_ack(&request)?;
         let db = self.runtime.db();
-        let repl = db.replication.as_ref().ok_or_else(|| {
+        db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
         })?;
 
-        let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
-        let replica_id = payload
-            .get("replica_id")
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| Status::invalid_argument("missing replica_id"))?
-            .to_string();
+        let ack = reddb_wire::replication::WalStreamAck::decode_json(
+            request.into_inner().payload_json.as_bytes(),
+        )
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let replica_id = ack.replica_id;
         if replica_id != authenticated_replica_id {
             return Err(Status::permission_denied(
                 "replica_id does not match authenticated identity",
             ));
         }
-        let applied_lsn = payload
-            .get("applied_lsn")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| Status::invalid_argument("missing applied_lsn"))?;
-        let durable_lsn = payload
-            .get("durable_lsn")
-            .and_then(JsonValue::as_u64)
-            .unwrap_or(applied_lsn);
-        let apply_errors_total = payload
-            .get("apply_errors_total")
-            .and_then(JsonValue::as_u64)
-            .unwrap_or(0);
-        let divergence_total = payload
-            .get("divergence_total")
-            .and_then(JsonValue::as_u64)
-            .unwrap_or(0);
+        let applied_lsn = ack.applied_lsn;
+        let durable_lsn = ack.durable_lsn;
+        let apply_errors_total = ack.apply_errors_total;
+        let divergence_total = ack.divergence_total;
 
-        repl.ack_replica_lsn_with_observability(
-            &authenticated_replica_id,
-            applied_lsn,
-            durable_lsn,
-            apply_errors_total,
-            divergence_total,
-        );
-        // Issue #826 — an ack moves a replica forward; re-evaluate flow
-        // control so the throttle releases as soon as an in-quorum
-        // member catches up below the soft target.
-        self.runtime.refresh_replication_flow_control();
+        self.runtime
+            .ack_primary_replica_lsn_and_prune(
+                &authenticated_replica_id,
+                applied_lsn,
+                durable_lsn,
+                apply_errors_total,
+                divergence_total,
+            )
+            .map_err(to_status)?;
 
         let mut reply = crate::json::Map::new();
         reply.insert("ok".into(), JsonValue::Bool(true));
@@ -3254,6 +3350,35 @@ impl RedDb for GrpcRuntime {
             .as_ref()
             .map(|spool| spool.current_lsn())
             .unwrap_or_else(|| repl.wal_buffer.current_lsn());
+        let basebackup_chunk_bytes = snapshot_max_bytes.unwrap_or(4 * 1024 * 1024).max(1);
+        let resumed_basebackup_lsn = requested_snapshot_token
+            .as_deref()
+            .and_then(replication_snapshot_token_lsn);
+        let basebackup_manifest = if let Some(checkpoint_lsn) = resumed_basebackup_lsn {
+            if let Some(plan) = self.runtime.primary_replica_file_plan() {
+                let backup = reddb_file::BaseBackupPlan::new(
+                    reddb_file::TimelineId::initial(),
+                    0,
+                    checkpoint_lsn,
+                );
+                Some(
+                    reddb_file::PrimaryReplicaBaseBackupManifest::read_from_path(
+                        plan.basebackup_path(&backup),
+                    )
+                    .map_err(|err| {
+                        Status::failed_precondition(format!(
+                            "snapshot token basebackup is not available: {err}"
+                        ))
+                    })?,
+                )
+            } else {
+                None
+            }
+        } else {
+            self.runtime
+                .create_primary_replica_basebackup(basebackup_chunk_bytes)
+                .map_err(to_status)?
+        };
 
         let mut map = crate::json::Map::new();
         map.insert("snapshot_available".into(), JsonValue::Bool(true));
@@ -3262,14 +3387,23 @@ impl RedDb for GrpcRuntime {
             "slot_restart_lsn".into(),
             JsonValue::Number(slot_restart_lsn as f64),
         );
+        if let Some(manifest) = &basebackup_manifest {
+            if let Some(plan) = self.runtime.primary_replica_file_plan() {
+                insert_basebackup_snapshot_fields(
+                    &mut map,
+                    manifest,
+                    &plan.basebackup_dir(),
+                    snapshot_offset,
+                )?;
+            }
+        }
         if let Some(path) = db.path() {
             let bytes = std::fs::read(path).map_err(|e| Status::internal(e.to_string()))?;
             // A resumable snapshot token is keyed to the replica, the pinned
             // snapshot LSN, and the total size so a resuming caller is matched
             // to the same byte stream it started.
-            let snapshot_token = requested_snapshot_token.unwrap_or_else(|| {
-                format!("snapshot:{replica_id}:{snapshot_lsn}:{}", bytes.len())
-            });
+            let snapshot_token = requested_snapshot_token
+                .unwrap_or_else(|| format!("snapshot:{replica_id}:{snapshot_lsn}:{}", bytes.len()));
             map.insert(
                 "snapshot_token".into(),
                 JsonValue::String(snapshot_token.clone()),
@@ -3351,7 +3485,14 @@ impl RedDb for GrpcRuntime {
             JsonValue::Number(snapshot_lsn as f64),
         );
 
-        Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+        let payload_json = crate::json::to_string(&JsonValue::Object(map))
+            .map_err(|err| Status::internal(format!("encode replication snapshot: {err}")))?;
+        let chunk = reddb_wire::replication::BaseBackupChunk::decode_json(payload_json.as_bytes())
+            .map_err(|err| Status::internal(format!("validate replication snapshot: {err}")))?;
+        Ok(Response::new(PayloadReply {
+            ok: true,
+            payload: String::from_utf8(chunk.encode_json()).unwrap_or_else(|_| "{}".to_string()),
+        }))
     }
 
     async fn submit_ask_side_effects(

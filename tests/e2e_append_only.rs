@@ -11,7 +11,6 @@
 //! mutator is the only moving piece.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::physical::InferredSegmentLayout;
 use reddb::{QueryUseCases, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
@@ -35,14 +34,6 @@ fn append_only_table_accepts_inserts() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);
     exec(&q, "CREATE TABLE audit_log (id INT, msg TEXT) APPEND ONLY");
-    let contract = rt
-        .db()
-        .collection_contract("audit_log")
-        .expect("append-only contract");
-    assert_eq!(
-        contract.inferred_segment_layout(),
-        InferredSegmentLayout::AppendOnlySegmentV0
-    );
     exec(&q, "INSERT INTO audit_log (id, msg) VALUES (1, 'hello')");
     exec(&q, "INSERT INTO audit_log (id, msg) VALUES (2, 'world')");
     let result = q
@@ -113,15 +104,6 @@ fn non_append_only_table_keeps_mutable_semantics() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);
     exec(&q, "CREATE TABLE users (id INT, name TEXT)");
-    let contract = rt
-        .db()
-        .collection_contract("users")
-        .expect("table contract");
-    assert!(!contract.append_only);
-    assert_eq!(
-        contract.inferred_segment_layout(),
-        InferredSegmentLayout::Row
-    );
     exec(&q, "INSERT INTO users (id, name) VALUES (1, 'alice')");
     // UPDATE must succeed — default is mutable.
     exec(&q, "UPDATE users SET name = 'bob' WHERE id = 1");

@@ -5,13 +5,17 @@
 //! drivers depend on. It deliberately has no dependency on the
 //! engine, storage, or runtime modules.
 //!
-//! Today it exposes the [`conn_string`] connection-string parser.
-//! Future slices will add the RedWire frame layout, header types,
-//! and framing codec (see ADR 0001 in `.red/adr/`).
+//! It owns the shared connection-string parser, audit-safe sanitizers,
+//! RedWire frame layout and codec, handshake payloads, topology payloads,
+//! query parameter encoding, queue/stream payloads, and replication wire
+//! messages. Listener loops, authentication policy, SQL dispatch, and
+//! runtime integration stay in `reddb-server`.
 
 pub mod conn_string;
+pub mod legacy;
 pub mod query_with_params;
 pub mod redwire;
+pub mod replication;
 pub mod sanitizer;
 pub mod topology;
 

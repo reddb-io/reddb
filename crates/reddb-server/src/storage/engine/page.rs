@@ -29,10 +29,10 @@
 use super::crc32::crc32;
 
 /// Page size in bytes (16KB, matching InnoDB's default for higher B-tree fanout)
-pub const PAGE_SIZE: usize = 16384;
+pub use reddb_file::PAGED_PAGE_SIZE as PAGE_SIZE;
 
 /// Header size in bytes
-pub const HEADER_SIZE: usize = 32;
+pub use reddb_file::PAGED_PAGE_HEADER_SIZE as HEADER_SIZE;
 
 /// Content area size (page minus header)
 pub const CONTENT_SIZE: usize = PAGE_SIZE - HEADER_SIZE;
@@ -40,11 +40,7 @@ pub const CONTENT_SIZE: usize = PAGE_SIZE - HEADER_SIZE;
 /// Maximum number of cells per page (limited by cell pointer array)
 pub const MAX_CELLS: usize = (CONTENT_SIZE - 4) / 6; // ~2724 cells
 
-/// Magic bytes for database file identification
-pub const MAGIC_BYTES: [u8; 4] = [0x52, 0x44, 0x44, 0x42]; // "RDDB"
-
-/// Database file version (1.0.0)
-pub const DB_VERSION: u32 = 0x00010000;
+pub use reddb_file::{PAGE_FILE_MAGIC as MAGIC_BYTES, PAGE_FILE_VERSION as DB_VERSION};
 
 /// Page type enumeration
 ///
@@ -212,39 +208,37 @@ impl PageHeader {
 
     /// Serialize header to bytes
     pub fn to_bytes(&self) -> [u8; HEADER_SIZE] {
-        let mut buf = [0u8; HEADER_SIZE];
-
-        buf[0] = self.page_type as u8;
-        buf[1] = self.flags;
-        buf[2..4].copy_from_slice(&self.cell_count.to_le_bytes());
-        buf[4..6].copy_from_slice(&self.free_start.to_le_bytes());
-        buf[6..8].copy_from_slice(&self.free_end.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.page_id.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.parent_id.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.right_child.to_le_bytes());
-        buf[20..28].copy_from_slice(&self.lsn.to_le_bytes());
-        buf[28..32].copy_from_slice(&self.checksum.to_le_bytes());
-
-        buf
+        reddb_file::encode_paged_page_header(&reddb_file::PagedPageHeader {
+            page_type: self.page_type as u8,
+            flags: self.flags,
+            cell_count: self.cell_count,
+            free_start: self.free_start,
+            free_end: self.free_end,
+            page_id: self.page_id,
+            parent_id: self.parent_id,
+            right_child: self.right_child,
+            lsn: self.lsn,
+            checksum: self.checksum,
+        })
     }
 
     /// Deserialize header from bytes
     pub fn from_bytes(buf: &[u8; HEADER_SIZE]) -> Result<Self, PageError> {
-        let page_type = PageType::from_u8(buf[0]).ok_or(PageError::InvalidPageType(buf[0]))?;
+        let raw = reddb_file::decode_paged_page_header(buf);
+        let page_type =
+            PageType::from_u8(raw.page_type).ok_or(PageError::InvalidPageType(raw.page_type))?;
 
         Ok(Self {
             page_type,
-            flags: buf[1],
-            cell_count: u16::from_le_bytes([buf[2], buf[3]]),
-            free_start: u16::from_le_bytes([buf[4], buf[5]]),
-            free_end: u16::from_le_bytes([buf[6], buf[7]]),
-            page_id: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
-            parent_id: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
-            right_child: u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
-            lsn: u64::from_le_bytes([
-                buf[20], buf[21], buf[22], buf[23], buf[24], buf[25], buf[26], buf[27],
-            ]),
-            checksum: u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]),
+            flags: raw.flags,
+            cell_count: raw.cell_count,
+            free_start: raw.free_start,
+            free_end: raw.free_end,
+            page_id: raw.page_id,
+            parent_id: raw.parent_id,
+            right_child: raw.right_child,
+            lsn: raw.lsn,
+            checksum: raw.checksum,
         })
     }
 

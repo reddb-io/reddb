@@ -15,14 +15,12 @@
 //! Waiters wake, recompute the count of replicas at or past their
 //! target, and either return `Ok(count)` or re-wait.
 //!
-//! ## Why this is just the foundation
+//! ## Runtime integration
 //!
-//! The actual write commit path doesn't yet call `await_acks` —
-//! wiring it in touches every public mutation surface and changes
-//! latency characteristics across the board. This module ships the
-//! primitive + the ack registry so the wiring change can land as
-//! one focused PR per surface (HTTP, gRPC, wire protocol) rather
-//! than a single massive diff.
+//! Public mutation surfaces call `RedDBRuntime::enforce_commit_policy`
+//! after successful writes. That runtime method maps `ack_n` to this
+//! waiter and decides whether a timeout is soft telemetry or a hard
+//! client-visible failure based on `RED_COMMIT_FAIL_ON_TIMEOUT`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

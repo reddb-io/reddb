@@ -2,7 +2,7 @@
 //!
 //! The Rust driver's `Auth` enum doesn't currently expose an
 //! `OauthJwt` variant, so this smoke speaks the wire protocol
-//! directly using `reddb_client::redwire::codec` + `Frame`.
+//! directly using `reddb_wire::redwire` frames.
 //! Once an `Auth::OauthJwt(token)` variant ships in the driver,
 //! this test should be rewritten to use it; the framing here
 //! mirrors what that variant must produce.
@@ -25,8 +25,8 @@ use reddb::api::RedDBOptions;
 use reddb::auth::{OAuthConfig, OAuthIdentityMode, OAuthValidator, Role};
 use reddb::wire::redwire::{start_redwire_listener, RedWireConfig};
 use reddb::RedDBRuntime;
-use reddb_client::redwire::codec::{decode_frame, encode_frame};
 use reddb_client::redwire::{Frame, MessageKind, MAGIC, SUPPORTED_VERSION};
+use reddb_wire::redwire::{decode_frame, encode_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 

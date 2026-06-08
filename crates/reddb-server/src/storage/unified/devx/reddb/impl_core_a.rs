@@ -21,12 +21,6 @@ fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
         .with_durability_mode(options.durability_mode)
         .with_group_commit(options.group_commit);
     config.auto_index_id = options.auto_index_id;
-    if options.storage_profile.deploy_profile == crate::storage::profile::DeployProfile::Cluster {
-        if let Some((_, paths)) = options.resolve_tiered_layout() {
-            config.cluster_range_layout =
-                Some(crate::storage::ClusterRangeLayout::new(paths.support_dir));
-        }
-    }
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {
@@ -51,6 +45,130 @@ fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
         }
     }
     config.with_group_commit(group_commit)
+}
+
+fn embedded_single_file_selected(options: &RedDBOptions) -> bool {
+    options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
+        && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile
+}
+
+fn fsync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = File::open(parent).and_then(|dir| dir.sync_all());
+    }
+}
+
+fn active_rebootstrap_matches_ready_marker(
+    data_path: &Path,
+    ready: &crate::replication::replica::ReplicaRebootstrapReady,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let artifact = crate::storage::EmbeddedRdbArtifact::open(data_path).map_err(|err| {
+        format!(
+            "open active replica rebootstrap candidate {}: {err}",
+            data_path.display()
+        )
+    })?;
+    let Some(snapshot) =
+        crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact).map_err(|err| {
+            format!(
+                "read active replica rebootstrap candidate {}: {err}",
+                data_path.display()
+            )
+        })?
+    else {
+        return Ok(false);
+    };
+    let store = UnifiedStore::load_from_bytes_with_config(
+        &snapshot,
+        crate::storage::unified::UnifiedStoreConfig::default(),
+    )
+    .map_err(|err| {
+        format!(
+            "decode active replica rebootstrap candidate {}: {err}",
+            data_path.display()
+        )
+    })?;
+    Ok(matches!(
+        store.get_config("red.replication.last_applied_lsn"),
+        Some(crate::storage::schema::Value::Integer(value))
+            if value >= 0 && value as u64 == ready.checkpoint_lsn
+    ) || matches!(
+        store.get_config("red.replication.last_applied_lsn"),
+        Some(crate::storage::schema::Value::UnsignedInteger(value))
+            if value == ready.checkpoint_lsn
+    ))
+}
+
+fn promote_ready_replica_rebootstrap(
+    data_path: &Path,
+    read_only: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let marker = crate::replication::replica::rebootstrap_ready_marker_path_for(data_path);
+    if !marker.exists() {
+        return Ok(false);
+    }
+    if read_only {
+        return Err(format!(
+            "replica rebootstrap is ready but database opened read-only: {}",
+            marker.display()
+        )
+        .into());
+    }
+
+    let ready =
+        crate::replication::replica::read_rebootstrap_ready_marker(data_path).map_err(|err| {
+            format!(
+                "read pending replica rebootstrap marker {}: {err}",
+                marker.display()
+            )
+        })?;
+    let pending = ready.pending_path.clone();
+    if !pending.exists() {
+        if data_path.exists() {
+            if active_rebootstrap_matches_ready_marker(data_path, &ready)? {
+                std::fs::remove_file(&marker)?;
+                fsync_parent_dir(&marker);
+                return Ok(false);
+            }
+        }
+        return Err(format!(
+            "replica rebootstrap marker exists but pending database is missing: {}",
+            pending.display()
+        )
+        .into());
+    }
+
+    let artifact = crate::storage::EmbeddedRdbArtifact::open(&pending).map_err(|err| {
+        format!(
+            "open pending replica rebootstrap {}: {err}",
+            pending.display()
+        )
+    })?;
+    crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact).map_err(|err| {
+        format!(
+            "validate pending replica rebootstrap {}: {err}",
+            pending.display()
+        )
+    })?;
+
+    if let Some(parent) = data_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let previous = crate::replication::replica::rebootstrap_previous_path_for(data_path);
+    let _ = std::fs::remove_file(&previous);
+    if data_path.exists() {
+        std::fs::rename(data_path, &previous)?;
+        fsync_parent_dir(data_path);
+    }
+    std::fs::rename(&pending, data_path)?;
+    fsync_parent_dir(data_path);
+    std::fs::remove_file(&marker)?;
+    fsync_parent_dir(&marker);
+    let _ = std::fs::remove_dir_all(crate::replication::replica::rebootstrap_staging_root_for(
+        data_path,
+    ));
+    Ok(true)
 }
 
 impl RedDB {
@@ -187,13 +305,26 @@ impl RedDB {
         // Must run before any physical-layer call site reads the
         // toggles, so it sits at the top of open_with_options.
         options.apply_tier_defaults();
-        if let Some((_, paths)) = options.resolve_tiered_layout() {
-            if let Err(err) = paths.ensure_dirs() {
-                tracing::warn!(
-                    target: "reddb::tier_wiring",
-                    error = %err,
-                    support_dir = %paths.support_dir.display(),
-                    "failed to ensure tier support directories; continuing with degraded layout"
+        if !embedded_single_file_selected(options) {
+            if let Some((_, paths)) = options.resolve_tiered_layout() {
+                if let Err(err) = paths.ensure_dirs() {
+                    tracing::warn!(
+                        target: "reddb::tier_wiring",
+                        error = %err,
+                        support_dir = %paths.support_dir.display(),
+                        "failed to ensure tier support directories; continuing with degraded layout"
+                    );
+                }
+            }
+        }
+
+        if embedded_single_file_selected(options) {
+            let local_path = options.resolved_path("data.rdb");
+            if promote_ready_replica_rebootstrap(&local_path, options.read_only)? {
+                tracing::info!(
+                    target: "reddb::replication::rebootstrap",
+                    path = %local_path.display(),
+                    "promoted staged replica rebootstrap before opening database"
                 );
             }
         }
@@ -292,8 +423,75 @@ impl RedDB {
         }
 
         let path_buf = options.resolved_path("data.rdb");
-        let store_config = store_config_from_options(options);
-        let (store, path, paged_mode) = if path_buf.exists() {
+        let mut store_config = store_config_from_options(options);
+        if embedded_single_file_selected(options) {
+            store_config = store_config.with_embedded_wal_path(path_buf.clone());
+        }
+        let embedded_open = if embedded_single_file_selected(options) {
+            if path_buf.exists() {
+                match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
+                    Ok(artifact) => {
+                        let store =
+                            match crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)? {
+                                Some(snapshot) => UnifiedStore::load_from_bytes_with_config(
+                                    &snapshot,
+                                    store_config.clone(),
+                                )?,
+                                None => UnifiedStore::with_config(store_config.clone()),
+                            };
+                        for payload in
+                            crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&artifact)?
+                        {
+                            store
+                                .apply_encoded_store_wal_action(&payload)
+                                .map_err(|err| format!("replay embedded rdb wal action: {err}"))?;
+                        }
+                        Some((store, Some(path_buf.clone()), false))
+                    }
+                    Err(_) if Self::is_binary_dump(&path_buf)? => {
+                        let snapshot = std::fs::read(&path_buf).map_err(|err| {
+                            format!(
+                                "read legacy embedded snapshot {}: {err}",
+                                path_buf.display()
+                            )
+                        })?;
+                        let store = UnifiedStore::load_from_bytes_with_config(
+                            &snapshot,
+                            store_config.clone(),
+                        )
+                        .map_err(|err| format!("load legacy embedded snapshot: {err}"))?;
+                        crate::storage::EmbeddedRdbArtifact::create_with_snapshot(
+                            &path_buf, &snapshot,
+                        )
+                        .map_err(|err| format!("promote legacy snapshot to embedded rdb: {err}"))?;
+                        Some((store, Some(path_buf.clone()), false))
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                if !options.create_if_missing {
+                    return Err(format!(
+                        "database path does not exist and create_if_missing is false: {}",
+                        path_buf.display()
+                    )
+                    .into());
+                }
+                crate::storage::EmbeddedRdbArtifact::create(&path_buf).map_err(|err| {
+                    format!("create embedded rdb artifact {}: {err}", path_buf.display())
+                })?;
+                Some((
+                    UnifiedStore::with_config(store_config.clone()),
+                    Some(path_buf.clone()),
+                    false,
+                ))
+            }
+        } else {
+            None
+        };
+
+        let (store, path, paged_mode) = if let Some(opened) = embedded_open {
+            opened
+        } else if path_buf.exists() {
             if Self::is_binary_dump(&path_buf)? {
                 (
                     UnifiedStore::load_from_file(&path_buf)?,
@@ -368,6 +566,7 @@ impl RedDB {
             turbo_rebuild_workers: parking_lot::Mutex::new(Vec::new()),
         }
         .with_initialized_metadata()
+        .map_err(|err| format!("initialize RedDB metadata: {err}").into())
     }
 
     /// Flush changes to disk (if persistence is enabled).
@@ -393,6 +592,9 @@ impl RedDB {
         if let Some(path) = &self.path {
             if self.paged_mode {
                 self.store.persist()?;
+            } else if embedded_single_file_selected(&self.options) {
+                let snapshot = self.store.to_binary_dump_bytes();
+                crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot)?;
             } else {
                 self.store.save_to_file(path)?;
             }

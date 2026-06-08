@@ -43,10 +43,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const SHM_MAGIC: &[u8; 8] = b"RDBSHM01";
-pub const SHM_VERSION: u32 = 1;
-pub const SHM_HEADER_SIZE: usize = 64;
-pub const SHM_FILE_SIZE: u64 = 4096;
+pub use reddb_file::{ShmHeader, SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION};
 
 static SHM_POLICY: AtomicU8 = AtomicU8::new(0);
 
@@ -72,15 +69,7 @@ pub fn shm_provisioning_enabled() -> bool {
 
 /// Sibling path of the `-shm` substrate file for a given data file.
 pub fn shm_path_for(data_path: &Path) -> PathBuf {
-    let file_name = data_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "data.rdb".to_string());
-    let shm_file = format!("{file_name}-shm");
-    match data_path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(shm_file),
-        _ => PathBuf::from(shm_file),
-    }
+    reddb_file::layout::shm_path(data_path)
 }
 
 /// Outcome of a provisioning attempt — distinguishes a clean takeover
@@ -95,54 +84,6 @@ pub enum ShmProvisionState {
     RecoveredFromCrash,
     /// File existed but the header was unreadable; reinitialised.
     HealedCorruptHeader,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShmHeader {
-    pub version: u32,
-    pub owner_pid: u32,
-    pub generation: u64,
-    pub reader_count: u64,
-    pub last_heartbeat_ms: u64,
-}
-
-impl ShmHeader {
-    fn encode(&self) -> [u8; SHM_HEADER_SIZE] {
-        let mut buf = [0u8; SHM_HEADER_SIZE];
-        buf[0..8].copy_from_slice(SHM_MAGIC);
-        buf[8..12].copy_from_slice(&self.version.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.owner_pid.to_le_bytes());
-        buf[16..24].copy_from_slice(&self.generation.to_le_bytes());
-        buf[24..32].copy_from_slice(&self.reader_count.to_le_bytes());
-        buf[32..40].copy_from_slice(&self.last_heartbeat_ms.to_le_bytes());
-        let checksum = fold_checksum(&buf[..56]);
-        buf[56..64].copy_from_slice(&checksum.to_le_bytes());
-        buf
-    }
-
-    fn decode(buf: &[u8; SHM_HEADER_SIZE]) -> io::Result<Self> {
-        if &buf[0..8] != SHM_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "shm magic mismatch",
-            ));
-        }
-        let stored_checksum = u64::from_le_bytes(buf[56..64].try_into().unwrap());
-        let computed = fold_checksum(&buf[..56]);
-        if stored_checksum != computed {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "shm checksum mismatch",
-            ));
-        }
-        Ok(Self {
-            version: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
-            owner_pid: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
-            generation: u64::from_le_bytes(buf[16..24].try_into().unwrap()),
-            reader_count: u64::from_le_bytes(buf[24..32].try_into().unwrap()),
-            last_heartbeat_ms: u64::from_le_bytes(buf[32..40].try_into().unwrap()),
-        })
-    }
 }
 
 /// Handle to the provisioned `-shm` file. Drop semantics intentionally
@@ -310,15 +251,6 @@ pub fn read_shm_header(data_path: &Path) -> io::Result<Option<ShmHeader>> {
     let mut buf = [0u8; SHM_HEADER_SIZE];
     file.read_exact(&mut buf)?;
     ShmHeader::decode(&buf).map(Some)
-}
-
-fn fold_checksum(bytes: &[u8]) -> u64 {
-    let mut acc: u64 = 0xcbf29ce484222325;
-    for &byte in bytes {
-        acc ^= byte as u64;
-        acc = acc.wrapping_mul(0x100000001b3);
-    }
-    acc
 }
 
 fn unix_ms_now() -> u64 {
