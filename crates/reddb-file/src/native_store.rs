@@ -37,6 +37,10 @@ pub const NATIVE_MANIFEST_SAMPLE_LIMIT: usize = 16;
 pub const ENTITY_RECORD_MAGIC: &[u8; 4] = b"RER1";
 pub const METADATA_OVERFLOW_MAGIC: &[u8; 4] = b"RDM3";
 
+pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
+    bytes.len() >= STORE_MAGIC.len() && &bytes[..STORE_MAGIC.len()] == STORE_MAGIC
+}
+
 pub fn is_supported_store_version(version: u32) -> bool {
     matches!(
         version,
@@ -1263,6 +1267,13 @@ mod tests {
         append_native_store_crc32_footer(&mut corrupt);
         corrupt[8] ^= 0xff;
         assert!(verify_native_store_crc32_footer(&mut corrupt, STORE_VERSION_CURRENT).is_err());
+    }
+
+    #[test]
+    fn native_store_magic_matcher_is_canonical() {
+        assert!(native_store_magic_matches(b"RDSTpayload"));
+        assert!(!native_store_magic_matches(b"RDS"));
+        assert!(!native_store_magic_matches(b"NOPEpayload"));
     }
 
     #[test]

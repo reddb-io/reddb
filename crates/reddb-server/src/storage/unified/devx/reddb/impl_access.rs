@@ -1529,6 +1529,6 @@ impl RedDB {
         let mut file = File::open(path)?;
         let mut magic = [0u8; 4];
         let read = file.read(&mut magic)?;
-        Ok(read == 4 && &magic == b"RDST")
+        Ok(read == 4 && reddb_file::native_store_magic_matches(&magic))
     }
 }
