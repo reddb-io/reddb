@@ -142,6 +142,49 @@ fn client_redwire_has_single_frame_io_adapter() {
 }
 
 #[test]
+fn redwire_startup_preface_lives_in_reddb_wire() {
+    let root = repo_root();
+    let client = read(root.join("crates/reddb-client/src/redwire/mod.rs"));
+    let listener = read(root.join("crates/reddb-server/src/wire/redwire/listener.rs"));
+    let session = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
+    let wire = read(root.join("crates/reddb-wire/src/redwire/mod.rs"));
+
+    for forbidden in [
+        "write_all(&[MAGIC, SUPPORTED_VERSION])",
+        "write_all(&[reddb_wire::redwire::REDWIRE_MAGIC",
+    ] {
+        assert!(
+            !client.contains(forbidden),
+            "client must get startup preface bytes from reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for forbidden in ["magic[0] != REDWIRE_MAGIC", "got 0x{:02x}"] {
+        assert!(
+            !listener.contains(forbidden),
+            "server listener must validate startup magic through reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    assert!(
+        !session.contains("minor > MAX_KNOWN_MINOR_VERSION"),
+        "server session must validate startup minor version through reddb-wire"
+    );
+
+    for required in [
+        "supported_client_preface",
+        "validate_startup_magic",
+        "validate_minor_version",
+        "StartupError",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire should own startup preface contract {required}"
+        );
+    }
+}
+
+#[test]
 fn client_redwire_bulk_binary_value_tags_come_from_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-client/src/redwire/mod.rs"));

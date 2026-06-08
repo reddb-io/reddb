@@ -90,3 +90,81 @@ pub const MAX_KNOWN_MINOR_VERSION: u8 = 0x01;
 
 /// Default port for the RedWire listener.
 pub const DEFAULT_REDWIRE_PORT: u16 = 5050;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupError {
+    BadMagic { got: u8 },
+    UnsupportedMinor { got: u8, max: u8 },
+}
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadMagic { got } => {
+                write!(
+                    f,
+                    "redwire: client did not present magic byte (got 0x{got:02x})"
+                )
+            }
+            Self::UnsupportedMinor { got, max } => {
+                write!(
+                    f,
+                    "redwire: unsupported minor version {got}; max supported is {max}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StartupError {}
+
+pub fn client_preface(minor: u8) -> [u8; 2] {
+    [REDWIRE_MAGIC, minor]
+}
+
+pub fn supported_client_preface() -> [u8; 2] {
+    client_preface(MAX_KNOWN_MINOR_VERSION)
+}
+
+pub fn validate_startup_magic(got: u8) -> Result<(), StartupError> {
+    if got == REDWIRE_MAGIC {
+        Ok(())
+    } else {
+        Err(StartupError::BadMagic { got })
+    }
+}
+
+pub fn validate_minor_version(got: u8) -> Result<(), StartupError> {
+    if got <= MAX_KNOWN_MINOR_VERSION {
+        Ok(())
+    } else {
+        Err(StartupError::UnsupportedMinor {
+            got,
+            max: MAX_KNOWN_MINOR_VERSION,
+        })
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn preface_uses_magic_and_supported_minor() {
+        assert_eq!(supported_client_preface(), [0xfe, MAX_KNOWN_MINOR_VERSION]);
+    }
+
+    #[test]
+    fn startup_validation_rejects_bad_magic_and_future_minor() {
+        assert_eq!(validate_startup_magic(REDWIRE_MAGIC), Ok(()));
+        assert!(matches!(
+            validate_startup_magic(0),
+            Err(StartupError::BadMagic { got: 0 })
+        ));
+        assert_eq!(validate_minor_version(MAX_KNOWN_MINOR_VERSION), Ok(()));
+        assert!(matches!(
+            validate_minor_version(MAX_KNOWN_MINOR_VERSION.saturating_add(1)),
+            Err(StartupError::UnsupportedMinor { .. })
+        ));
+    }
+}

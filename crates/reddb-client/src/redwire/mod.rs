@@ -48,7 +48,7 @@ use reddb_wire::legacy::WireValue;
 use reddb_wire::redwire::{
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
     encode_bulk_binary_payload, encode_bulk_insert_payload, encode_insert_payload,
-    encode_key_payload,
+    encode_key_payload, supported_client_preface,
 };
 
 /// Magic byte that identifies a RedWire connection on the shared port.
@@ -192,7 +192,7 @@ impl RedWireClient {
 
         // Discriminator + minor-version byte.
         stream
-            .write_all(&[MAGIC, SUPPORTED_VERSION])
+            .write_all(&supported_client_preface())
             .await
             .map_err(io_err)?;
 
