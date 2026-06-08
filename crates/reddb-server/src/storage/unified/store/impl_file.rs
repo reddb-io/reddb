@@ -44,10 +44,10 @@ impl UnifiedStore {
 
     /// Load store from binary file
     ///
-    /// Binary format:
+    /// Binary dump framing is defined by `reddb_file::native_store`.
+    ///
+    /// Store payload shape:
     /// ```text
-    /// [magic: 4 bytes "RDST"]
-    /// [version: u32]
     /// [collection_count: varu32]
     /// [collections...]
     /// [cross_ref_count: varu32]

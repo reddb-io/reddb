@@ -319,6 +319,11 @@ fn server_does_not_redeclare_native_store_file_contracts() {
             .join("crates/reddb-server/src/storage/unified/store")
             .to_path_buf(),
     );
+    let server_unified_files = rust_files_under(
+        &root
+            .join("crates/reddb-server/src/storage/unified")
+            .to_path_buf(),
+    );
 
     for forbidden in [
         "const STORE_MAGIC",
@@ -375,6 +380,7 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub fn is_supported_store_version",
         "pub fn encode_native_store_header",
         "pub fn decode_native_store_header",
+        "pub fn native_store_magic_matches",
         "pub fn append_native_store_crc32_footer",
         "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
@@ -451,6 +457,15 @@ fn server_does_not_redeclare_native_store_file_contracts() {
                 path.display()
             );
         }
+    }
+
+    for path in server_unified_files {
+        let text = read(&path);
+        assert!(
+            !text.contains("b\"RDST\""),
+            "{} must delegate native store magic matching to reddb-file",
+            path.display()
+        );
     }
 
     let impl_file = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
