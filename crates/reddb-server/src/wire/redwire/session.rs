@@ -33,8 +33,8 @@ use reddb_wire::redwire::handshake::{
 };
 use reddb_wire::redwire::{
     build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame, decode_frame,
-    encode_frame, frame_len_from_header, Frame, MessageDirection, MessageKind, FRAME_HEADER_SIZE,
-    MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
+    decode_frame_parts, encode_frame, frame_len_from_header, Frame, MessageDirection, MessageKind,
+    FRAME_HEADER_SIZE, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
 };
 
 #[derive(Debug)]
@@ -151,7 +151,7 @@ where
                 .read_exact(&mut buf[FRAME_HEADER_SIZE..length])
                 .await?;
         }
-        let (frame, _) = decode_frame(&buf[..length])
+        let frame = decode_frame_parts(&header, &buf[FRAME_HEADER_SIZE..length])
             .map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
 
         // Catalog-driven direction gate: server-only kinds (PreparedOk,
@@ -1103,15 +1103,13 @@ where
     stream.read_exact(&mut header).await?;
     let length = frame_len_from_header(&header)
         .map_err(|err| io::Error::other(format!("decode frame header: {err}")))?;
-    let mut buf = vec![0u8; length];
-    buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
+    let payload_len = length - FRAME_HEADER_SIZE;
+    let mut payload = vec![0u8; payload_len];
     if length > FRAME_HEADER_SIZE {
-        stream
-            .read_exact(&mut buf[FRAME_HEADER_SIZE..length])
-            .await?;
+        stream.read_exact(&mut payload).await?;
     }
-    let (frame, _) =
-        decode_frame(&buf).map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
+    let frame = decode_frame_parts(&header, &payload)
+        .map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
     Ok(frame)
 }
 

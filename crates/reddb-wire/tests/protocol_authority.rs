@@ -64,6 +64,10 @@ fn server_redwire_frame_header_length_routes_through_reddb_wire() {
         text.contains("frame_len_from_header"),
         "server RedWire session should call reddb_wire::redwire::frame_len_from_header"
     );
+    assert!(
+        text.contains("decode_frame_parts"),
+        "server RedWire session should assemble split header/payload reads through reddb_wire::redwire::decode_frame_parts"
+    );
 }
 
 #[test]
@@ -129,7 +133,7 @@ fn client_redwire_has_single_frame_io_adapter() {
 
     for required in [
         "frame_len_from_header",
-        "decode_frame",
+        "decode_frame_parts",
         "encode_frame",
         "pub(super) async fn read_frame",
         "pub(super) async fn write_frame",
