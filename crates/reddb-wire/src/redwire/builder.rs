@@ -87,12 +87,13 @@ enum Compress {
     Yes,
 }
 
-/// Builder for server-emitted [`Frame`]s.
+/// Builder for RedWire [`Frame`]s.
 ///
-/// Construct with [`FrameBuilder::reply_to`] for response frames
-/// (carries the request's correlation id) or
-/// [`FrameBuilder::unsolicited`] for server-initiated frames
-/// (correlation id `0`). All other fields are optional.
+/// Construct with [`FrameBuilder::request`] for client requests,
+/// [`FrameBuilder::reply_to`] for response frames (carries the
+/// request's correlation id), or [`FrameBuilder::unsolicited`] for
+/// server-initiated frames (correlation id `0`). All other fields are
+/// optional.
 #[derive(Debug, Clone)]
 pub struct FrameBuilder {
     kind: Option<MessageKind>,
@@ -108,6 +109,12 @@ pub struct FrameBuilder {
 }
 
 impl FrameBuilder {
+    /// Client request frame. Carries the caller's new correlation id
+    /// so the server can echo it in its reply.
+    pub fn request(correlation_id: u64) -> Self {
+        Self::with_correlation(correlation_id)
+    }
+
     /// Reply to a request frame. Echoes the caller's correlation id
     /// so the client can pair the response with the request.
     pub fn reply_to(correlation_id: u64) -> Self {
@@ -282,6 +289,55 @@ pub fn build_dispatch_reply_frame(
         .unwrap_or_else(|err| build_error_frame_lossy(correlation_id, &err.to_string()))
 }
 
+pub fn build_query_frame(correlation_id: u64, sql: &str) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::Query, sql.as_bytes().to_vec())
+}
+
+pub fn build_query_with_params_frame(
+    correlation_id: u64,
+    payload: Vec<u8>,
+) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::QueryWithParams, payload)
+}
+
+pub fn build_bulk_insert_frame(correlation_id: u64, payload: Vec<u8>) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::BulkInsert, payload)
+}
+
+pub fn build_get_frame(correlation_id: u64, payload: Vec<u8>) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::Get, payload)
+}
+
+pub fn build_delete_frame(correlation_id: u64, payload: Vec<u8>) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::Delete, payload)
+}
+
+pub fn build_bulk_insert_binary_frame(
+    correlation_id: u64,
+    payload: Vec<u8>,
+) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::BulkInsertBinary, payload)
+}
+
+pub fn build_ping_frame(correlation_id: u64) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::Ping, Vec::new())
+}
+
+pub fn build_bye_frame(correlation_id: u64) -> Result<Frame, BuildError> {
+    build_request_frame(correlation_id, MessageKind::Bye, Vec::new())
+}
+
+pub fn build_request_frame(
+    correlation_id: u64,
+    kind: MessageKind,
+    payload: Vec<u8>,
+) -> Result<Frame, BuildError> {
+    FrameBuilder::request(correlation_id)
+        .kind(kind)
+        .payload(payload)
+        .build()
+}
+
 /// Cheap heuristic: zstd's frame header is ~12 bytes, so a payload
 /// has to clear that bar to even potentially shrink. The codec also
 /// catches truly pathological cases at encode time and falls back to
@@ -307,6 +363,22 @@ mod tests {
         assert_eq!(frame.correlation_id, 0xABCD);
         assert_eq!(frame.kind, MessageKind::Result);
         assert_eq!(frame.payload, b"ok");
+    }
+
+    #[test]
+    fn request_builders_choose_client_message_kinds() {
+        let query = build_query_frame(1, "select 1").expect("query");
+        assert_eq!(query.kind, MessageKind::Query);
+        assert_eq!(query.correlation_id, 1);
+        assert_eq!(query.payload, b"select 1");
+
+        let ping = build_ping_frame(2).expect("ping");
+        assert_eq!(ping.kind, MessageKind::Ping);
+        assert!(ping.payload.is_empty());
+
+        let bye = build_bye_frame(3).expect("bye");
+        assert_eq!(bye.kind, MessageKind::Bye);
+        assert!(bye.payload.is_empty());
     }
 
     #[test]
