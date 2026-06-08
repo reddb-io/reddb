@@ -174,6 +174,15 @@ pub fn backup_wal_prefix(root_prefix: &str) -> String {
     format!("{}wal/", normalize_backup_root_prefix(root_prefix))
 }
 
+pub fn remote_database_key(root_prefix: &str) -> String {
+    let trimmed = root_prefix.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "data.rdb".to_string()
+    } else {
+        format!("{trimmed}/data.rdb")
+    }
+}
+
 pub fn backup_root_from_snapshot_prefix(snapshot_prefix: &str) -> String {
     let trimmed = snapshot_prefix.trim_end_matches('/');
     if let Some(idx) = trimmed.rfind("/snapshots") {
@@ -746,6 +755,12 @@ mod tests {
         assert_eq!(backup_head_key(""), "manifests/head.json");
         assert_eq!(backup_snapshot_prefix("tenant/db"), "tenant/db/snapshots/");
         assert_eq!(backup_wal_prefix("tenant/db"), "tenant/db/wal/");
+        assert_eq!(remote_database_key("tenant/db/"), "tenant/db/data.rdb");
+        assert_eq!(
+            remote_database_key("/var/lib/reddb"),
+            "/var/lib/reddb/data.rdb"
+        );
+        assert_eq!(remote_database_key(""), "data.rdb");
         assert_eq!(
             archived_snapshot_key("tenant/db/snapshots/", 7, 1730000000000),
             "tenant/db/snapshots/000000000007-1730000000000.snapshot"
