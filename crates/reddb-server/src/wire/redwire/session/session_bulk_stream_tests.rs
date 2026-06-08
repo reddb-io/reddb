@@ -1,19 +1,8 @@
 use super::*;
 
 /// Read a full RedWire frame off the client side of the duplex.
-async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Frame {
-    let mut header = [0u8; FRAME_HEADER_SIZE];
-    r.read_exact(&mut header).await.expect("read header");
-    let length = frame_len_from_header(&header).expect("valid frame header");
-    let mut buf = vec![0u8; length];
-    buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
-    if length > FRAME_HEADER_SIZE {
-        r.read_exact(&mut buf[FRAME_HEADER_SIZE..])
-            .await
-            .expect("read body");
-    }
-    let (frame, _) = decode_frame(&buf).expect("decode");
-    frame
+async fn read_one_frame<R: tokio::io::AsyncRead + Unpin + Send>(r: &mut R) -> Frame {
+    read_frame_async(r).await.expect("read frame")
 }
 
 fn stream_start_payload(coll: &str, cols: &[&str]) -> Vec<u8> {

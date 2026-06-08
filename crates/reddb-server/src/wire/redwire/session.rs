@@ -35,8 +35,8 @@ use reddb_wire::redwire::handshake::{
 };
 use reddb_wire::redwire::{
     build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame,
-    choose_hello_minor_version, decode_frame, decode_frame_parts, encode_frame,
-    frame_len_from_header, Frame, MessageDirection, MessageKind, FRAME_HEADER_SIZE, REDWIRE_MAGIC,
+    choose_hello_minor_version, decode_frame, encode_frame, read_frame_async, Frame,
+    MessageDirection, MessageKind, REDWIRE_MAGIC,
 };
 
 #[derive(Debug)]
@@ -126,35 +126,21 @@ where
     // (AC #2/#4) independently of this connection-scoped abort.
     let mut queue_wait_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-    let mut buf = vec![0u8; FRAME_HEADER_SIZE];
     loop {
         // Reap finished wait tasks so the set does not accumulate joined
         // handles over a long-lived connection. Non-blocking — only
         // already-complete tasks are drained.
         while queue_wait_tasks.try_join_next().is_some() {}
 
-        // Read header.
-        if let Err(err) = reader.read_exact(&mut buf[..FRAME_HEADER_SIZE]).await {
-            if err.kind() == io::ErrorKind::UnexpectedEof {
-                return Ok(());
+        let frame = match read_frame_async(&mut reader).await {
+            Ok(frame) => frame,
+            Err(reddb_wire::redwire::RedWireIoError::Io(err))
+                if err.kind() == io::ErrorKind::UnexpectedEof =>
+            {
+                return Ok(())
             }
-            return Err(err);
-        }
-        let mut header = [0u8; FRAME_HEADER_SIZE];
-        header.copy_from_slice(&buf[..FRAME_HEADER_SIZE]);
-        let length = frame_len_from_header(&header)
-            .map_err(|err| io::Error::other(format!("invalid frame length: {err}")))?;
-        if buf.len() < length {
-            buf.resize(length, 0);
-        }
-        let payload_len = length - FRAME_HEADER_SIZE;
-        if payload_len > 0 {
-            reader
-                .read_exact(&mut buf[FRAME_HEADER_SIZE..length])
-                .await?;
-        }
-        let frame = decode_frame_parts(&header, &buf[FRAME_HEADER_SIZE..length])
-            .map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
+            Err(err) => return Err(redwire_io_err(err)),
+        };
 
         // Catalog-driven direction gate: server-only kinds (PreparedOk,
         // AuthOk/Fail, BulkOk, …) must never arrive *from* a client.
@@ -1092,20 +1078,18 @@ where
 
 async fn read_frame<S>(stream: &mut S) -> io::Result<Frame>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    S: AsyncRead + Unpin + Send,
 {
-    let mut header = [0u8; FRAME_HEADER_SIZE];
-    stream.read_exact(&mut header).await?;
-    let length = frame_len_from_header(&header)
-        .map_err(|err| io::Error::other(format!("decode frame header: {err}")))?;
-    let payload_len = length - FRAME_HEADER_SIZE;
-    let mut payload = vec![0u8; payload_len];
-    if length > FRAME_HEADER_SIZE {
-        stream.read_exact(&mut payload).await?;
+    read_frame_async(stream).await.map_err(redwire_io_err)
+}
+
+fn redwire_io_err(err: reddb_wire::redwire::RedWireIoError) -> io::Error {
+    match err {
+        reddb_wire::redwire::RedWireIoError::Io(err) => err,
+        reddb_wire::redwire::RedWireIoError::Frame(err) => {
+            io::Error::other(format!("decode frame: {err}"))
+        }
     }
-    let frame = decode_frame_parts(&header, &payload)
-        .map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
-    Ok(frame)
 }
 
 fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
