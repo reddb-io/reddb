@@ -566,117 +566,69 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
 fn subscription_descriptor_to_json(
     subscription: &crate::catalog::SubscriptionDescriptor,
 ) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "name".to_string(),
-        JsonValue::String(subscription.name.clone()),
-    );
-    object.insert(
-        "source".to_string(),
-        JsonValue::String(subscription.source.clone()),
-    );
-    object.insert(
-        "target_queue".to_string(),
-        JsonValue::String(subscription.target_queue.clone()),
-    );
-    object.insert(
-        "ops_filter".to_string(),
-        JsonValue::Array(
-            subscription
-                .ops_filter
-                .iter()
-                .map(|op| JsonValue::String(op.as_str().to_string()))
-                .collect(),
-        ),
-    );
-    object.insert(
-        "where_filter".to_string(),
-        subscription
-            .where_filter
-            .clone()
-            .map(JsonValue::String)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "redact_fields".to_string(),
-        JsonValue::Array(
-            subscription
-                .redact_fields
-                .iter()
-                .map(|field| JsonValue::String(field.clone()))
-                .collect(),
-        ),
-    );
-    object.insert("enabled".to_string(), JsonValue::Bool(subscription.enabled));
-    object.insert(
-        "all_tenants".to_string(),
-        JsonValue::Bool(subscription.all_tenants),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_subscription_descriptor_json(
+            &subscription_descriptor_to_persisted(subscription),
+        )
+        .expect("reddb-file must encode physical subscription descriptor JSON"),
+    )
+}
+
+fn subscription_descriptor_to_persisted(
+    subscription: &crate::catalog::SubscriptionDescriptor,
+) -> reddb_file::PhysicalSubscriptionDescriptor {
+    reddb_file::PhysicalSubscriptionDescriptor {
+        name: subscription.name.clone(),
+        source: subscription.source.clone(),
+        target_queue: subscription.target_queue.clone(),
+        ops_filter: subscription
+            .ops_filter
+            .iter()
+            .map(|op| op.as_str().to_string())
+            .collect(),
+        where_filter: subscription.where_filter.clone(),
+        redact_fields: subscription.redact_fields.clone(),
+        enabled: subscription.enabled,
+        all_tenants: subscription.all_tenants,
+    }
+}
+
+fn subscription_descriptor_from_persisted(
+    subscription: reddb_file::PhysicalSubscriptionDescriptor,
+) -> io::Result<crate::catalog::SubscriptionDescriptor> {
+    let ops_filter = subscription
+        .ops_filter
+        .iter()
+        .map(|op| {
+            crate::catalog::SubscriptionOperation::from_str(op).ok_or_else(|| {
+                invalid_data(format!(
+                    "unsupported subscription operation in catalog: {op}"
+                ))
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    Ok(crate::catalog::SubscriptionDescriptor {
+        name: subscription.name,
+        source: subscription.source,
+        target_queue: subscription.target_queue,
+        ops_filter,
+        where_filter: subscription.where_filter,
+        redact_fields: subscription.redact_fields,
+        enabled: subscription.enabled,
+        all_tenants: subscription.all_tenants,
+    })
 }
 
 fn subscription_descriptor_from_json(
     value: &JsonValue,
 ) -> io::Result<crate::catalog::SubscriptionDescriptor> {
-    let object = expect_object(value, "subscription_descriptor")?;
-    let ops_filter = object
-        .get("ops_filter")
-        .and_then(JsonValue::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .map(|value| {
-                    let op = value.as_str().ok_or_else(|| {
-                        invalid_data("subscription_descriptor.ops_filter must contain strings")
-                    })?;
-                    crate::catalog::SubscriptionOperation::from_str(op).ok_or_else(|| {
-                        invalid_data(format!(
-                            "unsupported subscription operation in catalog: {op}"
-                        ))
-                    })
-                })
-                .collect::<io::Result<Vec<_>>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let redact_fields = object
-        .get("redact_fields")
-        .and_then(JsonValue::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str().map(|value| value.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(crate::catalog::SubscriptionDescriptor {
-        name: object
-            .get("name")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("")
-            .to_string(),
-        source: json_string_required(object, "source")?,
-        target_queue: json_string_required(object, "target_queue")?,
-        ops_filter,
-        where_filter: match object.get("where_filter") {
-            Some(JsonValue::String(value)) => Some(value.clone()),
-            Some(JsonValue::Null) | None => None,
-            Some(_) => {
-                return Err(invalid_data(
-                    "subscription_descriptor.where_filter must be a string or null".to_string(),
-                ))
-            }
-        },
-        redact_fields,
-        enabled: object
-            .get("enabled")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(true),
-        all_tenants: object
-            .get("all_tenants")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(false),
-    })
+    let subscription =
+        reddb_file::decode_physical_subscription_descriptor_json(&value.to_string_compact())
+            .map_err(|err| {
+                invalid_data(format!("decode physical subscription descriptor: {err}"))
+            })?;
+    subscription_descriptor_from_persisted(subscription)
 }
 
 fn analytics_view_descriptor_to_json(view: &crate::catalog::AnalyticsViewDescriptor) -> JsonValue {
