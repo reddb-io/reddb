@@ -395,6 +395,8 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub fn decode_native_len_prefixed_string",
         "pub fn encode_native_paged_collection_root",
         "pub fn decode_native_paged_collection_root",
+        "pub fn encode_native_paged_cross_ref",
+        "pub fn decode_native_paged_cross_ref",
         "pub fn append_native_store_crc32_footer",
         "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
@@ -515,6 +517,8 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "reddb_file::decode_native_len_prefixed_string",
         "reddb_file::encode_native_paged_collection_root",
         "reddb_file::decode_native_paged_collection_root",
+        "reddb_file::encode_native_paged_cross_ref",
+        "reddb_file::decode_native_paged_cross_ref",
     ] {
         assert!(
             impl_pages.contains(required),
@@ -528,6 +532,10 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "fn read_string(data: &[u8], pos: &mut usize) -> Result<String, StoreError> {\n    let len = read_u32",
         "fn read_bytes(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, StoreError> {\n    let len = read_u32",
         "meta_data.extend_from_slice(&(name.len() as u32).to_le_bytes());\n            meta_data.extend_from_slice(name.as_bytes());\n            meta_data.extend_from_slice(&root_page.to_le_bytes());",
+        "meta_data.extend_from_slice(&source_id.raw().to_le_bytes());",
+        "meta_data.extend_from_slice(&target_id.raw().to_le_bytes());",
+        "let source_id = u64::from_le_bytes([",
+        "let target_id = u64::from_le_bytes([",
     ] {
         assert!(
             !impl_pages.contains(forbidden),
