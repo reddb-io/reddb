@@ -25,8 +25,8 @@ use reddb::api::RedDBOptions;
 use reddb::auth::{OAuthConfig, OAuthIdentityMode, OAuthValidator, Role};
 use reddb::wire::redwire::{start_redwire_listener, RedWireConfig};
 use reddb::RedDBRuntime;
-use reddb_client::redwire::{Frame, MessageKind, MAGIC, SUPPORTED_VERSION};
-use reddb_wire::redwire::{decode_frame, encode_frame};
+use reddb_client::redwire::{Frame, MessageKind};
+use reddb_wire::redwire::{decode_frame, encode_frame, supported_client_preface};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -317,7 +317,7 @@ fn happy_claims(issuer: &str) -> Claims {
 
 async fn run_handshake(addr: SocketAddr, jwt: &str) -> Frame {
     let mut sock = TcpStream::connect(addr).await.expect("connect");
-    sock.write_all(&[MAGIC, SUPPORTED_VERSION])
+    sock.write_all(&supported_client_preface())
         .await
         .expect("magic+version");
 
