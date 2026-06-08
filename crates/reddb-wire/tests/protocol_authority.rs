@@ -86,6 +86,9 @@ fn server_redwire_frame_header_length_routes_through_reddb_wire() {
         "u32::from_le_bytes([header[0]",
         "length < FRAME_HEADER_SIZE",
         "length > MAX_FRAME_SIZE",
+        "frame_len_from_header",
+        "decode_frame_parts",
+        "FRAME_HEADER_SIZE",
     ] {
         assert!(
             !text.contains(forbidden),
@@ -93,12 +96,8 @@ fn server_redwire_frame_header_length_routes_through_reddb_wire() {
         );
     }
     assert!(
-        text.contains("frame_len_from_header"),
-        "server RedWire session should call reddb_wire::redwire::frame_len_from_header"
-    );
-    assert!(
-        text.contains("decode_frame_parts"),
-        "server RedWire session should assemble split header/payload reads through reddb_wire::redwire::decode_frame_parts"
+        text.contains("read_frame_async"),
+        "server RedWire session should delegate frame reads to reddb_wire::redwire::read_frame_async"
     );
 }
 
