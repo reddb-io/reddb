@@ -435,14 +435,8 @@ impl PointInTimeRecovery {
     }
 
     fn load_current_head(&self) -> Option<super::BackupHead> {
-        let snapshot_root = self.snapshot_prefix.trim_end_matches('/');
-        let parent = Path::new(snapshot_root).parent()?;
-        let parent = parent.to_string_lossy().trim_end_matches('/').to_string();
-        let head_key = if parent.is_empty() {
-            "manifests/head.json".to_string()
-        } else {
-            format!("{parent}/manifests/head.json")
-        };
+        let root = reddb_file::backup_root_from_snapshot_prefix(&self.snapshot_prefix);
+        let head_key = reddb_file::backup_head_key(&root);
         load_backup_head(self.backend.as_ref(), &head_key)
             .ok()
             .flatten()

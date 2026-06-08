@@ -142,7 +142,7 @@ pub fn archive_snapshot(
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let key = format!("{}{:012}-{}.snapshot", prefix, snapshot_id, timestamp);
+    let key = reddb_file::archived_snapshot_key(prefix, snapshot_id, timestamp);
 
     backend.upload(snapshot_path, &key)?;
     Ok(key)
@@ -195,9 +195,9 @@ pub fn publish_unified_manifest_for_prefix(
     backend: &dyn RemoteBackend,
     snapshot_prefix: &str,
 ) -> Result<String, BackendError> {
-    let root = derive_backup_root(snapshot_prefix);
+    let root = reddb_file::backup_root_from_snapshot_prefix(snapshot_prefix);
     let snapshots = collect_unified_snapshots(backend, snapshot_prefix)?;
-    let wal_root = format!("{}wal/", root);
+    let wal_root = reddb_file::backup_wal_prefix(&root);
     let wal_segments = collect_unified_wal_segments(backend, &wal_root)?;
     let manifest = UnifiedManifest::new_with_engine_version(
         env!("CARGO_PKG_VERSION"),
@@ -205,26 +205,6 @@ pub fn publish_unified_manifest_for_prefix(
         wal_segments,
     );
     publish_unified_manifest(backend, &root, &manifest)
-}
-
-fn derive_backup_root(snapshot_prefix: &str) -> String {
-    // `snapshots/...` → `""`; `<root>/snapshots/...` → `<root>/`. Empty
-    // prefix is allowed when the operator publishes everything under
-    // the bucket root.
-    let trimmed = snapshot_prefix.trim_end_matches('/');
-    if let Some(idx) = trimmed.rfind("/snapshots") {
-        let (head, _) = trimmed.split_at(idx);
-        if head.is_empty() {
-            String::new()
-        } else {
-            format!("{head}/")
-        }
-    } else if trimmed == "snapshots" || trimmed.is_empty() {
-        String::new()
-    } else {
-        // Already a root prefix (no /snapshots suffix).
-        format!("{trimmed}/")
-    }
 }
 
 fn collect_unified_snapshots(

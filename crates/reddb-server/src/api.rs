@@ -527,21 +527,21 @@ impl RedDBOptions {
         if let Some(value) = self.metadata.get("red.config.backup.head_key") {
             return value.clone();
         }
-        format!("{}manifests/head.json", self.remote_namespace_prefix())
+        reddb_file::backup_head_key(&self.remote_namespace_prefix())
     }
 
     pub fn default_snapshot_prefix(&self) -> String {
         if let Some(value) = self.metadata.get("red.config.backup.snapshot_prefix") {
             return value.clone();
         }
-        format!("{}snapshots/", self.remote_namespace_prefix())
+        reddb_file::backup_snapshot_prefix(&self.remote_namespace_prefix())
     }
 
     pub fn default_wal_archive_prefix(&self) -> String {
         if let Some(value) = self.metadata.get("red.config.wal.archive.prefix") {
             return value.clone();
         }
-        format!("{}wal/", self.remote_namespace_prefix())
+        reddb_file::backup_wal_prefix(&self.remote_namespace_prefix())
     }
 
     pub fn has_capability(&self, capability: Capability) -> bool {

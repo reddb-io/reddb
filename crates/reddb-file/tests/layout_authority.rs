@@ -1500,6 +1500,7 @@ fn server_operational_manifest_is_runtime_alias_only() {
 fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));
+    let api = read(root.join("crates/reddb-server/src/api.rs"));
     let recovery = read(root.join("crates/reddb-server/src/storage/wal/recovery.rs"));
     let non_test_archiver = text
         .split("#[cfg(test)]")
@@ -1532,6 +1533,7 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         "archived logical wal must be a JSON array",
         "decode wal record hex failed",
         "{:012}-{:012}.wal",
+        "{:012}-{}.snapshot",
     ] {
         assert!(
             !text.contains(forbidden),
@@ -1554,12 +1556,41 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         "parse_archived_wal_segment_key",
         "is_archived_wal_segment_key",
         "is_backup_manifest_sidecar_key",
+        "archived_snapshot_key",
+        "backup_root_from_snapshot_prefix",
+        "backup_wal_prefix",
     ] {
         assert!(
             text.contains(required),
             "backup/WAL archive manifest runtime should route through {required}"
         );
     }
+
+    for forbidden in ["manifests/head.json", "snapshots/", "wal/"] {
+        assert!(
+            !api.contains(forbidden),
+            "backup namespace defaults belong in reddb-file, found {forbidden:?}"
+        );
+    }
+    assert!(
+        !non_test_recovery.contains("manifests/head.json"),
+        "backup head key derivation belongs in reddb-file"
+    );
+    for required in [
+        "reddb_file::backup_head_key",
+        "reddb_file::backup_snapshot_prefix",
+        "reddb_file::backup_wal_prefix",
+    ] {
+        assert!(
+            api.contains(required),
+            "API backup defaults should route through {required}"
+        );
+    }
+    assert!(
+        non_test_recovery.contains("reddb_file::backup_head_key")
+            && non_test_recovery.contains("reddb_file::backup_root_from_snapshot_prefix"),
+        "recovery backup head lookup should route through reddb-file"
+    );
 
     for forbidden in [
         ".strip_suffix(\".wal\")",
