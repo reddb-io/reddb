@@ -35,6 +35,7 @@ pub const LEGACY_LOGICAL_SLOTS_SUFFIX: &str = "logical.slots.json";
 pub const LEGACY_LOGICAL_SLOTS_TEMP_EXTENSION: &str = "logical.slots.tmp";
 pub const LEGACY_AUDIT_LOG_FILE_NAME: &str = ".audit.log";
 pub const AUDIT_LOG_ROTATED_COMPRESSED_EXTENSION: &str = "zst";
+pub const LEGACY_SLOW_QUERY_LOG_FILE_NAME: &str = "red-slow.log";
 pub const SERVERLESS_ROOT_EXTENSION: &str = "serverless";
 pub const SERVERLESS_CACHE_DIR: &str = "cache";
 pub const RESULT_CACHE_L2_EXTENSION: &str = "result-cache.l2";
@@ -682,6 +683,10 @@ pub fn parse_audit_log_rotated_timestamp(
     timestamp.parse::<u128>().ok()
 }
 
+pub fn legacy_slow_query_log_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(LEGACY_SLOW_QUERY_LOG_FILE_NAME)
+}
+
 pub fn serverless_root(data_path: &Path) -> PathBuf {
     data_path.with_extension(SERVERLESS_ROOT_EXTENSION)
 }
@@ -907,6 +912,10 @@ mod tests {
         assert_eq!(
             parse_audit_log_rotated_timestamp(&legacy_audit_log_path(path), "other.42.zst"),
             None
+        );
+        assert_eq!(
+            legacy_slow_query_log_path(Path::new("/var/log/reddb")),
+            PathBuf::from("/var/log/reddb/red-slow.log")
         );
         assert_eq!(
             serverless_root(path),

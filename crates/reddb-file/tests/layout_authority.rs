@@ -337,6 +337,25 @@ fn server_uses_reddb_file_for_audit_log_paths() {
 }
 
 #[test]
+fn server_uses_reddb_file_for_slow_query_log_paths() {
+    let root = repo_root();
+    let slow_logger = read(root.join("crates/reddb-server/src/telemetry/slow_query_logger.rs"));
+    let non_test = slow_logger
+        .split("#[cfg(test)]")
+        .next()
+        .expect("slow_query_logger.rs has non-test source");
+
+    assert!(
+        !non_test.contains("join(\"red-slow.log\")"),
+        "slow-query fallback log path belongs in reddb-file"
+    );
+    assert!(
+        non_test.contains("reddb_file::layout::legacy_slow_query_log_path"),
+        "slow-query fallback log path should route through reddb-file"
+    );
+}
+
+#[test]
 fn server_does_not_redeclare_physical_metadata_core_contracts() {
     let root = repo_root();
     let server = read(root.join("crates/reddb-server/src/physical.rs"));
