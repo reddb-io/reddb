@@ -3344,34 +3344,11 @@ impl RedDb for GrpcRuntime {
                 .map_err(to_status)?
         };
 
-        let mut chunk = reddb_wire::replication::BaseBackupChunk {
-            snapshot_available: true,
-            replica_id: replica_id.clone(),
+        let mut chunk = reddb_wire::replication::BaseBackupChunk::new(
+            replica_id.clone(),
             slot_restart_lsn,
-            snapshot_lsn: Some(snapshot_lsn),
-            snapshot_token: None,
-            snapshot_total_bytes: None,
-            snapshot_offset: 0,
-            next_snapshot_offset: None,
-            snapshot_complete: false,
-            snapshot_path: None,
-            snapshot_chunk: None,
-            snapshot_hex: None,
-            metadata_binary: None,
-            metadata_json: None,
-            header_shadow: None,
-            metadata_shadow: None,
-            basebackup_available: false,
-            basebackup_timeline: None,
-            basebackup_start_lsn: None,
-            basebackup_checkpoint_lsn: None,
-            basebackup_snapshot_bytes: None,
-            basebackup_snapshot_checksum: None,
-            basebackup_manifest: None,
-            basebackup_chunks: Vec::new(),
-            basebackup_chunk_ordinal: None,
-            basebackup_chunk: None,
-        };
+        );
+        chunk.snapshot_lsn = Some(snapshot_lsn);
         if let Some(manifest) = &basebackup_manifest {
             if let Some(plan) = self.runtime.primary_replica_file_plan() {
                 attach_basebackup_snapshot_fields(
