@@ -128,6 +128,37 @@ pub struct BaseBackupChunk {
 }
 
 impl BaseBackupChunk {
+    pub fn new(replica_id: impl Into<String>, slot_restart_lsn: u64) -> Self {
+        Self {
+            snapshot_available: true,
+            replica_id: replica_id.into(),
+            slot_restart_lsn,
+            snapshot_lsn: None,
+            snapshot_token: None,
+            snapshot_total_bytes: None,
+            snapshot_offset: 0,
+            next_snapshot_offset: None,
+            snapshot_complete: false,
+            snapshot_path: None,
+            snapshot_chunk: None,
+            snapshot_hex: None,
+            metadata_binary: None,
+            metadata_json: None,
+            header_shadow: None,
+            metadata_shadow: None,
+            basebackup_available: false,
+            basebackup_timeline: None,
+            basebackup_start_lsn: None,
+            basebackup_checkpoint_lsn: None,
+            basebackup_snapshot_bytes: None,
+            basebackup_snapshot_checksum: None,
+            basebackup_manifest: None,
+            basebackup_chunks: Vec::new(),
+            basebackup_chunk_ordinal: None,
+            basebackup_chunk: None,
+        }
+    }
+
     pub fn encode_json(&self) -> Vec<u8> {
         let mut obj = serde_json::Map::new();
         obj.insert(
@@ -332,6 +363,18 @@ mod tests {
             BaseBackupRequest::decode_json(&request.encode_json()).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn basebackup_chunk_constructor_sets_wire_defaults() {
+        let chunk = BaseBackupChunk::new("replica-a", 7);
+        assert!(chunk.snapshot_available);
+        assert_eq!(chunk.replica_id, "replica-a");
+        assert_eq!(chunk.slot_restart_lsn, 7);
+        assert_eq!(chunk.snapshot_offset, 0);
+        assert!(!chunk.snapshot_complete);
+        assert!(!chunk.basebackup_available);
+        assert!(chunk.basebackup_chunks.is_empty());
     }
 
     #[test]

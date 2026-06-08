@@ -706,7 +706,7 @@ fn replication_basebackup_payload_lives_in_reddb_wire() {
         );
     }
     for required in [
-        "reddb_wire::replication::BaseBackupChunk",
+        "reddb_wire::replication::BaseBackupChunk::new",
         "reddb_wire::replication::BaseBackupManifestChunk",
         "chunk.encode_json()",
     ] {
