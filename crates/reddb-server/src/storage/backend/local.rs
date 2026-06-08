@@ -32,11 +32,7 @@ fn local_version_for(path: &Path) -> Result<Option<BackendObjectVersion>, Backen
 }
 
 fn lock_path_for(dest: &Path) -> PathBuf {
-    let file_name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("object");
-    dest.with_file_name(format!(".{file_name}.cas.lock"))
+    reddb_file::layout::local_cas_lock_path(dest)
 }
 
 pub(crate) fn local_cas_lock_path_for(dest: &Path) -> PathBuf {
@@ -64,12 +60,8 @@ impl RemoteBackend for LocalBackend {
             fs::create_dir_all(parent)
                 .map_err(|e| BackendError::Transport(format!("mkdir failed: {e}")))?;
         }
-        let file_name = dest
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("object");
         let unique = LOCAL_UPLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp = dest.with_file_name(format!(".{file_name}.tmp-{}-{unique}", std::process::id()));
+        let temp = reddb_file::layout::local_upload_temp_path(dest, std::process::id(), unique);
 
         let copy_result = fs::copy(local_path, &temp)
             .map_err(|e| BackendError::Transport(format!("copy failed: {e}")));

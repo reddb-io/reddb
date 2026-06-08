@@ -33,6 +33,8 @@ pub const LEGACY_LOGICAL_SLOTS_TEMP_EXTENSION: &str = "logical.slots.tmp";
 pub const SERVERLESS_ROOT_EXTENSION: &str = "serverless";
 pub const SERVERLESS_CACHE_DIR: &str = "cache";
 pub const RESULT_CACHE_L2_EXTENSION: &str = "result-cache.l2";
+pub const LOCAL_CAS_LOCK_SUFFIX: &str = "cas.lock";
+pub const LOCAL_UPLOAD_TEMP_TAG: &str = "tmp";
 
 /// Storage layout preset for tier-aware RedDB file placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -572,6 +574,18 @@ pub fn physical_export_data_path(data_path: &Path, name: &str) -> PathBuf {
     )
 }
 
+pub fn local_cas_lock_path(dest: &Path) -> PathBuf {
+    let file_name = data_file_name(dest);
+    dest.with_file_name(format!(".{file_name}.{LOCAL_CAS_LOCK_SUFFIX}"))
+}
+
+pub fn local_upload_temp_path(dest: &Path, pid: u32, unique: u64) -> PathBuf {
+    let file_name = data_file_name(dest);
+    dest.with_file_name(format!(
+        ".{file_name}.{LOCAL_UPLOAD_TEMP_TAG}-{pid}-{unique}"
+    ))
+}
+
 pub fn rebootstrap_staging_root(data_path: &Path) -> PathBuf {
     data_path.with_extension(REBOOTSTRAP_STAGING_EXTENSION)
 }
@@ -753,6 +767,14 @@ mod tests {
         assert_eq!(
             physical_export_data_path(path, "nightly backup"),
             PathBuf::from("/var/lib/reddb/main.export.nightly_backup.rdb")
+        );
+        assert_eq!(
+            local_cas_lock_path(path),
+            PathBuf::from("/var/lib/reddb/.main.rdb.cas.lock")
+        );
+        assert_eq!(
+            local_upload_temp_path(path, 123, 7),
+            PathBuf::from("/var/lib/reddb/.main.rdb.tmp-123-7")
         );
         assert_eq!(
             rebootstrap_staging_root(path),

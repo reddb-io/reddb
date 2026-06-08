@@ -1359,6 +1359,29 @@ fn server_uses_reddb_file_for_serverless_roots_and_cache() {
 }
 
 #[test]
+fn server_uses_reddb_file_for_local_backend_temp_names() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/storage/backend/local.rs"));
+
+    for forbidden in [".cas.lock", ".tmp-{}-{unique}", "with_file_name(format!"] {
+        assert!(
+            !text.contains(forbidden),
+            "local backend temporary filename contracts belong in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "reddb_file::layout::local_cas_lock_path",
+        "reddb_file::layout::local_upload_temp_path",
+    ] {
+        assert!(
+            text.contains(required),
+            "local backend should route temporary filenames through {required}"
+        );
+    }
+}
+
+#[test]
 fn server_does_not_own_serverless_writer_lease_artifact() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/replication/lease.rs"));
