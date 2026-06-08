@@ -390,6 +390,19 @@ pub fn store_commit_coord_temp_wal_file_name(name: &str, process_id: u32, nanos:
     format!("rb_commit_coord_{name}_{process_id}_{nanos}.wal")
 }
 
+pub fn wal_component_temp_path(
+    temp_dir: &Path,
+    component: &str,
+    name: &str,
+    process_id: u32,
+) -> PathBuf {
+    temp_dir.join(wal_component_temp_file_name(component, name, process_id))
+}
+
+pub fn wal_component_temp_file_name(component: &str, name: &str, process_id: u32) -> String {
+    format!("rb_wal_{component}_{name}_{process_id}.wal")
+}
+
 pub fn backup_temp_json_path(
     temp_dir: &Path,
     prefix: &str,
@@ -643,6 +656,14 @@ mod tests {
         assert_eq!(
             store_commit_coord_temp_wal_path(Path::new("/tmp"), "burst", 7, 99),
             PathBuf::from("/tmp/rb_commit_coord_burst_7_99.wal")
+        );
+        assert_eq!(
+            wal_component_temp_path(Path::new("/tmp"), "writer", "create", 7),
+            PathBuf::from("/tmp/rb_wal_writer_create_7.wal")
+        );
+        assert_eq!(
+            wal_component_temp_path(Path::new("/tmp"), "reader", "empty", 7),
+            PathBuf::from("/tmp/rb_wal_reader_empty_7.wal")
         );
         assert_eq!(
             backup_temp_json_path(

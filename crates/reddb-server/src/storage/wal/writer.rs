@@ -490,8 +490,12 @@ mod tests {
     }
 
     fn temp_wal(name: &str) -> (FileGuard, PathBuf) {
-        let path =
-            std::env::temp_dir().join(format!("rb_wal_writer_{}_{}.wal", name, std::process::id()));
+        let path = reddb_file::layout::wal_component_temp_path(
+            &std::env::temp_dir(),
+            "writer",
+            name,
+            std::process::id(),
+        );
         let guard = FileGuard { path: path.clone() };
         let _ = std::fs::remove_file(&path);
         (guard, path)
