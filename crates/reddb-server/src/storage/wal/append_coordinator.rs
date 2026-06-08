@@ -375,12 +375,13 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "rb_wal_coord_{}_{}_{}.wal",
+        let path = reddb_file::layout::wal_component_unique_temp_path(
+            &std::env::temp_dir(),
+            "coord",
             name,
             std::process::id(),
-            nanos
-        ));
+            nanos,
+        );
         let _ = std::fs::remove_file(&path);
         (FileGuard { path: path.clone() }, path)
     }
