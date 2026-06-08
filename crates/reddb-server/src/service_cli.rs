@@ -471,7 +471,7 @@ fn apply_backup_config(options: &mut RedDBOptions, cfg: &crate::backup_bootstrap
         // `default_wal_archive_prefix`) derive sub-prefixes from the
         // parent of `remote_key`.
         let trimmed = cfg.prefix.trim_end_matches('/');
-        options.remote_key = Some(format!("{}/data.rdb", trimmed));
+        options.remote_key = Some(reddb_file::remote_database_key(trimmed));
 
         tracing::info!(
             backend = "s3",
@@ -709,7 +709,7 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
                 if let Some(config) = s3_config_from_env() {
                     let remote_key = env_nonempty("RED_REMOTE_KEY")
                         .or_else(|| env_nonempty("REDDB_REMOTE_KEY"))
-                        .unwrap_or_else(|| "clusters/dev/data.rdb".to_string());
+                        .unwrap_or_else(|| reddb_file::remote_database_key("clusters/dev"));
                     let backend = Arc::new(crate::storage::backend::S3Backend::new(config));
                     options.remote_backend = Some(backend.clone());
                     options.remote_backend_atomic = Some(backend);
@@ -739,10 +739,10 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
                     base.trim_end_matches('/'),
                     rel.trim_start_matches('/')
                 )),
-                (Some(base), None) => Some(format!(
-                    "{}/clusters/dev/data.rdb",
+                (Some(base), None) => Some(reddb_file::remote_database_key(&format!(
+                    "{}/clusters/dev",
                     base.trim_end_matches('/')
-                )),
+                ))),
                 (None, Some(rel)) => Some(rel),
                 (None, None) => None,
             };
@@ -816,7 +816,7 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
             }
             options.remote_key = env_nonempty("RED_REMOTE_KEY")
                 .or_else(|| env_nonempty("REDDB_REMOTE_KEY"))
-                .or_else(|| Some("clusters/dev/data.rdb".to_string()));
+                .or_else(|| Some(reddb_file::remote_database_key("clusters/dev")));
         }
         // `none` is the explicit standalone — no remote, no backup
         // pipeline. Boot never blocks on network reachability.

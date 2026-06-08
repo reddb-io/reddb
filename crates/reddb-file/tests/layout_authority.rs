@@ -1501,6 +1501,7 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));
     let api = read(root.join("crates/reddb-server/src/api.rs"));
+    let service_cli = read(root.join("crates/reddb-server/src/service_cli.rs"));
     let recovery = read(root.join("crates/reddb-server/src/storage/wal/recovery.rs"));
     let non_test_archiver = text
         .split("#[cfg(test)]")
@@ -1590,6 +1591,19 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         non_test_recovery.contains("reddb_file::backup_head_key")
             && non_test_recovery.contains("reddb_file::backup_root_from_snapshot_prefix"),
         "recovery backup head lookup should route through reddb-file"
+    );
+    for forbidden in [
+        "format!(\"{}/data.rdb\"",
+        "\"clusters/dev/data.rdb\".to_string()",
+    ] {
+        assert!(
+            !service_cli.contains(forbidden),
+            "remote database key defaults belong in reddb-file, found {forbidden:?}"
+        );
+    }
+    assert!(
+        service_cli.contains("reddb_file::remote_database_key"),
+        "service CLI remote database key defaults should route through reddb-file"
     );
 
     for forbidden in [
