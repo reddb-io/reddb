@@ -31,7 +31,7 @@ use std::env;
 use std::process::ExitCode;
 
 use reddb_client::connector::http::{query_one_shot as http_query_one_shot, Auth as HttpAuth};
-use reddb_client::connector::redwire::{Auth as RedWireAuth, RedWireClient, RedWireError};
+use reddb_client::redwire::{Auth as RedWireAuth, ConnectOptions, RedWireClient};
 use reddb_client::{repl::run_repl, RedDBClient};
 use reddb_wire::{parse, ConnectionTarget, ParseErrorKind};
 
@@ -148,23 +148,28 @@ async fn run_grpc(endpoint: String, parsed: ParsedArgs) -> ExitCode {
 }
 
 async fn run_redwire(host: String, port: u16, tls: bool, parsed: ParsedArgs) -> ExitCode {
+    if tls {
+        eprintln!(
+            "red_client: RedWire-over-TLS (reds://) is not yet wired through red_client; \
+             use red:// (plain) or the full `red` binary for now"
+        );
+        return ExitCode::from(EXIT_TRANSPORT_UNSUPPORTED);
+    }
+
     let auth = match parsed.token.clone() {
         Some(t) => RedWireAuth::Bearer(t),
         None => RedWireAuth::Anonymous,
     };
-    let mut client = match RedWireClient::connect(&host, port, tls, auth).await {
+    let opts = ConnectOptions::new(host.clone(), port).with_auth(auth);
+    let mut client = match RedWireClient::connect(opts).await {
         Ok(c) => c,
-        Err(RedWireError::TlsNotImplemented) => {
-            eprintln!("red_client: {}", RedWireError::TlsNotImplemented);
-            return ExitCode::from(EXIT_TRANSPORT_UNSUPPORTED);
-        }
         Err(e) => {
             eprintln!("red_client: redwire connect to {host}:{port} failed: {e}");
             return ExitCode::from(EXIT_CONNECT_FAILED);
         }
     };
     match parsed.command {
-        Some(Command::OneShot(sql)) => match client.query(&sql).await {
+        Some(Command::OneShot(sql)) => match client.query_raw(&sql).await {
             Ok(out) => {
                 println!("{out}");
                 ExitCode::SUCCESS

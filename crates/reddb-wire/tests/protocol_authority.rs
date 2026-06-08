@@ -75,6 +75,10 @@ fn client_connector_redwire_is_compatibility_adapter_only() {
         "tokio::net::TcpStream",
         "AsyncReadExt",
         "AsyncWriteExt",
+        "pub enum Auth",
+        "pub enum RedWireError",
+        "pub struct RedWireClient",
+        "fn from_client_error",
         "build_hello_payload",
         "build_auth_response",
         "fn handshake",
@@ -88,8 +92,8 @@ fn client_connector_redwire_is_compatibility_adapter_only() {
         );
     }
     assert!(
-        text.contains("crate::redwire::{ConnectOptions, RedWireClient as CanonicalRedWireClient}"),
-        "connector::redwire should be a shim over the canonical client redwire module"
+        text.contains("pub use crate::redwire::{Auth, ConnectOptions, RedWireClient};"),
+        "connector::redwire should be reexports over the canonical client redwire module"
     );
 }
 
