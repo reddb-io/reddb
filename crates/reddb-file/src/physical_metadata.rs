@@ -263,6 +263,35 @@ pub struct PhysicalAnalyticsViewDescriptor {
     pub tolerance: Option<f64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalDeclaredColumnContract {
+    pub name: String,
+    pub data_type: String,
+    pub sql_type: Option<PhysicalSqlTypeName>,
+    pub not_null: bool,
+    pub default: Option<String>,
+    pub compress: Option<u8>,
+    pub unique: bool,
+    pub primary_key: bool,
+    pub enum_variants: Vec<String>,
+    pub array_element: Option<String>,
+    pub decimal_precision: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalSqlTypeName {
+    pub name: String,
+    pub modifiers: Vec<PhysicalTypeModifier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhysicalTypeModifier {
+    Number(u32),
+    Ident(String),
+    StringLiteral(String),
+    Type(Box<PhysicalSqlTypeName>),
+}
+
 pub fn encode_physical_metadata_document_root_json(
     document: &PhysicalMetadataDocumentEnvelope,
     pretty: bool,
@@ -466,6 +495,19 @@ pub fn decode_physical_analytics_view_descriptor_json(
 ) -> RdbFileResult<PhysicalAnalyticsViewDescriptor> {
     let value = parse_json_value(json, "physical analytics view descriptor")?;
     analytics_view_descriptor_from_json_value(&value)
+}
+
+pub fn encode_physical_declared_column_contract_json(
+    column: &PhysicalDeclaredColumnContract,
+) -> RdbFileResult<String> {
+    Ok(declared_column_contract_json_value(column).to_string())
+}
+
+pub fn decode_physical_declared_column_contract_json(
+    json: &str,
+) -> RdbFileResult<PhysicalDeclaredColumnContract> {
+    let value = parse_json_value(json, "physical declared column contract")?;
+    declared_column_contract_from_json_value(&value)
 }
 
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
@@ -1189,6 +1231,189 @@ fn analytics_view_descriptor_from_json_value(
         max_iterations: optional_i64_field(object, "max_iterations")?,
         tolerance: optional_f64_field(object, "tolerance")?,
     })
+}
+
+fn declared_column_contract_json_value(
+    column: &PhysicalDeclaredColumnContract,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(column.name.clone()),
+    );
+    object.insert(
+        "data_type".to_string(),
+        serde_json::Value::String(column.data_type.clone()),
+    );
+    object.insert(
+        "sql_type".to_string(),
+        column
+            .sql_type
+            .as_ref()
+            .map(sql_type_name_json_value)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "not_null".to_string(),
+        serde_json::Value::Bool(column.not_null),
+    );
+    object.insert(
+        "default".to_string(),
+        column
+            .default
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert("compress".to_string(), optional_u8_json(column.compress));
+    object.insert("unique".to_string(), serde_json::Value::Bool(column.unique));
+    object.insert(
+        "primary_key".to_string(),
+        serde_json::Value::Bool(column.primary_key),
+    );
+    object.insert(
+        "enum_variants".to_string(),
+        string_array_json(&column.enum_variants),
+    );
+    object.insert(
+        "array_element".to_string(),
+        column
+            .array_element
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "decimal_precision".to_string(),
+        optional_u8_json(column.decimal_precision),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn declared_column_contract_from_json_value(
+    value: &serde_json::Value,
+) -> RdbFileResult<PhysicalDeclaredColumnContract> {
+    let object = expect_object(value, "physical declared column contract")?;
+    Ok(PhysicalDeclaredColumnContract {
+        name: json_string_required(object, "name")?,
+        data_type: json_string_required(object, "data_type")?,
+        sql_type: optional_sql_type_name_from_json_value(object.get("sql_type"))?,
+        not_null: json_bool_required(object, "not_null")?,
+        default: optional_string_field(object, "default")?,
+        compress: optional_u8_field(object, "compress")?,
+        unique: json_bool_required(object, "unique")?,
+        primary_key: json_bool_required(object, "primary_key")?,
+        enum_variants: string_array_from_json(object.get("enum_variants")).unwrap_or_default(),
+        array_element: optional_string_field(object, "array_element")?,
+        decimal_precision: optional_u8_field(object, "decimal_precision")?,
+    })
+}
+
+fn sql_type_name_json_value(sql_type: &PhysicalSqlTypeName) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(sql_type.name.clone()),
+    );
+    object.insert(
+        "modifiers".to_string(),
+        serde_json::Value::Array(
+            sql_type
+                .modifiers
+                .iter()
+                .map(type_modifier_json_value)
+                .collect(),
+        ),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn optional_sql_type_name_from_json_value(
+    value: Option<&serde_json::Value>,
+) -> RdbFileResult<Option<PhysicalSqlTypeName>> {
+    match value {
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(value) => sql_type_name_from_json_value(value).map(Some),
+    }
+}
+
+fn sql_type_name_from_json_value(value: &serde_json::Value) -> RdbFileResult<PhysicalSqlTypeName> {
+    let object = expect_object(value, "physical sql type name")?;
+    let modifiers = object
+        .get("modifiers")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(type_modifier_from_json_value)
+                .collect::<RdbFileResult<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(PhysicalSqlTypeName {
+        name: json_string_required(object, "name")?,
+        modifiers,
+    })
+}
+
+fn type_modifier_json_value(modifier: &PhysicalTypeModifier) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    match modifier {
+        PhysicalTypeModifier::Number(value) => {
+            object.insert(
+                "kind".to_string(),
+                serde_json::Value::String("number".to_string()),
+            );
+            object.insert("value".to_string(), serde_json::Value::from(*value));
+        }
+        PhysicalTypeModifier::Ident(value) => {
+            object.insert(
+                "kind".to_string(),
+                serde_json::Value::String("ident".to_string()),
+            );
+            object.insert(
+                "value".to_string(),
+                serde_json::Value::String(value.clone()),
+            );
+        }
+        PhysicalTypeModifier::StringLiteral(value) => {
+            object.insert(
+                "kind".to_string(),
+                serde_json::Value::String("string".to_string()),
+            );
+            object.insert(
+                "value".to_string(),
+                serde_json::Value::String(value.clone()),
+            );
+        }
+        PhysicalTypeModifier::Type(value) => {
+            object.insert(
+                "kind".to_string(),
+                serde_json::Value::String("type".to_string()),
+            );
+            object.insert("value".to_string(), sql_type_name_json_value(value));
+        }
+    }
+    serde_json::Value::Object(object)
+}
+
+fn type_modifier_from_json_value(value: &serde_json::Value) -> RdbFileResult<PhysicalTypeModifier> {
+    let object = expect_object(value, "physical type modifier")?;
+    match json_string_required(object, "kind")?.as_str() {
+        "number" => Ok(PhysicalTypeModifier::Number(json_u32_required(
+            object, "value",
+        )?)),
+        "ident" => Ok(PhysicalTypeModifier::Ident(json_string_required(
+            object, "value",
+        )?)),
+        "string" => Ok(PhysicalTypeModifier::StringLiteral(json_string_required(
+            object, "value",
+        )?)),
+        "type" => Ok(PhysicalTypeModifier::Type(Box::new(
+            sql_type_name_from_json_value(required(object, "value")?)?,
+        ))),
+        other => Err(invalid(format!("unsupported type modifier kind: {other}"))),
+    }
 }
 
 fn snapshot_descriptor_json_value(snapshot: &SnapshotDescriptor) -> serde_json::Value {
@@ -1990,6 +2215,21 @@ fn optional_i64_field(
     }
 }
 
+fn optional_u8_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Option<u8>> {
+    match object.get(key) {
+        Some(serde_json::Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| invalid(format!("field '{key}' must be a u8")))
+            .map(Some),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(_) => Err(invalid(format!("field '{key}' must be a u8 or null"))),
+    }
+}
+
 fn json_u64(value: u64) -> serde_json::Value {
     serde_json::Value::String(value.to_string())
 }
@@ -2006,6 +2246,12 @@ fn optional_f64_json(value: Option<f64>) -> serde_json::Value {
     value
         .and_then(serde_json::Number::from_f64)
         .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn optional_u8_json(value: Option<u8>) -> serde_json::Value {
+    value
+        .map(serde_json::Value::from)
         .unwrap_or(serde_json::Value::Null)
 }
 
@@ -2211,6 +2457,39 @@ mod tests {
         assert_eq!(
             decode_physical_analytics_view_descriptor_json(&json).unwrap(),
             view
+        );
+    }
+
+    #[test]
+    fn physical_declared_column_contract_round_trips() {
+        let column = PhysicalDeclaredColumnContract {
+            name: "amount".to_string(),
+            data_type: "DECIMAL(12, 2)".to_string(),
+            sql_type: Some(PhysicalSqlTypeName {
+                name: "DECIMAL".to_string(),
+                modifiers: vec![
+                    PhysicalTypeModifier::Number(12),
+                    PhysicalTypeModifier::Type(Box::new(PhysicalSqlTypeName {
+                        name: "VARCHAR".to_string(),
+                        modifiers: vec![PhysicalTypeModifier::Number(32)],
+                    })),
+                ],
+            }),
+            not_null: true,
+            default: Some("0".to_string()),
+            compress: Some(3),
+            unique: false,
+            primary_key: false,
+            enum_variants: vec!["pending".to_string(), "paid".to_string()],
+            array_element: Some("TEXT".to_string()),
+            decimal_precision: Some(12),
+        };
+
+        let json = encode_physical_declared_column_contract_json(&column).unwrap();
+        assert!(json.contains("\"enum_variants\""));
+        assert_eq!(
+            decode_physical_declared_column_contract_json(&json).unwrap(),
+            column
         );
     }
 
