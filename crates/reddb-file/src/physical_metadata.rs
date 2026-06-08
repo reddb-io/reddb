@@ -278,6 +278,36 @@ pub struct PhysicalDeclaredColumnContract {
     pub decimal_precision: Option<u8>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PhysicalCollectionContract {
+    pub name: String,
+    pub declared_model: String,
+    pub schema_mode: String,
+    pub origin: String,
+    pub version: u32,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+    pub default_ttl_ms: Option<u64>,
+    pub vector_dimension: Option<usize>,
+    pub vector_metric: Option<String>,
+    pub context_index_fields: Vec<String>,
+    pub declared_columns: Vec<PhysicalDeclaredColumnContract>,
+    pub table_def_hex: Option<String>,
+    pub timestamps_enabled: bool,
+    pub context_index_enabled: bool,
+    pub metrics_raw_retention_ms: Option<u64>,
+    pub metrics_rollup_policies: Vec<String>,
+    pub metrics_tenant_identity: Option<String>,
+    pub metrics_namespace: Option<String>,
+    pub append_only: bool,
+    pub subscriptions: Vec<PhysicalSubscriptionDescriptor>,
+    pub analytics_config: Vec<PhysicalAnalyticsViewDescriptor>,
+    pub session_key: Option<String>,
+    pub session_gap_ms: Option<u64>,
+    pub retention_duration_ms: Option<u64>,
+    pub analytical_storage: Option<PhysicalAnalyticalStorageConfig>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhysicalSqlTypeName {
     pub name: String,
@@ -508,6 +538,19 @@ pub fn decode_physical_declared_column_contract_json(
 ) -> RdbFileResult<PhysicalDeclaredColumnContract> {
     let value = parse_json_value(json, "physical declared column contract")?;
     declared_column_contract_from_json_value(&value)
+}
+
+pub fn encode_physical_collection_contract_json(
+    contract: &PhysicalCollectionContract,
+) -> RdbFileResult<String> {
+    Ok(collection_contract_json_value(contract).to_string())
+}
+
+pub fn decode_physical_collection_contract_json(
+    json: &str,
+) -> RdbFileResult<PhysicalCollectionContract> {
+    let value = parse_json_value(json, "physical collection contract")?;
+    collection_contract_from_json_value(&value)
 }
 
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
@@ -1306,6 +1349,194 @@ fn declared_column_contract_from_json_value(
         enum_variants: string_array_from_json(object.get("enum_variants")).unwrap_or_default(),
         array_element: optional_string_field(object, "array_element")?,
         decimal_precision: optional_u8_field(object, "decimal_precision")?,
+    })
+}
+
+fn collection_contract_json_value(contract: &PhysicalCollectionContract) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(contract.name.clone()),
+    );
+    object.insert(
+        "declared_model".to_string(),
+        serde_json::Value::String(contract.declared_model.clone()),
+    );
+    object.insert(
+        "schema_mode".to_string(),
+        serde_json::Value::String(contract.schema_mode.clone()),
+    );
+    object.insert(
+        "origin".to_string(),
+        serde_json::Value::String(contract.origin.clone()),
+    );
+    object.insert(
+        "version".to_string(),
+        serde_json::Value::from(contract.version),
+    );
+    object.insert(
+        "created_at_unix_ms".to_string(),
+        json_u128(contract.created_at_unix_ms),
+    );
+    object.insert(
+        "updated_at_unix_ms".to_string(),
+        json_u128(contract.updated_at_unix_ms),
+    );
+    object.insert(
+        "default_ttl_ms".to_string(),
+        optional_u64_json(contract.default_ttl_ms),
+    );
+    object.insert(
+        "vector_dimension".to_string(),
+        optional_usize_json(contract.vector_dimension),
+    );
+    object.insert(
+        "vector_metric".to_string(),
+        optional_string_json(contract.vector_metric.as_ref()),
+    );
+    object.insert(
+        "context_index_fields".to_string(),
+        string_array_json(&contract.context_index_fields),
+    );
+    object.insert(
+        "declared_columns".to_string(),
+        serde_json::Value::Array(
+            contract
+                .declared_columns
+                .iter()
+                .map(declared_column_contract_json_value)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "timestamps_enabled".to_string(),
+        serde_json::Value::Bool(contract.timestamps_enabled),
+    );
+    object.insert(
+        "context_index_enabled".to_string(),
+        serde_json::Value::Bool(contract.context_index_enabled),
+    );
+    object.insert(
+        "metrics_raw_retention_ms".to_string(),
+        optional_u64_json(contract.metrics_raw_retention_ms),
+    );
+    object.insert(
+        "metrics_rollup_policies".to_string(),
+        string_array_json(&contract.metrics_rollup_policies),
+    );
+    object.insert(
+        "metrics_tenant_identity".to_string(),
+        optional_string_json(contract.metrics_tenant_identity.as_ref()),
+    );
+    object.insert(
+        "metrics_namespace".to_string(),
+        optional_string_json(contract.metrics_namespace.as_ref()),
+    );
+    object.insert(
+        "append_only".to_string(),
+        serde_json::Value::Bool(contract.append_only),
+    );
+    object.insert(
+        "subscriptions".to_string(),
+        serde_json::Value::Array(
+            contract
+                .subscriptions
+                .iter()
+                .map(subscription_descriptor_json_value)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "analytics_config".to_string(),
+        serde_json::Value::Array(
+            contract
+                .analytics_config
+                .iter()
+                .map(analytics_view_descriptor_json_value)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "session_key".to_string(),
+        optional_string_json(contract.session_key.as_ref()),
+    );
+    object.insert(
+        "session_gap_ms".to_string(),
+        optional_u64_json(contract.session_gap_ms),
+    );
+    object.insert(
+        "retention_duration_ms".to_string(),
+        optional_u64_json(contract.retention_duration_ms),
+    );
+    object.insert(
+        "analytical_storage".to_string(),
+        contract
+            .analytical_storage
+            .as_ref()
+            .map(analytical_storage_json_value)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "table_def".to_string(),
+        optional_string_json(contract.table_def_hex.as_ref()),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn collection_contract_from_json_value(
+    value: &serde_json::Value,
+) -> RdbFileResult<PhysicalCollectionContract> {
+    let object = expect_object(value, "physical collection contract")?;
+    Ok(PhysicalCollectionContract {
+        name: json_string_required(object, "name")?,
+        declared_model: json_string_required(object, "declared_model")?,
+        schema_mode: json_string_required(object, "schema_mode")?,
+        origin: json_string_required(object, "origin")?,
+        version: json_u32_required(object, "version")?,
+        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
+        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
+        default_ttl_ms: optional_u64_field(object, "default_ttl_ms")?,
+        vector_dimension: optional_usize_field(object, "vector_dimension")?,
+        vector_metric: optional_string_field(object, "vector_metric")?,
+        context_index_fields: string_array_from_json(object.get("context_index_fields"))
+            .unwrap_or_default(),
+        declared_columns: physical_array_from_json(
+            object.get("declared_columns"),
+            declared_column_contract_from_json_value,
+        )?,
+        table_def_hex: optional_string_field(object, "table_def")?,
+        timestamps_enabled: object
+            .get("timestamps_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        context_index_enabled: object
+            .get("context_index_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        metrics_raw_retention_ms: optional_u64_field(object, "metrics_raw_retention_ms")?,
+        metrics_rollup_policies: string_array_from_json(object.get("metrics_rollup_policies"))
+            .unwrap_or_default(),
+        metrics_tenant_identity: optional_string_field(object, "metrics_tenant_identity")?,
+        metrics_namespace: optional_string_field(object, "metrics_namespace")?,
+        append_only: object
+            .get("append_only")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        subscriptions: physical_array_from_json(
+            object.get("subscriptions"),
+            subscription_descriptor_from_json_value,
+        )?,
+        analytics_config: physical_array_from_json(
+            object.get("analytics_config"),
+            analytics_view_descriptor_from_json_value,
+        )?,
+        session_key: optional_string_field(object, "session_key")?,
+        session_gap_ms: optional_u64_field(object, "session_gap_ms")?,
+        retention_duration_ms: optional_u64_field(object, "retention_duration_ms")?,
+        analytical_storage: match object.get("analytical_storage") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(value) => Some(analytical_storage_from_json_value(value)?),
+        },
     })
 }
 
@@ -2230,6 +2461,26 @@ fn optional_u8_field(
     }
 }
 
+fn optional_u64_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Option<u64>> {
+    match object.get(key) {
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(value) => json_u64_value(value).map(Some),
+    }
+}
+
+fn optional_usize_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RdbFileResult<Option<usize>> {
+    match object.get(key) {
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(value) => json_usize_value(value).map(Some),
+    }
+}
+
 fn json_u64(value: u64) -> serde_json::Value {
     serde_json::Value::String(value.to_string())
 }
@@ -2255,6 +2506,21 @@ fn optional_u8_json(value: Option<u8>) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn optional_u64_json(value: Option<u64>) -> serde_json::Value {
+    value.map(json_u64).unwrap_or(serde_json::Value::Null)
+}
+
+fn optional_usize_json(value: Option<usize>) -> serde_json::Value {
+    value.map(json_usize).unwrap_or(serde_json::Value::Null)
+}
+
+fn optional_string_json(value: Option<&String>) -> serde_json::Value {
+    value
+        .cloned()
+        .map(serde_json::Value::String)
+        .unwrap_or(serde_json::Value::Null)
+}
+
 fn string_array_json(values: &[String]) -> serde_json::Value {
     serde_json::Value::Array(
         values
@@ -2272,6 +2538,19 @@ fn string_array_from_json(value: Option<&serde_json::Value>) -> Option<Vec<Strin
             .filter_map(|value| value.as_str().map(str::to_string))
             .collect()
     })
+}
+
+fn physical_array_from_json<T>(
+    value: Option<&serde_json::Value>,
+    item_from_json: fn(&serde_json::Value) -> RdbFileResult<T>,
+) -> RdbFileResult<Vec<T>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(values) = value.as_array() else {
+        return Err(invalid("physical array field must be an array"));
+    };
+    values.iter().map(item_from_json).collect()
 }
 
 fn invalid(message: impl Into<String>) -> RdbFileError {
@@ -2490,6 +2769,79 @@ mod tests {
         assert_eq!(
             decode_physical_declared_column_contract_json(&json).unwrap(),
             column
+        );
+    }
+
+    #[test]
+    fn physical_collection_contract_round_trips() {
+        let contract = PhysicalCollectionContract {
+            name: "orders".to_string(),
+            declared_model: "table".to_string(),
+            schema_mode: "strict".to_string(),
+            origin: "explicit".to_string(),
+            version: 7,
+            created_at_unix_ms: 100,
+            updated_at_unix_ms: 200,
+            default_ttl_ms: Some(30_000),
+            vector_dimension: Some(128),
+            vector_metric: Some("cosine".to_string()),
+            context_index_fields: vec!["body".to_string()],
+            declared_columns: vec![PhysicalDeclaredColumnContract {
+                name: "id".to_string(),
+                data_type: "UUID".to_string(),
+                sql_type: Some(PhysicalSqlTypeName {
+                    name: "UUID".to_string(),
+                    modifiers: Vec::new(),
+                }),
+                not_null: true,
+                default: None,
+                compress: None,
+                unique: true,
+                primary_key: true,
+                enum_variants: Vec::new(),
+                array_element: None,
+                decimal_precision: None,
+            }],
+            table_def_hex: Some("00ff".to_string()),
+            timestamps_enabled: true,
+            context_index_enabled: false,
+            metrics_raw_retention_ms: Some(60_000),
+            metrics_rollup_policies: vec!["1m".to_string()],
+            metrics_tenant_identity: Some("tenant_id".to_string()),
+            metrics_namespace: Some("default".to_string()),
+            append_only: true,
+            subscriptions: vec![PhysicalSubscriptionDescriptor {
+                name: "audit".to_string(),
+                source: "orders".to_string(),
+                target_queue: "audit_queue".to_string(),
+                ops_filter: vec!["insert".to_string()],
+                where_filter: None,
+                redact_fields: Vec::new(),
+                enabled: true,
+                all_tenants: false,
+            }],
+            analytics_config: vec![PhysicalAnalyticsViewDescriptor {
+                output: "centrality".to_string(),
+                algorithm: Some("pagerank".to_string()),
+                resolution: None,
+                max_iterations: Some(20),
+                tolerance: Some(0.01),
+            }],
+            session_key: Some("session_id".to_string()),
+            session_gap_ms: Some(10_000),
+            retention_duration_ms: Some(86_400_000),
+            analytical_storage: Some(PhysicalAnalyticalStorageConfig {
+                columnar: true,
+                time_key: "ts".to_string(),
+                order_by_key: Some("id".to_string()),
+            }),
+        };
+
+        let json = encode_physical_collection_contract_json(&contract).unwrap();
+        assert!(json.contains("\"context_index_enabled\""));
+        assert_eq!(
+            decode_physical_collection_contract_json(&json).unwrap(),
+            contract
         );
     }
 

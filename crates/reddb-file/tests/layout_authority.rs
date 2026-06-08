@@ -1922,6 +1922,7 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "PhysicalSubscriptionDescriptor",
         "PhysicalAnalyticsViewDescriptor",
         "PhysicalDeclaredColumnContract",
+        "PhysicalCollectionContract",
         "PhysicalSqlTypeName",
         "PhysicalTypeModifier",
         "encode_physical_schema_manifest_json",
@@ -1936,6 +1937,8 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "decode_physical_analytics_view_descriptor_json",
         "encode_physical_declared_column_contract_json",
         "decode_physical_declared_column_contract_json",
+        "encode_physical_collection_contract_json",
+        "decode_physical_collection_contract_json",
         "\"protocol_version\".to_string()",
         "\"manifest_events\".to_string()",
         "\"collection_ttl_defaults_ms\".to_string()",
@@ -1955,6 +1958,12 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "\"sql_type\".to_string()",
         "\"enum_variants\".to_string()",
         "\"decimal_precision\".to_string()",
+        "\"declared_model\".to_string()",
+        "\"schema_mode\".to_string()",
+        "\"context_index_enabled\".to_string()",
+        "\"metrics_raw_retention_ms\".to_string()",
+        "\"analytics_config\".to_string()",
+        "\"table_def\".to_string()",
     ] {
         assert!(
             file.contains(required),
@@ -1997,6 +2006,13 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "expect_object(value, \"declared_column_contract\")",
         "expect_object(value, \"type_modifier\")",
         "unsupported type modifier kind",
+        "\"declared_model\".to_string()",
+        "\"schema_mode\".to_string()",
+        "\"context_index_enabled\".to_string()",
+        "\"metrics_raw_retention_ms\".to_string()",
+        "\"analytics_config\".to_string()",
+        "\"table_def\".to_string()",
+        "expect_object(value, \"collection_contract\")",
     ] {
         assert!(
             !json_codec_non_test.contains(forbidden),
@@ -2029,6 +2045,10 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "decode_physical_declared_column_contract_json",
         "declared_column_contract_to_persisted",
         "declared_column_contract_from_persisted",
+        "encode_physical_collection_contract_json",
+        "decode_physical_collection_contract_json",
+        "collection_contract_to_persisted",
+        "collection_contract_from_persisted",
     ] {
         assert!(
             json_codec_non_test.contains(required),

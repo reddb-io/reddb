@@ -195,177 +195,133 @@ fn catalog_from_persisted(
 }
 
 pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(contract.name.clone()));
-    object.insert(
-        "declared_model".to_string(),
-        JsonValue::String(collection_model_as_str(contract.declared_model).to_string()),
-    );
-    object.insert(
-        "schema_mode".to_string(),
-        JsonValue::String(schema_mode_as_str(contract.schema_mode).to_string()),
-    );
-    object.insert(
-        "origin".to_string(),
-        JsonValue::String(contract.origin.as_str().to_string()),
-    );
-    object.insert(
-        "version".to_string(),
-        JsonValue::Number(contract.version as f64),
-    );
-    object.insert(
-        "created_at_unix_ms".to_string(),
-        json_u128(contract.created_at_unix_ms),
-    );
-    object.insert(
-        "updated_at_unix_ms".to_string(),
-        json_u128(contract.updated_at_unix_ms),
-    );
-    object.insert(
-        "default_ttl_ms".to_string(),
-        contract
-            .default_ttl_ms
-            .map(json_u64)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "vector_dimension".to_string(),
-        contract
-            .vector_dimension
-            .map(|dimension| JsonValue::Number(dimension as f64))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "vector_metric".to_string(),
-        contract
+    file_json_to_server_json(
+        reddb_file::encode_physical_collection_contract_json(&collection_contract_to_persisted(
+            contract,
+        ))
+        .expect("reddb-file must encode physical collection contract JSON"),
+    )
+}
+
+fn collection_contract_to_persisted(
+    contract: &CollectionContract,
+) -> reddb_file::PhysicalCollectionContract {
+    reddb_file::PhysicalCollectionContract {
+        name: contract.name.clone(),
+        declared_model: collection_model_as_str(contract.declared_model).to_string(),
+        schema_mode: schema_mode_as_str(contract.schema_mode).to_string(),
+        origin: contract.origin.as_str().to_string(),
+        version: contract.version,
+        created_at_unix_ms: contract.created_at_unix_ms,
+        updated_at_unix_ms: contract.updated_at_unix_ms,
+        default_ttl_ms: contract.default_ttl_ms,
+        vector_dimension: contract.vector_dimension,
+        vector_metric: contract
             .vector_metric
-            .map(|metric| JsonValue::String(distance_metric_as_str(metric).to_string()))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "context_index_fields".to_string(),
-        JsonValue::Array(
-            contract
-                .context_index_fields
-                .iter()
-                .map(|field| JsonValue::String(field.clone()))
-                .collect(),
-        ),
-    );
-    object.insert(
-        "declared_columns".to_string(),
-        JsonValue::Array(
-            contract
-                .declared_columns
-                .iter()
-                .map(declared_column_contract_to_json)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "timestamps_enabled".to_string(),
-        JsonValue::Bool(contract.timestamps_enabled),
-    );
-    object.insert(
-        "context_index_enabled".to_string(),
-        JsonValue::Bool(contract.context_index_enabled),
-    );
-    object.insert(
-        "metrics_raw_retention_ms".to_string(),
-        contract
-            .metrics_raw_retention_ms
-            .map(json_u64)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "metrics_rollup_policies".to_string(),
-        JsonValue::Array(
-            contract
-                .metrics_rollup_policies
-                .iter()
-                .map(|policy| JsonValue::String(policy.clone()))
-                .collect(),
-        ),
-    );
-    object.insert(
-        "metrics_tenant_identity".to_string(),
-        contract
-            .metrics_tenant_identity
-            .as_ref()
-            .map(|identity| JsonValue::String(identity.clone()))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "metrics_namespace".to_string(),
-        contract
-            .metrics_namespace
-            .as_ref()
-            .map(|namespace| JsonValue::String(namespace.clone()))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "append_only".to_string(),
-        JsonValue::Bool(contract.append_only),
-    );
-    object.insert(
-        "subscriptions".to_string(),
-        JsonValue::Array(
-            contract
-                .subscriptions
-                .iter()
-                .map(subscription_descriptor_to_json)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "analytics_config".to_string(),
-        JsonValue::Array(
-            contract
-                .analytics_config
-                .iter()
-                .map(analytics_view_descriptor_to_json)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "session_key".to_string(),
-        contract
-            .session_key
-            .as_ref()
-            .map(|name| JsonValue::String(name.clone()))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "session_gap_ms".to_string(),
-        contract
-            .session_gap_ms
-            .map(|ms| JsonValue::Number(ms as f64))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "retention_duration_ms".to_string(),
-        contract
-            .retention_duration_ms
-            .map(json_u64)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "analytical_storage".to_string(),
-        contract
-            .analytical_storage
-            .as_ref()
-            .map(analytical_storage_to_json)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "table_def".to_string(),
-        contract
+            .map(distance_metric_as_str)
+            .map(str::to_string),
+        context_index_fields: contract.context_index_fields.clone(),
+        declared_columns: contract
+            .declared_columns
+            .iter()
+            .map(declared_column_contract_to_persisted)
+            .collect(),
+        table_def_hex: contract
             .table_def
             .as_ref()
-            .map(|table_def| JsonValue::String(hex::encode(table_def.to_bytes())))
-            .unwrap_or(JsonValue::Null),
-    );
-    JsonValue::Object(object)
+            .map(|table_def| hex::encode(table_def.to_bytes())),
+        timestamps_enabled: contract.timestamps_enabled,
+        context_index_enabled: contract.context_index_enabled,
+        metrics_raw_retention_ms: contract.metrics_raw_retention_ms,
+        metrics_rollup_policies: contract.metrics_rollup_policies.clone(),
+        metrics_tenant_identity: contract.metrics_tenant_identity.clone(),
+        metrics_namespace: contract.metrics_namespace.clone(),
+        append_only: contract.append_only,
+        subscriptions: contract
+            .subscriptions
+            .iter()
+            .map(subscription_descriptor_to_persisted)
+            .collect(),
+        analytics_config: contract
+            .analytics_config
+            .iter()
+            .map(analytics_view_descriptor_to_persisted)
+            .collect(),
+        session_key: contract.session_key.clone(),
+        session_gap_ms: contract.session_gap_ms,
+        retention_duration_ms: contract.retention_duration_ms,
+        analytical_storage: contract
+            .analytical_storage
+            .as_ref()
+            .map(analytical_storage_to_persisted),
+    }
+}
+
+fn collection_contract_from_persisted(
+    contract: reddb_file::PhysicalCollectionContract,
+) -> io::Result<CollectionContract> {
+    let table_def = match contract.table_def_hex {
+        Some(encoded) => {
+            let bytes = hex::decode(encoded).map_err(|err| {
+                invalid_data(format!("invalid collection contract table_def hex: {err}"))
+            })?;
+            Some(
+                crate::storage::schema::TableDef::from_bytes(&bytes).map_err(|err| {
+                    invalid_data(format!(
+                        "invalid collection contract table_def payload: {err}"
+                    ))
+                })?,
+            )
+        }
+        None => None,
+    };
+
+    Ok(CollectionContract {
+        name: contract.name,
+        declared_model: collection_model_from_str(&contract.declared_model)?,
+        schema_mode: schema_mode_from_str(&contract.schema_mode)?,
+        origin: contract_origin_from_str(&contract.origin)?,
+        version: contract.version,
+        created_at_unix_ms: contract.created_at_unix_ms,
+        updated_at_unix_ms: contract.updated_at_unix_ms,
+        default_ttl_ms: contract.default_ttl_ms,
+        vector_dimension: contract.vector_dimension,
+        vector_metric: contract
+            .vector_metric
+            .as_deref()
+            .map(distance_metric_from_str)
+            .transpose()?,
+        context_index_fields: contract.context_index_fields,
+        declared_columns: contract
+            .declared_columns
+            .into_iter()
+            .map(declared_column_contract_from_persisted)
+            .collect(),
+        table_def,
+        timestamps_enabled: contract.timestamps_enabled,
+        context_index_enabled: contract.context_index_enabled,
+        metrics_raw_retention_ms: contract.metrics_raw_retention_ms,
+        metrics_rollup_policies: contract.metrics_rollup_policies,
+        metrics_tenant_identity: contract.metrics_tenant_identity,
+        metrics_namespace: contract.metrics_namespace,
+        append_only: contract.append_only,
+        subscriptions: contract
+            .subscriptions
+            .into_iter()
+            .map(subscription_descriptor_from_persisted)
+            .collect::<io::Result<Vec<_>>>()?,
+        analytics_config: contract
+            .analytics_config
+            .into_iter()
+            .map(analytics_view_descriptor_from_persisted)
+            .collect::<io::Result<Vec<_>>>()?,
+        session_key: contract.session_key,
+        session_gap_ms: contract.session_gap_ms,
+        retention_duration_ms: contract.retention_duration_ms,
+        analytical_storage: contract
+            .analytical_storage
+            .map(analytical_storage_from_persisted),
+    })
 }
 
 fn analytical_storage_to_json(cfg: &crate::catalog::AnalyticalStorageConfig) -> JsonValue {
@@ -404,163 +360,9 @@ fn analytical_storage_from_persisted(
 }
 
 pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<CollectionContract> {
-    let object = expect_object(value, "collection_contract")?;
-    let table_def = match object.get("table_def") {
-        Some(JsonValue::String(encoded)) => {
-            let bytes = hex::decode(encoded).map_err(|err| {
-                invalid_data(format!("invalid collection contract table_def hex: {err}"))
-            })?;
-            Some(
-                crate::storage::schema::TableDef::from_bytes(&bytes).map_err(|err| {
-                    invalid_data(format!(
-                        "invalid collection contract table_def payload: {err}"
-                    ))
-                })?,
-            )
-        }
-        Some(JsonValue::Null) | None => None,
-        Some(_) => {
-            return Err(invalid_data(
-                "collection_contract.table_def must be a hex string or null".to_string(),
-            ))
-        }
-    };
-
-    Ok(CollectionContract {
-        name: json_string_required(object, "name")?,
-        declared_model: collection_model_from_str(&json_string_required(
-            object,
-            "declared_model",
-        )?)?,
-        schema_mode: schema_mode_from_str(&json_string_required(object, "schema_mode")?)?,
-        origin: contract_origin_from_str(&json_string_required(object, "origin")?)?,
-        version: json_u32_required(object, "version")?,
-        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
-        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
-        default_ttl_ms: match object.get("default_ttl_ms") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(json_u64_value(value)?),
-        },
-        vector_dimension: match object.get("vector_dimension") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(json_usize_value(value)?),
-        },
-        vector_metric: match object.get("vector_metric") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(distance_metric_from_str(value.as_str().ok_or_else(
-                || invalid_data("collection_contract.vector_metric must be a string".to_string()),
-            )?)?),
-        },
-        context_index_fields: object
-            .get("context_index_fields")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(|value| value.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        declared_columns: object
-            .get("declared_columns")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .map(declared_column_contract_from_json)
-                    .collect::<io::Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default(),
-        table_def,
-        timestamps_enabled: object
-            .get("timestamps_enabled")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(false),
-        // Legacy sidecars written before per-table opt-in lack this key.
-        // Pre-PR behavior was "context index on unless REDDB_DISABLE_CONTEXT_INDEX";
-        // defaulting missing → true preserves that for existing tables on upgrade.
-        context_index_enabled: object
-            .get("context_index_enabled")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(true),
-        metrics_raw_retention_ms: match object.get("metrics_raw_retention_ms") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(json_u64_value(value)?),
-        },
-        metrics_rollup_policies: object
-            .get("metrics_rollup_policies")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        metrics_tenant_identity: object
-            .get("metrics_tenant_identity")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string),
-        metrics_namespace: object
-            .get("metrics_namespace")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string),
-        // Legacy sidecars lack the append_only flag — default false
-        // (pre-feature behaviour: tables were always mutable).
-        append_only: object
-            .get("append_only")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(false),
-        subscriptions: object
-            .get("subscriptions")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .map(subscription_descriptor_from_json)
-                    .collect::<io::Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default(),
-        // Legacy sidecars written before the analytics opt-in lack this
-        // key — default to an empty config (no analytics views). Issue #800.
-        analytics_config: object
-            .get("analytics_config")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .map(analytics_view_descriptor_from_json)
-                    .collect::<io::Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default(),
-        // Legacy sidecars lack the session_key / session_gap_ms keys —
-        // default None preserves pre-feature behaviour (no SESSIONIZE
-        // defaults). Issue #576 slice 1.
-        session_key: object
-            .get("session_key")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string),
-        session_gap_ms: match object.get("session_gap_ms") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(json_u64_value(value)?),
-        },
-        // Legacy sidecars lack the retention_duration_ms key — default
-        // None preserves pre-feature behaviour (no retention filter).
-        // Issue #580 slice 1.
-        retention_duration_ms: match object.get("retention_duration_ms") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(json_u64_value(value)?),
-        },
-        // Legacy sidecars written before the columnar analytical-storage
-        // seam lack this key — default None (row engine). PRD #850 Phase 1.
-        analytical_storage: match object.get("analytical_storage") {
-            Some(JsonValue::Null) | None => None,
-            Some(value) => Some(analytical_storage_from_json(value)?),
-        },
-    })
+    let contract = reddb_file::decode_physical_collection_contract_json(&value.to_string_compact())
+        .map_err(|err| invalid_data(format!("decode physical collection contract: {err}")))?;
+    collection_contract_from_persisted(contract)
 }
 
 fn subscription_descriptor_to_json(
