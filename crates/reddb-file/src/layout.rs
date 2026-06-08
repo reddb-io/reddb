@@ -32,6 +32,7 @@ pub const LEGACY_LOGICAL_SLOTS_SUFFIX: &str = "logical.slots.json";
 pub const LEGACY_LOGICAL_SLOTS_TEMP_EXTENSION: &str = "logical.slots.tmp";
 pub const SERVERLESS_ROOT_EXTENSION: &str = "serverless";
 pub const SERVERLESS_CACHE_DIR: &str = "cache";
+pub const RESULT_CACHE_L2_EXTENSION: &str = "result-cache.l2";
 
 /// Storage layout preset for tier-aware RedDB file placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -444,6 +445,10 @@ pub fn atomic_temp_path(path: &Path) -> PathBuf {
     path.with_extension(ATOMIC_TEMP_EXTENSION)
 }
 
+pub fn result_cache_l2_path(data_path: &Path) -> PathBuf {
+    data_path.with_extension(RESULT_CACHE_L2_EXTENSION)
+}
+
 pub fn temp_path_in(support_dir: &Path, data_path: &Path) -> PathBuf {
     support_dir
         .join("tmp")
@@ -669,6 +674,10 @@ mod tests {
         assert_eq!(
             atomic_temp_path(&pager_meta_path(path)),
             PathBuf::from("/var/lib/reddb/main.tmp")
+        );
+        assert_eq!(
+            result_cache_l2_path(path),
+            PathBuf::from("/var/lib/reddb/main.result-cache.l2")
         );
         assert_eq!(
             engine_wal_path(path),

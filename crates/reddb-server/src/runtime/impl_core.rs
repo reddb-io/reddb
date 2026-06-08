@@ -2228,9 +2228,7 @@ impl RedDBRuntime {
             crate::storage::cache::BlobCacheConfig::default()
         } else {
             crate::storage::cache::BlobCacheConfig::default().with_l2_path(
-                options
-                    .resolved_path("data.rdb")
-                    .with_extension("result-cache.l2"),
+                reddb_file::layout::result_cache_l2_path(&options.resolved_path("data.rdb")),
             )
         };
         let result_blob_cache =
