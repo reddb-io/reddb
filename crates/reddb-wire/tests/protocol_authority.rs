@@ -725,6 +725,12 @@ fn redwire_stream_frame_builders_live_in_reddb_wire() {
             "kind(MessageKind::StreamChunk)",
             "kind(MessageKind::StreamError)",
             "kind(MessageKind::StreamEnd)",
+            "pub fn build_open_ack_payload",
+            "pub fn build_stream_chunk_payload",
+            "pub fn build_stream_error_payload",
+            "pub fn build_stream_end_payload",
+            "pub fn build_input_stream_end_payload",
+            "pub fn build_input_stream_error_payload",
         ] {
             assert!(
                 !text.contains(forbidden),

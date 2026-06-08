@@ -500,10 +500,43 @@ mod tests {
         let ack = build_open_ack_payload(42, 7, false);
         let value: JsonValue = serde_json::from_slice(&ack).unwrap();
         assert_eq!(value["lease_handle"], "42");
+        assert_eq!(value["resumable"], false);
+        assert_eq!(value["snapshot_lsn"], 7);
 
         let end = build_stream_end_payload(5, 42, 7, true);
         let value: JsonValue = serde_json::from_slice(&end).unwrap();
+        assert_eq!(value["stats"]["row_count"], 5);
+        assert_eq!(value["stats"]["lease_id"], 42);
+        assert_eq!(value["stats"]["snapshot_lsn"], 7);
         assert_eq!(value["stats"]["cancelled"], true);
+
+        let with_seq = build_stream_error_payload(Some(3), "x", "y");
+        let value: JsonValue = serde_json::from_slice(&with_seq).unwrap();
+        assert_eq!(value["seq"], 3);
+        assert_eq!(value["code"], "x");
+        assert_eq!(value["message"], "y");
+
+        let without_seq = build_stream_error_payload(None, "x", "y");
+        let value: JsonValue = serde_json::from_slice(&without_seq).unwrap();
+        assert!(value.as_object().unwrap().get("seq").is_none());
+    }
+
+    #[test]
+    fn input_stream_payload_builders_emit_committed_range_and_error_cursor() {
+        let end = build_input_stream_end_payload(3, 2, 42, 40, false);
+        let value: JsonValue = serde_json::from_slice(&end).unwrap();
+        assert_eq!(value["stats"]["row_count"], 3);
+        assert_eq!(value["stats"]["chunk_count"], 2);
+        assert_eq!(value["stats"]["committed_rid"], 42);
+        assert_eq!(value["stats"]["snapshot_lsn"], 40);
+        assert_eq!(value["stats"]["cancelled"], false);
+
+        let error = build_input_stream_error_payload("invalid_row", "bad", 2, 41);
+        let value: JsonValue = serde_json::from_slice(&error).unwrap();
+        assert_eq!(value["code"], "invalid_row");
+        assert_eq!(value["message"], "bad");
+        assert_eq!(value["chunk_seq"], 2);
+        assert_eq!(value["recoverable_rid"], 41);
     }
 
     #[test]
