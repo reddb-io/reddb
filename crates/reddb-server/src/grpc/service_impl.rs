@@ -3422,15 +3422,11 @@ impl RedDb for GrpcRuntime {
                     &crate::physical::PhysicalMetadataFile::metadata_path_for(path),
                 )?;
 
-                let mut header_shadow = path.to_path_buf().into_os_string();
-                header_shadow.push("-hdr");
                 chunk.header_shadow =
-                    read_snapshot_sidecar(&std::path::PathBuf::from(header_shadow))?;
+                    read_snapshot_sidecar(&reddb_file::layout::pager_header_shadow_path(path))?;
 
-                let mut metadata_shadow = path.to_path_buf().into_os_string();
-                metadata_shadow.push("-meta");
                 chunk.metadata_shadow =
-                    read_snapshot_sidecar(&std::path::PathBuf::from(metadata_shadow))?;
+                    read_snapshot_sidecar(&reddb_file::layout::pager_meta_shadow_path(path))?;
             }
         }
         let payload = chunk.encode_json();
