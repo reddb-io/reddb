@@ -25,6 +25,7 @@ pub const STORE_VERSION_V9: u32 = 9;
 pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V9;
 
 pub const METADATA_MAGIC: &[u8; 4] = b"RDM2";
+pub const METADATA_HEADER_BYTES: usize = 12;
 pub const NATIVE_COLLECTION_ROOTS_MAGIC: &[u8; 4] = b"RDRT";
 pub const NATIVE_MANIFEST_MAGIC: &[u8; 4] = b"RDMF";
 pub const NATIVE_REGISTRY_MAGIC: &[u8; 4] = b"RDRG";
@@ -56,6 +57,12 @@ pub struct NativeMetadataOverflowHeader {
 pub struct NativeMetadataOverflowContinuationHeader {
     pub next_overflow_page_id: u32,
     pub chunk_bytes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativePagedMetadataHeader {
+    pub format_version: u32,
+    pub collection_count: u32,
 }
 
 pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
@@ -161,6 +168,29 @@ pub fn decode_native_metadata_overflow_continuation_header(
         next_overflow_page_id: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
         chunk_bytes: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
     })
+}
+
+pub fn encode_native_paged_metadata_header(out: &mut Vec<u8>, header: NativePagedMetadataHeader) {
+    out.extend_from_slice(METADATA_MAGIC);
+    out.extend_from_slice(&header.format_version.to_le_bytes());
+    out.extend_from_slice(&header.collection_count.to_le_bytes());
+}
+
+pub fn decode_native_paged_metadata_header(
+    data: &[u8],
+) -> RdbFileResult<Option<NativePagedMetadataHeader>> {
+    if data.len() < 4 || &data[..4] != METADATA_MAGIC {
+        return Ok(None);
+    }
+    if data.len() < METADATA_HEADER_BYTES {
+        return Err(RdbFileError::InvalidOperation(
+            "truncated native paged metadata header".to_string(),
+        ));
+    }
+    Ok(Some(NativePagedMetadataHeader {
+        format_version: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+        collection_count: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+    }))
 }
 
 pub fn is_supported_store_version(version: u32) -> bool {
@@ -1498,6 +1528,33 @@ mod tests {
                 chunk_bytes: 2048,
             }
         );
+    }
+
+    #[test]
+    fn native_paged_metadata_header_round_trips_and_skips_legacy_payloads() {
+        let mut bytes = Vec::new();
+        encode_native_paged_metadata_header(
+            &mut bytes,
+            NativePagedMetadataHeader {
+                format_version: 9,
+                collection_count: 200,
+            },
+        );
+
+        assert_eq!(
+            decode_native_paged_metadata_header(&bytes)
+                .expect("decode header")
+                .expect("metadata header"),
+            NativePagedMetadataHeader {
+                format_version: 9,
+                collection_count: 200,
+            }
+        );
+        assert!(decode_native_paged_metadata_header(&123u32.to_le_bytes())
+            .expect("decode legacy")
+            .is_none());
+
+        assert!(decode_native_paged_metadata_header(b"RDM2").is_err());
     }
 
     #[test]
