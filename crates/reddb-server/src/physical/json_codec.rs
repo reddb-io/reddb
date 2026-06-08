@@ -682,222 +682,131 @@ fn analytics_view_descriptor_from_json(
 }
 
 fn declared_column_contract_to_json(column: &DeclaredColumnContract) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(column.name.clone()));
-    object.insert(
-        "data_type".to_string(),
-        JsonValue::String(column.data_type.clone()),
-    );
-    object.insert(
-        "sql_type".to_string(),
-        column
-            .sql_type
-            .as_ref()
-            .map(sql_type_name_to_json)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert("not_null".to_string(), JsonValue::Bool(column.not_null));
-    object.insert(
-        "default".to_string(),
-        column
-            .default
-            .clone()
-            .map(JsonValue::String)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "compress".to_string(),
-        column
-            .compress
-            .map(|value| JsonValue::Number(value as f64))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert("unique".to_string(), JsonValue::Bool(column.unique));
-    object.insert(
-        "primary_key".to_string(),
-        JsonValue::Bool(column.primary_key),
-    );
-    object.insert(
-        "enum_variants".to_string(),
-        JsonValue::Array(
-            column
-                .enum_variants
-                .iter()
-                .map(|variant| JsonValue::String(variant.clone()))
-                .collect(),
-        ),
-    );
-    object.insert(
-        "array_element".to_string(),
-        column
-            .array_element
-            .clone()
-            .map(JsonValue::String)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "decimal_precision".to_string(),
-        column
-            .decimal_precision
-            .map(|value| JsonValue::Number(value as f64))
-            .unwrap_or(JsonValue::Null),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_declared_column_contract_json(
+            &declared_column_contract_to_persisted(column),
+        )
+        .expect("reddb-file must encode physical declared column contract JSON"),
+    )
+}
+
+fn declared_column_contract_to_persisted(
+    column: &DeclaredColumnContract,
+) -> reddb_file::PhysicalDeclaredColumnContract {
+    reddb_file::PhysicalDeclaredColumnContract {
+        name: column.name.clone(),
+        data_type: column.data_type.clone(),
+        sql_type: column.sql_type.as_ref().map(sql_type_name_to_persisted),
+        not_null: column.not_null,
+        default: column.default.clone(),
+        compress: column.compress,
+        unique: column.unique,
+        primary_key: column.primary_key,
+        enum_variants: column.enum_variants.clone(),
+        array_element: column.array_element.clone(),
+        decimal_precision: column.decimal_precision,
+    }
+}
+
+fn declared_column_contract_from_persisted(
+    column: reddb_file::PhysicalDeclaredColumnContract,
+) -> DeclaredColumnContract {
+    let sql_type = column
+        .sql_type
+        .map(sql_type_name_from_persisted)
+        .or_else(|| {
+            Some(crate::storage::schema::SqlTypeName::parse_declared(
+                &column.data_type,
+            ))
+        });
+    DeclaredColumnContract {
+        name: column.name,
+        data_type: column.data_type,
+        sql_type,
+        not_null: column.not_null,
+        default: column.default,
+        compress: column.compress,
+        unique: column.unique,
+        primary_key: column.primary_key,
+        enum_variants: column.enum_variants,
+        array_element: column.array_element,
+        decimal_precision: column.decimal_precision,
+    }
 }
 
 fn declared_column_contract_from_json(value: &JsonValue) -> io::Result<DeclaredColumnContract> {
-    let object = expect_object(value, "declared_column_contract")?;
-    Ok(DeclaredColumnContract {
-        name: json_string_required(object, "name")?,
-        data_type: json_string_required(object, "data_type")?,
-        sql_type: object
-            .get("sql_type")
-            .map(sql_type_name_from_json)
-            .transpose()?
-            .flatten()
-            .or_else(|| {
-                object
-                    .get("data_type")
-                    .and_then(JsonValue::as_str)
-                    .map(crate::storage::schema::SqlTypeName::parse_declared)
-            }),
-        not_null: json_bool_required(object, "not_null")?,
-        default: object
-            .get("default")
-            .and_then(JsonValue::as_str)
-            .map(|value| value.to_string()),
-        compress: match object.get("compress") {
-            None | Some(JsonValue::Null) => None,
-            Some(value) => Some(json_u8_field_value(value)?),
-        },
-        unique: json_bool_required(object, "unique")?,
-        primary_key: json_bool_required(object, "primary_key")?,
-        enum_variants: object
-            .get("enum_variants")
-            .and_then(JsonValue::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(|value| value.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        array_element: object
-            .get("array_element")
-            .and_then(JsonValue::as_str)
-            .map(|value| value.to_string()),
-        decimal_precision: match object.get("decimal_precision") {
-            None | Some(JsonValue::Null) => None,
-            Some(value) => Some(json_u8_field_value(value)?),
-        },
-    })
+    let column =
+        reddb_file::decode_physical_declared_column_contract_json(&value.to_string_compact())
+            .map_err(|err| {
+                invalid_data(format!("decode physical declared column contract: {err}"))
+            })?;
+    Ok(declared_column_contract_from_persisted(column))
 }
 
-fn sql_type_name_to_json(sql_type: &crate::storage::schema::SqlTypeName) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(sql_type.name.clone()));
-    object.insert(
-        "modifiers".to_string(),
-        JsonValue::Array(
-            sql_type
-                .modifiers
-                .iter()
-                .map(type_modifier_to_json)
-                .collect(),
-        ),
-    );
-    JsonValue::Object(object)
-}
-
-fn sql_type_name_from_json(
-    value: &JsonValue,
-) -> io::Result<Option<crate::storage::schema::SqlTypeName>> {
-    match value {
-        JsonValue::Null => Ok(None),
-        JsonValue::Object(object) => {
-            let name = json_string_required(object, "name")?;
-            let modifiers = object
-                .get("modifiers")
-                .and_then(JsonValue::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(type_modifier_from_json)
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
-            Ok(Some(crate::storage::schema::SqlTypeName {
-                name,
-                modifiers,
-            }))
-        }
-        _ => Err(invalid_data(
-            "sql_type must be an object or null".to_string(),
-        )),
+fn sql_type_name_to_persisted(
+    sql_type: &crate::storage::schema::SqlTypeName,
+) -> reddb_file::PhysicalSqlTypeName {
+    reddb_file::PhysicalSqlTypeName {
+        name: sql_type.name.clone(),
+        modifiers: sql_type
+            .modifiers
+            .iter()
+            .map(type_modifier_to_persisted)
+            .collect(),
     }
 }
 
-fn type_modifier_to_json(modifier: &crate::storage::schema::TypeModifier) -> JsonValue {
-    let mut object = Map::new();
+fn sql_type_name_from_persisted(
+    sql_type: reddb_file::PhysicalSqlTypeName,
+) -> crate::storage::schema::SqlTypeName {
+    crate::storage::schema::SqlTypeName {
+        name: sql_type.name,
+        modifiers: sql_type
+            .modifiers
+            .into_iter()
+            .map(type_modifier_from_persisted)
+            .collect(),
+    }
+}
+
+fn type_modifier_to_persisted(
+    modifier: &crate::storage::schema::TypeModifier,
+) -> reddb_file::PhysicalTypeModifier {
     match modifier {
         crate::storage::schema::TypeModifier::Number(value) => {
-            object.insert("kind".to_string(), JsonValue::String("number".to_string()));
-            object.insert("value".to_string(), JsonValue::Number(*value as f64));
+            reddb_file::PhysicalTypeModifier::Number(*value)
         }
         crate::storage::schema::TypeModifier::Ident(value) => {
-            object.insert("kind".to_string(), JsonValue::String("ident".to_string()));
-            object.insert("value".to_string(), JsonValue::String(value.clone()));
+            reddb_file::PhysicalTypeModifier::Ident(value.clone())
         }
         crate::storage::schema::TypeModifier::StringLiteral(value) => {
-            object.insert("kind".to_string(), JsonValue::String("string".to_string()));
-            object.insert("value".to_string(), JsonValue::String(value.clone()));
+            reddb_file::PhysicalTypeModifier::StringLiteral(value.clone())
         }
         crate::storage::schema::TypeModifier::Type(value) => {
-            object.insert("kind".to_string(), JsonValue::String("type".to_string()));
-            object.insert("value".to_string(), sql_type_name_to_json(value));
+            reddb_file::PhysicalTypeModifier::Type(Box::new(sql_type_name_to_persisted(value)))
         }
-    }
-    JsonValue::Object(object)
-}
-
-fn type_modifier_from_json(value: &JsonValue) -> io::Result<crate::storage::schema::TypeModifier> {
-    let object = expect_object(value, "type_modifier")?;
-    let kind = json_string_required(object, "kind")?;
-    match kind.as_str() {
-        "number" => Ok(crate::storage::schema::TypeModifier::Number(
-            json_u32_required(object, "value")?,
-        )),
-        "ident" => Ok(crate::storage::schema::TypeModifier::Ident(
-            json_string_required(object, "value")?,
-        )),
-        "string" => Ok(crate::storage::schema::TypeModifier::StringLiteral(
-            json_string_required(object, "value")?,
-        )),
-        "type" => {
-            let value = object
-                .get("value")
-                .ok_or_else(|| invalid_data("missing type modifier value".to_string()))?;
-            let nested = sql_type_name_from_json(value)?
-                .ok_or_else(|| invalid_data("type modifier cannot be null".to_string()))?;
-            Ok(crate::storage::schema::TypeModifier::Type(Box::new(nested)))
-        }
-        other => Err(invalid_data(format!(
-            "unsupported type modifier kind: {other}"
-        ))),
     }
 }
 
-fn json_u8_field_value(value: &JsonValue) -> io::Result<u8> {
-    let number = value
-        .as_f64()
-        .ok_or_else(|| invalid_data("expected numeric u8 field value".to_string()))?;
-    if !(0.0..=(u8::MAX as f64)).contains(&number) {
-        return Err(invalid_data(format!(
-            "u8 field value out of range: {number}"
-        )));
+fn type_modifier_from_persisted(
+    modifier: reddb_file::PhysicalTypeModifier,
+) -> crate::storage::schema::TypeModifier {
+    match modifier {
+        reddb_file::PhysicalTypeModifier::Number(value) => {
+            crate::storage::schema::TypeModifier::Number(value)
+        }
+        reddb_file::PhysicalTypeModifier::Ident(value) => {
+            crate::storage::schema::TypeModifier::Ident(value)
+        }
+        reddb_file::PhysicalTypeModifier::StringLiteral(value) => {
+            crate::storage::schema::TypeModifier::StringLiteral(value)
+        }
+        reddb_file::PhysicalTypeModifier::Type(value) => {
+            crate::storage::schema::TypeModifier::Type(Box::new(sql_type_name_from_persisted(
+                *value,
+            )))
+        }
     }
-    Ok(number as u8)
 }
 
 fn collection_model_as_str(model: crate::catalog::CollectionModel) -> &'static str {
