@@ -82,88 +82,59 @@ impl UnifiedStore {
         store.set_format_version(version);
 
         // Read collection count
-        let collection_count = read_varu32(&buf, &mut pos)
-            .map_err(|e| format!("Failed to read collection count: {:?}", e))?;
+        let collection_count =
+            reddb_file::decode_native_dump_count(&buf, &mut pos).map_err(|e| e.to_string())?;
 
         // Read each collection
         for _ in 0..collection_count {
-            // Collection name
-            let name_len = read_varu32(&buf, &mut pos)
-                .map_err(|e| format!("Failed to read name length: {:?}", e))?
-                as usize;
-            let name = String::from_utf8(buf[pos..pos + name_len].to_vec())
-                .map_err(|e| format!("Invalid UTF-8 in collection name: {}", e))?;
-            pos += name_len;
-
-            // Entity count
-            let entity_count = read_varu32(&buf, &mut pos)
-                .map_err(|e| format!("Failed to read entity count: {:?}", e))?;
+            let collection_header =
+                reddb_file::decode_native_dump_collection_header(&buf, &mut pos)
+                    .map_err(|e| e.to_string())?;
 
             // Read each entity — V7+ includes metadata alongside entity data.
-            for _ in 0..entity_count {
+            for _ in 0..collection_header.entity_count {
                 if version >= STORE_VERSION_V7 {
                     // Length-prefixed entity+metadata record (serialize_entity_record format)
-                    if pos + 4 > buf.len() {
-                        return Err("Truncated entity record length".into());
-                    }
-                    let record_len =
-                        u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
-                            as usize;
-                    pos += 4;
-                    if pos + record_len > buf.len() {
-                        return Err("Truncated entity record payload".into());
-                    }
-                    let record_bytes = &buf[pos..pos + record_len];
-                    pos += record_len;
+                    let record_bytes = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
+                        .map_err(|e| e.to_string())?;
 
                     let (entity, metadata) = Self::deserialize_entity_record(record_bytes, version)
                         .map_err(|e| format!("Entity record deserialization error: {e}"))?;
 
-                    store.insert_auto(&name, entity.clone())?;
+                    store.insert_auto(&collection_header.name, entity.clone())?;
 
                     if let Some(metadata) = metadata {
-                        if let Some(manager) = store.get_collection(&name) {
+                        if let Some(manager) = store.get_collection(&collection_header.name) {
                             let _ = manager.set_metadata(entity.id, metadata);
                         }
                     }
                 } else {
                     // V1–V6: entity only, no metadata
                     let entity = Self::read_entity_binary(&buf, &mut pos, version)?;
-                    store.insert_auto(&name, entity)?;
+                    store.insert_auto(&collection_header.name, entity)?;
                 }
             }
         }
 
         if pos < buf.len() {
             // Read cross-references section
-            let cross_ref_count = read_varu32(&buf, &mut pos)
-                .map_err(|e| format!("Failed to read cross-ref count: {:?}", e))?;
+            let cross_ref_count =
+                reddb_file::decode_native_dump_count(&buf, &mut pos).map_err(|e| e.to_string())?;
 
             for _ in 0..cross_ref_count {
-                let source_id = read_varu64(&buf, &mut pos)
-                    .map_err(|e| format!("Failed to read source_id: {:?}", e))?;
-                let target_id = read_varu64(&buf, &mut pos)
-                    .map_err(|e| format!("Failed to read target_id: {:?}", e))?;
-                let ref_type_byte = buf[pos];
-                pos += 1;
-                let ref_type = RefType::from_byte(ref_type_byte);
-
-                let coll_len = read_varu32(&buf, &mut pos)
-                    .map_err(|e| format!("Failed to read collection length: {:?}", e))?
-                    as usize;
-                let collection = String::from_utf8(buf[pos..pos + coll_len].to_vec())
-                    .map_err(|e| format!("Invalid UTF-8 in collection: {}", e))?;
-                pos += coll_len;
+                let cross_ref = reddb_file::decode_native_dump_cross_ref(&buf, &mut pos)
+                    .map_err(|e| e.to_string())?;
+                let ref_type = RefType::from_byte(cross_ref.ref_type);
 
                 let source_collection = store
-                    .get_any(EntityId::new(source_id))
+                    .get_any(EntityId::new(cross_ref.source_id))
                     .map(|(name, _)| name)
-                    .unwrap_or_else(|| collection.clone());
+                    .unwrap_or_else(|| cross_ref.target_collection.clone());
                 let _ = store.add_cross_ref(
                     &source_collection,
-                    EntityId::new(source_id),
-                    &collection,
-                    EntityId::new(target_id),
+                    EntityId::new(cross_ref.source_id),
+                    &cross_ref.target_collection,
+                    EntityId::new(cross_ref.target_id),
                     ref_type,
                     1.0,
                 );
@@ -217,40 +188,37 @@ impl UnifiedStore {
 
         // Get all collections
         let collections = self.collections.read();
-        write_varu32(&mut buf, collections.len() as u32);
+        reddb_file::encode_native_dump_count(&mut buf, collections.len() as u32);
 
         let fv = STORE_VERSION_CURRENT;
         for (name, manager) in collections.iter() {
-            // Collection name
-            write_varu32(&mut buf, name.len() as u32);
-            buf.extend_from_slice(name.as_bytes());
-
             // Get all entities from this collection
             let entities = manager.query_all(|_| true);
-            write_varu32(&mut buf, entities.len() as u32);
+            reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
 
             // V7+: serialize entity+metadata as a length-prefixed record.
             // Each record: [u32 len][serialize_entity_record bytes]
             for entity in entities {
                 let metadata = manager.get_metadata(entity.id);
                 let record = Self::serialize_entity_record(&entity, metadata.as_ref(), fv);
-                buf.extend_from_slice(&(record.len() as u32).to_le_bytes());
-                buf.extend_from_slice(&record);
+                reddb_file::encode_native_dump_entity_record(&mut buf, &record);
             }
         }
 
         // Write cross-references
         let cross_refs = self.cross_refs.read();
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
-        write_varu32(&mut buf, total_refs as u32);
+        reddb_file::encode_native_dump_count(&mut buf, total_refs as u32);
 
         for (source_id, refs) in cross_refs.iter() {
             for (target_id, ref_type, collection) in refs {
-                write_varu64(&mut buf, source_id.raw());
-                write_varu64(&mut buf, target_id.raw());
-                buf.push(ref_type.to_byte());
-                write_varu32(&mut buf, collection.len() as u32);
-                buf.extend_from_slice(collection.as_bytes());
+                reddb_file::encode_native_dump_cross_ref(
+                    &mut buf,
+                    source_id.raw(),
+                    target_id.raw(),
+                    ref_type.to_byte(),
+                    collection,
+                );
             }
         }
 
