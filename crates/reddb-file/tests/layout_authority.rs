@@ -1346,6 +1346,7 @@ fn server_uses_reddb_file_for_serverless_roots_and_cache() {
 fn server_does_not_own_serverless_writer_lease_artifact() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/replication/lease.rs"));
+    let failover = read(root.join("crates/reddb-server/src/server/handlers_failover.rs"));
 
     for forbidden in [
         "pub struct WriterLease",
@@ -1367,6 +1368,16 @@ fn server_does_not_own_serverless_writer_lease_artifact() {
         );
     }
 
+    for forbidden in [
+        "leases/{database_key}.lease.json",
+        "leases/.{database_key}.lease.json.cas.lock",
+    ] {
+        assert!(
+            !failover.contains(forbidden),
+            "failover tests should route serverless writer lease artifact names through reddb-file, found {forbidden:?}"
+        );
+    }
+
     for required in [
         "pub use reddb_file::ServerlessWriterLease as WriterLease",
         "reddb_file::serverless_writer_lease_key",
@@ -1379,6 +1390,11 @@ fn server_does_not_own_serverless_writer_lease_artifact() {
             "serverless writer lease runtime should route through {required}"
         );
     }
+
+    assert!(
+        failover.contains("reddb_file::serverless_writer_lease_key"),
+        "failover cleanup should route serverless writer lease object key through reddb-file"
+    );
 }
 
 #[test]

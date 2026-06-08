@@ -323,8 +323,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(
             crate::replication::primary::PrimaryReplication::primary_replica_root_for(data_path),
         );
-        let _ = std::fs::remove_file(format!("leases/{database_key}.lease.json"));
-        let _ = std::fs::remove_file(format!("leases/.{database_key}.lease.json.cas.lock"));
+        let lease_key = reddb_file::serverless_writer_lease_key("leases/", database_key);
+        let _ = std::fs::remove_file(&lease_key);
+        let _ = std::fs::remove_file(crate::storage::backend::local::local_cas_lock_path_for(
+            Path::new(&lease_key),
+        ));
     }
 
     fn replica_runtime_for_promote(data_path: &Path, database_key: &str) -> RedDBRuntime {
