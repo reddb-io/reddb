@@ -20,10 +20,11 @@ use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityId};
 use reddb_wire::legacy::{
-    encode_column_name, write_frame_header, MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED,
-    MSG_BULK_OK, MSG_BULK_STREAM_ACK, MSG_BULK_STREAM_COMMIT, MSG_BULK_STREAM_ROWS,
-    MSG_BULK_STREAM_START, MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR, MSG_PREPARED_OK, MSG_QUERY,
-    MSG_QUERY_BINARY, MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
+    build_legacy_error_frame, build_legacy_result_frame, encode_column_name, write_frame_header,
+    MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED, MSG_BULK_OK, MSG_BULK_STREAM_ACK,
+    MSG_BULK_STREAM_COMMIT, MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START, MSG_CURSOR_BATCH,
+    MSG_CURSOR_OK, MSG_ERROR, MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY, MSG_RESULT, VAL_F64,
+    VAL_I64, VAL_TEXT, VAL_U64,
 };
 use reddb_wire::redwire::{
     decode_bulk_binary_payload, decode_bulk_json_payload, decode_bulk_ok_count_payload,
@@ -74,11 +75,7 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             // Fast path: if pre_serialized_json available, send it as text
             // (avoids gRPC/protobuf overhead while reusing existing JSON turbo path)
             if let Some(ref json) = result.result.pre_serialized_json {
-                let json_bytes = json.as_bytes();
-                let mut resp = Vec::with_capacity(5 + json_bytes.len());
-                write_frame_header(&mut resp, MSG_RESULT, json_bytes.len() as u32);
-                resp.extend_from_slice(json_bytes);
-                return resp;
+                return build_legacy_result_frame(json.as_bytes());
             }
             encode_result(&result)
         }
@@ -141,18 +138,12 @@ fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<
         encode_value(&mut body, &val);
     }
 
-    let mut resp = Vec::with_capacity(5 + body.len());
-    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
-    resp.extend_from_slice(&body);
-    resp
+    build_legacy_result_frame(&body)
 }
 
 fn encode_empty_result() -> Vec<u8> {
     let body = [0u8, 0, 0, 0, 0, 0]; // ncols=0, nrows=0
-    let mut resp = Vec::with_capacity(11);
-    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
-    resp.extend_from_slice(&body);
-    resp
+    build_legacy_result_frame(&body)
 }
 
 pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
@@ -320,10 +311,7 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
         buf.clone()
     });
 
-    let mut resp = Vec::with_capacity(5 + payload.len());
-    write_frame_header(&mut resp, MSG_RESULT, payload.len() as u32);
-    resp.extend_from_slice(&payload);
-    resp
+    build_legacy_result_frame(&payload)
 }
 
 /// Binary bulk insert — zero JSON parsing. Values come as typed wire bytes.
@@ -618,10 +606,7 @@ pub(crate) fn handle_stream_commit(
 }
 
 fn make_error(msg: &[u8]) -> Vec<u8> {
-    let mut resp = Vec::with_capacity(5 + msg.len());
-    write_frame_header(&mut resp, MSG_ERROR, msg.len() as u32);
-    resp.extend_from_slice(msg);
-    resp
+    build_legacy_error_frame(msg)
 }
 
 // ── Prepared statements ───────────────────────────────────────────
@@ -786,11 +771,7 @@ pub(crate) fn handle_execute_prepared(
                 }
             }
             if let Some(ref json) = result.result.pre_serialized_json {
-                let bytes = json.as_bytes();
-                let mut resp = Vec::with_capacity(5 + bytes.len());
-                write_frame_header(&mut resp, MSG_RESULT, bytes.len() as u32);
-                resp.extend_from_slice(bytes);
-                return resp;
+                return build_legacy_result_frame(json.as_bytes());
             }
             encode_result(&result)
         }
