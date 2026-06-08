@@ -39,6 +39,10 @@ fn lock_path_for(dest: &Path) -> PathBuf {
     dest.with_file_name(format!(".{file_name}.cas.lock"))
 }
 
+pub(crate) fn local_cas_lock_path_for(dest: &Path) -> PathBuf {
+    lock_path_for(dest)
+}
+
 impl RemoteBackend for LocalBackend {
     fn name(&self) -> &str {
         "local"
