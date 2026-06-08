@@ -213,6 +213,7 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
     let wire = read(root.join("crates/reddb-wire/src/legacy.rs"));
 
     for forbidden in [
+        "write_frame_header(&mut resp",
         "write_frame_header(&mut resp, MSG_RESULT",
         "write_frame_header(&mut resp, MSG_ERROR",
     ] {
@@ -240,6 +241,23 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
         assert!(
             wire.contains(&format!("pub fn {required}")),
             "reddb-wire should own legacy envelope builder {required}"
+        );
+    }
+
+    for required in [
+        "build_legacy_bulk_ok_frame",
+        "build_legacy_bulk_stream_ack_frame",
+        "build_legacy_prepared_ok_frame",
+        "build_legacy_cursor_ok_frame",
+        "build_legacy_cursor_batch_frame",
+    ] {
+        assert!(
+            listener.contains(required),
+            "server legacy listener should delegate response envelopes through {required}"
+        );
+        assert!(
+            wire.contains(&format!("pub fn {required}")),
+            "reddb-wire should own legacy response envelope builder {required}"
         );
     }
 }

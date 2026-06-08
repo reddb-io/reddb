@@ -20,11 +20,12 @@ use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityId};
 use reddb_wire::legacy::{
-    build_legacy_error_frame, build_legacy_result_frame, encode_column_name, write_frame_header,
-    MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED, MSG_BULK_OK, MSG_BULK_STREAM_ACK,
-    MSG_BULK_STREAM_COMMIT, MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START, MSG_CURSOR_BATCH,
-    MSG_CURSOR_OK, MSG_ERROR, MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY, MSG_RESULT, VAL_F64,
-    VAL_I64, VAL_TEXT, VAL_U64,
+    build_legacy_bulk_ok_frame, build_legacy_bulk_stream_ack_frame,
+    build_legacy_cursor_batch_frame, build_legacy_cursor_ok_frame, build_legacy_error_frame,
+    build_legacy_prepared_ok_frame, build_legacy_result_frame, encode_column_name,
+    MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED, MSG_BULK_OK, MSG_BULK_STREAM_COMMIT,
+    MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START, MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR,
+    MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY, MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
 };
 use reddb_wire::redwire::{
     decode_bulk_binary_payload, decode_bulk_json_payload, decode_bulk_ok_count_payload,
@@ -181,10 +182,7 @@ pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<
                 }
             }
             let payload = encode_bulk_ok_count_payload(count);
-            let mut resp = Vec::with_capacity(5 + payload.len());
-            write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
-            resp.extend_from_slice(&payload);
-            resp
+            build_legacy_bulk_ok_frame(&payload)
         }
         Err(e) => make_error(format!("bulk insert: {e}").as_bytes()),
     }
@@ -352,10 +350,7 @@ pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) 
                 }
             }
             let payload = encode_bulk_ok_count_payload(count as u64);
-            let mut resp = Vec::with_capacity(5 + payload.len());
-            write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
-            resp.extend_from_slice(&payload);
-            resp
+            build_legacy_bulk_ok_frame(&payload)
         }
         Err(e) => make_error(format!("bulk insert: {e}").as_bytes()),
     }
@@ -396,10 +391,7 @@ pub(crate) fn handle_bulk_insert_binary_prevalidated(
                 }
             }
             let payload = encode_bulk_ok_count_payload(count as u64);
-            let mut resp = Vec::with_capacity(5 + payload.len());
-            write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
-            resp.extend_from_slice(&payload);
-            resp
+            build_legacy_bulk_ok_frame(&payload)
         }
         Err(e) => make_error(format!("prevalidated bulk insert: {e}").as_bytes()),
     }
@@ -519,9 +511,7 @@ pub(crate) fn handle_stream_start(
         flush_row_threshold,
         flush_byte_threshold,
     });
-    let mut resp = Vec::with_capacity(5);
-    write_frame_header(&mut resp, MSG_BULK_STREAM_ACK, 0);
-    resp
+    build_legacy_bulk_stream_ack_frame()
 }
 
 /// `MSG_BULK_STREAM_ROWS` payload: `[nrows u32] ([val_tag u8 +
@@ -599,10 +589,7 @@ pub(crate) fn handle_stream_commit(
         }
     }
     let payload = encode_bulk_ok_count_payload(state.total_flushed);
-    let mut resp = Vec::with_capacity(5 + payload.len());
-    write_frame_header(&mut resp, MSG_BULK_OK, payload.len() as u32);
-    resp.extend_from_slice(&payload);
-    resp
+    build_legacy_bulk_ok_frame(&payload)
 }
 
 fn make_error(msg: &[u8]) -> Vec<u8> {
@@ -688,10 +675,7 @@ pub(crate) fn handle_prepare(
         Ok(payload_body) => payload_body,
         Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    let mut resp = Vec::with_capacity(5 + payload_body.len());
-    write_frame_header(&mut resp, MSG_PREPARED_OK, payload_body.len() as u32);
-    resp.extend_from_slice(&payload_body);
-    resp
+    build_legacy_prepared_ok_frame(&payload_body)
 }
 
 pub(crate) fn handle_execute_prepared(
@@ -902,10 +886,7 @@ fn handle_declare_cursor(
         Err(err) => return make_error(err.to_string().as_bytes()),
     };
 
-    let mut resp = Vec::with_capacity(5 + payload_body.len());
-    write_frame_header(&mut resp, MSG_CURSOR_OK, payload_body.len() as u32);
-    resp.extend_from_slice(&payload_body);
-    resp
+    build_legacy_cursor_ok_frame(&payload_body)
 }
 
 fn handle_fetch(
@@ -952,10 +933,7 @@ fn handle_fetch(
         Ok(body) => body,
         Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    let mut resp = Vec::with_capacity(5 + body.len());
-    write_frame_header(&mut resp, MSG_CURSOR_BATCH, body.len() as u32);
-    resp.extend_from_slice(&body);
-    resp
+    build_legacy_cursor_batch_frame(&body)
 }
 
 fn handle_close_cursor(
