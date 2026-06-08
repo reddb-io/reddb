@@ -285,11 +285,13 @@ impl UnifiedStore {
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {
             for (target_id, ref_type, collection) in refs {
-                meta_data.extend_from_slice(&source_id.raw().to_le_bytes());
-                meta_data.extend_from_slice(&target_id.raw().to_le_bytes());
-                meta_data.push(ref_type.to_byte());
-                meta_data.extend_from_slice(&(collection.len() as u32).to_le_bytes());
-                meta_data.extend_from_slice(collection.as_bytes());
+                reddb_file::encode_native_paged_cross_ref(
+                    &mut meta_data,
+                    source_id.raw(),
+                    target_id.raw(),
+                    ref_type.to_byte(),
+                    collection,
+                );
             }
         }
 
@@ -599,53 +601,15 @@ impl UnifiedStore {
                     pos += 4;
 
                     for _ in 0..cross_ref_count {
-                        if pos + 17 > content.len() {
+                        let Ok(cross_ref) =
+                            reddb_file::decode_native_paged_cross_ref(content, &mut pos)
+                        else {
                             break;
-                        }
-                        let source_id = u64::from_le_bytes([
-                            content[pos],
-                            content[pos + 1],
-                            content[pos + 2],
-                            content[pos + 3],
-                            content[pos + 4],
-                            content[pos + 5],
-                            content[pos + 6],
-                            content[pos + 7],
-                        ]);
-                        pos += 8;
-                        let target_id = u64::from_le_bytes([
-                            content[pos],
-                            content[pos + 1],
-                            content[pos + 2],
-                            content[pos + 3],
-                            content[pos + 4],
-                            content[pos + 5],
-                            content[pos + 6],
-                            content[pos + 7],
-                        ]);
-                        pos += 8;
-                        let ref_type = RefType::from_byte(content[pos]);
-                        pos += 1;
-
-                        if pos + 4 > content.len() {
-                            break;
-                        }
-                        let name_len = u32::from_le_bytes([
-                            content[pos],
-                            content[pos + 1],
-                            content[pos + 2],
-                            content[pos + 3],
-                        ]) as usize;
-                        pos += 4;
-                        if pos + name_len > content.len() {
-                            break;
-                        }
-                        let target_collection =
-                            String::from_utf8_lossy(&content[pos..pos + name_len]).to_string();
-                        pos += name_len;
-
-                        let source_id = EntityId::new(source_id);
-                        let target_id = EntityId::new(target_id);
+                        };
+                        let source_id = EntityId::new(cross_ref.source_id);
+                        let target_id = EntityId::new(cross_ref.target_id);
+                        let ref_type = RefType::from_byte(cross_ref.ref_type);
+                        let target_collection = cross_ref.target_collection;
 
                         self.cross_refs.write().entry(source_id).or_default().push((
                             target_id,
@@ -885,11 +849,13 @@ impl UnifiedStore {
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {
             for (target_id, ref_type, collection) in refs {
-                meta_data.extend_from_slice(&source_id.raw().to_le_bytes());
-                meta_data.extend_from_slice(&target_id.raw().to_le_bytes());
-                meta_data.push(ref_type.to_byte());
-                meta_data.extend_from_slice(&(collection.len() as u32).to_le_bytes());
-                meta_data.extend_from_slice(collection.as_bytes());
+                reddb_file::encode_native_paged_cross_ref(
+                    &mut meta_data,
+                    source_id.raw(),
+                    target_id.raw(),
+                    ref_type.to_byte(),
+                    collection,
+                );
             }
         }
 

@@ -71,6 +71,14 @@ pub struct NativePagedCollectionRoot {
     pub root_page: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativePagedCrossRef {
+    pub source_id: u64,
+    pub target_id: u64,
+    pub ref_type: u8,
+    pub target_collection: String,
+}
+
 pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
     bytes.len() >= STORE_MAGIC.len() && &bytes[..STORE_MAGIC.len()] == STORE_MAGIC
 }
@@ -238,6 +246,35 @@ pub fn decode_native_paged_collection_root(
     })
 }
 
+pub fn encode_native_paged_cross_ref(
+    out: &mut Vec<u8>,
+    source_id: u64,
+    target_id: u64,
+    ref_type: u8,
+    target_collection: &str,
+) {
+    out.extend_from_slice(&source_id.to_le_bytes());
+    out.extend_from_slice(&target_id.to_le_bytes());
+    out.push(ref_type);
+    encode_native_len_prefixed_str(out, target_collection);
+}
+
+pub fn decode_native_paged_cross_ref(
+    data: &[u8],
+    pos: &mut usize,
+) -> RdbFileResult<NativePagedCrossRef> {
+    let source_id = read_native_u64(data, pos, "truncated native paged cross-ref source")?;
+    let target_id = read_native_u64(data, pos, "truncated native paged cross-ref target")?;
+    let ref_type = read_native_u8(data, pos, "truncated native paged cross-ref type")?;
+    let target_collection = decode_native_len_prefixed_string(data, pos)?;
+    Ok(NativePagedCrossRef {
+        source_id,
+        target_id,
+        ref_type,
+        target_collection,
+    })
+}
+
 pub fn is_supported_store_version(version: u32) -> bool {
     matches!(
         version,
@@ -337,6 +374,18 @@ fn read_native_u32(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileRe
     let mut raw = [0u8; 4];
     raw.copy_from_slice(bytes);
     Ok(u32::from_le_bytes(raw))
+}
+
+fn read_native_u64(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u64> {
+    let bytes = read_native_bytes(data, pos, 8, err)?;
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(raw))
+}
+
+fn read_native_u8(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u8> {
+    let bytes = read_native_bytes(data, pos, 1, err)?;
+    Ok(bytes[0])
 }
 
 #[derive(Debug, Clone)]
@@ -1645,6 +1694,29 @@ mod tests {
         truncated.pop();
         let mut pos = 0;
         assert!(decode_native_paged_collection_root(&truncated, &mut pos).is_err());
+    }
+
+    #[test]
+    fn native_paged_cross_ref_round_trips() {
+        let mut bytes = Vec::new();
+        encode_native_paged_cross_ref(&mut bytes, 10, 20, 3, "accounts");
+
+        let mut pos = 0;
+        assert_eq!(
+            decode_native_paged_cross_ref(&bytes, &mut pos).expect("decode cross-ref"),
+            NativePagedCrossRef {
+                source_id: 10,
+                target_id: 20,
+                ref_type: 3,
+                target_collection: "accounts".to_string(),
+            }
+        );
+        assert_eq!(pos, bytes.len());
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        let mut pos = 0;
+        assert!(decode_native_paged_cross_ref(&truncated, &mut pos).is_err());
     }
 
     #[test]
