@@ -2384,6 +2384,7 @@ dependencies = [
  "reddb-io-grpc-proto",
  "regex",
  "serde_json",
+ "tokio",
  "url",
  "zstd",
 ]

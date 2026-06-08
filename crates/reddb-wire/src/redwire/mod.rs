@@ -1,10 +1,10 @@
 //! RedWire — RedDB's binary TCP/TLS wire protocol.
 //!
 //! ADR 0001 (`.red/adr/0001-redwire-tcp-protocol.md`) is the
-//! normative spec. This module owns the *transport-agnostic* parts:
-//! frame layout, message-kind discriminator, flags, and the
-//! encode/decode codec. Server-side dispatch (auth handshake,
-//! session loop, listener accept) stays in `reddb` and depends on
+//! normative spec. This module owns the frame layout, message-kind
+//! discriminator, flags, encode/decode codec, and generic async
+//! frame I/O over byte streams. Server-side dispatch, auth policy,
+//! session loop, and listener accept stay in `reddb` and depend on
 //! these types.
 
 pub mod builder;
@@ -15,6 +15,7 @@ pub mod codec;
 pub mod cursor;
 pub mod frame;
 pub mod handshake;
+pub mod io;
 pub mod operations;
 pub mod prepared;
 pub mod queue;
@@ -55,6 +56,7 @@ pub use handshake::{
     build_client_hello_payload, build_hello_ack, build_hello_ack_frame, build_hello_payload,
     choose_hello_minor_version, AuthFail, AuthOk, Hello, HelloAck, SUPPORTED_METHODS,
 };
+pub use io::{read_frame_async, write_frame_async, RedWireIoError};
 pub use operations::{
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
     decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,

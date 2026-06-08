@@ -18,6 +18,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["io-util"] }
 url = "2"
 zstd = { version = "0.13", default-features = false }
 

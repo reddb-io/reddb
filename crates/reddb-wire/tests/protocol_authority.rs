@@ -139,6 +139,7 @@ fn client_redwire_has_single_frame_io_adapter() {
     let client = read(root.join("crates/reddb-client/src/redwire/mod.rs"));
     let handshake = read(root.join("crates/reddb-client/src/redwire/handshake.rs"));
     let io = read(root.join("crates/reddb-client/src/redwire/io.rs"));
+    let wire_io = read(root.join("crates/reddb-wire/src/redwire/io.rs"));
 
     for forbidden in [
         "FRAME_HEADER_SIZE",
@@ -157,6 +158,9 @@ fn client_redwire_has_single_frame_io_adapter() {
     for forbidden in [
         "FRAME_HEADER_SIZE",
         "decode_frame",
+        "decode_frame_parts",
+        "encode_frame",
+        "frame_len_from_header",
         "u32::from_le_bytes([header[0]",
     ] {
         assert!(
@@ -165,16 +169,41 @@ fn client_redwire_has_single_frame_io_adapter() {
         );
     }
 
-    for required in [
+    for forbidden in [
         "frame_len_from_header",
         "decode_frame_parts",
         "encode_frame",
+        "read_exact",
+        "write_all",
+    ] {
+        assert!(
+            !io.contains(forbidden),
+            "client frame I/O adapter should delegate to reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "read_frame_async",
+        "write_frame_async",
         "pub(super) async fn read_frame",
         "pub(super) async fn write_frame",
     ] {
         assert!(
             io.contains(required),
             "client frame I/O adapter should route through reddb-wire {required}"
+        );
+    }
+
+    for required in [
+        "pub async fn read_frame_async",
+        "pub async fn write_frame_async",
+        "frame_len_from_header",
+        "decode_frame_parts",
+        "encode_frame",
+    ] {
+        assert!(
+            wire_io.contains(required),
+            "reddb-wire should own async frame I/O contract {required}"
         );
     }
 
