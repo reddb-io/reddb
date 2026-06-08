@@ -219,6 +219,22 @@ pub struct PhysicalSchemaManifest {
     pub options: PhysicalSchemaOptions,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalCatalogCollectionStats {
+    pub entities: usize,
+    pub cross_refs: usize,
+    pub segments: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalCatalogSnapshot {
+    pub name: String,
+    pub total_entities: usize,
+    pub total_collections: usize,
+    pub updated_at_unix_ms: u128,
+    pub stats_by_collection: BTreeMap<String, PhysicalCatalogCollectionStats>,
+}
+
 pub fn encode_physical_metadata_document_root_json(
     document: &PhysicalMetadataDocumentEnvelope,
     pretty: bool,
@@ -372,6 +388,17 @@ pub fn encode_physical_schema_manifest_json(
 pub fn decode_physical_schema_manifest_json(json: &str) -> RdbFileResult<PhysicalSchemaManifest> {
     let value = parse_json_value(json, "physical schema manifest")?;
     schema_manifest_from_json_value(&value)
+}
+
+pub fn encode_physical_catalog_snapshot_json(
+    catalog: &PhysicalCatalogSnapshot,
+) -> RdbFileResult<String> {
+    Ok(catalog_snapshot_json_value(catalog).to_string())
+}
+
+pub fn decode_physical_catalog_snapshot_json(json: &str) -> RdbFileResult<PhysicalCatalogSnapshot> {
+    let value = parse_json_value(json, "physical catalog snapshot")?;
+    catalog_snapshot_from_json_value(&value)
 }
 
 pub fn encode_physical_superblock_json(superblock: &SuperblockHeader) -> RdbFileResult<String> {
@@ -876,6 +903,70 @@ fn schema_manifest_from_json_value(
         updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
         collection_count: json_usize_required(object, "collection_count")?,
         options,
+    })
+}
+
+fn catalog_snapshot_json_value(catalog: &PhysicalCatalogSnapshot) -> serde_json::Value {
+    let mut stats = serde_json::Map::new();
+    for (name, stat) in &catalog.stats_by_collection {
+        let mut entry = serde_json::Map::new();
+        entry.insert("entities".to_string(), json_usize(stat.entities));
+        entry.insert("cross_refs".to_string(), json_usize(stat.cross_refs));
+        entry.insert("segments".to_string(), json_usize(stat.segments));
+        stats.insert(name.clone(), serde_json::Value::Object(entry));
+    }
+
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(catalog.name.clone()),
+    );
+    object.insert(
+        "total_entities".to_string(),
+        json_usize(catalog.total_entities),
+    );
+    object.insert(
+        "total_collections".to_string(),
+        json_usize(catalog.total_collections),
+    );
+    object.insert(
+        "updated_at_unix_ms".to_string(),
+        json_u128(catalog.updated_at_unix_ms),
+    );
+    object.insert(
+        "stats_by_collection".to_string(),
+        serde_json::Value::Object(stats),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn catalog_snapshot_from_json_value(
+    value: &serde_json::Value,
+) -> RdbFileResult<PhysicalCatalogSnapshot> {
+    let object = expect_object(value, "physical catalog snapshot")?;
+    let stats = expect_object(
+        required(object, "stats_by_collection")?,
+        "physical catalog stats",
+    )?;
+    let mut stats_by_collection = BTreeMap::new();
+    for (name, value) in stats {
+        let entry = expect_object(value, "physical catalog stats entry")?;
+        stats_by_collection.insert(
+            name.clone(),
+            PhysicalCatalogCollectionStats {
+                entities: json_usize_required(entry, "entities")?,
+                cross_refs: json_usize_required(entry, "cross_refs")?,
+                segments: json_usize_required(entry, "segments")?,
+            },
+        );
+    }
+
+    Ok(PhysicalCatalogSnapshot {
+        name: json_string_required(object, "name")?,
+        total_entities: json_usize_required(object, "total_entities")?,
+        total_collections: json_usize_required(object, "total_collections")?,
+        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
+        stats_by_collection,
     })
 }
 
@@ -1772,6 +1863,33 @@ mod tests {
 
         let decoded = decode_physical_schema_manifest_json(&json).unwrap();
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn physical_catalog_snapshot_round_trips() {
+        let mut stats = BTreeMap::new();
+        stats.insert(
+            "events".to_string(),
+            PhysicalCatalogCollectionStats {
+                entities: 10,
+                cross_refs: 2,
+                segments: 1,
+            },
+        );
+        let catalog = PhysicalCatalogSnapshot {
+            name: "main".to_string(),
+            total_entities: 10,
+            total_collections: 1,
+            updated_at_unix_ms: 123,
+            stats_by_collection: stats,
+        };
+
+        let json = encode_physical_catalog_snapshot_json(&catalog).unwrap();
+        assert!(json.contains("\"stats_by_collection\""));
+        assert_eq!(
+            decode_physical_catalog_snapshot_json(&json).unwrap(),
+            catalog
+        );
     }
 
     #[test]
