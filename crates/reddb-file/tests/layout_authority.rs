@@ -1619,6 +1619,7 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         "is_backup_manifest_sidecar_key",
         "archived_snapshot_key",
         "backup_root_from_snapshot_prefix",
+        "backup_snapshot_dir",
         "backup_wal_prefix",
     ] {
         assert!(
@@ -1652,6 +1653,17 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
             && non_test_recovery.contains("reddb_file::backup_root_from_snapshot_prefix"),
         "recovery backup head lookup should route through reddb-file"
     );
+    assert!(
+        recovery.contains("reddb_file::backup_snapshot_dir")
+            && recovery.contains("reddb_file::backup_wal_dir"),
+        "recovery backup test paths should route through reddb-file"
+    );
+    for forbidden in ["join(\"snapshots\")", "join(\"wal\")"] {
+        assert!(
+            !text.contains(forbidden) && !recovery.contains(forbidden),
+            "backup artifact path joins belong in reddb-file, found {forbidden:?}"
+        );
+    }
     for forbidden in [
         "format!(\"{}/data.rdb\"",
         "\"clusters/dev/data.rdb\".to_string()",
