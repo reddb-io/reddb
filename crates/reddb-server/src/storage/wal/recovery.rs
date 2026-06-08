@@ -453,7 +453,7 @@ mod tests {
     fn restore_to_downloads_latest_snapshot_before_target() {
         let temp_dir =
             std::env::temp_dir().join(format!("reddb_pitr_restore_{}_{}", std::process::id(), 1));
-        let snapshot_dir = temp_dir.join("snapshots");
+        let snapshot_dir = reddb_file::backup_snapshot_dir(&temp_dir);
         let restore_path = temp_dir.join("restore").join("data.rdb");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&snapshot_dir).unwrap();
@@ -494,7 +494,9 @@ mod tests {
         let recovery = PointInTimeRecovery::new(
             Arc::new(LocalBackend),
             snapshot_dir.to_string_lossy().to_string(),
-            temp_dir.join("wal").to_string_lossy().to_string(),
+            reddb_file::backup_wal_dir(&temp_dir)
+                .to_string_lossy()
+                .to_string(),
         );
 
         let result = recovery.restore_to(150, &restore_path).unwrap();
@@ -525,8 +527,8 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        let snapshot_dir = temp_dir.join("snapshots");
-        let wal_dir = temp_dir.join("wal");
+        let snapshot_dir = reddb_file::backup_snapshot_dir(&temp_dir);
+        let wal_dir = reddb_file::backup_wal_dir(&temp_dir);
         let restore_path = temp_dir.join("restore").join("data.rdb");
         std::fs::create_dir_all(&snapshot_dir).unwrap();
         std::fs::create_dir_all(&wal_dir).unwrap();

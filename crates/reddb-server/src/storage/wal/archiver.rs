@@ -554,8 +554,7 @@ mod tests {
         let backend = LocalBackend;
         let manifest = SnapshotManifest {
             timeline_id: "main".to_string(),
-            snapshot_key: temp_dir
-                .join("snapshots")
+            snapshot_key: reddb_file::backup_snapshot_dir(&temp_dir)
                 .join("000001-123.snapshot")
                 .to_string_lossy()
                 .to_string(),

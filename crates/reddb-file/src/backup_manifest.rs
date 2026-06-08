@@ -174,6 +174,14 @@ pub fn backup_wal_prefix(root_prefix: &str) -> String {
     format!("{}wal/", normalize_backup_root_prefix(root_prefix))
 }
 
+pub fn backup_snapshot_dir(root: impl AsRef<Path>) -> PathBuf {
+    root.as_ref().join("snapshots")
+}
+
+pub fn backup_wal_dir(root: impl AsRef<Path>) -> PathBuf {
+    root.as_ref().join("wal")
+}
+
 pub fn remote_database_key(root_prefix: &str) -> String {
     let trimmed = root_prefix.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -755,6 +763,14 @@ mod tests {
         assert_eq!(backup_head_key(""), "manifests/head.json");
         assert_eq!(backup_snapshot_prefix("tenant/db"), "tenant/db/snapshots/");
         assert_eq!(backup_wal_prefix("tenant/db"), "tenant/db/wal/");
+        assert_eq!(
+            backup_snapshot_dir(Path::new("/tmp/reddb")).as_path(),
+            Path::new("/tmp/reddb/snapshots")
+        );
+        assert_eq!(
+            backup_wal_dir(Path::new("/tmp/reddb")).as_path(),
+            Path::new("/tmp/reddb/wal")
+        );
         assert_eq!(remote_database_key("tenant/db/"), "tenant/db/data.rdb");
         assert_eq!(
             remote_database_key("/var/lib/reddb"),
