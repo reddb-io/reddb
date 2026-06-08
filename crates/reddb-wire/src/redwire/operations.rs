@@ -149,6 +149,21 @@ pub fn encode_bulk_ok_payload_from_json_ids_bytes(affected: u64, ids: &[u8]) -> 
     encode_bulk_ok_payload(affected, ids)
 }
 
+pub fn encode_bulk_ok_payload_from_json_id_literals<I, S>(affected: u64, ids: I) -> Vec<u8>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let ids = ids
+        .into_iter()
+        .map(|id| {
+            serde_json::from_str::<JsonValue>(id.as_ref())
+                .unwrap_or_else(|_| JsonValue::String(id.as_ref().to_string()))
+        })
+        .collect();
+    encode_bulk_ok_payload(affected, ids)
+}
+
 pub fn decode_bulk_ok_payload(bytes: &[u8]) -> Result<BulkOkPayload, OperationPayloadError> {
     let obj = object_from_payload("BulkOk", bytes)?;
     let affected = obj.get("affected").and_then(JsonValue::as_u64).unwrap_or(0);
@@ -294,6 +309,12 @@ mod tests {
 
         let payload = encode_bulk_ok_payload_from_json_ids_bytes(2, br#"[1,"2"]"#);
         assert_eq!(decode_bulk_ok_payload(&payload).unwrap().ids.len(), 2);
+
+        let payload = encode_bulk_ok_payload_from_json_id_literals(2, ["1", r#""2""#]);
+        assert_eq!(
+            decode_bulk_ok_payload(&payload).unwrap().ids,
+            vec!["1".to_string(), "2".to_string()]
+        );
     }
 
     #[test]
