@@ -612,7 +612,7 @@ fn l2_rehydrates_after_reopen_without_json_rows() {
     }
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -637,7 +637,7 @@ fn l2_expired_entry_does_not_rehydrate_on_reopen() {
     }
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -656,7 +656,7 @@ fn l2_invalidated_entry_does_not_resurrect_after_reopen() {
     }
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -677,7 +677,7 @@ fn l2_rejects_put_when_hard_byte_cap_is_exceeded() {
     assert_eq!(cache.stats().l2_full_rejections, 1);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -700,7 +700,7 @@ fn l2_metadata_last_hides_partial_blob_after_fault() {
     }
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -715,7 +715,7 @@ fn l2_synopsis_negative_skip_avoids_metadata_read() {
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -731,7 +731,7 @@ fn l2_synopsis_maybe_present_verifies_authoritative_metadata() {
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -760,7 +760,7 @@ fn stale_synopsis_bits_after_delete_cannot_produce_present() {
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -794,7 +794,7 @@ fn stale_synopsis_bits_after_expiry_cannot_produce_present() {
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -820,7 +820,7 @@ fn l2_synopsis_rebuilds_from_metadata_on_reopen() {
     }
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -855,7 +855,7 @@ fn deleted_l2_entries_never_return_present_under_repeated_stale_synopsis() {
     assert_eq!(cache.stats().l2_metadata_reads, 1_000);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 #[test]
@@ -1093,7 +1093,7 @@ fn blob_cache_is_send_and_sync_across_thread_boundary() {
 fn cleanup_l2(path: &Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(path.with_extension("dwb"));
+    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
 }
 
 /// Slow executor that sleeps `delay` then increments a counter.

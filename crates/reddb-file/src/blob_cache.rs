@@ -15,6 +15,7 @@ pub const L2_FRAME_TAG_ZSTD: u8 = 1;
 
 const L2_CONTROL_EXTENSION: &str = "blob-cache.ctl";
 const L2_CONTROL_TEMP_EXTENSION: &str = "ctl.tmp";
+const L2_DOUBLE_WRITE_EXTENSION: &str = "dwb";
 pub const L2_BACKUP_PAGER_SUFFIX: &str = "l2.pager";
 pub const L2_BACKUP_CONTROL_SUFFIX: &str = "l2.ctl";
 
@@ -24,6 +25,10 @@ pub fn blob_cache_control_path(l2_path: &Path) -> PathBuf {
 
 pub fn blob_cache_control_temp_path(control_path: &Path) -> PathBuf {
     control_path.with_extension(L2_CONTROL_TEMP_EXTENSION)
+}
+
+pub fn blob_cache_double_write_path(l2_path: impl AsRef<Path>) -> PathBuf {
+    l2_path.as_ref().with_extension(L2_DOUBLE_WRITE_EXTENSION)
 }
 
 pub fn blob_cache_l2_backup_pager_key(prefix: &str) -> String {
@@ -338,6 +343,10 @@ mod tests {
         assert_eq!(
             blob_cache_control_path(Path::new("/tmp/cache.rdb")),
             PathBuf::from("/tmp/cache.blob-cache.ctl")
+        );
+        assert_eq!(
+            blob_cache_double_write_path(Path::new("/tmp/cache.rdb")),
+            PathBuf::from("/tmp/cache.dwb")
         );
     }
 

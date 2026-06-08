@@ -49,11 +49,11 @@ pub use backup_manifest::{
     BACKUP_MANIFEST_FORMAT_VERSION,
 };
 pub use blob_cache::{
-    blob_cache_control_path, blob_cache_control_temp_path, blob_cache_l2_backup_control_key,
-    blob_cache_l2_backup_pager_key, decode_l2_v2_frame, encode_l2_key, encode_l2_v2_frame,
-    L2BlobFrame, L2Control, L2Record, L2_BACKUP_CONTROL_SUFFIX, L2_BACKUP_PAGER_SUFFIX,
-    L2_BLOB_MAGIC, L2_CONTROL_MAGIC, L2_FORMAT_V1_RAW, L2_FORMAT_V2_FRAMED, L2_FRAME_TAG_RAW,
-    L2_FRAME_TAG_ZSTD, L2_METADATA_MAGIC,
+    blob_cache_control_path, blob_cache_control_temp_path, blob_cache_double_write_path,
+    blob_cache_l2_backup_control_key, blob_cache_l2_backup_pager_key, decode_l2_v2_frame,
+    encode_l2_key, encode_l2_v2_frame, L2BlobFrame, L2Control, L2Record, L2_BACKUP_CONTROL_SUFFIX,
+    L2_BACKUP_PAGER_SUFFIX, L2_BLOB_MAGIC, L2_CONTROL_MAGIC, L2_FORMAT_V1_RAW, L2_FORMAT_V2_FRAMED,
+    L2_FRAME_TAG_RAW, L2_FRAME_TAG_ZSTD, L2_METADATA_MAGIC,
 };
 pub use bloom_segment::{
     decode_bloom_segment_frame, encode_bloom_segment_frame, BloomSegmentFrame,

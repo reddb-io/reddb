@@ -1509,6 +1509,7 @@ fn server_does_not_redeclare_blob_cache_l2_file_format() {
             "pub(super) struct L2Record",
             "fn encode_v2_frame",
             "fn decode_v2_frame",
+            "with_extension(\"dwb\")",
             "with_extension(\"blob-cache.ctl\")",
             "with_extension(\"ctl.tmp\")",
             "blob-cache.ctl",
@@ -1539,6 +1540,7 @@ fn server_does_not_redeclare_blob_cache_l2_file_format() {
     for required in [
         "reddb_file::{",
         "blob_cache_control_path",
+        "blob_cache_double_write_path",
         "encode_l2_key",
         "encode_l2_v2_frame",
         "decode_l2_v2_frame",

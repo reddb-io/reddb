@@ -689,7 +689,7 @@ mod tests {
     fn cleanup_l2(path: &Path) {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-        let _ = std::fs::remove_file(path.with_extension("dwb"));
+        let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
     }
 
     fn l2_cache(path: &Path) -> BlobCache {
