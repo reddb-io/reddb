@@ -387,6 +387,8 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub fn decode_native_metadata_overflow_header",
         "pub fn encode_native_metadata_overflow_continuation_header",
         "pub fn decode_native_metadata_overflow_continuation_header",
+        "pub fn encode_native_paged_metadata_header",
+        "pub fn decode_native_paged_metadata_header",
         "pub fn append_native_store_crc32_footer",
         "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
@@ -440,6 +442,8 @@ fn server_does_not_redeclare_native_store_file_contracts() {
             "METADATA_OVERFLOW_MAGIC",
             "const ENTITY_RECORD_MAGIC",
             "const METADATA_OVERFLOW_MAGIC",
+            "extend_from_slice(METADATA_MAGIC)",
+            "&content[0..4] == METADATA_MAGIC",
             "Invalid magic bytes - expected RDST",
             "Unsupported version:",
             "Binary store CRC32 mismatch",
@@ -497,6 +501,8 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "reddb_file::decode_native_metadata_overflow_header",
         "reddb_file::encode_native_metadata_overflow_continuation_header",
         "reddb_file::decode_native_metadata_overflow_continuation_header",
+        "reddb_file::encode_native_paged_metadata_header",
+        "reddb_file::decode_native_paged_metadata_header",
     ] {
         assert!(
             impl_pages.contains(required),

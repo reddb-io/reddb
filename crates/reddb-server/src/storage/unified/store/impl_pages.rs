@@ -122,11 +122,10 @@ fn build_meta_page1_with_overflow(
     }
 
     // Mirror the inner format_version for debug-friendly hex dumps.
-    let format_version = if meta_data.len() >= 8 && &meta_data[0..4] == METADATA_MAGIC {
-        u32::from_le_bytes([meta_data[4], meta_data[5], meta_data[6], meta_data[7]])
-    } else {
-        0
-    };
+    let format_version = reddb_file::decode_native_paged_metadata_header(meta_data)
+        .ok()
+        .flatten()
+        .map_or(0, |header| header.format_version);
 
     let buf = page1.as_bytes_mut();
     reddb_file::encode_native_metadata_overflow_header(
@@ -270,9 +269,13 @@ impl UnifiedStore {
         drop(collections);
 
         let mut meta_data = Vec::with_capacity(4096);
-        meta_data.extend_from_slice(METADATA_MAGIC);
-        meta_data.extend_from_slice(&format_version.to_le_bytes());
-        meta_data.extend_from_slice(&(collection_roots.len() as u32).to_le_bytes());
+        reddb_file::encode_native_paged_metadata_header(
+            &mut meta_data,
+            reddb_file::NativePagedMetadataHeader {
+                format_version,
+                collection_count: collection_roots.len() as u32,
+            },
+        );
         for (name, root_page) in &collection_roots {
             meta_data.extend_from_slice(&(name.len() as u32).to_le_bytes());
             meta_data.extend_from_slice(name.as_bytes());
@@ -508,22 +511,29 @@ impl UnifiedStore {
                 let mut pos = 0;
                 let mut format_version = STORE_VERSION_V1;
 
-                if content.len() >= 8 && &content[0..4] == METADATA_MAGIC {
-                    format_version =
-                        u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
-                    pos += 8;
-                }
+                let collection_count = if let Some(header) =
+                    reddb_file::decode_native_paged_metadata_header(content)
+                        .map_err(|err| StoreError::Serialization(err.to_string()))?
+                {
+                    format_version = header.format_version;
+                    pos += reddb_file::METADATA_HEADER_BYTES;
+                    header.collection_count as usize
+                } else {
+                    let count = u32::from_le_bytes([
+                        content[pos],
+                        content[pos + 1],
+                        content[pos + 2],
+                        content[pos + 3],
+                    ]) as usize;
+                    pos += 4;
+                    count
+                };
 
                 self.set_format_version(format_version);
 
-                // Collection count
-                let collection_count = u32::from_le_bytes([
-                    content[pos],
-                    content[pos + 1],
-                    content[pos + 2],
-                    content[pos + 3],
-                ]) as usize;
-                pos += 4;
+                if pos > content.len() {
+                    return Ok(());
+                }
 
                 // Read collection names and their B-tree root pages
                 for _ in 0..collection_count {
@@ -879,10 +889,13 @@ impl UnifiedStore {
         let format_version = STORE_VERSION_V9;
         self.set_format_version(format_version);
 
-        // Metadata header: magic + version + collection count
-        meta_data.extend_from_slice(METADATA_MAGIC);
-        meta_data.extend_from_slice(&format_version.to_le_bytes());
-        meta_data.extend_from_slice(&(collection_roots.len() as u32).to_le_bytes());
+        reddb_file::encode_native_paged_metadata_header(
+            &mut meta_data,
+            reddb_file::NativePagedMetadataHeader {
+                format_version,
+                collection_count: collection_roots.len() as u32,
+            },
+        );
 
         // Write each collection's name and B-tree root page
         for (name, root_page) in &collection_roots {
