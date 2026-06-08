@@ -1043,6 +1043,70 @@ mod tests {
     }
 
     #[test]
+    fn basebackup_staged_chunk_parts_recover_and_prune_corruption() {
+        let root = temp_root("primary-basebackup-stage-chunk");
+        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(4));
+        let backup = BaseBackupPlan::new(TimelineId(4), 10, 50);
+        let manifest = PrimaryReplicaBaseBackupManifest::incremental(
+            backup,
+            PathBuf::from("base-00000000000000000010-00000000000000000050.snapshot"),
+            19,
+            crc32(b"chunk-one-chunk-two"),
+            vec![
+                BaseBackupChunkRef::new(
+                    0,
+                    0,
+                    9,
+                    crc32(b"chunk-one"),
+                    plan.basebackup_chunk_relative_path(&backup, 0),
+                ),
+                BaseBackupChunkRef::new(
+                    1,
+                    9,
+                    9,
+                    crc32(b"-chunk-tw"),
+                    plan.basebackup_chunk_relative_path(&backup, 1),
+                ),
+                BaseBackupChunkRef::new(
+                    2,
+                    18,
+                    1,
+                    crc32(b"o"),
+                    plan.basebackup_chunk_relative_path(&backup, 2),
+                ),
+            ],
+        )
+        .expect("manifest");
+
+        manifest
+            .stage_chunk_part(plan.basebackup_dir(), 0, b"chunk-one")
+            .expect("stage chunk 0");
+        manifest
+            .stage_chunk_part(plan.basebackup_dir(), 1, b"-chunk-tw")
+            .expect("stage chunk 1");
+
+        let recovered = manifest
+            .recover_staged_chunk_parts(plan.basebackup_dir())
+            .expect("recover staged chunks");
+        assert_eq!(recovered.into_iter().collect::<Vec<_>>(), vec![0, 1]);
+
+        let corrupt_path = plan
+            .basebackup_dir()
+            .join(&manifest.chunks[1].relative_path);
+        std::fs::write(&corrupt_path, b"corrupt!!").expect("overwrite chunk");
+        let recovered = manifest
+            .recover_staged_chunk_parts(plan.basebackup_dir())
+            .expect("recover after corruption");
+        assert_eq!(recovered.into_iter().collect::<Vec<_>>(), vec![0]);
+        assert!(
+            !corrupt_path.exists(),
+            "corrupt staged basebackup chunk should be pruned"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn basebackup_manifest_rejects_incomplete_snapshot_parts() {
         let root = temp_root("primary-basebackup-incomplete");
         let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(4));

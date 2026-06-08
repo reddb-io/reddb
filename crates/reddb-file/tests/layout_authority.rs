@@ -1718,13 +1718,44 @@ fn server_uses_reddb_file_for_replica_rebootstrap_paths() {
         "reddb_file::layout::rebootstrap_ready_marker_path",
         "reddb_file::layout::rebootstrap_intent_log_path",
         "reddb_file::layout::rebootstrap_previous_path",
-        "reddb_file::layout::atomic_temp_path",
         "reddb_file::write_rebootstrap_ready_marker",
         "reddb_file::read_rebootstrap_ready_marker",
     ] {
         assert!(
             text.contains(required),
             "replica rebootstrap pathing should route through {required}"
+        );
+    }
+}
+
+#[test]
+fn server_uses_reddb_file_for_replica_basebackup_chunk_files() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/replication/replica.rs"));
+    let non_test = text
+        .split("#[cfg(test)]")
+        .next()
+        .expect("replica.rs has non-test source");
+
+    for forbidden in [
+        "fn write_chunk_atomically",
+        "OpenOptions::new()",
+        "fs::create_dir_all",
+        "fs::rename",
+        "std::fs::read(&path)",
+        "std::fs::remove_file(path)",
+        "reddb_file::layout::atomic_temp_path",
+    ] {
+        assert!(
+            !non_test.contains(forbidden),
+            "replica basebackup chunk files belong in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in ["stage_chunk_part", "recover_staged_chunk_parts"] {
+        assert!(
+            non_test.contains(required),
+            "replica basebackup chunk handling should route through reddb-file {required}"
         );
     }
 }
