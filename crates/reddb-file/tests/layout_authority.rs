@@ -373,6 +373,10 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub struct NativeMetadataStateSummary",
         "pub struct NativeVectorArtifactPageSummary",
         "pub fn is_supported_store_version",
+        "pub fn encode_native_store_header",
+        "pub fn decode_native_store_header",
+        "pub fn append_native_store_crc32_footer",
+        "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
         "pub fn decode_native_collection_roots_page",
         "pub fn encode_native_manifest_summary_page",
@@ -422,6 +426,11 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         for forbidden in [
             "const ENTITY_RECORD_MAGIC",
             "const METADATA_OVERFLOW_MAGIC",
+            "Invalid magic bytes - expected RDST",
+            "Unsupported version:",
+            "Binary store CRC32 mismatch",
+            "buf.extend_from_slice(STORE_MAGIC)",
+            "crc32::crc32(&buf",
             "extend_from_slice(NATIVE_",
             "invalid native registry summary page",
             "invalid native recovery summary page",
@@ -442,6 +451,19 @@ fn server_does_not_redeclare_native_store_file_contracts() {
                 path.display()
             );
         }
+    }
+
+    let impl_file = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
+    for required in [
+        "reddb_file::decode_native_store_header",
+        "reddb_file::verify_native_store_crc32_footer",
+        "reddb_file::encode_native_store_header",
+        "reddb_file::append_native_store_crc32_footer",
+    ] {
+        assert!(
+            impl_file.contains(required),
+            "UnifiedStore dump header/footer should route through {required}"
+        );
     }
 }
 
