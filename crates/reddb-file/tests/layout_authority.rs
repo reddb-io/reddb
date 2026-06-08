@@ -1920,6 +1920,7 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "PhysicalCatalogCollectionStats",
         "PhysicalAnalyticalStorageConfig",
         "PhysicalSubscriptionDescriptor",
+        "PhysicalAnalyticsViewDescriptor",
         "encode_physical_schema_manifest_json",
         "decode_physical_schema_manifest_json",
         "encode_physical_catalog_snapshot_json",
@@ -1928,6 +1929,8 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "decode_physical_analytical_storage_json",
         "encode_physical_subscription_descriptor_json",
         "decode_physical_subscription_descriptor_json",
+        "encode_physical_analytics_view_descriptor_json",
+        "decode_physical_analytics_view_descriptor_json",
         "\"protocol_version\".to_string()",
         "\"manifest_events\".to_string()",
         "\"collection_ttl_defaults_ms\".to_string()",
@@ -1941,6 +1944,8 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "\"ops_filter\".to_string()",
         "\"redact_fields\".to_string()",
         "\"all_tenants\".to_string()",
+        "\"max_iterations\".to_string()",
+        "\"tolerance\".to_string()",
     ] {
         assert!(
             file.contains(required),
@@ -1973,6 +1978,9 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "\"redact_fields\".to_string()",
         "\"all_tenants\".to_string()",
         "expect_object(value, \"subscription_descriptor\")",
+        "\"max_iterations\".to_string()",
+        "\"tolerance\".to_string()",
+        "expect_object(value, \"analytics_view_descriptor\")",
     ] {
         assert!(
             !json_codec_non_test.contains(forbidden),
@@ -1997,6 +2005,10 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "analytical_storage_from_persisted",
         "subscription_descriptor_to_persisted",
         "subscription_descriptor_from_persisted",
+        "encode_physical_analytics_view_descriptor_json",
+        "decode_physical_analytics_view_descriptor_json",
+        "analytics_view_descriptor_to_persisted",
+        "analytics_view_descriptor_from_persisted",
     ] {
         assert!(
             json_codec_non_test.contains(required),

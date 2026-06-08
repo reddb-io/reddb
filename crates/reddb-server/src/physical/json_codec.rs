@@ -632,59 +632,53 @@ fn subscription_descriptor_from_json(
 }
 
 fn analytics_view_descriptor_to_json(view: &crate::catalog::AnalyticsViewDescriptor) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "output".to_string(),
-        JsonValue::String(view.output.as_str().to_string()),
-    );
-    object.insert(
-        "algorithm".to_string(),
-        view.algorithm
-            .clone()
-            .map(JsonValue::String)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "resolution".to_string(),
-        view.resolution
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "max_iterations".to_string(),
-        view.max_iterations
-            .map(|n| JsonValue::Number(n as f64))
-            .unwrap_or(JsonValue::Null),
-    );
-    object.insert(
-        "tolerance".to_string(),
-        view.tolerance
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-    );
-    JsonValue::Object(object)
+    file_json_to_server_json(
+        reddb_file::encode_physical_analytics_view_descriptor_json(
+            &analytics_view_descriptor_to_persisted(view),
+        )
+        .expect("reddb-file must encode physical analytics view descriptor JSON"),
+    )
+}
+
+fn analytics_view_descriptor_to_persisted(
+    view: &crate::catalog::AnalyticsViewDescriptor,
+) -> reddb_file::PhysicalAnalyticsViewDescriptor {
+    reddb_file::PhysicalAnalyticsViewDescriptor {
+        output: view.output.as_str().to_string(),
+        algorithm: view.algorithm.clone(),
+        resolution: view.resolution,
+        max_iterations: view.max_iterations,
+        tolerance: view.tolerance,
+    }
+}
+
+fn analytics_view_descriptor_from_persisted(
+    view: reddb_file::PhysicalAnalyticsViewDescriptor,
+) -> io::Result<crate::catalog::AnalyticsViewDescriptor> {
+    let output = crate::catalog::AnalyticsOutput::from_str(&view.output).ok_or_else(|| {
+        invalid_data(format!(
+            "analytics_view_descriptor.output has unsupported value: {}",
+            view.output
+        ))
+    })?;
+    Ok(crate::catalog::AnalyticsViewDescriptor {
+        output,
+        algorithm: view.algorithm,
+        resolution: view.resolution,
+        max_iterations: view.max_iterations,
+        tolerance: view.tolerance,
+    })
 }
 
 fn analytics_view_descriptor_from_json(
     value: &JsonValue,
 ) -> io::Result<crate::catalog::AnalyticsViewDescriptor> {
-    let object = expect_object(value, "analytics_view_descriptor")?;
-    let output_str = json_string_required(object, "output")?;
-    let output = crate::catalog::AnalyticsOutput::from_str(&output_str).ok_or_else(|| {
-        invalid_data(format!(
-            "analytics_view_descriptor.output has unsupported value: {output_str}"
-        ))
-    })?;
-    Ok(crate::catalog::AnalyticsViewDescriptor {
-        output,
-        algorithm: object
-            .get("algorithm")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string),
-        resolution: object.get("resolution").and_then(JsonValue::as_f64),
-        max_iterations: object.get("max_iterations").and_then(JsonValue::as_i64),
-        tolerance: object.get("tolerance").and_then(JsonValue::as_f64),
-    })
+    let view =
+        reddb_file::decode_physical_analytics_view_descriptor_json(&value.to_string_compact())
+            .map_err(|err| {
+                invalid_data(format!("decode physical analytics view descriptor: {err}"))
+            })?;
+    analytics_view_descriptor_from_persisted(view)
 }
 
 fn declared_column_contract_to_json(column: &DeclaredColumnContract) -> JsonValue {
