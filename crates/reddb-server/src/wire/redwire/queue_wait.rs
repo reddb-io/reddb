@@ -25,14 +25,6 @@ pub fn parse_queue_wait_open(payload: &[u8]) -> Result<QueueWaitOpenRequest, Que
     reddb_wire::redwire::queue::parse_queue_wait_open(payload)
 }
 
-/// Build the `QueueEventPush` payload for one delivered message. The
-/// `message` value is the JSON object rendered by the runtime
-/// (`message_id` / `payload` / `consumer` / `delivery_count`).
-pub fn build_event_push_payload(message: &JsonValue) -> Vec<u8> {
-    let bytes = serde_json::to_vec(message).unwrap_or_default();
-    reddb_wire::redwire::queue::build_event_push_payload_from_json_bytes(&bytes)
-}
-
 /// Build a `QueueEventPush` frame echoing the open request's
 /// `correlation_id` and `stream_id` so the client pairs the push with
 /// the wait it opened.
