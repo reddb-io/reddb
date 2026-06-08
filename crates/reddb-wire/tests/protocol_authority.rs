@@ -209,6 +209,7 @@ fn client_redwire_bulk_binary_value_tags_come_from_reddb_wire() {
 fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
     let root = repo_root();
     let listener = read(root.join("crates/reddb-server/src/wire/listener.rs"));
+    let query_direct = read(root.join("crates/reddb-server/src/wire/query_direct.rs"));
     let wire = read(root.join("crates/reddb-wire/src/legacy.rs"));
 
     for forbidden in [
@@ -219,6 +220,10 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
             !listener.contains(forbidden),
             "legacy result/error envelope construction belongs in reddb-wire, found {forbidden:?}"
         );
+        assert!(
+            !query_direct.contains(forbidden),
+            "query_direct legacy envelope construction belongs in reddb-wire, found {forbidden:?}"
+        );
     }
 
     for required in ["build_legacy_result_frame", "build_legacy_error_frame"] {
@@ -226,6 +231,12 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
             listener.contains(required),
             "server legacy listener should delegate envelope construction through {required}"
         );
+        if required == "build_legacy_result_frame" {
+            assert!(
+                query_direct.contains(required),
+                "query_direct should delegate legacy result envelopes through {required}"
+            );
+        }
         assert!(
             wire.contains(&format!("pub fn {required}")),
             "reddb-wire should own legacy envelope builder {required}"

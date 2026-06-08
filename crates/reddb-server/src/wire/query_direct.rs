@@ -28,7 +28,7 @@ use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
 
 use super::protocol::encode_value;
-use reddb_wire::legacy::{encode_column_name, write_frame_header, MSG_RESULT, VAL_NULL, VAL_U64};
+use reddb_wire::legacy::{build_legacy_result_frame, encode_column_name, VAL_NULL, VAL_U64};
 
 /// Try to serve a binary SELECT via the zero-copy scan path.
 ///
@@ -261,12 +261,9 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
 
     body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
 
-    let mut resp = Vec::with_capacity(5 + body.len());
-    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
-    resp.extend_from_slice(&body);
     let _ = db;
     let _ = store;
-    Some(resp)
+    Some(build_legacy_result_frame(&body))
 }
 
 struct SimpleHashEqSelect {
@@ -855,10 +852,7 @@ fn execute_simple_ordered_complex_select(
     }
     body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
 
-    let mut resp = Vec::with_capacity(5 + body.len());
-    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
-    resp.extend_from_slice(&body);
-    Some(resp)
+    Some(build_legacy_result_frame(&body))
 }
 
 fn execute_simple_indexed_select<FBuild>(
@@ -921,10 +915,7 @@ where
     cols.as_ref()?;
 
     body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
-    let mut resp = Vec::with_capacity(5 + body.len());
-    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
-    resp.extend_from_slice(&body);
-    Some(resp)
+    Some(build_legacy_result_frame(&body))
 }
 
 fn encode_empty_simple_select(columns: &[String]) -> Vec<u8> {
@@ -935,10 +926,7 @@ fn encode_empty_simple_select(columns: &[String]) -> Vec<u8> {
     }
     body.extend_from_slice(&0u32.to_le_bytes());
 
-    let mut resp = Vec::with_capacity(5 + body.len());
-    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
-    resp.extend_from_slice(&body);
-    resp
+    build_legacy_result_frame(&body)
 }
 
 fn encode_empty_direct_select(tq: &TableQuery, schema: Option<&[String]>) -> Option<Vec<u8>> {
@@ -953,10 +941,7 @@ fn encode_empty_direct_select(tq: &TableQuery, schema: Option<&[String]>) -> Opt
     }
     body.extend_from_slice(&0u32.to_le_bytes());
 
-    let mut resp = Vec::with_capacity(5 + body.len());
-    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
-    resp.extend_from_slice(&body);
-    Some(resp)
+    Some(build_legacy_result_frame(&body))
 }
 
 fn estimate_simple_response_capacity(columns: &[String], row_hint: usize) -> usize {
