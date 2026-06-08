@@ -79,6 +79,20 @@ pub struct NativePagedCrossRef {
     pub target_collection: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDumpCollectionHeader {
+    pub name: String,
+    pub entity_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDumpCrossRef {
+    pub source_id: u64,
+    pub target_id: u64,
+    pub ref_type: u8,
+    pub target_collection: String,
+}
+
 pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
     bytes.len() >= STORE_MAGIC.len() && &bytes[..STORE_MAGIC.len()] == STORE_MAGIC
 }
@@ -275,6 +289,100 @@ pub fn decode_native_paged_cross_ref(
     })
 }
 
+pub fn encode_native_dump_count(out: &mut Vec<u8>, count: u32) {
+    write_native_varu32(out, count);
+}
+
+pub fn decode_native_dump_count(data: &[u8], pos: &mut usize) -> RdbFileResult<u32> {
+    read_native_varu32(data, pos, "truncated native dump count")
+}
+
+pub fn encode_native_dump_collection_header(out: &mut Vec<u8>, name: &str, entity_count: u32) {
+    write_native_varu32(out, name.len() as u32);
+    out.extend_from_slice(name.as_bytes());
+    write_native_varu32(out, entity_count);
+}
+
+pub fn decode_native_dump_collection_header(
+    data: &[u8],
+    pos: &mut usize,
+) -> RdbFileResult<NativeDumpCollectionHeader> {
+    let name_len =
+        read_native_varu32(data, pos, "truncated native dump collection name length")? as usize;
+    let name_bytes =
+        read_native_bytes(data, pos, name_len, "truncated native dump collection name")?;
+    let name = String::from_utf8(name_bytes.to_vec()).map_err(|err| {
+        RdbFileError::InvalidOperation(format!("invalid native dump collection name utf8: {err}"))
+    })?;
+    let entity_count =
+        read_native_varu32(data, pos, "truncated native dump collection entity count")?;
+    Ok(NativeDumpCollectionHeader { name, entity_count })
+}
+
+pub fn encode_native_dump_entity_record(out: &mut Vec<u8>, record: &[u8]) {
+    out.extend_from_slice(&(record.len() as u32).to_le_bytes());
+    out.extend_from_slice(record);
+}
+
+pub fn decode_native_dump_entity_record<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+) -> RdbFileResult<&'a [u8]> {
+    let record_len =
+        read_native_u32(data, pos, "truncated native dump entity record length")? as usize;
+    read_native_bytes(
+        data,
+        pos,
+        record_len,
+        "truncated native dump entity record payload",
+    )
+}
+
+pub fn encode_native_dump_cross_ref(
+    out: &mut Vec<u8>,
+    source_id: u64,
+    target_id: u64,
+    ref_type: u8,
+    target_collection: &str,
+) {
+    write_native_varu64(out, source_id);
+    write_native_varu64(out, target_id);
+    out.push(ref_type);
+    write_native_varu32(out, target_collection.len() as u32);
+    out.extend_from_slice(target_collection.as_bytes());
+}
+
+pub fn decode_native_dump_cross_ref(
+    data: &[u8],
+    pos: &mut usize,
+) -> RdbFileResult<NativeDumpCrossRef> {
+    let source_id = read_native_varu64(data, pos, "truncated native dump cross-ref source")?;
+    let target_id = read_native_varu64(data, pos, "truncated native dump cross-ref target")?;
+    let ref_type = read_native_u8(data, pos, "truncated native dump cross-ref type")?;
+    let collection_len = read_native_varu32(
+        data,
+        pos,
+        "truncated native dump cross-ref collection length",
+    )? as usize;
+    let collection_bytes = read_native_bytes(
+        data,
+        pos,
+        collection_len,
+        "truncated native dump cross-ref collection",
+    )?;
+    let target_collection = String::from_utf8(collection_bytes.to_vec()).map_err(|err| {
+        RdbFileError::InvalidOperation(format!(
+            "invalid native dump cross-ref collection utf8: {err}"
+        ))
+    })?;
+    Ok(NativeDumpCrossRef {
+        source_id,
+        target_id,
+        ref_type,
+        target_collection,
+    })
+}
+
 pub fn is_supported_store_version(version: u32) -> bool {
     matches!(
         version,
@@ -386,6 +494,54 @@ fn read_native_u64(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileRe
 fn read_native_u8(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u8> {
     let bytes = read_native_bytes(data, pos, 1, err)?;
     Ok(bytes[0])
+}
+
+fn write_native_varu32(out: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn write_native_varu64(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_native_varu32(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u32> {
+    let mut result = 0u32;
+    let mut shift = 0u32;
+    for _ in 0..5 {
+        let byte = read_native_u8(data, pos, err)?;
+        result |= ((byte & 0x7f) as u32) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err(RdbFileError::InvalidOperation(
+        "invalid native dump varu32".to_string(),
+    ))
+}
+
+fn read_native_varu64(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u64> {
+    let mut result = 0u64;
+    let mut shift = 0u32;
+    for _ in 0..10 {
+        let byte = read_native_u8(data, pos, err)?;
+        result |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err(RdbFileError::InvalidOperation(
+        "invalid native dump varu64".to_string(),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -1717,6 +1873,56 @@ mod tests {
         truncated.pop();
         let mut pos = 0;
         assert!(decode_native_paged_cross_ref(&truncated, &mut pos).is_err());
+    }
+
+    #[test]
+    fn native_dump_envelope_round_trips() {
+        let mut bytes = Vec::new();
+        encode_native_dump_count(&mut bytes, 1);
+        encode_native_dump_collection_header(&mut bytes, "users", 2);
+        encode_native_dump_entity_record(&mut bytes, b"entity-a");
+        encode_native_dump_entity_record(&mut bytes, b"entity-b");
+        encode_native_dump_count(&mut bytes, 1);
+        encode_native_dump_cross_ref(&mut bytes, 10, 20, 4, "accounts");
+
+        let mut pos = 0;
+        assert_eq!(decode_native_dump_count(&bytes, &mut pos).unwrap(), 1);
+        assert_eq!(
+            decode_native_dump_collection_header(&bytes, &mut pos).unwrap(),
+            NativeDumpCollectionHeader {
+                name: "users".to_string(),
+                entity_count: 2,
+            }
+        );
+        assert_eq!(
+            decode_native_dump_entity_record(&bytes, &mut pos).unwrap(),
+            b"entity-a"
+        );
+        assert_eq!(
+            decode_native_dump_entity_record(&bytes, &mut pos).unwrap(),
+            b"entity-b"
+        );
+        assert_eq!(decode_native_dump_count(&bytes, &mut pos).unwrap(), 1);
+        assert_eq!(
+            decode_native_dump_cross_ref(&bytes, &mut pos).unwrap(),
+            NativeDumpCrossRef {
+                source_id: 10,
+                target_id: 20,
+                ref_type: 4,
+                target_collection: "accounts".to_string(),
+            }
+        );
+        assert_eq!(pos, bytes.len());
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        let mut pos = 0;
+        assert!(decode_native_dump_count(&truncated, &mut pos).is_ok());
+        assert!(decode_native_dump_collection_header(&truncated, &mut pos).is_ok());
+        assert!(decode_native_dump_entity_record(&truncated, &mut pos).is_ok());
+        assert!(decode_native_dump_entity_record(&truncated, &mut pos).is_ok());
+        assert!(decode_native_dump_count(&truncated, &mut pos).is_ok());
+        assert!(decode_native_dump_cross_ref(&truncated, &mut pos).is_err());
     }
 
     #[test]

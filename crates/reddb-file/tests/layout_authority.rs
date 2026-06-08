@@ -397,6 +397,14 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "pub fn decode_native_paged_collection_root",
         "pub fn encode_native_paged_cross_ref",
         "pub fn decode_native_paged_cross_ref",
+        "pub fn encode_native_dump_count",
+        "pub fn decode_native_dump_count",
+        "pub fn encode_native_dump_collection_header",
+        "pub fn decode_native_dump_collection_header",
+        "pub fn encode_native_dump_entity_record",
+        "pub fn decode_native_dump_entity_record",
+        "pub fn encode_native_dump_cross_ref",
+        "pub fn decode_native_dump_cross_ref",
         "pub fn append_native_store_crc32_footer",
         "pub fn verify_native_store_crc32_footer",
         "pub fn encode_native_collection_roots_page",
@@ -494,10 +502,41 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "reddb_file::verify_native_store_crc32_footer",
         "reddb_file::encode_native_store_header",
         "reddb_file::append_native_store_crc32_footer",
+        "reddb_file::encode_native_dump_count",
+        "reddb_file::decode_native_dump_count",
+        "reddb_file::encode_native_dump_collection_header",
+        "reddb_file::decode_native_dump_collection_header",
+        "reddb_file::encode_native_dump_entity_record",
+        "reddb_file::decode_native_dump_entity_record",
+        "reddb_file::encode_native_dump_cross_ref",
+        "reddb_file::decode_native_dump_cross_ref",
     ] {
         assert!(
             impl_file.contains(required),
             "UnifiedStore dump header/footer should route through {required}"
+        );
+    }
+
+    for forbidden in [
+        "Failed to read collection count",
+        "Failed to read name length",
+        "Failed to read entity count",
+        "Truncated entity record length",
+        "Truncated entity record payload",
+        "Failed to read cross-ref count",
+        "Failed to read source_id",
+        "Failed to read target_id",
+        "Failed to read collection length",
+        "Invalid UTF-8 in collection:",
+        "buf.extend_from_slice(&(record.len() as u32).to_le_bytes());",
+        "write_varu32(&mut buf, collections.len() as u32);",
+        "write_varu32(&mut buf, total_refs as u32);",
+        "write_varu64(&mut buf, source_id.raw());",
+        "write_varu64(&mut buf, target_id.raw());",
+    ] {
+        assert!(
+            !impl_file.contains(forbidden),
+            "UnifiedStore dump envelope should route through reddb-file, found {forbidden:?}"
         );
     }
 
