@@ -263,8 +263,9 @@ pub use turboquant_snapshot::{
     TurboQuantSnapshotPayload, TURBOQUANT_SNAPSHOT_HEADER_BYTES,
 };
 pub use wal_header::{
-    decode_wal_file_header, encode_wal_file_header, WalFileHeader, WAL_FILE_HEADER_BYTES,
-    WAL_FILE_MAGIC, WAL_FILE_VERSION, WAL_FILE_VERSION_V2,
+    decode_wal_file_header, encode_wal_file_header, next_main_wal_segment_boundary, WalFileHeader,
+    MAIN_WAL_SEGMENT_BYTES, WAL_FILE_HEADER_BYTES, WAL_FILE_MAGIC, WAL_FILE_VERSION,
+    WAL_FILE_VERSION_V2,
 };
 pub use wal_record::{
     decode_main_wal_record_frame, encode_main_wal_record_frame, encode_main_wal_record_frame_into,

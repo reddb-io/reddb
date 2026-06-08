@@ -134,6 +134,8 @@ fn server_does_not_own_main_wal_file_header() {
             "extend_from_slice(WAL_MAGIC)",
             "push(WAL_VERSION)",
             "Invalid WAL magic bytes",
+            "const WAL_SEGMENT_BYTES",
+            "fn next_wal_segment_boundary",
         ] {
             assert!(
                 !text.contains(forbidden),
@@ -151,6 +153,14 @@ fn server_does_not_own_main_wal_file_header() {
     assert!(
         writer.contains("reddb_file::encode_wal_file_header"),
         "WAL writer should encode file headers through reddb-file"
+    );
+    assert!(
+        writer.contains("reddb_file::next_main_wal_segment_boundary"),
+        "WAL writer should plan segment boundaries through reddb-file"
+    );
+    assert!(
+        writer.contains("reddb_file::MAIN_WAL_SEGMENT_BYTES"),
+        "WAL writer should use main WAL segment sizing from reddb-file"
     );
 }
 
