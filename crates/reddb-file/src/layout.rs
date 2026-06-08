@@ -389,6 +389,34 @@ pub fn store_commit_coord_temp_wal_file_name(name: &str, process_id: u32, nanos:
     format!("rb_commit_coord_{name}_{process_id}_{nanos}.wal")
 }
 
+pub fn backup_temp_json_path(
+    temp_dir: &Path,
+    prefix: &str,
+    process_id: u32,
+    nanos: u128,
+    start_lsn: Option<u64>,
+    end_lsn: Option<u64>,
+) -> PathBuf {
+    temp_dir.join(backup_temp_json_file_name(
+        prefix, process_id, nanos, start_lsn, end_lsn,
+    ))
+}
+
+pub fn backup_temp_json_file_name(
+    prefix: &str,
+    process_id: u32,
+    nanos: u128,
+    start_lsn: Option<u64>,
+    end_lsn: Option<u64>,
+) -> String {
+    match (start_lsn, end_lsn) {
+        (Some(start_lsn), Some(end_lsn)) => {
+            format!("{prefix}-{process_id}-{start_lsn}-{end_lsn}-{nanos}.json")
+        }
+        _ => format!("{prefix}-{process_id}-{nanos}.json"),
+    }
+}
+
 pub fn logical_wal_path(data_path: &Path) -> PathBuf {
     sibling_path(
         data_path,
@@ -610,6 +638,21 @@ mod tests {
         assert_eq!(
             store_commit_coord_temp_wal_path(Path::new("/tmp"), "burst", 7, 99),
             PathBuf::from("/tmp/rb_commit_coord_burst_7_99.wal")
+        );
+        assert_eq!(
+            backup_temp_json_path(
+                Path::new("/tmp"),
+                "reddb-archived-change-records",
+                7,
+                99,
+                Some(10),
+                Some(20)
+            ),
+            PathBuf::from("/tmp/reddb-archived-change-records-7-10-20-99.json")
+        );
+        assert_eq!(
+            backup_temp_json_path(Path::new("/tmp"), "reddb-json-object", 7, 99, None, None),
+            PathBuf::from("/tmp/reddb-json-object-7-99.json")
         );
         assert_eq!(
             logical_wal_path(path),

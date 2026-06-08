@@ -1293,6 +1293,28 @@ fn server_uses_reddb_file_for_relay_segment_names() {
 }
 
 #[test]
+fn server_uses_reddb_file_for_backup_temp_json_names() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));
+
+    for forbidden in [
+        "format!(\"-{start}-{end}\")",
+        "\"{prefix}-{}{}-{}.json\"",
+        "\"{prefix}-{process_id}-{start_lsn}-{end_lsn}-{nanos}.json\"",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "backup temp JSON names are a reddb_file::layout contract, found {forbidden:?}"
+        );
+    }
+
+    assert!(
+        text.contains("reddb_file::layout::backup_temp_json_path"),
+        "backup temp JSON names should route through reddb-file"
+    );
+}
+
+#[test]
 fn server_uses_reddb_file_for_serverless_roots_and_cache() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/runtime/impl_serverless.rs"));
