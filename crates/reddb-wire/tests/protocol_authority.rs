@@ -111,6 +111,8 @@ fn client_redwire_has_single_frame_io_adapter() {
     for forbidden in [
         "FRAME_HEADER_SIZE",
         "decode_frame",
+        "MAX_KNOWN_MINOR_VERSION",
+        "build_hello_payload",
         "u32::from_le_bytes([header[0]",
         "async fn read_frame",
     ] {
@@ -143,6 +145,11 @@ fn client_redwire_has_single_frame_io_adapter() {
             "client frame I/O adapter should route through reddb-wire {required}"
         );
     }
+
+    assert!(
+        handshake.contains("build_client_hello_payload"),
+        "client handshake should let reddb-wire choose advertised Hello minor versions"
+    );
 }
 
 #[test]

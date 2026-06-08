@@ -51,9 +51,9 @@ pub use frame::{
 pub use handshake::{
     build_auth_fail_frame, build_auth_fail_payload, build_auth_ok_frame_from_payload,
     build_auth_ok_payload, build_auth_response_anonymous_payload,
-    build_auth_response_bearer_payload, build_auth_response_oauth_jwt_payload, build_hello_ack,
-    build_hello_ack_frame, build_hello_payload, AuthFail, AuthOk, Hello, HelloAck,
-    SUPPORTED_METHODS,
+    build_auth_response_bearer_payload, build_auth_response_oauth_jwt_payload,
+    build_client_hello_payload, build_hello_ack, build_hello_ack_frame, build_hello_payload,
+    AuthFail, AuthOk, Hello, HelloAck, SUPPORTED_METHODS,
 };
 pub use operations::{
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
