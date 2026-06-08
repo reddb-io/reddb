@@ -207,9 +207,56 @@ fn client_redwire_has_single_frame_io_adapter() {
     }
 
     assert!(
-        handshake.contains("build_client_hello_payload"),
-        "client handshake should let reddb-wire choose advertised Hello minor versions"
+        handshake.contains("build_client_hello_frame"),
+        "client handshake should let reddb-wire build the Hello frame and choose advertised minor versions"
     );
+}
+
+#[test]
+fn client_redwire_request_frames_live_in_reddb_wire() {
+    let root = repo_root();
+    let client = read(root.join("crates/reddb-client/src/redwire/mod.rs"));
+    let handshake = read(root.join("crates/reddb-client/src/redwire/handshake.rs"));
+    let builder = read(root.join("crates/reddb-wire/src/redwire/builder.rs"));
+    let wire_handshake = read(root.join("crates/reddb-wire/src/redwire/handshake.rs"));
+
+    for file in [&client, &handshake] {
+        assert!(
+            !file.contains("Frame::new("),
+            "client RedWire request frame construction belongs in reddb-wire"
+        );
+    }
+
+    for required in [
+        "build_query_frame",
+        "build_query_with_params_frame",
+        "build_bulk_insert_frame",
+        "build_get_frame",
+        "build_delete_frame",
+        "build_bulk_insert_binary_frame",
+        "build_ping_frame",
+        "build_bye_frame",
+    ] {
+        assert!(
+            client.contains(required),
+            "client should route request frame construction through {required}"
+        );
+        assert!(
+            builder.contains(&format!("pub fn {required}")),
+            "reddb-wire should own client request frame builder {required}"
+        );
+    }
+
+    for required in ["build_client_hello_frame", "build_auth_response_frame"] {
+        assert!(
+            handshake.contains(required),
+            "client handshake should route frame construction through {required}"
+        );
+        assert!(
+            wire_handshake.contains(&format!("pub fn {required}")),
+            "reddb-wire should own handshake frame builder {required}"
+        );
+    }
 }
 
 #[test]

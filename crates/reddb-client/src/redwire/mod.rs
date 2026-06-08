@@ -46,9 +46,11 @@ use crate::types::{BulkInsertResult, QueryResult};
 use handshake::HandshakeOutcome;
 use reddb_wire::legacy::WireValue;
 use reddb_wire::redwire::{
+    build_bulk_insert_binary_frame, build_bulk_insert_frame, build_bye_frame, build_delete_frame,
+    build_get_frame, build_ping_frame, build_query_frame, build_query_with_params_frame,
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
     encode_bulk_binary_payload, encode_bulk_insert_payload, encode_insert_payload,
-    encode_key_payload, supported_client_preface,
+    encode_key_payload, supported_client_preface, BuildError,
 };
 
 /// Authentication credentials for the RedWire handshake.
@@ -220,7 +222,7 @@ impl RedWireClient {
     /// output stays byte-for-byte aligned with its old RedWire path.
     pub async fn query_raw(&mut self, sql: &str) -> Result<String> {
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::Query, corr, sql.as_bytes().to_vec());
+        let req = build_query_frame(corr, sql).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
@@ -255,7 +257,7 @@ impl RedWireClient {
         let payload = encode_query_with_params(sql, &wire_params)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::QueryWithParams, corr, payload);
+        let req = build_query_with_params_frame(corr, payload).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
@@ -297,7 +299,7 @@ impl RedWireClient {
 
     async fn send_insert_frame(&mut self, bytes: Vec<u8>) -> Result<BulkInsertResult> {
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::BulkInsert, corr, bytes);
+        let req = build_bulk_insert_frame(corr, bytes).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
@@ -326,7 +328,8 @@ impl RedWireClient {
     /// server emits on a `Get` frame: `{ ok, found, ... }`.
     pub async fn get(&mut self, collection: &str, id: &str) -> Result<serde_json::Value> {
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::Get, corr, encode_key_payload(collection, id));
+        let req =
+            build_get_frame(corr, encode_key_payload(collection, id)).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
@@ -346,11 +349,8 @@ impl RedWireClient {
     /// Delete by primary id. Returns the affected count.
     pub async fn delete(&mut self, collection: &str, id: &str) -> Result<u64> {
         let corr = self.next_corr();
-        let req = Frame::new(
-            MessageKind::Delete,
-            corr,
-            encode_key_payload(collection, id),
-        );
+        let req = build_delete_frame(corr, encode_key_payload(collection, id))
+            .map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
@@ -390,7 +390,7 @@ impl RedWireClient {
             .map_err(|e| ClientError::new(ErrorCode::Protocol, e.to_string()))?;
 
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::BulkInsertBinary, corr, payload);
+        let req = build_bulk_insert_binary_frame(corr, payload).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
@@ -409,7 +409,7 @@ impl RedWireClient {
 
     pub async fn ping(&mut self) -> Result<()> {
         let corr = self.next_corr();
-        let req = Frame::new(MessageKind::Ping, corr, vec![]);
+        let req = build_ping_frame(corr).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
@@ -423,7 +423,7 @@ impl RedWireClient {
 
     pub async fn close(mut self) -> Result<()> {
         let corr = self.next_corr();
-        let bye = Frame::new(MessageKind::Bye, corr, vec![]);
+        let bye = build_bye_frame(corr).map_err(frame_build_err)?;
         let _ = io::write_frame(&mut self.stream, &bye).await;
         Ok(())
     }
@@ -458,6 +458,10 @@ fn param_to_redwire(value: &crate::params::Value) -> RedWireParamValue {
 
 fn io_err(err: std_io::Error) -> ClientError {
     ClientError::new(ErrorCode::Network, err.to_string())
+}
+
+fn frame_build_err(err: BuildError) -> ClientError {
+    ClientError::new(ErrorCode::Protocol, format!("build redwire frame: {err}"))
 }
 
 #[cfg(test)]

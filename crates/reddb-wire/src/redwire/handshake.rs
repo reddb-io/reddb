@@ -200,6 +200,25 @@ where
     )
 }
 
+pub fn build_client_hello_frame<'a, I>(
+    correlation_id: u64,
+    auth_methods: I,
+    features: u32,
+    client_name: Option<&str>,
+) -> Result<Frame, BuildError>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    FrameBuilder::request(correlation_id)
+        .kind(MessageKind::Hello)
+        .payload(build_client_hello_payload(
+            auth_methods,
+            features,
+            client_name,
+        ))
+        .build()
+}
+
 pub fn choose_hello_minor_version(client_versions: &[u8]) -> Option<u8> {
     client_versions
         .iter()
@@ -277,6 +296,16 @@ pub fn build_auth_response_oauth_jwt_payload(jwt: &str) -> Vec<u8> {
     let mut obj = serde_json::Map::new();
     obj.insert("jwt".to_string(), JsonValue::String(jwt.to_string()));
     serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+}
+
+pub fn build_auth_response_frame(
+    correlation_id: u64,
+    payload: Vec<u8>,
+) -> Result<Frame, BuildError> {
+    FrameBuilder::request(correlation_id)
+        .kind(MessageKind::AuthResponse)
+        .payload(payload)
+        .build()
 }
 
 pub fn parse_auth_response_oauth_jwt(payload: &[u8]) -> Result<String, String> {

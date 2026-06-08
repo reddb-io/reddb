@@ -5,11 +5,11 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::{ClientError, ErrorCode, Result};
 use reddb_wire::redwire::handshake::{
     build_auth_response_anonymous_payload, build_auth_response_bearer_payload,
-    build_client_hello_payload, AuthFail, AuthOk, HelloAck,
+    build_auth_response_frame, build_client_hello_frame, AuthFail, AuthOk, HelloAck,
 };
 
 use super::{io, Auth, ConnectOptions};
-use reddb_wire::redwire::{Frame, MessageKind};
+use reddb_wire::redwire::{BuildError, MessageKind};
 
 #[derive(Debug)]
 pub(super) enum HandshakeOutcome {
@@ -29,8 +29,8 @@ where
         Auth::Bearer(_) => vec!["bearer"],
         Auth::Anonymous => vec!["anonymous", "bearer"],
     };
-    let hello_bytes = build_client_hello_payload(methods, 0, opts.client_name.as_deref());
-    let hello = Frame::new(MessageKind::Hello, 1, hello_bytes);
+    let hello = build_client_hello_frame(1, methods, 0, opts.client_name.as_deref())
+        .map_err(frame_build_err)?;
     io::write_frame(stream, &hello).await?;
 
     // 2. Read HelloAck.
@@ -67,7 +67,7 @@ where
             ));
         }
     };
-    let resp = Frame::new(MessageKind::AuthResponse, 2, resp_payload);
+    let resp = build_auth_response_frame(2, resp_payload).map_err(frame_build_err)?;
     io::write_frame(stream, &resp).await?;
 
     // 4. Read AuthOk / AuthFail.
@@ -100,6 +100,10 @@ fn parse_hello_ack(payload: &[u8]) -> Result<HelloAck> {
 fn parse_auth_ok(payload: &[u8]) -> Result<AuthOk> {
     AuthOk::from_payload(payload)
         .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode auth_ok: {e}")))
+}
+
+fn frame_build_err(err: BuildError) -> ClientError {
+    ClientError::new(ErrorCode::Protocol, format!("build redwire frame: {err}"))
 }
 
 fn parse_reason(payload: &[u8]) -> Option<String> {
