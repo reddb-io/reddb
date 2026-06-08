@@ -20,7 +20,10 @@ pub mod prepared;
 pub mod queue;
 pub mod stream;
 
-pub use builder::{BuildError, FrameBuilder};
+pub use builder::{
+    build_dispatch_reply_frame, build_error_frame, build_error_frame_lossy, build_reply_frame,
+    BuildError, FrameBuilder,
+};
 pub use bulk_binary::{
     decode_bulk_binary_payload, encode_bulk_binary_payload, BulkBinaryError, BulkBinaryFlavor,
     BulkBinaryPayload,
@@ -44,9 +47,11 @@ pub use frame::{
     Flags, Frame, MessageClass, MessageDirection, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE,
 };
 pub use handshake::{
-    build_auth_fail_payload, build_auth_ok_payload, build_auth_response_anonymous_payload,
+    build_auth_fail_frame, build_auth_fail_payload, build_auth_ok_frame_from_payload,
+    build_auth_ok_payload, build_auth_response_anonymous_payload,
     build_auth_response_bearer_payload, build_auth_response_oauth_jwt_payload, build_hello_ack,
-    build_hello_payload, AuthFail, AuthOk, Hello, HelloAck, SUPPORTED_METHODS,
+    build_hello_ack_frame, build_hello_payload, AuthFail, AuthOk, Hello, HelloAck,
+    SUPPORTED_METHODS,
 };
 pub use operations::{
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,

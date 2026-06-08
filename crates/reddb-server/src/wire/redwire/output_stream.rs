@@ -50,6 +50,22 @@ pub fn build_open_ack_payload(lease_id: u64, snapshot_lsn: u64, resumable: bool)
     reddb_wire::redwire::stream::build_open_ack_payload(lease_id, snapshot_lsn, resumable)
 }
 
+pub fn build_open_ack_frame(
+    correlation_id: u64,
+    stream_id: u16,
+    lease_id: u64,
+    snapshot_lsn: u64,
+    resumable: bool,
+) -> Result<Frame, reddb_wire::BuildError> {
+    reddb_wire::redwire::stream::build_open_ack_frame(
+        correlation_id,
+        stream_id,
+        lease_id,
+        snapshot_lsn,
+        resumable,
+    )
+}
+
 pub fn build_stream_chunk_payload(seq: u64, rows: Vec<JsonValue>, terminal: bool) -> Vec<u8> {
     let rows = rows
         .into_iter()

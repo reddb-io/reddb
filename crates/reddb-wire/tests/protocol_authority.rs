@@ -601,6 +601,7 @@ fn redwire_stream_frame_builders_live_in_reddb_wire() {
     let root = repo_root();
     let output = read(root.join("crates/reddb-server/src/wire/redwire/output_stream.rs"));
     let input = read(root.join("crates/reddb-server/src/wire/redwire/input_stream.rs"));
+    let session = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
     let wire = read(root.join("crates/reddb-wire/src/redwire/stream.rs"));
 
     for (file, text) in [
@@ -639,6 +640,48 @@ fn redwire_stream_frame_builders_live_in_reddb_wire() {
     assert!(output.contains("build_stream_chunk_frame_from_json_bytes"));
     assert!(input.contains("build_input_stream_error_frame"));
     assert!(input.contains("build_input_stream_end_frame"));
+    assert!(
+        !session.contains("kind(MessageKind::OpenAck)"),
+        "session OpenAck frame construction should delegate to reddb-wire"
+    );
+    assert!(
+        session.contains("os::build_open_ack_frame"),
+        "session input stream OpenAck should route through reddb-wire"
+    );
+}
+
+#[test]
+fn redwire_generic_reply_frame_builders_live_in_reddb_wire() {
+    let root = repo_root();
+    let session = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
+    let wire = read(root.join("crates/reddb-wire/src/redwire/builder.rs"));
+
+    for forbidden in [
+        "fn build_error_frame_lossy",
+        "fn build_dispatch_reply_frame",
+        "FrameBuilder::reply_to(correlation_id)",
+        "kind(MessageKind::Error)",
+    ] {
+        assert!(
+            !session.contains(forbidden),
+            "generic RedWire reply/error frame construction belongs in reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "build_reply_frame",
+        "build_error_frame_lossy",
+        "build_dispatch_reply_frame",
+    ] {
+        assert!(
+            session.contains(required),
+            "server session should delegate generic frame construction through {required}"
+        );
+        assert!(
+            wire.contains(&format!("pub fn {required}")),
+            "reddb-wire should own generic frame builder {required}"
+        );
+    }
 }
 
 #[test]
@@ -662,6 +705,17 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
             "server auth must not own RedWire auth/SCRAM payload contract, found {forbidden:?}"
         );
     }
+    for forbidden in [
+        "FrameBuilder::reply_to",
+        "kind(MessageKind::HelloAck)",
+        "kind(MessageKind::AuthOk)",
+        "kind(MessageKind::AuthFail)",
+    ] {
+        assert!(
+            !session.contains(forbidden),
+            "server session must not own RedWire handshake frame construction, found {forbidden:?}"
+        );
+    }
 
     for required in [
         "parse_auth_response_bearer_token",
@@ -671,6 +725,16 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
         assert!(
             auth.contains(required),
             "server auth should adapt runtime policy through reddb-wire {required}"
+        );
+    }
+    for required in ["build_hello_ack_frame", "build_auth_ok_frame_from_payload"] {
+        assert!(
+            session.contains(required),
+            "server session handshake should delegate frame construction through {required}"
+        );
+        assert!(
+            wire.contains(&format!("pub fn {required}")),
+            "reddb-wire should own handshake frame builder {required}"
         );
     }
 

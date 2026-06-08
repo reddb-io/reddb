@@ -28,10 +28,13 @@ use reddb_wire::redwire::operations::{
 
 use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
 use super::validate_minor_version;
-use reddb_wire::redwire::handshake::{build_auth_fail_payload, build_hello_ack, Hello};
+use reddb_wire::redwire::handshake::{
+    build_auth_fail_payload, build_auth_ok_frame_from_payload, build_hello_ack_frame, Hello,
+};
 use reddb_wire::redwire::{
-    decode_frame, encode_frame, frame_len_from_header, Frame, FrameBuilder, MessageDirection,
-    MessageKind, FRAME_HEADER_SIZE, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
+    build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame, decode_frame,
+    encode_frame, frame_len_from_header, Frame, MessageDirection, MessageKind, FRAME_HEADER_SIZE,
+    MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
 };
 
 #[derive(Debug)]
@@ -156,18 +159,17 @@ where
         // The catalog (`MessageKind::direction`) is the single source
         // of truth — see `frame.rs::catalog_tests::direction_matrix_is_pinned`.
         if frame.kind.direction() == MessageDirection::ServerToClient {
-            let err_frame = FrameBuilder::reply_to(frame.correlation_id)
-                .kind(MessageKind::Error)
-                .payload(format!("redwire: {:?} is server-only", frame.kind).into_bytes())
-                .build()
-                .map_err(|e| io::Error::other(format!("build Error frame: {e}")))?;
+            let err_frame = build_error_frame_lossy(
+                frame.correlation_id,
+                &format!("redwire: {:?} is server-only", frame.kind),
+            );
             queue_send(&out_tx, encode_frame(&err_frame))?;
             continue;
         }
 
         match frame.kind {
             MessageKind::Bye => {
-                let bye = encode_frame(&build_reply(
+                let bye = encode_frame(&reply_frame_or_io_error(
                     frame.correlation_id,
                     MessageKind::Bye,
                     vec![],
@@ -176,7 +178,7 @@ where
                 return Ok(());
             }
             MessageKind::Ping => {
-                let pong = encode_frame(&build_reply(
+                let pong = encode_frame(&reply_frame_or_io_error(
                     frame.correlation_id,
                     MessageKind::Pong,
                     vec![],
@@ -353,12 +355,9 @@ where
                         queue_send(&out_tx, encode_frame(&err))?;
                         continue;
                     }
-                    let ack = FrameBuilder::reply_to(frame_id)
-                        .kind(MessageKind::OpenAck)
-                        .stream_id(sid)
-                        .payload(os::build_open_ack_payload(lease_id, lease_snapshot, false))
-                        .build()
-                        .map_err(|e| io::Error::other(format!("build OpenAck: {e}")))?;
+                    let ack =
+                        os::build_open_ack_frame(frame_id, sid, lease_id, lease_snapshot, false)
+                            .map_err(|e| io::Error::other(format!("build OpenAck: {e}")))?;
                     queue_send(&out_tx, encode_frame(&ack))?;
                     continue;
                 }
@@ -641,11 +640,10 @@ where
                 }
             }
             other => {
-                let err_frame = FrameBuilder::reply_to(frame.correlation_id)
-                    .kind(MessageKind::Error)
-                    .payload(format!("redwire: cannot dispatch {other:?} yet").into_bytes())
-                    .build()
-                    .map_err(|e| io::Error::other(format!("build Error frame: {e}")))?;
+                let err_frame = build_error_frame_lossy(
+                    frame.correlation_id,
+                    &format!("redwire: cannot dispatch {other:?} yet"),
+                );
                 queue_send(&out_tx, encode_frame(&err_frame))?;
             }
         }
@@ -684,7 +682,7 @@ where
     // Step 2: read the Hello frame.
     let hello = read_frame(stream).await?;
     if hello.kind != MessageKind::Hello {
-        let fail = encode_frame(&build_reply(
+        let fail = encode_frame(&reply_frame_or_io_error(
             hello.correlation_id,
             MessageKind::AuthFail,
             build_auth_fail_payload("first frame after magic must be Hello"),
@@ -695,7 +693,7 @@ where
     let hello_msg = match Hello::from_payload(&hello.payload) {
         Ok(h) => h,
         Err(e) => {
-            let fail = encode_frame(&build_reply(
+            let fail = encode_frame(&reply_frame_or_io_error(
                 hello.correlation_id,
                 MessageKind::AuthFail,
                 build_auth_fail_payload(&e),
@@ -713,7 +711,7 @@ where
         .max()
         .unwrap_or(0);
     if chosen_version == 0 {
-        let fail = encode_frame(&build_reply(
+        let fail = encode_frame(&reply_frame_or_io_error(
             hello.correlation_id,
             MessageKind::AuthFail,
             build_auth_fail_payload("no overlapping protocol version"),
@@ -726,7 +724,7 @@ where
     let chosen = match pick_auth_method(&hello_msg.auth_methods, server_anon_ok) {
         Some(m) => m,
         None => {
-            let fail = encode_frame(&build_reply(
+            let fail = encode_frame(&reply_frame_or_io_error(
                 hello.correlation_id,
                 MessageKind::AuthFail,
                 build_auth_fail_payload("no overlapping auth method"),
@@ -746,16 +744,14 @@ where
     // RPC after the connection is established.
     let server_features = FEATURE_PARAMS;
     let topology = build_topology_for_hello_ack(runtime);
-    let ack_frame = FrameBuilder::reply_to(hello.correlation_id)
-        .kind(MessageKind::HelloAck)
-        .payload(build_hello_ack(
-            chosen_version,
-            chosen,
-            server_features,
-            topology.as_ref(),
-        ))
-        .build()
-        .map_err(|e| io::Error::other(format!("build HelloAck: {e}")))?;
+    let ack_frame = build_hello_ack_frame(
+        hello.correlation_id,
+        chosen_version,
+        chosen,
+        server_features,
+        topology.as_ref(),
+    )
+    .map_err(|e| io::Error::other(format!("build HelloAck: {e}")))?;
     let ack = encode_frame(&ack_frame);
     stream.write_all(&ack).await?;
 
@@ -771,7 +767,7 @@ where
     // bearer/anonymous send their proof in the first AuthResponse).
     let resp = read_frame(stream).await?;
     if resp.kind != MessageKind::AuthResponse {
-        let fail = encode_frame(&build_reply(
+        let fail = encode_frame(&reply_frame_or_io_error(
             resp.correlation_id,
             MessageKind::AuthFail,
             build_auth_fail_payload("expected AuthResponse"),
@@ -797,7 +793,7 @@ where
             }) {
             Some(s) if !s.is_empty() => s,
             _ => {
-                let fail = encode_frame(&build_reply(
+                let fail = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
                     MessageKind::AuthFail,
                     build_auth_fail_payload("oauth-jwt: AuthResponse missing 'jwt' string"),
@@ -824,7 +820,7 @@ where
                 .unwrap_or(0);
             if let Ok(identity) = authority.validate_access(&raw, now) {
                 let session_id = super::auth::new_session_id_for_scram();
-                let ok = encode_frame(&build_reply(
+                let ok = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
                     MessageKind::AuthOk,
                     build_auth_ok(
@@ -848,7 +844,7 @@ where
         let validator = match oauth {
             Some(v) => v,
             None => {
-                let fail = encode_frame(&build_reply(
+                let fail = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
                     MessageKind::AuthFail,
                     build_auth_fail_payload(
@@ -862,7 +858,7 @@ where
         match super::auth::validate_oauth_jwt_full(validator, &raw) {
             Ok((tenant, username, role)) => {
                 let session_id = super::auth::new_session_id_for_scram();
-                let ok = encode_frame(&build_reply(
+                let ok = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
                     MessageKind::AuthOk,
                     build_auth_ok(&session_id, &username, role, server_features),
@@ -876,7 +872,7 @@ where
                 }));
             }
             Err(reason) => {
-                let fail = encode_frame(&build_reply(
+                let fail = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
                     MessageKind::AuthFail,
                     build_auth_fail_payload(&format!("oauth-jwt: {reason}")),
@@ -894,11 +890,11 @@ where
             tenant,
             session_id,
         } => {
-            let ok_frame = FrameBuilder::reply_to(resp.correlation_id)
-                .kind(MessageKind::AuthOk)
-                .payload(build_auth_ok(&session_id, &username, role, server_features))
-                .build()
-                .map_err(|e| io::Error::other(format!("build AuthOk: {e}")))?;
+            let ok_frame = build_auth_ok_frame_from_payload(
+                resp.correlation_id,
+                build_auth_ok(&session_id, &username, role, server_features),
+            )
+            .map_err(|e| io::Error::other(format!("build AuthOk: {e}")))?;
             let ok = encode_frame(&ok_frame);
             stream.write_all(&ok).await?;
             Ok(Some(AuthedSession {
@@ -909,7 +905,7 @@ where
             }))
         }
         AuthOutcome::Refused(reason) => {
-            let fail = encode_frame(&build_reply(
+            let fail = encode_frame(&reply_frame_or_io_error(
                 resp.correlation_id,
                 MessageKind::AuthFail,
                 build_auth_fail_payload(&reason),
@@ -938,7 +934,7 @@ where
     let store = match auth_store {
         Some(s) => s,
         None => {
-            let fail = encode_frame(&build_reply(
+            let fail = encode_frame(&reply_frame_or_io_error(
                 initial_correlation,
                 MessageKind::AuthFail,
                 build_auth_fail_payload("scram-sha-256 requires an AuthStore"),
@@ -951,7 +947,7 @@ where
     // 1. Client-first.
     let cf = read_frame(stream).await?;
     if cf.kind != MessageKind::AuthResponse {
-        let fail = encode_frame(&build_reply(
+        let fail = encode_frame(&reply_frame_or_io_error(
             cf.correlation_id,
             MessageKind::AuthFail,
             build_auth_fail_payload("expected AuthResponse(client-first-message)"),
@@ -963,7 +959,7 @@ where
         match reddb_wire::redwire::handshake::parse_scram_client_first(&cf.payload) {
             Ok(t) => t,
             Err(e) => {
-                let fail = encode_frame(&build_reply(
+                let fail = encode_frame(&reply_frame_or_io_error(
                     cf.correlation_id,
                     MessageKind::AuthFail,
                     build_auth_fail_payload(&format!("scram client-first: {e}")),
@@ -1001,7 +997,7 @@ where
         &salt,
         iter,
     );
-    let req = encode_frame(&build_reply(
+    let req = encode_frame(&reply_frame_or_io_error(
         cf.correlation_id,
         MessageKind::AuthRequest,
         server_first.as_bytes().to_vec(),
@@ -1011,7 +1007,7 @@ where
     // 4. Client-final.
     let cfinal = read_frame(stream).await?;
     if cfinal.kind != MessageKind::AuthResponse {
-        let fail = encode_frame(&build_reply(
+        let fail = encode_frame(&reply_frame_or_io_error(
             cfinal.correlation_id,
             MessageKind::AuthFail,
             build_auth_fail_payload("expected AuthResponse(client-final-message)"),
@@ -1023,7 +1019,7 @@ where
         match reddb_wire::redwire::handshake::parse_scram_client_final(&cfinal.payload) {
             Ok(t) => t,
             Err(e) => {
-                let fail = encode_frame(&build_reply(
+                let fail = encode_frame(&reply_frame_or_io_error(
                     cfinal.correlation_id,
                     MessageKind::AuthFail,
                     build_auth_fail_payload(&format!("scram client-final: {e}")),
@@ -1034,7 +1030,7 @@ where
         };
     let expected_combined = format!("{client_nonce}{server_nonce}");
     if combined_nonce != expected_combined {
-        let fail = encode_frame(&build_reply(
+        let fail = encode_frame(&reply_frame_or_io_error(
             cfinal.correlation_id,
             MessageKind::AuthFail,
             build_auth_fail_payload("scram nonce mismatch — replay protection failed"),
@@ -1058,7 +1054,7 @@ where
         false
     };
     if !proof_ok {
-        let fail = encode_frame(&build_reply(
+        let fail = encode_frame(&reply_frame_or_io_error(
             cfinal.correlation_id,
             MessageKind::AuthFail,
             build_auth_fail_payload("invalid SCRAM proof"),
@@ -1085,7 +1081,7 @@ where
         server_features,
         &server_sig,
     );
-    let ok = encode_frame(&build_reply(
+    let ok = encode_frame(&reply_frame_or_io_error(
         cfinal.correlation_id,
         MessageKind::AuthOk,
         ok_payload,
@@ -1123,7 +1119,10 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let sql = match std::str::from_utf8(&frame.payload) {
         Ok(s) => s,
         Err(_) => {
-            return error_frame(frame.correlation_id, "Query payload must be UTF-8 SQL");
+            return build_error_frame_lossy(
+                frame.correlation_id,
+                "Query payload must be UTF-8 SQL",
+            );
         }
     };
     match runtime.execute_query(sql) {
@@ -1139,16 +1138,16 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                 JsonValue::Number(result.affected_rows as f64),
             );
             let payload = serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default();
-            build_dispatch_reply(frame.correlation_id, MessageKind::Result, payload)
+            build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
-        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     }
 }
 
 fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let (sql, params) = match decode_query_with_params(&frame.payload) {
         Ok(decoded) => decoded,
-        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     let params = params
         .into_iter()
@@ -1156,11 +1155,11 @@ fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         .collect::<Vec<_>>();
     let parsed = match crate::storage::query::modes::parse_multi(&sql) {
         Ok(parsed) => parsed,
-        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     let bound = match crate::storage::query::user_params::bind(&parsed, &params) {
         Ok(bound) => bound,
-        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     match runtime.execute_query_expr(bound) {
         Ok(result) => {
@@ -1168,16 +1167,16 @@ fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             if is_mutation {
                 let post_lsn = runtime.cdc_current_lsn();
                 if let Err(err) = runtime.enforce_commit_policy(post_lsn) {
-                    return error_frame(frame.correlation_id, &err.to_string());
+                    return build_error_frame_lossy(frame.correlation_id, &err.to_string());
                 }
             }
             let payload = serde_json::to_vec(
                 &crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
             )
             .unwrap_or_default();
-            build_dispatch_reply(frame.correlation_id, MessageKind::Result, payload)
+            build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
-        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     }
 }
 
@@ -1217,7 +1216,7 @@ fn param_to_schema_value(value: RedWireParamValue) -> crate::storage::schema::Va
 fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_insert_dispatch_payload(&frame.payload) {
         Ok(request) => request,
-        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     let collection = request.collection.as_str();
     let payload = request.payload.map(wire_json_to_server_json);
@@ -1237,7 +1236,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         let items = match payloads.as_deref() {
             Some(rows) => rows,
             None => {
-                return error_frame(
+                return build_error_frame_lossy(
                     frame.correlation_id,
                     "BatchInsert: missing 'payloads' array",
                 )
@@ -1258,7 +1257,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         } else {
             MessageKind::Error
         };
-        return build_dispatch_reply(frame.correlation_id, kind, outcome.body);
+        return build_dispatch_reply_frame(frame.correlation_id, kind, outcome.body);
     }
 
     if let Some(rows) = payloads.as_ref() {
@@ -1267,7 +1266,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             objects.push(match entry.as_object() {
                 Some(o) => o,
                 None => {
-                    return error_frame(
+                    return build_error_frame_lossy(
                         frame.correlation_id,
                         "Insert: each payload must be a JSON object",
                     )
@@ -1279,9 +1278,9 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             return match crate::rpc_stdio::bulk_insert_graph(runtime, collection, &objects) {
                 Ok(body) => {
                     let payload = serde_json::to_vec(&body).unwrap_or_default();
-                    build_dispatch_reply(frame.correlation_id, MessageKind::BulkOk, payload)
+                    build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload)
                 }
-                Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+                Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
             };
         }
 
@@ -1296,20 +1295,20 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                         ids.push(id.clone());
                     }
                 }
-                Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+                Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
             }
         }
         let mut out = crate::serde_json::Map::new();
         out.insert("affected".to_string(), JsonValue::Number(affected as f64));
         out.insert("ids".to_string(), JsonValue::Array(ids));
         let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
-        return build_dispatch_reply(frame.correlation_id, MessageKind::BulkOk, payload);
+        return build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload);
     }
 
     let row = match payload.as_ref().and_then(|x| x.as_object()) {
         Some(o) => o,
         None => {
-            return error_frame(
+            return build_error_frame_lossy(
                 frame.correlation_id,
                 "Insert: missing 'payload' object or 'payloads' array",
             )
@@ -1320,9 +1319,9 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         Ok(qr) => {
             let body = crate::rpc_stdio::insert_result_to_json(&qr);
             let payload = serde_json::to_vec(&body).unwrap_or_default();
-            build_dispatch_reply(frame.correlation_id, MessageKind::BulkOk, payload)
+            build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload)
         }
-        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     }
 }
 
@@ -1366,46 +1365,13 @@ fn build_topology_for_hello_ack(runtime: &RedDBRuntime) -> Option<reddb_wire::to
     ))
 }
 
-fn error_frame(correlation_id: u64, msg: &str) -> Frame {
-    // Error frames are guaranteed to fit (UTF-8 message bodies are
-    // far smaller than MAX_FRAME_SIZE), so unwrapping the builder
-    // here is sound — failure would mean the codebase generated a
-    // 16 MiB error string, at which point we have a bigger problem.
-    FrameBuilder::reply_to(correlation_id)
-        .kind(MessageKind::Error)
-        .payload(msg.as_bytes().to_vec())
-        .build()
-        .expect("error frame fits in MAX_FRAME_SIZE")
-}
-
-/// Single-frame reply via the [`FrameBuilder`] interface.
-///
-/// The dispatch loop needs builder-level enforcement (correlation-id
-/// echo, MORE_FRAMES last-frame invariant, MAX_FRAME_SIZE check) on
-/// every emitted frame; this helper folds the four-line builder
-/// chain into one call so dispatch arms read like the table they
-/// describe. `BuildError` surfaces as `io::Error::other` because the
-/// dispatch loop already returns `io::Result`.
-fn build_reply(correlation_id: u64, kind: MessageKind, payload: Vec<u8>) -> io::Result<Frame> {
-    FrameBuilder::reply_to(correlation_id)
-        .kind(kind)
-        .payload(payload)
-        .build()
+fn reply_frame_or_io_error(
+    correlation_id: u64,
+    kind: MessageKind,
+    payload: Vec<u8>,
+) -> io::Result<Frame> {
+    build_reply_frame(correlation_id, kind, payload)
         .map_err(|e| io::Error::other(format!("build {kind:?}: {e}")))
-}
-
-/// Variant for non-async dispatch helpers (`run_query`, `run_get`,
-/// `run_delete`, `run_insert_dispatch`, `rewrap_handler_response`)
-/// that return a `Frame` rather than `io::Result<Frame>`. Builder
-/// failures degrade to a wire-level Error frame so the client always
-/// gets a terminal response — the alternative (panic) would drop
-/// the connection mid-reply.
-fn build_dispatch_reply(correlation_id: u64, kind: MessageKind, payload: Vec<u8>) -> Frame {
-    FrameBuilder::reply_to(correlation_id)
-        .kind(kind)
-        .payload(payload)
-        .build()
-        .unwrap_or_else(|e| error_frame(correlation_id, &e.to_string()))
 }
 
 fn wire_json_to_server_json(value: impl std::fmt::Display) -> JsonValue {
@@ -1425,7 +1391,7 @@ fn wire_json_to_server_json(value: impl std::fmt::Display) -> JsonValue {
 /// allocation, no body copy — preserving max bulk-insert perf.
 fn rewrap_handler_response(raw_bytes: &[u8], req: &Frame) -> Frame {
     if raw_bytes.len() < 5 {
-        return error_frame(
+        return build_error_frame_lossy(
             req.correlation_id,
             "fast-path handler returned a truncated frame",
         );
@@ -1433,7 +1399,7 @@ fn rewrap_handler_response(raw_bytes: &[u8], req: &Frame) -> Frame {
     let kind_byte = raw_bytes[4];
     let kind = MessageKind::from_u8(kind_byte).unwrap_or(MessageKind::Error);
     let body = raw_bytes[5..].to_vec();
-    build_dispatch_reply(req.correlation_id, kind, body)
+    build_dispatch_reply_frame(req.correlation_id, kind, body)
 }
 
 /// Get payload shape: `{ "collection": "...", "id": "..." }`.
@@ -1442,7 +1408,7 @@ fn rewrap_handler_response(raw_bytes: &[u8], req: &Frame) -> Frame {
 fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_get_payload(&frame.payload) {
         Ok(request) => request,
-        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     // Sanitise the id by treating it as a string literal — same
     // approach as build_insert_sql for arbitrary input.
@@ -1462,9 +1428,9 @@ fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             // Records pass through as-is; the JS / Rust clients
             // pick the shape they want from the JSON envelope.
             let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
-            build_dispatch_reply(frame.correlation_id, MessageKind::Result, payload)
+            build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
-        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     }
 }
 
@@ -1474,7 +1440,7 @@ fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_delete_payload(&frame.payload) {
         Ok(request) => request,
-        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(request.id));
     let sql = format!("DELETE FROM {} WHERE _id = {id_lit}", request.collection);
@@ -1486,9 +1452,9 @@ fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                 JsonValue::Number(qr.affected_rows as f64),
             );
             let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
-            build_dispatch_reply(frame.correlation_id, MessageKind::DeleteOk, payload)
+            build_dispatch_reply_frame(frame.correlation_id, MessageKind::DeleteOk, payload)
         }
-        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     }
 }
 

@@ -244,6 +244,44 @@ impl FrameBuilder {
     }
 }
 
+pub fn build_reply_frame(
+    correlation_id: u64,
+    kind: MessageKind,
+    payload: Vec<u8>,
+) -> Result<Frame, BuildError> {
+    FrameBuilder::reply_to(correlation_id)
+        .kind(kind)
+        .payload(payload)
+        .build()
+}
+
+pub fn build_error_frame(correlation_id: u64, message: &str) -> Result<Frame, BuildError> {
+    build_reply_frame(
+        correlation_id,
+        MessageKind::Error,
+        message.as_bytes().to_vec(),
+    )
+}
+
+pub fn build_error_frame_lossy(correlation_id: u64, message: &str) -> Frame {
+    build_error_frame(correlation_id, message).unwrap_or_else(|_| {
+        Frame::new(
+            MessageKind::Error,
+            correlation_id,
+            b"redwire error frame too large".to_vec(),
+        )
+    })
+}
+
+pub fn build_dispatch_reply_frame(
+    correlation_id: u64,
+    kind: MessageKind,
+    payload: Vec<u8>,
+) -> Frame {
+    build_reply_frame(correlation_id, kind, payload)
+        .unwrap_or_else(|err| build_error_frame_lossy(correlation_id, &err.to_string()))
+}
+
 /// Cheap heuristic: zstd's frame header is ~12 bytes, so a payload
 /// has to clear that bar to even potentially shrink. The codec also
 /// catches truly pathological cases at encode time and falls back to
@@ -416,5 +454,31 @@ mod tests {
             .build()
             .expect("build");
         assert_eq!(frame.stream_id, 0xBEEF);
+    }
+
+    #[test]
+    fn generic_reply_builders_pin_server_frame_contracts() {
+        let reply = build_reply_frame(7, MessageKind::Pong, b"ok".to_vec()).expect("reply frame");
+        assert_eq!(reply.correlation_id, 7);
+        assert_eq!(reply.kind, MessageKind::Pong);
+        assert_eq!(reply.payload, b"ok");
+
+        let err = build_error_frame(8, "bad request").expect("error frame");
+        assert_eq!(err.kind, MessageKind::Error);
+        assert_eq!(err.correlation_id, 8);
+        assert_eq!(err.payload, b"bad request");
+
+        let dispatch = build_dispatch_reply_frame(9, MessageKind::Result, b"rows".to_vec());
+        assert_eq!(dispatch.kind, MessageKind::Result);
+        assert_eq!(dispatch.correlation_id, 9);
+    }
+
+    #[test]
+    fn lossy_error_builder_never_panics_on_oversized_payload() {
+        let too_large = "x".repeat(MAX_FRAME_SIZE as usize);
+        let err = build_error_frame_lossy(11, &too_large);
+        assert_eq!(err.kind, MessageKind::Error);
+        assert_eq!(err.correlation_id, 11);
+        assert_eq!(err.payload, b"redwire error frame too large");
     }
 }
