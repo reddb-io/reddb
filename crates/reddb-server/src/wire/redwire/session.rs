@@ -32,9 +32,9 @@ use reddb_wire::redwire::handshake::{
     build_auth_fail_payload, build_auth_ok_frame_from_payload, build_hello_ack_frame, Hello,
 };
 use reddb_wire::redwire::{
-    build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame, decode_frame,
-    decode_frame_parts, encode_frame, frame_len_from_header, Frame, MessageDirection, MessageKind,
-    FRAME_HEADER_SIZE, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
+    build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame,
+    choose_hello_minor_version, decode_frame, decode_frame_parts, encode_frame,
+    frame_len_from_header, Frame, MessageDirection, MessageKind, FRAME_HEADER_SIZE, REDWIRE_MAGIC,
 };
 
 #[derive(Debug)]
@@ -703,14 +703,7 @@ where
         }
     };
 
-    let chosen_version = hello_msg
-        .versions
-        .iter()
-        .copied()
-        .filter(|v| *v <= MAX_KNOWN_MINOR_VERSION)
-        .max()
-        .unwrap_or(0);
-    if chosen_version == 0 {
+    let Some(chosen_version) = choose_hello_minor_version(&hello_msg.versions) else {
         let fail = encode_frame(&reply_frame_or_io_error(
             hello.correlation_id,
             MessageKind::AuthFail,
@@ -718,7 +711,7 @@ where
         )?);
         let _ = stream.write_all(&fail).await;
         return Ok(None);
-    }
+    };
 
     let server_anon_ok = auth_store.map(|s| !s.is_enabled()).unwrap_or(true);
     let chosen = match pick_auth_method(&hello_msg.auth_methods, server_anon_ok) {

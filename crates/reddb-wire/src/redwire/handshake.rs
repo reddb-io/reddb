@@ -200,6 +200,14 @@ where
     )
 }
 
+pub fn choose_hello_minor_version(client_versions: &[u8]) -> Option<u8> {
+    client_versions
+        .iter()
+        .copied()
+        .filter(|version| *version > 0 && *version <= MAX_KNOWN_MINOR_VERSION)
+        .max()
+}
+
 pub fn build_hello_ack(
     chosen_version: u8,
     chosen_auth: &str,
@@ -555,6 +563,28 @@ mod tests {
         assert_eq!(hello.versions, vec![MAX_KNOWN_MINOR_VERSION]);
         assert_eq!(hello.auth_methods, vec!["anonymous"]);
         assert_eq!(hello.client_name.as_deref(), Some("client"));
+    }
+
+    #[test]
+    fn hello_minor_version_negotiation_picks_highest_supported_nonzero_version() {
+        assert_eq!(
+            choose_hello_minor_version(&[0, MAX_KNOWN_MINOR_VERSION]),
+            Some(MAX_KNOWN_MINOR_VERSION)
+        );
+        assert_eq!(
+            choose_hello_minor_version(&[
+                MAX_KNOWN_MINOR_VERSION.saturating_add(1),
+                MAX_KNOWN_MINOR_VERSION,
+                1,
+            ]),
+            Some(MAX_KNOWN_MINOR_VERSION)
+        );
+        assert_eq!(choose_hello_minor_version(&[]), None);
+        assert_eq!(choose_hello_minor_version(&[0]), None);
+        assert_eq!(
+            choose_hello_minor_version(&[MAX_KNOWN_MINOR_VERSION.saturating_add(1)]),
+            None
+        );
     }
 
     #[test]

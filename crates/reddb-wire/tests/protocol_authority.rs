@@ -45,6 +45,38 @@ fn redwire_frame_contracts_live_only_in_reddb_wire() {
 }
 
 #[test]
+fn server_public_reexport_describes_reddb_wire_as_protocol_authority() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/lib.rs"));
+
+    for forbidden in [
+        "connection-string parser today",
+        "RedWire frames in a follow-up",
+        "future slice",
+        "future slices",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "server reexport docs must describe reddb-wire as the current protocol authority, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "connection strings",
+        "audit-safe sanitizers",
+        "RedWire frames/codecs",
+        "payloads",
+        "topology",
+        "replication wire messages",
+    ] {
+        assert!(
+            text.contains(required),
+            "server reexport docs should mention reddb-wire ownership of {required}"
+        );
+    }
+}
+
+#[test]
 fn server_redwire_frame_header_length_routes_through_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
@@ -183,11 +215,20 @@ fn redwire_startup_preface_lives_in_reddb_wire() {
         !session.contains("minor > MAX_KNOWN_MINOR_VERSION"),
         "server session must validate startup minor version through reddb-wire"
     );
+    assert!(
+        !session.contains("MAX_KNOWN_MINOR_VERSION"),
+        "server session must negotiate Hello minor versions through reddb-wire"
+    );
+    assert!(
+        session.contains("choose_hello_minor_version"),
+        "server session should call reddb_wire::redwire::choose_hello_minor_version"
+    );
 
     for required in [
         "supported_client_preface",
         "validate_startup_magic",
         "validate_minor_version",
+        "choose_hello_minor_version",
         "StartupError",
     ] {
         assert!(

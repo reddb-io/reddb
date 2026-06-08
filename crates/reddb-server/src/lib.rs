@@ -53,10 +53,11 @@ pub mod wire;
 
 /// Re-export of the shared `reddb-wire` crate.
 ///
-/// `reddb-wire` is the transport-agnostic protocol vocabulary
-/// (connection-string parser today, RedWire frames in a follow-up
-/// slice). Exposed here so existing `use reddb::…` callers can
-/// reach the parser without a separate dependency.
+/// `reddb-wire` is the transport-agnostic protocol vocabulary:
+/// connection strings, audit-safe sanitizers, RedWire frames/codecs,
+/// payloads, topology, and replication wire messages. Exposed here so
+/// existing `use reddb::...` callers can reach the shared protocol
+/// contracts without a separate dependency.
 pub use reddb_wire as wire_proto;
 
 pub mod prelude {
