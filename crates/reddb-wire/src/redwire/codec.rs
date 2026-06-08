@@ -56,6 +56,25 @@ pub fn frame_len_from_header(header: &[u8; FRAME_HEADER_SIZE]) -> Result<usize, 
     Ok(length as usize)
 }
 
+pub fn decode_frame_parts(
+    header: &[u8; FRAME_HEADER_SIZE],
+    payload: &[u8],
+) -> Result<Frame, FrameError> {
+    let length = frame_len_from_header(header)?;
+    let expected_payload_len = length - FRAME_HEADER_SIZE;
+    if payload.len() < expected_payload_len {
+        return Err(FrameError::PayloadTruncated {
+            expected: expected_payload_len as u32,
+            available: payload.len() as u32,
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(length);
+    bytes.extend_from_slice(header);
+    bytes.extend_from_slice(&payload[..expected_payload_len]);
+    decode_frame(&bytes).map(|(frame, _)| frame)
+}
+
 pub fn encode_frame(frame: &Frame) -> Vec<u8> {
     // The frame's `payload` is always the plaintext form. If the
     // COMPRESSED flag is set we compress on the wire and rewrite
@@ -213,6 +232,18 @@ mod tests {
     #[test]
     fn round_trip_with_payload() {
         round_trip(Frame::new(MessageKind::Query, 42, b"SELECT 1".to_vec()));
+    }
+
+    #[test]
+    fn decode_frame_parts_matches_full_buffer_decode() {
+        let frame = Frame::new(MessageKind::Result, 42, br#"{"ok":true}"#.to_vec());
+        let bytes = encode_frame(&frame);
+        let mut header = [0u8; FRAME_HEADER_SIZE];
+        header.copy_from_slice(&bytes[..FRAME_HEADER_SIZE]);
+        let payload = &bytes[FRAME_HEADER_SIZE..];
+
+        let decoded = decode_frame_parts(&header, payload).expect("decode parts");
+        assert_eq!(decoded, frame);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{ClientError, ErrorCode, Result};
 use reddb_wire::redwire::{
-    decode_frame, encode_frame, frame_len_from_header, Frame, FRAME_HEADER_SIZE,
+    decode_frame_parts, encode_frame, frame_len_from_header, Frame, FRAME_HEADER_SIZE,
 };
 
 pub(super) async fn read_frame<S>(stream: &mut S) -> Result<Frame>
@@ -14,15 +14,12 @@ where
     let length = frame_len_from_header(&header)
         .map_err(|err| ClientError::new(ErrorCode::Protocol, format!("decode frame: {err}")))?;
 
-    let mut buf = vec![0u8; length];
-    buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
+    let payload_len = length - FRAME_HEADER_SIZE;
+    let mut payload = vec![0u8; payload_len];
     if length > FRAME_HEADER_SIZE {
-        stream
-            .read_exact(&mut buf[FRAME_HEADER_SIZE..])
-            .await
-            .map_err(io_err)?;
+        stream.read_exact(&mut payload).await.map_err(io_err)?;
     }
-    let (frame, _) = decode_frame(&buf)
+    let frame = decode_frame_parts(&header, &payload)
         .map_err(|err| ClientError::new(ErrorCode::Protocol, format!("decode frame: {err}")))?;
     Ok(frame)
 }

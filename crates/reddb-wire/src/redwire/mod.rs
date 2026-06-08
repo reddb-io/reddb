@@ -36,7 +36,9 @@ pub use bulk_stream::{
     encode_bulk_stream_rows_payload, encode_bulk_stream_start_payload, BulkStreamError,
     BulkStreamRowsPayload, BulkStreamStartPayload,
 };
-pub use codec::{decode_frame, encode_frame, frame_len_from_header, FrameError};
+pub use codec::{
+    decode_frame, decode_frame_parts, encode_frame, frame_len_from_header, FrameError,
+};
 pub use cursor::{
     decode_close_cursor_payload, decode_declare_cursor_payload, decode_fetch_payload,
     encode_close_cursor_payload, encode_cursor_batch_payload, encode_cursor_ok_payload,
