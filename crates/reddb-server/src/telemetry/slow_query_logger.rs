@@ -73,7 +73,7 @@ pub struct SlowQueryLogger {
 
 impl SlowQueryLogger {
     pub fn new(opts: SlowQueryOpts) -> Arc<Self> {
-        let path = opts.log_dir.join("red-slow.log");
+        let path = reddb_file::layout::legacy_slow_query_log_path(&opts.log_dir);
         Self::open_at(path, opts.threshold_ms, opts.sample_pct)
     }
 
@@ -90,13 +90,15 @@ impl SlowQueryLogger {
         use crate::storage::layout::LogDestination;
         let path = match dest {
             LogDestination::File(p) => p.clone(),
-            LogDestination::Stderr => fallback_log_dir.join("red-slow.log"),
+            LogDestination::Stderr => {
+                reddb_file::layout::legacy_slow_query_log_path(fallback_log_dir)
+            }
             LogDestination::Syslog => {
                 tracing::warn!(
                     target: "reddb::slow",
                     "slow-query LogDestination::Syslog requested; sink not implemented, falling back to file"
                 );
-                fallback_log_dir.join("red-slow.log")
+                reddb_file::layout::legacy_slow_query_log_path(fallback_log_dir)
             }
         };
         Self::open_at(path, threshold_ms, sample_pct)
@@ -247,7 +249,7 @@ mod tests {
     }
 
     fn read_log_lines(dir: &PathBuf) -> Vec<crate::json::Value> {
-        let path = dir.join("red-slow.log");
+        let path = reddb_file::layout::legacy_slow_query_log_path(dir);
         let body = std::fs::read_to_string(&path).unwrap_or_default();
         body.lines()
             .filter(|l| !l.is_empty())
@@ -409,7 +411,7 @@ mod tests {
             log.record(QueryKind::Select, 1, sql.to_string(), &scope);
             flush(&log);
 
-            let path = dir.join("red-slow.log");
+            let path = reddb_file::layout::legacy_slow_query_log_path(&dir);
             let body = std::fs::read_to_string(&path).unwrap_or_default();
             let line = body
                 .lines()
