@@ -155,6 +155,105 @@ impl RejoinRewindConfirmationReply {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailoverPromotionRequest {
+    pub holder_id: Option<String>,
+    pub ttl_ms: Option<u64>,
+}
+
+impl FailoverPromotionRequest {
+    pub fn decode_json(bytes: &[u8]) -> Result<Self> {
+        let obj = object_from_slice(bytes)?;
+        Ok(Self {
+            holder_id: get_opt_string(&obj, "holder_id"),
+            ttl_ms: get_opt_u64(&obj, "ttl_ms").filter(|ttl| *ttl > 0),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailoverPromotionReply {
+    pub ok: bool,
+    pub holder_id: String,
+    pub generation: u64,
+    pub acquired_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub timeline: u64,
+    pub applied_lsn: u64,
+    pub next_step: String,
+}
+
+impl FailoverPromotionReply {
+    pub fn promoted(
+        holder_id: impl Into<String>,
+        generation: u64,
+        acquired_at_ms: u64,
+        expires_at_ms: u64,
+        timeline: u64,
+        applied_lsn: u64,
+    ) -> Self {
+        Self {
+            ok: true,
+            holder_id: holder_id.into(),
+            generation,
+            acquired_at_ms,
+            expires_at_ms,
+            timeline,
+            applied_lsn,
+            next_step: "restart with RED_REPLICATION_MODE=primary to start accepting writes"
+                .to_string(),
+        }
+    }
+
+    pub fn encode_json(&self) -> Vec<u8> {
+        let mut obj = serde_json::Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(self.ok));
+        obj.insert(
+            "holder_id".to_string(),
+            JsonValue::String(self.holder_id.clone()),
+        );
+        obj.insert(
+            "generation".to_string(),
+            JsonValue::Number(self.generation.into()),
+        );
+        obj.insert(
+            "acquired_at_ms".to_string(),
+            JsonValue::Number(self.acquired_at_ms.into()),
+        );
+        obj.insert(
+            "expires_at_ms".to_string(),
+            JsonValue::Number(self.expires_at_ms.into()),
+        );
+        obj.insert(
+            "timeline".to_string(),
+            JsonValue::Number(self.timeline.into()),
+        );
+        obj.insert(
+            "applied_lsn".to_string(),
+            JsonValue::Number(self.applied_lsn.into()),
+        );
+        obj.insert(
+            "next_step".to_string(),
+            JsonValue::String(self.next_step.clone()),
+        );
+        serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    }
+
+    pub fn decode_json(bytes: &[u8]) -> Result<Self> {
+        let obj = object_from_slice(bytes)?;
+        Ok(Self {
+            ok: obj.get("ok").and_then(JsonValue::as_bool).unwrap_or(false),
+            holder_id: get_string(&obj, "holder_id")?,
+            generation: get_u64(&obj, "generation")?,
+            acquired_at_ms: get_u64(&obj, "acquired_at_ms")?,
+            expires_at_ms: get_u64(&obj, "expires_at_ms")?,
+            timeline: get_u64(&obj, "timeline")?,
+            applied_lsn: get_u64(&obj, "applied_lsn")?,
+            next_step: get_string(&obj, "next_step")?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +302,21 @@ mod tests {
         let reply = RejoinRewindConfirmationReply::confirmed(3, 42);
         assert_eq!(
             RejoinRewindConfirmationReply::decode_json(&reply.encode_json()).unwrap(),
+            reply
+        );
+    }
+
+    #[test]
+    fn failover_promotion_payloads_round_trip() {
+        let request =
+            FailoverPromotionRequest::decode_json(br#"{"holder_id":"replica-a","ttl_ms":30000}"#)
+                .unwrap();
+        assert_eq!(request.holder_id.as_deref(), Some("replica-a"));
+        assert_eq!(request.ttl_ms, Some(30_000));
+
+        let reply = FailoverPromotionReply::promoted("replica-a", 7, 100, 200, 2, 42);
+        assert_eq!(
+            FailoverPromotionReply::decode_json(&reply.encode_json()).unwrap(),
             reply
         );
     }
