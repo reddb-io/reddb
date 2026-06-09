@@ -48,7 +48,7 @@ pub use ai_model_cache::{
     AI_MODEL_CACHE_STAGING_DIR_NAME,
 };
 pub use backup_manifest::{
-    archived_snapshot_key, archived_wal_segment_key, backup_head_key,
+    archived_snapshot_key, archived_wal_segment_key, backup_head_artifact, backup_head_key,
     backup_root_from_snapshot_prefix, backup_snapshot_dir, backup_snapshot_dir_prefix,
     backup_snapshot_prefix, backup_wal_dir, backup_wal_dir_prefix, backup_wal_prefix,
     decode_archived_logical_wal_records, decode_backup_head_json, decode_snapshot_manifest_json,
@@ -57,9 +57,11 @@ pub use backup_manifest::{
     encode_unified_manifest_json, encode_wal_segment_manifest_json, is_archived_snapshot_key,
     is_archived_wal_segment_key, is_backup_manifest_sidecar_key, parse_archived_snapshot_key,
     parse_archived_wal_segment_key, remote_database_key, sha256_bytes_hex, sha256_file_hex,
-    snapshot_manifest_key, unified_manifest_key, wal_segment_manifest_key,
-    ArchivedLogicalWalRecord, BackupHead, SnapshotManifest, UnifiedManifest, UnifiedSnapshotEntry,
-    UnifiedWalEntry, WalSegmentManifest, WalSegmentMeta, BACKUP_MANIFEST_FORMAT_VERSION,
+    snapshot_manifest_artifact, snapshot_manifest_key, unified_manifest_artifact,
+    unified_manifest_key, wal_segment_manifest_artifact, wal_segment_manifest_key,
+    ArchivedLogicalWalRecord, BackupHead, BackupJsonArtifact, SnapshotManifest, UnifiedManifest,
+    UnifiedSnapshotEntry, UnifiedWalEntry, WalSegmentManifest, WalSegmentMeta,
+    BACKUP_MANIFEST_FORMAT_VERSION,
 };
 pub use backup_temp::{
     BackupTempJsonFile, ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX,

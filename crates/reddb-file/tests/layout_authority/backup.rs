@@ -8,6 +8,7 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let runtime_core = read(root.join("crates/reddb-server/src/runtime/impl_core.rs"));
     let service_cli = read(root.join("crates/reddb-server/src/service_cli.rs"));
     let recovery = read(root.join("crates/reddb-server/src/storage/wal/recovery.rs"));
+    let file = read(root.join("crates/reddb-file/src/backup_manifest.rs"));
     let non_test_archiver = text
         .split("#[cfg(test)]")
         .next()
@@ -40,22 +41,26 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         "decode wal record hex failed",
         "{:012}-{:012}.wal",
         "{:012}-{}.snapshot",
+        "encode_unified_manifest_json(manifest)",
+        "encode_wal_segment_manifest_json(manifest)",
+        "encode_backup_head_json(head)",
+        "encode_snapshot_manifest_json(manifest)",
     ] {
         assert!(
-            !text.contains(forbidden),
+            !non_test_archiver.contains(forbidden),
             "backup/WAL archive manifest codecs belong in reddb-file, found {forbidden:?}"
         );
     }
 
     for required in [
-        "reddb_file::encode_unified_manifest_json",
         "reddb_file::decode_unified_manifest_json",
-        "reddb_file::encode_wal_segment_manifest_json",
         "reddb_file::decode_wal_segment_manifest_json",
-        "reddb_file::encode_backup_head_json",
         "reddb_file::decode_backup_head_json",
-        "reddb_file::encode_snapshot_manifest_json",
         "reddb_file::decode_snapshot_manifest_json",
+        "reddb_file::unified_manifest_artifact",
+        "reddb_file::wal_segment_manifest_artifact",
+        "reddb_file::backup_head_artifact",
+        "reddb_file::snapshot_manifest_artifact",
         "reddb_file::encode_archived_logical_wal_records",
         "reddb_file::decode_archived_logical_wal_records",
         "reddb_file::archived_wal_segment_key",
@@ -70,6 +75,18 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         assert!(
             text.contains(required),
             "backup/WAL archive manifest runtime should route through {required}"
+        );
+    }
+    for required in [
+        "pub struct BackupJsonArtifact",
+        "pub fn unified_manifest_artifact",
+        "pub fn wal_segment_manifest_artifact",
+        "pub fn backup_head_artifact",
+        "pub fn snapshot_manifest_artifact",
+    ] {
+        assert!(
+            file.contains(required),
+            "backup/WAL archive manifest artifact contract should live in reddb-file: {required}"
         );
     }
     for required in ["parse_archived_snapshot_key"] {

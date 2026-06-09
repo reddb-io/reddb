@@ -90,6 +90,12 @@ pub struct UnifiedWalEntry {
     pub prev_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupJsonArtifact {
+    pub key: String,
+    pub body: Vec<u8>,
+}
+
 impl SnapshotManifest {
     pub fn compute_snapshot_sha256(snapshot_path: &Path) -> io::Result<String> {
         sha256_file_hex(snapshot_path)
@@ -164,6 +170,39 @@ pub fn backup_head_key(root_prefix: &str) -> String {
         "{}manifests/head.json",
         normalize_backup_root_prefix(root_prefix)
     )
+}
+
+pub fn unified_manifest_artifact(
+    prefix: &str,
+    manifest: &UnifiedManifest,
+) -> io::Result<BackupJsonArtifact> {
+    Ok(BackupJsonArtifact {
+        key: unified_manifest_key(prefix),
+        body: encode_unified_manifest_json(manifest)?,
+    })
+}
+
+pub fn wal_segment_manifest_artifact(
+    manifest: &WalSegmentManifest,
+) -> io::Result<BackupJsonArtifact> {
+    Ok(BackupJsonArtifact {
+        key: wal_segment_manifest_key(&manifest.key),
+        body: encode_wal_segment_manifest_json(manifest)?,
+    })
+}
+
+pub fn snapshot_manifest_artifact(manifest: &SnapshotManifest) -> io::Result<BackupJsonArtifact> {
+    Ok(BackupJsonArtifact {
+        key: snapshot_manifest_key(&manifest.snapshot_key),
+        body: encode_snapshot_manifest_json(manifest)?,
+    })
+}
+
+pub fn backup_head_artifact(head_key: &str, head: &BackupHead) -> io::Result<BackupJsonArtifact> {
+    Ok(BackupJsonArtifact {
+        key: head_key.to_string(),
+        body: encode_backup_head_json(head)?,
+    })
 }
 
 pub fn backup_snapshot_prefix(root_prefix: &str) -> String {
@@ -774,6 +813,83 @@ mod tests {
         assert_eq!(
             parse_archived_wal_segment_key("wal/not-a-segment.wal"),
             None
+        );
+    }
+
+    #[test]
+    fn backup_json_artifacts_pair_keys_with_encoded_bodies() {
+        let snapshot = SnapshotManifest {
+            timeline_id: "main".into(),
+            snapshot_key: "snapshots/1.snapshot".into(),
+            snapshot_id: 1,
+            snapshot_time: 2,
+            base_lsn: 3,
+            schema_version: BACKUP_MANIFEST_FORMAT_VERSION,
+            format_version: BACKUP_MANIFEST_FORMAT_VERSION,
+            snapshot_sha256: Some("abc".into()),
+        };
+        let artifact = snapshot_manifest_artifact(&snapshot).unwrap();
+        assert_eq!(artifact.key, "snapshots/1.snapshot.manifest.json");
+        assert_eq!(
+            decode_snapshot_manifest_json(&artifact.body).unwrap(),
+            snapshot
+        );
+
+        let wal = WalSegmentManifest {
+            key: "wal/000000000010-000000000020.wal".into(),
+            lsn_start: 10,
+            lsn_end: 20,
+            size_bytes: 128,
+            created_at: 30,
+            sha256: Some("abc".into()),
+            prev_hash: Some("def".into()),
+        };
+        let artifact = wal_segment_manifest_artifact(&wal).unwrap();
+        assert_eq!(
+            artifact.key,
+            "wal/000000000010-000000000020.wal.manifest.json"
+        );
+        assert_eq!(
+            decode_wal_segment_manifest_json(&artifact.body).unwrap(),
+            wal
+        );
+
+        let head = BackupHead {
+            timeline_id: "main".into(),
+            snapshot_key: "snapshots/1.snapshot".into(),
+            snapshot_id: 1,
+            snapshot_time: 2,
+            current_lsn: 3,
+            last_archived_lsn: 4,
+            wal_prefix: "wal/".into(),
+        };
+        let artifact = backup_head_artifact("manifests/head.json", &head).unwrap();
+        assert_eq!(artifact.key, "manifests/head.json");
+        assert_eq!(decode_backup_head_json(&artifact.body).unwrap(), head);
+
+        let unified = UnifiedManifest::new(
+            vec![UnifiedSnapshotEntry {
+                id: 1,
+                lsn: 3,
+                ts: 2,
+                bytes: 100,
+                key: "snapshots/1.snapshot".into(),
+                checksum: Some("abc".into()),
+            }],
+            vec![UnifiedWalEntry {
+                lsn_start: 10,
+                lsn_end: 20,
+                key: "wal/000000000010-000000000020.wal".into(),
+                bytes: 128,
+                checksum: Some("def".into()),
+                prev_hash: None,
+            }],
+        );
+        let artifact = unified_manifest_artifact("tenant/db/", &unified).unwrap();
+        assert_eq!(artifact.key, "tenant/db/MANIFEST.json");
+        assert_eq!(
+            decode_unified_manifest_json(&artifact.body).unwrap(),
+            unified
         );
     }
 
