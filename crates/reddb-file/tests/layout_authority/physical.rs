@@ -346,6 +346,47 @@ fn server_does_not_own_physical_metadata_document_codec() {
 }
 
 #[test]
+fn server_does_not_own_physical_manifest_block_reference_contract() {
+    let root = repo_root();
+    let helpers = read(root.join("crates/reddb-server/src/physical/helpers.rs"));
+    let file_types = read(root.join("crates/reddb-file/src/physical_metadata/types.rs"));
+
+    for forbidden in [
+        "fn manifest_block_reference",
+        "checksum: ((root as u128) << 64) | sequence as u128",
+        "\"__system__\".to_string()",
+        "format!(\"superblock:{sequence}\")",
+    ] {
+        assert!(
+            !helpers.contains(forbidden),
+            "physical manifest reference contracts belong in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "reddb_file::physical_manifest_block_reference",
+        "reddb_file::physical_superblock_checkpoint_event",
+    ] {
+        assert!(
+            helpers.contains(required),
+            "server physical metadata helpers should route through {required}"
+        );
+    }
+
+    for required in [
+        "pub const PHYSICAL_SYSTEM_COLLECTION",
+        "pub fn physical_manifest_block_reference",
+        "pub fn physical_superblock_object_key",
+        "pub fn physical_superblock_checkpoint_event",
+    ] {
+        assert!(
+            file_types.contains(required),
+            "reddb-file should own physical manifest reference helper {required}"
+        );
+    }
+}
+
+#[test]
 fn server_does_not_redeclare_shm_file_format() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/physical/shm.rs"));
