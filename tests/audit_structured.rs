@@ -5,25 +5,15 @@
 //! parses one event must be able to parse all events without
 //! per-site exceptions.
 
-use std::path::PathBuf;
+#[allow(dead_code)]
+mod support;
+
 use std::time::Duration;
 
 use reddb::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditLogger, Outcome};
 
-fn temp_path(tag: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-audit-structured-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p.push("data.rdb");
-    p
+fn temp_path(tag: &str) -> support::TempDbFile {
+    support::temp_db_file(tag)
 }
 
 #[test]

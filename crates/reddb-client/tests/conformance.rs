@@ -538,7 +538,7 @@ mod client_transport {
     use super::*;
     use std::net::TcpListener;
     use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn client_transport_conformance_suite() {
@@ -557,15 +557,13 @@ mod client_transport {
         };
 
         let port = pick_free_port().expect("pick port");
-        let data_dir = std::env::temp_dir().join(format!(
-            "reddb-rust-conformance-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&data_dir).expect("scratch dir");
+        // Held for the whole test: the TempDir guard removes the scratch DB
+        // directory on drop (incl. panic), after the server is killed below.
+        let data_dir_guard = tempfile::Builder::new()
+            .prefix("reddb-test-rust-conformance-")
+            .tempdir()
+            .expect("scratch dir");
+        let data_dir = data_dir_guard.path();
 
         let mut server = Command::new(&bin)
             .arg("server")
@@ -583,7 +581,6 @@ mod client_transport {
 
         let _ = server.kill();
         let _ = server.wait();
-        let _ = std::fs::remove_dir_all(&data_dir);
 
         result.expect("client-transport conformance suite");
     }

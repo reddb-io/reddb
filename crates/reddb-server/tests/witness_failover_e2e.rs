@@ -41,17 +41,15 @@ fn identity(subject: &str) -> NodeIdentity {
     NodeIdentity::from_certificate_subject(subject).expect("non-empty subject")
 }
 
-fn temp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-witness-e2e-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Auto-cleaning temp dir for one test's per-node durable last-vote files. The
+/// returned [`tempfile::TempDir`] guard removes the directory and all files
+/// under it on drop (incl. panic); the caller keeps the binding alive for the
+/// whole test.
+fn temp_dir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-witness-e2e-{tag}-"))
+        .tempdir()
+        .expect("temp dir")
 }
 
 /// A `2 data + 1 witness` cluster. The two data members vote through durable
@@ -59,6 +57,9 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 /// [`WitnessSupervisor`] (no data plane). A `reachable` flag models a node
 /// being killed or partitioned away.
 struct WitnessCluster {
+    // Retained for construction symmetry; the TempDir guard in the test owns
+    // cleanup now, so this field is no longer read.
+    #[allow(dead_code)]
     dir: std::path::PathBuf,
     members: Vec<Member>,
     /// data member id -> (durable last-vote path, reachable)
@@ -171,16 +172,12 @@ fn surviving_candidate(id: &str, current_term: u64, lsn: u64, watermark: u64) ->
     }
 }
 
-fn cleanup(c: &WitnessCluster) {
-    let _ = std::fs::remove_dir_all(&c.dir);
-}
-
 // The headline acceptance test: 2 data + 1 witness, primary killed, the
 // surviving data node is elected with the witness's vote.
 #[test]
 fn two_data_plus_witness_elects_surviving_node_on_primary_loss() {
     let dir = temp_dir("failover");
-    let mut cluster = WitnessCluster::new(dir, 100);
+    let mut cluster = WitnessCluster::new(dir.path().to_path_buf(), 100);
 
     // data-a was the primary; it is killed. data-b survives and stands.
     cluster.kill(DATA_A);
@@ -211,7 +208,6 @@ fn two_data_plus_witness_elects_surviving_node_on_primary_loss() {
         vec![5],
         "the real election bumped exactly one term"
     );
-    cleanup(&cluster);
 }
 
 // The witness genuinely holds no data plane and can never be the one promoted.
@@ -235,7 +231,7 @@ fn witness_holds_no_data_and_is_never_electable() {
 #[test]
 fn two_data_alone_cannot_elect_when_the_witness_is_also_down() {
     let dir = temp_dir("no-witness");
-    let mut cluster = WitnessCluster::new(dir, 100);
+    let mut cluster = WitnessCluster::new(dir.path().to_path_buf(), 100);
 
     // Primary data-a is killed AND the witness is unreachable: data-b reaches
     // only itself = 1 < majority 2. No promotion — the cluster correctly
@@ -258,7 +254,6 @@ fn two_data_alone_cannot_elect_when_the_witness_is_also_down() {
     );
     assert!(cluster.bumped.is_empty(), "a failed probe burns no term");
     assert_eq!(cluster.promoted, None, "no minority primary");
-    cleanup(&cluster);
 }
 
 // The witness vote is durable: once it grants the surviving node a term, a
@@ -266,7 +261,7 @@ fn two_data_alone_cannot_elect_when_the_witness_is_also_down() {
 #[test]
 fn witness_vote_is_durable_across_restart() {
     let dir = temp_dir("durable");
-    let path = dir.join("witness.lastvote.json");
+    let path = dir.path().join("witness.lastvote.json");
     let id = identity(WITNESS);
 
     // The witness grants data-b in term 5 and the grant is persisted.
@@ -291,5 +286,4 @@ fn witness_vote_is_durable_across_restart() {
             }),
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

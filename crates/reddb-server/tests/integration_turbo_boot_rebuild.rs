@@ -7,8 +7,6 @@
 //! the pre-restart state exactly — same block/lane placement, same
 //! encoded codes, same scale, same search results.
 
-use std::path::Path;
-
 use reddb_server::runtime::vector_turbo_kind::TURBO_CODEC_SEED;
 use reddb_server::storage::engine::distance::DistanceMetric;
 use reddb_server::storage::engine::turboquant::index::TurboQuantIndex;
@@ -16,20 +14,36 @@ use reddb_server::storage::engine::turboquant::storage::BLOCK_LANES;
 use reddb_server::storage::EntityId;
 use reddb_server::{RedDBOptions, RedDBRuntime};
 
-fn db_path(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-turbo-boot-rebuild-{}-{tag}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("reddb.rdb")
+/// Auto-cleaning DB path: holds the [`tempfile::TempDir`] guard so the temp
+/// directory and the `.rdb` (plus every sidecar artifact) are removed on drop,
+/// including on panic. Derefs/coerces to `&Path`, so callers keep using
+/// `&path` / `RedDBOptions::persistent(&path)` unchanged while the directory
+/// lives for the whole test.
+struct TempDb {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
 }
 
-fn cleanup(path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::remove_dir_all(parent);
+impl std::ops::Deref for TempDb {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
     }
+}
+
+impl From<&TempDb> for std::path::PathBuf {
+    fn from(value: &TempDb) -> std::path::PathBuf {
+        value.path.clone()
+    }
+}
+
+fn db_path(tag: &str) -> TempDb {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("reddb-test-turbo-boot-rebuild-{tag}-"))
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join("reddb.rdb");
+    TempDb { _dir: dir, path }
 }
 
 fn synth_vector(i: usize) -> Vec<f32> {
@@ -138,8 +152,6 @@ fn turbo_collection_recovers_partial_block_tail_after_restart() {
         runtime_contents, oracle_contents,
         "runtime ordering must match scalar oracle after boot rebuild",
     );
-
-    cleanup(&path);
 }
 
 /// Determinism contract: two independent restarts of the same
@@ -188,6 +200,4 @@ fn turbo_recovery_is_deterministic_across_restarts() {
     let a = run();
     let b = run();
     assert_eq!(a, b, "two restarts produce identical recovery state");
-
-    cleanup(&path);
 }

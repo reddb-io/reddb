@@ -1,5 +1,6 @@
 //! Issue #827 — causal bookmarks and contiguous replica apply waits.
 
+#[allow(dead_code)]
 mod support;
 
 use std::time::Duration;
@@ -10,15 +11,8 @@ use reddb::replication::{CausalBookmark, DEFAULT_REPLICATION_TERM};
 use reddb::storage::RedDB;
 use reddb::{RedDBOptions, RedDBRuntime, ReplicationConfig};
 
-fn temp_path(prefix: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "reddb-issue-827-{prefix}-{}-{}.rdb",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+fn temp_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(&format!("issue-827-{prefix}"))
 }
 
 fn record(lsn: u64, payload: &[u8]) -> ChangeRecord {
@@ -76,7 +70,6 @@ fn causal_session_carries_extracts_and_injects_bookmark() {
 #[test]
 fn bookmark_wait_uses_contiguous_applied_lsn_not_gappy_received_frontier() {
     let path = temp_path("gap-wait");
-    let _ = std::fs::remove_file(&path);
     let db = RedDB::open(&path).expect("db");
     let applier = LogicalChangeApplier::new(0);
 
@@ -105,6 +98,4 @@ fn bookmark_wait_uses_contiguous_applied_lsn_not_gappy_received_frontier() {
     applier
         .wait_for_bookmark(&bookmark, Duration::from_secs(1))
         .expect("contiguous apply reaches bookmark");
-
-    let _ = std::fs::remove_file(&path);
 }

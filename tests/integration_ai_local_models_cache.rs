@@ -4,11 +4,14 @@
 //! #678 registry. Artifact acquisition is fixture-based — these
 //! tests never reach out to HuggingFace.
 
+#[allow(dead_code)]
+mod support;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::time::Duration;
 
 use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
@@ -61,22 +64,11 @@ const MINIMAL_VALID: &str = r#"{
     "dimensions":384
 }"#;
 
-fn unique_temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let p = std::env::temp_dir().join(format!(
-        "reddb_cache_it_{label}_{}_{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = fs::remove_dir_all(&p);
-    fs::create_dir_all(&p).unwrap();
-    p
+fn unique_temp_dir(label: &str) -> support::TempDataDir {
+    support::temp_data_dir(&format!("ai-cache-{label}"))
 }
 
-fn make_fixture(label: &str) -> PathBuf {
+fn make_fixture(label: &str) -> support::TempDataDir {
     let dir = unique_temp_dir(label);
     fs::write(dir.join("config.json"), b"{\"model_type\":\"bert\"}").unwrap();
     fs::write(dir.join("model.safetensors"), b"fake-weights-bytes").unwrap();
@@ -164,7 +156,9 @@ fn pull_with_missing_fixture_dir_returns_400() {
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
 
-    let bogus = std::env::temp_dir().join(format!("does_not_exist_{}", std::process::id()));
+    // A path that is guaranteed not to exist: the temp dir is created and then
+    // immediately removed when the guard drops, so the joined child is absent.
+    let bogus = support::temp_data_dir("ai-bogus").join("does_not_exist");
     let body_json = format!(r#"{{"fixture_dir":"{}"}}"#, bogus.display());
     let (status, body) = send(&addr, "POST", "/ai/models/minilm-l6-v2/pull", &body_json);
     assert_eq!(status, 400, "{body}");

@@ -29,10 +29,11 @@
 //! reconnects) and assert the replica's live row set matches the
 //! primary's and stays flat across repeated re-pulls.
 
+#[allow(dead_code)]
+mod support;
+
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
 use reddb::replication::cdc::ChangeRecord;
@@ -42,25 +43,8 @@ use reddb::replication::ReplicationConfig;
 use reddb::storage::{EntityKind, RedDB, UnifiedStore};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn temp_path(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "reddb-813-{prefix}-{}-{}.rdb",
-        std::process::id(),
-        nanos
-    ))
-}
-
-fn cleanup(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
-    for ext in ["-wal", "-hdr", "-meta", "-dwb", "-uwal", ".logical.wal"] {
-        let mut p = path.to_path_buf().into_os_string();
-        p.push(ext);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
+fn temp_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn exec(query: &QueryUseCases<'_, RedDBRuntime>, sql: &str) {
@@ -205,8 +189,6 @@ fn repull_from_lsn_zero_does_not_inflate_table_rows() {
     );
 
     drop(replica);
-    cleanup(&primary_path);
-    cleanup(&replica_path);
 }
 
 /// Reconnect storm: re-pulling from 0 repeatedly must keep the live row
@@ -239,8 +221,6 @@ fn repeated_repull_from_zero_stays_flat() {
     }
 
     drop(replica);
-    cleanup(&primary_path);
-    cleanup(&replica_path);
 }
 
 /// THE 22×-inflation regression. A table row that is UPDATEd installs a
@@ -293,6 +273,4 @@ fn repull_with_updates_converges_to_primary_live_set() {
     );
 
     drop(replica);
-    cleanup(&primary_path);
-    cleanup(&replica_path);
 }

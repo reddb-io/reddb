@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
@@ -5,17 +8,18 @@ use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identit
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime(name: &str) -> RedDBRuntime {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"));
-    RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("runtime should open")
+fn runtime(name: &str) -> (support::TempDbFile, RedDBRuntime) {
+    let path = support::temp_db_file(name);
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
+        .expect("runtime should open");
+    (path, rt)
 }
 
-fn runtime_with_vault(name: &str, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
-    let rt = runtime(name);
+fn runtime_with_vault(
+    name: &str,
+    passphrase: &str,
+) -> (support::TempDbFile, RedDBRuntime, Arc<AuthStore>) {
+    let (path, rt) = runtime(name);
     let pager = Arc::clone(
         rt.db()
             .store()
@@ -28,7 +32,7 @@ fn runtime_with_vault(name: &str, passphrase: &str) -> (RedDBRuntime, Arc<AuthSt
     );
     auth.ensure_vault_secret_key();
     rt.set_auth_store(Arc::clone(&auth));
-    (rt, auth)
+    (path, rt, auth)
 }
 
 fn text(row: &reddb::storage::query::unified::UnifiedRecord, name: &str) -> String {
@@ -83,7 +87,7 @@ fn attach_user_policy(auth: &AuthStore, user: &str, id: &str, statements: &str) 
 
 #[test]
 fn bootstrap_creates_protected_system_config_and_vault_collections() {
-    let rt = runtime("system_config_vault_bootstrap");
+    let (_path, rt) = runtime("system_config_vault_bootstrap");
 
     let rows = rt
         .execute_query(
@@ -105,7 +109,7 @@ fn bootstrap_creates_protected_system_config_and_vault_collections() {
 
 #[test]
 fn system_config_and_vault_reject_public_create_drop_and_truncate() {
-    let rt = runtime("system_config_vault_protection");
+    let (_path, rt) = runtime("system_config_vault_protection");
 
     for sql in [
         "CREATE CONFIG red.config",
@@ -123,7 +127,7 @@ fn system_config_and_vault_reject_public_create_drop_and_truncate() {
 
 #[test]
 fn system_config_reads_and_writes_require_normalized_system_capabilities() {
-    let rt = runtime("system_config_capabilities");
+    let (_path, rt) = runtime("system_config_capabilities");
     let auth = Arc::new(AuthStore::new(AuthConfig::default()));
     auth.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&auth));
@@ -184,7 +188,7 @@ fn system_config_reads_and_writes_require_normalized_system_capabilities() {
 
 #[test]
 fn system_vault_reads_and_writes_require_normalized_system_capabilities() {
-    let (rt, auth) = runtime_with_vault("system_vault_capabilities", "system-vault-pass");
+    let (_path, rt, auth) = runtime_with_vault("system_vault_capabilities", "system-vault-pass");
     auth.create_user("alice", "p", Role::Write).unwrap();
 
     rt.execute_query("VAULT PUT red.vault.api_key = 'first'")

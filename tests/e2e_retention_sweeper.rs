@@ -4,21 +4,15 @@
 //! reclaims rows expired beyond the retention window, and the three
 //! new observability columns on `red.retention`.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::ExecuteQueryInput;
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
 
-fn unique_dir(prefix: &str) -> PathBuf {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut path = std::env::temp_dir();
-    path.push(format!("reddb-{prefix}-{pid}-{nanos}"));
-    std::fs::create_dir_all(&path).unwrap();
-    path
+fn unique_dir(prefix: &str) -> support::TempDataDir {
+    support::temp_data_dir(prefix)
 }
 
 /// Sweeper drains expired rows across multiple ticks, never touching
@@ -236,8 +230,6 @@ fn sweeper_after_restart_continues_to_reclaim_via_wal() {
             "WAL replay must reproduce the sweeper's physical deletes"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `CREATE MATERIALIZED VIEW ... WITH RETENTION <duration>` is

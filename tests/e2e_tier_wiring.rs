@@ -15,27 +15,20 @@
 //! | `fold_dwb_into_wal`        |   off   |    off   |     off     |  on  |
 //! | audit/slow log destination | stderr  |  stderr  |    file     | file |
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{
     fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled,
     seqn_journal_enabled, seqn_journal_retention, shm_provisioning_enabled, tier_wiring,
     LayoutOverrides, LogDestination, RedDBOptions, RedDBRuntime, StorageLayout,
     DEFAULT_METADATA_JOURNAL_RETENTION, OPT_IN_METADATA_JOURNAL_RETENTION,
 };
-use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// All tests in this binary mutate process-global tier toggles. Serialise
 /// them so a parallel runner doesn't observe a half-applied tier state.
 static TIER_GUARD: Mutex<()> = Mutex::new(());
-
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_tier_{prefix}_{unique}.rdb"))
-}
 
 fn reset_env() {
     std::env::remove_var("REDDB_META_JSON_SIDECAR");
@@ -46,11 +39,11 @@ fn reset_env() {
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
 }
 
-fn open_at_layout(prefix: &str, layout: StorageLayout) -> (RedDBRuntime, PathBuf) {
-    let path = persistent_path(prefix);
-    let options = RedDBOptions::persistent(&path).with_layout(layout);
+fn open_at_layout(prefix: &str, layout: StorageLayout) -> (RedDBRuntime, support::TempDbFile) {
+    let guard = support::temp_db_file(prefix);
+    let options = RedDBOptions::persistent(guard.path()).with_layout(layout);
     let rt = RedDBRuntime::with_options(options).expect("runtime opens");
-    (rt, path)
+    (rt, guard)
 }
 
 #[test]
@@ -142,7 +135,7 @@ fn layout_overrides_win_over_tier_default() {
     use reddb::LogRoutingOverrides;
     let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     reset_env();
-    let path = persistent_path("overrides");
+    let guard = support::temp_db_file("overrides");
     let override_dest = LogDestination::Syslog;
     let overrides = LayoutOverrides {
         logs: LogRoutingOverrides {
@@ -151,7 +144,7 @@ fn layout_overrides_win_over_tier_default() {
         },
         ..LayoutOverrides::default()
     };
-    let options = RedDBOptions::persistent(&path)
+    let options = RedDBOptions::persistent(guard.path())
         .with_layout(StorageLayout::Performance)
         .with_layout_overrides(overrides);
     let _rt = RedDBRuntime::with_options(options).expect("runtime opens");

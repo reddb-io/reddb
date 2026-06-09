@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::control_events::CONTROL_EVENTS_COLLECTION;
@@ -9,34 +7,8 @@ use reddb::storage::schema::Value;
 use reddb::storage::EntityData;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn temp_db_path(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
-}
-
-fn cleanup_related(path: &Path) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let Some(stem) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name == stem || name.starts_with(&format!("{stem}-")) {
-                let _ = std::fs::remove_file(&entry_path);
-                let _ = std::fs::remove_dir_all(&entry_path);
-            }
-        }
-    }
-}
+#[allow(dead_code)]
+mod support;
 
 fn control_event_rows(rt: &RedDBRuntime) -> Vec<HashMap<String, Value>> {
     rt.db()
@@ -114,11 +86,10 @@ fn ddl_and_rls_control_events_record_allowed_denied_and_error_outcomes() {
 
 #[test]
 fn backup_control_event_records_snapshot_and_wal_metadata() {
-    let path = temp_db_path("control_events_backup_654");
-    cleanup_related(&path);
+    let path = support::temp_db_file("control-events-backup-654");
 
-    let rt =
-        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime should open");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
+        .expect("runtime should open");
     rt.execute_query("CREATE TABLE docs (id INT)")
         .expect("table should be created before backup");
 
@@ -136,6 +107,4 @@ fn backup_control_event_records_snapshot_and_wal_metadata() {
         ledger_body.contains("\"outcome\": Text(\"allowed\")"),
         "{ledger_body}"
     );
-
-    cleanup_related(&path);
 }

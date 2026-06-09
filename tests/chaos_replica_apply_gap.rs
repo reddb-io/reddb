@@ -11,20 +11,12 @@ use reddb::replication::logical::{
     ApplyMode, ApplyOutcome, LogicalApplyError, LogicalChangeApplier,
 };
 use reddb::storage::RedDB;
-use std::path::PathBuf;
 
 #[allow(dead_code)]
 mod support;
 
-fn temp_path(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "reddb-chaos-{prefix}-{}-{}.rdb",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+fn temp_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn record(lsn: u64, payload: &[u8]) -> ChangeRecord {
@@ -34,7 +26,6 @@ fn record(lsn: u64, payload: &[u8]) -> ChangeRecord {
 #[test]
 fn replica_applier_returns_gap_when_record_skips_lsn() {
     let path = temp_path("apply-gap");
-    let _ = std::fs::remove_file(&path);
     let db = RedDB::open(&path).unwrap();
     let applier = LogicalChangeApplier::new(0);
 
@@ -65,6 +56,4 @@ fn replica_applier_returns_gap_when_record_skips_lsn() {
         1,
         "applier must stay at 1 after Gap; advancing would silently swallow corruption"
     );
-
-    let _ = std::fs::remove_file(&path);
 }

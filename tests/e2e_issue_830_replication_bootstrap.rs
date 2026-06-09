@@ -101,17 +101,6 @@ fn bearer_payload(
     request
 }
 
-fn temp_data_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "reddb-{name}-{}-{}.rdb",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
-}
-
 #[tokio::test]
 async fn replication_snapshot_pins_authenticated_replica_slot_at_bootstrap_start() {
     let primary = RedDBRuntime::with_options(
@@ -205,9 +194,7 @@ async fn replication_snapshot_pins_authenticated_replica_slot_at_bootstrap_start
 
 #[tokio::test]
 async fn pull_wal_records_reports_basebackup_catchup_mode_for_invalidated_slot() {
-    let data_path = temp_data_path("issue-830-catchup-mode");
-    let _ = std::fs::remove_file(&data_path);
-    let _ = std::fs::remove_dir_all(data_path.with_extension("primary-replica"));
+    let data_path = support::temp_db_file("issue-830-catchup-mode");
 
     let primary = RedDBRuntime::with_options(
         RedDBOptions::persistent(&data_path)
@@ -294,8 +281,6 @@ async fn pull_wal_records_reports_basebackup_catchup_mode_for_invalidated_slot()
     );
 
     handle.abort();
-    let _ = std::fs::remove_file(&data_path);
-    let _ = std::fs::remove_dir_all(data_path.with_extension("primary-replica"));
 }
 
 #[tokio::test]

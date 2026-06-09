@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use reddb_file::{
@@ -19,12 +19,12 @@ fn relay_manifest_write_survives_atomic_crash_points() {
 
     for point in crash_points() {
         let root = temp_root("relay", point);
-        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1));
+        let plan = PrimaryReplicaFilePlan::new(root.path(), TimelineId(1));
         initial_relay()
             .write_to_path(plan.relay_manifest_path("replica-a"))
             .expect("write initial relay manifest");
 
-        run_child(&root, "relay", point);
+        run_child(root.path(), "relay", point);
 
         let manifest =
             ReplicaRelayLogManifest::read_from_path(plan.relay_manifest_path("replica-a"))
@@ -35,8 +35,6 @@ fn relay_manifest_write_survives_atomic_crash_points() {
             manifest.flushed_lsn
         );
         assert_eq!(manifest.applied_lsn, manifest.flushed_lsn);
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -48,7 +46,7 @@ fn relay_segment_write_survives_atomic_crash_points() {
 
     for point in crash_points() {
         let root = temp_root("relay-segment", point);
-        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1));
+        let plan = PrimaryReplicaFilePlan::new(root.path(), TimelineId(1));
         let segment_path = plan
             .relay_dir("replica-a")
             .join("relay-00000000000000000001-00000000000000000010.redwal");
@@ -56,7 +54,7 @@ fn relay_segment_write_survives_atomic_crash_points() {
             .write_to_path(&segment_path)
             .expect("write initial relay segment");
 
-        run_child(&root, "relay-segment", point);
+        run_child(root.path(), "relay-segment", point);
 
         let segment =
             ReplicaRelayLogSegment::read_from_path(&segment_path).expect("relay segment decodes");
@@ -72,8 +70,6 @@ fn relay_segment_write_survives_atomic_crash_points() {
             assert_eq!(segment.records.len(), 2);
             assert_eq!(segment.records[1].payload, b"new".to_vec());
         }
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -85,12 +81,12 @@ fn timeline_history_write_survives_atomic_crash_points() {
 
     for point in crash_points() {
         let root = temp_root("timeline", point);
-        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1));
+        let plan = PrimaryReplicaFilePlan::new(root.path(), TimelineId(1));
         TimelineHistory::new(1)
             .write_to_path(plan.timeline_history_path())
             .expect("write initial timeline history");
 
-        run_child(&root, "timeline", point);
+        run_child(root.path(), "timeline", point);
 
         let history =
             TimelineHistory::read_from_path(plan.timeline_history_path()).expect("history decodes");
@@ -102,8 +98,6 @@ fn timeline_history_write_survives_atomic_crash_points() {
         if history.current() == Some(TimelineId(2)) {
             assert_eq!(history.ancestor_lsn(TimelineId(2)), Some(80));
         }
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -132,7 +126,7 @@ fn primary_replica_atomic_crash_child() -> ExitCode {
     ExitCode::from(1)
 }
 
-fn run_child(root: &PathBuf, artifact: &str, point: &str) {
+fn run_child(root: &Path, artifact: &str, point: &str) {
     let child = Command::new(std::env::current_exe().expect("current test exe"))
         .arg("--exact")
         .arg("primary_replica_atomic_crash_child")
@@ -204,13 +198,13 @@ fn updated_timeline() -> TimelineHistory {
     history
 }
 
-fn temp_root(artifact: &str, point: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "reddb-file-primary-{artifact}-crash-{point}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+/// Auto-cleaning temp root: the returned [`tempfile::TempDir`] guard removes the
+/// directory and all artifacts under it on drop, including on panic. The caller
+/// keeps the binding alive across the crash child + assertions and reads the
+/// path via `root.path()`.
+fn temp_root(artifact: &str, point: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-primary-{artifact}-crash-{point}-"))
+        .tempdir()
+        .expect("temp dir")
 }

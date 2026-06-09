@@ -18,34 +18,17 @@
 //! relative ratio is still printed deterministically for the iter 2
 //! acceptance note.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 static POLICY_GUARD: Mutex<()> = Mutex::new(());
 
 const TX_COUNT: usize = 200;
-
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
-
-fn cleanup(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    for suffix in ["-dwb", "-hdr", "-meta"] {
-        let mut p = path.to_path_buf().into_os_string();
-        p.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
-    let mut wal = path.to_path_buf();
-    wal.set_extension("wal");
-    let _ = std::fs::remove_file(&wal);
-}
 
 fn run_workload(path: &Path) -> std::time::Duration {
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
@@ -86,17 +69,15 @@ fn fold_dwb_into_wal_oltp_overhead_under_20pct() {
 
     // Baseline: DWB OFF (legacy sidecar fsync path).
     set_fold_dwb_into_wal_enabled(false);
-    let off_path = persistent_path("bench_off");
-    cleanup(&off_path);
-    let off = run_workload(&off_path);
-    cleanup(&off_path);
+    let off_db = support::temp_db_file("bench_off");
+    let off = run_workload(off_db.path());
+    drop(off_db);
 
     // Treatment: DWB folded into WAL.
     set_fold_dwb_into_wal_enabled(true);
-    let on_path = persistent_path("bench_on");
-    cleanup(&on_path);
-    let on = run_workload(&on_path);
-    cleanup(&on_path);
+    let on_db = support::temp_db_file("bench_on");
+    let on = run_workload(on_db.path());
+    drop(on_db);
 
     set_fold_dwb_into_wal_enabled(false);
 

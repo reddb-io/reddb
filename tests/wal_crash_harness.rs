@@ -17,6 +17,9 @@
 //! WAL writer implementation; every assertion here must still hold.
 //! If one fails, Phase 2 has lost data on recovery.
 
+#[allow(dead_code)]
+mod support;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,23 +30,10 @@ use reddb::storage::{
     EntityData, EntityId, EntityKind, RowData, UnifiedEntity, UnifiedStore, UnifiedStoreConfig,
 };
 
-struct FileGuard {
-    path: PathBuf,
-}
-
-impl Drop for FileGuard {
-    fn drop(&mut self) {
-        // Best-effort — integration runs in parallel tmp dirs.
-        let _ = std::fs::remove_file(&self.path);
-        let wal = self.path.with_extension("rdb-uwal");
-        let _ = std::fs::remove_file(wal);
-    }
-}
-
-fn tmp_path(name: &str) -> (FileGuard, PathBuf) {
-    let base = std::env::temp_dir();
+fn tmp_path(name: &str) -> (support::TempDataDir, PathBuf) {
+    let base = support::temp_data_dir("wal-crash");
     let path = base.join(format!(
-        "reddb_wal_crash_{}_{}_{}.rdb",
+        "wal_crash_{}_{}_{}.rdb",
         name,
         std::process::id(),
         std::time::SystemTime::now()
@@ -51,11 +41,7 @@ fn tmp_path(name: &str) -> (FileGuard, PathBuf) {
             .unwrap()
             .as_nanos(),
     ));
-    let guard = FileGuard { path: path.clone() };
-    // Best-effort cleanup of stale files from a prior run.
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
-    (guard, path)
+    (base, path)
 }
 
 fn row_entity(id: u64, name: &str) -> UnifiedEntity {

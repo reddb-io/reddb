@@ -8,45 +8,20 @@
 //!  - free list overflow works for > N pages (one trunk holds 1014 ids);
 //!  - tests cover massive allocation forcing overflow.
 
-use reddb::{
-    fold_pager_meta_enabled, set_fold_pager_meta_enabled, PhysicalMetadataFile, RedDBOptions,
-    RedDBRuntime,
-};
+#[allow(dead_code)]
+mod support;
+
+use reddb::{fold_pager_meta_enabled, set_fold_pager_meta_enabled, RedDBOptions, RedDBRuntime};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // Serialise tests that flip the process-global toggle.
 static POLICY_GUARD: Mutex<()> = Mutex::new(());
-
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
 
 fn meta_shadow_path(data: &Path) -> PathBuf {
     let mut p = data.to_path_buf().into_os_string();
     p.push("-meta");
     PathBuf::from(p)
-}
-
-fn cleanup(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(meta_shadow_path(path));
-    let mut hdr = path.to_path_buf().into_os_string();
-    hdr.push("-hdr");
-    let _ = std::fs::remove_file(PathBuf::from(hdr));
-    let mut dwb = path.to_path_buf().into_os_string();
-    dwb.push("-dwb");
-    let _ = std::fs::remove_file(PathBuf::from(dwb));
-    let mut wal = path.to_path_buf();
-    wal.set_extension("wal");
-    let _ = std::fs::remove_file(&wal);
-    let _ = std::fs::remove_file(PhysicalMetadataFile::metadata_path_for(path));
-    let _ = std::fs::remove_file(PhysicalMetadataFile::metadata_binary_path_for(path));
 }
 
 #[test]
@@ -56,24 +31,22 @@ fn fold_off_default_preserves_meta_shadow() {
     std::env::remove_var("REDDB_FOLD_PAGER_META");
     assert!(!fold_pager_meta_enabled(), "default policy must be OFF");
 
-    let path = persistent_path("fold_off");
-    cleanup(&path);
+    let db = support::temp_db_file("fold_off");
+    let path = db.path();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
             .expect("persistent runtime opens");
         rt.execute_query("CREATE TABLE fold_off_a (name TEXT)")
             .expect("ddl");
         rt.checkpoint().expect("flush");
     }
 
-    let shadow = meta_shadow_path(&path);
+    let shadow = meta_shadow_path(path);
     assert!(
         shadow.exists(),
         "legacy <data>-meta shadow must be written when fold is OFF: {shadow:?}",
     );
-
-    cleanup(&path);
 }
 
 #[test]
@@ -81,11 +54,11 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     set_fold_pager_meta_enabled(true);
 
-    let path = persistent_path("fold_on");
-    cleanup(&path);
+    let db = support::temp_db_file("fold_on");
+    let path = db.path();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
             .expect("persistent runtime opens");
         rt.execute_query("CREATE TABLE fold_on_a (name TEXT)")
             .expect("ddl");
@@ -94,7 +67,7 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
         rt.checkpoint().expect("flush");
     }
 
-    let shadow = meta_shadow_path(&path);
+    let shadow = meta_shadow_path(path);
     assert!(
         !shadow.exists(),
         "<data>-meta shadow must be absent when fold is ON: {shadow:?}",
@@ -102,14 +75,13 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
 
     // Reopen: catalog and data must survive without the shadow.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
             .expect("persistent runtime reopens");
         let _ = rt
             .execute_query("SELECT name FROM fold_on_a")
             .expect("select");
     }
 
-    cleanup(&path);
     set_fold_pager_meta_enabled(false);
 }
 
@@ -121,8 +93,8 @@ fn massive_catalog_forces_meta_overflow_chain() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     set_fold_pager_meta_enabled(true);
 
-    let path = persistent_path("fold_overflow");
-    cleanup(&path);
+    let db = support::temp_db_file("fold_overflow");
+    let path = db.path();
 
     // Each row in the metadata blob is `name_len:u32 | name | root:u32`. A
     // ~32-char name costs ~40 bytes, so 200 collections clears 4 KiB
@@ -133,7 +105,7 @@ fn massive_catalog_forces_meta_overflow_chain() {
         .collect();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
             .expect("persistent runtime opens");
         for name in &names {
             rt.execute_query(&format!("CREATE TABLE {name} (id INTEGER)"))
@@ -143,7 +115,7 @@ fn massive_catalog_forces_meta_overflow_chain() {
     }
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
             .expect("persistent runtime reopens");
         for name in &names {
             // SELECT against the catalog: parse must succeed (no truncation).
@@ -153,7 +125,6 @@ fn massive_catalog_forces_meta_overflow_chain() {
         }
     }
 
-    cleanup(&path);
     set_fold_pager_meta_enabled(false);
 }
 

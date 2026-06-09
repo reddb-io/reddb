@@ -462,13 +462,21 @@ mod tests {
 
     #[test]
     fn test_archive_and_download() {
-        let temp_dir = std::env::temp_dir().join("reddb_archiver_test");
-        let _ = std::fs::create_dir_all(&temp_dir);
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-archiver-test-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let backend_dir = temp_dir.join("backend");
         let _ = std::fs::create_dir_all(&backend_dir);
 
         let backend = Arc::new(LocalBackend);
-        let wal_prefix = reddb_file::backup_wal_prefix("");
+        // Anchor the archive prefix inside the temp dir. `backup_wal_prefix("")`
+        // yields a cwd-relative `wal/` directory, which leaks archived segments
+        // into the working tree (`crates/reddb-server/wal/`) and is never cleaned.
+        let wal_prefix = reddb_file::backup_wal_prefix(&format!("{}/", temp_dir.to_string_lossy()));
         let archiver = WalArchiver::new(backend, &wal_prefix);
 
         // Create a fake WAL file
@@ -501,14 +509,18 @@ mod tests {
         assert!(found);
         assert!(dest.exists());
 
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]
     fn test_backup_head_roundtrip() {
-        let temp_dir = std::env::temp_dir().join("reddb_backup_head_test");
-        let _ = std::fs::create_dir_all(&temp_dir);
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-backup-head-test-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let backend = LocalBackend;
         let root_prefix = format!("{}/", temp_dir.to_string_lossy());
         let head_key = reddb_file::backup_head_key(&root_prefix);
@@ -533,13 +545,18 @@ mod tests {
             .expect("head");
         assert_eq!(loaded, head);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]
     fn test_snapshot_manifest_roundtrip() {
-        let temp_dir = std::env::temp_dir().join("reddb_snapshot_manifest_test");
-        let _ = std::fs::create_dir_all(&temp_dir);
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-snapshot-manifest-test-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let backend = LocalBackend;
         let root_prefix = format!("{}/", temp_dir.to_string_lossy());
         let manifest = SnapshotManifest {
@@ -563,14 +580,18 @@ mod tests {
             .expect("manifest");
         assert_eq!(loaded, manifest);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]
     fn test_archived_change_records_roundtrip() {
-        let temp_dir = std::env::temp_dir().join("reddb_archived_change_records_test");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-archived-change-records-test-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let backend = LocalBackend;
         let root_prefix = format!("{}/", temp_dir.to_string_lossy());
         let prefix = reddb_file::backup_wal_prefix(&root_prefix);
@@ -595,15 +616,18 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].lsn, 7);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]
     fn archive_change_records_writes_sidecar_with_sha256() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("reddb_archiver_sidecar_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-archiver-sidecar-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let backend = LocalBackend;
         let root_prefix = format!("{}/", temp_dir.to_string_lossy());
         let prefix = reddb_file::backup_wal_prefix(&root_prefix);
@@ -637,7 +661,7 @@ mod tests {
             load_archived_change_records_with_sha256(&backend, &meta.key).unwrap();
         assert_eq!(computed, meta.sha256, "computed sha must match sidecar");
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]
@@ -696,10 +720,13 @@ mod tests {
 
     #[test]
     fn unified_manifest_publish_load_roundtrip() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("reddb_unified_manifest_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-unified-manifest-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let prefix = temp_dir.to_string_lossy().to_string();
 
         let backend = LocalBackend;
@@ -711,15 +738,18 @@ mod tests {
         assert_eq!(loaded.version, "1.0");
         assert_eq!(loaded.latest_lsn, 0);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]
     fn archive_change_records_chains_prev_hash() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("reddb_archive_chain_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-archive-chain-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let backend = LocalBackend;
         let root_prefix = format!("{}/", temp_dir.to_string_lossy());
         let prefix = reddb_file::backup_wal_prefix(&root_prefix);
@@ -773,7 +803,7 @@ mod tests {
         assert_eq!(s2.prev_hash, m1.sha256, "seg 2 links to seg 1 sha256");
         assert_eq!(s3.prev_hash, m2.sha256, "seg 3 links to seg 2 sha256");
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]

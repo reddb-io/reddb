@@ -4,6 +4,9 @@
 //! `SHOW CONFIG <key>` (populated into red_config if absent). Tier B
 //! keys stay silent until a user `SET CONFIG` writes them.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
@@ -190,14 +193,8 @@ fn config_file_overlay_seeds_missing_keys() {
     // overlay, so the file's value must NOT overwrite the matrix
     // default — write-if-absent semantics. The test asserts that
     // exact property: SHOW CONFIG still reports the matrix default.
-    let mut tmp = std::env::temp_dir();
-    tmp.push(format!(
-        "reddb-overlay-{}.json",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
+    let tmp_dir = support::temp_data_dir("e2e-config-overlay");
+    let tmp = tmp_dir.join("overlay.json");
     {
         let mut f = std::fs::File::create(&tmp).unwrap();
         f.write_all(
@@ -234,7 +231,6 @@ fn config_file_overlay_seeds_missing_keys() {
     unsafe {
         std::env::remove_var("REDDB_CONFIG_FILE");
     }
-    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]

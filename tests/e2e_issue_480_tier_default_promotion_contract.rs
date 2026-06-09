@@ -25,26 +25,19 @@
 //!
 //! Each test maps to one acceptance bullet on the issue.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{
     fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled,
     seqn_journal_enabled, shm_provisioning_enabled, tier_wiring, LogDestination, RedDBOptions,
     RedDBRuntime, StorageLayout,
 };
-use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Tests in this binary poke process-global tier toggles. Serialise so a
 /// parallel runner never observes a half-applied tier state.
 static PROMOTION_GUARD: Mutex<()> = Mutex::new(());
-
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_issue480_{prefix}_{unique}.rdb"))
-}
 
 fn reset_env() {
     std::env::remove_var("REDDB_META_JSON_SIDECAR");
@@ -55,10 +48,11 @@ fn reset_env() {
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
 }
 
-fn open_at_layout(prefix: &str, layout: StorageLayout) -> RedDBRuntime {
-    let path = persistent_path(prefix);
-    let options = RedDBOptions::persistent(&path).with_layout(layout);
-    RedDBRuntime::with_options(options).expect("runtime opens")
+fn open_at_layout(prefix: &str, layout: StorageLayout) -> (support::TempDbFile, RedDBRuntime) {
+    let db = support::temp_db_file(prefix);
+    let options = RedDBOptions::persistent(db.path()).with_layout(layout);
+    let rt = RedDBRuntime::with_options(options).expect("runtime opens");
+    (db, rt)
 }
 
 fn read_adr_0018() -> String {
@@ -311,8 +305,8 @@ fn promoted_phase_a_log_routing_override_remains_available() {
         },
         ..LayoutOverrides::default()
     };
-    let path = persistent_path("override_phaseA");
-    let options = RedDBOptions::persistent(&path)
+    let db = support::temp_db_file("override_phaseA");
+    let options = RedDBOptions::persistent(db.path())
         .with_layout(StorageLayout::Performance)
         .with_layout_overrides(overrides);
     let _rt = RedDBRuntime::with_options(options).expect("runtime opens");

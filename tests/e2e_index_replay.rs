@@ -6,23 +6,15 @@
 //!   2. equality queries on the indexed column hit the index
 //!      (correctness — they must return the right rows)
 
-use reddb::{RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
+#[allow(dead_code)]
+mod support;
 
-fn unique_data_dir(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    p.push(format!("reddb-{prefix}-{pid}-{nanos}"));
-    p
-}
+use reddb::{RedDBOptions, RedDBRuntime};
 
 #[test]
 fn persistent_reopen_restores_indexed_query_results() {
-    let path = unique_data_dir("idx-replay");
+    let dir = support::temp_data_dir("e2e-idx-replay");
+    let path = dir.join("data.rdb");
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
         rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
@@ -96,6 +88,4 @@ fn persistent_reopen_restores_indexed_query_results() {
         "after restart, indexed equality must use an index path, got plan ops: {}",
         plan_text
     );
-
-    let _ = std::fs::remove_dir_all(&path);
 }

@@ -11,22 +11,17 @@
 //!
 //! Refs #757 — child of PRD #735.
 
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-issue-757-{}-{now_nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("tempdir");
+fn runtime_with_auth() -> (support::TempDataDir, RedDBRuntime, Arc<AuthStore>) {
+    let dir = support::temp_data_dir("issue-757");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
@@ -34,7 +29,7 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Read).unwrap();
     rt.set_auth_store(Arc::clone(&store));
-    (rt, store)
+    (dir, rt, store)
 }
 
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
@@ -108,7 +103,7 @@ fn catalog_advertises_graph_actions() {
 
 #[test]
 fn properties_allowed_with_graph_read_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_graph(&rt);
     attach_alice_policy(
         &store,
@@ -124,7 +119,7 @@ fn properties_allowed_with_graph_read_grant() {
 
 #[test]
 fn properties_denied_returns_structured_reason() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_graph(&rt);
     // Grant traversal but not metadata read — Red UI should see the
     // properties toolbar action rejected with a structured envelope.
@@ -146,7 +141,7 @@ fn properties_denied_returns_structured_reason() {
 
 #[test]
 fn neighborhood_allowed_with_graph_traverse_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_graph(&rt);
     attach_alice_policy(
         &store,
@@ -168,7 +163,7 @@ fn match_pattern_query_uses_graph_traverse() {
     // must gate on `graph:traverse`, not `graph:read`, so the
     // explorer's pattern-walk toolbar action is independently
     // grantable from plain metadata reads.
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_graph(&rt);
     attach_alice_policy(
         &store,
@@ -187,7 +182,7 @@ fn match_pattern_query_uses_graph_traverse() {
 
 #[test]
 fn neighborhood_denied_without_traverse_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_graph(&rt);
     attach_alice_policy(
         &store,
@@ -206,7 +201,7 @@ fn neighborhood_denied_without_traverse_grant() {
 
 #[test]
 fn algorithm_run_requires_dedicated_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_graph(&rt);
     // Grant read + traversal but NOT algorithm — the expensive
     // analytics toolbar must not be reachable through a plain
@@ -239,7 +234,7 @@ fn algorithm_run_requires_dedicated_grant() {
 
 #[test]
 fn graph_wildcard_grants_every_operation() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_graph(&rt);
     attach_alice_policy(
         &store,

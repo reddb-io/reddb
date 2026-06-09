@@ -1,12 +1,11 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb_server::replication::primary::PrimaryReplication;
 use reddb_server::{RedDBOptions, RedDBRuntime, RedDBServer, ReplicationConfig};
@@ -15,12 +14,33 @@ const SLOT_CRASH_CHILD_ENV: &str = "REDDB_PRIMARY_REPLICA_SLOT_RUNTIME_CRASH_CHI
 const SLOT_CRASH_DATA_PATH_ENV: &str = "REDDB_PRIMARY_REPLICA_SLOT_RUNTIME_CRASH_DATA_PATH";
 const PRIMARY_REPLICA_CRASH_ENV: &str = "REDDB_PRIMARY_REPLICA_CRASH_AT";
 
-fn temp_data_path(name: &str) -> PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{name}_{suffix}.rdb"))
+/// Auto-cleaning data path: holds the [`tempfile::TempDir`] guard so the temp
+/// directory and all WAL/sidecar artifacts are removed on drop (incl. panic).
+struct TempDataPath {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for TempDataPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for TempDataPath {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+fn temp_data_path(name: &str) -> TempDataPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("reddb-test-{name}-"))
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join(format!("{name}.rdb"));
+    TempDataPath { _dir: dir, path }
 }
 
 fn env_lock() -> &'static Mutex<()> {
@@ -54,19 +74,6 @@ impl Drop for EnvGuard {
             }
         }
     }
-}
-
-fn cleanup(data_path: &Path) {
-    let _ = fs::remove_file(data_path);
-    let _ = fs::remove_file(PrimaryReplication::slot_path_for(data_path));
-    let _ =
-        fs::remove_file(reddb_server::replication::primary::LogicalWalSpool::path_for(data_path));
-    let _ = fs::remove_dir_all(PrimaryReplication::primary_replica_root_for(data_path));
-    let _ = fs::remove_dir_all(reddb_file::layout::rebootstrap_staging_root(data_path));
-    let _ = fs::remove_file(reddb_file::layout::rebootstrap_pending_path(data_path));
-    let _ = fs::remove_file(reddb_file::layout::rebootstrap_ready_marker_path(data_path));
-    let _ = fs::remove_file(reddb_file::layout::rebootstrap_intent_log_path(data_path));
-    let _ = fs::remove_file(reddb_file::layout::rebootstrap_previous_path(data_path));
 }
 
 fn post_query_once(runtime: &RedDBRuntime, sql: &str) -> (u16, String) {
@@ -144,7 +151,6 @@ fn scrape_metrics(runtime: &RedDBRuntime) -> String {
 #[test]
 fn primary_persists_reddb_file_replication_slot_catalog() {
     let data_path = temp_data_path("primary_replica_slot_catalog");
-    cleanup(&data_path);
 
     {
         let primary = PrimaryReplication::new(Some(&data_path));
@@ -166,8 +172,6 @@ fn primary_persists_reddb_file_replication_slot_catalog() {
     assert_eq!(slot.confirmed_flush_lsn, 8);
     assert_eq!(slot.confirmed_apply_lsn, 8);
     assert!(slot.active);
-
-    cleanup(&data_path);
 }
 
 #[test]
@@ -183,7 +187,6 @@ fn primary_runtime_slot_catalog_write_survives_atomic_crash_points() {
         "atomic_after_dir_sync",
     ] {
         let data_path = temp_data_path(&format!("primary_replica_slot_runtime_crash_{point}"));
-        cleanup(&data_path);
 
         {
             let primary = PrimaryReplication::new(Some(&data_path));
@@ -232,8 +235,6 @@ fn primary_runtime_slot_catalog_write_survives_atomic_crash_points() {
             resume == 8 || resume == 80,
             "reopened primary should resume from old or new durable slot after {point}, got {resume}"
         );
-
-        cleanup(&data_path);
     }
 }
 
@@ -251,7 +252,6 @@ fn primary_runtime_slot_catalog_crash_child() -> ExitCode {
 #[test]
 fn primary_can_reopen_slots_from_binary_catalog_without_legacy_json() {
     let data_path = temp_data_path("primary_replica_slot_catalog_binary_only");
-    cleanup(&data_path);
 
     {
         let primary = PrimaryReplication::new(Some(&data_path));
@@ -269,14 +269,11 @@ fn primary_can_reopen_slots_from_binary_catalog_without_legacy_json() {
     assert_eq!(slot.restart_lsn, 13);
     assert_eq!(slot.confirmed_lsn(), 17);
     assert_eq!(reopened.register_replica("replica-a".to_string()), 13);
-
-    cleanup(&data_path);
 }
 
 #[test]
 fn primary_falls_back_to_legacy_slots_when_binary_catalog_is_corrupt() {
     let data_path = temp_data_path("primary_replica_slot_catalog_corrupt_binary");
-    cleanup(&data_path);
 
     {
         let primary = PrimaryReplication::new(Some(&data_path));
@@ -298,14 +295,11 @@ fn primary_falls_back_to_legacy_slots_when_binary_catalog_is_corrupt() {
     assert_eq!(slot.restart_lsn, 14);
     assert_eq!(slot.confirmed_lsn(), 21);
     assert_eq!(reopened.register_replica("replica-a".to_string()), 14);
-
-    cleanup(&data_path);
 }
 
 #[test]
 fn primary_runtime_materializes_reddb_file_wal_segments_for_commits() {
     let data_path = temp_data_path("primary_replica_redwal_runtime");
-    cleanup(&data_path);
 
     let runtime = RedDBRuntime::with_options(
         RedDBOptions::persistent(&data_path).with_replication(ReplicationConfig::primary()),
@@ -335,8 +329,6 @@ fn primary_runtime_materializes_reddb_file_wal_segments_for_commits() {
         segment.records.len() >= 2,
         "two commits should append to the same redwal segment"
     );
-
-    cleanup(&data_path);
 }
 
 #[test]
@@ -348,7 +340,6 @@ fn http_mutation_ack_n_commit_policy_fails_closed_without_replica_ack() {
         ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
     ]);
     let data_path = temp_data_path("primary_replica_http_ack_n_timeout");
-    cleanup(&data_path);
 
     let runtime = RedDBRuntime::with_options(
         RedDBOptions::persistent(&data_path).with_replication(ReplicationConfig::primary()),
@@ -371,14 +362,11 @@ fn http_mutation_ack_n_commit_policy_fails_closed_without_replica_ack() {
         runtime.cdc_current_lsn() > 0,
         "local mutation should have advanced CDC before the response failed"
     );
-
-    cleanup(&data_path);
 }
 
 #[test]
 fn primary_runtime_writes_redwal_to_promoted_timeline() {
     let data_path = temp_data_path("primary_replica_redwal_promoted_timeline");
-    cleanup(&data_path);
 
     let runtime = RedDBRuntime::with_options(
         RedDBOptions::persistent(&data_path).with_replication(ReplicationConfig::primary()),
@@ -430,14 +418,11 @@ fn primary_runtime_writes_redwal_to_promoted_timeline() {
             .any(|record| record.lsn == head_lsn),
         "post-promotion commit must not append to initial timeline"
     );
-
-    cleanup(&data_path);
 }
 
 #[test]
 fn runtime_reports_primary_replica_wal_retention_plan_from_slot_catalog() {
     let data_path = temp_data_path("primary_replica_wal_retention_plan");
-    cleanup(&data_path);
 
     let runtime =
         RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("runtime boots");
@@ -478,14 +463,11 @@ fn runtime_reports_primary_replica_wal_retention_plan_from_slot_catalog() {
     assert_eq!(pruned.retained_bytes_after_prune, 7);
     assert!(pruned.removed_segments.is_empty());
     assert!(wal_path.exists());
-
-    cleanup(&data_path);
 }
 
 #[test]
 fn metrics_exports_primary_replica_wal_retention_plan() {
     let data_path = temp_data_path("primary_replica_wal_retention_metrics");
-    cleanup(&data_path);
 
     let runtime =
         RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("runtime boots");
@@ -513,14 +495,11 @@ fn metrics_exports_primary_replica_wal_retention_plan() {
     assert!(metrics.contains("reddb_primary_replica_wal_oldest_required_lsn 0"));
     assert!(metrics.contains("reddb_primary_replica_wal_removable_segments 0"));
     assert!(metrics.contains("reddb_primary_replica_wal_retention_error 0"));
-
-    cleanup(&data_path);
 }
 
 #[test]
 fn metrics_surfaces_primary_replica_wal_retention_errors() {
     let data_path = temp_data_path("primary_replica_wal_retention_metrics_error");
-    cleanup(&data_path);
 
     let runtime =
         RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("runtime boots");
@@ -537,14 +516,11 @@ fn metrics_surfaces_primary_replica_wal_retention_errors() {
         metrics.contains("reddb_primary_replica_wal_retention_error 1"),
         "metrics should surface retention computation errors, got {metrics}"
     );
-
-    cleanup(&data_path);
 }
 
 #[test]
 fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
     let data_path = temp_data_path("primary_replica_wal_prune_on_ack");
-    cleanup(&data_path);
 
     let runtime = RedDBRuntime::with_options(
         RedDBOptions::persistent(&data_path).with_replication(ReplicationConfig::primary()),
@@ -581,6 +557,4 @@ fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
             "segment {index} should remain inside the minimum retention window"
         );
     }
-
-    cleanup(&data_path);
 }
