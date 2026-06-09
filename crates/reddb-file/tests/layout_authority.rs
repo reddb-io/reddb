@@ -1435,21 +1435,29 @@ fn server_uses_reddb_file_for_relay_segment_names() {
 fn server_uses_reddb_file_for_backup_temp_json_names() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));
+    let non_test = text
+        .split("#[cfg(test)]")
+        .next()
+        .expect("archiver has non-test source");
 
     for forbidden in [
         "format!(\"-{start}-{end}\")",
         "\"{prefix}-{}{}-{}.json\"",
         "\"{prefix}-{process_id}-{start_lsn}-{end_lsn}-{nanos}.json\"",
+        "std::fs::write(&temp",
+        "std::fs::read(&temp",
+        "std::fs::remove_file(&temp",
+        "fn temp_json_path(",
     ] {
         assert!(
-            !text.contains(forbidden),
-            "backup temp JSON names are a reddb_file::layout contract, found {forbidden:?}"
+            !non_test.contains(forbidden),
+            "backup temp JSON lifecycle is a reddb-file contract, found {forbidden:?}"
         );
     }
 
     assert!(
-        text.contains("reddb_file::layout::backup_temp_json_path"),
-        "backup temp JSON names should route through reddb-file"
+        text.contains("reddb_file::BackupTempJsonFile"),
+        "backup temp JSON lifecycle should route through reddb-file"
     );
 }
 
