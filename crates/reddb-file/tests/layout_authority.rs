@@ -1903,6 +1903,62 @@ fn server_operational_manifest_is_runtime_alias_only() {
 }
 
 #[test]
+fn server_ai_model_cache_uses_file_owned_manifest_contract() {
+    let root = repo_root();
+    let server = read(root.join("crates/reddb-server/src/server/handlers_ai_model_cache.rs"));
+    let file = read(root.join("crates/reddb-file/src/ai_model_cache.rs"));
+
+    for forbidden in [
+        "const CACHE_DIR_NAME",
+        "const STAGING_DIR_NAME",
+        "const PURGE_DIR_NAME",
+        "const MANIFEST_FILE",
+        "struct ManifestFile",
+        "struct Manifest",
+        "fn manifest_from_json",
+        "staging_root.join(format!",
+        "purge_root.join(format!",
+        "model_dir.join(MANIFEST_FILE)",
+        "staging_dir.join(MANIFEST_FILE)",
+    ] {
+        assert!(
+            !server.contains(forbidden),
+            "AI model cache file contract belongs in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "AiModelCacheManifest as Manifest",
+        "AiModelCacheManifestFile as ManifestFile",
+        "ai_model_cache_root",
+        "ai_model_cache_staging_dir",
+        "ai_model_cache_purge_dir",
+        "ai_model_cache_manifest_path",
+        "encode_ai_model_cache_manifest_json",
+        "decode_ai_model_cache_manifest_json",
+    ] {
+        assert!(
+            server.contains(required),
+            "server AI model cache runtime should route through reddb-file {required}"
+        );
+    }
+
+    for required in [
+        "pub struct AiModelCacheManifestFile",
+        "pub struct AiModelCacheManifest",
+        "pub fn encode_ai_model_cache_manifest_json",
+        "pub fn decode_ai_model_cache_manifest_json",
+        "pub fn ai_model_cache_manifest_path",
+        "pub const AI_MODEL_CACHE_MANIFEST_FILE",
+    ] {
+        assert!(
+            file.contains(required),
+            "reddb-file should own AI model cache file contract {required}"
+        );
+    }
+}
+
+#[test]
 fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));

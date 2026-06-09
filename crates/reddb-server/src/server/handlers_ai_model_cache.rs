@@ -28,15 +28,18 @@ use crate::application::CreateKvInput;
 use crate::json::{parse_json, to_string as json_to_string, Map, Value as JsonValue};
 use crate::storage::schema::Value;
 use crate::RedDBServer;
+use reddb_file::{
+    ai_model_cache_manifest_path, ai_model_cache_manifest_temp_path, ai_model_cache_purge_dir,
+    ai_model_cache_purge_root, ai_model_cache_root, ai_model_cache_staging_dir,
+    ai_model_cache_staging_root, decode_ai_model_cache_manifest_json,
+    encode_ai_model_cache_manifest_json, AiModelCacheManifest as Manifest,
+    AiModelCacheManifestFile as ManifestFile, AI_MODEL_CACHE_MANIFEST_FILE,
+};
 
 const RED_CONFIG_COLLECTION: &str = "red_config";
 const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";
 const AI_LOCAL_CACHE_DIR_KEY: &str = "red.config.ai.local.cache_dir";
 const AI_LOCAL_FIXTURE_DIR_KEY: &str = "red.config.ai.local.fixture_dir";
-const CACHE_DIR_NAME: &str = "ai_models_cache";
-const STAGING_DIR_NAME: &str = ".staging";
-const PURGE_DIR_NAME: &str = ".purge";
-const MANIFEST_FILE: &str = "manifest.json";
 
 /// Body fields the pull endpoint must reject outright: the boundary
 /// never accepts plaintext credentials. Operators stage them in the
@@ -359,7 +362,7 @@ impl RedDBServer {
             },
             None => std::env::temp_dir(),
         };
-        let root = base.join(CACHE_DIR_NAME);
+        let root = ai_model_cache_root(&base);
         ensure_dir(&root)?;
         Ok(root)
     }
@@ -493,33 +496,13 @@ fn ensure_dir(path: &Path) -> Result<(), String> {
         .map_err(|err| format!("failed to create directory '{}': {err}", path.display()))
 }
 
-#[derive(Debug, Clone)]
-struct ManifestFile {
-    path: String,
-    sha256_hex: String,
-    size_bytes: u64,
-}
-
-#[derive(Debug, Clone)]
-struct Manifest {
-    name: String,
-    source: String,
-    revision: String,
-    task: String,
-    engine: String,
-    dimensions: u32,
-    installed_at_unix_ms: u64,
-    total_size_bytes: u64,
-    files: Vec<ManifestFile>,
-}
-
 fn install_artifacts(
     entry: &JsonValue,
     cache_root: &Path,
     model_dir: &Path,
     fixture_dir: &Path,
 ) -> Result<Manifest, String> {
-    let staging_root = cache_root.join(STAGING_DIR_NAME);
+    let staging_root = ai_model_cache_staging_root(cache_root);
     ensure_dir(&staging_root)?;
     let unique = unique_suffix();
     let name = entry
@@ -527,7 +510,7 @@ fn install_artifacts(
         .and_then(JsonValue::as_str)
         .unwrap_or("model")
         .to_string();
-    let staging_dir = staging_root.join(format!("{}-{}", name, unique));
+    let staging_dir = ai_model_cache_staging_dir(cache_root, &name, &unique);
     if staging_dir.exists() {
         // Should not happen, but defend against suffix collision.
         let _ = fs::remove_dir_all(&staging_dir);
@@ -605,13 +588,12 @@ fn install_artifacts(
             files,
         };
 
-        let manifest_json = manifest_to_json(&manifest);
-        let manifest_text = json_to_string(&manifest_json)
+        let manifest_bytes = encode_ai_model_cache_manifest_json(&manifest)
             .map_err(|err| format!("failed to encode manifest: {err}"))?;
-        let manifest_tmp = staging_dir.join(format!("{}.tmp", MANIFEST_FILE));
-        fs::write(&manifest_tmp, manifest_text.as_bytes())
+        let manifest_tmp = ai_model_cache_manifest_temp_path(&staging_dir);
+        fs::write(&manifest_tmp, &manifest_bytes)
             .map_err(|err| format!("failed to write manifest tmp: {err}"))?;
-        fs::rename(&manifest_tmp, staging_dir.join(MANIFEST_FILE))
+        fs::rename(&manifest_tmp, ai_model_cache_manifest_path(&staging_dir))
             .map_err(|err| format!("failed to finalize manifest: {err}"))?;
         Ok(manifest)
     })();
@@ -629,9 +611,9 @@ fn install_artifacts(
     // purge dir. That keeps the active path coherent at every step: a
     // crash mid-promotion leaves either the new or the old artifact
     // valid, never a half-merged tree.
-    let purge_root = cache_root.join(PURGE_DIR_NAME);
+    let purge_root = ai_model_cache_purge_root(cache_root);
     ensure_dir(&purge_root)?;
-    let purge_dir = purge_root.join(format!("{}-{}", name, unique));
+    let purge_dir = ai_model_cache_purge_dir(cache_root, &name, &unique);
     if model_dir.exists() {
         fs::rename(model_dir, &purge_dir).map_err(|err| {
             format!(
@@ -682,7 +664,7 @@ fn collect_files_relative(root: &Path) -> Result<Vec<CollectedFile>, String> {
             // Skip dotfiles/staging artefacts and skip the manifest itself
             // if a caller includes one in the fixture — the cache owns
             // manifest.json.
-            if name.starts_with('.') || name == MANIFEST_FILE {
+            if name.starts_with('.') || name == AI_MODEL_CACHE_MANIFEST_FILE {
                 continue;
             }
             let rel = if prefix.is_empty() {
@@ -707,14 +689,14 @@ fn drop_cache(cache_root: &Path, model_dir: &Path) -> Result<bool, String> {
     if !model_dir.exists() {
         return Ok(false);
     }
-    let purge_root = cache_root.join(PURGE_DIR_NAME);
+    let purge_root = ai_model_cache_purge_root(cache_root);
     ensure_dir(&purge_root)?;
     let unique = unique_suffix();
     let model_name = model_dir
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("model");
-    let purge_dir = purge_root.join(format!("{}-{}", model_name, unique));
+    let purge_dir = ai_model_cache_purge_dir(cache_root, model_name, &unique);
     fs::rename(model_dir, &purge_dir).map_err(|err| {
         format!(
             "failed to move cache aside ('{}' → '{}'): {err}",
@@ -743,9 +725,9 @@ fn inspect_cache(model_dir: &Path) -> CacheReport {
             footprint_bytes: 0,
         };
     }
-    let manifest_path = model_dir.join(MANIFEST_FILE);
-    let manifest_text = match fs::read_to_string(&manifest_path) {
-        Ok(s) => s,
+    let manifest_path = ai_model_cache_manifest_path(model_dir);
+    let manifest_bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
         Err(err) => {
             return CacheReport {
                 status: STATUS_UNHEALTHY,
@@ -755,18 +737,7 @@ fn inspect_cache(model_dir: &Path) -> CacheReport {
             };
         }
     };
-    let parsed = match parse_json(&manifest_text).map(JsonValue::from) {
-        Ok(v) => v,
-        Err(err) => {
-            return CacheReport {
-                status: STATUS_UNHEALTHY,
-                manifest: None,
-                detail: Some(format!("manifest is not valid JSON: {err}")),
-                footprint_bytes: directory_footprint(model_dir),
-            };
-        }
-    };
-    let manifest = match manifest_from_json(&parsed) {
+    let manifest = match decode_ai_model_cache_manifest_json(&manifest_bytes) {
         Ok(m) => m,
         Err(err) => {
             return CacheReport {
@@ -838,123 +809,15 @@ fn directory_footprint(path: &Path) -> u64 {
 }
 
 fn manifest_to_json(manifest: &Manifest) -> JsonValue {
-    let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(manifest.name.clone()));
-    object.insert(
-        "source".to_string(),
-        JsonValue::String(manifest.source.clone()),
-    );
-    object.insert(
-        "revision".to_string(),
-        JsonValue::String(manifest.revision.clone()),
-    );
-    object.insert("task".to_string(), JsonValue::String(manifest.task.clone()));
-    object.insert(
-        "engine".to_string(),
-        JsonValue::String(manifest.engine.clone()),
-    );
-    object.insert(
-        "dimensions".to_string(),
-        JsonValue::Number(manifest.dimensions as f64),
-    );
-    object.insert(
-        "installed_at_unix_ms".to_string(),
-        JsonValue::Number(manifest.installed_at_unix_ms as f64),
-    );
-    object.insert(
-        "total_size_bytes".to_string(),
-        JsonValue::Number(manifest.total_size_bytes as f64),
-    );
-    let files: Vec<JsonValue> = manifest
-        .files
-        .iter()
-        .map(|f| {
-            let mut o = Map::new();
-            o.insert("path".to_string(), JsonValue::String(f.path.clone()));
-            o.insert(
-                "sha256".to_string(),
-                JsonValue::String(f.sha256_hex.clone()),
-            );
-            o.insert(
-                "size_bytes".to_string(),
-                JsonValue::Number(f.size_bytes as f64),
-            );
-            JsonValue::Object(o)
-        })
-        .collect();
-    object.insert("files".to_string(), JsonValue::Array(files));
-    JsonValue::Object(object)
-}
-
-fn manifest_from_json(value: &JsonValue) -> Result<Manifest, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "manifest is not an object".to_string())?;
-    let required_str = |k: &str| -> Result<String, String> {
-        object
-            .get(k)
-            .and_then(JsonValue::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("manifest field '{k}' missing or not a string"))
+    let Ok(bytes) = encode_ai_model_cache_manifest_json(manifest) else {
+        return JsonValue::Null;
     };
-    let name = required_str("name")?;
-    let source = required_str("source")?;
-    let revision = required_str("revision")?;
-    let task = required_str("task")?;
-    let engine = required_str("engine")?;
-    let dimensions = object
-        .get("dimensions")
-        .and_then(JsonValue::as_u64)
-        .ok_or_else(|| "manifest field 'dimensions' missing or not a number".to_string())?
-        as u32;
-    let installed_at_unix_ms = object
-        .get("installed_at_unix_ms")
-        .and_then(JsonValue::as_u64)
-        .ok_or_else(|| "manifest field 'installed_at_unix_ms' missing".to_string())?;
-    let total_size_bytes = object
-        .get("total_size_bytes")
-        .and_then(JsonValue::as_u64)
-        .ok_or_else(|| "manifest field 'total_size_bytes' missing".to_string())?;
-    let files_raw = object
-        .get("files")
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| "manifest field 'files' must be an array".to_string())?;
-    let mut files = Vec::with_capacity(files_raw.len());
-    for (idx, raw) in files_raw.iter().enumerate() {
-        let entry = raw
-            .as_object()
-            .ok_or_else(|| format!("manifest files[{idx}] is not an object"))?;
-        let path = entry
-            .get("path")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("manifest files[{idx}].path missing"))?;
-        let sha256_hex = entry
-            .get("sha256")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("manifest files[{idx}].sha256 missing"))?;
-        let size_bytes = entry
-            .get("size_bytes")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| format!("manifest files[{idx}].size_bytes missing"))?;
-        files.push(ManifestFile {
-            path,
-            sha256_hex,
-            size_bytes,
-        });
-    }
-    Ok(Manifest {
-        name,
-        source,
-        revision,
-        task,
-        engine,
-        dimensions,
-        installed_at_unix_ms,
-        total_size_bytes,
-        files,
-    })
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return JsonValue::Null;
+    };
+    parse_json(text)
+        .map(JsonValue::from)
+        .unwrap_or(JsonValue::Null)
 }
 
 fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
@@ -1051,7 +914,7 @@ mod tests {
         let dir = tempdir("collect");
         fs::write(dir.join("a.txt"), b"a").unwrap();
         fs::write(dir.join(".hidden"), b"h").unwrap();
-        fs::write(dir.join(MANIFEST_FILE), b"m").unwrap();
+        fs::write(dir.join(AI_MODEL_CACHE_MANIFEST_FILE), b"m").unwrap();
         fs::create_dir(dir.join("sub")).unwrap();
         fs::write(dir.join("sub").join("b.txt"), b"b").unwrap();
         let mut files = collect_files_relative(&dir).unwrap();

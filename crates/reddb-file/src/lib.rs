@@ -5,6 +5,7 @@
 //! SQL, and storage-engine payload semantics stay in `reddb-server`; this crate
 //! works with bytes, offsets, locks, checkpoints, manifests, and recovery rules.
 
+pub mod ai_model_cache;
 pub mod backup_manifest;
 pub mod blob_cache;
 pub mod bloom_segment;
@@ -35,6 +36,14 @@ pub mod wal_header;
 pub mod wal_record;
 pub mod zone_map;
 
+pub use ai_model_cache::{
+    ai_model_cache_manifest_path, ai_model_cache_manifest_temp_path, ai_model_cache_purge_dir,
+    ai_model_cache_purge_root, ai_model_cache_root, ai_model_cache_staging_dir,
+    ai_model_cache_staging_root, decode_ai_model_cache_manifest_json,
+    encode_ai_model_cache_manifest_json, AiModelCacheManifest, AiModelCacheManifestFile,
+    AI_MODEL_CACHE_DIR_NAME, AI_MODEL_CACHE_MANIFEST_FILE, AI_MODEL_CACHE_PURGE_DIR_NAME,
+    AI_MODEL_CACHE_STAGING_DIR_NAME,
+};
 pub use backup_manifest::{
     archived_snapshot_key, archived_wal_segment_key, backup_head_key,
     backup_root_from_snapshot_prefix, backup_snapshot_dir, backup_snapshot_prefix, backup_wal_dir,
