@@ -2144,6 +2144,12 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
             "archived WAL key parsing belongs in reddb-file, found {forbidden:?}"
         );
     }
+    for forbidden in [".ends_with(\".wal\")"] {
+        assert!(
+            !text.contains(forbidden) && !recovery.contains(forbidden),
+            "archived WAL key suffix checks belong in reddb-file, found {forbidden:?}"
+        );
+    }
 }
 
 #[test]
