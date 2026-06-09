@@ -433,6 +433,8 @@ fn redwire_json_operation_payloads_live_in_reddb_wire() {
         "obj.insert(\"id\"",
         "bulk_insert_result_from_json",
         "fn json_id_to_string",
+        "serde_json::from_slice(raw.as_bytes())",
+        "serde_json::from_slice(&resp.payload)",
     ] {
         assert!(
             !client.contains(forbidden),
@@ -443,6 +445,8 @@ fn redwire_json_operation_payloads_live_in_reddb_wire() {
         "encode_insert_payload",
         "encode_bulk_insert_payload",
         "encode_key_payload",
+        "decode_query_result_payload",
+        "decode_get_result_payload",
         "decode_bulk_ok_payload",
         "decode_delete_ok_affected",
     ] {
