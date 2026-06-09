@@ -88,6 +88,23 @@ fn server_uses_reddb_file_for_relay_segment_names() {
 }
 
 #[test]
+fn primary_replica_crash_contract_tests_live_in_reddb_file() {
+    let root = repo_root();
+    let primary_replica = read(root.join("crates/reddb-file/src/primary_replica/mod.rs"));
+
+    for required in [
+        "basebackup_manifest_ignores_leftover_tmp_file_after_crash",
+        "replication_slot_catalog_ignores_leftover_tmp_file_after_crash",
+        "relay_and_timeline_manifests_ignore_leftover_tmp_files_after_crash",
+    ] {
+        assert!(
+            primary_replica.contains(required),
+            "primary-replica file crash contract test should live in reddb-file: {required}"
+        );
+    }
+}
+
+#[test]
 fn server_uses_reddb_file_for_backup_temp_json_names() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));

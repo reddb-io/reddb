@@ -952,6 +952,30 @@ mod tests {
     }
 
     #[test]
+    fn basebackup_manifest_ignores_leftover_tmp_file_after_crash() {
+        let root = temp_root("primary-basebackup-crash-tmp");
+        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(4));
+        let backup = BaseBackupPlan::new(TimelineId(4), 10, 50);
+        let manifest =
+            PrimaryReplicaBaseBackupManifest::new(backup, "snapshot.rdb", 8192, 0xCAFE_BABE)
+                .expect("manifest");
+        let path = plan.basebackup_path(&backup);
+
+        manifest.write_to_path(&path).expect("write manifest");
+        std::fs::write(
+            crate::layout::atomic_temp_path(&path),
+            b"torn-basebackup-manifest",
+        )
+        .expect("write leftover tmp");
+
+        assert_eq!(
+            PrimaryReplicaBaseBackupManifest::read_from_path(&path).expect("read manifest"),
+            manifest
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn basebackup_list_reads_manifests_sorted_by_checkpoint_lsn() {
         let root = temp_root("primary-basebackup-list");
         let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(4));
