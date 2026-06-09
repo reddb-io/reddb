@@ -119,7 +119,6 @@ fn runtime_publishes_serverless_generation_with_complete_packs() {
     );
 
     let _ = fs::remove_file(&hydrated_path);
-    let _ = fs::remove_dir_all(data_path.with_extension("serverless"));
     primary_replica_file::cleanup(&data_path);
 }
 
@@ -201,7 +200,6 @@ fn runtime_serverless_publish_survives_pack_and_current_crash_points() {
                 .expect("advanced CURRENT must reference a complete generation");
         }
 
-        let _ = fs::remove_dir_all(data_path.with_extension("serverless"));
         primary_replica_file::cleanup(&data_path);
     }
 }
@@ -280,13 +278,7 @@ fn runtime_hydrates_current_serverless_collection_from_verified_pointer() {
         reddb_file::ServerlessExtentIndex::read_from_path(current_plan.extent_index_path())
             .expect("read extent index");
     let hydration = extent_index.hydration_plan_for_key("serverless_items", b"1");
-    let cache = reddb_file::ServerlessLocalCache::new(
-        current_plan
-            .root
-            .join(&current_plan.namespace)
-            .join("cache"),
-        pointer.generation,
-    );
+    let cache = current_plan.local_cache();
     let cache_path = cache.path_for_request(&hydration.requests[0]);
     assert!(
         cache_path.exists(),
@@ -332,7 +324,6 @@ fn runtime_hydrates_current_serverless_collection_from_verified_pointer() {
     );
 
     let _ = fs::remove_file(&hydrated_path);
-    let _ = fs::remove_dir_all(data_path.with_extension("serverless"));
     primary_replica_file::cleanup(&data_path);
 }
 
@@ -351,7 +342,6 @@ fn runtime_allows_missing_serverless_current_generation() {
         "missing serverless CURRENT pointer should not block serverless attach"
     );
 
-    let _ = fs::remove_dir_all(data_path.with_extension("serverless"));
     primary_replica_file::cleanup(&data_path);
 }
 
@@ -398,7 +388,6 @@ fn runtime_rejects_corrupt_serverless_current_generation() {
         "hydrate should identify corrupt serverless generation, got {hydrate_err}"
     );
 
-    let _ = fs::remove_dir_all(data_path.with_extension("serverless"));
     primary_replica_file::cleanup(&data_path);
 }
 
@@ -429,6 +418,5 @@ fn native_use_cases_reject_corrupt_serverless_current_generation() {
         "error should identify corrupt serverless generation, got {err}"
     );
 
-    let _ = fs::remove_dir_all(data_path.with_extension("serverless"));
     primary_replica_file::cleanup(&data_path);
 }

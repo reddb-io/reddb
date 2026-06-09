@@ -19,6 +19,7 @@ pub fn cleanup(data_path: &Path) {
     let _ =
         fs::remove_file(reddb_server::replication::primary::LogicalWalSpool::path_for(data_path));
     let _ = fs::remove_dir_all(PrimaryReplication::primary_replica_root_for(data_path));
+    let _ = fs::remove_dir_all(reddb_file::layout::serverless_root(data_path));
     reddb_file::cleanup_rebootstrap_artifacts(data_path);
 }
 
