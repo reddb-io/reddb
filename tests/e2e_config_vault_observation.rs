@@ -1,6 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::replication::cdc::ChangeOperation;
@@ -8,37 +7,11 @@ use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identit
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
+#[allow(dead_code)]
+mod support;
+
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
-}
-
-fn temp_db_path(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
-}
-
-fn cleanup_related(path: &Path) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let Some(stem) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name == stem || name.starts_with(&format!("{stem}-")) {
-                let _ = std::fs::remove_file(&entry_path);
-                let _ = std::fs::remove_dir_all(&entry_path);
-            }
-        }
-    }
 }
 
 fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
@@ -208,10 +181,9 @@ fn watch_config_events_include_values_only_when_read_is_allowed() {
 
 #[test]
 fn list_and_watch_vault_are_metadata_only() {
-    let path = temp_db_path("vault_observation");
-    cleanup_related(&path);
+    let path = support::temp_db_file("config-vault-observation");
     let secret = "vault_plaintext_observation_probe";
-    let (rt, _auth) = open_runtime_with_vault(&path, "vault-observation-pass");
+    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-observation-pass");
 
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
         .expect("create vault");
@@ -251,6 +223,4 @@ fn list_and_watch_vault_are_metadata_only() {
         debug.contains("fingerprint"),
         "vault watch lacks metadata: {debug}"
     );
-
-    cleanup_related(&path);
 }

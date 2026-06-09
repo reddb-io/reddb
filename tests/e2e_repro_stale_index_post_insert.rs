@@ -9,6 +9,9 @@
 //!
 //! Expect: all 2N rows considered; bench reports about half are missing.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::{CreateRowInput, CreateRowsBatchInput, RuntimeEntityPort};
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
@@ -215,15 +218,7 @@ fn post_create_index_update_keeps_index_in_sync() {
 /// to corrupt post-CREATE-INDEX entity lookups.
 #[test]
 fn post_create_index_inserts_at_scale_keeps_index_fresh() {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-scale-repro-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let p = support::temp_data_dir("scale-repro");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&p)).unwrap();
     rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
         .unwrap();
@@ -308,7 +303,6 @@ fn post_create_index_inserts_at_scale_keeps_index_fresh() {
         );
     }
 
-    let _ = std::fs::remove_dir_all(&p);
 }
 
 /// Mirror of the bench `reddb_wire` `insert_one` path: single-row

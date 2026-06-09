@@ -468,7 +468,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&backend_dir);
 
         let backend = Arc::new(LocalBackend);
-        let wal_prefix = reddb_file::backup_wal_prefix("");
+        // Anchor the archive prefix inside the temp dir. `backup_wal_prefix("")`
+        // yields a cwd-relative `wal/` directory, which leaks archived segments
+        // into the working tree (`crates/reddb-server/wal/`) and is never cleaned.
+        let wal_prefix =
+            reddb_file::backup_wal_prefix(&format!("{}/", temp_dir.to_string_lossy()));
         let archiver = WalArchiver::new(backend, &wal_prefix);
 
         // Create a fake WAL file

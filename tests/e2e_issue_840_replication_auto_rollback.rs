@@ -21,6 +21,9 @@
 //! the cluster here is a deterministic in-memory model that drives the
 //! recover-to-LSN mechanism exactly as the live wiring will.
 
+#[allow(dead_code)]
+mod support;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -140,16 +143,10 @@ impl RollbackTransport for DeposedPrimary {
     }
 }
 
-fn make_audit() -> (AuditLogger, PathBuf) {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "reddb-840-{}-{}",
-        std::process::id(),
-        reddb::utils::now_unix_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+fn make_audit() -> (support::TempDataDir, AuditLogger, PathBuf) {
+    let dir = support::temp_data_dir("840");
     let path = dir.join(".audit.log");
-    (AuditLogger::with_path(path.clone()), path)
+    (dir, AuditLogger::with_path(path.clone()), path)
 }
 
 fn last_audit_line(path: &std::path::Path) -> reddb::json::Value {
@@ -160,7 +157,7 @@ fn last_audit_line(path: &std::path::Path) -> reddb::json::Value {
 
 #[test]
 fn deposed_primary_auto_rolls_back_divergent_tail_and_rejoins() {
-    let (audit, audit_path) = make_audit();
+    let (_dir, audit, audit_path) = make_audit();
     let rollback_dir = audit_path.parent().unwrap().join("rollback");
 
     // The deposed primary's timeline: committed history up to 200 (term 7)
@@ -247,7 +244,7 @@ fn rollback_refuses_to_cross_the_commit_watermark() {
     // committed data. The coordinator must refuse and change nothing —
     // the invariant "nothing at/below the watermark is ever rolled back"
     // is enforced even against a bad election result.
-    let (audit, audit_path) = make_audit();
+    let (_dir, audit, audit_path) = make_audit();
     let rollback_dir = audit_path.parent().unwrap().join("rollback");
     let mut node = DeposedPrimary::new(vec![(150, 7), (200, 7), (250, 7)], rollback_dir, audit);
 
@@ -279,7 +276,7 @@ fn caught_up_ex_primary_rejoins_without_a_rollback() {
     // An ex-primary whose frontier equals the common point has no
     // divergent tail: it rejoins cleanly, with no rollback file and no
     // operator event.
-    let (audit, audit_path) = make_audit();
+    let (_dir, audit, audit_path) = make_audit();
     let rollback_dir = audit_path.parent().unwrap().join("rollback");
     let mut node = DeposedPrimary::new(vec![(180, 7), (200, 7)], rollback_dir, audit);
 

@@ -114,6 +114,7 @@ async-trait = "0.1"
 # convergence and inverse-RTT weighted distribution.
 proptest = "1"
 prost = "0.14"
+tempfile = "3"
 
 [[bin]]
 name = "red_client"

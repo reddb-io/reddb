@@ -3,30 +3,18 @@
 //! reader coexistence, and crash recovery when the prior owner pid is
 //! dead. Mmap wiring + tier auto-enable are deferred — see ADR-0018.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{
     provision_shm, read_shm_header, set_shm_provisioning_enabled, shm_path_for,
     shm_provisioning_enabled, ShmProvisionState, SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC,
     SHM_VERSION,
 };
-use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // Tests poke a process-global toggle; serialise them.
 static POLICY_GUARD: Mutex<()> = Mutex::new(());
-
-fn unique_data_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
-
-fn cleanup(data: &PathBuf) {
-    let _ = std::fs::remove_file(shm_path_for(data));
-    let _ = std::fs::remove_file(data);
-}
 
 fn reset_policy() {
     set_shm_provisioning_enabled(false);
@@ -46,8 +34,7 @@ fn provisioning_disabled_by_default() {
 #[test]
 fn provision_creates_shm_with_canonical_header() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    let data = unique_data_path("shm_create");
-    cleanup(&data);
+    let data = support::temp_db_file("shm-create");
 
     let handle = provision_shm(&data).expect("shm provisions cleanly");
     let shm_path = shm_path_for(&data);
@@ -74,14 +61,12 @@ fn provision_creates_shm_with_canonical_header() {
     assert_eq!(header.reader_count, 0);
 
     drop(handle);
-    cleanup(&data);
 }
 
 #[test]
 fn reopen_by_same_process_attaches_without_bumping_generation() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    let data = unique_data_path("shm_reattach");
-    cleanup(&data);
+    let data = support::temp_db_file("shm-reattach");
 
     let first = provision_shm(&data).expect("first open");
     let gen_after_create = first.generation();
@@ -98,15 +83,12 @@ fn reopen_by_same_process_attaches_without_bumping_generation() {
         gen_after_create,
         "generation must not bump for a same-pid reopen",
     );
-
-    cleanup(&data);
 }
 
 #[test]
 fn multiple_readers_can_attach_concurrently() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    let data = unique_data_path("shm_readers");
-    cleanup(&data);
+    let data = support::temp_db_file("shm-readers");
 
     let mut owner = provision_shm(&data).expect("owner open");
     let count_a = owner.attach_reader().expect("attach reader 1");
@@ -127,15 +109,12 @@ fn multiple_readers_can_attach_concurrently() {
 
     let after_detach = owner.detach_reader().expect("detach reader");
     assert_eq!(after_detach, 2);
-
-    cleanup(&data);
 }
 
 #[test]
 fn crash_of_prior_owner_is_detected_and_state_cleaned() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    let data = unique_data_path("shm_crash");
-    cleanup(&data);
+    let data = support::temp_db_file("shm-crash");
 
     // Bootstrap a valid shm with a fabricated dead-pid owner.
     let mut handle = provision_shm(&data).expect("seed shm");
@@ -185,15 +164,12 @@ fn crash_of_prior_owner_is_detected_and_state_cleaned() {
         "generation must bump on takeover (was {prior_gen}, now {})",
         recovered.header.generation,
     );
-
-    cleanup(&data);
 }
 
 #[test]
 fn corrupt_header_is_healed_in_place() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    let data = unique_data_path("shm_corrupt");
-    cleanup(&data);
+    let data = support::temp_db_file("shm-corrupt");
 
     // Plant a file that exists but has no valid magic.
     let shm_path = shm_path_for(&data);
@@ -207,6 +183,4 @@ fn corrupt_header_is_healed_in_place() {
         .expect("re-read")
         .expect("header present after heal");
     assert_eq!(header.version, SHM_VERSION);
-
-    cleanup(&data);
 }

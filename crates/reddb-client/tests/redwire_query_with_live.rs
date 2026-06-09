@@ -2,7 +2,7 @@
 
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
 use reddb_client::{Value, ValueOut};
@@ -22,13 +22,12 @@ async fn redwire_query_with_params_against_live_server() -> Result<(), Box<dyn s
     };
 
     let port = pick_free_port()?;
-    let data_dir = std::env::temp_dir().join(format!(
-        "reddb-rust-redwire-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    std::fs::create_dir_all(&data_dir)?;
-    let data_path = data_dir.join("data.db");
+    // Held for the whole test: the TempDir guard removes the scratch DB
+    // directory on drop (incl. panic), after the server is stopped below.
+    let data_dir = tempfile::Builder::new()
+        .prefix("reddb-test-rust-redwire-")
+        .tempdir()?;
+    let data_path = data_dir.path().join("data.db");
 
     let mut server = Command::new(&bin)
         .arg("server")
@@ -42,7 +41,7 @@ async fn redwire_query_with_params_against_live_server() -> Result<(), Box<dyn s
 
     let test_result = run_live_query_with(port).await;
     stop_server(&mut server);
-    let _ = std::fs::remove_dir_all(data_dir);
+    drop(data_dir);
     test_result
 }
 

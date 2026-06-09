@@ -1,5 +1,8 @@
 //! Atomic TxCommitBatch WAL recovery for explicit table transactions.
 
+#[allow(dead_code)]
+mod support;
+
 use std::path::{Path, PathBuf};
 
 use reddb::api::DurabilityMode;
@@ -8,48 +11,16 @@ use reddb::storage::schema::Value;
 use reddb::storage::wal::{WalReader, WalRecord};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-struct DbPath {
-    path: PathBuf,
+fn db_open(db: &support::TempDbFile) -> RedDBRuntime {
+    RedDBRuntime::with_options(
+        RedDBOptions::persistent(db.path())
+            .with_durability_mode(DurabilityMode::WalDurableGrouped),
+    )
+    .expect("persistent runtime")
 }
 
-impl DbPath {
-    fn new(label: &str) -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "reddb_txcommitbatch_explicit_{label}_{}_{}.rdb",
-            std::process::id(),
-            nanos
-        ));
-        let db = Self { path };
-        db.cleanup();
-        db
-    }
-
-    fn open(&self) -> RedDBRuntime {
-        RedDBRuntime::with_options(
-            RedDBOptions::persistent(&self.path)
-                .with_durability_mode(DurabilityMode::WalDurableGrouped),
-        )
-        .expect("persistent runtime")
-    }
-
-    fn wal_path(&self) -> PathBuf {
-        self.path.with_extension("rdb-uwal")
-    }
-
-    fn cleanup(&self) {
-        let _ = std::fs::remove_file(&self.path);
-        let _ = std::fs::remove_file(self.wal_path());
-    }
-}
-
-impl Drop for DbPath {
-    fn drop(&mut self) {
-        self.cleanup();
-    }
+fn db_wal_path(db: &support::TempDbFile) -> PathBuf {
+    db.path().with_extension("rdb-uwal")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -110,10 +81,10 @@ fn wal_records(path: &Path) -> Vec<WalRecord> {
 
 #[test]
 fn committed_explicit_transaction_recovers_all_mutations_idempotently() {
-    let db = DbPath::new("recover");
+    let db = support::temp_db_file("txcommitbatch-explicit-recover");
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44101);
         exec(&rt, "CREATE TABLE txb_explicit (id INT, label TEXT)");
         exec(
@@ -135,7 +106,7 @@ fn committed_explicit_transaction_recovers_all_mutations_idempotently() {
     }
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44102);
         assert_eq!(
             label_for_id(&rt, "txb_explicit", 1).as_deref(),
@@ -146,7 +117,7 @@ fn committed_explicit_transaction_recovers_all_mutations_idempotently() {
     }
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44103);
         assert_eq!(
             label_for_id(&rt, "txb_explicit", 1).as_deref(),
@@ -160,11 +131,11 @@ fn committed_explicit_transaction_recovers_all_mutations_idempotently() {
 
 #[test]
 fn torn_explicit_transaction_commit_batch_recovers_no_partial_state() {
-    let db = DbPath::new("torn");
-    let stable_db_image = db.path.with_extension("stable-copy");
+    let db = support::temp_db_file("txcommitbatch-explicit-torn");
+    let stable_db_image = db.path().with_extension("stable-copy");
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44111);
         exec(&rt, "CREATE TABLE txb_explicit_torn (id INT, label TEXT)");
         exec(
@@ -172,7 +143,7 @@ fn torn_explicit_transaction_commit_batch_recovers_no_partial_state() {
             "INSERT INTO txb_explicit_torn (id, label) VALUES (1, 'base'), (2, 'delete-me')",
         );
         rt.checkpoint().expect("checkpoint stable prefix");
-        std::fs::copy(&db.path, &stable_db_image).expect("copy stable db image");
+        std::fs::copy(db.path(), &stable_db_image).expect("copy stable db image");
         exec(&rt, "BEGIN");
         exec(
             &rt,
@@ -187,12 +158,12 @@ fn torn_explicit_transaction_commit_batch_recovers_no_partial_state() {
         clear_current_connection_id();
     }
 
-    std::fs::copy(&stable_db_image, &db.path).expect("restore stable db image");
+    std::fs::copy(&stable_db_image, db.path()).expect("restore stable db image");
     let _ = std::fs::remove_file(&stable_db_image);
-    truncate_wal_tail(&db.wal_path(), 1);
+    truncate_wal_tail(&db_wal_path(&db), 1);
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44112);
         assert_eq!(
             label_for_id(&rt, "txb_explicit_torn", 1).as_deref(),
@@ -212,10 +183,10 @@ fn torn_explicit_transaction_commit_batch_recovers_no_partial_state() {
 
 #[test]
 fn explicit_transaction_writes_one_tx_commit_batch_for_staged_table_mutations() {
-    let db = DbPath::new("shape");
+    let db = support::temp_db_file("txcommitbatch-explicit-shape");
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44121);
         exec(&rt, "CREATE TABLE txb_explicit_shape (id INT, label TEXT)");
         exec(
@@ -236,7 +207,7 @@ fn explicit_transaction_writes_one_tx_commit_batch_for_staged_table_mutations() 
         clear_current_connection_id();
     }
 
-    let records = wal_records(&db.wal_path());
+    let records = wal_records(&db_wal_path(&db));
     let transaction_batches = records
         .iter()
         .filter(|record| matches!(record, WalRecord::TxCommitBatch { actions, .. } if actions.len() >= 3))

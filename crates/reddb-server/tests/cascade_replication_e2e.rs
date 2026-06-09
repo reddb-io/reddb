@@ -20,19 +20,34 @@
 //! values the transport would carry.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb_server::replication::primary::PrimaryReplication;
 use reddb_server::replication::{
     CascadeRefusal, CascadeRelay, CausalBookmark, ReplicaClass, ReplicationConfig, UpstreamChoice,
 };
 
-fn temp_data_path(name: &str) -> std::path::PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_cascade_e2e_{name}_{suffix}.rdb"))
+/// Auto-cleaning data path: the returned guard holds a [`tempfile::TempDir`],
+/// so the directory and all artifacts are removed on drop (incl. panic). Keep
+/// the binding alive for the whole test.
+struct TempDataPath {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl std::ops::Deref for TempDataPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn temp_data_path(name: &str) -> TempDataPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("reddb-test-cascade-e2e-{name}-"))
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join(format!("reddb_cascade_e2e_{name}.rdb"));
+    TempDataPath { _dir: dir, path }
 }
 
 const TERM: u64 = 1;
@@ -151,8 +166,6 @@ fn cascaded_leaf_syncs_through_intermediate_and_frontier_propagates() {
     assert_eq!(chain_frontier, 10);
     primary.ack_replica_lsn("inter-a", chain_frontier, chain_frontier);
     assert_eq!(primary.retention_floor_lsn(), Some(10));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -180,8 +193,6 @@ fn bookmark_read_routes_by_visible_frontier_through_the_chain() {
     let inter_bookmark = relay.upstream_confirmed_bookmark(TERM);
     assert_eq!(inter_bookmark.commit_lsn(), 6); // pinned by the leaf
     assert_eq!(inter_bookmark.term(), TERM);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -214,8 +225,6 @@ fn intermediate_fan_out_is_one_stream_at_the_primary() {
     assert_eq!(relay.upstream_confirmed_lsn(), 12);
     primary.ack_replica_lsn("inter-a", 12, 12);
     assert_eq!(primary.retention_floor_lsn(), Some(12));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Sanity that the shared `Arc<[u8]>` fan-out path the production transport
@@ -238,6 +247,4 @@ fn forwarding_works_over_shared_payload_handles() {
         vec![1, 2, 3],
         "the intermediate withholds records it has not yet applied"
     );
-
-    let _ = std::fs::remove_file(&path);
 }

@@ -12,22 +12,17 @@
 //!
 //! Refs #756 — child of PRD #735.
 
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-issue-756-{}-{now_nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("tempdir");
+fn runtime_with_auth() -> (support::TempDataDir, RedDBRuntime, Arc<AuthStore>) {
+    let dir = support::temp_data_dir("issue-756");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
@@ -35,7 +30,7 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&store));
-    (rt, store)
+    (dir, rt, store)
 }
 
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
@@ -106,7 +101,7 @@ fn catalog_advertises_granular_vector_actions() {
 
 #[test]
 fn search_allowed_with_vector_search_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_vector_collection(&rt, "embeddings");
     // The vector executor checks a `select` projection on the
     // implicit `content` column (the snippet text shown alongside
@@ -129,7 +124,7 @@ fn search_allowed_with_vector_search_grant() {
 
 #[test]
 fn search_denied_returns_structured_reason() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_vector_collection(&rt, "embeddings");
     // Grant an unrelated vector verb so iam_authorization_enabled
     // flips on and the evaluator runs end-to-end.
@@ -151,7 +146,7 @@ fn search_denied_returns_structured_reason() {
 
 #[test]
 fn search_denied_when_grant_is_on_different_collection() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_vector_collection(&rt, "embeddings");
     setup_vector_collection(&rt, "other_vecs");
     // Grant only on `other_vecs` — the IAM gate must scope per
@@ -178,7 +173,7 @@ fn search_similar_text_form_uses_vector_search_action() {
     // `QueryExpr::Vector` shape as `VECTOR SEARCH <c> SIMILAR TO […]`
     // so the IAM envelope must mention the same `vector:search` verb
     // — pin that contract for Red UI.
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_vector_collection(&rt, "embeddings");
     attach_alice_policy(
         &store,
@@ -197,7 +192,7 @@ fn search_similar_text_form_uses_vector_search_action() {
 
 #[test]
 fn vector_wildcard_grants_search() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_vector_collection(&rt, "embeddings");
     attach_alice_policy(
         &store,
@@ -227,7 +222,7 @@ fn search_grant_does_not_unlock_artifact_admin_verbs() {
     // slice).
     use reddb::auth::policies::ResourceRef;
 
-    let (_rt, store) = runtime_with_auth();
+    let (_dir, _rt, store) = runtime_with_auth();
     attach_alice_policy(
         &store,
         "vector-search-only",
@@ -280,7 +275,7 @@ fn vector_admin_verb_is_independently_grantable() {
     // policy evaluator.
     use reddb::auth::policies::ResourceRef;
 
-    let (_rt, store) = runtime_with_auth();
+    let (_dir, _rt, store) = runtime_with_auth();
     attach_alice_policy(
         &store,
         "vector-admin-only",

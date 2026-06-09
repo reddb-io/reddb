@@ -10,21 +10,13 @@
 //!      file-length inspection — a flushed-but-not-synced write may
 //!      still be in the kernel page cache, but `sync_all` forces it).
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::replication::primary::LogicalWalSpool;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
-
-fn temp_data_path(tag: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    p.push(format!("reddb-logical-wal-{tag}-{pid}-{nanos}"));
-    p
-}
 
 fn spool_file_path(data_path: &std::path::Path) -> PathBuf {
     LogicalWalSpool::path_for(data_path)
@@ -32,7 +24,7 @@ fn spool_file_path(data_path: &std::path::Path) -> PathBuf {
 
 #[test]
 fn truncated_tail_after_append_returns_valid_prefix_only() {
-    let data_path = temp_data_path("truncated-tail");
+    let data_path = support::temp_data_dir("logical-wal-truncated-tail");
     let spool_path = spool_file_path(&data_path);
 
     // Write three records via the public API. After this, every
@@ -81,13 +73,11 @@ fn truncated_tail_after_append_returns_valid_prefix_only() {
     let entries = spool.read_since(0, 100).unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[2].0, 4);
-
-    let _ = std::fs::remove_file(&spool_path);
 }
 
 #[test]
 fn checksum_flip_in_middle_record_truncates_at_corrupt_offset() {
-    let data_path = temp_data_path("crc-flip");
+    let data_path = support::temp_data_dir("logical-wal-crc-flip");
     let spool_path = spool_file_path(&data_path);
 
     // Three records, every byte covered by crc32.
@@ -134,26 +124,21 @@ fn checksum_flip_in_middle_record_truncates_at_corrupt_offset() {
     );
     assert_eq!(entries[0].0, 10);
     assert_eq!(spool.current_lsn(), 10);
-
-    let _ = std::fs::remove_file(&spool_path);
 }
 
 #[test]
 fn empty_file_recovers_to_empty_state() {
-    let data_path = temp_data_path("empty");
-    let spool_path = spool_file_path(&data_path);
+    let data_path = support::temp_data_dir("logical-wal-empty");
 
     let spool = LogicalWalSpool::open(&data_path).expect("open empty");
     let entries = spool.read_since(0, 100).expect("read");
     assert!(entries.is_empty());
     assert_eq!(spool.current_lsn(), 0);
-
-    let _ = std::fs::remove_file(&spool_path);
 }
 
 #[test]
 fn first_record_torn_leaves_clean_empty_spool() {
-    let data_path = temp_data_path("first-torn");
+    let data_path = support::temp_data_dir("logical-wal-first-torn");
     let spool_path = spool_file_path(&data_path);
 
     // Single record then chop the crc.
@@ -185,8 +170,6 @@ fn first_record_torn_leaves_clean_empty_spool() {
     let entries = spool.read_since(0, 100).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0, 1);
-
-    let _ = std::fs::remove_file(&spool_path);
 }
 
 #[test]
@@ -197,7 +180,7 @@ fn append_is_synced_when_call_returns() {
     // true even for unsynced writes, so the assertion is a regression
     // canary against a future buffered-writer change that would only
     // flush on drop.
-    let data_path = temp_data_path("sync");
+    let data_path = support::temp_data_dir("logical-wal-sync");
     let spool_path = spool_file_path(&data_path);
 
     let spool = LogicalWalSpool::open(&data_path).expect("open");
@@ -208,5 +191,4 @@ fn append_is_synced_when_call_returns() {
         after > before,
         "append must produce visible bytes on disk; before={before} after={after}"
     );
-    let _ = std::fs::remove_file(&spool_path);
 }

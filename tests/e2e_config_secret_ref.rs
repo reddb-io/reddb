@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,13 +7,8 @@ use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identit
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn temp_db_path(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
-}
+#[allow(dead_code)]
+mod support;
 
 fn unique_ident(prefix: &str) -> String {
     let unique = SystemTime::now()
@@ -21,27 +16,6 @@ fn unique_ident(prefix: &str) -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{prefix}_{unique}")
-}
-
-fn cleanup_related(path: &Path) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let Some(stem) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name == stem || name.starts_with(&format!("{stem}-")) {
-                let _ = std::fs::remove_file(&entry_path);
-                let _ = std::fs::remove_dir_all(&entry_path);
-            }
-        }
-    }
 }
 
 fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
@@ -98,11 +72,10 @@ fn secret_ref_test_lock() -> &'static Mutex<()> {
 #[test]
 fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_audited() {
     let _guard = secret_ref_test_lock().lock().unwrap();
-    let path = temp_db_path("config_secret_ref_326");
-    cleanup_related(&path);
+    let path = support::temp_db_file("config-secret-ref-326");
 
     let secret = "vault_plaintext_probe_326";
-    let (rt, auth) = open_runtime_with_vault(&path, "vault-pass-326");
+    let (rt, auth) = open_runtime_with_vault(path.path(), "vault-pass-326");
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
     let alice = unique_ident("alice");
@@ -224,8 +197,6 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
     assert!(audit_body.contains(&format!("{app}.api_key")));
     assert!(audit_body.contains(&format!("{secrets}.api_key")));
     assert!(!audit_body.contains(secret));
-
-    cleanup_related(&path);
 }
 
 /// `SecretRefGuard` — depth-2 chains must be rejected at config write time
@@ -235,10 +206,9 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
 #[test]
 fn secret_ref_guard_rejects_depth_two_chain_at_write() {
     let _guard = secret_ref_test_lock().lock().unwrap();
-    let path = temp_db_path("secret_ref_guard_708_depth2");
-    cleanup_related(&path);
+    let path = support::temp_db_file("secret-ref-guard-708-depth2");
 
-    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-d2");
+    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-d2");
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 
@@ -271,8 +241,6 @@ fn secret_ref_guard_rejects_depth_two_chain_at_write() {
         msg.contains(&format!("{secrets}.chain")),
         "missing target key: {msg}"
     );
-
-    cleanup_related(&path);
 }
 
 /// `SecretRefGuard` — a cyclic write (vault target points back into a
@@ -281,10 +249,9 @@ fn secret_ref_guard_rejects_depth_two_chain_at_write() {
 #[test]
 fn secret_ref_guard_rejects_cycle_at_write() {
     let _guard = secret_ref_test_lock().lock().unwrap();
-    let path = temp_db_path("secret_ref_guard_708_cycle");
-    cleanup_related(&path);
+    let path = support::temp_db_file("secret-ref-guard-708-cycle");
 
-    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-cyc");
+    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-cyc");
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 
@@ -314,8 +281,6 @@ fn secret_ref_guard_rejects_cycle_at_write() {
         msg.contains(&format!("{secrets}.loop")),
         "missing target key: {msg}"
     );
-
-    cleanup_related(&path);
 }
 
 /// `SecretRefGuard` — defence-in-depth at read. If a chain somehow exists
@@ -326,10 +291,9 @@ fn secret_ref_guard_rejects_cycle_at_write() {
 #[test]
 fn secret_ref_guard_read_backstop_when_store_contains_chain() {
     let _guard = secret_ref_test_lock().lock().unwrap();
-    let path = temp_db_path("secret_ref_guard_708_read");
-    cleanup_related(&path);
+    let path = support::temp_db_file("secret-ref-guard-708-read");
 
-    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-r");
+    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-r");
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 
@@ -368,8 +332,6 @@ fn secret_ref_guard_read_backstop_when_store_contains_chain() {
         msg.contains(&format!("{secrets}.api_key")),
         "missing target key: {msg}"
     );
-
-    cleanup_related(&path);
 }
 
 /// `SecretRefGuard` — depth-1 references resolve normally and are not
@@ -378,10 +340,9 @@ fn secret_ref_guard_read_backstop_when_store_contains_chain() {
 #[test]
 fn secret_ref_guard_allows_depth_one_reference() {
     let _guard = secret_ref_test_lock().lock().unwrap();
-    let path = temp_db_path("secret_ref_guard_708_ok");
-    cleanup_related(&path);
+    let path = support::temp_db_file("secret-ref-guard-708-ok");
 
-    let (rt, _auth) = open_runtime_with_vault(&path, "vault-pass-708-ok");
+    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-ok");
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 
@@ -402,6 +363,4 @@ fn secret_ref_guard_allows_depth_one_reference() {
         resolved.result.records[0].get("value"),
         Some(&Value::text("sk-flat-708".to_string()))
     );
-
-    cleanup_related(&path);
 }

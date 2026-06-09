@@ -12,22 +12,17 @@
 //!
 //! Refs #755 — child of PRD #735.
 
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-issue-755-{}-{now_nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("tempdir");
+fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>, support::TempDataDir) {
+    let dir = support::temp_data_dir("e2e-issue-755");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
@@ -35,7 +30,7 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&store));
-    (rt, store)
+    (rt, store, dir)
 }
 
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
@@ -107,7 +102,7 @@ fn catalog_advertises_granular_queue_actions() {
 
 #[test]
 fn enqueue_allowed_with_queue_enqueue_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     attach_alice_policy(
         &store,
@@ -125,7 +120,7 @@ fn enqueue_allowed_with_queue_enqueue_grant() {
 
 #[test]
 fn enqueue_denied_returns_structured_reason() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     // Grant peek but not enqueue: Red UI should see the producer
     // toolbar action rejected with a structured, UI-safe reason.
@@ -147,7 +142,7 @@ fn enqueue_denied_returns_structured_reason() {
 
 #[test]
 fn peek_allowed_with_queue_peek_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     as_user("admin", Role::Admin, || {
         rt.execute_query("QUEUE PUSH jobs 'work'").unwrap();
@@ -171,7 +166,7 @@ fn typed_queue_select_succeeds_with_queue_peek_grant() {
     // carries a `queue:peek` grant on the target queue — pinning that
     // the `queue:peek` action covers the typed-select surface, not
     // just the `QUEUE PEEK` command.
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     as_user("admin", Role::Admin, || {
         rt.execute_query("QUEUE PUSH jobs 'work'").unwrap();
@@ -191,7 +186,7 @@ fn typed_queue_select_succeeds_with_queue_peek_grant() {
 
 #[test]
 fn read_pop_denied_without_queue_read_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     as_user("admin", Role::Admin, || {
         rt.execute_query("QUEUE PUSH jobs 'work'").unwrap();
@@ -213,7 +208,7 @@ fn read_pop_denied_without_queue_read_grant() {
 
 #[test]
 fn ack_and_nack_are_independently_grantable() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     // Seed two messages and read them as admin to acquire delivery
     // handles. The IAM check fires before runtime execution, so we only
@@ -253,7 +248,7 @@ fn ack_and_nack_are_independently_grantable() {
 
 #[test]
 fn purge_requires_dedicated_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     // Grant every consumer/producer verb but NOT purge — a destructive
     // toolbar action must not be reachable through a broad consumer
@@ -289,7 +284,7 @@ fn purge_requires_dedicated_grant() {
 
 #[test]
 fn dlq_move_uses_dedicated_action() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     setup_queue(&rt, "jobs_dlq");
 
@@ -311,7 +306,7 @@ fn dlq_move_uses_dedicated_action() {
 
 #[test]
 fn queue_wildcard_grants_every_operation() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     setup_queue(&rt, "jobs");
     attach_alice_policy(
         &store,
