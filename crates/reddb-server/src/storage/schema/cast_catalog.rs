@@ -48,19 +48,35 @@ pub enum CastContext {
 }
 
 impl CastContext {
-    /// Returns `true` when a cast legal in `self` is also legal in
-    /// `other`. Used when the catalog entry lists its "minimum"
-    /// required context and the resolver asks whether a specific
-    /// usage satisfies that minimum.
+    /// Returns `true` when an entry whose *minimum* required context
+    /// is `self` may be applied in the requested context `other`.
     ///
     /// Ordering (widest → narrowest): `Explicit ⊇ Assignment ⊇ Implicit`.
     /// An implicit cast can be used anywhere; an explicit-only cast
-    /// needs an explicit call site.
+    /// needs an explicit call site and MUST NOT leak into implicit
+    /// expression context.
+    ///
+    /// ## Strict implicit-coercion policy (issue #968)
+    ///
+    /// RedDB rejects implicit Integer↔Text coercion and Text
+    /// arithmetic by *design*. Those conversions live in the catalog
+    /// at `Explicit` context, so this predicate is the single gate
+    /// that keeps them out of implicit resolution: an `Explicit`-min
+    /// entry is satisfied **only** by an `Explicit` request — never by
+    /// `Implicit` or `Assignment`. Widening that the engine inserts
+    /// silently (e.g. `Integer → Float`) is registered at `Implicit`
+    /// and remains available everywhere.
+    ///
+    /// Note: `Assignment`-min entries (lossy numeric narrowing such as
+    /// `Float → Integer`) are still reachable from `Implicit` here —
+    /// that legacy expression-context allowance is intentionally
+    /// preserved and is out of scope for the #968 strict-coercion
+    /// decision, which concerns only the Integer/Text boundary.
     pub fn allows(self, other: CastContext) -> bool {
         use CastContext::*;
         matches!(
             (self, other),
-            (Explicit, _)
+            (Explicit, Explicit)
                 | (Assignment, Assignment)
                 | (Assignment, Implicit)
                 | (Implicit, Implicit)

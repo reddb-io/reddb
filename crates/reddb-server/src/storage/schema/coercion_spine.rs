@@ -399,19 +399,27 @@ mod tests {
         assert!(coercions.is_identity());
     }
 
-    /// Pin: `LENGTH(integer)` has no Integer overload. The cast
-    /// catalog lists Integer → Text (at Explicit context, but the
-    /// catalog's `allows` rule treats Explicit as legal everywhere
-    /// — see `cast_catalog::CastContext::allows`). So the spine
-    /// resolves the call to `LENGTH(text)` with an Integer→Text
-    /// coercion on slot 0. This pins the existing legacy behaviour;
-    /// tightening `allows` is a separate change.
+    /// Pin (strict policy, issue #968): `LENGTH(integer)` has no
+    /// Integer overload, and Integer → Text is an *explicit-only*
+    /// cast. The spine must NOT silently widen the Integer argument
+    /// to Text — `resolve_function` returns `None`, and the runtime
+    /// surfaces this as a type error (`UnknownFunction`) rather than
+    /// masking it with an implicit string coercion. Callers that
+    /// genuinely want the digit count must write an explicit
+    /// `LENGTH(CAST(n AS TEXT))`, which lands as a `LENGTH(text)`
+    /// call (see `function_exact_match_emits_identity`).
     #[test]
-    fn function_int_to_text_widening_resolves_with_explicit_cast() {
-        let (entry, coercions) = resolve_function("LENGTH", &[DataType::Integer])
-            .expect("LENGTH(int) currently resolves via Integer->Text widening");
+    fn function_int_to_text_widening_rejected() {
+        assert!(
+            resolve_function("LENGTH", &[DataType::Integer]).is_none(),
+            "LENGTH(int) must not resolve via implicit Integer→Text widening"
+        );
+        // The explicit-cast spelling — argument already Text — still
+        // resolves cleanly, preserving the supported call shape.
+        let (entry, coercions) =
+            resolve_function("LENGTH", &[DataType::Text]).expect("LENGTH(text) must resolve");
         assert_eq!(entry.arg_types, &[DataType::Text]);
-        assert_eq!(coercions.at(0), Some(DataType::Text));
+        assert!(coercions.is_identity());
     }
 
     /// Pin: `ABS(int)` and `ABS(float)` both exist; calling with
@@ -483,14 +491,16 @@ mod tests {
         );
     }
 
-    /// Text → Integer has no catalog entry at any context. The spine
-    /// must return None regardless; this guards against accidental
-    /// catalog additions that would open a silent parse path.
+    /// Text → Integer is registered Explicit-only (a parse that may
+    /// fail). `resolve_cast` asks at Implicit context, so the spine
+    /// must return None — no silent string-to-number parse path. This
+    /// also guards against the conversion being relaxed to an implicit
+    /// catalog context.
     #[test]
     fn text_to_integer_cast_rejected_by_spine() {
         assert!(
             resolve_cast(DataType::Text, DataType::Integer).is_none(),
-            "Text→Integer has no catalog entry"
+            "Text→Integer is Explicit-only; it must not resolve implicitly"
         );
     }
 
