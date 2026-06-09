@@ -60,7 +60,7 @@ impl RedDBEngine {
         );
 
         let db = {
-            let path = options.resolved_path("data.rdb");
+            let path = options.resolved_path(reddb_file::default_database_path());
             let config = storage::engine::DatabaseConfig {
                 read_only: options.read_only,
                 create: options.create_if_missing,

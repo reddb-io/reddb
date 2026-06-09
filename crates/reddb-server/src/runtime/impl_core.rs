@@ -2228,7 +2228,9 @@ impl RedDBRuntime {
             crate::storage::cache::BlobCacheConfig::default()
         } else {
             crate::storage::cache::BlobCacheConfig::default().with_l2_path(
-                reddb_file::layout::result_cache_l2_path(&options.resolved_path("data.rdb")),
+                reddb_file::layout::result_cache_l2_path(
+                    &options.resolved_path(reddb_file::default_database_path()),
+                ),
             )
         };
         let result_blob_cache =
@@ -2346,7 +2348,7 @@ impl RedDBRuntime {
                 audit_log: {
                     // Default audit-log path for the in-memory case
                     // sits in the system temp dir; persistent runs
-                    // place it next to data.rdb.
+                    // place it next to the resolved data file.
                     //
                     // gh-471 iter 2: route through the resolved
                     // `LogDestination`. Performance/Max tiers emit a

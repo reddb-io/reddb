@@ -234,6 +234,28 @@ fn server_source_does_not_embed_owned_file_suffixes() {
 }
 
 #[test]
+fn server_runtime_uses_file_owned_default_database_path() {
+    let root = repo_root();
+    let runtime_files = [
+        "crates/reddb-server/src/engine.rs",
+        "crates/reddb-server/src/storage/unified/devx/reddb/impl_core_a.rs",
+        "crates/reddb-server/src/runtime/impl_core.rs",
+    ];
+
+    for file in runtime_files {
+        let text = read(root.join(file));
+        assert!(
+            !text.contains("resolved_path(\"data.rdb\")"),
+            "{file} must ask reddb-file for the default database path"
+        );
+        assert!(
+            text.contains("reddb_file::default_database_path()"),
+            "{file} should route default database path through reddb-file"
+        );
+    }
+}
+
+#[test]
 fn server_does_not_redeclare_tiered_layout_contracts() {
     let root = repo_root();
     let server = read(root.join("crates/reddb-server/src/storage/layout.rs"));

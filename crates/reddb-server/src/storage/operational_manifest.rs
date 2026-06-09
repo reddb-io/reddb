@@ -24,7 +24,7 @@ mod tests {
             nanos
         ));
         fs::create_dir_all(&dir).unwrap();
-        dir.join("data.rdb")
+        dir.join(reddb_file::DEFAULT_DATABASE_FILE_NAME)
     }
 
     #[test]

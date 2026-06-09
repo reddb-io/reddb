@@ -291,7 +291,7 @@ impl RedDB {
         }
 
         if embedded_single_file_selected(options) {
-            let local_path = options.resolved_path("data.rdb");
+            let local_path = options.resolved_path(reddb_file::default_database_path());
             if promote_ready_replica_rebootstrap(&local_path, options.read_only)? {
                 tracing::info!(
                     target: "reddb::replication::rebootstrap",
@@ -302,7 +302,7 @@ impl RedDB {
         }
 
         if let ReplicationRole::Replica { primary_addr } = &options.replication.role {
-            let local_path = options.resolved_path("data.rdb");
+            let local_path = options.resolved_path(reddb_file::default_database_path());
             if !local_path.exists() {
                 let _ = Self::bootstrap_replica_snapshot(primary_addr, &local_path);
             }
@@ -310,7 +310,7 @@ impl RedDB {
 
         // If remote backend configured, download before opening
         if let Some(backend) = &options.remote_backend {
-            let local_path = options.resolved_path("data.rdb");
+            let local_path = options.resolved_path(reddb_file::default_database_path());
             if !local_path.exists() {
                 // Ensure parent directory exists for the download target
                 if let Some(parent) = local_path.parent() {
@@ -329,7 +329,7 @@ impl RedDB {
                 //
                 // PITR requires a published snapshot manifest. When
                 // the operator hasn't published one yet (e.g. the
-                // remote was seeded with only a `data.rdb` blob),
+                // remote was seeded with only the default database blob),
                 // we fall through to the legacy single-key download
                 // path below.
                 let auto_restore_requested = std::env::var("RED_AUTO_RESTORE")
@@ -394,7 +394,7 @@ impl RedDB {
             }
         }
 
-        let path_buf = options.resolved_path("data.rdb");
+        let path_buf = options.resolved_path(reddb_file::default_database_path());
         let mut store_config = store_config_from_options(options);
         if embedded_single_file_selected(options) {
             store_config = store_config.with_embedded_wal_path(path_buf.clone());
