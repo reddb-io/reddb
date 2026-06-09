@@ -326,6 +326,98 @@ fn client_connection_string_vocabulary_lives_in_reddb_wire() {
 }
 
 #[test]
+fn connection_string_and_sanitizer_contracts_live_only_in_reddb_wire() {
+    let root = repo_root();
+    let server_root = root.join("crates/reddb-server/src");
+    let client_root = root.join("crates/reddb-client/src");
+    let connector_root = root.join("crates/reddb-client-connector/src");
+    let wire_lib = read(root.join("crates/reddb-wire/src/lib.rs"));
+    let wire_conn = read(root.join("crates/reddb-wire/src/conn_string.rs"));
+    let wire_sanitizer = read(root.join("crates/reddb-wire/src/sanitizer.rs"));
+
+    for path in rust_files_under(&server_root)
+        .into_iter()
+        .chain(rust_files_under(&client_root))
+        .chain(rust_files_under(&connector_root))
+    {
+        let text = read(&path);
+        let rel = path.strip_prefix(&root).unwrap_or(&path).display();
+
+        for forbidden in [
+            "pub enum ConnectionTarget",
+            "enum ConnectionTarget",
+            "pub struct ConnStringLimits",
+            "struct ConnStringLimits",
+            "pub struct ConnStringSanitizer",
+            "struct ConnStringSanitizer",
+            "pub struct ParsedConnString",
+            "struct ParsedConnString",
+            "pub struct Tainted",
+            "struct Tainted",
+            "pub struct TaintedRef",
+            "struct TaintedRef",
+            "pub enum TaintedTarget",
+            "enum TaintedTarget",
+            "pub enum Boundary",
+            "enum Boundary",
+            "Url::parse",
+            "url::Url",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{rel} must not own connection-string or sanitizer contracts; found {forbidden:?}"
+            );
+        }
+    }
+
+    for required in [
+        "pub enum ConnectionTarget",
+        "pub struct ConnStringLimits",
+        "pub fn parse(",
+        "pub fn parse_with_limits(",
+        "pub fn is_embedded_connection_uri",
+    ] {
+        assert!(
+            wire_conn.contains(required),
+            "reddb-wire conn_string module should own {required}"
+        );
+    }
+
+    for required in [
+        "pub enum Boundary",
+        "pub struct Tainted",
+        "pub struct ConnStringSanitizer",
+        "pub struct ParsedConnString",
+        "pub struct TaintedRef",
+        "pub enum TaintedTarget",
+        "pub fn audit_safe_log_field",
+    ] {
+        assert!(
+            wire_sanitizer.contains(required),
+            "reddb-wire sanitizer module should own {required}"
+        );
+    }
+
+    for required in [
+        "parse_with_limits",
+        "ConnStringLimits",
+        "ConnectionTarget",
+        "ConnStringSanitizer",
+        "ParsedConnString",
+        "Tainted",
+        "TaintedRef",
+        "TaintedTarget",
+        "Boundary",
+        "audit_safe_log_field",
+    ] {
+        assert!(
+            wire_lib.contains(required),
+            "reddb-wire lib should export connection-string/sanitizer contract {required}"
+        );
+    }
+}
+
+#[test]
 fn client_auth_wire_vocabulary_lives_in_reddb_wire() {
     let root = repo_root();
     let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
