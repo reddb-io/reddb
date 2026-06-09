@@ -61,7 +61,11 @@ pub use backup_manifest::{
     ArchivedLogicalWalRecord, BackupHead, SnapshotManifest, UnifiedManifest, UnifiedSnapshotEntry,
     UnifiedWalEntry, WalSegmentManifest, WalSegmentMeta, BACKUP_MANIFEST_FORMAT_VERSION,
 };
-pub use backup_temp::BackupTempJsonFile;
+pub use backup_temp::{
+    BackupTempJsonFile, ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX,
+    ARCHIVED_CHANGE_RECORDS_TEMP_PREFIX, BACKUP_JSON_OBJECT_READ_TEMP_PREFIX,
+    BACKUP_JSON_OBJECT_TEMP_PREFIX,
+};
 pub use blob_cache::{
     blob_cache_control_path, blob_cache_control_temp_path, blob_cache_double_write_path,
     blob_cache_l2_backup_control_key, blob_cache_l2_backup_pager_key, decode_l2_v2_frame,

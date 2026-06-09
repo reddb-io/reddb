@@ -355,11 +355,7 @@ pub fn archive_change_records(
     // matches what gets uploaded byte-for-byte.
     let sha = sha256_bytes_hex(&body);
 
-    let temp = reddb_file::BackupTempJsonFile::new(
-        "reddb-archived-change-records",
-        Some(*lsn_start),
-        Some(*lsn_end),
-    );
+    let temp = reddb_file::BackupTempJsonFile::archived_change_records(*lsn_start, *lsn_end);
     let size_bytes = temp
         .write_bytes(&body)
         .map_err(|err| BackendError::Transport(format!("write temp logical wal failed: {err}")))?;
@@ -413,8 +409,7 @@ pub fn load_archived_change_records_with_sha256(
     backend: &dyn RemoteBackend,
     segment_key: &str,
 ) -> Result<(Vec<ChangeRecord>, Option<String>), BackendError> {
-    let temp =
-        reddb_file::BackupTempJsonFile::new("reddb-archived-change-records-read", None, None);
+    let temp = reddb_file::BackupTempJsonFile::archived_change_records_read();
     let found = backend.download(segment_key, temp.path())?;
     if !found {
         return Ok((Vec::new(), None));
@@ -441,7 +436,7 @@ fn write_json_bytes(
     key: &str,
     bytes: &[u8],
 ) -> Result<(), BackendError> {
-    let temp = reddb_file::BackupTempJsonFile::new("reddb-json-object", None, None);
+    let temp = reddb_file::BackupTempJsonFile::json_object();
     temp.write_bytes(bytes)
         .map_err(|err| BackendError::Transport(format!("write temp json object failed: {err}")))?;
     backend.upload(temp.path(), key)
@@ -451,7 +446,7 @@ fn read_json_bytes(
     backend: &dyn RemoteBackend,
     key: &str,
 ) -> Result<Option<Vec<u8>>, BackendError> {
-    let temp = reddb_file::BackupTempJsonFile::new("reddb-json-object-read", None, None);
+    let temp = reddb_file::BackupTempJsonFile::json_object_read();
     let found = backend.download(key, temp.path())?;
     if !found {
         return Ok(None);

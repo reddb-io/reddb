@@ -94,6 +94,10 @@ fn server_uses_reddb_file_for_backup_temp_json_names() {
         "std::fs::read(&temp",
         "std::fs::remove_file(&temp",
         "fn temp_json_path(",
+        "reddb-json-object",
+        "reddb-json-object-read",
+        "reddb-archived-change-records",
+        "reddb-archived-change-records-read",
     ] {
         assert!(
             !non_test.contains(forbidden),
@@ -105,6 +109,17 @@ fn server_uses_reddb_file_for_backup_temp_json_names() {
         text.contains("reddb_file::BackupTempJsonFile"),
         "backup temp JSON lifecycle should route through reddb-file"
     );
+    for required in [
+        "BackupTempJsonFile::json_object",
+        "BackupTempJsonFile::json_object_read",
+        "BackupTempJsonFile::archived_change_records",
+        "BackupTempJsonFile::archived_change_records_read",
+    ] {
+        assert!(
+            non_test.contains(required),
+            "backup temp JSON lifecycle should route through reddb-file constructor {required}"
+        );
+    }
 }
 
 #[test]
