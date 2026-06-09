@@ -130,7 +130,7 @@ fn replica_relay_missing_segment_fails_closed() {
     );
     assert!(
         !relay_dir
-            .join("relay-00000000000000000002-00000000000000000002.redwal")
+            .join(reddb_file::layout::relay_segment_relative_path(2, 2))
             .exists(),
         "failed closed path must not write a new relay segment"
     );

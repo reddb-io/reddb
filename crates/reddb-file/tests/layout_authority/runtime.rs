@@ -65,14 +65,20 @@ fn server_does_not_redeclare_logical_wal_spool_format() {
 #[test]
 fn server_uses_reddb_file_for_relay_segment_names() {
     let root = repo_root();
-    let text = read(root.join("crates/reddb-server/src/runtime/impl_primary_replica_file.rs"));
+    let runtime = read(root.join("crates/reddb-server/src/runtime/impl_primary_replica_file.rs"));
+    let relay_test = read(root.join("crates/reddb-server/tests/primary_replica_relay_runtime.rs"));
 
     assert!(
-        !text.contains("relay-{start_lsn:020}-{end_lsn:020}.redwal"),
+        !runtime.contains("relay-{start_lsn:020}-{end_lsn:020}.redwal"),
         "relay segment names are a reddb_file::layout contract"
     );
     assert!(
-        text.contains("reddb_file::layout::relay_segment_relative_path"),
+        !relay_test.contains("relay-00000000000000000002-00000000000000000002.redwal"),
+        "server relay tests should not rebuild relay segment names"
+    );
+    assert!(
+        runtime.contains("reddb_file::layout::relay_segment_relative_path")
+            && relay_test.contains("reddb_file::layout::relay_segment_relative_path"),
         "runtime should route relay segment names through reddb-file"
     );
 }
