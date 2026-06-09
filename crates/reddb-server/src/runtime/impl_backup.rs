@@ -92,18 +92,17 @@ impl RedDBRuntime {
                 // Phase 4). Failure to hash is non-fatal — we still
                 // publish the manifest, just without a checksum, so a
                 // future fix can backfill rather than losing the backup.
-                let snapshot_sha256 =
-                    crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(path)
-                        .map_err(|err| {
-                            tracing::warn!(
-                                target: "reddb::backup",
-                                error = %err,
-                                snapshot_id = snapshot.snapshot_id,
-                                "snapshot hash failed; manifest will lack checksum"
-                            );
-                        })
-                        .ok();
-                let manifest = crate::storage::wal::SnapshotManifest {
+                let snapshot_sha256 = reddb_file::SnapshotManifest::compute_snapshot_sha256(path)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            target: "reddb::backup",
+                            error = %err,
+                            snapshot_id = snapshot.snapshot_id,
+                            "snapshot hash failed; manifest will lack checksum"
+                        );
+                    })
+                    .ok();
+                let manifest = reddb_file::SnapshotManifest {
                     timeline_id: timeline_id.clone(),
                     snapshot_key: snapshot_key.clone(),
                     snapshot_id: snapshot.snapshot_id,
@@ -183,7 +182,7 @@ impl RedDBRuntime {
                     last_archived_lsn
                 };
 
-                let head = crate::storage::wal::BackupHead {
+                let head = reddb_file::BackupHead {
                     timeline_id,
                     snapshot_key,
                     snapshot_id: snapshot.snapshot_id,

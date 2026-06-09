@@ -4,6 +4,8 @@ use crate::common::*;
 fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));
+    let wal_mod = read(root.join("crates/reddb-server/src/storage/wal/mod.rs"));
+    let runtime_backup = read(root.join("crates/reddb-server/src/runtime/impl_backup.rs"));
     let api = read(root.join("crates/reddb-server/src/api.rs"));
     let runtime_core = read(root.join("crates/reddb-server/src/runtime/impl_core.rs"));
     let service_cli = read(root.join("crates/reddb-server/src/service_cli.rs"));
@@ -87,6 +89,34 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         assert!(
             file.contains(required),
             "backup/WAL archive manifest artifact contract should live in reddb-file: {required}"
+        );
+    }
+    for forbidden in [
+        "BackupHead",
+        "SnapshotManifest",
+        "UnifiedManifest",
+        "UnifiedSnapshotEntry",
+        "UnifiedWalEntry",
+        "WalSegmentManifest",
+        "WalSegmentMeta",
+        "snapshot_manifest_key",
+        "unified_manifest_key",
+        "wal_segment_manifest_key",
+        "sha256_bytes_hex",
+        "sha256_file_hex",
+    ] {
+        assert!(
+            !wal_mod.contains(forbidden),
+            "storage::wal must not reexport backup manifest file contract {forbidden:?}"
+        );
+    }
+    for forbidden in [
+        "crate::storage::wal::BackupHead",
+        "crate::storage::wal::SnapshotManifest",
+    ] {
+        assert!(
+            !runtime_backup.contains(forbidden),
+            "runtime backup should use reddb_file manifest types directly, found {forbidden:?}"
         );
     }
     for required in ["parse_archived_snapshot_key"] {
