@@ -436,6 +436,11 @@ fn redwire_json_operation_payloads_live_in_reddb_wire() {
         "serde_json::from_slice(raw.as_bytes())",
         "serde_json::from_slice(&resp.payload)",
         "String::from_utf8_lossy(&resp.payload)",
+        "match resp.kind",
+        "expected Result/Error",
+        "expected BulkOk/Error",
+        "expected DeleteOk/Error",
+        "expected Pong",
     ] {
         assert!(
             !client.contains(forbidden),
@@ -450,7 +455,10 @@ fn redwire_json_operation_payloads_live_in_reddb_wire() {
         "decode_get_result_payload",
         "decode_bulk_ok_payload",
         "decode_delete_ok_affected",
-        "decode_error_payload",
+        "expect_result_or_error",
+        "expect_bulk_ok_or_error",
+        "expect_delete_ok_or_error",
+        "expect_pong_reply",
     ] {
         assert!(
             client.contains(required),

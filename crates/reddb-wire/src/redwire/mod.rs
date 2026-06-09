@@ -67,8 +67,9 @@ pub use operations::{
     encode_bulk_insert_payload, encode_bulk_ok_count_payload, encode_bulk_ok_payload,
     encode_bulk_ok_payload_from_json_id_literals, encode_bulk_ok_payload_from_json_ids_bytes,
     encode_delete_ok_payload, encode_get_result_payload, encode_insert_payload, encode_key_payload,
-    encode_query_result_summary_payload, BulkOkPayload, InsertDispatchPayload, KeyPayload,
-    OperationPayloadError,
+    encode_query_result_summary_payload, expect_bulk_ok_or_error, expect_delete_ok_or_error,
+    expect_pong_reply, expect_result_or_error, BulkOkPayload, InsertDispatchPayload, KeyPayload,
+    OperationPayloadError, OperationReplyError,
 };
 pub use prepared::{
     decode_deallocate_payload, decode_execute_prepared_payload, decode_prepare_payload,
