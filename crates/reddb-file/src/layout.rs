@@ -349,8 +349,14 @@ impl TieredLayoutPaths {
 pub fn data_file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("data.rdb")
+        .unwrap_or(DEFAULT_DATABASE_FILE_NAME)
         .to_string()
+}
+
+pub const DEFAULT_DATABASE_FILE_NAME: &str = "data.rdb";
+
+pub fn default_database_path() -> PathBuf {
+    PathBuf::from(DEFAULT_DATABASE_FILE_NAME)
 }
 
 pub fn sibling_path(path: &Path, file_name: &str) -> PathBuf {
@@ -364,7 +370,7 @@ pub fn sidecar_file_name(path: &Path, extension: &str) -> String {
     path.with_extension(extension)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("data.rdb")
+        .unwrap_or(DEFAULT_DATABASE_FILE_NAME)
         .to_string()
 }
 

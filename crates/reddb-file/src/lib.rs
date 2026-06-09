@@ -142,7 +142,7 @@ pub use graph_table_index::{
 };
 pub use layout::{
     audit_log_rotated_compressed_path, audit_log_rotated_plain_path, data_file_name,
-    engine_wal_path, legacy_audit_log_path, legacy_logical_slots_path,
+    default_database_path, engine_wal_path, legacy_audit_log_path, legacy_logical_slots_path,
     legacy_logical_slots_temp_path, legacy_slow_query_log_path, local_cas_lock_path,
     local_upload_temp_path, logical_wal_path, logical_wal_path_in, logical_wal_temp_path,
     pager_dwb_path, pager_dwb_shadow_path, pager_header_path, pager_header_shadow_path,
@@ -156,6 +156,7 @@ pub use layout::{
     store_commit_coord_temp_wal_file_name, store_commit_coord_temp_wal_path, support_dir_for,
     temp_path, temp_path_in, unified_wal_path, unified_wal_path_in, LayoutOverrides, LayoutToggles,
     LogDestination, LogRoutingOverrides, StorageLayout, TieredLayoutPaths,
+    DEFAULT_DATABASE_FILE_NAME,
 };
 pub use logical_wal::{
     build_logical_wal_seek_index, encode_logical_wal_v2_for_compat, encode_logical_wal_v3,
