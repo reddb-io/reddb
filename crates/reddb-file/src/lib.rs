@@ -290,8 +290,9 @@ pub use store_wal::{
     STORE_WAL_ACTION_VERSION,
 };
 pub use transaction_wal::{
-    decode_transaction_wal_record_frame, encode_transaction_wal_record_frame,
-    transaction_wal_record_encoded_len, TransactionWalRecordFrame,
+    decode_transaction_wal_entry_payload, decode_transaction_wal_record_frame,
+    encode_transaction_wal_entry_payload, encode_transaction_wal_record_frame,
+    transaction_wal_record_encoded_len, TransactionWalEntryPayload, TransactionWalRecordFrame,
     TRANSACTION_WAL_RECORD_CHECKSUM_LEN, TRANSACTION_WAL_RECORD_HEADER_LEN,
     TRANSACTION_WAL_RECORD_LEN_LEN, TRANSACTION_WAL_RECORD_MIN_LEN,
 };

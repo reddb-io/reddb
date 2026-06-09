@@ -189,6 +189,19 @@ fn server_does_not_own_transaction_wal_record_envelope() {
         "buf.extend(&self.prev_lsn.unwrap_or(0).to_le_bytes())",
         "buf.extend(&self.timestamp.to_le_bytes())",
         "buf.extend(&(type_bytes.len() as u32).to_le_bytes())",
+        "buf.push(0)",
+        "buf.push(1)",
+        "buf.push(2)",
+        "buf.push(3)",
+        "buf.push(4)",
+        "buf.push(5)",
+        "buf.push(6)",
+        "buf.push(7)",
+        "buf.push(8)",
+        "buf.push(9)",
+        "buf.push(10)",
+        "read_u32(data, &mut offset",
+        "read_u64(data, &mut offset",
         "let computed: u8 = data[..offset].iter().fold(0",
         "Checksum mismatch",
         "Missing WAL entry checksum",
@@ -205,10 +218,13 @@ fn server_does_not_own_transaction_wal_record_envelope() {
         "pub fn encode_transaction_wal_record_frame",
         "pub fn decode_transaction_wal_record_frame",
         "pub fn transaction_wal_record_encoded_len",
+        "pub enum TransactionWalEntryPayload",
+        "pub fn encode_transaction_wal_entry_payload",
+        "pub fn decode_transaction_wal_entry_payload",
     ] {
         assert!(
             file.contains(required),
-            "reddb-file should own transaction WAL envelope {required}"
+            "reddb-file should own transaction WAL contract {required}"
         );
     }
 
@@ -217,10 +233,13 @@ fn server_does_not_own_transaction_wal_record_envelope() {
         "reddb_file::encode_transaction_wal_record_frame",
         "reddb_file::decode_transaction_wal_record_frame",
         "reddb_file::transaction_wal_record_encoded_len",
+        "reddb_file::TransactionWalEntryPayload",
+        "reddb_file::encode_transaction_wal_entry_payload",
+        "reddb_file::decode_transaction_wal_entry_payload",
     ] {
         assert!(
             non_test.contains(required),
-            "transaction WAL runtime should route envelope through {required}"
+            "transaction WAL runtime should route persisted contract through {required}"
         );
     }
 }

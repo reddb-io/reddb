@@ -19,40 +19,6 @@ pub type Lsn = u64;
 /// Timestamp type
 pub type Timestamp = u64;
 
-fn read_bytes<'a>(
-    data: &'a [u8],
-    offset: &mut usize,
-    len: usize,
-    context: &'static str,
-) -> io::Result<&'a [u8]> {
-    let end = offset.saturating_add(len);
-    if end > data.len() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, context));
-    }
-    let bytes = &data[*offset..end];
-    *offset = end;
-    Ok(bytes)
-}
-
-fn read_array<const N: usize>(
-    data: &[u8],
-    offset: &mut usize,
-    context: &'static str,
-) -> io::Result<[u8; N]> {
-    let bytes = read_bytes(data, offset, N, context)?;
-    let mut array = [0u8; N];
-    array.copy_from_slice(bytes);
-    Ok(array)
-}
-
-fn read_u32(data: &[u8], offset: &mut usize, context: &'static str) -> io::Result<u32> {
-    Ok(u32::from_le_bytes(read_array::<4>(data, offset, context)?))
-}
-
-fn read_u64(data: &[u8], offset: &mut usize, context: &'static str) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(read_array::<8>(data, offset, context)?))
-}
-
 fn io_lock_error(context: &'static str) -> io::Error {
     io::Error::other(format!("{context} lock poisoned"))
 }
@@ -88,6 +54,7 @@ fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
 fn transaction_wal_frame_error(err: reddb_file::RdbFileError) -> io::Error {
     let message = err.to_string();
     let kind = if message.contains("missing")
+        || message.contains("empty")
         || message.contains("truncated")
         || message.contains("too short")
     {
@@ -96,6 +63,10 @@ fn transaction_wal_frame_error(err: reddb_file::RdbFileError) -> io::Error {
         io::ErrorKind::InvalidData
     };
     io::Error::new(kind, message)
+}
+
+fn transaction_wal_payload_error(err: reddb_file::RdbFileError) -> io::Error {
+    transaction_wal_frame_error(err)
 }
 
 /// Log entry types
@@ -150,180 +121,94 @@ impl LogEntryType {
 
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        match self {
-            LogEntryType::Begin => buf.push(0),
-            LogEntryType::Commit => buf.push(1),
-            LogEntryType::Abort => buf.push(2),
-            LogEntryType::Insert { key, value } => {
-                buf.push(3);
-                buf.extend(&(key.len() as u32).to_le_bytes());
-                buf.extend(key);
-                buf.extend(&(value.len() as u32).to_le_bytes());
-                buf.extend(value);
-            }
-            LogEntryType::Update {
-                key,
-                old_value,
-                new_value,
-            } => {
-                buf.push(4);
-                buf.extend(&(key.len() as u32).to_le_bytes());
-                buf.extend(key);
-                buf.extend(&(old_value.len() as u32).to_le_bytes());
-                buf.extend(old_value);
-                buf.extend(&(new_value.len() as u32).to_le_bytes());
-                buf.extend(new_value);
-            }
-            LogEntryType::Delete { key, old_value } => {
-                buf.push(5);
-                buf.extend(&(key.len() as u32).to_le_bytes());
-                buf.extend(key);
-                buf.extend(&(old_value.len() as u32).to_le_bytes());
-                buf.extend(old_value);
-            }
-            LogEntryType::Checkpoint { active_txns } => {
-                buf.push(6);
-                buf.extend(&(active_txns.len() as u32).to_le_bytes());
-                for txn in active_txns {
-                    buf.extend(&txn.to_le_bytes());
-                }
-            }
-            LogEntryType::Savepoint { name } => {
-                buf.push(7);
-                let name_bytes = name.as_bytes();
-                buf.extend(&(name_bytes.len() as u32).to_le_bytes());
-                buf.extend(name_bytes);
-            }
-            LogEntryType::RollbackToSavepoint { name } => {
-                buf.push(8);
-                let name_bytes = name.as_bytes();
-                buf.extend(&(name_bytes.len() as u32).to_le_bytes());
-                buf.extend(name_bytes);
-            }
-            LogEntryType::Compensate { original_lsn } => {
-                buf.push(9);
-                buf.extend(&original_lsn.to_le_bytes());
-            }
-            LogEntryType::End => buf.push(10),
-        }
-
-        buf
+        reddb_file::encode_transaction_wal_entry_payload(&self.to_file_payload())
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> io::Result<(Self, usize)> {
-        if data.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Empty data"));
+        let (payload, consumed) = reddb_file::decode_transaction_wal_entry_payload(data)
+            .map_err(transaction_wal_payload_error)?;
+        Ok((Self::from_file_payload(payload), consumed))
+    }
+
+    fn to_file_payload(&self) -> reddb_file::TransactionWalEntryPayload {
+        match self {
+            LogEntryType::Begin => reddb_file::TransactionWalEntryPayload::Begin,
+            LogEntryType::Commit => reddb_file::TransactionWalEntryPayload::Commit,
+            LogEntryType::Abort => reddb_file::TransactionWalEntryPayload::Abort,
+            LogEntryType::Insert { key, value } => reddb_file::TransactionWalEntryPayload::Insert {
+                key: key.clone(),
+                value: value.clone(),
+            },
+            LogEntryType::Update {
+                key,
+                old_value,
+                new_value,
+            } => reddb_file::TransactionWalEntryPayload::Update {
+                key: key.clone(),
+                old_value: old_value.clone(),
+                new_value: new_value.clone(),
+            },
+            LogEntryType::Delete { key, old_value } => {
+                reddb_file::TransactionWalEntryPayload::Delete {
+                    key: key.clone(),
+                    old_value: old_value.clone(),
+                }
+            }
+            LogEntryType::Checkpoint { active_txns } => {
+                reddb_file::TransactionWalEntryPayload::Checkpoint {
+                    active_txns: active_txns.clone(),
+                }
+            }
+            LogEntryType::Savepoint { name } => {
+                reddb_file::TransactionWalEntryPayload::Savepoint { name: name.clone() }
+            }
+            LogEntryType::RollbackToSavepoint { name } => {
+                reddb_file::TransactionWalEntryPayload::RollbackToSavepoint { name: name.clone() }
+            }
+            LogEntryType::Compensate { original_lsn } => {
+                reddb_file::TransactionWalEntryPayload::Compensate {
+                    original_lsn: *original_lsn,
+                }
+            }
+            LogEntryType::End => reddb_file::TransactionWalEntryPayload::End,
         }
+    }
 
-        let mut offset = 0;
-        let tag = read_bytes(data, &mut offset, 1, "Missing log entry tag")?[0];
-
-        let entry = match tag {
-            0 => LogEntryType::Begin,
-            1 => LogEntryType::Commit,
-            2 => LogEntryType::Abort,
-            3 => {
-                // Insert
-                let key_len =
-                    read_u32(data, &mut offset, "Missing WAL insert key length")? as usize;
-                let key =
-                    read_bytes(data, &mut offset, key_len, "Truncated WAL insert key")?.to_vec();
-                let value_len =
-                    read_u32(data, &mut offset, "Missing WAL insert value length")? as usize;
-                let value = read_bytes(data, &mut offset, value_len, "Truncated WAL insert value")?
-                    .to_vec();
+    fn from_file_payload(payload: reddb_file::TransactionWalEntryPayload) -> Self {
+        match payload {
+            reddb_file::TransactionWalEntryPayload::Begin => LogEntryType::Begin,
+            reddb_file::TransactionWalEntryPayload::Commit => LogEntryType::Commit,
+            reddb_file::TransactionWalEntryPayload::Abort => LogEntryType::Abort,
+            reddb_file::TransactionWalEntryPayload::Insert { key, value } => {
                 LogEntryType::Insert { key, value }
             }
-            4 => {
-                // Update
-                let key_len =
-                    read_u32(data, &mut offset, "Missing WAL update key length")? as usize;
-                let key =
-                    read_bytes(data, &mut offset, key_len, "Truncated WAL update key")?.to_vec();
-                let old_len =
-                    read_u32(data, &mut offset, "Missing WAL update old value length")? as usize;
-                let old_value =
-                    read_bytes(data, &mut offset, old_len, "Truncated WAL update old value")?
-                        .to_vec();
-                let new_len =
-                    read_u32(data, &mut offset, "Missing WAL update new value length")? as usize;
-                let new_value =
-                    read_bytes(data, &mut offset, new_len, "Truncated WAL update new value")?
-                        .to_vec();
-                LogEntryType::Update {
-                    key,
-                    old_value,
-                    new_value,
-                }
-            }
-            5 => {
-                // Delete
-                let key_len =
-                    read_u32(data, &mut offset, "Missing WAL delete key length")? as usize;
-                let key =
-                    read_bytes(data, &mut offset, key_len, "Truncated WAL delete key")?.to_vec();
-                let old_len =
-                    read_u32(data, &mut offset, "Missing WAL delete old value length")? as usize;
-                let old_value =
-                    read_bytes(data, &mut offset, old_len, "Truncated WAL delete old value")?
-                        .to_vec();
+            reddb_file::TransactionWalEntryPayload::Update {
+                key,
+                old_value,
+                new_value,
+            } => LogEntryType::Update {
+                key,
+                old_value,
+                new_value,
+            },
+            reddb_file::TransactionWalEntryPayload::Delete { key, old_value } => {
                 LogEntryType::Delete { key, old_value }
             }
-            6 => {
-                // Checkpoint
-                let count =
-                    read_u32(data, &mut offset, "Missing WAL checkpoint txn count")? as usize;
-                let mut active_txns = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let txn =
-                        read_u64(data, &mut offset, "Truncated WAL checkpoint transaction id")?;
-                    active_txns.push(txn);
-                }
+            reddb_file::TransactionWalEntryPayload::Checkpoint { active_txns } => {
                 LogEntryType::Checkpoint { active_txns }
             }
-            7 => {
-                // Savepoint
-                let name_len =
-                    read_u32(data, &mut offset, "Missing WAL savepoint name length")? as usize;
-                let name = String::from_utf8_lossy(read_bytes(
-                    data,
-                    &mut offset,
-                    name_len,
-                    "Truncated WAL savepoint name",
-                )?)
-                .to_string();
+            reddb_file::TransactionWalEntryPayload::Savepoint { name } => {
                 LogEntryType::Savepoint { name }
             }
-            8 => {
-                // RollbackToSavepoint
-                let name_len = read_u32(
-                    data,
-                    &mut offset,
-                    "Missing WAL rollback-to-savepoint name length",
-                )? as usize;
-                let name = String::from_utf8_lossy(read_bytes(
-                    data,
-                    &mut offset,
-                    name_len,
-                    "Truncated WAL rollback-to-savepoint name",
-                )?)
-                .to_string();
+            reddb_file::TransactionWalEntryPayload::RollbackToSavepoint { name } => {
                 LogEntryType::RollbackToSavepoint { name }
             }
-            9 => {
-                // Compensate
-                let original_lsn =
-                    read_u64(data, &mut offset, "Truncated WAL compensate original LSN")?;
+            reddb_file::TransactionWalEntryPayload::Compensate { original_lsn } => {
                 LogEntryType::Compensate { original_lsn }
             }
-            10 => LogEntryType::End,
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid tag")),
-        };
-
-        Ok((entry, offset))
+            reddb_file::TransactionWalEntryPayload::End => LogEntryType::End,
+        }
     }
 }
 
