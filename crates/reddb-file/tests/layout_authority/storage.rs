@@ -158,6 +158,7 @@ fn server_does_not_own_native_store_atomic_publish() {
 fn server_does_not_own_main_wal_file_header() {
     let root = repo_root();
     let files = [
+        "crates/reddb-server/src/storage/wal/mod.rs",
         "crates/reddb-server/src/storage/wal/record.rs",
         "crates/reddb-server/src/storage/wal/reader.rs",
         "crates/reddb-server/src/storage/wal/writer.rs",
@@ -169,6 +170,10 @@ fn server_does_not_own_main_wal_file_header() {
             "pub const WAL_MAGIC",
             "pub const WAL_VERSION",
             "pub const WAL_VERSION_V2",
+            "RDBW",
+            "Version (1 byte)",
+            "Reserved (3 bytes)",
+            "CRC32 checksum",
             "extend_from_slice(WAL_MAGIC)",
             "push(WAL_VERSION)",
             "Invalid WAL magic bytes",
