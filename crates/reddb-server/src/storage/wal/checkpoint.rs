@@ -578,13 +578,17 @@ mod tests {
 
         assert!(result.wal_truncated);
 
-        // WAL should be truncated (only header + checkpoint marker)
-        let wal_size = fs::metadata(&wal_path).unwrap().len();
-        // Header (8 bytes) + Checkpoint record (1 + 8 + 4 = 13 bytes)
-        assert!(
-            wal_size < 50,
-            "WAL should be truncated, but size is {}",
-            wal_size
+        let records: Vec<_> = WalReader::open(&wal_path)
+            .unwrap()
+            .iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].1,
+            WalRecord::Checkpoint {
+                lsn: result.checkpoint_lsn
+            }
         );
 
         cleanup(&dir);

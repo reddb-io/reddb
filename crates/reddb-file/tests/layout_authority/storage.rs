@@ -274,6 +274,30 @@ fn server_wal_record_tests_do_not_assert_physical_tags() {
 }
 
 #[test]
+fn server_checkpoint_tests_do_not_assert_wal_physical_sizes() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/storage/wal/checkpoint.rs"));
+    let test_source = text.split("#[cfg(test)]").nth(1).unwrap_or("");
+
+    for forbidden in [
+        "Header (8 bytes)",
+        "Checkpoint record (1 + 8 + 4",
+        "WAL should be truncated, but size",
+        "fs::metadata(&wal_path).unwrap().len()",
+    ] {
+        assert!(
+            !test_source.contains(forbidden),
+            "server checkpoint tests should assert WAL semantics, not byte sizes: {forbidden:?}"
+        );
+    }
+
+    assert!(
+        test_source.contains("WalRecord::Checkpoint { lsn: result.checkpoint_lsn }"),
+        "server checkpoint truncate test should validate the semantic checkpoint marker"
+    );
+}
+
+#[test]
 fn server_does_not_own_transaction_wal_record_envelope() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/transaction/log.rs"));
