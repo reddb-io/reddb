@@ -36,8 +36,8 @@ use reddb_wire::redwire::handshake::{
 };
 use reddb_wire::redwire::{
     build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame,
-    choose_hello_minor_version, decode_frame, encode_frame, read_frame_async, Frame,
-    MessageDirection, MessageKind, REDWIRE_MAGIC,
+    choose_hello_minor_version, decode_frame, encode_frame, read_frame_async,
+    rewrap_length_prefixed_handler_response, Frame, MessageDirection, MessageKind, REDWIRE_MAGIC,
 };
 
 #[derive(Debug)]
@@ -194,7 +194,10 @@ where
                     crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload);
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw,
+                        frame.correlation_id,
+                    )),
                 )?;
             }
             MessageKind::BulkInsertPrevalidated => {
@@ -204,14 +207,20 @@ where
                 );
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw,
+                        frame.correlation_id,
+                    )),
                 )?;
             }
             MessageKind::QueryBinary => {
                 let raw = crate::wire::listener::handle_query_binary(&runtime, &frame.payload);
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw,
+                        frame.correlation_id,
+                    )),
                 )?;
             }
             // Streaming bulk insert (PG COPY equivalent).
@@ -220,7 +229,10 @@ where
                     crate::wire::listener::handle_stream_start(&frame.payload, &mut stream_session);
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw,
+                        frame.correlation_id,
+                    )),
                 )?;
             }
             MessageKind::BulkStreamRows => {
@@ -232,7 +244,10 @@ where
                 if !raw.is_empty() {
                     queue_send(
                         &out_tx,
-                        encode_frame(&rewrap_handler_response(&raw, &frame)),
+                        encode_frame(&rewrap_length_prefixed_handler_response(
+                            &raw,
+                            frame.correlation_id,
+                        )),
                     )?;
                 }
             }
@@ -241,7 +256,10 @@ where
                     crate::wire::listener::handle_stream_commit(&runtime, &mut stream_session);
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw,
+                        frame.correlation_id,
+                    )),
                 )?;
             }
             MessageKind::Prepare => {
@@ -252,7 +270,10 @@ where
                 );
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw,
+                        frame.correlation_id,
+                    )),
                 )?;
             }
             MessageKind::ExecutePrepared => {
@@ -263,7 +284,10 @@ where
                 );
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_handler_response(&raw, &frame)),
+                    encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw,
+                        frame.correlation_id,
+                    )),
                 )?;
             }
             MessageKind::Get => {
@@ -1359,30 +1383,6 @@ fn reply_frame_or_io_error(
 
 fn wire_json_to_server_json(value: impl std::fmt::Display) -> JsonValue {
     serde_json::from_str::<JsonValue>(&value.to_string()).unwrap_or(JsonValue::Null)
-}
-
-/// Adapt a binary-fast-path handler response into a RedWire frame.
-///
-/// The fast-path handlers (`handle_bulk_insert_binary`,
-/// `handle_query_binary`, etc) return their result already wrapped
-/// in a 5-byte length-prefixed envelope (`[u32 length][u8 kind][body]`).
-/// RedWire carries the same body verbatim — kinds 0x01..0x0F are
-/// the same numeric values — so we strip the 5-byte envelope and
-/// rewrap with a RedWire header using the response correlation id.
-///
-/// The payload `Vec<u8>` is moved into the new frame — no extra
-/// allocation, no body copy — preserving max bulk-insert perf.
-fn rewrap_handler_response(raw_bytes: &[u8], req: &Frame) -> Frame {
-    if raw_bytes.len() < 5 {
-        return build_error_frame_lossy(
-            req.correlation_id,
-            "fast-path handler returned a truncated frame",
-        );
-    }
-    let kind_byte = raw_bytes[4];
-    let kind = MessageKind::from_u8(kind_byte).unwrap_or(MessageKind::Error);
-    let body = raw_bytes[5..].to_vec();
-    build_dispatch_reply_frame(req.correlation_id, kind, body)
 }
 
 /// Get payload shape: `{ "collection": "...", "id": "..." }`.
