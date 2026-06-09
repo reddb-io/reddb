@@ -28,7 +28,10 @@ use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
 
 use super::protocol::encode_value;
-use reddb_wire::legacy::{build_legacy_result_frame, encode_column_name, VAL_NULL, VAL_U64};
+use reddb_wire::legacy::{
+    build_legacy_result_frame, encode_result_payload_header, set_result_payload_row_count,
+    VAL_NULL, VAL_U64,
+};
 
 /// Try to serve a binary SELECT via the zero-copy scan path.
 ///
@@ -182,12 +185,11 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
                     let resolved = pre_resolved_cols
                         .clone()
                         .unwrap_or_else(|| resolve_wire_columns(tq, row));
-                    body.extend_from_slice(&(resolved.len() as u16).to_le_bytes());
-                    for col in &resolved {
-                        encode_column_name(&mut body, col.name.as_ref());
-                    }
-                    header_nrows_pos = body.len();
-                    body.extend_from_slice(&[0u8; 4]);
+                    header_nrows_pos = encode_result_payload_header(
+                        &mut body,
+                        resolved.iter().map(|col| col.name.as_ref()),
+                        0,
+                    );
                     cols = Some(resolved);
                 }
                 if let Some(cols_ref) = cols.as_ref() {
@@ -259,7 +261,7 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
 
     cols.as_ref()?;
 
-    body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
+    set_result_payload_row_count(&mut body, header_nrows_pos, row_count).ok()?;
 
     let _ = db;
     let _ = store;
@@ -819,12 +821,8 @@ fn execute_simple_ordered_complex_select(
         &cols,
         candidates.len(),
     ));
-    body.extend_from_slice(&(cols.len() as u16).to_le_bytes());
-    for col in &cols {
-        encode_column_name(&mut body, col.name.as_ref());
-    }
-    let header_nrows_pos = body.len();
-    body.extend_from_slice(&0u32.to_le_bytes());
+    let header_nrows_pos =
+        encode_result_payload_header(&mut body, cols.iter().map(|col| col.name.as_ref()), 0);
     let mut row_count: u32 = 0;
     let candidate_ids: Vec<EntityId> = candidates
         .iter()
@@ -850,7 +848,7 @@ fn execute_simple_ordered_complex_select(
         body.extend_from_slice(&row_bytes);
         row_count += 1;
     }
-    body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
+    set_result_payload_row_count(&mut body, header_nrows_pos, row_count).ok()?;
 
     Some(build_legacy_result_frame(&body))
 }
@@ -895,12 +893,11 @@ where
             let resolved = pre_resolved_cols
                 .clone()
                 .unwrap_or_else(|| resolve_wire_columns_from_names(columns, row));
-            body.extend_from_slice(&(resolved.len() as u16).to_le_bytes());
-            for col in &resolved {
-                encode_column_name(&mut body, col.name.as_ref());
-            }
-            header_nrows_pos = body.len();
-            body.extend_from_slice(&[0u8; 4]);
+            header_nrows_pos = encode_result_payload_header(
+                &mut body,
+                resolved.iter().map(|col| col.name.as_ref()),
+                0,
+            );
             cols = Some(resolved);
         }
 
@@ -914,17 +911,13 @@ where
 
     cols.as_ref()?;
 
-    body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
+    set_result_payload_row_count(&mut body, header_nrows_pos, row_count).ok()?;
     Some(build_legacy_result_frame(&body))
 }
 
 fn encode_empty_simple_select(columns: &[String]) -> Vec<u8> {
     let mut body = Vec::with_capacity(estimate_simple_response_capacity(columns, 0));
-    body.extend_from_slice(&(columns.len() as u16).to_le_bytes());
-    for column in columns {
-        encode_column_name(&mut body, column.as_str());
-    }
-    body.extend_from_slice(&0u32.to_le_bytes());
+    encode_result_payload_header(&mut body, columns.iter().map(String::as_str), 0);
 
     build_legacy_result_frame(&body)
 }
@@ -935,11 +928,7 @@ fn encode_empty_direct_select(tq: &TableQuery, schema: Option<&[String]>) -> Opt
         None => resolve_wire_columns_for_empty_projection(tq)?,
     };
     let mut body = Vec::with_capacity(estimate_wire_columns_response_capacity(&cols, 0));
-    body.extend_from_slice(&(cols.len() as u16).to_le_bytes());
-    for col in &cols {
-        encode_column_name(&mut body, col.name.as_ref());
-    }
-    body.extend_from_slice(&0u32.to_le_bytes());
+    encode_result_payload_header(&mut body, cols.iter().map(|col| col.name.as_ref()), 0);
 
     Some(build_legacy_result_frame(&body))
 }

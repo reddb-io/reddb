@@ -349,14 +349,19 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
         "write_frame_header(&mut resp",
         "write_frame_header(&mut resp, MSG_RESULT",
         "write_frame_header(&mut resp, MSG_ERROR",
+        "encode_column_name",
+        "buf.extend_from_slice(&(columns.len() as u16).to_le_bytes())",
+        "buf.extend_from_slice(&(records.len() as u32).to_le_bytes())",
+        "body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice",
+        "let body = [0u8, 0, 0, 0, 0, 0]",
     ] {
         assert!(
             !listener.contains(forbidden),
-            "legacy result/error envelope construction belongs in reddb-wire, found {forbidden:?}"
+            "legacy result/error frame and result-set payload construction belongs in reddb-wire, found {forbidden:?}"
         );
         assert!(
             !query_direct.contains(forbidden),
-            "query_direct legacy envelope construction belongs in reddb-wire, found {forbidden:?}"
+            "query_direct legacy frame and result-set payload construction belongs in reddb-wire, found {forbidden:?}"
         );
     }
 
@@ -376,6 +381,23 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
             "reddb-wire should own legacy envelope builder {required}"
         );
     }
+    assert!(
+        listener.contains("encode_result_payload_header")
+            && query_direct.contains("encode_result_payload_header"),
+        "server legacy listener should delegate result-set payload headers through reddb-wire"
+    );
+    assert!(
+        wire.contains("pub fn encode_result_payload_header"),
+        "reddb-wire should own legacy result-set payload header construction"
+    );
+    assert!(
+        query_direct.contains("set_result_payload_row_count"),
+        "query_direct should patch result-set row counts through reddb-wire"
+    );
+    assert!(
+        wire.contains("pub fn set_result_payload_row_count"),
+        "reddb-wire should own legacy result-set row-count patching"
+    );
 
     for required in [
         "build_legacy_bulk_ok_frame",

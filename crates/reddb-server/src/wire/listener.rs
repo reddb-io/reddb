@@ -22,7 +22,7 @@ use crate::storage::unified::{EntityData, EntityId};
 use reddb_wire::legacy::{
     build_legacy_bulk_ok_frame, build_legacy_bulk_stream_ack_frame,
     build_legacy_cursor_batch_frame, build_legacy_cursor_ok_frame, build_legacy_error_frame,
-    build_legacy_prepared_ok_frame, build_legacy_result_frame, encode_column_name,
+    build_legacy_prepared_ok_frame, build_legacy_result_frame, encode_result_payload_header,
     MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED, MSG_BULK_OK, MSG_BULK_STREAM_COMMIT,
     MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START, MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR,
     MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY, MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
@@ -114,11 +114,7 @@ fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<
     }
 
     let mut body = Vec::with_capacity(256);
-    body.extend_from_slice(&(cols.len() as u16).to_le_bytes());
-    for col in &cols {
-        encode_column_name(&mut body, col);
-    }
-    body.extend_from_slice(&1u32.to_le_bytes());
+    encode_result_payload_header(&mut body, cols.iter().map(String::as_str), 1);
     for col in &cols {
         let val = match col.as_str() {
             "red_entity_id" => Value::UnsignedInteger(entity.logical_id().raw()),
@@ -143,7 +139,8 @@ fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<
 }
 
 fn encode_empty_result() -> Vec<u8> {
-    let body = [0u8, 0, 0, 0, 0, 0]; // ncols=0, nrows=0
+    let mut body = Vec::with_capacity(6);
+    encode_result_payload_header(&mut body, std::iter::empty::<&str>(), 0);
     build_legacy_result_frame(&body)
 }
 
@@ -261,11 +258,11 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
         buf.clear();
         buf.reserve(256 + records.len() * 128);
 
-        buf.extend_from_slice(&(columns.len() as u16).to_le_bytes());
-        for col in &columns {
-            encode_column_name(&mut buf, col);
-        }
-        buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
+        encode_result_payload_header(
+            &mut buf,
+            columns.iter().map(|column| column.as_ref()),
+            records.len() as u32,
+        );
 
         for record in records {
             // When the schema identity matches the first record's
