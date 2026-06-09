@@ -374,9 +374,15 @@ fn server_does_not_redeclare_shm_file_format() {
 fn server_does_not_own_spill_file_format() {
     let root = repo_root();
     let server = read(root.join("crates/reddb-server/src/storage/cache/spill.rs"));
+    let server_non_test = server
+        .split("#[cfg(test)]")
+        .next()
+        .expect("spill.rs has non-test source");
     let file = read(root.join("crates/reddb-file/src/spill.rs"));
 
     for forbidden in [
+        "reddb-spill",
+        "e == \"spill\"",
         "b\"SPIL\"",
         "write_all(&[2u8])",
         "checksum.to_le_bytes()",
@@ -388,12 +394,16 @@ fn server_does_not_own_spill_file_format() {
         "crc32::crc32",
     ] {
         assert!(
-            !server.contains(forbidden),
+            !server_non_test.contains(forbidden),
             "spill file frame belongs in reddb-file, found {forbidden:?}"
         );
     }
 
     for required in [
+        "DEFAULT_SPILL_DIR_NAME",
+        "SPILL_FILE_EXTENSION",
+        "default_spill_dir",
+        "is_spill_file_path",
         "SPILL_FILE_MAGIC",
         "SPILL_FILE_HEADER_LEN",
         "encode_spill_file_frame",
@@ -406,7 +416,9 @@ fn server_does_not_own_spill_file_format() {
         );
     }
 
-    assert!(server.contains("reddb_file::encode_spill_file_frame"));
-    assert!(server.contains("reddb_file::decode_spill_file_frame"));
-    assert!(server.contains("reddb_file::spill_file_name"));
+    assert!(server_non_test.contains("reddb_file::default_spill_dir"));
+    assert!(server_non_test.contains("reddb_file::is_spill_file_path"));
+    assert!(server_non_test.contains("reddb_file::encode_spill_file_frame"));
+    assert!(server_non_test.contains("reddb_file::decode_spill_file_frame"));
+    assert!(server_non_test.contains("reddb_file::spill_file_name"));
 }

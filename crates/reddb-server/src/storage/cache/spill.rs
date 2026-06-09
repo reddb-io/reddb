@@ -31,7 +31,7 @@
 //! let config = SpillConfig::new()
 //!     .max_memory(512 * 1024 * 1024)  // 512MB
 //!     .spill_threshold(0.8)            // 80%
-//!     .spill_dir("/tmp/reddb-spill");
+//!     .spill_dir(reddb_file::default_spill_dir());
 //!
 //! let mut manager = SpillManager::new(config);
 //!
@@ -122,7 +122,7 @@ impl SpillConfig {
         Self {
             max_memory: 512 * 1024 * 1024, // 512MB default
             spill_threshold: 0.80,         // Spill at 80%
-            spill_dir: std::env::temp_dir().join("reddb-spill"),
+            spill_dir: reddb_file::default_spill_dir(),
             target_after_spill: 0.60,    // Target 60% after spill
             min_spill_size: 1024 * 1024, // 1MB minimum
             access_decay: 0.95,          // 5% decay per check cycle
@@ -659,7 +659,7 @@ impl SpillManager {
             for entry in fs::read_dir(&self.config.spill_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().map(|e| e == "spill").unwrap_or(false) {
+                if reddb_file::is_spill_file_path(&path) {
                     let _ = fs::remove_file(path);
                 }
             }

@@ -4,11 +4,14 @@
 //! here so the server does not define persisted bytes directly.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 pub const SPILL_FILE_MAGIC: [u8; 4] = *b"SPIL";
 pub const SPILL_FILE_VERSION_V1: u8 = 1;
 pub const SPILL_FILE_VERSION_V2: u8 = 2;
 pub const SPILL_FILE_HEADER_LEN: usize = 4 + 1 + 4 + 8;
+pub const SPILL_FILE_EXTENSION: &str = "spill";
+pub const DEFAULT_SPILL_DIR_NAME: &str = "reddb-spill";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpillFileFrameError {
@@ -39,7 +42,17 @@ impl fmt::Display for SpillFileFrameError {
 impl std::error::Error for SpillFileFrameError {}
 
 pub fn spill_file_name(segment: &str, pid: u32) -> String {
-    format!("{segment}-{pid}.spill")
+    format!("{segment}-{pid}.{SPILL_FILE_EXTENSION}")
+}
+
+pub fn default_spill_dir() -> PathBuf {
+    std::env::temp_dir().join(DEFAULT_SPILL_DIR_NAME)
+}
+
+pub fn is_spill_file_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == SPILL_FILE_EXTENSION)
 }
 
 pub fn encode_spill_file_frame(data: &[u8]) -> Vec<u8> {
