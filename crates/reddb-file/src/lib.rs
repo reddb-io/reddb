@@ -288,7 +288,8 @@ pub use shm::{
     SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION,
 };
 pub use spill::{
-    decode_spill_file_frame, encode_spill_file_frame, spill_file_name, SpillFileFrameError,
+    decode_spill_file_frame, default_spill_dir, encode_spill_file_frame, is_spill_file_path,
+    spill_file_name, SpillFileFrameError, DEFAULT_SPILL_DIR_NAME, SPILL_FILE_EXTENSION,
     SPILL_FILE_HEADER_LEN, SPILL_FILE_MAGIC, SPILL_FILE_VERSION_V1, SPILL_FILE_VERSION_V2,
 };
 pub use store_wal::{
