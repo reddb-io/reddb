@@ -47,7 +47,12 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("reddb_wal_test_{}", timestamp));
         let _ = fs::create_dir_all(&dir);
-        let path = dir.join("test.wal");
+        let path = reddb_file::layout::wal_component_temp_path(
+            &dir,
+            "mod",
+            "write-read",
+            std::process::id(),
+        );
         if path.exists() {
             fs::remove_file(&path).unwrap();
         }

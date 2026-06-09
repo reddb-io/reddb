@@ -312,6 +312,33 @@ fn server_checkpoint_tests_do_not_assert_wal_physical_sizes() {
 }
 
 #[test]
+fn server_wal_tests_use_reddb_file_temp_wal_names() {
+    let root = repo_root();
+    for file in [
+        "crates/reddb-server/src/storage/wal/mod.rs",
+        "crates/reddb-server/src/storage/wal/archiver.rs",
+        "crates/reddb-server/src/storage/wal/checkpoint.rs",
+    ] {
+        let text = read(root.join(file));
+        let test_source = text.split("#[cfg(test)]").nth(1).unwrap_or("");
+        for forbidden in [
+            "dir.join(\"test.wal\")",
+            "temp_dir.join(\"test.wal\")",
+            "temp_dir.join(\"downloaded.wal\")",
+        ] {
+            assert!(
+                !test_source.contains(forbidden),
+                "{file} WAL fixtures should use reddb-file layout helpers, found {forbidden:?}"
+            );
+        }
+        assert!(
+            test_source.contains("reddb_file::layout::wal_component_temp_path"),
+            "{file} should derive WAL fixture paths through reddb-file"
+        );
+    }
+}
+
+#[test]
 fn server_does_not_own_transaction_wal_record_envelope() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/transaction/log.rs"));
