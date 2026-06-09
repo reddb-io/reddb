@@ -978,10 +978,12 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
         "kind(MessageKind::HelloAck)",
         "kind(MessageKind::AuthOk)",
         "kind(MessageKind::AuthFail)",
+        "crate::serde_json::from_slice::<JsonValue>(&resp.payload)",
+        "o.get(\"jwt\")",
     ] {
         assert!(
             !session.contains(forbidden),
-            "server session must not own RedWire handshake frame construction, found {forbidden:?}"
+            "server session must not own RedWire handshake frame/payload contract, found {forbidden:?}"
         );
     }
 
@@ -1005,6 +1007,14 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
             "reddb-wire should own handshake frame builder {required}"
         );
     }
+    assert!(
+        session.contains("parse_auth_response_oauth_jwt"),
+        "server session OAuth AuthResponse parsing should route through reddb-wire"
+    );
+    assert!(
+        wire.contains("pub fn parse_auth_response_oauth_jwt"),
+        "reddb-wire should own OAuth AuthResponse payload parsing"
+    );
 
     for required in [
         "parse_scram_client_first",

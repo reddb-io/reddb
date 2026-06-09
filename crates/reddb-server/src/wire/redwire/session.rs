@@ -31,7 +31,8 @@ use reddb_wire::redwire::operations::{
 use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
 use super::validate_minor_version;
 use reddb_wire::redwire::handshake::{
-    build_auth_fail_payload, build_auth_ok_frame_from_payload, build_hello_ack_frame, Hello,
+    build_auth_fail_payload, build_auth_ok_frame_from_payload, build_hello_ack_frame,
+    parse_auth_response_oauth_jwt, Hello,
 };
 use reddb_wire::redwire::{
     build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame,
@@ -765,14 +766,8 @@ where
     // external OAuth IdP still authenticates. mTLS stays native-only
     // (ADR 0036) — the browser presents this access JWT and nothing else.
     if chosen == "oauth-jwt" {
-        let raw = match crate::serde_json::from_slice::<JsonValue>(&resp.payload)
-            .ok()
-            .and_then(|v| {
-                v.as_object()
-                    .and_then(|o| o.get("jwt").cloned())
-                    .and_then(|x| x.as_str().map(String::from))
-            }) {
-            Some(s) if !s.is_empty() => s,
+        let raw = match parse_auth_response_oauth_jwt(&resp.payload) {
+            Ok(raw) if !raw.is_empty() => raw,
             _ => {
                 let fail = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
