@@ -14,6 +14,10 @@ fn read(path: impl AsRef<Path>) -> String {
         .unwrap_or_else(|err| panic!("read {}: {err}", path.as_ref().display()))
 }
 
+fn non_test_source(text: &str) -> &str {
+    text.split("#[cfg(test)]").next().unwrap_or(text)
+}
+
 #[test]
 fn redwire_frame_contracts_live_only_in_reddb_wire() {
     let root = repo_root();
@@ -916,6 +920,7 @@ fn redwire_stream_frame_builders_live_in_reddb_wire() {
 fn redwire_generic_reply_frame_builders_live_in_reddb_wire() {
     let root = repo_root();
     let session = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
+    let session_non_test = non_test_source(&session);
     let wire = read(root.join("crates/reddb-wire/src/redwire/builder.rs"));
 
     for forbidden in [
@@ -923,9 +928,10 @@ fn redwire_generic_reply_frame_builders_live_in_reddb_wire() {
         "fn build_dispatch_reply_frame",
         "FrameBuilder::reply_to(correlation_id)",
         "kind(MessageKind::Error)",
+        "Frame::new(",
     ] {
         assert!(
-            !session.contains(forbidden),
+            !session_non_test.contains(forbidden),
             "generic RedWire reply/error frame construction belongs in reddb-wire, found {forbidden:?}"
         );
     }
