@@ -7,9 +7,12 @@
 //! Both binaries are reached through Cargo's `CARGO_BIN_EXE_*`
 //! env vars so the test never duplicates path knowledge.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{ErrorKind, Read};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -55,21 +58,6 @@ fn pick_port() -> u16 {
     let p = l.local_addr().unwrap().port();
     drop(l);
     p
-}
-
-fn scratch_path(label: &str) -> PathBuf {
-    let now_ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-cross-smoke-{}-{}-{}",
-        label,
-        std::process::id(),
-        now_ns
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("data.rdb")
 }
 
 /// Block until `host:port` accepts a TCP connection or the deadline
@@ -122,8 +110,7 @@ impl Drop for ServerHandle {
     }
 }
 
-fn boot_red_grpc(port: u16) -> Result<ServerHandle, String> {
-    let path = scratch_path("grpc");
+fn boot_red_grpc(port: u16, data_path: &Path) -> Result<ServerHandle, String> {
     let bind = format!("127.0.0.1:{port}");
     let mut cmd = Command::new(red_binary());
     cmd.args([
@@ -132,7 +119,7 @@ fn boot_red_grpc(port: u16) -> Result<ServerHandle, String> {
         "--grpc-bind",
         &bind,
         "--path",
-        path.to_str().unwrap(),
+        data_path.to_str().unwrap(),
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
@@ -140,8 +127,7 @@ fn boot_red_grpc(port: u16) -> Result<ServerHandle, String> {
     Ok(ServerHandle { child })
 }
 
-fn boot_red_http(port: u16) -> Result<ServerHandle, String> {
-    let path = scratch_path("http");
+fn boot_red_http(port: u16, data_path: &Path) -> Result<ServerHandle, String> {
     let bind = format!("127.0.0.1:{port}");
     let grpc_port = pick_port();
     let grpc_bind = format!("127.0.0.1:{grpc_port}");
@@ -154,7 +140,7 @@ fn boot_red_http(port: u16) -> Result<ServerHandle, String> {
         "--grpc-bind",
         &grpc_bind,
         "--path",
-        path.to_str().unwrap(),
+        data_path.to_str().unwrap(),
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
@@ -162,8 +148,7 @@ fn boot_red_http(port: u16) -> Result<ServerHandle, String> {
     Ok(ServerHandle { child })
 }
 
-fn boot_red_wire(port: u16) -> Result<ServerHandle, String> {
-    let path = scratch_path("wire");
+fn boot_red_wire(port: u16, data_path: &Path) -> Result<ServerHandle, String> {
     let bind = format!("127.0.0.1:{port}");
     // The server boots a default-port gRPC listener even when only
     // --wire-bind is requested. Pin it to a free port so parallel
@@ -178,7 +163,7 @@ fn boot_red_wire(port: u16) -> Result<ServerHandle, String> {
         "--grpc-bind",
         &grpc_bind,
         "--path",
-        path.to_str().unwrap(),
+        data_path.to_str().unwrap(),
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
@@ -209,7 +194,8 @@ fn red_client_round_trips_against_red_over_grpc() {
     };
     let _guard = lock_boot();
     let port = pick_port();
-    let mut server = match boot_red_grpc(port) {
+    let _dir = support::temp_data_dir("cross-smoke-grpc");
+    let mut server = match boot_red_grpc(port, &_dir.join("data.rdb")) {
         Ok(h) => h,
         Err(e) => panic!("could not start `red server`: {e}"),
     };
@@ -250,7 +236,8 @@ fn red_client_round_trips_against_red_over_redwire() {
     };
     let _guard = lock_boot();
     let port = pick_port();
-    let mut server = match boot_red_wire(port) {
+    let _dir = support::temp_data_dir("cross-smoke-redwire");
+    let mut server = match boot_red_wire(port, &_dir.join("data.rdb")) {
         Ok(h) => h,
         Err(e) => panic!("could not start `red server` (wire): {e}"),
     };
@@ -290,7 +277,8 @@ fn red_client_round_trips_against_red_over_http() {
     };
     let _guard = lock_boot();
     let port = pick_port();
-    let mut server = match boot_red_http(port) {
+    let _dir = support::temp_data_dir("cross-smoke-http");
+    let mut server = match boot_red_http(port, &_dir.join("data.rdb")) {
         Ok(h) => h,
         Err(e) => panic!("could not start `red server` (http): {e}"),
     };
@@ -364,7 +352,8 @@ fn red_client_red_scheme_routes_to_default_port() {
     drop(probe);
 
     let _guard = lock_boot();
-    let mut server = match boot_red_wire(port) {
+    let _dir = support::temp_data_dir("cross-smoke-default-port");
+    let mut server = match boot_red_wire(port, &_dir.join("data.rdb")) {
         Ok(h) => h,
         Err(e) => panic!("could not start `red server` (wire): {e}"),
     };

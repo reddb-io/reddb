@@ -22,7 +22,7 @@ fn slot_catalog_write_survives_atomic_crash_points() {
         "atomic_after_dir_sync",
     ] {
         let root = temp_root(point);
-        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1));
+        let plan = PrimaryReplicaFilePlan::new(root.path(), TimelineId(1));
         initial_catalog()
             .write_to_path(plan.slots_path())
             .expect("write initial slot catalog");
@@ -32,7 +32,7 @@ fn slot_catalog_write_survives_atomic_crash_points() {
             .arg("primary_replica_slot_catalog_crash_child")
             .arg("--nocapture")
             .env(CHILD_ENV, "1")
-            .env(ROOT_ENV, &root)
+            .env(ROOT_ENV, root.path())
             .env(CRASH_ENV, point)
             .status()
             .expect("run crash child");
@@ -55,8 +55,6 @@ fn slot_catalog_write_survives_atomic_crash_points() {
             slot.confirmed_flush_lsn
         );
         assert_eq!(slot.confirmed_flush_lsn, slot.confirmed_apply_lsn);
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -91,13 +89,13 @@ fn updated_catalog() -> ReplicationSlotCatalog {
     catalog
 }
 
-fn temp_root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "reddb-file-primary-slot-crash-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+/// Auto-cleaning temp root: the returned [`tempfile::TempDir`] guard removes the
+/// directory and all artifacts under it on drop, including on panic. The caller
+/// keeps the binding alive across the crash child + assertions and reads the
+/// path via `root.path()`.
+fn temp_root(label: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-primary-slot-crash-{label}-"))
+        .tempdir()
+        .expect("temp dir")
 }

@@ -27,3 +27,4 @@ zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 toml = "1.1"
+tempfile = "3"

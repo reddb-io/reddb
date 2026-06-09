@@ -8,28 +8,17 @@
 //! so the operator sees who's blocking the takeover instead of a
 //! generic 409.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::replication::lease::{LeaseError, LeaseStore};
 use reddb::storage::backend::LocalBackend;
-use std::path::PathBuf;
 use std::sync::Arc;
-
-fn temp_prefix(tag: &str) -> String {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-chaos-promote-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p.to_string_lossy().to_string()
-}
 
 #[test]
 fn second_promoter_is_refused_while_first_lease_alive() {
-    let prefix = temp_prefix("contended");
+    let dir = support::temp_data_dir("chaos-promote-contended");
+    let prefix = dir.to_string_lossy().to_string();
     let store = LeaseStore::new(Arc::new(LocalBackend)).with_prefix(prefix.clone());
 
     // Holder A acquires a 60s lease.
@@ -56,13 +45,12 @@ fn second_promoter_is_refused_while_first_lease_alive() {
     let refreshed = store.refresh(&lease_a, 60_000).expect("refresh");
     assert_eq!(refreshed.generation, 1);
     assert!(refreshed.expires_at_ms >= lease_a.expires_at_ms);
-
-    let _ = std::fs::remove_dir_all(&prefix);
 }
 
 #[test]
 fn promote_after_lease_expiry_bumps_generation() {
-    let prefix = temp_prefix("expired-takeover");
+    let dir = support::temp_data_dir("chaos-promote-expired");
+    let prefix = dir.to_string_lossy().to_string();
     let store = LeaseStore::new(Arc::new(LocalBackend)).with_prefix(prefix.clone());
 
     // Original holder takes a 1ms lease; we sleep past expiry.
@@ -78,6 +66,4 @@ fn promote_after_lease_expiry_bumps_generation() {
         .expect("expired lease must be poachable");
     assert_eq!(lease_b.holder_id, "writer-b");
     assert_eq!(lease_b.generation, lease_a.generation + 1);
-
-    let _ = std::fs::remove_dir_all(&prefix);
 }

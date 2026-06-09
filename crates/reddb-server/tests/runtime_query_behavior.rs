@@ -667,16 +667,11 @@ fn config_reference_compares_stored_value_without_reparsing_sql() {
 
 #[test]
 fn secret_reference_compares_vault_value_without_reparsing_sql() {
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "reddb-runtime-secret-test-{}-{}.rdb",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
+    let dir = tempfile::Builder::new()
+        .prefix("reddb-test-runtime-secret-")
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join("runtime-secret-test.rdb");
 
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime boots");
     let pager = rt
@@ -716,7 +711,6 @@ fn secret_reference_compares_vault_value_without_reparsing_sql() {
     assert_eq!(int_at(&matched, 0, "id"), 1);
 
     drop(rt);
-    let _ = std::fs::remove_file(path);
 }
 
 // ── Issue #299 conformance: queue full → DLQ routing ─────────────────────────
@@ -1201,12 +1195,11 @@ fn vector_turbo_collection_searches_with_inner_product_and_cosine() {
 
 #[test]
 fn vector_turbo_collection_reopens_without_tv_snapshot() {
-    let path = std::env::temp_dir().join(format!(
-        "reddb-vector-turbo-reopen-{}.db",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::layout::unified_wal_path(&path));
+    let dir = tempfile::Builder::new()
+        .prefix("reddb-test-vector-turbo-reopen-")
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join("reddb-vector-turbo-reopen.db");
 
     {
         let rt =
@@ -1225,9 +1218,6 @@ fn vector_turbo_collection_reopens_without_tv_snapshot() {
         .expect("search after reopen");
     assert_eq!(text_at(&result, 0, "content"), "persisted");
     assert!(!path.with_extension("tv").exists());
-
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::layout::unified_wal_path(&path));
 }
 
 /// Acceptance check for issue #693 — `vector.turbo` SEARCH must
@@ -2252,16 +2242,11 @@ fn first_user_entity_id_is_one_hundred_and_two() {
 
 #[test]
 fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "reddb-first-user-entity-id-{}-{}.rdb",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
+    let dir = tempfile::Builder::new()
+        .prefix("reddb-test-first-user-entity-id-")
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join("first-user-entity-id.rdb");
 
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime boots");
     let res = rt
@@ -2271,7 +2256,6 @@ fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
         .expect("first persistent user insert");
     let id = u64_at(&res, 0, "red_entity_id");
     drop(rt);
-    let _ = std::fs::remove_file(&path);
 
     assert_eq!(
         id, 102,

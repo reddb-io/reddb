@@ -25,7 +25,7 @@ fn basebackup_parts_publish_survives_crash_without_manifest() {
         "basebackup_after_parts_dir_rename",
     ] {
         let root = temp_root(point);
-        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1));
+        let plan = PrimaryReplicaFilePlan::new(root.path(), TimelineId(1));
         let backup = backup_plan();
 
         let child = Command::new(std::env::current_exe().expect("current test exe"))
@@ -33,7 +33,7 @@ fn basebackup_parts_publish_survives_crash_without_manifest() {
             .arg("primary_replica_basebackup_crash_child")
             .arg("--nocapture")
             .env(CHILD_ENV, "1")
-            .env(ROOT_ENV, &root)
+            .env(ROOT_ENV, root.path())
             .env(CRASH_ENV, point)
             .status()
             .expect("run crash child");
@@ -53,8 +53,6 @@ fn basebackup_parts_publish_survives_crash_without_manifest() {
                 "final parts dir must not be visible before directory publish at {point}"
             );
         }
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -65,7 +63,7 @@ fn basebackup_retry_crash_preserves_existing_parts() {
     }
 
     let root = temp_root("retry");
-    let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1));
+    let plan = PrimaryReplicaFilePlan::new(root.path(), TimelineId(1));
     let backup = backup_plan();
     let manifest = plan
         .write_basebackup_snapshot_parts(backup.clone(), b"original-snapshot", 8)
@@ -91,8 +89,6 @@ fn basebackup_retry_crash_preserves_existing_parts() {
         .read_snapshot_parts(plan.basebackup_dir())
         .expect("existing parts still verify");
     assert_eq!(restored, b"original-snapshot");
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -108,7 +104,7 @@ fn basebackup_manifest_publish_survives_atomic_crash_points() {
         "atomic_after_dir_sync",
     ] {
         let root = temp_root(&format!("manifest-{point}"));
-        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1));
+        let plan = PrimaryReplicaFilePlan::new(root.path(), TimelineId(1));
         let backup = backup_plan();
         let manifest = plan
             .write_basebackup_snapshot_parts(backup.clone(), b"manifest-snapshot", 8)
@@ -119,7 +115,7 @@ fn basebackup_manifest_publish_survives_atomic_crash_points() {
             .arg("primary_replica_basebackup_crash_child")
             .arg("--nocapture")
             .env(CHILD_ENV, "1")
-            .env(ROOT_ENV, &root)
+            .env(ROOT_ENV, root.path())
             .env(MODE_ENV, "manifest")
             .env(CRASH_ENV, point)
             .status()
@@ -143,8 +139,6 @@ fn basebackup_manifest_publish_survives_atomic_crash_points() {
                 .verify_snapshot_parts(plan.basebackup_dir())
                 .expect("unpublished basebackup chunks remain valid");
         }
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -219,13 +213,13 @@ fn crc32(bytes: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-fn temp_root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "reddb-file-primary-basebackup-crash-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+/// Auto-cleaning temp root: the returned [`tempfile::TempDir`] guard removes the
+/// directory and all artifacts under it on drop, including on panic. The caller
+/// keeps the binding alive across the crash child + assertions and reads the
+/// path via `root.path()`.
+fn temp_root(label: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-primary-basebackup-crash-{label}-"))
+        .tempdir()
+        .expect("temp dir")
 }

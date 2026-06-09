@@ -7,31 +7,25 @@
 //! closes the loop: the runtime *consumes* that destination, so the
 //! actual log files exist on disk after `RedDBRuntime::with_options`.
 
-use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use reddb::{
     tier_wiring, LayoutOverrides, LogDestination, LogRoutingOverrides, RedDBOptions, RedDBRuntime,
     StorageLayout,
 };
 
+#[allow(dead_code)]
+mod support;
+
 // Tier toggles + global audit sink are process-globals — serialise the
 // two routing tests so they don't observe each other's state.
 static TIER_GUARD: Mutex<()> = Mutex::new(());
 
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_audit_slow_{prefix}_{unique}.rdb"))
-}
-
 #[test]
 fn performance_tier_creates_slow_log_file_under_support_dir() {
     let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    let data = persistent_path("perf");
+    let data = support::temp_db_file("audit-slow-perf");
     let options = RedDBOptions::persistent(&data).with_layout(StorageLayout::Performance);
     let _rt = RedDBRuntime::with_options(options).expect("runtime opens");
 
@@ -85,7 +79,7 @@ fn syslog_override_falls_back_without_panicking() {
     // panicking even when the resolved destination is Syslog. The audit
     // / slow sinks fall back to a file-on-disk so events still survive.
     let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    let data = persistent_path("syslog");
+    let data = support::temp_db_file("audit-slow-syslog");
     let overrides = LayoutOverrides {
         logs: LogRoutingOverrides {
             audit_log: Some(LogDestination::Syslog),

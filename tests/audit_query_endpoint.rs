@@ -4,6 +4,9 @@
 //! runtime's `AuditLogger`, then issues filtered HTTP requests and
 //! confirms the response matches the in-memory expectation.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -15,18 +18,7 @@ use reddb::{RedDBOptions, RedDBRuntime};
 
 /// Unique per-test data path so the audit logger doesn't share
 /// `<tmp>/.audit.log` across parallel tests.
-fn isolated_runtime(tag: &str) -> RedDBRuntime {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "reddb-audit-endpoint-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+fn isolated_runtime(dir: &support::TempDataDir) -> RedDBRuntime {
     let opts = RedDBOptions::in_memory().with_data_path(dir.join("data.rdb"));
     RedDBRuntime::with_options(opts).expect("runtime")
 }
@@ -105,7 +97,8 @@ fn seed_events(rt: &RedDBRuntime) {
 
 #[test]
 fn query_by_principal_returns_only_alice_events() {
-    let rt = isolated_runtime("seed");
+    let dir = support::temp_data_dir("audit-endpoint-principal");
+    let rt = isolated_runtime(&dir);
     seed_events(&rt);
     let addr = spawn_http(rt);
 
@@ -118,7 +111,8 @@ fn query_by_principal_returns_only_alice_events() {
 
 #[test]
 fn query_by_action_prefix_filters_correctly() {
-    let rt = isolated_runtime("seed");
+    let dir = support::temp_data_dir("audit-endpoint-action");
+    let rt = isolated_runtime(&dir);
     seed_events(&rt);
     let addr = spawn_http(rt);
 
@@ -132,7 +126,8 @@ fn query_by_action_prefix_filters_correctly() {
 
 #[test]
 fn query_by_outcome_denied_returns_eve_only() {
-    let rt = isolated_runtime("seed");
+    let dir = support::temp_data_dir("audit-endpoint-outcome");
+    let rt = isolated_runtime(&dir);
     seed_events(&rt);
     let addr = spawn_http(rt);
 
@@ -144,7 +139,8 @@ fn query_by_outcome_denied_returns_eve_only() {
 
 #[test]
 fn query_jsonl_format_returns_ndjson() {
-    let rt = isolated_runtime("seed");
+    let dir = support::temp_data_dir("audit-endpoint-jsonl");
+    let rt = isolated_runtime(&dir);
     seed_events(&rt);
     let addr = spawn_http(rt);
 
@@ -161,7 +157,8 @@ fn query_jsonl_format_returns_ndjson() {
 
 #[test]
 fn invalid_outcome_returns_400() {
-    let rt = isolated_runtime("seed");
+    let dir = support::temp_data_dir("audit-endpoint-400");
+    let rt = isolated_runtime(&dir);
     seed_events(&rt);
     let addr = spawn_http(rt);
 

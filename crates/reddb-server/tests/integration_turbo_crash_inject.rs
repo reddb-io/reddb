@@ -26,11 +26,33 @@
 
 #![cfg(feature = "turbo-crash-inject")]
 
-use std::path::Path;
 use std::sync::Arc;
 
 use reddb_server::runtime::turbo_crash_inject::{install, InjectionPoint, TurboCrashInjector};
 use reddb_server::{RedDBOptions, RedDBRuntime};
+
+/// Auto-cleaning DB path: holds the [`tempfile::TempDir`] guard so the temp
+/// directory and the `.rdb` (plus every sidecar artifact) are removed on drop,
+/// including on panic. Derefs/coerces to `&Path` so callers keep using `&path`
+/// / `RedDBOptions::persistent(&path)` unchanged while the directory lives for
+/// the whole test.
+struct TempDb {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl std::ops::Deref for TempDb {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl From<&TempDb> for std::path::PathBuf {
+    fn from(value: &TempDb) -> std::path::PathBuf {
+        value.path.clone()
+    }
+}
 
 /// Process-global lock — the injector slot is global, so every
 /// kill-point scenario in this file must serialise against every
@@ -45,20 +67,13 @@ fn injector_test_lock() -> &'static parking_lot::Mutex<()> {
     LOCK.get_or_init(|| parking_lot::Mutex::new(()))
 }
 
-fn db_path(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-turbo-crash-inject-{}-{tag}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("reddb.rdb")
-}
-
-fn cleanup(path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::remove_dir_all(parent);
-    }
+fn db_path(tag: &str) -> TempDb {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("reddb-test-turbo-crash-inject-{tag}-"))
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join("reddb.rdb");
+    TempDb { _dir: dir, path }
 }
 
 /// Injector that panics the first time `target` is fired and
@@ -197,7 +212,6 @@ fn crash_before_wal_fsync_leaves_no_partial_state() {
     // `content` field). The "no half-visible lane" contract is
     // enforced by construction — partial-block tail recovery is
     // proven by `crash_in_partial_tail_recovers_to_clean_boundary`.
-    cleanup(&path);
 }
 
 /// After a kill at `BeforeIndexCommit`, recovery via WAL replay must
@@ -226,7 +240,6 @@ fn crash_before_index_commit_recovers_via_wal_replay() {
         hits.iter().any(|c| c == "recovered"),
         "INSERT WAL-fsync'd before crash must be recovered: {hits:?}"
     );
-    cleanup(&path);
 }
 
 /// After a kill at `BeforeExtentFsync`, the in-memory index update
@@ -257,7 +270,6 @@ fn crash_before_extent_fsync_recovers_via_wal_replay() {
         hits.iter().any(|c| c == "recovered"),
         "INSERT WAL-fsync'd before crash must be recovered: {hits:?}"
     );
-    cleanup(&path);
 }
 
 /// Kill mid-checkpoint: the WAL is intact and recovery resumes from
@@ -295,7 +307,6 @@ fn crash_mid_checkpoint_does_not_lose_acked_inserts() {
             "INSERT acked before checkpoint must survive ({want}): {hits:?}"
         );
     }
-    cleanup(&path);
 }
 
 /// Partial-block tail crash safety (PRD #688, ADR 0024): a kill mid-
@@ -342,5 +353,4 @@ fn crash_in_partial_tail_recovers_to_clean_boundary() {
         // no panic, no NOT_READY — the search above already proved
         // that.
     }
-    cleanup(&path);
 }

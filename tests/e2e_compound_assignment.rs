@@ -1,7 +1,9 @@
+#[allow(dead_code)]
+mod support;
+
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
@@ -48,16 +50,6 @@ fn read_event_payload(rt: &RedDBRuntime, queue: &str) -> serde_json::Value {
         }
         other => panic!("expected Json payload, got {other:?}"),
     }
-}
-
-fn unique_data_dir(prefix: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    path.push(format!("reddb-{prefix}-{}-{nanos}", std::process::id()));
-    path
 }
 
 #[test]
@@ -189,7 +181,8 @@ fn update_compound_rejects_zero_division_modulo_and_overflow() {
 
 #[test]
 fn update_compound_refreshes_indexes_events_and_persists_materialized_value() {
-    let path = unique_data_dir("compound-assignment");
+    let dir = support::temp_data_dir("e2e-compound-assignment");
+    let path = dir.join("data.rdb");
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
             .expect("persistent runtime");
@@ -229,5 +222,4 @@ fn update_compound_refreshes_indexes_events_and_persists_materialized_value() {
         .expect("reopened persistent runtime");
     let reopened = exec(&rt, "SELECT score FROM compound_materialized WHERE id = 1");
     assert_eq!(int_field(only_record(&reopened), "score"), 15);
-    let _ = std::fs::remove_dir_all(path);
 }

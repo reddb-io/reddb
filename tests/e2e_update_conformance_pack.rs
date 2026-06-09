@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
@@ -77,13 +80,6 @@ fn read_event_payload(rt: &RedDBRuntime, queue: &str) -> serde_json::Value {
     }
 }
 
-fn unique_db_path(prefix: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb-{prefix}-{}-{nanos}.rdb", std::process::id()))
-}
 
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
     set_current_auth_identity(name.to_string(), role);
@@ -342,9 +338,7 @@ fn explicit_updates_recheck_changed_indexed_fields() {
 
 #[test]
 fn explicit_multimodel_compound_updates_survive_reopen_as_post_images() {
-    let path = unique_db_path("update-conformance-recovery");
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
+    let path = support::temp_db_file("update-conformance-recovery");
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
             .expect("persistent runtime");
@@ -385,6 +379,4 @@ fn explicit_multimodel_compound_updates_survive_reopen_as_post_images() {
     assert_eq!(int_field(only_record(&kv), "value"), 17);
     let node = exec(&rt, "SELECT score FROM recovery_graph WHERE label = 'node'");
     assert_eq!(int_field(only_record(&node), "score"), 12);
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
 }

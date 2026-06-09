@@ -17,22 +17,13 @@
 //! entity port below, so the shared chokepoints here demonstrate the
 //! gate fires at the right layer.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::{CreateRowInput, DeleteEntityInput, EntityUseCases};
 use reddb::replication::ReplicationConfig;
 use reddb::storage::EntityId;
 use reddb::{RedDBError, RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
-
-fn unique_data_dir(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    p.push(format!("reddb-{prefix}-{pid}-{nanos}"));
-    p
-}
 
 fn assert_read_only_err<T: std::fmt::Debug>(
     res: Result<T, RedDBError>,
@@ -51,7 +42,7 @@ fn assert_read_only_err<T: std::fmt::Debug>(
 
 #[test]
 fn replica_rejects_sql_ddl_and_dml_on_every_surface() {
-    let primary_path = unique_data_dir("replica-primary");
+    let primary_path = support::temp_data_dir("replica-primary");
 
     // 1. Boot a standalone primary, create a table, insert one row.
     {
@@ -134,7 +125,7 @@ fn replica_rejects_sql_ddl_and_dml_on_every_surface() {
 
 #[test]
 fn explicit_read_only_flag_rejects_writes_on_standalone() {
-    let path = unique_data_dir("readonly-flag");
+    let path = support::temp_data_dir("readonly-flag");
 
     // Seed a table on a writable instance so the read-only re-open has
     // something to read.
@@ -163,7 +154,7 @@ fn explicit_read_only_flag_rejects_writes_on_standalone() {
 
 #[test]
 fn standalone_primary_default_is_writable() {
-    let path = unique_data_dir("primary-writable");
+    let path = support::temp_data_dir("primary-writable");
 
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("primary open");
     rt.execute_query("CREATE TABLE writable (id INT)")
@@ -188,7 +179,7 @@ fn replica_internal_apply_path_remains_privileged() {
     // it succeeds even after the gate has rejected client writes.
     use reddb::storage::{EntityData, EntityKind, RowData, UnifiedEntity};
 
-    let path = unique_data_dir("replica-privileged");
+    let path = support::temp_data_dir("replica-privileged");
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("primary open");
         rt.execute_query("CREATE TABLE shipped (id INT, payload TEXT)")

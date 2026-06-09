@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,6 +7,9 @@ use reddb::auth::{AuthConfig, AuthStore};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+
+#[allow(dead_code)]
+mod support;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
@@ -17,41 +20,12 @@ fn ddl_drop_test_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn temp_db_path(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
-}
-
 fn unique_ident(prefix: &str) -> String {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     format!("{prefix}_{unique}")
-}
-
-fn cleanup_related(path: &Path) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let Some(stem) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name == stem || name.starts_with(&format!("{stem}-")) {
-                let _ = std::fs::remove_file(&entry_path);
-                let _ = std::fs::remove_dir_all(&entry_path);
-            }
-        }
-    }
 }
 
 fn rt_with_vault(path: &Path) -> RedDBRuntime {
@@ -98,9 +72,8 @@ fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
 #[test]
 fn typed_drop_removes_non_table_models() {
     let _guard = ddl_drop_test_lock().lock().unwrap();
-    let path = temp_db_path("ddl_drop_typed_models");
-    cleanup_related(&path);
-    let rt = rt_with_vault(&path);
+    let path = support::temp_db_file("ddl-drop-typed-models");
+    let rt = rt_with_vault(path.path());
     for (name, create_sql, drop_sql) in [
         {
             let name = unique_ident("identity");
@@ -157,7 +130,6 @@ fn typed_drop_removes_non_table_models() {
         assert!(rt.db().collection_contract(&name).is_none(), "{name}");
     }
     drop(rt);
-    cleanup_related(&path);
 }
 
 #[test]
@@ -176,9 +148,8 @@ fn drop_collection_dispatches_polymorphically_and_if_exists_is_idempotent() {
 #[test]
 fn create_keyed_models_are_visible_in_typed_show_filters() {
     let _guard = ddl_drop_test_lock().lock().unwrap();
-    let path = temp_db_path("ddl_drop_foundation_vault");
-    cleanup_related(&path);
-    let rt = rt_with_vault(&path);
+    let path = support::temp_db_file("ddl-drop-foundation-vault");
+    let rt = rt_with_vault(path.path());
     let sessions = unique_ident("sessions");
     let app_settings = unique_ident("app_settings");
     let secrets = unique_ident("secrets");
@@ -211,7 +182,6 @@ fn create_keyed_models_are_visible_in_typed_show_filters() {
         );
     }
     drop(rt);
-    cleanup_related(&path);
 }
 
 #[test]
