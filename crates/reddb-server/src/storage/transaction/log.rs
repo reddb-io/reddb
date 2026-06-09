@@ -85,6 +85,19 @@ fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
     }
 }
 
+fn transaction_wal_frame_error(err: reddb_file::RdbFileError) -> io::Error {
+    let message = err.to_string();
+    let kind = if message.contains("missing")
+        || message.contains("truncated")
+        || message.contains("too short")
+    {
+        io::ErrorKind::UnexpectedEof
+    } else {
+        io::ErrorKind::InvalidData
+    };
+    io::Error::new(kind, message)
+}
+
 /// Log entry types
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogEntryType {
@@ -346,82 +359,39 @@ impl LogEntry {
 
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        // Header: lsn(8) + txn_id(8) + prev_lsn(8) + timestamp(8) = 32 bytes
-        buf.extend(&self.lsn.to_le_bytes());
-        buf.extend(&self.txn_id.to_le_bytes());
-        buf.extend(&self.prev_lsn.unwrap_or(0).to_le_bytes());
-        buf.extend(&self.timestamp.to_le_bytes());
-
-        // Entry type
-        let type_bytes = self.entry_type.to_bytes();
-        buf.extend(&(type_bytes.len() as u32).to_le_bytes());
-        buf.extend(&type_bytes);
-
-        // Checksum (simple XOR for demo)
-        let checksum: u8 = buf.iter().fold(0, |acc, &b| acc ^ b);
-        buf.push(checksum);
-
-        buf
+        reddb_file::encode_transaction_wal_record_frame(&reddb_file::TransactionWalRecordFrame {
+            lsn: self.lsn,
+            txn_id: self.txn_id,
+            prev_lsn: self.prev_lsn,
+            timestamp: self.timestamp,
+            entry_type_payload: self.entry_type.to_bytes(),
+        })
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
-        if data.len() < 37 {
-            // 32 header + 4 type_len + 1 checksum minimum
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Too short"));
-        }
-
-        let mut offset = 0;
-        let lsn = read_u64(data, &mut offset, "Missing WAL entry LSN")?;
-        let txn_id = read_u64(data, &mut offset, "Missing WAL entry txn id")?;
-        let prev_lsn_raw = read_u64(data, &mut offset, "Missing WAL entry prev_lsn")?;
-        let prev_lsn = if prev_lsn_raw == 0 {
-            None
-        } else {
-            Some(prev_lsn_raw)
-        };
-        let timestamp = read_u64(data, &mut offset, "Missing WAL entry timestamp")?;
-        let type_len = read_u32(data, &mut offset, "Missing WAL entry type length")? as usize;
-        let entry_type_bytes = read_bytes(
-            data,
-            &mut offset,
-            type_len,
-            "Truncated WAL entry type bytes",
-        )?;
-        let (entry_type, consumed) = LogEntryType::from_bytes(entry_type_bytes)?;
-        if consumed != entry_type_bytes.len() {
+        let frame = reddb_file::decode_transaction_wal_record_frame(data)
+            .map_err(transaction_wal_frame_error)?;
+        let (entry_type, consumed) = LogEntryType::from_bytes(&frame.entry_type_payload)?;
+        if consumed != frame.entry_type_payload.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "WAL entry type length mismatch",
             ));
         }
 
-        // Verify checksum
-        let stored_checksum = *data.get(offset).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "Missing WAL entry checksum")
-        })?;
-        let computed: u8 = data[..offset].iter().fold(0, |acc, &b| acc ^ b);
-        if stored_checksum != computed {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Checksum mismatch",
-            ));
-        }
-
         Ok(Self {
-            lsn,
-            txn_id,
-            prev_lsn,
-            timestamp,
+            lsn: frame.lsn,
+            txn_id: frame.txn_id,
+            prev_lsn: frame.prev_lsn,
+            timestamp: frame.timestamp,
             entry_type,
         })
     }
 
     /// Get the size of this entry when serialized
     pub fn serialized_size(&self) -> usize {
-        32 + 4 + self.entry_type.to_bytes().len() + 1
+        reddb_file::transaction_wal_record_encoded_len(self.entry_type.to_bytes().len())
     }
 }
 

@@ -31,6 +31,7 @@ pub mod serverless;
 pub mod shm;
 pub mod spill;
 pub mod store_wal;
+pub mod transaction_wal;
 pub mod turboquant_snapshot;
 pub mod vector_btree_page_format;
 pub mod vector_value_codec;
@@ -287,6 +288,12 @@ pub use spill::{
 pub use store_wal::{
     decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
     STORE_WAL_ACTION_VERSION,
+};
+pub use transaction_wal::{
+    decode_transaction_wal_record_frame, encode_transaction_wal_record_frame,
+    transaction_wal_record_encoded_len, TransactionWalRecordFrame,
+    TRANSACTION_WAL_RECORD_CHECKSUM_LEN, TRANSACTION_WAL_RECORD_HEADER_LEN,
+    TRANSACTION_WAL_RECORD_LEN_LEN, TRANSACTION_WAL_RECORD_MIN_LEN,
 };
 pub use turboquant_snapshot::{
     read_turboquant_snapshot, write_turboquant_snapshot, TurboQuantSnapshotError,
