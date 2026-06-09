@@ -1,10 +1,10 @@
-//! Columnar-vs-row read benchmark (#943, PRD #850 Phase 2).
+//! Columnar-vs-row read benchmark (#943/#962, PRD #850 Phase 2).
 //!
 //! Reproducible gate harness measuring both decode paths on the same sealed
-//! columnar chunk workload. Does NOT optimise — that is #962's job.
+//! columnar chunk workload. Baseline recorded by #943; optimised by #962.
 //!
 //! Run with:
-//!   cargo bench -p reddb-server --bench columnar_read_bench
+//!   cargo bench -p reddb-io-server --bench columnar_read_bench
 //!
 //! Results feed docs/perf/2026-06-03-columnar-read.md.
 
@@ -14,9 +14,9 @@ use reddb_server::storage::timeseries::chunk::{
     points_from_column_block, TimeSeriesChunk, COLUMNAR_TS_COLUMN_ID, COLUMNAR_VALUE_COLUMN_ID,
 };
 
-/// Seal a synthetic chunk of `n` rows: timestamps 1 ns apart starting at a
+/// Seal a synthetic chunk of `n` rows: timestamps 1 ms apart starting at a
 /// realistic epoch, values cycling over a small range to reproduce the codec
-/// pattern (DoubleDelta+Zstd for ts, Xor+Zstd for values).
+/// pattern (DoubleDelta+LZ4 for ts, Xor+LZ4 for values after #962).
 fn sealed_chunk(n: usize) -> Vec<u8> {
     let mut chunk = TimeSeriesChunk::with_max_points("cpu.idle", Default::default(), n.max(1));
     for i in 0..n {
