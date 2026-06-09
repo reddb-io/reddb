@@ -5,6 +5,9 @@
 //! `.rdb` compatibility is governed by `reddb-file`.
 
 use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
+use std::path::Path;
 
 use crate::embedded::{RdbFileError, RdbFileResult};
 use crate::physical_metadata::{ManifestEvent, ManifestEventKind};
@@ -95,6 +98,25 @@ pub struct NativeDumpCrossRef {
 
 pub fn native_store_magic_matches(bytes: &[u8]) -> bool {
     bytes.len() >= STORE_MAGIC.len() && &bytes[..STORE_MAGIC.len()] == STORE_MAGIC
+}
+
+pub fn write_native_store_bytes_atomically(path: &Path, bytes: &[u8]) -> RdbFileResult<()> {
+    let tmp_path = crate::layout::temp_path(path);
+    {
+        let file = File::create(&tmp_path)?;
+        let mut writer = BufWriter::new(file);
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+    }
+
+    fs::rename(&tmp_path, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 pub fn encode_native_entity_record_frame(entity: &[u8], metadata: Option<&[u8]>) -> Vec<u8> {

@@ -153,27 +153,8 @@ impl UnifiedStore {
     /// Uses compact binary encoding with varint for efficient storage.
     /// No JSON - pure binary with pages and indices.
     pub fn save_to_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        // Write to temp file first, then atomic rename
-        let tmp_path = reddb_file::temp_path(path);
-        let file = File::create(&tmp_path)?;
-        let mut writer = BufWriter::new(file);
         let buf = self.to_binary_dump_bytes();
-
-        writer.write_all(&buf)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-        drop(writer);
-
-        // Atomic rename: tmp → final
-        std::fs::rename(&tmp_path, path)?;
-
-        // fsync parent directory for rename durability
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-
+        reddb_file::write_native_store_bytes_atomically(path, &buf)?;
         Ok(())
     }
 
