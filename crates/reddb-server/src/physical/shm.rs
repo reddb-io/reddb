@@ -1,10 +1,10 @@
-//! `<data>.shm` shared-memory file substrate (gh-475).
+//! Shared-memory file substrate (gh-475).
 //!
 //! When provisioning is enabled (tier-wired for `Standard` and above in a
-//! later slice), opening a database creates a sibling `<data>.shm` file
-//! with a deterministic binary header owned by `reddb-file`. This module
-//! owns the runtime lock policy: current owner pid, generation counter,
-//! reader registry, and crash takeover decisions.
+//! later slice), opening a database creates the sibling file selected by
+//! `reddb_file::layout::shm_path` with a deterministic binary header owned by
+//! `reddb-file`. This module owns the runtime lock policy: current owner pid,
+//! generation counter, reader registry, and crash takeover decisions.
 //!
 //! ## Lock protocol
 //!
@@ -32,7 +32,7 @@ pub use reddb_file::{ShmHeader, SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_V
 
 static SHM_POLICY: AtomicU8 = AtomicU8::new(0);
 
-/// Process-wide opt-in for `<data>.shm` provisioning. Default off so
+/// Process-wide opt-in for SHM provisioning. Default off so
 /// existing single-writer flows (`minimal`) keep their current shape.
 /// Tier wiring should call this with `true` when `tier >= Standard`.
 /// Escape hatch: `REDDB_SHM_PROVISION=1`.
@@ -40,7 +40,7 @@ pub fn set_shm_provisioning_enabled(enabled: bool) {
     SHM_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
 }
 
-/// Whether the open path should provision a `<data>.shm` file.
+/// Whether the open path should provision a SHM file.
 pub fn shm_provisioning_enabled() -> bool {
     match SHM_POLICY.load(Ordering::Relaxed) {
         1 => true,
