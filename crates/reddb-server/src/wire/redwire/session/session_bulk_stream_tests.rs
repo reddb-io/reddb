@@ -5,6 +5,21 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin + Send>(r: &mut R) -> Fr
     read_frame_async(r).await.expect("read frame")
 }
 
+fn request_frame(correlation_id: u64, kind: MessageKind, payload: Vec<u8>) -> Frame {
+    reddb_wire::redwire::build_request_frame(correlation_id, kind, payload)
+        .expect("build request frame")
+}
+
+fn hello_frame(correlation_id: u64, client_name: Option<&str>) -> Frame {
+    reddb_wire::redwire::build_client_hello_frame(correlation_id, ["anonymous"], 0, client_name)
+        .expect("build hello frame")
+}
+
+fn anonymous_auth_response_frame(correlation_id: u64) -> Frame {
+    reddb_wire::redwire::build_auth_response_frame(correlation_id, b"{}".to_vec())
+        .expect("build auth response frame")
+}
+
 fn stream_start_payload(coll: &str, cols: &[&str]) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(&(coll.len() as u16).to_le_bytes());
@@ -57,10 +72,7 @@ async fn bulk_stream_rows_success_emits_no_response_frame() {
     client.write_all(&[1u8]).await.expect("write minor");
 
     // 2) Hello — anonymous, since the server has no AuthStore.
-    let hello_payload =
-        br#"{"versions":[1],"auth_methods":["anonymous"],"features":0,"client_name":"test"}"#
-            .to_vec();
-    let hello = encode_frame(&Frame::new(MessageKind::Hello, 1, hello_payload));
+    let hello = encode_frame(&hello_frame(1, Some("test")));
     client.write_all(&hello).await.expect("write hello");
 
     // 3) Read HelloAck.
@@ -68,7 +80,7 @@ async fn bulk_stream_rows_success_emits_no_response_frame() {
     assert_eq!(ack.kind, MessageKind::HelloAck);
 
     // 4) AuthResponse (anonymous needs no proof body).
-    let authresp = encode_frame(&Frame::new(MessageKind::AuthResponse, 2, b"{}".to_vec()));
+    let authresp = encode_frame(&anonymous_auth_response_frame(2));
     client.write_all(&authresp).await.expect("write authresp");
 
     // 5) Read AuthOk.
@@ -76,9 +88,9 @@ async fn bulk_stream_rows_success_emits_no_response_frame() {
     assert_eq!(auth_ok.kind, MessageKind::AuthOk);
 
     // 6) BulkStreamStart — server sends a BulkStreamAck back.
-    let start = encode_frame(&Frame::new(
-        MessageKind::BulkStreamStart,
+    let start = encode_frame(&request_frame(
         3,
+        MessageKind::BulkStreamStart,
         stream_start_payload("target", &["id", "name"]),
     ));
     client.write_all(&start).await.expect("write start");
@@ -87,9 +99,9 @@ async fn bulk_stream_rows_success_emits_no_response_frame() {
     assert_eq!(start_ack.correlation_id, 3);
 
     // 7) BulkStreamRows — success path MUST NOT emit a response.
-    let rows = encode_frame(&Frame::new(
-        MessageKind::BulkStreamRows,
+    let rows = encode_frame(&request_frame(
         4,
+        MessageKind::BulkStreamRows,
         stream_rows_payload(&[(1, "a"), (2, "b")]),
     ));
     client.write_all(&rows).await.expect("write rows");
@@ -99,7 +111,7 @@ async fn bulk_stream_rows_success_emits_no_response_frame() {
     //    next frame on the wire would be a BulkStreamAck with
     //    correlation_id 4 (the rewrapped empty success vec) and
     //    the assertion below would fail.
-    let commit = encode_frame(&Frame::new(MessageKind::BulkStreamCommit, 5, vec![]));
+    let commit = encode_frame(&request_frame(5, MessageKind::BulkStreamCommit, vec![]));
     client.write_all(&commit).await.expect("write commit");
 
     let next = read_one_frame(&mut client).await;
@@ -115,7 +127,7 @@ async fn bulk_stream_rows_success_emits_no_response_frame() {
     );
 
     // 9) Tear the session down cleanly.
-    let bye = encode_frame(&Frame::new(MessageKind::Bye, 6, vec![]));
+    let bye = encode_frame(&request_frame(6, MessageKind::Bye, vec![]));
     client.write_all(&bye).await.expect("write bye");
     let _ = read_one_frame(&mut client).await; // drain Bye echo
     drop(client);
@@ -134,22 +146,13 @@ async fn bulk_stream_rows_error_still_emits_error_frame() {
     });
 
     client.write_all(&[1u8]).await.unwrap();
-    let hello_payload = br#"{"versions":[1],"auth_methods":["anonymous"],"features":0}"#.to_vec();
     client
-        .write_all(&encode_frame(&Frame::new(
-            MessageKind::Hello,
-            1,
-            hello_payload,
-        )))
+        .write_all(&encode_frame(&hello_frame(1, None)))
         .await
         .unwrap();
     let _ack = read_one_frame(&mut client).await;
     client
-        .write_all(&encode_frame(&Frame::new(
-            MessageKind::AuthResponse,
-            2,
-            b"{}".to_vec(),
-        )))
+        .write_all(&encode_frame(&anonymous_auth_response_frame(2)))
         .await
         .unwrap();
     let _auth_ok = read_one_frame(&mut client).await;
@@ -157,9 +160,9 @@ async fn bulk_stream_rows_error_still_emits_error_frame() {
     // Send BulkStreamRows with no prior BulkStreamStart — the
     // legacy handler returns a non-empty Error frame, which the
     // session must forward.
-    let rows = encode_frame(&Frame::new(
-        MessageKind::BulkStreamRows,
+    let rows = encode_frame(&request_frame(
         7,
+        MessageKind::BulkStreamRows,
         stream_rows_payload(&[(1, "a")]),
     ));
     client.write_all(&rows).await.unwrap();
