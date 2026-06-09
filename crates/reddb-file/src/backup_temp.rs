@@ -4,6 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{layout, RdbFileResult};
 
+pub const BACKUP_JSON_OBJECT_TEMP_PREFIX: &str = "reddb-json-object";
+pub const BACKUP_JSON_OBJECT_READ_TEMP_PREFIX: &str = "reddb-json-object-read";
+pub const ARCHIVED_CHANGE_RECORDS_TEMP_PREFIX: &str = "reddb-archived-change-records";
+pub const ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX: &str = "reddb-archived-change-records-read";
+
 /// Local temporary JSON artifact used while publishing or reading backup metadata.
 ///
 /// Remote backends still own upload/download transport. This type owns the local
@@ -24,6 +29,26 @@ impl BackupTempJsonFile {
             start_lsn,
             end_lsn,
         )
+    }
+
+    pub fn json_object() -> Self {
+        Self::new(BACKUP_JSON_OBJECT_TEMP_PREFIX, None, None)
+    }
+
+    pub fn json_object_read() -> Self {
+        Self::new(BACKUP_JSON_OBJECT_READ_TEMP_PREFIX, None, None)
+    }
+
+    pub fn archived_change_records(start_lsn: u64, end_lsn: u64) -> Self {
+        Self::new(
+            ARCHIVED_CHANGE_RECORDS_TEMP_PREFIX,
+            Some(start_lsn),
+            Some(end_lsn),
+        )
+    }
+
+    pub fn archived_change_records_read() -> Self {
+        Self::new(ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX, None, None)
     }
 
     pub fn with_clock(
@@ -87,8 +112,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("create temp root");
 
-        let temp =
-            BackupTempJsonFile::with_clock(&root, "reddb-json-object", 7, 99, Some(10), Some(20));
+        let temp = BackupTempJsonFile::with_clock(
+            &root,
+            BACKUP_JSON_OBJECT_TEMP_PREFIX,
+            7,
+            99,
+            Some(10),
+            Some(20),
+        );
 
         assert_eq!(
             temp.path(),
@@ -111,7 +142,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("create temp root");
 
-        let temp = BackupTempJsonFile::with_clock(&root, "reddb-json-object", 7, 99, None, None);
+        let temp = BackupTempJsonFile::with_clock(
+            &root,
+            BACKUP_JSON_OBJECT_TEMP_PREFIX,
+            7,
+            99,
+            None,
+            None,
+        );
 
         temp.cleanup().expect("missing cleanup");
         assert!(!temp.path().exists());
