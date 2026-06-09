@@ -41,6 +41,10 @@ fn server_does_not_redeclare_logical_wal_spool_format() {
         "fn read_one_v3",
         "fn read_one_v2",
         "fn read_one_v1",
+        "[magic",
+        "[version",
+        "[crc32",
+        "b\"RDLW\"",
     ] {
         assert!(
             !text.contains(forbidden),

@@ -1,51 +1,8 @@
 //! Primary-side replication: WAL record production and snapshot serving.
 //!
-//! ## Logical WAL spool wire format
-//!
-//! ### Version 3 (current — issue #821)
-//!
-//! ```text
-//! [magic     4 bytes  = b"RDLW"]
-//! [version   1 byte   = 0x03]
-//! [term      8 bytes  little-endian u64]
-//! [lsn       8 bytes  little-endian u64]
-//! [timestamp 8 bytes  little-endian u64 — wall-clock millis since UNIX epoch]
-//! [payload_len 4 bytes little-endian u32]
-//! [payload   payload_len bytes]
-//! [crc32     4 bytes  little-endian u32 — crc32fast of (version || term ||
-//!                                          lsn || timestamp || payload_len ||
-//!                                          payload)]
-//! ```
-//!
-//! ### Version 2 (legacy, read-only — PLAN.md Phase 2 / W2)
-//!
-//! ```text
-//! [magic     4 bytes  = b"RDLW"]
-//! [version   1 byte   = 0x02]
-//! [lsn       8 bytes  little-endian u64]
-//! [timestamp 8 bytes  little-endian u64 — wall-clock millis since UNIX epoch]
-//! [payload_len 4 bytes little-endian u32]
-//! [payload   payload_len bytes]
-//! [crc32     4 bytes  little-endian u32 — crc32fast of (version || lsn ||
-//!                                          timestamp || payload_len || payload)]
-//! ```
-//!
-//! - `sync_all()` is called after every append so an acknowledged
-//!   `append()` survives a power-loss event.
-//! - Recovery accepts the longest valid prefix and silently truncates
-//!   at the first torn header, short payload/crc, or checksum
-//!   mismatch (warning logged). No partial record is ever returned to
-//!   the replication subsystem.
-//!
-//! ### Version 1 (legacy, read-only)
-//!
-//! ```text
-//! [magic 4][version 1=0x01][lsn 8][payload_len 8][payload]
-//! ```
-//!
-//! No checksum, no timestamp. Read for backward compatibility on
-//! existing spools; never written. A v1 record found in a spool will
-//! be returned to consumers but flagged via `LogicalWalEntry::v1`.
+//! The logical WAL spool byte format is a `reddb-file` contract. This module
+//! owns runtime policy: appending after writes, syncing acknowledged records,
+//! serving replica pulls, and pruning once slots make records removable.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};

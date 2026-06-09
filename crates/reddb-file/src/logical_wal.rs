@@ -1,3 +1,45 @@
+//! Logical WAL spool file contract.
+//!
+//! This module owns the durable byte layout used by the primary-side
+//! replication spool. Runtime code may decide when to append, prune, or serve
+//! records, but the persisted framing, compatibility readers, checksums, and
+//! seek-index rebuilding rules live here.
+//!
+//! ## Version 3, current
+//!
+//! ```text
+//! [magic     4 bytes  = b"RDLW"]
+//! [version   1 byte   = 0x03]
+//! [term      8 bytes  little-endian u64]
+//! [lsn       8 bytes  little-endian u64]
+//! [timestamp 8 bytes  little-endian u64, wall-clock millis since UNIX epoch]
+//! [payload_len 4 bytes little-endian u32]
+//! [payload   payload_len bytes]
+//! [crc32     4 bytes  little-endian u32 over version, term, lsn, timestamp, len, payload]
+//! ```
+//!
+//! ## Version 2, legacy read-only
+//!
+//! ```text
+//! [magic     4 bytes  = b"RDLW"]
+//! [version   1 byte   = 0x02]
+//! [lsn       8 bytes  little-endian u64]
+//! [timestamp 8 bytes  little-endian u64, wall-clock millis since UNIX epoch]
+//! [payload_len 4 bytes little-endian u32]
+//! [payload   payload_len bytes]
+//! [crc32     4 bytes  little-endian u32 over version, lsn, timestamp, len, payload]
+//! ```
+//!
+//! ## Version 1, legacy read-only
+//!
+//! ```text
+//! [magic 4][version 1 = 0x01][lsn 8][payload_len 8][payload]
+//! ```
+//!
+//! Recovery accepts the longest valid prefix and truncates the file at the
+//! first torn header, short payload/checksum, or checksum mismatch. No partial
+//! record is returned to the replication subsystem.
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
