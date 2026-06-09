@@ -2062,6 +2062,12 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
             "backup/WAL archive manifest runtime should route through {required}"
         );
     }
+    for required in ["parse_archived_snapshot_key"] {
+        assert!(
+            text.contains(required) || non_test_recovery.contains(required),
+            "backup snapshot archive key parsing should route through {required}"
+        );
+    }
 
     for forbidden in ["manifests/head.json", "snapshots/", "wal/"] {
         assert!(
@@ -2122,6 +2128,7 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     );
 
     for forbidden in [
+        ".strip_suffix(\".snapshot\")",
         ".strip_suffix(\".wal\")",
         "!key.ends_with(\".wal\")",
         "key.ends_with(\".manifest.json\")",
