@@ -158,14 +158,13 @@ impl PointInTimeRecovery {
         // backups get fail-closed protection.
         match &plan.snapshot_sha256 {
             Some(expected) => {
-                let computed =
-                    crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(dest_path)
-                        .map_err(|err| {
-                            BackendError::Internal(format!(
-                                "snapshot integrity hash failed for '{}': {err}",
-                                plan.snapshot_key
-                            ))
-                        })?;
+                let computed = reddb_file::SnapshotManifest::compute_snapshot_sha256(dest_path)
+                    .map_err(|err| {
+                        BackendError::Internal(format!(
+                            "snapshot integrity hash failed for '{}': {err}",
+                            plan.snapshot_key
+                        ))
+                    })?;
                 if !computed.eq_ignore_ascii_case(expected) {
                     return Err(BackendError::Internal(format!(
                         "snapshot integrity check failed for '{}': manifest sha256 {} != computed sha256 {}; \
@@ -421,7 +420,7 @@ impl PointInTimeRecovery {
         Ok(out)
     }
 
-    fn load_current_head(&self) -> Option<super::BackupHead> {
+    fn load_current_head(&self) -> Option<reddb_file::BackupHead> {
         let root = reddb_file::backup_root_from_snapshot_prefix(&self.snapshot_prefix);
         let head_key = reddb_file::backup_head_key(&root);
         load_backup_head(self.backend.as_ref(), &head_key)
@@ -434,7 +433,7 @@ impl PointInTimeRecovery {
 mod tests {
     use super::*;
     use crate::storage::backend::LocalBackend;
-    use crate::storage::wal::{publish_snapshot_manifest, SnapshotManifest};
+    use crate::storage::wal::publish_snapshot_manifest;
 
     #[test]
     fn restore_to_downloads_latest_snapshot_before_target() {
@@ -459,7 +458,7 @@ mod tests {
         RedDB::open(&snapshot2).unwrap().flush().unwrap();
         publish_snapshot_manifest(
             &LocalBackend,
-            &SnapshotManifest {
+            &reddb_file::SnapshotManifest {
                 timeline_id: "main".to_string(),
                 snapshot_key: snapshot1.to_string_lossy().to_string(),
                 snapshot_id: 1,
@@ -473,7 +472,7 @@ mod tests {
         .unwrap();
         publish_snapshot_manifest(
             &LocalBackend,
-            &SnapshotManifest {
+            &reddb_file::SnapshotManifest {
                 timeline_id: "main".to_string(),
                 snapshot_key: snapshot2.to_string_lossy().to_string(),
                 snapshot_id: 2,
@@ -507,7 +506,7 @@ mod tests {
     /// return its result. Lets the chain tests share boilerplate.
     fn run_chain_restore(
         tag: &str,
-        mutate: impl FnOnce(&LocalBackend, &[crate::storage::wal::WalSegmentMeta]),
+        mutate: impl FnOnce(&LocalBackend, &[reddb_file::WalSegmentMeta]),
     ) -> Result<RecoveryResult, BackendError> {
         use crate::replication::cdc::{change_record_from_entity, ChangeRecord};
         use crate::storage::schema::Value;
@@ -536,7 +535,7 @@ mod tests {
         RedDB::open(&snapshot_path).unwrap().flush().unwrap();
         publish_snapshot_manifest(
             &LocalBackend,
-            &SnapshotManifest {
+            &reddb_file::SnapshotManifest {
                 timeline_id: "main".to_string(),
                 snapshot_key: snapshot_path.to_string_lossy().to_string(),
                 snapshot_id: 1,
@@ -621,13 +620,11 @@ mod tests {
         // Corrupt segment 2's sidecar manifest by overwriting the
         // declared prev_hash with a value that doesn't match segment 1.
         let result = run_chain_restore("chainbreak", |backend, metas| {
-            let sidecar_key = crate::storage::wal::wal_segment_manifest_key(&metas[1].key);
             let mut bad = crate::storage::wal::load_wal_segment_manifest(backend, &metas[1].key)
                 .unwrap()
                 .unwrap();
             bad.prev_hash = Some("00".repeat(32));
             crate::storage::wal::publish_wal_segment_manifest(backend, &bad).unwrap();
-            let _ = sidecar_key; // ensure key reference unused warning suppressed
         });
         let err = result.expect_err("chain break must fail closed");
         let msg = err.to_string();
