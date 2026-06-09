@@ -437,6 +437,7 @@ fn redwire_json_operation_payloads_live_in_reddb_wire() {
         "out.insert(\"ok\"",
         "out.insert(\"found\"",
         "JsonValue::Array(ids)",
+        "serde_json::to_vec",
     ] {
         assert!(
             !server.contains(forbidden),

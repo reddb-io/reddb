@@ -1140,10 +1140,10 @@ fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                     return build_error_frame_lossy(frame.correlation_id, &err.to_string());
                 }
             }
-            let payload = serde_json::to_vec(
-                &crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
-            )
-            .unwrap_or_default();
+            let payload =
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None)
+                    .to_string_compact()
+                    .into_bytes();
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
         Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
@@ -1247,7 +1247,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         if crate::rpc_stdio::should_bulk_insert_graph(runtime, collection, &objects) {
             return match crate::rpc_stdio::bulk_insert_graph(runtime, collection, &objects) {
                 Ok(body) => {
-                    let payload = serde_json::to_vec(&body).unwrap_or_default();
+                    let payload = body.to_string_compact().into_bytes();
                     build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload)
                 }
                 Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
@@ -1288,7 +1288,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             let body = crate::rpc_stdio::insert_result_to_json(&qr);
-            let payload = serde_json::to_vec(&body).unwrap_or_default();
+            let payload = body.to_string_compact().into_bytes();
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload)
         }
         Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
