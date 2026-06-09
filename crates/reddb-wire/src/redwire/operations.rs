@@ -127,11 +127,19 @@ pub fn encode_query_result_summary_payload(statement: &str, affected: u64) -> Ve
     serde_json::to_vec(&JsonValue::Object(obj)).expect("query result payload JSON is serializable")
 }
 
+pub fn decode_query_result_payload(bytes: &[u8]) -> Result<JsonValue, OperationPayloadError> {
+    json_value_from_payload("QueryResult", bytes)
+}
+
 pub fn encode_get_result_payload(found: bool) -> Vec<u8> {
     let mut obj = JsonMap::new();
     obj.insert("ok".into(), JsonValue::Bool(true));
     obj.insert("found".into(), JsonValue::Bool(found));
     serde_json::to_vec(&JsonValue::Object(obj)).expect("get result payload JSON is serializable")
+}
+
+pub fn decode_get_result_payload(bytes: &[u8]) -> Result<JsonValue, OperationPayloadError> {
+    json_value_from_payload("GetResult", bytes)
 }
 
 pub fn encode_bulk_ok_payload(affected: u64, ids: Vec<JsonValue>) -> Vec<u8> {
@@ -217,6 +225,21 @@ fn decode_key_payload(op: &'static str, bytes: &[u8]) -> Result<KeyPayload, Oper
         _ => return Err(OperationPayloadError::MissingId { op }),
     };
     Ok(KeyPayload { collection, id })
+}
+
+fn json_value_from_payload(
+    op: &'static str,
+    bytes: &[u8],
+) -> Result<JsonValue, OperationPayloadError> {
+    let value: JsonValue =
+        serde_json::from_slice(bytes).map_err(|err| OperationPayloadError::InvalidJson {
+            op,
+            message: err.to_string(),
+        })?;
+    match value {
+        JsonValue::Object(_) => Ok(value),
+        _ => Err(OperationPayloadError::ExpectedObject { op }),
+    }
 }
 
 fn object_from_payload(
@@ -320,13 +343,12 @@ mod tests {
     #[test]
     fn operation_reply_payloads_encode_wire_visible_json_contracts() {
         let query =
-            serde_json::from_slice::<JsonValue>(&encode_query_result_summary_payload("INSERT", 3))
-                .unwrap();
+            decode_query_result_payload(&encode_query_result_summary_payload("INSERT", 3)).unwrap();
         assert_eq!(query["ok"], JsonValue::Bool(true));
         assert_eq!(query["statement"], JsonValue::String("INSERT".into()));
         assert_eq!(query["affected"], JsonValue::Number(3.into()));
 
-        let get = serde_json::from_slice::<JsonValue>(&encode_get_result_payload(false)).unwrap();
+        let get = decode_get_result_payload(&encode_get_result_payload(false)).unwrap();
         assert_eq!(get["ok"], JsonValue::Bool(true));
         assert_eq!(get["found"], JsonValue::Bool(false));
 

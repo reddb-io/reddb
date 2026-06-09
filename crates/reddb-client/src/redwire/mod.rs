@@ -49,8 +49,9 @@ use reddb_wire::redwire::{
     build_bulk_insert_binary_frame, build_bulk_insert_frame, build_bye_frame, build_delete_frame,
     build_get_frame, build_ping_frame, build_query_frame, build_query_with_params_frame,
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
-    encode_bulk_binary_payload, encode_bulk_insert_payload, encode_insert_payload,
-    encode_key_payload, supported_client_preface, BuildError,
+    decode_get_result_payload, decode_query_result_payload, encode_bulk_binary_payload,
+    encode_bulk_insert_payload, encode_insert_payload, encode_key_payload,
+    supported_client_preface, BuildError,
 };
 
 /// Authentication credentials for the RedWire handshake.
@@ -212,7 +213,7 @@ impl RedWireClient {
 
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
         let raw = self.query_raw(sql).await?;
-        let value: serde_json::Value = serde_json::from_slice(raw.as_bytes())
+        let value = decode_query_result_payload(raw.as_bytes())
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))?;
         Ok(QueryResult::from_envelope(value))
     }
@@ -262,10 +263,9 @@ impl RedWireClient {
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::Result => {
-                let value: serde_json::Value =
-                    serde_json::from_slice(&resp.payload).map_err(|e| {
-                        ClientError::new(ErrorCode::Protocol, format!("decode result: {e}"))
-                    })?;
+                let value = decode_query_result_payload(&resp.payload).map_err(|e| {
+                    ClientError::new(ErrorCode::Protocol, format!("decode result: {e}"))
+                })?;
                 Ok(QueryResult::from_envelope(value))
             }
             MessageKind::Error => {
@@ -333,7 +333,7 @@ impl RedWireClient {
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
-            MessageKind::Result => serde_json::from_slice(&resp.payload)
+            MessageKind::Result => decode_get_result_payload(&resp.payload)
                 .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode get: {e}"))),
             MessageKind::Error => Err(ClientError::new(
                 ErrorCode::Engine,
