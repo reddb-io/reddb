@@ -2352,7 +2352,8 @@ impl RedDBRuntime {
                     //
                     // gh-471 iter 2: route through the resolved
                     // `LogDestination`. Performance/Max tiers emit a
-                    // `File(...)` under `<dbname>.rdb.red/logs/`;
+                    // file-backed log destination under the file-owned
+                    // support-directory logs tier;
                     // lower tiers / ephemeral runs report `Stderr`
                     // and we keep the legacy file-next-to-data sink.
                     let data_path = if embedded_single_file {
@@ -2397,7 +2398,7 @@ impl RedDBRuntime {
                     //
                     // gh-471 iter 2: same routing as the audit log —
                     // `LogDestination::File(...)` for Performance/Max
-                    // lands under `<dbname>.rdb.red/logs/slow.log`;
+                    // lands under the file-owned support-directory logs tier;
                     // lower tiers fall back to `red-slow.log` in the
                     // data directory.
                     let fallback_dir = if embedded_single_file {

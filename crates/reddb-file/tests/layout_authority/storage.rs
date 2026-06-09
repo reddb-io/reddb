@@ -289,6 +289,23 @@ fn server_source_does_not_embed_owned_file_suffixes() {
 }
 
 #[test]
+fn tiered_layout_matrix_lives_in_reddb_file_tests() {
+    let root = repo_root();
+    let file_test = read(root.join("crates/reddb-file/tests/storage_layout.rs"));
+    assert!(
+        file_test.contains("use reddb_file::{")
+            && file_test.contains("standard_layout_is_default_and_derives_stable_sidecar_paths"),
+        "tiered layout contract tests should live in reddb-file"
+    );
+
+    let server_test = root.join("crates/reddb-server/tests/storage_layout.rs");
+    assert!(
+        !server_test.exists(),
+        "server must not own the tiered layout matrix test"
+    );
+}
+
+#[test]
 fn server_runtime_uses_file_owned_default_database_path() {
     let root = repo_root();
     let runtime_files = [

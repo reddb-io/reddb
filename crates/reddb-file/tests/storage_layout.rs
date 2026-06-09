@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use reddb_server::storage::{
+use reddb_file::{
     LayoutOverrides, LayoutToggles, LogDestination, LogRoutingOverrides, StorageLayout,
     TieredLayoutPaths,
 };
