@@ -599,6 +599,11 @@ fn server_redwire_frame_header_length_routes_through_reddb_wire() {
 fn client_connector_redwire_is_compatibility_adapter_only() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-client/src/connector/redwire.rs"));
+    let code_lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//!"))
+        .collect::<Vec<_>>();
 
     for forbidden in [
         "tokio::net::TcpStream",
@@ -623,6 +628,32 @@ fn client_connector_redwire_is_compatibility_adapter_only() {
     assert!(
         text.contains("pub use crate::redwire::{Auth, ConnectOptions, RedWireClient};"),
         "connector::redwire should be reexports over the canonical client redwire module"
+    );
+    assert_eq!(
+        code_lines,
+        vec![
+            "pub use crate::error::{ClientError as RedWireError, Result};",
+            "pub use crate::redwire::{Auth, ConnectOptions, RedWireClient};",
+        ],
+        "connector::redwire should stay a compatibility re-export only"
+    );
+}
+
+#[test]
+fn client_redwire_client_type_has_single_definition() {
+    let root = repo_root();
+    let mut definitions = Vec::new();
+    for path in rust_files_under(&root.join("crates/reddb-client/src")) {
+        let text = read(&path);
+        if text.contains("pub struct RedWireClient") {
+            definitions.push(path.strip_prefix(&root).unwrap_or(&path).to_path_buf());
+        }
+    }
+
+    assert_eq!(
+        definitions,
+        vec![PathBuf::from("crates/reddb-client/src/redwire/mod.rs")],
+        "reddb-client should expose exactly one RedWireClient implementation"
     );
 }
 
