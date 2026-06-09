@@ -240,12 +240,12 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "rb_group_commit_{}_{}_{}.wal",
+        let path = reddb_file::layout::group_commit_temp_wal_path(
+            &std::env::temp_dir(),
             name,
             std::process::id(),
-            nanos
-        ));
+            nanos,
+        );
         let _ = std::fs::remove_file(&path);
         (FileGuard { path: path.clone() }, path)
     }

@@ -409,6 +409,19 @@ pub fn store_commit_coord_temp_wal_file_name(name: &str, process_id: u32, nanos:
     format!("rb_commit_coord_{name}_{process_id}_{nanos}.wal")
 }
 
+pub fn group_commit_temp_wal_path(
+    temp_dir: &Path,
+    name: &str,
+    process_id: u32,
+    nanos: u128,
+) -> PathBuf {
+    temp_dir.join(group_commit_temp_wal_file_name(name, process_id, nanos))
+}
+
+pub fn group_commit_temp_wal_file_name(name: &str, process_id: u32, nanos: u128) -> String {
+    format!("rb_group_commit_{name}_{process_id}_{nanos}.wal")
+}
+
 pub fn wal_component_temp_path(
     temp_dir: &Path,
     component: &str,
@@ -771,6 +784,10 @@ mod tests {
         assert_eq!(
             store_commit_coord_temp_wal_path(Path::new("/tmp"), "burst", 7, 99),
             PathBuf::from("/tmp/rb_commit_coord_burst_7_99.wal")
+        );
+        assert_eq!(
+            group_commit_temp_wal_path(Path::new("/tmp"), "batch", 7, 99),
+            PathBuf::from("/tmp/rb_group_commit_batch_7_99.wal")
         );
         assert_eq!(
             wal_component_temp_path(Path::new("/tmp"), "writer", "create", 7),
