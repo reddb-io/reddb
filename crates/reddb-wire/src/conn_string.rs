@@ -151,6 +151,20 @@ pub fn parse(uri: &str) -> Result<ConnectionTarget, ParseError> {
     parse_with_limits(uri, ConnStringLimits::default())
 }
 
+/// Return true for documented embedded aliases that must not resolve to
+/// a remote transport target.
+///
+/// This is intentionally separate from [`parse`]: legacy clients may need
+/// to reject embedded targets before mapping `red://host` onto a remote
+/// compatibility transport.
+pub fn is_embedded_connection_uri(uri: &str) -> bool {
+    let trimmed = uri.trim();
+    matches!(
+        trimmed,
+        "red://" | "red:" | "red:///" | "red://:memory" | "red://:memory:"
+    ) || trimmed.starts_with("red:///")
+}
+
 /// Same as [`parse`] but with caller-supplied DoS guardrails.
 /// Useful for tests that need tighter limits or for callers (a
 /// future admin tool, an offline validator) that need to relax the

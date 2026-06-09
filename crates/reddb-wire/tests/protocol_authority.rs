@@ -81,6 +81,48 @@ fn server_public_reexport_describes_reddb_wire_as_protocol_authority() {
 }
 
 #[test]
+fn client_connection_string_vocabulary_lives_in_reddb_wire() {
+    let root = repo_root();
+    let connect = read(root.join("crates/reddb-client/src/connect.rs"));
+    let red_client = read(root.join("crates/reddb-client/src/bin/red_client.rs"));
+    let wire = read(root.join("crates/reddb-wire/src/conn_string.rs"));
+
+    for forbidden in [
+        "fn is_embedded_uri",
+        "\"red://\" | \"red:\"",
+        "trimmed.starts_with(\"red:///\")",
+        "Url::parse",
+        "split_once(\"://\")",
+    ] {
+        assert!(
+            !red_client.contains(forbidden),
+            "red_client connection-string vocabulary belongs in reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for forbidden in ["Url::parse", "split_once(\"://\")"] {
+        assert!(
+            !connect.contains(forbidden),
+            "reddb-client connect parser should delegate to reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "use reddb_wire::{parse as wire_parse",
+        "is_embedded_connection_uri",
+    ] {
+        assert!(
+            connect.contains(required) || red_client.contains(required),
+            "client connection handling should route through reddb-wire helper {required}"
+        );
+    }
+    assert!(
+        wire.contains("pub fn is_embedded_connection_uri"),
+        "reddb-wire should own embedded connection URI aliases"
+    );
+}
+
+#[test]
 fn server_redwire_frame_header_length_routes_through_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));

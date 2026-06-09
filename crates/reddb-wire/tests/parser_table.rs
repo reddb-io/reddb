@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use reddb_wire::{parse, ConnectionTarget, ParseErrorKind};
+use reddb_wire::{is_embedded_connection_uri, parse, ConnectionTarget, ParseErrorKind};
 
 #[derive(Debug)]
 struct OkCase {
@@ -239,4 +239,23 @@ fn err_cases_match_expected_kind() {
             c.name, c.input, err.message
         );
     }
+}
+
+#[test]
+fn embedded_red_uri_aliases_are_centralized() {
+    for input in [
+        "red://",
+        "red:",
+        "red:///",
+        "red://:memory",
+        "red://:memory:",
+    ] {
+        assert!(
+            is_embedded_connection_uri(input),
+            "{input} should be an embedded alias"
+        );
+    }
+    assert!(is_embedded_connection_uri(" red:///tmp/demo.rdb "));
+    assert!(!is_embedded_connection_uri("red://primary:5050"));
+    assert!(!is_embedded_connection_uri("grpc://primary:5055"));
 }
