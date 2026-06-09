@@ -47,6 +47,7 @@ fn server_uses_reddb_file_for_unified_wal_paths() {
         "crates/reddb-server/src/storage/wal/append_coordinator.rs",
         "crates/reddb-server/src/storage/wal/reader.rs",
         "crates/reddb-server/src/storage/wal/writer.rs",
+        "crates/reddb-server/src/storage/wal/group_commit.rs",
     ];
 
     for file in files {
@@ -57,6 +58,7 @@ fn server_uses_reddb_file_for_unified_wal_paths() {
             "rb_wal_coord_",
             "rb_wal_reader_",
             "rb_wal_writer_",
+            "rb_group_commit_",
             "with_extension(\"rdb-uwal\")",
             "with_extension(\"rdb-wal\")",
             "with_extension(\"rdb-tmp\")",
