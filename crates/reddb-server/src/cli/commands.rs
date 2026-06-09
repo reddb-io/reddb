@@ -470,7 +470,7 @@ fn service_flags() -> Vec<FlagSchema> {
         FlagSchema::new("path")
             .with_short('d')
             .with_description("Persistent database file path")
-            .with_default("/var/lib/reddb/data.rdb"),
+            .with_default(reddb_file::DEFAULT_SERVICE_DATABASE_PATH),
         FlagSchema::new("bind").with_short('b').with_description(
             "Bind address (host:port) for the routed front-door or legacy single-transport mode",
         ),
