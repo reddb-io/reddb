@@ -5,25 +5,13 @@
 //! the view name resolves on `SELECT`, and `DROP MATERIALIZED VIEW`
 //! clears the persisted catalog row.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
-
-fn cleanup(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
-    for ext in ["-wal", "-hdr", "-meta", "-dwb"] {
-        let mut p = path.to_path_buf().into_os_string();
-        p.push(ext);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
+fn persistent_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
@@ -34,11 +22,11 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
 #[test]
 fn materialized_view_survives_restart() {
     let path = persistent_path("mv_persist_survives");
-    cleanup(&path);
 
     // ── First boot: create table, insert rows, define materialized view.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("first open");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(path.path())).expect("first open");
         exec(&rt, "CREATE TABLE orders (id INT, total INT, status TEXT)");
         exec(
             &rt,
@@ -71,7 +59,7 @@ fn materialized_view_survives_restart() {
     //    the API opens. The view name should resolve on SELECT and
     //    appear in `red.materialized_views`.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path())).expect("reopen");
         let names: Vec<String> = rt
             .materialized_view_metadata()
             .into_iter()
@@ -101,17 +89,15 @@ fn materialized_view_survives_restart() {
         let refreshed = exec(&rt, "REFRESH MATERIALIZED VIEW paid_orders");
         assert_eq!(refreshed.statement_type, "refresh_materialized_view");
     }
-
-    cleanup(&path);
 }
 
 #[test]
 fn drop_materialized_view_removes_persisted_descriptor() {
     let path = persistent_path("mv_persist_drop");
-    cleanup(&path);
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("first open");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(path.path())).expect("first open");
         exec(&rt, "CREATE TABLE t (id INT)");
         exec(&rt, "CREATE MATERIALIZED VIEW v AS SELECT * FROM t");
         exec(&rt, "DROP MATERIALIZED VIEW v");
@@ -119,7 +105,7 @@ fn drop_materialized_view_removes_persisted_descriptor() {
     }
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path())).expect("reopen");
         let names: Vec<String> = rt
             .materialized_view_metadata()
             .into_iter()
@@ -130,6 +116,4 @@ fn drop_materialized_view_removes_persisted_descriptor() {
             "dropped view must not rehydrate, got {names:?}",
         );
     }
-
-    cleanup(&path);
 }

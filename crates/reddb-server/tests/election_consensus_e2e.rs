@@ -30,18 +30,15 @@ use reddb_server::replication::{
 
 const LONG: Duration = Duration::from_secs(60);
 
-/// Unique temp dir for one test's per-node durable last-vote files.
-fn temp_cluster_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-election-e2e-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Auto-cleaning temp dir for one test's per-node durable last-vote files.
+/// The returned [`tempfile::TempDir`] guard removes the directory (and every
+/// last-vote file under it) on drop, including on panic; the caller binds it to
+/// a local and keeps it alive for the whole test.
+fn temp_cluster_dir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-election-e2e-{tag}-"))
+        .tempdir()
+        .expect("temp dir")
 }
 
 struct PeerState {
@@ -54,6 +51,9 @@ struct PeerState {
 /// Black-box cluster: each peer is a real durable [`Voter`]; the candidate is
 /// the real coordinator. Clock advances a fixed tick per RPC.
 struct Cluster {
+    // Retained for construction symmetry; the TempDir guard in the test owns
+    // cleanup now, so this field is no longer read.
+    #[allow(dead_code)]
     dir: std::path::PathBuf,
     members: Vec<Member>,
     peers: HashMap<String, PeerState>,
@@ -128,10 +128,6 @@ impl ElectionTransport for Cluster {
     }
 }
 
-fn cleanup(c: &Cluster) {
-    let _ = std::fs::remove_dir_all(&c.dir);
-}
-
 fn candidate(id: &str, current_term: u64, lsn: u64, watermark: u64) -> ElectionRequest {
     ElectionRequest {
         candidate: Member::data_voting(id),
@@ -150,7 +146,7 @@ fn covering_replica_is_elected_by_majority_within_timeout() {
         Member::data_voting("r2"),
         Member::data_voting("r3"),
     ];
-    let mut cluster = Cluster::new(dir, members, 100);
+    let mut cluster = Cluster::new(dir.path().to_path_buf(), members, 100);
     // The old primary is gone; replica r1 covers the watermark (frontier 150).
     let req = candidate("r1", 4, 150, 100);
 
@@ -163,7 +159,6 @@ fn covering_replica_is_elected_by_majority_within_timeout() {
         "got {outcome:?}",
     );
     assert_eq!(cluster.promoted, Some(5));
-    cleanup(&cluster);
 }
 
 // Criterion 2: a candidate below the watermark cannot win.
@@ -175,7 +170,7 @@ fn candidate_below_watermark_cannot_win() {
         Member::data_voting("r2"),
         Member::data_voting("r3"),
     ];
-    let mut cluster = Cluster::new(dir, members, 100);
+    let mut cluster = Cluster::new(dir.path().to_path_buf(), members, 100);
     // r1's frontier 90 does not cover watermark 100.
     let req = candidate("r1", 4, 90, 100);
 
@@ -184,14 +179,13 @@ fn candidate_below_watermark_cannot_win() {
     assert_eq!(outcome, ElectionOutcome::NotElectable);
     assert!(cluster.bumped.is_empty(), "no term burned");
     assert_eq!(cluster.promoted, None);
-    cleanup(&cluster);
 }
 
 // Criterion 3: durable last-vote survives restart — no double-vote.
 #[test]
 fn restarted_voter_does_not_double_vote() {
     let dir = temp_cluster_dir("restart");
-    let path = dir.join("r2.lastvote.json");
+    let path = dir.path().join("r2.lastvote.json");
 
     // r2 grants candidate "alpha" in term 5, persisted to disk.
     {
@@ -215,7 +209,6 @@ fn restarted_voter_does_not_double_vote() {
             }),
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // Criterion 4a: a failed dry-run probe does not bump the term.
@@ -227,7 +220,7 @@ fn failed_probe_does_not_bump_term() {
         Member::data_voting("r2"),
         Member::data_voting("r3"),
     ];
-    let mut cluster = Cluster::new(dir, members, 100);
+    let mut cluster = Cluster::new(dir.path().to_path_buf(), members, 100);
     cluster.partition_away("r2");
     cluster.partition_away("r3");
     let req = candidate("r1", 4, 150, 100);
@@ -242,7 +235,6 @@ fn failed_probe_does_not_bump_term() {
         cluster.bumped.is_empty(),
         "dry-run probe must not bump the term"
     );
-    cleanup(&cluster);
 }
 
 // Criterion 4b: a witness vote counts toward quorum.
@@ -254,7 +246,7 @@ fn witness_completes_the_quorum() {
         Member::data_voting("r2"),
         Member::witness("w1"),
     ];
-    let mut cluster = Cluster::new(dir, members, 100);
+    let mut cluster = Cluster::new(dir.path().to_path_buf(), members, 100);
     cluster.partition_away("r2"); // only candidate + witness reachable
     let req = candidate("r1", 4, 150, 100);
 
@@ -271,7 +263,6 @@ fn witness_completes_the_quorum() {
         ),
         "witness vote should complete the majority, got {outcome:?}",
     );
-    cleanup(&cluster);
 }
 
 // Criterion 4c: a catching-up replica is non-voting and out of the denominator.
@@ -283,7 +274,7 @@ fn catching_up_replica_is_non_voting() {
         Member::data_voting("r2"),
         Member::data_catching_up("r3"), // syncing — excluded
     ];
-    let mut cluster = Cluster::new(dir, members, 100);
+    let mut cluster = Cluster::new(dir.path().to_path_buf(), members, 100);
     let req = candidate("r1", 4, 150, 100);
 
     let outcome = ElectionCoordinator::run(&req, &mut cluster, LONG);
@@ -300,7 +291,6 @@ fn catching_up_replica_is_non_voting() {
         ),
         "got {outcome:?}",
     );
-    cleanup(&cluster);
 }
 
 // Criterion 5: no two primaries in a term, under partition. Two candidates on
@@ -314,7 +304,7 @@ fn no_two_primaries_in_a_term_under_partition() {
 
     // Both partitions read/write the SAME per-node durable files (one disk
     // per node). Build two clusters pointed at the same dir.
-    let mut majority = Cluster::new(dir.clone(), members.clone(), 100);
+    let mut majority = Cluster::new(dir.path().to_path_buf(), members.clone(), 100);
     majority.partition_away("a");
     majority.partition_away("b");
     let c_outcome = ElectionCoordinator::run(&candidate("c", 4, 150, 100), &mut majority, LONG);
@@ -331,7 +321,7 @@ fn no_two_primaries_in_a_term_under_partition() {
     );
     assert_eq!(majority.promoted, Some(5));
 
-    let mut minority = Cluster::new(dir.clone(), members, 100);
+    let mut minority = Cluster::new(dir.path().to_path_buf(), members, 100);
     minority.partition_away("c");
     minority.partition_away("d");
     minority.partition_away("e");
@@ -344,7 +334,7 @@ fn no_two_primaries_in_a_term_under_partition() {
 
     // Durable barrier: a voter d, which granted c in term 5, refuses a in 5
     // even across a process restart (fresh Voter over the same file).
-    let d_path = dir.join("d.lastvote.json");
+    let d_path = dir.path().join("d.lastvote.json");
     let d = Voter::new("d", FileLastVoteStore::new(&d_path));
     assert_eq!(
         d.consider(&VoteRequest::real("a", 5, 150), 100).unwrap(),
@@ -353,5 +343,4 @@ fn no_two_primaries_in_a_term_under_partition() {
             voted_for: "c".to_string(),
         }),
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

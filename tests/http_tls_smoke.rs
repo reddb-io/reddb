@@ -7,6 +7,9 @@
 //!   * A rustls client completes the handshake and reads `/health`.
 //!   * Authorization: Bearer survives the TLS wrap and reaches handlers.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -18,19 +21,6 @@ use reddb::server::tls::{build_server_config, HttpTlsConfig};
 use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
 use rustls::pki_types::{CertificateDer, ServerName};
-
-fn tmpdir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-http-tls-test-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// Generate a fresh self-signed cert + key pair using rcgen.
 fn write_self_signed(dir: &std::path::Path) -> (PathBuf, PathBuf, Vec<u8>) {
@@ -54,8 +44,11 @@ fn write_self_signed(dir: &std::path::Path) -> (PathBuf, PathBuf, Vec<u8>) {
     (cert_path, key_path, cert_der)
 }
 
-fn spawn_https_server(rt: RedDBRuntime, cert_der: Vec<u8>) -> (String, Vec<u8>) {
-    let dir = tmpdir("server");
+fn spawn_https_server(
+    rt: RedDBRuntime,
+    cert_der: Vec<u8>,
+) -> (support::TempDataDir, String, Vec<u8>) {
+    let dir = support::temp_data_dir("http-tls-smoke-server");
     let (cert_path, key_path, der) = write_self_signed(&dir);
     let _ = cert_der; // shadow path: caller passes empty; we use generated
     let cfg = HttpTlsConfig {
@@ -76,7 +69,7 @@ fn spawn_https_server(rt: RedDBRuntime, cert_der: Vec<u8>) -> (String, Vec<u8>) 
 
     // Give the listener a moment.
     thread::sleep(Duration::from_millis(100));
-    (format!("{}", addr), der)
+    (dir, format!("{}", addr), der)
 }
 
 fn rustls_client_get(
@@ -120,7 +113,7 @@ fn rustls_client_get(
 #[test]
 fn https_handshake_and_health_probe() {
     let rt = RedDBRuntime::in_memory().expect("runtime");
-    let (addr, server_cert_der) = spawn_https_server(rt, vec![]);
+    let (_dir, addr, server_cert_der) = spawn_https_server(rt, vec![]);
 
     // /health/live is the universal "process is running" probe — never
     // gated by readiness or auth. Confirms the TLS handshake + HTTP
@@ -137,7 +130,7 @@ fn https_handshake_and_health_probe() {
 #[test]
 fn https_admin_token_over_tls() {
     let rt = RedDBRuntime::in_memory().expect("runtime");
-    let (addr, server_cert_der) = spawn_https_server(rt, vec![]);
+    let (_dir, addr, server_cert_der) = spawn_https_server(rt, vec![]);
 
     // Inject an admin token; expect non-bearer hits to 401, correct
     // bearer to 200 on /admin/status (always-routed admin endpoint).
@@ -165,7 +158,7 @@ fn https_admin_token_over_tls() {
 #[test]
 fn https_alpn_advertises_http11() {
     let rt = RedDBRuntime::in_memory().expect("runtime");
-    let (addr, server_cert_der) = spawn_https_server(rt, vec![]);
+    let (_dir, addr, server_cert_der) = spawn_https_server(rt, vec![]);
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = rustls::RootCertStore::empty();
@@ -203,12 +196,12 @@ fn https_refuses_with_unknown_root() {
     // Client trusts a different cert: handshake must fail. Confirms we
     // are NOT serving plaintext on the TLS port.
     let rt = RedDBRuntime::in_memory().expect("runtime");
-    let (addr, _server_cert_der) = spawn_https_server(rt, vec![]);
+    let (_dir, addr, _server_cert_der) = spawn_https_server(rt, vec![]);
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     // Use an unrelated freshly-generated cert as the client's only trust anchor.
-    let dir = tmpdir("rogue");
-    let (_cp, _kp, rogue_der) = write_self_signed(&dir);
+    let rogue_dir = support::temp_data_dir("http-tls-smoke-rogue");
+    let (_cp, _kp, rogue_der) = write_self_signed(&rogue_dir);
 
     let mut roots = rustls::RootCertStore::empty();
     roots.add(CertificateDer::from(rogue_der)).unwrap();

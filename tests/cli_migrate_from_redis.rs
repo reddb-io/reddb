@@ -2,6 +2,9 @@
 //! These tests spawn the real `red` binary so help text, flag parsing,
 //! exit status, and JSON envelopes stay wired through main().
 
+#[allow(dead_code)]
+mod support;
+
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -9,21 +12,6 @@ use std::thread;
 
 fn red_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
-}
-
-fn scratch_path(label: &str) -> PathBuf {
-    let now_ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-cli-migrate-{}-{}-{}",
-        label,
-        std::process::id(),
-        now_ns
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("data.rdb")
 }
 
 fn one_shot_tcp_listener() -> String {
@@ -55,7 +43,7 @@ fn migrate_from_redis_help_declares_cli_status() {
 #[test]
 fn migrate_from_redis_dry_run_validates_connectivity_without_writes() {
     let redis_url = one_shot_tcp_listener();
-    let path = scratch_path("dry-run");
+    let path = support::temp_db_file("cli-migrate-dry-run");
     let output = Command::new(red_binary())
         .args([
             "migrate-from-redis",
@@ -89,7 +77,7 @@ fn migrate_from_redis_dry_run_validates_connectivity_without_writes() {
 
 #[test]
 fn migrate_from_redis_dual_write_mode_points_to_application_helper() {
-    let path = scratch_path("dual-write");
+    let path = support::temp_db_file("cli-migrate-dual-write");
     let output = Command::new(red_binary())
         .args([
             "migrate-from-redis",

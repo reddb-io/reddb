@@ -11,22 +11,13 @@ use reddb::storage::wal::{
     publish_wal_segment_manifest, PointInTimeRecovery, SnapshotManifest,
 };
 use reddb::storage::RedDB;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[allow(dead_code)]
 mod support;
 
-fn temp_dir(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    p.push(format!("reddb-chaos-{prefix}-{pid}-{nanos}"));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn temp_dir(prefix: &str) -> support::TempDataDir {
+    support::temp_data_dir(prefix)
 }
 
 fn record(lsn: u64, payload: &[u8]) -> reddb::replication::cdc::ChangeRecord {
@@ -99,6 +90,4 @@ fn restore_fails_closed_when_wal_chain_is_broken() {
         msg.to_lowercase().contains("chain"),
         "error must mention chain; got: {msg}"
     );
-
-    let _ = std::fs::remove_dir_all(&work);
 }

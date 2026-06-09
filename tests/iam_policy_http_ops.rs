@@ -18,6 +18,9 @@
 //! * When IAM is inactive (no policies installed), the gate is a
 //!   no-op and dashboards keep their current behavior.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -32,25 +35,17 @@ use reddb::server::RedDBServer;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 struct Harness {
+    _dir: support::TempDataDir,
     addr: String,
     token: String,
     store: Arc<AuthStore>,
 }
 
-fn isolated_runtime(tag: &str) -> RedDBRuntime {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "reddb-iam-ops-http-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+fn isolated_runtime(tag: &str) -> (support::TempDataDir, RedDBRuntime) {
+    let dir = support::temp_data_dir(&format!("iam-ops-http-{tag}"));
     let opts = RedDBOptions::in_memory().with_data_path(dir.join("data.rdb"));
-    RedDBRuntime::with_options(opts).expect("runtime")
+    let rt = RedDBRuntime::with_options(opts).expect("runtime");
+    (dir, rt)
 }
 
 fn spawn(tag: &str) -> Harness {
@@ -58,7 +53,7 @@ fn spawn(tag: &str) -> Harness {
     // make sure it's unset for these tests — we exercise the
     // application-auth path that Red UI uses.
     std::env::remove_var("RED_ADMIN_TOKEN");
-    let rt = isolated_runtime(tag);
+    let (dir, rt) = isolated_runtime(tag);
     let store = Arc::new(AuthStore::new(AuthConfig {
         enabled: true,
         require_auth: true,
@@ -75,6 +70,7 @@ fn spawn(tag: &str) -> Harness {
     });
     thread::sleep(Duration::from_millis(80));
     Harness {
+        _dir: dir,
         addr: addr.to_string(),
         token: key.key,
         store,

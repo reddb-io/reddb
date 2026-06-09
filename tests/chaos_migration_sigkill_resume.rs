@@ -27,9 +27,11 @@
 
 #![cfg(unix)]
 
+#[allow(dead_code)]
+mod support;
+
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use reddb::client::RedDBClient;
@@ -43,33 +45,6 @@ fn pick_port() -> u16 {
     let port = listener.local_addr().expect("local_addr").port();
     drop(listener);
     port
-}
-
-/// Counter so concurrent test runs (rare, but possible) get distinct
-/// temp dirs without colliding.
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Deterministic per-run temp dir under `/tmp/reddb-chaos-<pid>-<n>/`.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let pid = std::process::id();
-        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("reddb-chaos-{pid}-{n}"));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self(path)
-    }
-
-    fn path(&self) -> &PathBuf {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 /// Spawn a `red server` child bound to `127.0.0.1:<port>` over gRPC
@@ -117,8 +92,8 @@ fn wait_until_ready(port: u16) -> Result<(), String> {
 #[test]
 #[ignore = "spawns a real red server subprocess; run with --ignored"]
 fn sigkill_mid_batched_migration_resumes_without_double_apply() {
-    let temp = TempDir::new();
-    let data_path = temp.path().join("data.rdb");
+    let temp = support::temp_data_dir("chaos-sigkill-migration");
+    let data_path = temp.join("data.rdb");
     let port = pick_port();
 
     let mut child = spawn_server(port, &data_path);

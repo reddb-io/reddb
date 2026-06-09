@@ -14,22 +14,17 @@
 //!    `schema:write` / `schema:admin` fallbacks gate their respective
 //!    operations.
 
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-issue-753-{}-{now_nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("tempdir");
+fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>, support::TempDataDir) {
+    let dir = support::temp_data_dir("e2e-issue-753");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
@@ -38,7 +33,7 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&store));
-    (rt, store)
+    (rt, store, dir)
 }
 
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
@@ -79,7 +74,7 @@ fn ddl_action_names_are_advertised_in_the_action_catalog() {
 
 #[test]
 fn allowed_create_table_proceeds_with_grant() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     attach(
         &store,
         "alice-create-users",
@@ -97,7 +92,7 @@ fn allowed_create_table_proceeds_with_grant() {
 
 #[test]
 fn denied_create_table_returns_structured_ui_safe_reason() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     attach(
         &store,
         "alice-no-ddl",
@@ -119,7 +114,7 @@ fn denied_create_table_returns_structured_ui_safe_reason() {
 
 #[test]
 fn allowed_alter_proceeds_and_explicit_deny_is_structured() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     rt.execute_query("CREATE TABLE accounts (id INT)").unwrap();
 
     // Two policies: one that allows alter on accounts, one that denies it.
@@ -155,7 +150,7 @@ fn allowed_alter_proceeds_and_explicit_deny_is_structured() {
 
 #[test]
 fn denied_create_index_returns_structured_reason_on_the_indexed_table() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT, status TEXT)")
         .unwrap();
     attach(
@@ -177,7 +172,7 @@ fn denied_create_index_returns_structured_reason_on_the_indexed_table() {
 #[test]
 fn schema_admin_fallback_gates_create_schema() {
     // No allow → DefaultDeny under PolicyOnly → structured reason.
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     attach(
         &store,
         "alice-select-only",
@@ -194,7 +189,7 @@ fn schema_admin_fallback_gates_create_schema() {
 
 #[test]
 fn schema_admin_grant_allows_create_schema() {
-    let (rt, store) = runtime_with_auth();
+    let (rt, store, _dir) = runtime_with_auth();
     attach(
         &store,
         "alice-schema-admin",

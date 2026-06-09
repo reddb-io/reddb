@@ -9,29 +9,18 @@
 //! `current()` returns one canonical holder + generation, and a
 //! refresh from the winner still works.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::replication::lease::{LeaseError, LeaseStore};
 use reddb::storage::backend::LocalBackend;
-use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-fn temp_prefix(tag: &str) -> String {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-chaos-lease-race-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p.to_string_lossy().to_string()
-}
-
 #[test]
 fn n_threads_racing_for_one_lease_yield_exactly_one_winner() {
-    let prefix = temp_prefix("race");
+    let dir = support::temp_data_dir("chaos-lease-race");
+    let prefix = dir.to_string_lossy().to_string();
     let store = Arc::new(LeaseStore::new(Arc::new(LocalBackend)).with_prefix(prefix.clone()));
 
     const CONTENDERS: usize = 8;
@@ -89,6 +78,4 @@ fn n_threads_racing_for_one_lease_yield_exactly_one_winner() {
         "current() must return the same holder we recorded as the winner"
     );
     assert_eq!(observed.generation, 1, "first acquire seeds generation 1");
-
-    let _ = std::fs::remove_dir_all(&prefix);
 }

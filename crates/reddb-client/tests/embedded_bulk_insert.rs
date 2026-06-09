@@ -11,32 +11,44 @@
 //! a single batch grows by one record's worth of framing plus the
 //! row payloads.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use reddb_client::embedded::EmbeddedClient;
 use reddb_client::JsonValue;
 
-fn unique_db_path(label: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!(
-        "reddb-bulk-{}-{}-{}.rdb",
-        label,
-        std::process::id(),
-        nanos
-    ))
+/// Auto-cleaning DB path: holds the [`tempfile::TempDir`] guard so the temp
+/// directory and the `.rdb` (plus its `.rdb-uwal` sidecar) are removed on drop,
+/// including on panic. Derefs to `&Path` for the helpers below; callers keep the
+/// binding alive for the whole test.
+struct TempDbPath {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for TempDbPath {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn unique_db_path(label: &str) -> TempDbPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("reddb-test-bulk-{label}-"))
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join(format!("reddb-bulk-{label}.rdb"));
+    TempDbPath { _dir: dir, path }
 }
 
 /// WAL filename mirrors `StoreCommitCoordinator::wal_path_for_db` —
 /// `<data_path>.rdb-uwal`. Building it from the data path keeps the
 /// test independent of the engine's internal path helpers.
-fn wal_path_for(data_path: &PathBuf) -> PathBuf {
+fn wal_path_for(data_path: &Path) -> PathBuf {
     data_path.with_extension("rdb-uwal")
 }
 
-fn wal_size(data_path: &PathBuf) -> u64 {
+fn wal_size(data_path: &Path) -> u64 {
     std::fs::metadata(wal_path_for(data_path))
         .map(|m| m.len())
         .unwrap_or(0)
@@ -69,7 +81,7 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     // exactly the per-batch-vs-per-row bytes we want to compare.
     let bulk_path = unique_db_path("bulk");
     let bulk_size = {
-        let db = EmbeddedClient::open(bulk_path.clone()).expect("open bulk db");
+        let db = EmbeddedClient::open(bulk_path.to_path_buf()).expect("open bulk db");
         let inserted = db.bulk_insert("users", &rows(N)).expect("bulk insert");
         assert_eq!(
             inserted.affected, N as u64,
@@ -90,7 +102,7 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     // same engine config.
     let perrow_path = unique_db_path("perrow");
     let perrow_size = {
-        let db = EmbeddedClient::open(perrow_path.clone()).expect("open perrow db");
+        let db = EmbeddedClient::open(perrow_path.to_path_buf()).expect("open perrow db");
         for i in 0..N {
             let sql = format!(
                 "INSERT INTO users (name, age) VALUES ('user_{i}', {})",
@@ -102,10 +114,6 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
         drop(db);
         after
     };
-
-    // Cleanup so a panic still leaves /tmp clean.
-    cleanup_db(&bulk_path);
-    cleanup_db(&perrow_path);
 
     eprintln!(
         "WAL size for {N} rows: bulk_insert={bulk_size} bytes, per-row={perrow_size} bytes (ratio {:.1}×)",
@@ -133,26 +141,10 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     );
 }
 
-fn cleanup_db(path: &PathBuf) {
-    if let Some(parent) = path.parent() {
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if let Ok(rd) = std::fs::read_dir(parent) {
-                for entry in rd.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with(stem) {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[test]
 fn bulk_insert_round_trip() {
     let path = unique_db_path("round-trip");
-    let db = EmbeddedClient::open(path.clone()).expect("open db");
+    let db = EmbeddedClient::open(path.to_path_buf()).expect("open db");
 
     let inserted = db
         .bulk_insert(
@@ -182,7 +174,6 @@ fn bulk_insert_round_trip() {
     assert_eq!(result.rows.len(), 3, "expected 3 rows back from select");
 
     drop(db);
-    cleanup_db(&path);
 }
 
 #[test]
@@ -191,7 +182,7 @@ fn bulk_insert_heterogeneous_payloads_still_work() {
     // the implementation to fall back to the per-row path. Pin
     // that this still inserts every row.
     let path = unique_db_path("hetero");
-    let db = EmbeddedClient::open(path.clone()).expect("open db");
+    let db = EmbeddedClient::open(path.to_path_buf()).expect("open db");
 
     let inserted = db
         .bulk_insert(
@@ -213,18 +204,16 @@ fn bulk_insert_heterogeneous_payloads_still_work() {
     assert_eq!(result.rows.len(), 2);
 
     drop(db);
-    cleanup_db(&path);
 }
 
 #[test]
 fn bulk_insert_empty_is_noop() {
     let path = unique_db_path("empty");
-    let db = EmbeddedClient::open(path.clone()).expect("open db");
+    let db = EmbeddedClient::open(path.to_path_buf()).expect("open db");
     let inserted = db.bulk_insert("anything", &[]).expect("empty bulk");
     assert_eq!(inserted.affected, 0);
     assert!(inserted.ids.is_empty());
     drop(db);
-    cleanup_db(&path);
 }
 
 /// Pins #111: `EmbeddedClient::insert` routes through the same
@@ -239,7 +228,7 @@ fn insert_emits_one_wal_record_per_call() {
     // Run 1: a single `insert` of one row.
     let insert_path = unique_db_path("insert-one");
     let insert_size = {
-        let db = EmbeddedClient::open(insert_path.clone()).expect("open insert db");
+        let db = EmbeddedClient::open(insert_path.to_path_buf()).expect("open insert db");
         let res = db
             .insert(
                 "users",
@@ -261,7 +250,7 @@ fn insert_emits_one_wal_record_per_call() {
     // hitting the same port with the same row.
     let bulk_path = unique_db_path("bulk-one");
     let bulk_size = {
-        let db = EmbeddedClient::open(bulk_path.clone()).expect("open bulk db");
+        let db = EmbeddedClient::open(bulk_path.to_path_buf()).expect("open bulk db");
         let inserted = db
             .bulk_insert(
                 "users",
@@ -284,17 +273,13 @@ fn insert_emits_one_wal_record_per_call() {
     // below the SQL path).
     let sql_path = unique_db_path("insert-sql");
     let sql_size = {
-        let db = EmbeddedClient::open(sql_path.clone()).expect("open sql db");
+        let db = EmbeddedClient::open(sql_path.to_path_buf()).expect("open sql db");
         db.query("INSERT INTO users (name, age) VALUES ('solo', 42)")
             .expect("sql insert");
         let after = wal_size(&sql_path);
         drop(db);
         after
     };
-
-    cleanup_db(&insert_path);
-    cleanup_db(&bulk_path);
-    cleanup_db(&sql_path);
 
     eprintln!(
         "WAL size for 1 row: insert={insert_size} bytes, bulk_insert(1)={bulk_size} bytes, query(SQL)={sql_size} bytes"
@@ -328,7 +313,7 @@ fn insert_emits_one_wal_record_per_call() {
 #[test]
 fn insert_round_trip() {
     let path = unique_db_path("insert-round-trip");
-    let db = EmbeddedClient::open(path.clone()).expect("open db");
+    let db = EmbeddedClient::open(path.to_path_buf()).expect("open db");
 
     let res = db
         .insert(
@@ -353,5 +338,4 @@ fn insert_round_trip() {
     assert_eq!(rid, returned_rid);
 
     drop(db);
-    cleanup_db(&path);
 }

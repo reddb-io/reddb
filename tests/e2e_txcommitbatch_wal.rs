@@ -1,5 +1,8 @@
 //! Atomic TxCommitBatch WAL recovery for autocommit table mutations.
 
+#[allow(dead_code)]
+mod support;
+
 use std::path::{Path, PathBuf};
 
 use reddb::api::DurabilityMode;
@@ -8,55 +11,18 @@ use reddb::storage::schema::Value;
 use reddb::storage::wal::{WalReader, WalRecord};
 use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
-struct DbPath {
-    path: PathBuf,
+fn db_open(db: &support::TempDbFile) -> RedDBRuntime {
+    RedDBRuntime::with_options(
+        RedDBOptions::persistent(db.path())
+            .with_durability_mode(DurabilityMode::WalDurableGrouped)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+            .expect("primary-replica operational profile"),
+    )
+    .expect("persistent runtime")
 }
 
-impl DbPath {
-    fn new(label: &str) -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "reddb_txcommitbatch_{label}_{}_{}.rdb",
-            std::process::id(),
-            nanos
-        ));
-        let db = Self { path };
-        db.cleanup();
-        db
-    }
-
-    fn open(&self) -> RedDBRuntime {
-        RedDBRuntime::with_options(
-            RedDBOptions::persistent(&self.path)
-                .with_durability_mode(DurabilityMode::WalDurableGrouped)
-                .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
-                .expect("primary-replica operational profile"),
-        )
-        .expect("persistent runtime")
-    }
-
-    fn wal_path(&self) -> PathBuf {
-        reddb_file::unified_wal_path(&self.path)
-    }
-
-    fn cleanup(&self) {
-        let _ = std::fs::remove_file(&self.path);
-        let _ = std::fs::remove_file(self.wal_path());
-        let _ = std::fs::remove_file(reddb_file::pager_dwb_path(&self.path));
-        let _ = std::fs::remove_file(reddb_file::pager_header_path(&self.path));
-        let _ = std::fs::remove_file(reddb_file::pager_meta_path(&self.path));
-        let _ = std::fs::remove_file(reddb_file::pager_legacy_wal_path(&self.path));
-        let _ = std::fs::remove_dir_all(reddb_file::support_dir_for(&self.path));
-    }
-}
-
-impl Drop for DbPath {
-    fn drop(&mut self) {
-        self.cleanup();
-    }
+fn db_wal_path(db: &support::TempDbFile) -> PathBuf {
+    reddb_file::unified_wal_path(db.path())
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -124,10 +90,10 @@ fn truncate_wal_tail(path: &Path, bytes: u64) {
 
 #[test]
 fn autocommit_insert_update_delete_recover_from_commit_batches() {
-    let db = DbPath::new("recover");
+    let db = support::temp_db_file("txcommitbatch-wal-recover");
 
     let (keep, deleted) = {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44001);
         exec(&rt, "CREATE TABLE txb_recover (id INT, label TEXT)");
         exec(
@@ -149,7 +115,7 @@ fn autocommit_insert_update_delete_recover_from_commit_batches() {
     };
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44002);
         assert_eq!(
             label_for(&rt, "txb_recover", keep).as_deref(),
@@ -176,7 +142,7 @@ fn autocommit_insert_update_delete_recover_from_commit_batches() {
     }
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44003);
         assert_eq!(
             label_for(&rt, "txb_recover", keep).as_deref(),
@@ -189,11 +155,11 @@ fn autocommit_insert_update_delete_recover_from_commit_batches() {
 
 #[test]
 fn truncated_commit_batch_is_absent_after_recovery() {
-    let db = DbPath::new("truncated");
-    let stable_db_image = db.path.with_extension("stable-copy");
+    let db = support::temp_db_file("txcommitbatch-wal-truncated");
+    let stable_db_image = db.path().with_extension("stable-copy");
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44011);
         exec(&rt, "CREATE TABLE txb_truncated (id INT, label TEXT)");
         exec(
@@ -201,7 +167,7 @@ fn truncated_commit_batch_is_absent_after_recovery() {
             "INSERT INTO txb_truncated (id, label) VALUES (1, 'base')",
         );
         rt.checkpoint().expect("checkpoint stable prefix");
-        std::fs::copy(&db.path, &stable_db_image).expect("copy stable db image");
+        std::fs::copy(db.path(), &stable_db_image).expect("copy stable db image");
         exec(
             &rt,
             "INSERT INTO txb_truncated (id, label) VALUES (2, 'torn')",
@@ -209,12 +175,12 @@ fn truncated_commit_batch_is_absent_after_recovery() {
         clear_current_connection_id();
     }
 
-    std::fs::copy(&stable_db_image, &db.path).expect("restore stable db image");
+    std::fs::copy(&stable_db_image, db.path()).expect("restore stable db image");
     let _ = std::fs::remove_file(&stable_db_image);
-    truncate_wal_tail(&db.wal_path(), 1);
+    truncate_wal_tail(&db_wal_path(&db), 1);
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44012);
         let base = red_entity_id(&rt, "txb_truncated", 1);
         assert_eq!(
@@ -231,10 +197,10 @@ fn truncated_commit_batch_is_absent_after_recovery() {
 
 #[test]
 fn autocommit_table_mutations_write_tx_commit_batch_records() {
-    let db = DbPath::new("record-shape");
+    let db = support::temp_db_file("txcommitbatch-wal-record-shape");
 
     {
-        let rt = db.open();
+        let rt = db_open(&db);
         set_current_connection_id(44021);
         exec(&rt, "CREATE TABLE txb_shape (id INT, label TEXT)");
         exec(
@@ -254,7 +220,7 @@ fn autocommit_table_mutations_write_tx_commit_batch_records() {
         clear_current_connection_id();
     }
 
-    let reader = WalReader::open(db.wal_path()).expect("open wal");
+    let reader = WalReader::open(db_wal_path(&db)).expect("open wal");
     let records: Vec<WalRecord> = reader
         .iter()
         .map(|entry| entry.expect("valid wal record").1)

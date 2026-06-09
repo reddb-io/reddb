@@ -7,18 +7,14 @@ use reddb_file::{
     EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
 };
 
-fn temp_dir(label: &str) -> PathBuf {
-    let unique = format!(
-        "reddb_embedded_rdb_{label}_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let dir = std::env::temp_dir().join(unique);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+/// Auto-cleaning temp dir: the returned [`tempfile::TempDir`] guard removes the
+/// directory and all `.rdb` artifacts under it on drop, including on panic. The
+/// caller keeps the binding alive and reads paths via `dir.path()`.
+fn temp_dir(label: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-embedded-rdb-{label}-"))
+        .tempdir()
+        .expect("temp dir")
 }
 
 fn artifact_names(dir: &Path) -> Vec<String> {
@@ -52,7 +48,7 @@ fn run_crash_child(test_name: &str, path: &Path, op: &str, point: &str) {
 #[test]
 fn create_open_embedded_rdb_uses_one_required_artifact() {
     let dir = temp_dir("create_open");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
 
     let created = EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
     assert_eq!(created.selected_superblock.copy_index, 1);
@@ -70,15 +66,13 @@ fn create_open_embedded_rdb_uses_one_required_artifact() {
     assert_eq!(reopened.selected_superblock.copy_index, 1);
     assert_eq!(reopened.selected_superblock.generation, 2);
     assert_eq!(reopened.manifest.checksum, created.manifest.checksum);
-    assert_eq!(artifact_names(&dir), vec!["data.rdb"]);
-
-    fs::remove_dir_all(dir).unwrap();
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
 }
 
 #[test]
 fn open_falls_back_to_older_superblock_when_newer_copy_is_invalid() {
     let dir = temp_dir("superblock_fallback");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
 
     let mut file = OpenOptions::new()
@@ -94,14 +88,12 @@ fn open_falls_back_to_older_superblock_when_newer_copy_is_invalid() {
     let reopened = EmbeddedRdbArtifact::open(&path).expect("open falls back");
     assert_eq!(reopened.selected_superblock.copy_index, 0);
     assert_eq!(reopened.selected_superblock.generation, 1);
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn open_validates_manifest_checksum_from_selected_superblock() {
     let dir = temp_dir("manifest_checksum");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
 
     let mut file = OpenOptions::new()
@@ -125,14 +117,12 @@ fn open_validates_manifest_checksum_from_selected_superblock() {
 
     let recovered = EmbeddedRdbArtifact::open(&path).expect("open recovers from superblock");
     assert_eq!(recovered.manifest.wal_region_offset, 12288);
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn embedded_wal_frames_are_versioned_ordered_and_chained() {
     let dir = temp_dir("wal_chain");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
 
     EmbeddedRdbArtifact::append_wal_payloads(
@@ -165,14 +155,12 @@ fn embedded_wal_frames_are_versioned_ordered_and_chained() {
     let payloads =
         EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read valid wal prefix");
     assert_eq!(payloads, vec![b"first".to_vec()]);
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn embedded_wal_recovery_ignores_corrupt_or_truncated_tail_frame() {
     let dir = temp_dir("wal_tail");
-    let corrupt_path = dir.join("corrupt.rdb");
+    let corrupt_path = dir.path().join("corrupt.rdb");
     EmbeddedRdbArtifact::create(&corrupt_path).expect("create corrupt artifact");
     EmbeddedRdbArtifact::append_wal_payloads(
         &corrupt_path,
@@ -196,7 +184,7 @@ fn embedded_wal_recovery_ignores_corrupt_or_truncated_tail_frame() {
         EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read valid wal prefix");
     assert_eq!(payloads, vec![b"durable".to_vec()]);
 
-    let truncated_path = dir.join("truncated.rdb");
+    let truncated_path = dir.path().join("truncated.rdb");
     EmbeddedRdbArtifact::create(&truncated_path).expect("create truncated artifact");
     EmbeddedRdbArtifact::append_wal_payloads(
         &truncated_path,
@@ -217,8 +205,6 @@ fn embedded_wal_recovery_ignores_corrupt_or_truncated_tail_frame() {
     let payloads =
         EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read valid wal prefix");
     assert_eq!(payloads, vec![b"durable".to_vec()]);
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -241,7 +227,7 @@ fn embedded_wal_crash_injection_preserves_last_published_prefix() {
         "wal_after_frame_sync",
         "wal_after_superblock_write",
     ] {
-        let path = dir.join(format!("{point}.rdb"));
+        let path = dir.path().join(format!("{point}.rdb"));
         EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
         EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"base".to_vec()])
             .expect("append base frame");
@@ -268,14 +254,12 @@ fn embedded_wal_crash_injection_preserves_last_published_prefix() {
             "base frame lost after {point}: {payloads:?}"
         );
     }
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn embedded_wal_serializes_concurrent_appenders() {
     let dir = temp_dir("wal_concurrent");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
 
     let mut handles = Vec::new();
@@ -299,14 +283,12 @@ fn embedded_wal_serializes_concurrent_appenders() {
     seen.sort();
     seen.dedup();
     assert_eq!(seen.len(), 200);
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn embedded_snapshot_checkpoint_is_copy_on_write_until_superblock_publish() {
     let dir = temp_dir("snapshot_cow");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     let v1 = b"RDST-v1";
     let v2 = b"RDST-v2-new-checkpoint";
     let created = EmbeddedRdbArtifact::create_with_snapshot(&path, v1).expect("create snapshot");
@@ -342,14 +324,12 @@ fn embedded_snapshot_checkpoint_is_copy_on_write_until_superblock_publish() {
             .unwrap(),
         v1
     );
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn embedded_open_skips_newer_superblock_when_snapshot_checksum_fails() {
     let dir = temp_dir("snapshot_checksum_fallback");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     let v1 = b"RDST-good";
     let v2 = b"RDST-bad-checkpoint";
     EmbeddedRdbArtifact::create_with_snapshot(&path, v1).expect("create snapshot");
@@ -372,8 +352,6 @@ fn embedded_open_skips_newer_superblock_when_snapshot_checksum_fails() {
             .unwrap(),
         v1
     );
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -397,7 +375,7 @@ fn embedded_snapshot_crash_injection_preserves_published_snapshot() {
         "snapshot_after_manifest_write",
         "snapshot_after_superblock_write",
     ] {
-        let path = dir.join(format!("{point}.rdb"));
+        let path = dir.path().join(format!("{point}.rdb"));
         EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-base")
             .expect("create base snapshot");
 
@@ -421,6 +399,4 @@ fn embedded_snapshot_crash_injection_preserves_published_snapshot() {
             b"RDST-after-crash".to_vec()
         );
     }
-
-    fs::remove_dir_all(dir).unwrap();
 }

@@ -1,7 +1,6 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::auth::vault::Vault;
 use reddb::auth::{AuthConfig, AuthStore};
@@ -9,14 +8,6 @@ use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 use support::PersistentDbPath;
-
-fn temp_db_path(name: &str) -> std::path::PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
-}
 
 fn open_runtime_with_vault(name: &str) -> (PersistentDbPath, RedDBRuntime, Arc<AuthStore>) {
     let path = PersistentDbPath::new(name);
@@ -143,15 +134,15 @@ fn vault_kv_logical_restore_placeholders_use_false() {
 
 #[test]
 fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
-    let source_path = temp_db_path("secret_cli_dump_source");
-    let dest_path = temp_db_path("secret_cli_dump_dest");
-    let dump_path = temp_db_path("secret_cli_dump_jsonl");
-    let _ = std::fs::remove_file(&source_path);
-    let _ = std::fs::remove_file(&dest_path);
-    let _ = std::fs::remove_file(&dump_path);
+    let source_guard = support::temp_db_file("secret-cli-dump-source");
+    let dest_guard = support::temp_db_file("secret-cli-dump-dest");
+    let dump_guard = support::temp_db_file("secret-cli-dump-jsonl");
+    let source_path = source_guard.path();
+    let dest_path = dest_guard.path();
+    let dump_path = dump_guard.path();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&source_path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(source_path))
             .expect("source runtime should open");
         let _auth = attach_vault(&rt, "cli-pass");
         rt.execute_query("SET CONFIG red.config.demo.enabled = true")
@@ -161,7 +152,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         rt.checkpoint().expect("source checkpoint should succeed");
     }
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&source_path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(source_path))
             .expect("source runtime should reopen");
         let auth = attach_vault(&rt, "cli-pass");
         assert_eq!(
@@ -210,7 +201,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         String::from_utf8_lossy(&restore.stderr)
     );
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&dest_path))
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dest_path))
         .expect("dest runtime should open");
     let auth = attach_vault(&rt, "cli-pass");
     assert_eq!(
@@ -222,9 +213,9 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         .expect("config should restore");
     assert_eq!(config.result.records.len(), 1);
 
-    let _ = std::fs::remove_file(source_path);
-    let _ = std::fs::remove_file(dest_path);
-    let _ = std::fs::remove_file(dump_path);
+    drop(source_guard);
+    drop(dest_guard);
+    drop(dump_guard);
 }
 
 #[test]

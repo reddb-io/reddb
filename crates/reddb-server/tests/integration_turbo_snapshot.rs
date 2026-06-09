@@ -19,16 +19,14 @@ use reddb_server::storage::engine::turboquant::storage::BLOCK_LANES;
 use reddb_server::storage::layout::{LayoutOverrides, StorageLayout, TieredLayoutPaths};
 use reddb_server::{RedDBOptions, RedDBRuntime};
 
-fn db_dir(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("reddb-turbo-snapshot-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn cleanup(dir: &Path) {
-    let _ = std::fs::remove_dir_all(dir);
+/// Auto-cleaning DB directory: the returned [`tempfile::TempDir`] guard removes
+/// the directory and all `.rdb`/`.tv` artifacts on drop (incl. panic). Callers
+/// keep the binding alive for the whole test and read paths via `dir.path()`.
+fn db_dir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-turbo-snapshot-{tag}-"))
+        .tempdir()
+        .expect("temp dir")
 }
 
 fn synth_vector(i: usize) -> Vec<f32> {
@@ -60,8 +58,8 @@ fn snapshot_path_for(dir: &Path, layout: StorageLayout, collection: &str) -> Opt
 #[test]
 fn standard_layout_writes_tv_snapshot_at_checkpoint() {
     let dir = db_dir("standard-writes");
-    let path = dir.join("data.rdb");
-    let snap = snapshot_path_for(&dir, StorageLayout::Standard, "turbo_snap")
+    let path = dir.path().join("data.rdb");
+    let snap = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_snap")
         .expect("standard layout produces a snapshot path");
 
     {
@@ -86,18 +84,16 @@ fn standard_layout_writes_tv_snapshot_at_checkpoint() {
         ".tv snapshot should exist at {} after checkpoint",
         snap.display()
     );
-
-    cleanup(&dir);
 }
 
 #[test]
 fn minimal_layout_writes_no_tv_snapshot() {
     let dir = db_dir("minimal-omits");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
 
-    let standard_path = snapshot_path_for(&dir, StorageLayout::Standard, "turbo_min")
+    let standard_path = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_min")
         .expect("standard layout has a snapshot path");
-    let minimal_path = snapshot_path_for(&dir, StorageLayout::Minimal, "turbo_min");
+    let minimal_path = snapshot_path_for(dir.path(), StorageLayout::Minimal, "turbo_min");
     assert!(
         minimal_path.is_none(),
         "Minimal layout must not advertise a snapshot path"
@@ -123,14 +119,12 @@ fn minimal_layout_writes_no_tv_snapshot() {
         "Minimal layout must not write a .tv anywhere — found {} on disk",
         standard_path.display()
     );
-
-    cleanup(&dir);
 }
 
 #[test]
 fn deleting_tv_snapshot_falls_back_to_rebuild() {
     let dir = db_dir("delete-fallback");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     let n = BLOCK_LANES + 5;
     let vectors: Vec<Vec<f32>> = (0..n).map(synth_vector).collect();
 
@@ -149,7 +143,7 @@ fn deleting_tv_snapshot_falls_back_to_rebuild() {
         rt.checkpoint().expect("checkpoint succeeds");
     }
 
-    let snap = snapshot_path_for(&dir, StorageLayout::Standard, "turbo_del").unwrap();
+    let snap = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_del").unwrap();
     assert!(snap.exists(), "precondition: .tv exists after checkpoint");
 
     // Wipe every .tv file under the support tree before restarting. The
@@ -167,7 +161,7 @@ fn deleting_tv_snapshot_falls_back_to_rebuild() {
             }
         }
     }
-    rm_tv(&dir);
+    rm_tv(dir.path());
     assert!(!snap.exists(), ".tv should be gone after manual deletion");
 
     let rt = RedDBRuntime::with_options(
@@ -188,14 +182,12 @@ fn deleting_tv_snapshot_falls_back_to_rebuild() {
         !hits.result.records.is_empty(),
         "rebuild fallback path must surface the inserted vectors"
     );
-
-    cleanup(&dir);
 }
 
 #[test]
 fn corrupt_tv_snapshot_is_ignored_on_boot() {
     let dir = db_dir("corrupt-fallback");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     let n = BLOCK_LANES + 2;
     let vectors: Vec<Vec<f32>> = (0..n).map(synth_vector).collect();
 
@@ -214,7 +206,7 @@ fn corrupt_tv_snapshot_is_ignored_on_boot() {
         rt.checkpoint().expect("checkpoint succeeds");
     }
 
-    let snap = snapshot_path_for(&dir, StorageLayout::Standard, "turbo_corrupt").unwrap();
+    let snap = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_corrupt").unwrap();
     assert!(snap.exists(), "precondition: .tv exists after checkpoint");
     // Overwrite the magic bytes so the loader rejects the file and the
     // runtime falls back to extent/WAL rebuild.
@@ -242,6 +234,4 @@ fn corrupt_tv_snapshot_is_ignored_on_boot() {
         !hits.result.records.is_empty(),
         "boot must succeed and rebuild from extent when .tv is corrupt"
     );
-
-    cleanup(&dir);
 }

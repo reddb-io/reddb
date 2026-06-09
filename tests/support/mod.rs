@@ -1,9 +1,106 @@
 use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tempfile::TempDir;
+
+// ---------------------------------------------------------------------------
+// Auto-cleaning temp helpers
+// ---------------------------------------------------------------------------
+
+/// An auto-cleaning temporary directory guard.  Derefs to `&Path`.  Removed on
+/// drop, including on panic.  The directory already exists when returned.
+pub struct TempDataDir {
+    inner: TempDir,
+}
+
+impl TempDataDir {
+    pub fn path(&self) -> &Path {
+        self.inner.path()
+    }
+
+    pub fn join<P: AsRef<Path>>(&self, child: P) -> PathBuf {
+        self.inner.path().join(child)
+    }
+}
+
+impl Deref for TempDataDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        self.inner.path()
+    }
+}
+
+impl AsRef<Path> for TempDataDir {
+    fn as_ref(&self) -> &Path {
+        self.inner.path()
+    }
+}
+
+// Lets `&TempDataDir` satisfy `Into<PathBuf>` (via the std blanket
+// `From<&T> for PathBuf where T: AsRef<OsStr>`) and `Command::arg`.
+impl AsRef<std::ffi::OsStr> for TempDataDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.inner.path().as_os_str()
+    }
+}
+
+/// An auto-cleaning `.rdb` file path guard inside a private temp directory.
+/// Derefs to `&Path`.  The parent directory (and the path itself if created)
+/// are removed on drop.
+pub struct TempDbFile {
+    _dir: TempDir,
+    path: PathBuf,
+}
+
+impl TempDbFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Deref for TempDbFile {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempDbFile {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+// Lets `&TempDbFile` satisfy `Into<PathBuf>` (via the std blanket
+// `From<&T> for PathBuf where T: AsRef<OsStr>`) and `Command::arg`, so
+// `RedDBOptions::persistent(&db_file)` and CLI subprocess args work.
+impl AsRef<std::ffi::OsStr> for TempDbFile {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+/// Return an auto-cleaning temporary directory.  The directory already exists.
+pub fn temp_data_dir(tag: &str) -> TempDataDir {
+    let inner = tempfile::Builder::new()
+        .prefix(&format!("reddb-{tag}-"))
+        .tempdir()
+        .unwrap_or_else(|err| panic!("failed to create temp dir for tag '{tag}': {err}"));
+    TempDataDir { inner }
+}
+
+/// Return an auto-cleaning `.rdb` file path inside a private temp directory.
+pub fn temp_db_file(tag: &str) -> TempDbFile {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("reddb-{tag}-"))
+        .tempdir()
+        .unwrap_or_else(|err| panic!("failed to create temp dir for tag '{tag}': {err}"));
+    let path = dir.path().join("data.rdb");
+    TempDbFile { _dir: dir, path }
+}
 
 pub mod mock_ai_provider;
 pub mod prometheus;
@@ -74,21 +171,25 @@ pub fn temp_db() -> (TempDir, PathBuf) {
     TestDb::new().into_parts()
 }
 
+/// A persistent `.rdb` path inside a private auto-cleaning temp directory.
+///
+/// The directory (and every engine artifact written beside `data.rdb`:
+/// `data.rdb.red/`, `-uwal`, lease, manifest, …) is removed when the guard
+/// drops, including on panic — so a failing test can never leak temp residue.
 #[derive(Debug)]
 pub struct PersistentDbPath {
+    _dir: TempDir,
     base: PathBuf,
 }
 
 impl PersistentDbPath {
     pub fn new(prefix: &str) -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let base = std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"));
-        let path = Self { base };
-        path.cleanup();
-        path
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("reddb-{prefix}-"))
+            .tempdir()
+            .unwrap_or_else(|err| panic!("failed to create temp dir for '{prefix}': {err}"));
+        let base = dir.path().join("data.rdb");
+        Self { _dir: dir, base }
     }
 
     pub fn open_runtime(&self) -> RedDBRuntime {
@@ -99,35 +200,6 @@ impl PersistentDbPath {
 
     fn path_string(&self) -> String {
         self.base.to_string_lossy().to_string()
-    }
-
-    fn cleanup(&self) {
-        if let Some(parent) = self.base.parent() {
-            let stem = self
-                .base
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if let Ok(entries) = std::fs::read_dir(parent) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                        continue;
-                    };
-                    if name == stem || name.starts_with(&format!("{stem}-")) {
-                        let _ = std::fs::remove_file(&path);
-                        let _ = std::fs::remove_dir_all(&path);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl Drop for PersistentDbPath {
-    fn drop(&mut self) {
-        self.cleanup();
     }
 }
 

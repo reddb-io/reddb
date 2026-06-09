@@ -8,6 +8,9 @@
 //!   - the legacy no-param path still works
 //!   - arity errors surface clearly
 
+#[allow(dead_code)]
+mod support;
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -15,22 +18,7 @@ fn red() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
 }
 
-fn scratch_db(label: &str) -> PathBuf {
-    let now_ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-cli-param-{}-{}-{}",
-        label,
-        std::process::id(),
-        now_ns
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("data.rdb")
-}
-
-fn run_query(path: &PathBuf, sql: &str, extra: &[&str]) -> (String, String, i32) {
+fn run_query(path: &std::path::Path, sql: &str, extra: &[&str]) -> (String, String, i32) {
     let path_str = path.display().to_string();
     let mut args: Vec<&str> = vec!["query", "--path", &path_str, sql];
     args.extend_from_slice(extra);
@@ -47,7 +35,7 @@ fn run_query(path: &PathBuf, sql: &str, extra: &[&str]) -> (String, String, i32)
     )
 }
 
-fn seed(path: &PathBuf) {
+fn seed(path: &std::path::Path) {
     let (_o, e, c) = run_query(path, "CREATE TABLE t (id INTEGER, name TEXT)", &["--json"]);
     assert_eq!(c, 0, "create: {e}");
     for (id, name) in [(1, "alice"), (2, "bob"), (3, "carol")] {
@@ -59,7 +47,7 @@ fn seed(path: &PathBuf) {
 
 #[test]
 fn legacy_no_param_select_still_works() {
-    let path = scratch_db("legacy");
+    let path = support::temp_db_file("cli-param-legacy");
     seed(&path);
     let (stdout, stderr, code) = run_query(&path, "SELECT * FROM t", &["--json"]);
     assert_eq!(code, 0, "stderr={stderr}");
@@ -68,7 +56,7 @@ fn legacy_no_param_select_still_works() {
 
 #[test]
 fn single_int_param_binds_dollar_one() {
-    let path = scratch_db("int");
+    let path = support::temp_db_file("cli-param-int");
     seed(&path);
     let (stdout, stderr, code) = run_query(
         &path,
@@ -82,7 +70,7 @@ fn single_int_param_binds_dollar_one() {
 
 #[test]
 fn auto_typed_string_param_falls_back_to_text() {
-    let path = scratch_db("text");
+    let path = support::temp_db_file("cli-param-text");
     seed(&path);
     let (stdout, stderr, code) = run_query(
         &path,
@@ -96,7 +84,7 @@ fn auto_typed_string_param_falls_back_to_text() {
 
 #[test]
 fn multiple_params_bind_positional_order() {
-    let path = scratch_db("multi");
+    let path = support::temp_db_file("cli-param-multi");
     seed(&path);
     let (stdout, stderr, code) = run_query(
         &path,
@@ -110,7 +98,7 @@ fn multiple_params_bind_positional_order() {
 
 #[test]
 fn param_type_text_keeps_numeric_string_as_text() {
-    let path = scratch_db("ty-text");
+    let path = support::temp_db_file("cli-param-ty-text");
     seed(&path);
     // Insert a row whose name is the digit string "42".
     let (_o, e, c) = run_query(
@@ -134,7 +122,7 @@ fn param_type_text_keeps_numeric_string_as_text() {
 
 #[test]
 fn param_at_file_loads_json_content() {
-    let path = scratch_db("file");
+    let path = support::temp_db_file("cli-param-file");
     seed(&path);
     // Drop the value into a JSON file (`@file` form).
     let pf = path.parent().unwrap().join("val.json");
@@ -151,7 +139,7 @@ fn param_at_file_loads_json_content() {
 
 #[test]
 fn arity_mismatch_is_a_clear_error() {
-    let path = scratch_db("arity");
+    let path = support::temp_db_file("cli-param-arity");
     seed(&path);
     let (_stdout, stderr, code) = run_query(
         &path,

@@ -9,36 +9,20 @@
 //! by post-hoc file mutation, which is the same shape as
 //! `e2e_seqn_journal_policy::recovery_handles_present_absent_and_corrupt_binary`.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime, StorageDeployPreset};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const PAGE_BYTES: u64 = 4096;
 const ROWS: usize = 25;
 
 // Serialise tests that flip the process-global fold-DWB toggle.
 static POLICY_GUARD: Mutex<()> = Mutex::new(());
-
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
-
-fn cleanup(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(reddb_file::pager_dwb_path(path));
-    let _ = std::fs::remove_file(reddb_file::pager_header_path(path));
-    let _ = std::fs::remove_file(reddb_file::pager_meta_path(path));
-    let _ = std::fs::remove_file(reddb_file::pager_legacy_wal_path(path));
-    let _ = std::fs::remove_file(reddb_file::unified_wal_path(path));
-    let _ = std::fs::remove_dir_all(reddb_file::support_dir_for(path));
-}
 
 fn operational_options(path: &Path) -> RedDBOptions {
     RedDBOptions::persistent(path)
@@ -48,13 +32,13 @@ fn operational_options(path: &Path) -> RedDBOptions {
 
 /// Populate a fresh DB with `ROWS` rows in its own table and run a
 /// checkpoint so the pages reach the main data file. Returns the
-/// path on disk for the caller to corrupt.
-fn populate(prefix: &str) -> PathBuf {
-    let path = persistent_path(prefix);
-    cleanup(&path);
+/// auto-cleaning guard for the caller to keep alive while corrupting.
+fn populate(prefix: &str) -> support::TempDbFile {
+    let db = support::temp_db_file(prefix);
+    let path = db.path();
 
     let rt =
-        RedDBRuntime::with_options(operational_options(&path)).expect("persistent runtime opens");
+        RedDBRuntime::with_options(operational_options(path)).expect("persistent runtime opens");
     rt.execute_query("CREATE TABLE crash_rows (n INTEGER, label TEXT)")
         .expect("ddl");
     for i in 0..ROWS {
@@ -65,7 +49,7 @@ fn populate(prefix: &str) -> PathBuf {
     }
     rt.checkpoint().expect("flush");
     drop(rt);
-    path
+    db
 }
 
 /// Overwrite the trailing 4 KiB of the data file with deterministic
@@ -104,14 +88,14 @@ fn crash_during_page_write_recovers_with_fold_off() {
     set_fold_dwb_into_wal_enabled(false);
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
 
-    let path = populate("crash_fold_off");
-    corrupt_last_page(&path);
-    let recovered = reopen_and_count(&path);
+    let db = populate("crash_fold_off");
+    let path = db.path();
+    corrupt_last_page(path);
+    let recovered = reopen_and_count(path);
     assert_eq!(
         recovered, ROWS,
         "WAL replay must reconstruct all committed rows when DWB is on",
     );
-    cleanup(&path);
 }
 
 #[test]
@@ -120,13 +104,13 @@ fn crash_during_page_write_recovers_with_fold_on() {
     set_fold_dwb_into_wal_enabled(true);
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
 
-    let path = populate("crash_fold_on");
-    corrupt_last_page(&path);
-    let recovered = reopen_and_count(&path);
+    let db = populate("crash_fold_on");
+    let path = db.path();
+    corrupt_last_page(path);
+    let recovered = reopen_and_count(path);
     assert_eq!(
         recovered, ROWS,
         "WAL replay must reconstruct all committed rows when fold-DWB-into-WAL is on",
     );
-    cleanup(&path);
     set_fold_dwb_into_wal_enabled(false);
 }

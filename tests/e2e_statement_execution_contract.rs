@@ -2,6 +2,9 @@
 //! routing. These tests intentionally drive `execute_query` and the
 //! application use case surface instead of private frame modules.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::ExecuteQueryInput;
 use reddb::auth::Role;
 use reddb::runtime::mvcc::{
@@ -10,24 +13,17 @@ use reddb::runtime::mvcc::{
 };
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
 }
 
-fn persistent_runtime(path: &PathBuf) -> RedDBRuntime {
+fn persistent_runtime(path: &support::TempDbFile) -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("persistent runtime")
 }
 
-fn temp_db_path(label: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    path.push(format!("reddb-{label}-{}-{nanos}.rdb", std::process::id()));
-    path
+fn temp_db_path(label: &str) -> support::TempDbFile {
+    support::temp_db_file(label)
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -98,13 +94,6 @@ fn selected_text(rt: &RedDBRuntime, sql: &str) -> String {
         Some(Value::Text(text)) => text.to_string(),
         other => panic!("expected text scalar, got {other:?} in record {record:?}"),
     }
-}
-
-fn cleanup_persistent_path(path: &PathBuf) {
-    let _ = std::fs::remove_file(path);
-    let l2 = path.with_extension("result-cache.l2");
-    let _ = std::fs::remove_file(&l2);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&l2));
 }
 
 fn seed_target_scan_fixture(rt: &RedDBRuntime) {
@@ -253,7 +242,6 @@ fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation() {
 
     clear_current_tenant();
     clear_current_auth_identity();
-    cleanup_persistent_path(&path);
 }
 
 #[test]
@@ -291,8 +279,6 @@ fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
             "the stale pre-restart result should have been invalidated before rehydrate"
         );
     }
-
-    cleanup_persistent_path(&path);
 }
 
 #[test]

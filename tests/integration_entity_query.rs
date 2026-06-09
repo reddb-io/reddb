@@ -4,6 +4,9 @@
 //! with filtering/ordering/pagination, universal queries, EXPLAIN, scan, similarity search,
 //! text search, and cross-model entity scenarios.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::{
     CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput, CreateRowInput,
     CreateVectorInput, DeleteEntityInput, ExecuteQueryInput, ExplainQueryInput, PatchEntityInput,
@@ -2309,15 +2312,9 @@ fn test_fast_entity_id_lookup_persistent() {
     // Regression: WHERE _entity_id = N on a persistent collection
     // used to return 0 rows because the fast path hit the B-tree
     // index with a stale snapshot.
-    let tmp = std::env::temp_dir().join(format!(
-        "reddb_fast_id_{}.rdb",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let _tmp_dir = support::temp_data_dir("entity-fast-id");
+    let tmp = _tmp_dir.join("data.rdb");
     let path_str = tmp.to_string_lossy().to_string();
-    let _ = std::fs::remove_file(&tmp);
 
     let rt = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
         .expect("open persistent runtime");
@@ -2354,8 +2351,6 @@ fn test_fast_entity_id_lookup_persistent() {
         1,
         "fast path `red_entity_id = {eid}` must return the inserted row"
     );
-
-    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]
@@ -2835,15 +2830,9 @@ fn finding_1_select_after_bulk_insert_persistent_reopen() {
     // writes and the read. This catches the case where data lives
     // in a process-local in-memory segment manager that is never
     // rehydrated from the persisted B-tree on open.
-    let tmp = std::env::temp_dir().join(format!(
-        "reddb_f1_reopen_{}.rdb",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let _tmp_dir = support::temp_data_dir("entity-f1-reopen");
+    let tmp = _tmp_dir.join("data.rdb");
     let path_str = tmp.to_string_lossy().to_string();
-    let _ = std::fs::remove_file(&tmp);
 
     const N: usize = 25;
     {
@@ -2895,11 +2884,6 @@ fn finding_1_select_after_bulk_insert_persistent_reopen() {
     );
 
     drop(rt2);
-    let _ = std::fs::remove_dir_all(&tmp);
-    let _ = std::fs::remove_file(&tmp);
-    let _ = std::fs::remove_file(format!("{path_str}-dwb"));
-    let _ = std::fs::remove_file(format!("{path_str}-hdr"));
-    let _ = std::fs::remove_file(format!("{path_str}-meta"));
 }
 
 #[test]

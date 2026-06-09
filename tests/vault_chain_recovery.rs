@@ -17,6 +17,9 @@
 //!   * Legacy v1 vaults that pre-date the chain refuse to load and
 //!     surface operator guidance.
 
+#[allow(dead_code)]
+mod support;
+
 use std::collections::HashMap;
 
 use reddb::auth::vault::{Vault, VaultError, VaultState};
@@ -24,18 +27,10 @@ use reddb::auth::{ApiKey, Role, User, UserId};
 use reddb::storage::engine::page::{Page, PageType, HEADER_SIZE};
 use reddb::storage::engine::pager::{Pager, PagerConfig};
 
-fn scratch_path(label: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb_vault_chain_{}_{}_{}",
-        label,
-        std::process::id(),
-        id
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("vault.rdb")
+fn scratch_path(label: &str) -> (support::TempDataDir, std::path::PathBuf) {
+    let dir = support::temp_data_dir(&format!("vault-chain-{label}"));
+    let path = dir.join("vault.rdb");
+    (dir, path)
 }
 
 fn now_ms() -> u128 {
@@ -121,7 +116,7 @@ fn read_first_data_pointer(pager: &Pager) -> u32 {
 
 #[test]
 fn header_pointer_to_missing_page_returns_clear_error() {
-    let db_path = scratch_path("missing-data");
+    let (_dir, db_path) = scratch_path("missing-data");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
     let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
 
@@ -151,7 +146,7 @@ fn header_pointer_to_missing_page_returns_clear_error() {
 
 #[test]
 fn data_page_magic_corruption_returns_clear_error() {
-    let db_path = scratch_path("bad-magic");
+    let (_dir, db_path) = scratch_path("bad-magic");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
     let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
 
@@ -188,7 +183,7 @@ fn premature_terminator_with_outstanding_payload_fails() {
     // chain_count says >0 but first_data_page_id is 0. Make sure the
     // walker doesn't dereference page id 0 (which is the DB header
     // page) and instead produces a clean error.
-    let db_path = scratch_path("premature-end");
+    let (_dir, db_path) = scratch_path("premature-end");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
     let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
 
@@ -216,7 +211,7 @@ fn premature_terminator_with_outstanding_payload_fails() {
 fn legacy_v1_vault_refuses_to_load() {
     // Hand-craft a vault page with version byte = 1. We don't need
     // valid ciphertext — the version check fires first.
-    let db_path = scratch_path("legacy-v1");
+    let (_dir, db_path) = scratch_path("legacy-v1");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
 
     // Reserve slots so id 2 is a real on-disk page.

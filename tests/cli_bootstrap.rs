@@ -3,29 +3,15 @@
 //! so they exercise the full main() path including the boot-time
 //! secret expansion.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 fn red_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
-}
-
-/// Per-test scratch dir under /tmp. Pid + nanos suffix dodges
-/// collision when the test binary runs in parallel.
-fn scratch_dir(label: &str) -> PathBuf {
-    let now_ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-cli-bootstrap-{}-{}-{}",
-        label,
-        std::process::id(),
-        now_ns
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// Run `red bootstrap ...` with a short-lived REDDB_VAULT_KEY env var
@@ -62,7 +48,7 @@ fn run_bootstrap(args: &[&str], password: Option<&str>, vault_key: &str) -> (i32
 
 #[test]
 fn bootstrap_succeeds_and_prints_certificate() {
-    let dir = scratch_dir("ok");
+    let dir = support::temp_data_dir("cli-bootstrap-ok");
     let path = dir.join("x.rdb");
     let path_str = path.display().to_string();
 
@@ -93,12 +79,11 @@ fn bootstrap_succeeds_and_prints_certificate() {
         cert.chars().all(|c| c.is_ascii_hexdigit()),
         "certificate not hex: {cert:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn bootstrap_fails_when_already_bootstrapped() {
-    let dir = scratch_dir("rerun");
+    let dir = support::temp_data_dir("cli-bootstrap-rerun");
     let path = dir.join("x.rdb");
     let path_str = path.display().to_string();
 
@@ -139,12 +124,11 @@ fn bootstrap_fails_when_already_bootstrapped() {
         stderr2.to_lowercase().contains("bootstrap") || stderr2.to_lowercase().contains("already"),
         "stderr should mention re-bootstrap; got: {stderr2}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn bootstrap_json_output_has_required_keys() {
-    let dir = scratch_dir("json");
+    let dir = support::temp_data_dir("cli-bootstrap-json");
     let path = dir.join("x.rdb");
     let path_str = path.display().to_string();
 
@@ -172,12 +156,11 @@ fn bootstrap_json_output_has_required_keys() {
     assert!(line.contains("\"username\":\"admin\""), "got: {line}");
     assert!(line.contains("\"token\":\""), "got: {line}");
     assert!(line.contains("\"certificate\":\""), "got: {line}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn bootstrap_requires_vault_flag() {
-    let dir = scratch_dir("novault");
+    let dir = support::temp_data_dir("cli-bootstrap-novault");
     let path = dir.join("x.rdb");
     let path_str = path.display().to_string();
 
@@ -198,7 +181,6 @@ fn bootstrap_requires_vault_flag() {
         stderr.contains("--vault") || stderr.contains("vault"),
         "stderr should mention vault: {stderr}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -208,7 +190,7 @@ fn password_file_env_expanded_into_password_var() {
     // and run bootstrap WITHOUT --password-stdin or --password.
     // Bootstrap should pull the password out of REDDB_PASSWORD,
     // which was filled by the boot-time expander.
-    let dir = scratch_dir("file-expand");
+    let dir = support::temp_data_dir("cli-bootstrap-file-expand");
     let path = dir.join("x.rdb");
     let path_str = path.display().to_string();
     let pwfile = dir.join("pw");
@@ -246,14 +228,13 @@ fn password_file_env_expanded_into_password_var() {
     );
     let cert = stdout.trim();
     assert_eq!(cert.len(), 64, "expected 64-hex cert, got {cert:?}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn password_file_and_password_var_conflict_fails_boot() {
     // When both REDDB_PASSWORD and REDDB_PASSWORD_FILE are set the
     // process must refuse to start (exit 2 from main).
-    let dir = scratch_dir("conflict");
+    let dir = support::temp_data_dir("cli-bootstrap-conflict");
     let pwfile = dir.join("pw");
     std::fs::write(&pwfile, "from-file").unwrap();
 
@@ -277,5 +258,4 @@ fn password_file_and_password_var_conflict_fails_boot() {
         stderr.contains("REDDB_PASSWORD") || stderr.contains("_FILE"),
         "expected conflict message; got: {stderr}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,23 +1,19 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use reddb_file::EmbeddedRdbArtifact;
 use reddb_server::storage::schema::Value;
 use reddb_server::storage::{EntityId, UnifiedStore, UnifiedStoreConfig};
 use reddb_server::{RedDBOptions, RedDBRuntime};
 
-fn temp_dir(label: &str) -> PathBuf {
-    let unique = format!(
-        "reddb_embedded_rdb_{label}_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let dir = std::env::temp_dir().join(unique);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+/// Auto-cleaning temp dir: the returned [`tempfile::TempDir`] guard removes the
+/// directory and the `.rdb` artifact (incl. internal WAL) on drop, including on
+/// panic. The caller keeps the binding alive and reads paths via `dir.path()`.
+fn temp_dir(label: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("reddb-test-embedded-rdb-{label}-"))
+        .tempdir()
+        .expect("temp dir")
 }
 
 fn artifact_names(dir: &Path) -> Vec<String> {
@@ -32,7 +28,7 @@ fn artifact_names(dir: &Path) -> Vec<String> {
 #[test]
 fn embedded_runtime_persists_table_data_inside_single_rdb_file() {
     let dir = temp_dir("runtime_single_file");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
 
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("open runtime");
@@ -43,7 +39,7 @@ fn embedded_runtime_persists_table_data_inside_single_rdb_file() {
         rt.flush().expect("flush embedded artifact");
     }
 
-    assert_eq!(artifact_names(&dir), vec!["data.rdb"]);
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
     let artifact = EmbeddedRdbArtifact::open(&path).expect("open embedded artifact");
     assert_eq!(artifact.manifest.snapshot_bytes > 0, true);
     assert!(EmbeddedRdbArtifact::read_snapshot(&artifact)
@@ -60,9 +56,7 @@ fn embedded_runtime_persists_table_data_inside_single_rdb_file() {
         rt.flush().expect("flush reopened artifact");
     }
 
-    assert_eq!(artifact_names(&dir), vec!["data.rdb"]);
-
-    fs::remove_dir_all(dir).unwrap();
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
 }
 
 #[test]
@@ -78,7 +72,7 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
     }
 
     let dir = temp_dir("internal_wal_replay");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg("embedded_runtime_replays_internal_wal_without_flush_or_drop")
@@ -93,7 +87,7 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(artifact_names(&dir), vec!["data.rdb"]);
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
     let artifact = EmbeddedRdbArtifact::open(&path).expect("open embedded artifact");
     assert_eq!(artifact.manifest.snapshot_bytes, 0);
     assert!(
@@ -114,15 +108,13 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
         checkpointed.manifest.wal_region_offset
     );
     assert!(checkpointed.manifest.snapshot_bytes > 0);
-    assert_eq!(artifact_names(&dir), vec!["data.rdb"]);
-
-    fs::remove_dir_all(dir).unwrap();
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
 }
 
 #[test]
 fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
     let dir = temp_dir("internal_wal_expand");
-    let path = dir.join("data.rdb");
+    let path = dir.path().join("data.rdb");
 
     EmbeddedRdbArtifact::create(&path).expect("create embedded artifact");
     let store =
@@ -147,7 +139,7 @@ fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
         .insert_auto("blobs", entity)
         .expect("insert large row");
 
-    assert_eq!(artifact_names(&dir), vec!["data.rdb"]);
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
     let artifact = EmbeddedRdbArtifact::open(&path).expect("open embedded artifact");
     assert!(artifact.manifest.snapshot_bytes > 0);
     assert!(artifact.manifest.wal_region_bytes > 64 * 1024);
@@ -158,6 +150,4 @@ fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
 
     let frames = EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read wal payloads");
     assert!(!frames.is_empty(), "expected retried wal frame");
-
-    fs::remove_dir_all(dir).unwrap();
 }

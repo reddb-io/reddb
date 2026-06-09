@@ -11,6 +11,9 @@
 //!     exceeding `handler_timeout` yields a 503 emitted over the TLS
 //!     stream; the permit drops; a follow-up TLS request succeeds.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -22,19 +25,6 @@ use reddb::server::tls::{build_server_config, HttpTlsConfig};
 use reddb::server::RedDBServer;
 use reddb::{RedDBOptions, RedDBRuntime};
 use rustls::pki_types::{CertificateDer, ServerName};
-
-fn tmpdir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-http-tls-limiter-test-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn write_self_signed(dir: &std::path::Path) -> (PathBuf, PathBuf, Vec<u8>) {
     use rcgen::{CertificateParams, KeyPair};
@@ -57,8 +47,8 @@ fn write_self_signed(dir: &std::path::Path) -> (PathBuf, PathBuf, Vec<u8>) {
     (cert_path, key_path, cert_der)
 }
 
-fn build_tls_config(label: &str) -> (Arc<rustls::ServerConfig>, Vec<u8>) {
-    let dir = tmpdir(label);
+fn build_tls_config(label: &str) -> (support::TempDataDir, Arc<rustls::ServerConfig>, Vec<u8>) {
+    let dir = support::temp_data_dir(&format!("http-tls-limiter-{label}"));
     let (cert_path, key_path, der) = write_self_signed(&dir);
     let cfg = HttpTlsConfig {
         cert_path,
@@ -66,7 +56,7 @@ fn build_tls_config(label: &str) -> (Arc<rustls::ServerConfig>, Vec<u8>) {
         client_ca_path: None,
     };
     let server_config = build_server_config(&cfg).expect("server config builds");
-    (server_config, der)
+    (dir, server_config, der)
 }
 
 fn client_config_trusting(cert_der: &[u8]) -> Arc<rustls::ClientConfig> {
@@ -146,7 +136,7 @@ fn tls_get_health(addr: &str, client_cfg: Arc<rustls::ClientConfig>) -> String {
 #[test]
 fn tls_rejection_when_clear_text_saturates_then_recovers() {
     let cap = 2;
-    let (tls_cfg, cert_der) = build_tls_config("cross");
+    let (_dir, tls_cfg, cert_der) = build_tls_config("cross");
 
     // Boot a single RedDBServer with one shared limiter, then bind two
     // listeners on it: clear-text and TLS.
@@ -231,7 +221,7 @@ fn tls_handler_deadline_emits_503_then_recovers() {
     let inject_ms: u64 = 500;
     let slack = Duration::from_millis(2_000);
 
-    let (tls_cfg, cert_der) = build_tls_config("deadline");
+    let (_dir, tls_cfg, cert_der) = build_tls_config("deadline");
     let opts = RedDBOptions::in_memory();
     let runtime = RedDBRuntime::with_options(opts).expect("runtime");
     let server = RedDBServer::new(runtime).with_handler_timeout(handler_timeout);
@@ -298,7 +288,7 @@ fn tls_handler_deadline_emits_503_then_recovers() {
 #[test]
 fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     let cap = 2;
-    let (tls_cfg, cert_der) = build_tls_config("mixed");
+    let (_dir, tls_cfg, cert_der) = build_tls_config("mixed");
 
     let opts = RedDBOptions::in_memory();
     let runtime = RedDBRuntime::with_options(opts).expect("runtime");

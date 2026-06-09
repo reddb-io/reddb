@@ -14,21 +14,15 @@
 //!    (four contract columns + three sweeper observability columns
 //!    added in slice 12).
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::ExecuteQueryInput;
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
 
-fn unique_dir(prefix: &str) -> PathBuf {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut path = std::env::temp_dir();
-    path.push(format!("reddb-{prefix}-{pid}-{nanos}"));
-    std::fs::create_dir_all(&path).unwrap();
-    path
+fn unique_dir(prefix: &str) -> support::TempDataDir {
+    support::temp_data_dir(prefix)
 }
 
 #[test]
@@ -187,6 +181,4 @@ fn retention_policy_persists_across_restart() {
             other => panic!("expected integer estimate, got {other:?}"),
         }
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

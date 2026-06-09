@@ -25,7 +25,9 @@
 //!    (and the replica fetcher) see the boundary explicitly instead
 //!    of having to infer it from a flurry of inserts.
 
-use std::path::PathBuf;
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,25 +42,8 @@ use reddb::{RedDBOptions, RedDBRuntime};
 
 const BACKING: &str = "paid_orders_596";
 
-fn temp_path(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "reddb-596-{prefix}-{}-{}.rdb",
-        std::process::id(),
-        nanos
-    ))
-}
-
-fn cleanup(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
-    for ext in ["-wal", "-hdr", "-meta", "-dwb", "-uwal"] {
-        let mut p = path.to_path_buf().into_os_string();
-        p.push(ext);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
+fn temp_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 /// Build an entity in the same shape as the runtime's REFRESH path
@@ -179,8 +164,6 @@ fn replica_replay_of_refresh_collection_matches_primary_row_for_row() {
 
     drop(primary_rt);
     drop(replica);
-    cleanup(&primary_path);
-    cleanup(&replica_path);
 }
 
 #[test]
@@ -234,8 +217,6 @@ fn replica_replay_of_refresh_collection_is_idempotent() {
 
     drop(primary_rt);
     drop(replica);
-    cleanup(&path);
-    cleanup(&primary_path);
 }
 
 #[test]
@@ -287,5 +268,4 @@ fn primary_refresh_materialized_view_emits_refresh_cdc_event() {
     );
 
     drop(rt);
-    cleanup(&primary_path);
 }
