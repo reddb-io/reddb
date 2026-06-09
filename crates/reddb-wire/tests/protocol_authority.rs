@@ -491,6 +491,23 @@ fn server_rejoin_rewind_confirmation_payload_lives_in_reddb_wire() {
             "reddb-wire should own rejoin rewind confirmation payload contract {required}"
         );
     }
+
+    for required in ["RejoinRewindConfirmation {", ".encode_json()"] {
+        assert!(
+            handler.contains(required),
+            "server rejoin rewind tests should use reddb-wire request encoder {required}"
+        );
+    }
+
+    for forbidden in [
+        r#"{"target_timeline":3,"rewind_to_lsn":42}"#,
+        r#"{"target_timeline":3,"rewind_to_lsn":41}"#,
+    ] {
+        assert!(
+            !handler.contains(forbidden),
+            "server rejoin rewind tests should use reddb-wire request encoders, found {forbidden:?}"
+        );
+    }
 }
 
 #[test]

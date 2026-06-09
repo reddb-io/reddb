@@ -99,6 +99,19 @@ pub struct RejoinRewindConfirmation {
 }
 
 impl RejoinRewindConfirmation {
+    pub fn encode_json(&self) -> Vec<u8> {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "target_timeline".to_string(),
+            JsonValue::Number(self.target_timeline.into()),
+        );
+        obj.insert(
+            "rewind_to_lsn".to_string(),
+            JsonValue::Number(self.rewind_to_lsn.into()),
+        );
+        serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    }
+
     pub fn decode_json(bytes: &[u8]) -> Result<Self> {
         let obj = object_from_slice(bytes)?;
         Ok(Self {
@@ -293,9 +306,11 @@ mod tests {
 
     #[test]
     fn rejoin_rewind_confirmation_contract_round_trips() {
-        let request =
-            RejoinRewindConfirmation::decode_json(br#"{"target_timeline":3,"rewind_to_lsn":42}"#)
-                .unwrap();
+        let request = RejoinRewindConfirmation {
+            target_timeline: 3,
+            rewind_to_lsn: 42,
+        };
+        let request = RejoinRewindConfirmation::decode_json(&request.encode_json()).unwrap();
         assert_eq!(request.target_timeline, 3);
         assert_eq!(request.rewind_to_lsn, 42);
 
