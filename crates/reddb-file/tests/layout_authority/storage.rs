@@ -430,7 +430,10 @@ fn server_does_not_own_transaction_wal_record_envelope() {
 #[test]
 fn server_source_does_not_embed_owned_file_suffixes() {
     let root = repo_root();
-    for path in rust_files_under(&root.join("crates/reddb-server/src")) {
+    for path in rust_files_under(&root.join("crates/reddb-server/src"))
+        .into_iter()
+        .chain(rust_files_under(&root.join("crates/reddb-server/tests")))
+    {
         let text = read(&path);
         for forbidden in [
             ".redwal",
