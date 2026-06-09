@@ -289,6 +289,23 @@ pub fn build_dispatch_reply_frame(
         .unwrap_or_else(|err| build_error_frame_lossy(correlation_id, &err.to_string()))
 }
 
+/// Adapt an older 5-byte handler envelope into a RedWire reply frame.
+///
+/// Some in-process fast paths return `[u32 length][u8 kind][body...]`.
+/// RedWire uses the same message-kind discriminator for `kind`, but owns the
+/// outer frame header. This helper keeps that compatibility bridge in the wire
+/// crate instead of letting runtime code parse kind bytes directly.
+pub fn rewrap_length_prefixed_handler_response(raw_bytes: &[u8], correlation_id: u64) -> Frame {
+    if raw_bytes.len() < 5 {
+        return build_error_frame_lossy(
+            correlation_id,
+            "fast-path handler returned a truncated frame",
+        );
+    }
+    let kind = MessageKind::from_u8(raw_bytes[4]).unwrap_or(MessageKind::Error);
+    build_dispatch_reply_frame(correlation_id, kind, raw_bytes[5..].to_vec())
+}
+
 pub fn build_query_frame(correlation_id: u64, sql: &str) -> Result<Frame, BuildError> {
     build_request_frame(correlation_id, MessageKind::Query, sql.as_bytes().to_vec())
 }
@@ -543,6 +560,23 @@ mod tests {
         let dispatch = build_dispatch_reply_frame(9, MessageKind::Result, b"rows".to_vec());
         assert_eq!(dispatch.kind, MessageKind::Result);
         assert_eq!(dispatch.correlation_id, 9);
+    }
+
+    #[test]
+    fn rewraps_length_prefixed_handler_response() {
+        let raw = [4u8, 0, 0, 0, MessageKind::BulkOk as u8, b'o', b'k'];
+        let frame = rewrap_length_prefixed_handler_response(&raw, 12);
+        assert_eq!(frame.correlation_id, 12);
+        assert_eq!(frame.kind, MessageKind::BulkOk);
+        assert_eq!(frame.payload, b"ok");
+
+        let truncated = rewrap_length_prefixed_handler_response(&raw[..4], 13);
+        assert_eq!(truncated.kind, MessageKind::Error);
+        assert_eq!(truncated.correlation_id, 13);
+        assert_eq!(
+            truncated.payload,
+            b"fast-path handler returned a truncated frame"
+        );
     }
 
     #[test]

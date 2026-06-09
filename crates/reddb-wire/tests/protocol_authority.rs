@@ -1406,9 +1406,14 @@ fn redwire_generic_reply_frame_builders_live_in_reddb_wire() {
     for forbidden in [
         "fn build_error_frame_lossy",
         "fn build_dispatch_reply_frame",
+        "fn rewrap_handler_response",
         "FrameBuilder::reply_to(correlation_id)",
         "kind(MessageKind::Error)",
         "Frame::new(",
+        "raw_bytes[4]",
+        "raw_bytes[5..]",
+        "MessageKind::from_u8(kind_byte)",
+        "fast-path handler returned a truncated frame",
     ] {
         assert!(
             !session_non_test.contains(forbidden),
@@ -1420,6 +1425,7 @@ fn redwire_generic_reply_frame_builders_live_in_reddb_wire() {
         "build_reply_frame",
         "build_error_frame_lossy",
         "build_dispatch_reply_frame",
+        "rewrap_length_prefixed_handler_response",
     ] {
         assert!(
             session.contains(required),

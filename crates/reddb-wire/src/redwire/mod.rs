@@ -25,7 +25,7 @@ pub use builder::{
     build_bulk_insert_binary_frame, build_bulk_insert_frame, build_bye_frame, build_delete_frame,
     build_dispatch_reply_frame, build_error_frame, build_error_frame_lossy, build_get_frame,
     build_ping_frame, build_query_frame, build_query_with_params_frame, build_reply_frame,
-    build_request_frame, BuildError, FrameBuilder,
+    build_request_frame, rewrap_length_prefixed_handler_response, BuildError, FrameBuilder,
 };
 pub use bulk_binary::{
     decode_bulk_binary_payload, encode_bulk_binary_payload, BulkBinaryError, BulkBinaryFlavor,
