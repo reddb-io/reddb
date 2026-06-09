@@ -2174,8 +2174,9 @@ fn server_uses_reddb_file_for_physical_metadata_paths() {
         "reddb_file::layout::physical_metadata_json_path",
         "reddb_file::layout::physical_metadata_binary_path",
         "reddb_file::layout::physical_metadata_journal_path",
-        "reddb_file::layout::physical_metadata_journal_prefix",
         "reddb_file::layout::physical_export_data_path",
+        "reddb_file::list_physical_metadata_journal_paths",
+        "reddb_file::prune_physical_metadata_journal_paths",
         "reddb_file::read_physical_metadata_document",
         "reddb_file::write_physical_metadata_json_document",
         "reddb_file::write_physical_metadata_binary_document",
@@ -2183,6 +2184,16 @@ fn server_uses_reddb_file_for_physical_metadata_paths() {
         assert!(
             text.contains(required),
             "physical metadata pathing should route through {required}"
+        );
+    }
+    for forbidden in [
+        "fs::read_dir",
+        "starts_with(&prefix)",
+        "fs::remove_file(path)",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "physical metadata journal discovery/pruning belongs in reddb-file, found {forbidden:?}"
         );
     }
 }
