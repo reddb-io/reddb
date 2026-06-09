@@ -62,21 +62,11 @@ fn cleanup(data_path: &Path) {
     let _ =
         fs::remove_file(reddb_server::replication::primary::LogicalWalSpool::path_for(data_path));
     let _ = fs::remove_dir_all(PrimaryReplication::primary_replica_root_for(data_path));
-    let _ = fs::remove_dir_all(
-        reddb_server::replication::replica::rebootstrap_staging_root_for(data_path),
-    );
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_pending_path_for(data_path),
-    );
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_ready_marker_path_for(data_path),
-    );
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_intent_log_path_for(data_path),
-    );
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_previous_path_for(data_path),
-    );
+    let _ = fs::remove_dir_all(reddb_file::layout::rebootstrap_staging_root(data_path));
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_pending_path(data_path));
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_ready_marker_path(data_path));
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_intent_log_path(data_path));
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_previous_path(data_path));
 }
 
 fn post_query_once(runtime: &RedDBRuntime, sql: &str) -> (u16, String) {

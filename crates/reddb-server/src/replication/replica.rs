@@ -1,7 +1,7 @@
 //! Replica-side replication: connects to primary, consumes WAL records.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::json::Value as JsonValue;
@@ -27,8 +27,6 @@ pub struct StagedBaseBackupChunk {
     pub next_snapshot_offset: Option<u64>,
     pub snapshot_complete: bool,
 }
-
-pub use reddb_file::ReplicaRebootstrapReadyMarker as ReplicaRebootstrapReady;
 
 #[derive(Debug)]
 pub enum ReplicaBaseBackupError {
@@ -126,39 +124,6 @@ pub fn recover_staged_basebackup_chunks(
     manifest
         .recover_staged_chunk_parts(parts_root)
         .map_err(Into::into)
-}
-
-pub fn rebootstrap_staging_root_for(data_path: &Path) -> PathBuf {
-    reddb_file::layout::rebootstrap_staging_root(data_path)
-}
-
-pub fn rebootstrap_pending_path_for(data_path: &Path) -> PathBuf {
-    reddb_file::layout::rebootstrap_pending_path(data_path)
-}
-
-pub fn rebootstrap_ready_marker_path_for(data_path: &Path) -> PathBuf {
-    reddb_file::layout::rebootstrap_ready_marker_path(data_path)
-}
-
-pub fn rebootstrap_intent_log_path_for(data_path: &Path) -> PathBuf {
-    reddb_file::layout::rebootstrap_intent_log_path(data_path)
-}
-
-pub fn rebootstrap_previous_path_for(data_path: &Path) -> PathBuf {
-    reddb_file::layout::rebootstrap_previous_path(data_path)
-}
-
-pub fn write_rebootstrap_ready_marker(
-    data_path: &Path,
-    ready: &ReplicaRebootstrapReady,
-) -> Result<(), ReplicaBaseBackupError> {
-    reddb_file::write_rebootstrap_ready_marker(data_path, ready).map_err(Into::into)
-}
-
-pub fn read_rebootstrap_ready_marker(
-    data_path: &Path,
-) -> Result<ReplicaRebootstrapReady, ReplicaBaseBackupError> {
-    reddb_file::read_rebootstrap_ready_marker(data_path).map_err(Into::into)
 }
 
 impl ReplicaReplication {
@@ -403,6 +368,7 @@ impl<'a> BootstrapHandle<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     fn tmp_path(label: &str) -> PathBuf {
@@ -426,36 +392,37 @@ mod tests {
             "reddb-rebootstrap-marker-{}.rdb",
             std::process::id()
         ));
-        let marker_path = rebootstrap_ready_marker_path_for(&data_path);
+        let marker_path = reddb_file::layout::rebootstrap_ready_marker_path(&data_path);
         let tmp_path = reddb_file::layout::atomic_temp_path(&marker_path);
-        let pending_path = rebootstrap_pending_path_for(&data_path);
+        let pending_path = reddb_file::layout::rebootstrap_pending_path(&data_path);
         let _ = fs::remove_file(&marker_path);
         let _ = fs::remove_file(&tmp_path);
 
-        write_rebootstrap_ready_marker(
+        reddb_file::write_rebootstrap_ready_marker(
             &data_path,
-            &ReplicaRebootstrapReady {
+            &reddb_file::ReplicaRebootstrapReadyMarker {
                 pending_path: pending_path.clone(),
                 checkpoint_lsn: 7,
                 timeline: reddb_file::TimelineId::initial(),
             },
         )
         .expect("write marker");
-        let ready = read_rebootstrap_ready_marker(&data_path).expect("read marker");
+        let ready = reddb_file::read_rebootstrap_ready_marker(&data_path).expect("read marker");
         assert_eq!(ready.checkpoint_lsn, 7);
         assert_eq!(ready.pending_path, pending_path);
 
         fs::write(&tmp_path, b"stale tmp").expect("write stale tmp");
-        write_rebootstrap_ready_marker(
+        reddb_file::write_rebootstrap_ready_marker(
             &data_path,
-            &ReplicaRebootstrapReady {
-                pending_path: rebootstrap_pending_path_for(&data_path),
+            &reddb_file::ReplicaRebootstrapReadyMarker {
+                pending_path: reddb_file::layout::rebootstrap_pending_path(&data_path),
                 checkpoint_lsn: 8,
                 timeline: reddb_file::TimelineId(3),
             },
         )
         .expect("replace marker");
-        let ready = read_rebootstrap_ready_marker(&data_path).expect("read replaced marker");
+        let ready =
+            reddb_file::read_rebootstrap_ready_marker(&data_path).expect("read replaced marker");
         assert_eq!(ready.checkpoint_lsn, 8);
         assert_eq!(ready.timeline, reddb_file::TimelineId(3));
 

@@ -54,7 +54,7 @@ fn embedded_single_file_selected(options: &RedDBOptions) -> bool {
 
 fn active_rebootstrap_matches_ready_marker(
     data_path: &Path,
-    ready: &crate::replication::replica::ReplicaRebootstrapReady,
+    ready: &reddb_file::ReplicaRebootstrapReadyMarker,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let artifact = crate::storage::EmbeddedRdbArtifact::open(data_path).map_err(|err| {
         format!(
@@ -97,7 +97,7 @@ fn promote_ready_replica_rebootstrap(
     data_path: &Path,
     read_only: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let marker = crate::replication::replica::rebootstrap_ready_marker_path_for(data_path);
+    let marker = reddb_file::layout::rebootstrap_ready_marker_path(data_path);
     if !marker.exists() {
         return Ok(false);
     }
@@ -109,13 +109,12 @@ fn promote_ready_replica_rebootstrap(
         .into());
     }
 
-    let ready =
-        crate::replication::replica::read_rebootstrap_ready_marker(data_path).map_err(|err| {
-            format!(
-                "read pending replica rebootstrap marker {}: {err}",
-                marker.display()
-            )
-        })?;
+    let ready = reddb_file::read_rebootstrap_ready_marker(data_path).map_err(|err| {
+        format!(
+            "read pending replica rebootstrap marker {}: {err}",
+            marker.display()
+        )
+    })?;
     let pending = ready.pending_path.clone();
     if !pending.exists() {
         if data_path.exists() {
