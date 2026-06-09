@@ -12,6 +12,7 @@
 
 use reddb_grpc_proto::red_db_client::RedDbClient;
 use reddb_grpc_proto::*;
+use reddb_wire::auth::{bearer_authorization_value, login_payload_json, AUTHORIZATION_HEADER};
 use tonic::transport::Channel;
 use tonic::Request;
 
@@ -84,8 +85,8 @@ impl RedDBClient {
     fn auth_request<T>(&self, inner: T) -> Request<T> {
         let mut req = Request::new(inner);
         if let Some(ref token) = self.token {
-            if let Ok(value) = format!("Bearer {}", token).parse() {
-                req.metadata_mut().insert("authorization", value);
+            if let Ok(value) = bearer_authorization_value(token).parse() {
+                req.metadata_mut().insert(AUTHORIZATION_HEADER, value);
             }
         }
         req
@@ -252,12 +253,8 @@ impl RedDBClient {
         username: &str,
         password: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let payload = format!(
-            "{{\"username\":\"{}\",\"password\":\"{}\"}}",
-            username, password
-        );
         let req = self.auth_request(JsonPayloadRequest {
-            payload_json: payload,
+            payload_json: login_payload_json(username, password),
         });
         let resp = self.inner.auth_login(req).await?;
         let reply = resp.into_inner();

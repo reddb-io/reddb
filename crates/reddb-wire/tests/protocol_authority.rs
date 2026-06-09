@@ -123,6 +123,50 @@ fn client_connection_string_vocabulary_lives_in_reddb_wire() {
 }
 
 #[test]
+fn client_auth_wire_vocabulary_lives_in_reddb_wire() {
+    let root = repo_root();
+    let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
+    let http = read(root.join("crates/reddb-client/src/http.rs"));
+    let bin_http = read(root.join("crates/reddb-client/src/connector/http.rs"));
+    let wire = read(root.join("crates/reddb-wire/src/auth.rs"));
+
+    for (file, text) in [
+        (
+            "crates/reddb-client-connector/src/lib.rs",
+            connector.as_str(),
+        ),
+        ("crates/reddb-client/src/http.rs", http.as_str()),
+        (
+            "crates/reddb-client/src/connector/http.rs",
+            bin_http.as_str(),
+        ),
+    ] {
+        for forbidden in [
+            "format!(\"Bearer",
+            "\"authorization\"",
+            "{{\\\"username\\\":\\\"{}\\\",\\\"password\\\":\\\"{}\\\"}}",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{file} auth wire vocabulary belongs in reddb-wire, found {forbidden:?}"
+            );
+        }
+    }
+
+    for required in [
+        "pub const AUTHORIZATION_HEADER",
+        "pub const BEARER_AUTH_SCHEME",
+        "pub fn bearer_authorization_value",
+        "pub fn login_payload_json",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire should own auth wire helper {required}"
+        );
+    }
+}
+
+#[test]
 fn server_redwire_frame_header_length_routes_through_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));

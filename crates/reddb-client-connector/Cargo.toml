@@ -23,4 +23,5 @@ path = "src/lib.rs"
 
 [dependencies]
 reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
+reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "../reddb-wire" }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
