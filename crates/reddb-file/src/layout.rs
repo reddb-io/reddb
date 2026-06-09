@@ -575,6 +575,14 @@ pub fn pager_dwb_shadow_path(data_path: &Path) -> PathBuf {
     path_with_dash_suffix(data_path, PAGER_DWB_SHADOW_SUFFIX)
 }
 
+pub fn pager_shadow_sidecar_paths(data_path: &Path) -> [PathBuf; 3] {
+    [
+        pager_header_shadow_path(data_path),
+        pager_meta_shadow_path(data_path),
+        pager_dwb_shadow_path(data_path),
+    ]
+}
+
 pub fn shm_path(data_path: &Path) -> PathBuf {
     sibling_path(
         data_path,
