@@ -645,157 +645,75 @@ impl HnswIndex {
     // Persistence
     // ========================================================================
 
-    /// Serialize the index to bytes for storage
+    /// Serialize the index to bytes for storage.
+    ///
+    /// The on-disk byte layout lives in [`reddb_file::vector_hnsw_index`]; this
+    /// method only projects engine state into the codec frame. The
+    /// `DistanceMetric` → `metric` byte mapping stays here.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        // Magic number and version
-        bytes.extend_from_slice(b"HNSW");
-        bytes.extend_from_slice(&1u32.to_le_bytes()); // version
-
-        // Config
-        bytes.extend_from_slice(&(self.dimension as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.config.m as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.config.m_max0 as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.config.ef_construction as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.config.ef_search as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.config.ml.to_le_bytes());
-        bytes.push(match self.config.metric {
-            DistanceMetric::L2 => 0,
-            DistanceMetric::Cosine => 1,
-            DistanceMetric::InnerProduct => 2,
-        });
-
-        // Index state
-        bytes.extend_from_slice(&(self.max_layer as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.entry_point.unwrap_or(u64::MAX).to_le_bytes());
-
-        // Node count
-        bytes.extend_from_slice(&(self.nodes.len() as u64).to_le_bytes());
-
-        // Nodes
-        for (&id, node) in &self.nodes {
-            bytes.extend_from_slice(&id.to_le_bytes());
-            bytes.extend_from_slice(&(node.max_layer as u32).to_le_bytes());
-
-            // Vector
-            for &val in &node.vector {
-                bytes.extend_from_slice(&val.to_le_bytes());
-            }
-
-            // Connections per layer
-            for layer in 0..=node.max_layer {
-                let conns = &node.connections[layer];
-                bytes.extend_from_slice(&(conns.len() as u32).to_le_bytes());
-                for &conn in conns {
-                    bytes.extend_from_slice(&conn.to_le_bytes());
-                }
-            }
-        }
-
-        bytes
+        let frame = reddb_file::HnswIndexFrame {
+            dimension: self.dimension as u32,
+            m: self.config.m as u32,
+            m_max0: self.config.m_max0 as u32,
+            ef_construction: self.config.ef_construction as u32,
+            ef_search: self.config.ef_search as u32,
+            ml: self.config.ml,
+            metric: match self.config.metric {
+                DistanceMetric::L2 => 0,
+                DistanceMetric::Cosine => 1,
+                DistanceMetric::InnerProduct => 2,
+            },
+            max_layer: self.max_layer as u32,
+            entry_point: self.entry_point,
+            nodes: self
+                .nodes
+                .iter()
+                .map(|(&id, node)| reddb_file::HnswNodeFrame {
+                    id,
+                    max_layer: node.max_layer as u32,
+                    vector: node.vector.clone(),
+                    connections: node.connections[..=node.max_layer].to_vec(),
+                })
+                .collect(),
+        };
+        reddb_file::encode_hnsw_index_frame(&frame)
     }
 
-    /// Deserialize index from bytes
+    /// Deserialize index from bytes.
+    ///
+    /// Byte parsing lives in [`reddb_file::vector_hnsw_index`]; this method
+    /// rebuilds engine state (node map, derived `next_id`, RNG reset) and maps
+    /// the `metric` byte back to a `DistanceMetric`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() < 8 {
-            return Err("Data too short".to_string());
-        }
+        let frame = reddb_file::decode_hnsw_index_frame(bytes).map_err(|e| e.to_string())?;
 
-        // Check magic number
-        if &bytes[0..4] != b"HNSW" {
-            return Err("Invalid magic number".to_string());
-        }
-
-        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != 1 {
-            return Err(format!("Unsupported version: {}", version));
-        }
-
-        let mut pos = 8;
-
-        // Config
-        let dimension = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let m = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let m_max0 = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let ef_construction = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let ef_search = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let ml = f64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let metric = match bytes[pos] {
+        let metric = match frame.metric {
             0 => DistanceMetric::L2,
             1 => DistanceMetric::Cosine,
             2 => DistanceMetric::InnerProduct,
             _ => return Err("Invalid distance metric".to_string()),
         };
-        pos += 1;
 
         let config = HnswConfig {
-            m,
-            m_max0,
-            ef_construction,
-            ef_search,
-            ml,
+            m: frame.m as usize,
+            m_max0: frame.m_max0 as usize,
+            ef_construction: frame.ef_construction as usize,
+            ef_search: frame.ef_search as usize,
+            ml: frame.ml,
             metric,
         };
 
-        // Index state
-        let max_layer = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let ep_value = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let entry_point = if ep_value == u64::MAX {
-            None
-        } else {
-            Some(ep_value)
-        };
-
-        // Node count
-        let node_count = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize;
-        pos += 8;
-
         let mut nodes = HashMap::new();
         let mut max_id = 0u64;
-
-        for _ in 0..node_count {
-            let id = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-            pos += 8;
-            max_id = max_id.max(id);
-
-            let level = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-            pos += 4;
-
-            let mut vector = Vec::with_capacity(dimension);
-            for _ in 0..dimension {
-                vector.push(f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()));
-                pos += 4;
-            }
-
-            let mut connections = vec![Vec::new(); level + 1];
-            for conn_list in connections.iter_mut().take(level + 1) {
-                let conn_count =
-                    u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-                pos += 4;
-
-                for _ in 0..conn_count {
-                    let conn = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
-                    pos += 8;
-                    conn_list.push(conn);
-                }
-            }
-
+        for node in frame.nodes {
+            max_id = max_id.max(node.id);
             nodes.insert(
-                id,
+                node.id,
                 HnswNode {
-                    id,
-                    max_layer: level,
-                    vector,
-                    connections,
+                    id: node.id,
+                    max_layer: node.max_layer as usize,
+                    vector: node.vector,
+                    connections: node.connections,
                 },
             );
         }
@@ -803,9 +721,9 @@ impl HnswIndex {
         Ok(Self {
             config,
             nodes,
-            entry_point,
-            max_layer,
-            dimension,
+            entry_point: frame.entry_point,
+            max_layer: frame.max_layer as usize,
+            dimension: frame.dimension as usize,
             next_id: AtomicU64::new(max_id + 1),
             rng_state: 12345, // Reset RNG
         })

@@ -203,38 +203,62 @@ fn read_u8(bytes: &[u8], pos: &mut usize, reason: &'static str) -> Result<u8, Iv
     Ok(value)
 }
 
-fn read_u32(bytes: &[u8], pos: &mut usize, reason: &'static str) -> Result<u32, IvfIndexFrameError> {
+fn read_u32(
+    bytes: &[u8],
+    pos: &mut usize,
+    reason: &'static str,
+) -> Result<u32, IvfIndexFrameError> {
     if *pos + 4 > bytes.len() {
         return Err(IvfIndexFrameError::Truncated {
             offset: *pos,
             reason,
         });
     }
-    let value = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().expect("u32 length checked"));
+    let value = u32::from_le_bytes(
+        bytes[*pos..*pos + 4]
+            .try_into()
+            .expect("u32 length checked"),
+    );
     *pos += 4;
     Ok(value)
 }
 
-fn read_u64(bytes: &[u8], pos: &mut usize, reason: &'static str) -> Result<u64, IvfIndexFrameError> {
+fn read_u64(
+    bytes: &[u8],
+    pos: &mut usize,
+    reason: &'static str,
+) -> Result<u64, IvfIndexFrameError> {
     if *pos + 8 > bytes.len() {
         return Err(IvfIndexFrameError::Truncated {
             offset: *pos,
             reason,
         });
     }
-    let value = u64::from_le_bytes(bytes[*pos..*pos + 8].try_into().expect("u64 length checked"));
+    let value = u64::from_le_bytes(
+        bytes[*pos..*pos + 8]
+            .try_into()
+            .expect("u64 length checked"),
+    );
     *pos += 8;
     Ok(value)
 }
 
-fn read_f32(bytes: &[u8], pos: &mut usize, reason: &'static str) -> Result<f32, IvfIndexFrameError> {
+fn read_f32(
+    bytes: &[u8],
+    pos: &mut usize,
+    reason: &'static str,
+) -> Result<f32, IvfIndexFrameError> {
     if *pos + 4 > bytes.len() {
         return Err(IvfIndexFrameError::Truncated {
             offset: *pos,
             reason,
         });
     }
-    let value = f32::from_le_bytes(bytes[*pos..*pos + 4].try_into().expect("f32 length checked"));
+    let value = f32::from_le_bytes(
+        bytes[*pos..*pos + 4]
+            .try_into()
+            .expect("f32 length checked"),
+    );
     *pos += 4;
     Ok(value)
 }
@@ -283,7 +307,7 @@ mod tests {
         let encoded = encode_ivf_index_frame(&frame);
         assert_eq!(&encoded[0..4], b"IVF1");
         assert_eq!(&encoded[4..8], &4u32.to_le_bytes()); // n_lists
-        // `trained` byte: after magic + 4 u32 + 1 f32.
+                                                         // `trained` byte: after magic + 4 u32 + 1 f32.
         let trained_off = 4 + 4 * 4 + 4;
         assert_eq!(encoded[trained_off], 1);
     }

@@ -307,49 +307,40 @@ impl RedDB {
     fn serialize_native_graph_adjacency_artifact(
         edges: &[(EntityId, String, String, String, f32)],
     ) -> Vec<u8> {
-        let mut data = Vec::with_capacity(32 + edges.len() * 48);
-        data.extend_from_slice(b"RDGA");
-        data.extend_from_slice(&(edges.len() as u32).to_le_bytes());
-        for (edge_id, from_node, to_node, label, weight) in edges {
-            data.extend_from_slice(&edge_id.raw().to_le_bytes());
-            Self::push_native_artifact_string(&mut data, from_node);
-            Self::push_native_artifact_string(&mut data, to_node);
-            Self::push_native_artifact_string(&mut data, label);
-            data.extend_from_slice(&weight.to_le_bytes());
-        }
-        data
+        let frame = reddb_file::NativeGraphAdjacencyFrame {
+            edges: edges
+                .iter()
+                .map(
+                    |(edge_id, from_node, to_node, label, weight)| reddb_file::NativeGraphEdge {
+                        edge_id: edge_id.raw(),
+                        from_node: from_node.clone(),
+                        to_node: to_node.clone(),
+                        label: label.clone(),
+                        weight: *weight,
+                    },
+                )
+                .collect(),
+        };
+        reddb_file::encode_native_graph_adjacency_frame(&frame)
     }
 
     pub(crate) fn inspect_native_graph_adjacency_artifact(
         bytes: &[u8],
     ) -> Result<(u64, u64, u32), String> {
-        if bytes.len() < 8 || &bytes[0..4] != b"RDGA" {
-            return Err("invalid graph adjacency artifact".to_string());
-        }
-        let mut pos = 4usize;
-        let edge_count =
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                as usize;
-        pos += 4;
+        let frame =
+            reddb_file::decode_native_graph_adjacency_frame(bytes).map_err(|e| e.to_string())?;
         let mut nodes = BTreeSet::new();
         let mut labels = BTreeSet::new();
-        for _ in 0..edge_count {
-            if pos + 8 > bytes.len() {
-                return Err("truncated graph adjacency artifact".to_string());
-            }
-            pos += 8;
-            let from = Self::read_native_artifact_string(bytes, &mut pos)?;
-            let to = Self::read_native_artifact_string(bytes, &mut pos)?;
-            let label = Self::read_native_artifact_string(bytes, &mut pos)?;
-            if pos + 4 > bytes.len() {
-                return Err("truncated graph adjacency artifact weight".to_string());
-            }
-            pos += 4;
-            nodes.insert(from);
-            nodes.insert(to);
-            labels.insert(label);
+        for edge in &frame.edges {
+            nodes.insert(edge.from_node.as_str());
+            nodes.insert(edge.to_node.as_str());
+            labels.insert(edge.label.as_str());
         }
-        Ok((edge_count as u64, nodes.len() as u64, labels.len() as u32))
+        Ok((
+            frame.edges.len() as u64,
+            nodes.len() as u64,
+            labels.len() as u32,
+        ))
     }
 
     fn serialize_native_fulltext_artifact(
@@ -370,122 +361,80 @@ impl RedDB {
             }
         }
 
-        let mut data = Vec::with_capacity(64 + postings.len() * 32);
-        data.extend_from_slice(b"RDFT");
-        Self::push_native_artifact_string(&mut data, collection);
-        data.extend_from_slice(&(documents.len() as u32).to_le_bytes());
-        data.extend_from_slice(&(postings.len() as u32).to_le_bytes());
-        for (term, entries) in postings {
-            Self::push_native_artifact_string(&mut data, &term);
-            data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-            for (entity_id, term_count) in entries {
-                data.extend_from_slice(&entity_id.to_le_bytes());
-                data.extend_from_slice(&term_count.to_le_bytes());
-            }
-        }
-        data
+        let frame = reddb_file::NativeFulltextFrame {
+            collection: collection.to_string(),
+            doc_count: documents.len() as u32,
+            terms: postings
+                .into_iter()
+                .map(|(term, entries)| reddb_file::NativeFulltextTerm {
+                    term,
+                    postings: entries
+                        .into_iter()
+                        .map(
+                            |(entity_id, term_count)| reddb_file::NativeFulltextPosting {
+                                entity_id,
+                                term_count,
+                            },
+                        )
+                        .collect(),
+                })
+                .collect(),
+        };
+        reddb_file::encode_native_fulltext_frame(&frame)
     }
 
     pub(crate) fn inspect_native_fulltext_artifact(
         bytes: &[u8],
     ) -> Result<(u64, u64, u64), String> {
-        if bytes.len() < 12 || &bytes[0..4] != b"RDFT" {
-            return Err("invalid fulltext artifact".to_string());
-        }
-        let mut pos = 4usize;
-        let _collection = Self::read_native_artifact_string(bytes, &mut pos)?;
-        if pos + 8 > bytes.len() {
-            return Err("truncated fulltext artifact".to_string());
-        }
-        let doc_count =
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
-        pos += 4;
-        let term_count =
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
-        pos += 4;
-        let mut posting_count = 0u64;
-        for _ in 0..term_count {
-            let _term = Self::read_native_artifact_string(bytes, &mut pos)?;
-            if pos + 4 > bytes.len() {
-                return Err("truncated fulltext posting count".to_string());
-            }
-            let entry_count =
-                u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                    as u64;
-            pos += 4;
-            posting_count += entry_count;
-            let bytes_needed = entry_count as usize * 12;
-            if pos + bytes_needed > bytes.len() {
-                return Err("truncated fulltext postings".to_string());
-            }
-            pos += bytes_needed;
-        }
-        Ok((doc_count, term_count, posting_count))
+        let frame = reddb_file::decode_native_fulltext_frame(bytes).map_err(|e| e.to_string())?;
+        let posting_count: u64 = frame.terms.iter().map(|t| t.postings.len() as u64).sum();
+        Ok((
+            frame.doc_count as u64,
+            frame.terms.len() as u64,
+            posting_count,
+        ))
     }
 
     fn serialize_native_document_pathvalue_artifact(
         collection: &str,
         documents: &[(EntityId, Vec<(String, String)>)],
     ) -> Vec<u8> {
-        let total_entries: usize = documents.iter().map(|(_, entries)| entries.len()).sum();
-        let mut data = Vec::with_capacity(64 + total_entries * 48);
-        data.extend_from_slice(b"RDDP");
-        Self::push_native_artifact_string(&mut data, collection);
-        data.extend_from_slice(&(documents.len() as u32).to_le_bytes());
-        data.extend_from_slice(&(total_entries as u32).to_le_bytes());
-        for (entity_id, entries) in documents {
-            data.extend_from_slice(&entity_id.raw().to_le_bytes());
-            data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-            for (path, value) in entries {
-                Self::push_native_artifact_string(&mut data, path);
-                Self::push_native_artifact_string(&mut data, value);
-            }
-        }
-        data
+        let frame = reddb_file::NativeDocPathValueFrame {
+            collection: collection.to_string(),
+            docs: documents
+                .iter()
+                .map(|(entity_id, entries)| reddb_file::NativeDocPathValue {
+                    entity_id: entity_id.raw(),
+                    entries: entries
+                        .iter()
+                        .map(|(path, value)| reddb_file::NativeDocPathValueEntry {
+                            path: path.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        reddb_file::encode_native_doc_pathvalue_frame(&frame)
     }
 
     pub(crate) fn inspect_native_document_pathvalue_artifact(
         bytes: &[u8],
     ) -> Result<(u64, u64, u64, u64), String> {
-        if bytes.len() < 12 || &bytes[0..4] != b"RDDP" {
-            return Err("invalid document path/value artifact".to_string());
-        }
-        let mut pos = 4usize;
-        let _collection = Self::read_native_artifact_string(bytes, &mut pos)?;
-        if pos + 8 > bytes.len() {
-            return Err("truncated document path/value artifact".to_string());
-        }
-        let doc_count =
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
-        pos += 4;
-        let total_entries =
-            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
-        pos += 4;
+        let frame =
+            reddb_file::decode_native_doc_pathvalue_frame(bytes).map_err(|e| e.to_string())?;
         let mut paths = BTreeSet::new();
         let mut values = BTreeSet::new();
-        let mut seen_entries = 0u64;
-        for _ in 0..doc_count {
-            if pos + 12 > bytes.len() {
-                return Err("truncated document path/value record".to_string());
+        let mut total_entries = 0u64;
+        for doc in &frame.docs {
+            for entry in &doc.entries {
+                paths.insert(entry.path.as_str());
+                values.insert(entry.value.as_str());
+                total_entries += 1;
             }
-            pos += 8;
-            let entry_count =
-                u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                    as usize;
-            pos += 4;
-            for _ in 0..entry_count {
-                let path = Self::read_native_artifact_string(bytes, &mut pos)?;
-                let value = Self::read_native_artifact_string(bytes, &mut pos)?;
-                paths.insert(path);
-                values.insert(value);
-                seen_entries += 1;
-            }
-        }
-        if seen_entries != total_entries {
-            return Err("document path/value artifact entry count mismatch".to_string());
         }
         Ok((
-            doc_count,
+            frame.docs.len() as u64,
             paths.len() as u64,
             total_entries,
             values.len() as u64,
@@ -722,33 +671,6 @@ impl RedDB {
             .filter(|s| s.len() >= 2)
             .map(|s| s.to_string())
             .collect()
-    }
-
-    fn push_native_artifact_string(buf: &mut Vec<u8>, value: &str) {
-        let bytes = value.as_bytes();
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(bytes);
-    }
-
-    fn read_native_artifact_string(bytes: &[u8], pos: &mut usize) -> Result<String, String> {
-        if *pos + 4 > bytes.len() {
-            return Err("truncated native artifact string length".to_string());
-        }
-        let len = u32::from_le_bytes([
-            bytes[*pos],
-            bytes[*pos + 1],
-            bytes[*pos + 2],
-            bytes[*pos + 3],
-        ]) as usize;
-        *pos += 4;
-        if *pos + len > bytes.len() {
-            return Err("truncated native artifact string content".to_string());
-        }
-        let value = std::str::from_utf8(&bytes[*pos..*pos + len])
-            .map_err(|_| "invalid utf-8 in native artifact".to_string())?
-            .to_string();
-        *pos += len;
-        Ok(value)
     }
 
     pub(crate) fn native_recovery_summary_from_metadata(

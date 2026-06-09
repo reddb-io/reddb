@@ -186,6 +186,14 @@ pub use logical_wal::{
     LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2, LOGICAL_WAL_SPOOL_VERSION_V3,
     LOGICAL_WAL_V3_HEADER_LEN,
 };
+pub use native_index_artifact::{
+    decode_native_doc_pathvalue_frame, decode_native_fulltext_frame,
+    decode_native_graph_adjacency_frame, encode_native_doc_pathvalue_frame,
+    encode_native_fulltext_frame, encode_native_graph_adjacency_frame, NativeArtifactFrameError,
+    NativeDocPathValue, NativeDocPathValueEntry, NativeDocPathValueFrame, NativeFulltextFrame,
+    NativeFulltextPosting, NativeFulltextTerm, NativeGraphAdjacencyFrame, NativeGraphEdge,
+    NATIVE_DOC_PATHVALUE_MAGIC, NATIVE_FULLTEXT_MAGIC, NATIVE_GRAPH_ADJACENCY_MAGIC,
+};
 pub use native_store::{
     append_native_store_crc32_footer, decode_native_blob_page, decode_native_catalog_summary_page,
     decode_native_collection_roots_page, decode_native_dump_collection_header,
@@ -224,14 +232,6 @@ pub use native_store::{
     NATIVE_REGISTRY_MAGIC, NATIVE_VECTOR_ARTIFACT_MAGIC, STORE_MAGIC, STORE_VERSION_CURRENT,
     STORE_VERSION_V1, STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5,
     STORE_VERSION_V6, STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
-};
-pub use native_index_artifact::{
-    decode_native_doc_pathvalue_frame, decode_native_fulltext_frame,
-    decode_native_graph_adjacency_frame, encode_native_doc_pathvalue_frame,
-    encode_native_fulltext_frame, encode_native_graph_adjacency_frame, NativeArtifactFrameError,
-    NativeDocPathValue, NativeDocPathValueEntry, NativeDocPathValueFrame, NativeFulltextFrame,
-    NativeFulltextPosting, NativeFulltextTerm, NativeGraphAdjacencyFrame, NativeGraphEdge,
-    NATIVE_DOC_PATHVALUE_MAGIC, NATIVE_FULLTEXT_MAGIC, NATIVE_GRAPH_ADJACENCY_MAGIC,
 };
 pub use operational_manifest::OperationalManifest;
 pub use physical_metadata::{

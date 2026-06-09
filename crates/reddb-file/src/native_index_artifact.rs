@@ -20,15 +20,24 @@
 /// Errors decoding a native index artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeArtifactFrameError {
-    TooShort { artifact: &'static str },
-    InvalidMagic { artifact: &'static str },
+    TooShort {
+        artifact: &'static str,
+    },
+    InvalidMagic {
+        artifact: &'static str,
+    },
     Truncated {
         artifact: &'static str,
         offset: usize,
         reason: &'static str,
     },
-    InvalidUtf8 { offset: usize },
-    EntryCountMismatch { expected: u64, seen: u64 },
+    InvalidUtf8 {
+        offset: usize,
+    },
+    EntryCountMismatch {
+        expected: u64,
+        seen: u64,
+    },
 }
 
 impl std::fmt::Display for NativeArtifactFrameError {
@@ -40,7 +49,10 @@ impl std::fmt::Display for NativeArtifactFrameError {
                 artifact,
                 offset,
                 reason,
-            } => write!(f, "truncated {artifact} artifact at offset {offset}: {reason}"),
+            } => write!(
+                f,
+                "truncated {artifact} artifact at offset {offset}: {reason}"
+            ),
             Self::InvalidUtf8 { offset } => {
                 write!(f, "invalid utf-8 in native artifact at offset {offset}")
             }
@@ -93,7 +105,11 @@ fn read_u32(
             reason,
         });
     }
-    let value = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().expect("u32 length checked"));
+    let value = u32::from_le_bytes(
+        bytes[*pos..*pos + 4]
+            .try_into()
+            .expect("u32 length checked"),
+    );
     *pos += 4;
     Ok(value)
 }
@@ -111,7 +127,11 @@ fn read_u64(
             reason,
         });
     }
-    let value = u64::from_le_bytes(bytes[*pos..*pos + 8].try_into().expect("u64 length checked"));
+    let value = u64::from_le_bytes(
+        bytes[*pos..*pos + 8]
+            .try_into()
+            .expect("u64 length checked"),
+    );
     *pos += 8;
     Ok(value)
 }
@@ -129,7 +149,11 @@ fn read_f32(
             reason,
         });
     }
-    let value = f32::from_le_bytes(bytes[*pos..*pos + 4].try_into().expect("f32 length checked"));
+    let value = f32::from_le_bytes(
+        bytes[*pos..*pos + 4]
+            .try_into()
+            .expect("f32 length checked"),
+    );
     *pos += 4;
     Ok(value)
 }

@@ -244,7 +244,11 @@ fn read_u32(
             reason,
         });
     }
-    let value = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().expect("u32 length checked"));
+    let value = u32::from_le_bytes(
+        bytes[*pos..*pos + 4]
+            .try_into()
+            .expect("u32 length checked"),
+    );
     *pos += 4;
     Ok(value)
 }
@@ -260,7 +264,11 @@ fn read_u64(
             reason,
         });
     }
-    let value = u64::from_le_bytes(bytes[*pos..*pos + 8].try_into().expect("u64 length checked"));
+    let value = u64::from_le_bytes(
+        bytes[*pos..*pos + 8]
+            .try_into()
+            .expect("u64 length checked"),
+    );
     *pos += 8;
     Ok(value)
 }
@@ -276,7 +284,11 @@ fn read_f32(
             reason,
         });
     }
-    let value = f32::from_le_bytes(bytes[*pos..*pos + 4].try_into().expect("f32 length checked"));
+    let value = f32::from_le_bytes(
+        bytes[*pos..*pos + 4]
+            .try_into()
+            .expect("f32 length checked"),
+    );
     *pos += 4;
     Ok(value)
 }
@@ -292,7 +304,11 @@ fn read_f64(
             reason,
         });
     }
-    let value = f64::from_le_bytes(bytes[*pos..*pos + 8].try_into().expect("f64 length checked"));
+    let value = f64::from_le_bytes(
+        bytes[*pos..*pos + 8]
+            .try_into()
+            .expect("f64 length checked"),
+    );
     *pos += 8;
     Ok(value)
 }
