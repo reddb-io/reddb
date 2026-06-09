@@ -362,6 +362,7 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
     let root = repo_root();
     let server = read(root.join("crates/reddb-server/src/physical.rs"));
     let file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
+    let policy = read(root.join("crates/reddb-file/src/physical_metadata_policy.rs"));
 
     for forbidden in [
         "pub struct BlockReference",
@@ -412,7 +413,7 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
         "pub fn fold_dwb_into_wal_enabled",
     ] {
         assert!(
-            file.contains(required),
+            file.contains(required) || policy.contains(required),
             "reddb-file should own physical metadata core contract {required}"
         );
     }
