@@ -624,14 +624,4 @@ mod tests {
         assert_eq!(&scratch[..prefix.len()], &prefix[..]);
         assert_eq!(&scratch[prefix.len()..], &record.encode_with_term(9)[..]);
     }
-
-    #[test]
-    fn test_wal_magic() {
-        assert_eq!(reddb_file::WAL_FILE_MAGIC, b"RDBW");
-    }
-
-    #[test]
-    fn test_wal_version() {
-        assert_eq!(WAL_FILE_VERSION, 3);
-    }
 }

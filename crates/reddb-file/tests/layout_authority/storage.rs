@@ -252,6 +252,8 @@ fn server_wal_record_tests_do_not_assert_physical_tags() {
         "encoded[0]",
         "Type (1)",
         "WAL_FILE_VERSION_V2",
+        "WAL_FILE_MAGIC",
+        "assert_eq!(WAL_FILE_VERSION",
         "crc32fast::Hasher",
     ] {
         assert!(
@@ -292,7 +294,8 @@ fn server_checkpoint_tests_do_not_assert_wal_physical_sizes() {
     }
 
     assert!(
-        test_source.contains("WalRecord::Checkpoint { lsn: result.checkpoint_lsn }"),
+        test_source.contains("WalRecord::Checkpoint")
+            && test_source.contains("lsn: result.checkpoint_lsn"),
         "server checkpoint truncate test should validate the semantic checkpoint marker"
     );
 }
