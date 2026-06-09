@@ -1,4 +1,24 @@
-use std::io;
+//! `<data>.shm` shared-memory file contract.
+//!
+//! The server owns provisioning policy and owner-pid recovery decisions.
+//! This crate owns the binary header and the file operations that preserve it.
+//!
+//! ## Binary layout (v1, little-endian, 64-byte fixed header)
+//!
+//! ```text
+//! offset size field             notes
+//!      0    8 magic             ASCII "RDBSHM01"
+//!      8    4 version           u32 = 1
+//!     12    4 owner_pid         u32, host pid of the writer that holds the lease
+//!     16    8 generation        u64, bumped on every owner takeover or heal
+//!     24    8 reader_count      u64, count of attached embedded readers
+//!     32    8 last_heartbeat_ms u64, owner heartbeat in unix-ms
+//!     40   16 reserved          zeroed, room for v2 fields
+//!     56    8 checksum          checksum fold of bytes [0..56)
+//! ```
+
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub const SHM_MAGIC: &[u8; 8] = b"RDBSHM01";
 pub const SHM_VERSION: u32 = 1;
@@ -15,6 +35,16 @@ pub struct ShmHeader {
 }
 
 impl ShmHeader {
+    pub fn new(owner_pid: u32, generation: u64, reader_count: u64, last_heartbeat_ms: u64) -> Self {
+        Self {
+            version: SHM_VERSION,
+            owner_pid,
+            generation,
+            reader_count,
+            last_heartbeat_ms,
+        }
+    }
+
     pub fn encode(&self) -> [u8; SHM_HEADER_SIZE] {
         let mut buf = [0u8; SHM_HEADER_SIZE];
         buf[0..8].copy_from_slice(SHM_MAGIC);
@@ -53,6 +83,26 @@ impl ShmHeader {
     }
 }
 
+pub fn initialize_shm_file(file: &mut File, header: &ShmHeader) -> io::Result<()> {
+    file.set_len(SHM_FILE_SIZE)?;
+    write_shm_header_to_file(file, header)
+}
+
+pub fn read_shm_header_from_file(file: &mut File) -> io::Result<ShmHeader> {
+    let mut buf = [0u8; SHM_HEADER_SIZE];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut buf)?;
+    ShmHeader::decode(&buf)
+}
+
+pub fn write_shm_header_to_file(file: &mut File, header: &ShmHeader) -> io::Result<()> {
+    let buf = header.encode();
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&buf)?;
+    file.sync_data()?;
+    Ok(())
+}
+
 fn fold_checksum(bytes: &[u8]) -> u64 {
     let mut acc: u64 = 0xcbf29ce484222325;
     for &byte in bytes {
@@ -68,13 +118,7 @@ mod tests {
 
     #[test]
     fn shm_header_round_trips() {
-        let header = ShmHeader {
-            version: SHM_VERSION,
-            owner_pid: 42,
-            generation: 7,
-            reader_count: 3,
-            last_heartbeat_ms: 99,
-        };
+        let header = ShmHeader::new(42, 7, 3, 99);
 
         let encoded = header.encode();
         assert_eq!(&encoded[0..8], SHM_MAGIC);
@@ -90,17 +134,59 @@ mod tests {
 
     #[test]
     fn shm_header_rejects_checksum_mismatch() {
-        let header = ShmHeader {
-            version: SHM_VERSION,
-            owner_pid: 1,
-            generation: 1,
-            reader_count: 0,
-            last_heartbeat_ms: 1,
-        };
+        let header = ShmHeader::new(1, 1, 0, 1);
         let mut encoded = header.encode();
         encoded[20] ^= 0xff;
 
         let err = ShmHeader::decode(&encoded).expect_err("checksum must fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn shm_file_helpers_initialize_and_rewrite_header() {
+        let path = std::env::temp_dir().join(format!(
+            "reddb-shm-file-helper-{}-{}.shm",
+            std::process::id(),
+            unique_test_suffix()
+        ));
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .expect("create shm file");
+
+        let header = ShmHeader::new(11, 2, 3, 4);
+        initialize_shm_file(&mut file, &header).expect("initialize");
+        assert_eq!(
+            file.metadata().expect("metadata").len(),
+            SHM_FILE_SIZE,
+            "helper owns the fixed shm file size"
+        );
+
+        let decoded = read_shm_header_from_file(&mut file).expect("read initialized header");
+        assert_eq!(decoded.owner_pid, 11);
+        assert_eq!(decoded.generation, 2);
+        assert_eq!(decoded.reader_count, 3);
+        assert_eq!(decoded.last_heartbeat_ms, 4);
+
+        let next = ShmHeader::new(12, 3, 0, 9);
+        write_shm_header_to_file(&mut file, &next).expect("rewrite");
+        let decoded = read_shm_header_from_file(&mut file).expect("read rewritten header");
+        assert_eq!(decoded.owner_pid, 12);
+        assert_eq!(decoded.generation, 3);
+        assert_eq!(decoded.reader_count, 0);
+        assert_eq!(decoded.last_heartbeat_ms, 9);
+
+        drop(file);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn unique_test_suffix() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
     }
 }

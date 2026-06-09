@@ -2,24 +2,9 @@
 //!
 //! When provisioning is enabled (tier-wired for `Standard` and above in a
 //! later slice), opening a database creates a sibling `<data>.shm` file
-//! that carries a deterministic binary header recording the current owner
-//! pid, generation counter, and reader registry. The header is the lock
-//! protocol substrate that lets multiple embedded readers coexist on the
-//! same data file and lets the next opener detect a crashed prior owner.
-//!
-//! ## Binary layout (v1, little-endian, 64-byte fixed header)
-//!
-//! ```text
-//! offset size field             notes
-//!      0    8 magic             ASCII "RDBSHM01"
-//!      8    4 version           u32 = 1
-//!     12    4 owner_pid         u32, host pid of the writer that holds the lease
-//!     16    8 generation        u64, bumped on every owner takeover or heal
-//!     24    8 reader_count      u64, count of attached embedded readers
-//!     32    8 last_heartbeat_ms u64, owner heartbeat in unix-ms
-//!     40   16 reserved          zeroed, room for v2 fields
-//!     56    8 checksum          xxh3-style fold of bytes [0..56)
-//! ```
+//! with a deterministic binary header owned by `reddb-file`. This module
+//! owns the runtime lock policy: current owner pid, generation counter,
+//! reader registry, and crash takeover decisions.
 //!
 //! ## Lock protocol
 //!
@@ -38,7 +23,7 @@
 //!    integration is mechanical when wired.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -124,11 +109,7 @@ impl ShmHandle {
     }
 
     fn rewrite_header(&mut self) -> io::Result<()> {
-        let buf = self.header.encode();
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&buf)?;
-        self.file.sync_data()?;
-        Ok(())
+        reddb_file::write_shm_header_to_file(&mut self.file, &self.header)
     }
 }
 
@@ -153,17 +134,8 @@ pub fn provision_shm(data_path: &Path) -> io::Result<ShmHandle> {
     let fresh = metadata.len() == 0;
 
     if fresh {
-        file.set_len(SHM_FILE_SIZE)?;
-        let header = ShmHeader {
-            version: SHM_VERSION,
-            owner_pid: current_pid(),
-            generation: 1,
-            reader_count: 0,
-            last_heartbeat_ms: unix_ms_now(),
-        };
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&header.encode())?;
-        file.sync_data()?;
+        let header = ShmHeader::new(current_pid(), 1, 0, unix_ms_now());
+        reddb_file::initialize_shm_file(&mut file, &header)?;
         return Ok(ShmHandle {
             path,
             header,
@@ -172,64 +144,51 @@ pub fn provision_shm(data_path: &Path) -> io::Result<ShmHandle> {
         });
     }
 
-    let mut buf = [0u8; SHM_HEADER_SIZE];
-    file.seek(SeekFrom::Start(0))?;
-    let existing = match file.read_exact(&mut buf) {
-        Ok(()) => ShmHeader::decode(&buf).ok(),
+    let existing = match reddb_file::read_shm_header_from_file(&mut file) {
+        Ok(header) => Some(header),
         Err(_) => None,
     };
 
     let (header, state) = match existing {
         Some(prev) if pid_alive(prev.owner_pid) && prev.owner_pid != current_pid() => {
             // Attach to live owner — increment reader_count, keep generation.
-            let next = ShmHeader {
-                version: SHM_VERSION,
-                owner_pid: prev.owner_pid,
-                generation: prev.generation,
-                reader_count: prev.reader_count.saturating_add(1),
-                last_heartbeat_ms: prev.last_heartbeat_ms,
-            };
+            let next = ShmHeader::new(
+                prev.owner_pid,
+                prev.generation,
+                prev.reader_count.saturating_add(1),
+                prev.last_heartbeat_ms,
+            );
             (next, ShmProvisionState::AttachedToLiveOwner)
         }
         Some(prev) if prev.owner_pid == current_pid() => {
             // Same-process reopen; refresh heartbeat, keep counters.
-            let next = ShmHeader {
-                version: SHM_VERSION,
-                owner_pid: prev.owner_pid,
-                generation: prev.generation,
-                reader_count: prev.reader_count,
-                last_heartbeat_ms: unix_ms_now(),
-            };
+            let next = ShmHeader::new(
+                prev.owner_pid,
+                prev.generation,
+                prev.reader_count,
+                unix_ms_now(),
+            );
             (next, ShmProvisionState::AttachedToLiveOwner)
         }
         Some(prev) => {
             // Owner is dead — take over, bump generation, clear reader count.
-            let next = ShmHeader {
-                version: SHM_VERSION,
-                owner_pid: current_pid(),
-                generation: prev.generation.saturating_add(1),
-                reader_count: 0,
-                last_heartbeat_ms: unix_ms_now(),
-            };
+            let next = ShmHeader::new(
+                current_pid(),
+                prev.generation.saturating_add(1),
+                0,
+                unix_ms_now(),
+            );
             (next, ShmProvisionState::RecoveredFromCrash)
         }
         None => {
             // File exists but header is unreadable — heal in place.
-            let next = ShmHeader {
-                version: SHM_VERSION,
-                owner_pid: current_pid(),
-                generation: 1,
-                reader_count: 0,
-                last_heartbeat_ms: unix_ms_now(),
-            };
-            file.set_len(SHM_FILE_SIZE)?;
+            let next = ShmHeader::new(current_pid(), 1, 0, unix_ms_now());
+            reddb_file::initialize_shm_file(&mut file, &next)?;
             (next, ShmProvisionState::HealedCorruptHeader)
         }
     };
 
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&header.encode())?;
-    file.sync_data()?;
+    reddb_file::write_shm_header_to_file(&mut file, &header)?;
 
     Ok(ShmHandle {
         path,
@@ -248,9 +207,7 @@ pub fn read_shm_header(data_path: &Path) -> io::Result<Option<ShmHeader>> {
         return Ok(None);
     }
     let mut file = OpenOptions::new().read(true).open(&path)?;
-    let mut buf = [0u8; SHM_HEADER_SIZE];
-    file.read_exact(&mut buf)?;
-    ShmHeader::decode(&buf).map(Some)
+    reddb_file::read_shm_header_from_file(&mut file).map(Some)
 }
 
 fn unix_ms_now() -> u64 {

@@ -254,7 +254,10 @@ pub use serverless::{
     ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry, ServerlessWriterLease,
     SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
 };
-pub use shm::{ShmHeader, SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION};
+pub use shm::{
+    initialize_shm_file, read_shm_header_from_file, write_shm_header_to_file, ShmHeader,
+    SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION,
+};
 pub use spill::{
     decode_spill_file_frame, encode_spill_file_frame, spill_file_name, SpillFileFrameError,
     SPILL_FILE_HEADER_LEN, SPILL_FILE_MAGIC, SPILL_FILE_VERSION_V1, SPILL_FILE_VERSION_V2,

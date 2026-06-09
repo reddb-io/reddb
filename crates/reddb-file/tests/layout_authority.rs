@@ -2270,6 +2270,9 @@ fn server_does_not_redeclare_shm_file_format() {
         "pub const SHM_FILE_SIZE",
         "pub struct ShmHeader",
         "fn fold_checksum",
+        "[0u8; SHM_HEADER_SIZE]",
+        ".encode()",
+        "ShmHeader::decode",
     ] {
         assert!(
             !text.contains(forbidden),
@@ -2280,6 +2283,16 @@ fn server_does_not_redeclare_shm_file_format() {
         text.contains("pub use reddb_file::{ShmHeader"),
         "server should reexport the SHM file contract from reddb-file"
     );
+    for required in [
+        "reddb_file::initialize_shm_file",
+        "reddb_file::read_shm_header_from_file",
+        "reddb_file::write_shm_header_to_file",
+    ] {
+        assert!(
+            text.contains(required),
+            "server SHM runtime should route file-format operations through {required}"
+        );
+    }
 }
 
 #[test]
