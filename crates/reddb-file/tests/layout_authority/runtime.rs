@@ -132,6 +132,8 @@ fn server_uses_reddb_file_for_backup_temp_json_names() {
 fn server_uses_reddb_file_for_serverless_roots_and_cache() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/runtime/impl_serverless.rs"));
+    let runtime_test = read(root.join("crates/reddb-server/tests/serverless_file_runtime.rs"));
+    let test_support = read(root.join("crates/reddb-server/tests/support/primary_replica_file.rs"));
 
     for forbidden in [
         "with_extension(\"serverless\")",
@@ -142,6 +144,12 @@ fn server_uses_reddb_file_for_serverless_roots_and_cache() {
         assert!(
             !text.contains(forbidden),
             "serverless root/cache filename contracts belong in reddb-file, found {forbidden:?}"
+        );
+    }
+    for forbidden in ["with_extension(\"serverless\")", ".join(\"cache\")"] {
+        assert!(
+            !runtime_test.contains(forbidden),
+            "serverless runtime tests should route layout through reddb-file, found {forbidden:?}"
         );
     }
 
@@ -156,6 +164,10 @@ fn server_uses_reddb_file_for_serverless_roots_and_cache() {
             "serverless runtime should route through {required}"
         );
     }
+    assert!(
+        test_support.contains("reddb_file::layout::serverless_root"),
+        "test cleanup should route serverless root cleanup through reddb-file layout"
+    );
 }
 
 #[test]
