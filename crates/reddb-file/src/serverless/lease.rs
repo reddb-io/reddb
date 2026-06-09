@@ -1,8 +1,10 @@
 use super::*;
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const SERVERLESS_WRITER_LEASE_DEFAULT_TERM: u64 = 1;
+static SERVERLESS_WRITER_LEASE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerlessWriterLease {
@@ -41,6 +43,58 @@ pub fn serverless_writer_lease_temp_path(
     std::env::temp_dir().join(format!(
         "reddb-lease-{kind}-{process_id}-{now_unix_nanos}-{unique}.json"
     ))
+}
+
+#[derive(Debug)]
+pub struct ServerlessWriterLeaseTempFile {
+    path: PathBuf,
+}
+
+impl ServerlessWriterLeaseTempFile {
+    pub fn new(kind: &str) -> Self {
+        let unique = SERVERLESS_WRITER_LEASE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self::with_clock(kind, std::process::id(), now_unix_nanos(), unique)
+    }
+
+    pub fn with_clock(kind: &str, process_id: u32, now_unix_nanos: u128, unique: u64) -> Self {
+        Self {
+            path: serverless_writer_lease_temp_path(kind, process_id, now_unix_nanos, unique),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn write_bytes(&self, bytes: &[u8]) -> RdbFileResult<()> {
+        fs::write(&self.path, bytes)?;
+        Ok(())
+    }
+
+    pub fn read_bytes(&self) -> RdbFileResult<Vec<u8>> {
+        Ok(fs::read(&self.path)?)
+    }
+
+    pub fn cleanup(&self) -> RdbFileResult<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
+impl Drop for ServerlessWriterLeaseTempFile {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn now_unix_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 pub fn encode_serverless_writer_lease_json(

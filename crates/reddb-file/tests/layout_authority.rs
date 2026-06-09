@@ -1533,6 +1533,9 @@ fn server_does_not_own_serverless_writer_lease_artifact() {
         "\"expires_at_ms\"",
         "{}{}.lease.json",
         "reddb-lease-{kind}",
+        "std::fs::read(&temp",
+        "std::fs::write(&temp",
+        "std::fs::remove_file(&temp",
     ] {
         assert!(
             !text.contains(forbidden),
@@ -1553,7 +1556,7 @@ fn server_does_not_own_serverless_writer_lease_artifact() {
     for required in [
         "pub use reddb_file::ServerlessWriterLease as WriterLease",
         "reddb_file::serverless_writer_lease_key",
-        "reddb_file::serverless_writer_lease_temp_path",
+        "reddb_file::ServerlessWriterLeaseTempFile",
         "reddb_file::encode_serverless_writer_lease_json",
         "reddb_file::decode_serverless_writer_lease_json",
     ] {

@@ -266,7 +266,7 @@ pub use serverless::{
     ServerlessHydratedRange, ServerlessHydrationPlan, ServerlessHydrationRequest,
     ServerlessLocalCache, ServerlessManifest, ServerlessManifestEntry, ServerlessPackKind,
     ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry, ServerlessWriterLease,
-    SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
+    ServerlessWriterLeaseTempFile, SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
 };
 pub use shm::{
     initialize_shm_file, read_shm_header_from_file, write_shm_header_to_file, ShmHeader,

@@ -36,7 +36,6 @@
 //! closed before the instance is allowed to write. This keeps
 //! serverless fencing out of "last writer wins" territory.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::storage::backend::{
@@ -44,24 +43,6 @@ use crate::storage::backend::{
 };
 
 pub use reddb_file::ServerlessWriterLease as WriterLease;
-
-/// Per-process monotonic counter that disambiguates lease temp files
-/// when multiple threads sample `now_unix_nanos()` within the same
-/// nanosecond (observed on virtualised CI runners with coarse
-/// clocks). Without this, two writers could share the same temp path,
-/// and the CAS holder would publish the *other* writer's bytes,
-/// producing a spurious `LostRace` for the apparent winner.
-static LEASE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn lease_temp_path(kind: &str) -> std::path::PathBuf {
-    let unique = LEASE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    reddb_file::serverless_writer_lease_temp_path(
-        kind,
-        std::process::id(),
-        crate::utils::now_unix_nanos(),
-        unique,
-    )
-}
 
 #[derive(Debug)]
 pub enum LeaseError {
@@ -201,14 +182,14 @@ impl LeaseStore {
 
     fn read_lease(&self, database_key: &str) -> Result<Option<WriterLease>, LeaseError> {
         let key = self.key_for(database_key);
-        let temp = lease_temp_path("read");
-        let downloaded = self.backend.download(&key, &temp)?;
+        let temp = reddb_file::ServerlessWriterLeaseTempFile::new("read");
+        let downloaded = self.backend.download(&key, temp.path())?;
         if !downloaded {
             return Ok(None);
         }
-        let bytes = std::fs::read(&temp)
+        let bytes = temp
+            .read_bytes()
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
-        let _ = std::fs::remove_file(&temp);
         decode_writer_lease(&bytes).map(Some)
     }
 
@@ -218,21 +199,20 @@ impl LeaseStore {
             Some(version) => version,
             None => return Ok(None),
         };
-        let temp = lease_temp_path("read");
-        let downloaded = self.backend.download(&key, &temp)?;
+        let temp = reddb_file::ServerlessWriterLeaseTempFile::new("read");
+        let downloaded = self.backend.download(&key, temp.path())?;
         if !downloaded {
             return Ok(None);
         }
         let after = self.backend.object_version(&key)?;
         if after.as_ref() != Some(&before) {
-            let _ = std::fs::remove_file(&temp);
             return Err(LeaseError::Backend(BackendError::PreconditionFailed(
                 "lease object changed while being read".to_string(),
             )));
         }
-        let bytes = std::fs::read(&temp)
+        let bytes = temp
+            .read_bytes()
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
-        let _ = std::fs::remove_file(&temp);
         Ok(Some(VersionedLease {
             lease: decode_writer_lease(&bytes)?,
             version: before,
@@ -494,12 +474,12 @@ impl LeaseStore {
         let key = self.key_for(&lease.database_key);
         let bytes = reddb_file::encode_serverless_writer_lease_json(lease)
             .map_err(|err| LeaseError::Backend(BackendError::Internal(err.to_string())))?;
-        let temp = lease_temp_path("write");
-        std::fs::write(&temp, &bytes)
+        let temp = reddb_file::ServerlessWriterLeaseTempFile::new("write");
+        temp.write_bytes(&bytes)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
-        let res = self.backend.upload_conditional(&temp, &key, condition);
-        let _ = std::fs::remove_file(&temp);
-        Ok(res?)
+        Ok(self
+            .backend
+            .upload_conditional(temp.path(), &key, condition)?)
     }
 }
 

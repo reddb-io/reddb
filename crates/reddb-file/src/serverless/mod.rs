@@ -1339,6 +1339,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn writer_lease_temp_file_round_trips_and_cleans_up() {
+        let temp = ServerlessWriterLeaseTempFile::with_clock("write", 10, 20, 30);
+        assert_eq!(
+            temp.path().file_name().and_then(|name| name.to_str()),
+            Some("reddb-lease-write-10-20-30.json")
+        );
+
+        temp.write_bytes(b"{\"lease\":true}")
+            .expect("write lease temp");
+        assert_eq!(
+            temp.read_bytes().expect("read lease temp"),
+            b"{\"lease\":true}"
+        );
+        temp.cleanup().expect("cleanup lease temp");
+        assert!(!temp.path().exists());
+    }
+
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "reddb-file-{label}-{}-{}",
