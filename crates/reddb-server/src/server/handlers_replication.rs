@@ -589,7 +589,11 @@ mod tests {
         let server = RedDBServer::new(runtime);
 
         let response = server.handle_admin_replication_confirm_rewind(
-            br#"{"target_timeline":3,"rewind_to_lsn":42}"#.to_vec(),
+            reddb_wire::replication::RejoinRewindConfirmation {
+                target_timeline: 3,
+                rewind_to_lsn: 42,
+            }
+            .encode_json(),
         );
         let body = String::from_utf8(response.body).expect("confirm body is utf8");
 
@@ -621,7 +625,11 @@ mod tests {
         let server = RedDBServer::new(runtime);
 
         let response = server.handle_admin_replication_confirm_rewind(
-            br#"{"target_timeline":3,"rewind_to_lsn":41}"#.to_vec(),
+            reddb_wire::replication::RejoinRewindConfirmation {
+                target_timeline: 3,
+                rewind_to_lsn: 41,
+            }
+            .encode_json(),
         );
         let body = String::from_utf8(response.body).expect("confirm body is utf8");
 
