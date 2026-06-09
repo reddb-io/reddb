@@ -32,7 +32,7 @@ use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthO
 use super::validate_minor_version;
 use reddb_wire::redwire::handshake::{
     build_auth_fail_payload, build_auth_ok_frame_from_payload, build_hello_ack_frame,
-    parse_auth_response_oauth_jwt, Hello,
+    expect_auth_response_payload, parse_auth_response_oauth_jwt, Hello,
 };
 use reddb_wire::redwire::{
     build_dispatch_reply_frame, build_error_frame_lossy, build_reply_frame,
@@ -748,15 +748,19 @@ where
     // Step 4: AuthResponse (no challenge for the 1-RTT methods —
     // bearer/anonymous send their proof in the first AuthResponse).
     let resp = read_frame(stream).await?;
-    if resp.kind != MessageKind::AuthResponse {
-        let fail = encode_frame(&reply_frame_or_io_error(
-            resp.correlation_id,
-            MessageKind::AuthFail,
-            build_auth_fail_payload("expected AuthResponse"),
-        )?);
-        let _ = stream.write_all(&fail).await;
-        return Ok(None);
-    }
+    let auth_payload = match expect_auth_response_payload(resp.kind, &resp.payload, "AuthResponse")
+    {
+        Ok(payload) => payload,
+        Err(err) => {
+            let fail = encode_frame(&reply_frame_or_io_error(
+                resp.correlation_id,
+                MessageKind::AuthFail,
+                build_auth_fail_payload(&err.to_string()),
+            )?);
+            let _ = stream.write_all(&fail).await;
+            return Ok(None);
+        }
+    };
 
     // OAuth-JWT branch. The `jwt` field carries either a browser access
     // JWT (the hybrid-token model, issue #936) or a federated IdP token
@@ -766,7 +770,7 @@ where
     // external OAuth IdP still authenticates. mTLS stays native-only
     // (ADR 0036) — the browser presents this access JWT and nothing else.
     if chosen == "oauth-jwt" {
-        let raw = match parse_auth_response_oauth_jwt(&resp.payload) {
+        let raw = match parse_auth_response_oauth_jwt(auth_payload) {
             Ok(raw) if !raw.is_empty() => raw,
             _ => {
                 let fail = encode_frame(&reply_frame_or_io_error(
@@ -859,7 +863,7 @@ where
         }
     }
 
-    match validate_auth_response(chosen, &resp.payload, auth_store) {
+    match validate_auth_response(chosen, auth_payload, auth_store) {
         AuthOutcome::Authenticated {
             username,
             role,
@@ -922,17 +926,24 @@ where
 
     // 1. Client-first.
     let cf = read_frame(stream).await?;
-    if cf.kind != MessageKind::AuthResponse {
-        let fail = encode_frame(&reply_frame_or_io_error(
-            cf.correlation_id,
-            MessageKind::AuthFail,
-            build_auth_fail_payload("expected AuthResponse(client-first-message)"),
-        )?);
-        let _ = stream.write_all(&fail).await;
-        return Ok(None);
-    }
+    let cf_payload = match expect_auth_response_payload(
+        cf.kind,
+        &cf.payload,
+        "AuthResponse(client-first-message)",
+    ) {
+        Ok(payload) => payload,
+        Err(err) => {
+            let fail = encode_frame(&reply_frame_or_io_error(
+                cf.correlation_id,
+                MessageKind::AuthFail,
+                build_auth_fail_payload(&err.to_string()),
+            )?);
+            let _ = stream.write_all(&fail).await;
+            return Ok(None);
+        }
+    };
     let (username, client_nonce, client_first_bare) =
-        match reddb_wire::redwire::handshake::parse_scram_client_first(&cf.payload) {
+        match reddb_wire::redwire::handshake::parse_scram_client_first(cf_payload) {
             Ok(t) => t,
             Err(e) => {
                 let fail = encode_frame(&reply_frame_or_io_error(
@@ -982,17 +993,24 @@ where
 
     // 4. Client-final.
     let cfinal = read_frame(stream).await?;
-    if cfinal.kind != MessageKind::AuthResponse {
-        let fail = encode_frame(&reply_frame_or_io_error(
-            cfinal.correlation_id,
-            MessageKind::AuthFail,
-            build_auth_fail_payload("expected AuthResponse(client-final-message)"),
-        )?);
-        let _ = stream.write_all(&fail).await;
-        return Ok(None);
-    }
+    let cfinal_payload = match expect_auth_response_payload(
+        cfinal.kind,
+        &cfinal.payload,
+        "AuthResponse(client-final-message)",
+    ) {
+        Ok(payload) => payload,
+        Err(err) => {
+            let fail = encode_frame(&reply_frame_or_io_error(
+                cfinal.correlation_id,
+                MessageKind::AuthFail,
+                build_auth_fail_payload(&err.to_string()),
+            )?);
+            let _ = stream.write_all(&fail).await;
+            return Ok(None);
+        }
+    };
     let (combined_nonce, presented_proof, client_final_no_proof) =
-        match reddb_wire::redwire::handshake::parse_scram_client_final(&cfinal.payload) {
+        match reddb_wire::redwire::handshake::parse_scram_client_final(cfinal_payload) {
             Ok(t) => t,
             Err(e) => {
                 let fail = encode_frame(&reply_frame_or_io_error(
