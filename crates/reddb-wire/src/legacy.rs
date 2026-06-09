@@ -206,6 +206,34 @@ pub fn encode_column_name(buf: &mut Vec<u8>, name: &str) {
     buf.extend_from_slice(bytes);
 }
 
+pub fn encode_result_payload_header<'a, I>(buf: &mut Vec<u8>, columns: I, row_count: u32) -> usize
+where
+    I: IntoIterator<Item = &'a str>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let columns = columns.into_iter();
+    buf.extend_from_slice(&(columns.len() as u16).to_le_bytes());
+    for column in columns {
+        encode_column_name(buf, column);
+    }
+    let row_count_offset = buf.len();
+    buf.extend_from_slice(&row_count.to_le_bytes());
+    row_count_offset
+}
+
+pub fn set_result_payload_row_count(
+    buf: &mut [u8],
+    row_count_offset: usize,
+    row_count: u32,
+) -> Result<(), &'static str> {
+    let end = row_count_offset.saturating_add(4);
+    if end > buf.len() {
+        return Err("result payload row-count offset out of bounds");
+    }
+    buf[row_count_offset..end].copy_from_slice(&row_count.to_le_bytes());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +309,27 @@ mod tests {
         );
         assert_eq!(try_decode_value(&bytes, &mut pos), Ok(WireValue::U64(1234)));
         assert_eq!(pos, bytes.len());
+    }
+
+    #[test]
+    fn result_payload_header_encodes_columns_and_row_count() {
+        let mut bytes = Vec::new();
+        let row_count_offset = encode_result_payload_header(&mut bytes, ["id", "name"], 3);
+
+        assert_eq!(
+            bytes,
+            [
+                2, 0, // ncols
+                2, 0, b'i', b'd', // "id"
+                4, 0, b'n', b'a', b'm', b'e', // "name"
+                3, 0, 0, 0, // nrows
+            ]
+        );
+        assert_eq!(row_count_offset, bytes.len() - 4);
+        set_result_payload_row_count(&mut bytes, row_count_offset, 5).unwrap();
+        assert_eq!(
+            &bytes[row_count_offset..row_count_offset + 4],
+            &[5, 0, 0, 0]
+        );
     }
 }
