@@ -56,27 +56,25 @@ pub fn parse_open_input(payload: &[u8]) -> Result<OpenInputRequest, OpenInputPar
     reddb_wire::redwire::stream::parse_open_input(payload)
 }
 
-/// Parsed `StreamChunk` payload sent by an input-stream client. Shape
-/// mirrors the output-stream chunk (`{"seq", "rows", "terminal"}`) but
-/// the rows are JSON objects keyed by column rather than already-shaped
-/// output rows.
+/// Runtime-local projection of the `reddb-wire` RedWire `StreamChunk`
+/// payload into the server's internal JSON value type.
 // No `Eq`: `serde_json::Value` rows may carry floats, which are only
 // `PartialEq`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct InputChunk {
+pub(super) struct RuntimeInputChunk {
     pub seq: u64,
     pub rows: Vec<JsonValue>,
     pub terminal: bool,
 }
 
-pub fn parse_input_chunk(payload: &[u8]) -> Result<InputChunk, ChunkParseError> {
+pub(super) fn parse_input_chunk(payload: &[u8]) -> Result<RuntimeInputChunk, ChunkParseError> {
     let chunk = reddb_wire::redwire::stream::parse_input_chunk_json(payload)?;
     let rows = chunk
         .rows_json
         .iter()
         .map(|row| serde_json::from_slice(row).unwrap_or(JsonValue::Null))
         .collect();
-    Ok(InputChunk {
+    Ok(RuntimeInputChunk {
         seq: chunk.seq,
         rows,
         terminal: chunk.terminal,
