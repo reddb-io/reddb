@@ -101,6 +101,32 @@ fn server_does_not_own_unified_store_wal_action_frame() {
 }
 
 #[test]
+fn server_does_not_own_native_store_atomic_publish() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
+
+    for forbidden in [
+        "reddb_file::temp_path(path)",
+        "File::create(&tmp_path)",
+        "BufWriter::new(file)",
+        "writer.get_ref().sync_all()",
+        "std::fs::rename(&tmp_path, path)",
+        "File::open(parent)",
+        "dir.sync_all()",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "native store atomic publish belongs in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    assert!(
+        text.contains("reddb_file::write_native_store_bytes_atomically(path, &buf)"),
+        "UnifiedStore::save_to_file should publish native store bytes through reddb-file"
+    );
+}
+
+#[test]
 fn server_does_not_own_main_wal_file_header() {
     let root = repo_root();
     let files = [
