@@ -1,6 +1,20 @@
 use crate::common::*;
 
 #[test]
+fn reddb_file_source_modules_stay_under_two_thousand_lines() {
+    let root = repo_root();
+    for path in rust_files_under(&root.join("crates/reddb-file/src")) {
+        let text = read(&path);
+        let line_count = text.lines().count();
+        assert!(
+            line_count <= 2_000,
+            "{} has {line_count} lines; split file-contract modules before adding more authority",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn server_uses_reddb_file_for_unified_wal_paths() {
     let root = repo_root();
     let files = [
