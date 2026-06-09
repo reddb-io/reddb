@@ -52,24 +52,56 @@ fn redwire_frame_contracts_live_only_in_reddb_wire() {
 fn redwire_stream_payload_contracts_live_only_in_reddb_wire() {
     let root = repo_root();
     let server_input = read(root.join("crates/reddb-server/src/wire/redwire/input_stream.rs"));
+    let server_output = read(root.join("crates/reddb-server/src/wire/redwire/output_stream.rs"));
     let server_non_test = non_test_source(&server_input);
+    let server_output_non_test = non_test_source(&server_output);
     let wire_stream = read(root.join("crates/reddb-wire/src/redwire/stream.rs"));
 
-    for forbidden in [
-        "pub struct InputChunk",
-        "struct InputChunk",
-        "pub enum ChunkParseError",
-        "enum ChunkParseError",
-        "pub struct OpenInputRequest",
-        "struct OpenInputRequest",
-        "pub enum OpenInputParseError",
-        "enum OpenInputParseError",
-        "build_input_stream_end_payload",
-        "build_input_stream_error_payload",
+    for (file, text) in [
+        ("input_stream.rs", server_non_test),
+        ("output_stream.rs", server_output_non_test),
+    ] {
+        for forbidden in [
+            "pub struct InputChunk",
+            "struct InputChunk",
+            "pub enum ChunkParseError",
+            "enum ChunkParseError",
+            "pub struct OpenInputRequest",
+            "struct OpenInputRequest",
+            "pub enum OpenInputParseError",
+            "enum OpenInputParseError",
+            "pub struct OpenStreamRequest",
+            "struct OpenStreamRequest",
+            "pub enum OpenStreamParseError",
+            "enum OpenStreamParseError",
+            "pub struct StreamCancelRequest",
+            "struct StreamCancelRequest",
+            "build_stream_chunk_payload",
+            "build_stream_error_payload",
+            "build_stream_end_payload",
+            "build_input_stream_end_payload",
+            "build_input_stream_error_payload",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{file} RedWire stream payload contract must live in reddb-wire, found {forbidden:?}"
+            );
+        }
+    }
+
+    for required in [
+        "pub struct OpenStreamRequest",
+        "pub enum OpenStreamParseError",
+        "pub struct StreamCancelRequest",
+        "pub fn parse_open_stream",
+        "pub fn parse_stream_cancel",
+        "pub fn build_stream_chunk_payload",
+        "pub fn build_stream_error_payload",
+        "pub fn build_stream_end_payload",
     ] {
         assert!(
-            !server_non_test.contains(forbidden),
-            "server RedWire input-stream payload contract must live in reddb-wire, found {forbidden:?}"
+            wire_stream.contains(required),
+            "reddb-wire should own output stream payload contract {required}"
         );
     }
 
@@ -97,6 +129,71 @@ fn redwire_stream_payload_contracts_live_only_in_reddb_wire() {
         assert!(
             server_non_test.contains(required),
             "server RedWire input-stream runtime should delegate through {required}"
+        );
+    }
+    for required in [
+        "reddb_wire::redwire::stream::parse_open_stream",
+        "reddb_wire::redwire::stream::parse_stream_cancel",
+        "reddb_wire::redwire::stream::build_open_ack_frame",
+        "reddb_wire::redwire::stream::build_stream_error_frame",
+        "reddb_wire::redwire::stream::build_stream_chunk_frame_from_json_bytes",
+        "reddb_wire::redwire::stream::build_stream_end_frame",
+    ] {
+        assert!(
+            server_output_non_test.contains(required),
+            "server RedWire output-stream runtime should delegate through {required}"
+        );
+    }
+}
+
+#[test]
+fn redwire_queue_payload_contracts_live_only_in_reddb_wire() {
+    let root = repo_root();
+    let server_queue = read(root.join("crates/reddb-server/src/wire/redwire/queue_wait.rs"));
+    let server_non_test = non_test_source(&server_queue);
+    let wire_queue = read(root.join("crates/reddb-wire/src/redwire/queue.rs"));
+
+    for forbidden in [
+        "pub struct QueueWaitOpenRequest",
+        "struct QueueWaitOpenRequest",
+        "pub enum QueueWaitParseError",
+        "enum QueueWaitParseError",
+        "build_event_push_payload",
+        "build_queue_wait_timeout_payload",
+        "build_queue_wait_error_payload",
+    ] {
+        assert!(
+            !server_non_test.contains(forbidden),
+            "server RedWire queue-wait payload contract must live in reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "pub struct QueueWaitOpenRequest",
+        "pub enum QueueWaitParseError",
+        "pub fn parse_queue_wait_open",
+        "pub fn build_event_push_payload",
+        "pub fn build_queue_wait_timeout_payload",
+        "pub fn build_queue_wait_error_payload",
+        "pub const WAIT_CANCELLED_CODE",
+        "pub const WAIT_EXCEEDS_CAP_CODE",
+        "pub const WAIT_FAILED_CODE",
+    ] {
+        assert!(
+            wire_queue.contains(required),
+            "reddb-wire should own queue-wait payload contract {required}"
+        );
+    }
+
+    for required in [
+        "reddb_wire::redwire::queue::parse_queue_wait_open",
+        "reddb_wire::redwire::queue::build_queue_event_push_frame_from_json_bytes",
+        "reddb_wire::redwire::queue::build_queue_wait_timeout_frame",
+        "reddb_wire::redwire::queue::build_queue_wait_error_frame",
+    ] {
+        assert!(
+            server_non_test.contains(required),
+            "server RedWire queue-wait runtime should delegate through {required}"
         );
     }
 }
