@@ -344,6 +344,8 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
     let listener = read(root.join("crates/reddb-server/src/wire/listener.rs"));
     let query_direct = read(root.join("crates/reddb-server/src/wire/query_direct.rs"));
     let wire = read(root.join("crates/reddb-wire/src/legacy.rs"));
+    let listener_non_test = non_test_source(&listener);
+    let query_direct_non_test = non_test_source(&query_direct);
 
     for forbidden in [
         "write_frame_header(&mut resp",
@@ -354,13 +356,14 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
         "buf.extend_from_slice(&(records.len() as u32).to_le_bytes())",
         "body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice",
         "let body = [0u8, 0, 0, 0, 0, 0]",
+        "body.push(VAL_",
     ] {
         assert!(
-            !listener.contains(forbidden),
+            !listener_non_test.contains(forbidden),
             "legacy result/error frame and result-set payload construction belongs in reddb-wire, found {forbidden:?}"
         );
         assert!(
-            !query_direct.contains(forbidden),
+            !query_direct_non_test.contains(forbidden),
             "query_direct legacy frame and result-set payload construction belongs in reddb-wire, found {forbidden:?}"
         );
     }

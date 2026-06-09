@@ -30,7 +30,7 @@ use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
 use super::protocol::encode_value;
 use reddb_wire::legacy::{
     build_legacy_result_frame, encode_result_payload_header, set_result_payload_row_count,
-    VAL_NULL, VAL_U64,
+    WireValue,
 };
 
 /// Try to serve a binary SELECT via the zero-copy scan path.
@@ -1443,13 +1443,12 @@ fn encode_entity_wire_value(
 
 #[inline]
 fn encode_wire_null(body: &mut Vec<u8>) {
-    body.push(VAL_NULL);
+    reddb_wire::legacy::encode_value(body, &WireValue::Null);
 }
 
 #[inline]
 fn encode_wire_u64(body: &mut Vec<u8>, value: u64) {
-    body.push(VAL_U64);
-    body.extend_from_slice(&value.to_le_bytes());
+    reddb_wire::legacy::encode_value(body, &WireValue::U64(value));
 }
 
 #[cfg(test)]
