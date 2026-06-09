@@ -297,21 +297,18 @@ impl RedDBServer {
             return json_error(409, "replica is not waiting for a confirmed rejoin rewind");
         }
 
-        let payload = match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
-            Ok(payload) => payload,
-            Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
-        };
-        let Some(target_timeline) = payload.get("target_timeline").and_then(|v| v.as_u64()) else {
+        let confirmation =
+            match reddb_wire::replication::RejoinRewindConfirmation::decode_json(&body) {
+                Ok(confirmation) => confirmation,
+                Err(err) => return json_error(400, err.to_string()),
+            };
+        let target_timeline = confirmation.target_timeline;
+        let rewind_to_lsn = confirmation.rewind_to_lsn;
+        if target_timeline == 0 {
             return json_error(400, "target_timeline must be a positive integer");
-        };
-        let Some(rewind_to_lsn) = payload.get("rewind_to_lsn").and_then(|v| v.as_u64()) else {
+        }
+        if rewind_to_lsn == 0 {
             return json_error(400, "rewind_to_lsn must be a positive integer");
-        };
-        if target_timeline == 0 || rewind_to_lsn == 0 {
-            return json_error(
-                400,
-                "target_timeline and rewind_to_lsn must be greater than zero",
-            );
         }
 
         let planned_timeline = self
@@ -332,21 +329,16 @@ impl RedDBServer {
         self.runtime
             .mark_replica_rejoin_rewind_confirmed(target_timeline, rewind_to_lsn);
 
-        let mut object = Map::new();
-        object.insert("ok".to_string(), JsonValue::Bool(true));
-        object.insert(
-            "target_timeline".to_string(),
-            JsonValue::Number(target_timeline as f64),
+        let reply = reddb_wire::replication::RejoinRewindConfirmationReply::confirmed(
+            target_timeline,
+            rewind_to_lsn,
         );
-        object.insert(
-            "rewind_to_lsn".to_string(),
-            JsonValue::Number(rewind_to_lsn as f64),
-        );
-        object.insert(
-            "next_step".to_string(),
-            JsonValue::String("restart or resume replica apply from the confirmed LSN".to_string()),
-        );
-        json_response(200, JsonValue::Object(object))
+        let value: JsonValue = crate::json::from_slice(&reply.encode_json()).unwrap_or_else(|_| {
+            let mut object = Map::new();
+            object.insert("ok".to_string(), JsonValue::Bool(true));
+            JsonValue::Object(object)
+        });
+        json_response(200, value)
     }
 
     /// POST /replication/snapshot
