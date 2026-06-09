@@ -175,7 +175,14 @@ fn server_uses_reddb_file_for_local_backend_temp_names() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/backend/local.rs"));
 
-    for forbidden in [".cas.lock", ".tmp-{}-{unique}", "with_file_name(format!"] {
+    for forbidden in [
+        ".cas.lock",
+        ".tmp-{}-{unique}",
+        "with_file_name(format!",
+        "fs::copy(",
+        "fs::rename(",
+        "sync_all()",
+    ] {
         assert!(
             !text.contains(forbidden),
             "local backend temporary filename contracts belong in reddb-file, found {forbidden:?}"
@@ -184,7 +191,8 @@ fn server_uses_reddb_file_for_local_backend_temp_names() {
 
     for required in [
         "reddb_file::layout::local_cas_lock_path",
-        "reddb_file::layout::local_upload_temp_path",
+        "reddb_file::local_backend_download",
+        "reddb_file::local_backend_atomic_upload",
     ] {
         assert!(
             text.contains(required),
