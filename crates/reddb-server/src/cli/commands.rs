@@ -195,6 +195,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: bootstrap_flags(),
     },
     CommandDef {
+      name: "ui",
+      summary: "Open the graphical UI against a database over a local bridge",
+      usage: "red ui [--server] [--desktop] [--ui-dir DIR] [--port PORT] <uri>",
+      flags: ui_flags(),
+    },
+    CommandDef {
       name: "version",
       summary: "Show RedDB version information",
       usage: "red version",
@@ -542,6 +548,25 @@ fn bootstrap_flags() -> Vec<FlagSchema> {
             .with_description("Read the admin password from stdin (one line)"),
         FlagSchema::boolean("print-certificate")
             .with_description("Print only the certificate to stdout"),
+    ]
+}
+
+fn ui_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::boolean("server").with_description(
+            "Force the browser-served path: stand up a local bridge and open the default browser",
+        ),
+        FlagSchema::boolean("desktop").with_description(
+            "Reserved: open in the desktop app (full behaviour lands in the deep-link slice)",
+        ),
+        FlagSchema::new("ui-dir").with_description(
+            "Directory holding the UI bundle to serve (defaults to a minimal fixture page)",
+        ),
+        FlagSchema::new("port")
+            .with_description("Local bridge port (default: an ephemeral port on 127.0.0.1)")
+            .with_default("0"),
+        FlagSchema::boolean("no-browser")
+            .with_description("Do not launch a browser; print the URL and keep the bridge open"),
     ]
 }
 

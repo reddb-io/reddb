@@ -181,6 +181,11 @@ proptest = "1"
 insta = { version = "1", features = ["filters"] }
 regex = "1"
 toml = "1.1"
+# `red ui` local bridge e2e (#1042): a RedWire-over-WebSocket client that
+# opens a session against the embedded engine the bridge fronts. Pinned to
+# the version axum already resolves in Cargo.lock.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

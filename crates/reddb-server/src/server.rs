@@ -127,6 +127,10 @@ mod handlers_log;
 mod handlers_metrics;
 mod handlers_ops;
 mod handlers_ops_policy;
+/// Local `red ui` bridge: serves the UI bundle and fronts the embedded
+/// engine over RedWire-over-WebSocket for `file://` targets (issue #1042,
+/// ADR 0047/0049). Public so the `red ui` CLI command can drive it.
+pub mod ui_bridge;
 mod ws_edge;
 // `pub(crate)` so the RedWire input-stream path (issue #764 / S5)
 // can reuse the canonical S4 INSERT builders / identifier checks

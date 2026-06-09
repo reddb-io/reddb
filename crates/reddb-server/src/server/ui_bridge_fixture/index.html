@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<!--
+  Minimal red-ui fixture page (issue #1042, ADR 0047/0049).
+
+  Tracer-bullet stand-in for the real red-ui bundle: it proves the served
+  page can open a RedWire-over-WebSocket session against the embedded
+  engine the `red ui` bridge fronts, and run a query. It imports the
+  node-free browser codec (`redwire-core.js`) the bridge serves alongside
+  it. The production UI lands in a later slice; this page exists so the
+  `file://` bridge has something to serve and exercise end to end.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>reddb — local UI bridge</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 0; padding: 2rem; line-height: 1.5;
+      }
+      h1 { font-size: 1.1rem; margin: 0 0 1rem; }
+      .row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+      input { flex: 1; padding: 0.5rem; font: inherit; }
+      button { padding: 0.5rem 1rem; font: inherit; cursor: pointer; }
+      pre {
+        background: rgba(127,127,127,0.12); padding: 1rem; border-radius: 6px;
+        overflow: auto; white-space: pre-wrap; word-break: break-word;
+      }
+      #status { font-weight: bold; }
+      .ok { color: #1a7f37; }
+      .err { color: #cf222e; }
+    </style>
+  </head>
+  <body>
+    <h1>reddb — local UI bridge (RedWire-over-WebSocket)</h1>
+    <p>Status: <span id="status">connecting…</span></p>
+    <div class="row">
+      <input id="sql" value="SELECT 1 AS one" aria-label="SQL query" />
+      <button id="run" disabled>Run query</button>
+    </div>
+    <pre id="out">—</pre>
+
+    <script type="module">
+      import { connectRedwireOverSocket } from './redwire-core.js'
+
+      const statusEl = document.getElementById('status')
+      const outEl = document.getElementById('out')
+      const runEl = document.getElementById('run')
+      const sqlEl = document.getElementById('sql')
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text
+        statusEl.className = cls || ''
+      }
+
+      // Adapt the browser binary WebSocket to the node-socket-shaped
+      // duplex the RedWire codec consumes. (Same shape as the driver's
+      // WebSocketDuplex; inlined so the fixture stays self-contained and
+      // can use plain ws:// on loopback without the wss:// guard.)
+      class WebSocketDuplex {
+        constructor(ws) {
+          this.ws = ws
+          this._handlers = { data: [], error: [], end: [], close: [] }
+          ws.binaryType = 'arraybuffer'
+          ws.addEventListener('message', (ev) => {
+            const d = ev.data
+            let bytes = null
+            if (d instanceof ArrayBuffer) bytes = new Uint8Array(d)
+            else if (ArrayBuffer.isView(d)) bytes = new Uint8Array(d.buffer, d.byteOffset, d.byteLength)
+            if (bytes) this._emit('data', bytes)
+          })
+          ws.addEventListener('error', () => this._emit('error', new Error('ws error')))
+          ws.addEventListener('close', () => this._emit('close'))
+        }
+        on(event, cb) { (this._handlers[event] ??= []).push(cb); return this }
+        _emit(event, arg) { for (const cb of this._handlers[event] ?? []) cb(arg) }
+        write(bytes, cb) { try { this.ws.send(bytes); cb && cb() } catch (e) { cb ? cb(e) : this._emit('error', e) } return true }
+        end() { try { this.ws.close() } catch {} }
+      }
+
+      function openWs(url) {
+        return new Promise((resolve, reject) => {
+          const ws = new WebSocket(url, 'reddb.redwire.v1')
+          ws.binaryType = 'arraybuffer'
+          ws.addEventListener('open', () => resolve(ws), { once: true })
+          ws.addEventListener('error', () => reject(new Error('ws failed to open')), { once: true })
+        })
+      }
+
+      let client = null
+
+      async function connect() {
+        const wsUrl = `ws://${location.host}/redwire`
+        const ws = await openWs(wsUrl)
+        client = await connectRedwireOverSocket(new WebSocketDuplex(ws), { clientName: 'red-ui-fixture' })
+        setStatus('connected', 'ok')
+        runEl.disabled = false
+      }
+
+      async function runQuery() {
+        runEl.disabled = true
+        outEl.textContent = '…'
+        try {
+          const res = await client.call('query', { sql: sqlEl.value })
+          outEl.textContent = JSON.stringify(res, null, 2)
+        } catch (err) {
+          outEl.textContent = String(err && err.message ? err.message : err)
+        } finally {
+          runEl.disabled = false
+        }
+      }
+
+      runEl.addEventListener('click', runQuery)
+      sqlEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') runQuery() })
+
+      connect().catch((err) => {
+        setStatus('connection failed: ' + (err && err.message ? err.message : err), 'err')
+      })
+    </script>
+  </body>
+</html>
