@@ -493,7 +493,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&backend_dir);
 
         let backend = Arc::new(LocalBackend);
-        let archiver = WalArchiver::new(backend, "wal/");
+        let wal_prefix = reddb_file::backup_wal_prefix("");
+        let archiver = WalArchiver::new(backend, &wal_prefix);
 
         // Create a fake WAL file
         let wal_path = temp_dir.join("test.wal");
@@ -506,8 +507,8 @@ mod tests {
         let meta = archiver.archive_segment(&wal_path, 8, 500, None).unwrap();
         assert_eq!(meta.lsn_start, 8);
         assert_eq!(meta.lsn_end, 500);
-        assert!(meta.key.starts_with("wal/"));
-        assert!(meta.key.ends_with(".wal"));
+        assert!(meta.key.starts_with(&wal_prefix));
+        assert!(is_archived_wal_segment_key(&meta.key));
 
         // Download it
         let dest = temp_dir.join("downloaded.wal");
