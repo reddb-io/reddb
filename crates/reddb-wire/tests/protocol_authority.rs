@@ -81,6 +81,39 @@ fn server_public_reexport_describes_reddb_wire_as_protocol_authority() {
 }
 
 #[test]
+fn context_declares_reddb_wire_as_protocol_authority() {
+    let root = repo_root();
+    let persistence = read(root.join(".red/context/persistence.md"));
+    let wire = read(root.join("crates/reddb-wire/src/lib.rs"));
+
+    for required in [
+        "File/protocol ownership boundary",
+        "`reddb-wire` is the authority for communication contracts",
+        "frames, codecs, payloads, topology, connection strings, sanitizers, and replication wire messages",
+        "must not introduce new persistent file formats or protocol payload formats directly",
+    ] {
+        assert!(
+            persistence.contains(required),
+            "persistence context must declare reddb-wire authority: {required}"
+        );
+    }
+
+    for required in [
+        "connection-string parser",
+        "audit-safe sanitizers",
+        "RedWire frame layout and codec",
+        "handshake payloads",
+        "topology payloads",
+        "replication wire",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire crate docs should advertise ownership of {required}"
+        );
+    }
+}
+
+#[test]
 fn client_connection_string_vocabulary_lives_in_reddb_wire() {
     let root = repo_root();
     let connect = read(root.join("crates/reddb-client/src/connect.rs"));

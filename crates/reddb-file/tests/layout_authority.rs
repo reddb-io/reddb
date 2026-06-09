@@ -1,5 +1,7 @@
 #[path = "layout_authority/backup.rs"]
 mod backup;
+#[path = "layout_authority/boundary.rs"]
+mod boundary;
 #[path = "layout_authority/common.rs"]
 mod common;
 #[path = "layout_authority/physical.rs"]
