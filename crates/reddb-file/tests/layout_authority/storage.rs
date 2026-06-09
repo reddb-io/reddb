@@ -174,6 +174,58 @@ fn server_does_not_own_main_wal_record_frame() {
 }
 
 #[test]
+fn server_does_not_own_transaction_wal_record_envelope() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/storage/transaction/log.rs"));
+    let non_test = text
+        .split("#[cfg(test)]")
+        .next()
+        .expect("transaction/log.rs has non-test source");
+    let file = read(root.join("crates/reddb-file/src/transaction_wal.rs"));
+
+    for forbidden in [
+        "buf.extend(&self.lsn.to_le_bytes())",
+        "buf.extend(&self.txn_id.to_le_bytes())",
+        "buf.extend(&self.prev_lsn.unwrap_or(0).to_le_bytes())",
+        "buf.extend(&self.timestamp.to_le_bytes())",
+        "buf.extend(&(type_bytes.len() as u32).to_le_bytes())",
+        "let computed: u8 = data[..offset].iter().fold(0",
+        "Checksum mismatch",
+        "Missing WAL entry checksum",
+        "Missing WAL entry LSN",
+    ] {
+        assert!(
+            !non_test.contains(forbidden),
+            "transaction WAL record envelope belongs in reddb-file, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "pub struct TransactionWalRecordFrame",
+        "pub fn encode_transaction_wal_record_frame",
+        "pub fn decode_transaction_wal_record_frame",
+        "pub fn transaction_wal_record_encoded_len",
+    ] {
+        assert!(
+            file.contains(required),
+            "reddb-file should own transaction WAL envelope {required}"
+        );
+    }
+
+    for required in [
+        "reddb_file::TransactionWalRecordFrame",
+        "reddb_file::encode_transaction_wal_record_frame",
+        "reddb_file::decode_transaction_wal_record_frame",
+        "reddb_file::transaction_wal_record_encoded_len",
+    ] {
+        assert!(
+            non_test.contains(required),
+            "transaction WAL runtime should route envelope through {required}"
+        );
+    }
+}
+
+#[test]
 fn server_source_does_not_embed_owned_file_suffixes() {
     let root = repo_root();
     for path in rust_files_under(&root.join("crates/reddb-server/src")) {
