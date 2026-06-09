@@ -2056,7 +2056,7 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         "is_backup_manifest_sidecar_key",
         "archived_snapshot_key",
         "backup_root_from_snapshot_prefix",
-        "backup_snapshot_dir",
+        "backup_snapshot_prefix",
         "backup_wal_prefix",
     ] {
         assert!(
@@ -2081,6 +2081,17 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         !non_test_recovery.contains("manifests/head.json"),
         "backup head key derivation belongs in reddb-file"
     );
+    for forbidden in [
+        "join(\"manifests\")",
+        "snapshots/000",
+        "wal/000",
+        "format!(\"{}/wal/\"",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "backup artifact test keys should route through reddb-file, found {forbidden:?}"
+        );
+    }
     for required in [
         "reddb_file::backup_head_key",
         "reddb_file::backup_snapshot_prefix",

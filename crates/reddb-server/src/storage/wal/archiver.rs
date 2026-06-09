@@ -525,20 +525,25 @@ mod tests {
         let temp_dir = std::env::temp_dir().join("reddb_backup_head_test");
         let _ = std::fs::create_dir_all(&temp_dir);
         let backend = LocalBackend;
-        let head_key = temp_dir.join("manifests").join("head.json");
+        let root_prefix = format!("{}/", temp_dir.to_string_lossy());
+        let head_key = reddb_file::backup_head_key(&root_prefix);
 
         let head = BackupHead {
             timeline_id: "main".to_string(),
-            snapshot_key: "snapshots/000001-123.snapshot".to_string(),
+            snapshot_key: reddb_file::archived_snapshot_key(
+                &reddb_file::backup_snapshot_prefix(""),
+                1,
+                123,
+            ),
             snapshot_id: 1,
             snapshot_time: 123,
             current_lsn: 456,
             last_archived_lsn: 456,
-            wal_prefix: "wal/".to_string(),
+            wal_prefix: reddb_file::backup_wal_prefix(""),
         };
 
-        publish_backup_head(&backend, &head_key.to_string_lossy(), &head).unwrap();
-        let loaded = load_backup_head(&backend, &head_key.to_string_lossy())
+        publish_backup_head(&backend, &head_key, &head).unwrap();
+        let loaded = load_backup_head(&backend, &head_key)
             .unwrap()
             .expect("head");
         assert_eq!(loaded, head);
@@ -551,12 +556,14 @@ mod tests {
         let temp_dir = std::env::temp_dir().join("reddb_snapshot_manifest_test");
         let _ = std::fs::create_dir_all(&temp_dir);
         let backend = LocalBackend;
+        let root_prefix = format!("{}/", temp_dir.to_string_lossy());
         let manifest = SnapshotManifest {
             timeline_id: "main".to_string(),
-            snapshot_key: reddb_file::backup_snapshot_dir(&temp_dir)
-                .join("000001-123.snapshot")
-                .to_string_lossy()
-                .to_string(),
+            snapshot_key: reddb_file::archived_snapshot_key(
+                &reddb_file::backup_snapshot_prefix(&root_prefix),
+                1,
+                123,
+            ),
             snapshot_id: 1,
             snapshot_time: 123,
             base_lsn: 456,
@@ -580,7 +587,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
         let backend = LocalBackend;
-        let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
+        let root_prefix = format!("{}/", temp_dir.to_string_lossy());
+        let prefix = reddb_file::backup_wal_prefix(&root_prefix);
         let record = ChangeRecord {
             term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn: 7,
@@ -612,7 +620,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
         let backend = LocalBackend;
-        let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
+        let root_prefix = format!("{}/", temp_dir.to_string_lossy());
+        let prefix = reddb_file::backup_wal_prefix(&root_prefix);
         let record = ChangeRecord {
             term: crate::replication::DEFAULT_REPLICATION_TERM,
             lsn: 11,
@@ -654,13 +663,21 @@ mod tests {
                 lsn: 100,
                 ts: 1730000000000,
                 bytes: 4096,
-                key: "snapshots/000007-1730000000000.snapshot".to_string(),
+                key: reddb_file::archived_snapshot_key(
+                    &reddb_file::backup_snapshot_prefix(""),
+                    7,
+                    1730000000000,
+                ),
                 checksum: Some("9f8b".to_string()),
             }],
             vec![UnifiedWalEntry {
                 lsn_start: 100,
                 lsn_end: 250,
-                key: "wal/000000000100-000000000250.wal".to_string(),
+                key: reddb_file::archived_wal_segment_key(
+                    &reddb_file::backup_wal_prefix(""),
+                    100,
+                    250,
+                ),
                 bytes: 1024,
                 checksum: Some("c1d2".to_string()),
                 prev_hash: Some("9f8b".to_string()),
@@ -719,7 +736,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
         let backend = LocalBackend;
-        let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
+        let root_prefix = format!("{}/", temp_dir.to_string_lossy());
+        let prefix = reddb_file::backup_wal_prefix(&root_prefix);
 
         let mk = |lsn: u64| ChangeRecord {
             term: crate::replication::DEFAULT_REPLICATION_TERM,
@@ -776,7 +794,7 @@ mod tests {
     #[test]
     fn wal_segment_manifest_carries_prev_hash_through_json() {
         let m = WalSegmentManifest {
-            key: "wal/000000000010-000000000010.wal".to_string(),
+            key: reddb_file::archived_wal_segment_key(&reddb_file::backup_wal_prefix(""), 10, 10),
             lsn_start: 10,
             lsn_end: 10,
             size_bytes: 128,
