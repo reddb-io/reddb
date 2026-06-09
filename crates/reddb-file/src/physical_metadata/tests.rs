@@ -375,6 +375,16 @@ fn physical_metadata_core_contracts_round_trip() {
     assert_eq!(decoded.kind, ManifestEventKind::Checkpoint);
     assert_eq!(decoded.snapshot_max, Some(10));
 
+    let reference = physical_manifest_block_reference(7, 9);
+    assert_eq!(reference.index, 7);
+    assert_eq!(reference.checksum, ((7u128) << 64) | 9u128);
+    assert_eq!(physical_superblock_object_key(9), "superblock:9");
+    let checkpoint = physical_superblock_checkpoint_event(9);
+    assert_eq!(checkpoint.collection, PHYSICAL_SYSTEM_COLLECTION);
+    assert_eq!(checkpoint.object_key, "superblock:9");
+    assert_eq!(checkpoint.kind, ManifestEventKind::Checkpoint);
+    assert_eq!(checkpoint.block, physical_manifest_block_reference(9, 9));
+
     let snapshot = SnapshotDescriptor {
         snapshot_id: 11,
         created_at_unix_ms: 12,

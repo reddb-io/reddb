@@ -162,7 +162,7 @@ pub(super) fn build_manifest_events(
                     collection: collection.clone(),
                     object_key: collection.clone(),
                     kind: ManifestEventKind::Remove,
-                    block: manifest_block_reference(*previous_root, sequence),
+                    block: reddb_file::physical_manifest_block_reference(*previous_root, sequence),
                     snapshot_min: sequence,
                     snapshot_max: Some(sequence),
                 });
@@ -181,27 +181,13 @@ pub(super) fn build_manifest_events(
             collection: collection.clone(),
             object_key: collection.clone(),
             kind,
-            block: manifest_block_reference(*root, sequence),
+            block: reddb_file::physical_manifest_block_reference(*root, sequence),
             snapshot_min: sequence,
             snapshot_max: None,
         });
     }
 
-    events.push(ManifestEvent {
-        collection: "__system__".to_string(),
-        object_key: format!("superblock:{sequence}"),
-        kind: ManifestEventKind::Checkpoint,
-        block: manifest_block_reference(sequence, sequence),
-        snapshot_min: sequence,
-        snapshot_max: None,
-    });
+    events.push(reddb_file::physical_superblock_checkpoint_event(sequence));
 
     events
-}
-
-pub(super) fn manifest_block_reference(root: u64, sequence: u64) -> BlockReference {
-    BlockReference {
-        index: root,
-        checksum: ((root as u128) << 64) | sequence as u128,
-    }
 }

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 pub const DEFAULT_PHYSICAL_FORMAT_VERSION: u32 = 2;
 pub const DEFAULT_SUPERBLOCK_COPIES: u8 = 4;
 pub const PHYSICAL_METADATA_PROTOCOL_VERSION: &str = "reddb-physical-v1";
+pub const PHYSICAL_SYSTEM_COLLECTION: &str = "__system__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BlockReference {
@@ -55,6 +56,28 @@ pub struct ManifestEvent {
     pub block: BlockReference,
     pub snapshot_min: u64,
     pub snapshot_max: Option<u64>,
+}
+
+pub fn physical_manifest_block_reference(root: u64, sequence: u64) -> BlockReference {
+    BlockReference {
+        index: root,
+        checksum: ((root as u128) << 64) | sequence as u128,
+    }
+}
+
+pub fn physical_superblock_object_key(sequence: u64) -> String {
+    format!("superblock:{sequence}")
+}
+
+pub fn physical_superblock_checkpoint_event(sequence: u64) -> ManifestEvent {
+    ManifestEvent {
+        collection: PHYSICAL_SYSTEM_COLLECTION.to_string(),
+        object_key: physical_superblock_object_key(sequence),
+        kind: ManifestEventKind::Checkpoint,
+        block: physical_manifest_block_reference(sequence, sequence),
+        snapshot_min: sequence,
+        snapshot_max: None,
+    }
 }
 
 #[derive(Debug, Clone, Default)]
