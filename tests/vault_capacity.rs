@@ -14,6 +14,9 @@
 //!   * AES-GCM tag accidentally being split across pages without
 //!     reassembly (would surface as a Decryption error).
 
+#[allow(dead_code)]
+mod support;
+
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -23,18 +26,10 @@ use reddb::storage::engine::pager::{Pager, PagerConfig};
 
 /// Shared scratch dir per test invocation. Bytes don't survive
 /// across runs but the directory is unique per (pid, counter).
-fn scratch_path(label: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb_vault_capacity_{}_{}_{}",
-        label,
-        std::process::id(),
-        id
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("vault.rdb")
+fn scratch_path(label: &str) -> (support::TempDataDir, std::path::PathBuf) {
+    let dir = support::temp_data_dir(&format!("vault-capacity-{label}"));
+    let path = dir.join("vault.rdb");
+    (dir, path)
 }
 
 fn now_ms() -> u128 {
@@ -125,7 +120,7 @@ fn assert_states_eq(a: &VaultState, b: &VaultState) {
 
 #[test]
 fn vault_round_trip_5000_users() {
-    let db_path = scratch_path("5k");
+    let (_dir, db_path) = scratch_path("5k");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
 
     let state = synth_state(5_000);
@@ -173,7 +168,7 @@ fn vault_round_trip_5000_users() {
 /// the freelist (page_count must not blow up unboundedly).
 #[test]
 fn vault_grows_and_shrinks_monotonically() {
-    let db_path = scratch_path("growshrink");
+    let (_dir, db_path) = scratch_path("growshrink");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
     let vault = Vault::open(&pager, Some("vault-grow-shrink")).unwrap();
 
@@ -223,7 +218,7 @@ fn vault_grows_and_shrinks_monotonically() {
 /// edge case the spec explicitly calls out.
 #[test]
 fn vault_single_user_fits_in_header_page() {
-    let db_path = scratch_path("single");
+    let (_dir, db_path) = scratch_path("single");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
     let vault = Vault::open(&pager, Some("vault-single-user")).unwrap();
 
