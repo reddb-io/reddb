@@ -705,6 +705,43 @@ fn client_redwire_request_frames_live_in_reddb_wire() {
 }
 
 #[test]
+fn server_redwire_test_request_frames_use_reddb_wire_builders() {
+    let root = repo_root();
+    let files = [
+        "crates/reddb-server/src/wire/redwire/session.rs",
+        "crates/reddb-server/src/wire/redwire/session/session_bulk_stream_tests.rs",
+    ];
+
+    for file in files {
+        let text = read(root.join(file));
+        assert!(
+            !text.contains("Frame::new("),
+            "{file} should build RedWire test frames through reddb-wire builders"
+        );
+    }
+
+    let session = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
+    let bulk_stream = read(
+        root.join("crates/reddb-server/src/wire/redwire/session/session_bulk_stream_tests.rs"),
+    );
+
+    assert!(
+        session.contains("build_bulk_insert_frame"),
+        "session RedWire tests should use reddb-wire bulk insert builders"
+    );
+    for required in [
+        "build_request_frame",
+        "build_client_hello_frame",
+        "build_auth_response_frame",
+    ] {
+        assert!(
+            bulk_stream.contains(required),
+            "bulk stream RedWire tests should use reddb-wire {required}"
+        );
+    }
+}
+
+#[test]
 fn redwire_startup_preface_lives_in_reddb_wire() {
     let root = repo_root();
     let client = read(root.join("crates/reddb-client/src/redwire/mod.rs"));

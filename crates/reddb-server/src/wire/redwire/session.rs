@@ -1436,6 +1436,11 @@ mod tests {
     use crate::runtime::RedDBRuntime;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn bulk_insert_frame(correlation_id: u64, payload: Vec<u8>) -> Frame {
+        reddb_wire::redwire::build_bulk_insert_frame(correlation_id, payload)
+            .expect("build bulk insert frame")
+    }
+
     fn create_graph_collection(runtime: &RedDBRuntime, name: &str) {
         let db = runtime.db();
         db.store()
@@ -1486,8 +1491,7 @@ mod tests {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
         create_graph_collection(&runtime, "network");
 
-        let nodes = Frame::new(
-            MessageKind::BulkInsert,
+        let nodes = bulk_insert_frame(
             7,
             br#"{"collection":"network","payloads":[{"label":"Host","name":"app"},{"label":"Host","name":"db"}]}"#.to_vec(),
         );
@@ -1507,8 +1511,7 @@ mod tests {
 
         let from = ids[0].as_u64().expect("from id");
         let to = ids[1].as_u64().expect("to id");
-        let edges = Frame::new(
-            MessageKind::BulkInsert,
+        let edges = bulk_insert_frame(
             8,
             format!(
                 r#"{{"collection":"network","payloads":[{{"label":"connects","from":{from},"to":{to},"role":"primary"}}]}}"#
@@ -1553,8 +1556,7 @@ mod tests {
             .execute_query("CREATE TABLE events_587_ok (id INTEGER, name TEXT)")
             .expect("create table");
 
-        let frame = Frame::new(
-            MessageKind::BulkInsert,
+        let frame = bulk_insert_frame(
             100,
             br#"{
                 "collection":"events_587_ok",
@@ -1611,8 +1613,7 @@ mod tests {
 
         // Row index 1 omits the required `fields` envelope — the parse
         // step rejects before any commit fires.
-        let frame = Frame::new(
-            MessageKind::BulkInsert,
+        let frame = bulk_insert_frame(
             101,
             br#"{
                 "collection":"events_587_rollback",
@@ -1672,8 +1673,7 @@ mod tests {
                 .as_nanos()
         );
 
-        let frame1 = Frame::new(
-            MessageKind::BulkInsert,
+        let frame1 = bulk_insert_frame(
             200,
             format!(
                 r#"{{
@@ -1691,8 +1691,7 @@ mod tests {
         // Replay with the same key + DIFFERENT body — the cache
         // returns the original bytes verbatim and the second row is
         // not committed.
-        let frame2 = Frame::new(
-            MessageKind::BulkInsert,
+        let frame2 = bulk_insert_frame(
             201,
             format!(
                 r#"{{
@@ -1740,8 +1739,7 @@ mod tests {
                 .as_nanos()
         );
 
-        let frame = Frame::new(
-            MessageKind::BulkInsert,
+        let frame = bulk_insert_frame(
             300,
             format!(
                 r#"{{
@@ -1782,8 +1780,7 @@ mod tests {
             r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#;
         reg::register(runtime.db().store().as_ref(), "click_587", schema).expect("register schema");
 
-        let frame = Frame::new(
-            MessageKind::BulkInsert,
+        let frame = bulk_insert_frame(
             400,
             br#"{
                 "collection":"events_587_schema",
@@ -1844,7 +1841,7 @@ mod tests {
         let frame_body = format!(
             r#"{{"collection":"events_587_oversize","idempotency_key":"k-oversize-587","payloads":{payloads}}}"#
         );
-        let frame = Frame::new(MessageKind::BulkInsert, 500, frame_body.into_bytes());
+        let frame = bulk_insert_frame(500, frame_body.into_bytes());
         let reply = run_insert_dispatch(&runtime, &frame);
 
         assert_eq!(reply.kind, MessageKind::Error);
