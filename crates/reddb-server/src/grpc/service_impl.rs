@@ -3225,9 +3225,8 @@ impl RedDb for GrpcRuntime {
     }
 
     /// PLAN.md Phase 11.4 — replica reports applied + durable LSN to the
-    /// primary after persisting a WAL batch. JSON payload:
-    /// `{"replica_id": "...", "applied_lsn": <u64>, "durable_lsn": <u64>,
-    ///   "apply_errors_total": <u64>, "divergence_total": <u64>}`.
+    /// primary after persisting a WAL batch. The request/reply payload
+    /// contracts live in `reddb-wire`.
     /// Idempotent — older LSN values are clamped to the existing maximum.
     async fn ack_replica_lsn(
         &self,
@@ -3264,23 +3263,19 @@ impl RedDb for GrpcRuntime {
             )
             .map_err(to_status)?;
 
-        let mut reply = crate::json::Map::new();
-        reply.insert("ok".into(), JsonValue::Bool(true));
-        reply.insert(
-            "replica_id".into(),
-            JsonValue::String(authenticated_replica_id),
+        let reply = reddb_wire::replication::WalStreamAckReply::from_ack(
+            &reddb_wire::replication::WalStreamAck {
+                replica_id: authenticated_replica_id,
+                applied_lsn,
+                durable_lsn,
+                apply_errors_total,
+                divergence_total,
+            },
         );
-        reply.insert("applied_lsn".into(), JsonValue::Number(applied_lsn as f64));
-        reply.insert("durable_lsn".into(), JsonValue::Number(durable_lsn as f64));
-        reply.insert(
-            "apply_errors_total".into(),
-            JsonValue::Number(apply_errors_total as f64),
-        );
-        reply.insert(
-            "divergence_total".into(),
-            JsonValue::Number(divergence_total as f64),
-        );
-        Ok(Response::new(json_payload_reply(JsonValue::Object(reply))))
+        Ok(Response::new(PayloadReply {
+            ok: true,
+            payload: String::from_utf8(reply.encode_json()).unwrap_or_else(|_| "{}".to_string()),
+        }))
     }
 
     async fn replication_snapshot(

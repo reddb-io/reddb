@@ -211,6 +211,67 @@ impl WalStreamAck {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalStreamAckReply {
+    pub ok: bool,
+    pub replica_id: String,
+    pub applied_lsn: u64,
+    pub durable_lsn: u64,
+    pub apply_errors_total: u64,
+    pub divergence_total: u64,
+}
+
+impl WalStreamAckReply {
+    pub fn from_ack(ack: &WalStreamAck) -> Self {
+        Self {
+            ok: true,
+            replica_id: ack.replica_id.clone(),
+            applied_lsn: ack.applied_lsn,
+            durable_lsn: ack.durable_lsn,
+            apply_errors_total: ack.apply_errors_total,
+            divergence_total: ack.divergence_total,
+        }
+    }
+
+    pub fn encode_json(&self) -> Vec<u8> {
+        let mut obj = serde_json::Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(self.ok));
+        obj.insert(
+            "replica_id".to_string(),
+            JsonValue::String(self.replica_id.clone()),
+        );
+        obj.insert(
+            "applied_lsn".to_string(),
+            JsonValue::Number(self.applied_lsn.into()),
+        );
+        obj.insert(
+            "durable_lsn".to_string(),
+            JsonValue::Number(self.durable_lsn.into()),
+        );
+        obj.insert(
+            "apply_errors_total".to_string(),
+            JsonValue::Number(self.apply_errors_total.into()),
+        );
+        obj.insert(
+            "divergence_total".to_string(),
+            JsonValue::Number(self.divergence_total.into()),
+        );
+        serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    }
+
+    pub fn decode_json(bytes: &[u8]) -> Result<Self> {
+        let obj = object_from_slice(bytes)?;
+        Ok(Self {
+            ok: get_bool_default(&obj, "ok", false),
+            replica_id: get_string(&obj, "replica_id")?,
+            applied_lsn: get_u64(&obj, "applied_lsn")?,
+            durable_lsn: get_u64(&obj, "durable_lsn")?,
+            apply_errors_total: get_opt_u64(&obj, "apply_errors_total").unwrap_or(0),
+            divergence_total: get_opt_u64(&obj, "divergence_total").unwrap_or(0),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +323,22 @@ mod tests {
         let ack = WalStreamAck::decode_json(br#"{"replica_id":"r","applied_lsn":7}"#).unwrap();
         assert_eq!(ack.durable_lsn, 7);
         assert_eq!(ack.apply_errors_total, 0);
+    }
+
+    #[test]
+    fn wal_ack_reply_round_trips() {
+        let ack = WalStreamAck {
+            replica_id: "replica-a".to_string(),
+            applied_lsn: 11,
+            durable_lsn: 10,
+            apply_errors_total: 2,
+            divergence_total: 1,
+        };
+        let reply = WalStreamAckReply::from_ack(&ack);
+
+        assert_eq!(
+            WalStreamAckReply::decode_json(&reply.encode_json()).unwrap(),
+            reply
+        );
     }
 }

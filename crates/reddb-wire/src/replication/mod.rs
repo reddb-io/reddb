@@ -27,4 +27,6 @@ pub use change_record::{
 };
 pub use timeline::{RejoinPlanNotice, TimelineForkNotice};
 pub use util::ReplicationPayloadError;
-pub use wal_stream::{WalStreamAck, WalStreamChunk, WalStreamOpen, WalStreamRecord};
+pub use wal_stream::{
+    WalStreamAck, WalStreamAckReply, WalStreamChunk, WalStreamOpen, WalStreamRecord,
+};
