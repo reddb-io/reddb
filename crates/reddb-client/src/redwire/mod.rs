@@ -49,9 +49,10 @@ use reddb_wire::redwire::{
     build_bulk_insert_binary_frame, build_bulk_insert_frame, build_bye_frame, build_delete_frame,
     build_get_frame, build_ping_frame, build_query_frame, build_query_with_params_frame,
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
-    decode_error_payload, decode_get_result_payload, decode_query_result_payload,
-    decode_text_payload, encode_bulk_binary_payload, encode_bulk_insert_payload,
-    encode_insert_payload, encode_key_payload, supported_client_preface, BuildError,
+    decode_get_result_payload, decode_query_result_payload, decode_text_payload,
+    encode_bulk_binary_payload, encode_bulk_insert_payload, encode_insert_payload,
+    encode_key_payload, expect_bulk_ok_or_error, expect_delete_ok_or_error, expect_pong_reply,
+    expect_result_or_error, supported_client_preface, BuildError, OperationReplyError,
 };
 
 /// Authentication credentials for the RedWire handshake.
@@ -226,17 +227,8 @@ impl RedWireClient {
         let req = build_query_frame(corr, sql).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
-        match resp.kind {
-            MessageKind::Result => Ok(decode_text_payload(&resp.payload)),
-            MessageKind::Error => Err(ClientError::new(
-                ErrorCode::Engine,
-                decode_error_payload(&resp.payload),
-            )),
-            other => Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("expected Result/Error, got {other:?}"),
-            )),
-        }
+        let payload = expect_result_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
+        Ok(decode_text_payload(payload))
     }
 
     pub async fn query_with(
@@ -261,22 +253,10 @@ impl RedWireClient {
         let req = build_query_with_params_frame(corr, payload).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
-        match resp.kind {
-            MessageKind::Result => {
-                let value = decode_query_result_payload(&resp.payload).map_err(|e| {
-                    ClientError::new(ErrorCode::Protocol, format!("decode result: {e}"))
-                })?;
-                Ok(QueryResult::from_envelope(value))
-            }
-            MessageKind::Error => {
-                let msg = decode_error_payload(&resp.payload);
-                Err(ClientError::new(ErrorCode::Engine, msg))
-            }
-            other => Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("expected Result/Error, got {other:?}"),
-            )),
-        }
+        let payload = expect_result_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
+        let value = decode_query_result_payload(payload)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))?;
+        Ok(QueryResult::from_envelope(value))
     }
 
     /// Insert a single row. `payload` is a JSON object with column
@@ -302,26 +282,14 @@ impl RedWireClient {
         let req = build_bulk_insert_frame(corr, bytes).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
-        match resp.kind {
-            MessageKind::BulkOk => {
-                let payload = decode_bulk_ok_payload(&resp.payload).map_err(|e| {
-                    ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}"))
-                })?;
-                Ok(BulkInsertResult {
-                    affected: payload.affected,
-                    rids: payload.rids,
-                    ids: payload.ids,
-                })
-            }
-            MessageKind::Error => {
-                let msg = decode_error_payload(&resp.payload);
-                Err(ClientError::new(ErrorCode::Engine, msg))
-            }
-            other => Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("expected BulkOk/Error, got {other:?}"),
-            )),
-        }
+        let payload = expect_bulk_ok_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
+        let payload = decode_bulk_ok_payload(payload)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}")))?;
+        Ok(BulkInsertResult {
+            affected: payload.affected,
+            rids: payload.rids,
+            ids: payload.ids,
+        })
     }
 
     /// Fetch one row by primary id. Returns the JSON envelope the
@@ -332,18 +300,9 @@ impl RedWireClient {
             build_get_frame(corr, encode_key_payload(collection, id)).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
-        match resp.kind {
-            MessageKind::Result => decode_get_result_payload(&resp.payload)
-                .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode get: {e}"))),
-            MessageKind::Error => Err(ClientError::new(
-                ErrorCode::Engine,
-                decode_error_payload(&resp.payload),
-            )),
-            other => Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("expected Result/Error, got {other:?}"),
-            )),
-        }
+        let payload = expect_result_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
+        decode_get_result_payload(payload)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode get: {e}")))
     }
 
     /// Delete by primary id. Returns the affected count.
@@ -353,19 +312,9 @@ impl RedWireClient {
             .map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
-        match resp.kind {
-            MessageKind::DeleteOk => decode_delete_ok_affected(&resp.payload).map_err(|e| {
-                ClientError::new(ErrorCode::Protocol, format!("decode delete_ok: {e}"))
-            }),
-            MessageKind::Error => Err(ClientError::new(
-                ErrorCode::Engine,
-                decode_error_payload(&resp.payload),
-            )),
-            other => Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("expected DeleteOk/Error, got {other:?}"),
-            )),
-        }
+        let payload = expect_delete_ok_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
+        decode_delete_ok_affected(payload)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode delete_ok: {e}")))
     }
 
     /// Bulk-insert via the binary fast path. Same wire shape as
@@ -393,18 +342,9 @@ impl RedWireClient {
         let req = build_bulk_insert_binary_frame(corr, payload).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
-        match resp.kind {
-            MessageKind::BulkOk => decode_bulk_ok_count_payload(&resp.payload)
-                .map_err(|e| ClientError::new(ErrorCode::Protocol, e.to_string())),
-            MessageKind::Error => Err(ClientError::new(
-                ErrorCode::Engine,
-                decode_error_payload(&resp.payload),
-            )),
-            other => Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("expected BulkOk/Error, got {other:?}"),
-            )),
-        }
+        let payload = expect_bulk_ok_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
+        decode_bulk_ok_count_payload(payload)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, e.to_string()))
     }
 
     pub async fn ping(&mut self) -> Result<()> {
@@ -412,13 +352,7 @@ impl RedWireClient {
         let req = build_ping_frame(corr).map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
-        match resp.kind {
-            MessageKind::Pong => Ok(()),
-            other => Err(ClientError::new(
-                ErrorCode::Protocol,
-                format!("expected Pong, got {other:?}"),
-            )),
-        }
+        expect_pong_reply(resp.kind).map_err(reply_err)
     }
 
     pub async fn close(mut self) -> Result<()> {
@@ -462,6 +396,15 @@ fn io_err(err: std_io::Error) -> ClientError {
 
 fn frame_build_err(err: BuildError) -> ClientError {
     ClientError::new(ErrorCode::Protocol, format!("build redwire frame: {err}"))
+}
+
+fn reply_err(err: OperationReplyError) -> ClientError {
+    match err {
+        OperationReplyError::Engine(message) => ClientError::new(ErrorCode::Engine, message),
+        OperationReplyError::UnexpectedKind { .. } => {
+            ClientError::new(ErrorCode::Protocol, err.to_string())
+        }
+    }
 }
 
 #[cfg(test)]

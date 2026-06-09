@@ -4,6 +4,7 @@
 //! request/reply envelopes carried by BulkInsert, Get, Delete, BulkOk,
 //! and DeleteOk frames.
 
+use super::frame::MessageKind;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 
@@ -53,6 +54,28 @@ impl fmt::Display for OperationPayloadError {
 }
 
 impl std::error::Error for OperationPayloadError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationReplyError {
+    Engine(String),
+    UnexpectedKind {
+        expected: &'static str,
+        actual: MessageKind,
+    },
+}
+
+impl fmt::Display for OperationReplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Engine(message) => write!(f, "{message}"),
+            Self::UnexpectedKind { expected, actual } => {
+                write!(f, "expected {expected}, got {actual:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OperationReplyError {}
 
 pub fn encode_insert_payload(collection: &str, payload: JsonValue) -> Vec<u8> {
     let mut obj = JsonMap::new();
@@ -150,6 +173,38 @@ pub fn decode_error_payload(bytes: &[u8]) -> String {
     decode_text_payload(bytes)
 }
 
+pub fn expect_result_or_error<'a>(
+    kind: MessageKind,
+    payload: &'a [u8],
+) -> Result<&'a [u8], OperationReplyError> {
+    expect_payload_or_error(kind, payload, MessageKind::Result, "Result/Error")
+}
+
+pub fn expect_bulk_ok_or_error<'a>(
+    kind: MessageKind,
+    payload: &'a [u8],
+) -> Result<&'a [u8], OperationReplyError> {
+    expect_payload_or_error(kind, payload, MessageKind::BulkOk, "BulkOk/Error")
+}
+
+pub fn expect_delete_ok_or_error<'a>(
+    kind: MessageKind,
+    payload: &'a [u8],
+) -> Result<&'a [u8], OperationReplyError> {
+    expect_payload_or_error(kind, payload, MessageKind::DeleteOk, "DeleteOk/Error")
+}
+
+pub fn expect_pong_reply(kind: MessageKind) -> Result<(), OperationReplyError> {
+    if kind == MessageKind::Pong {
+        Ok(())
+    } else {
+        Err(OperationReplyError::UnexpectedKind {
+            expected: "Pong",
+            actual: kind,
+        })
+    }
+}
+
 pub fn encode_bulk_ok_payload(affected: u64, ids: Vec<JsonValue>) -> Vec<u8> {
     let mut obj = JsonMap::new();
     obj.insert("affected".into(), JsonValue::Number(affected.into()));
@@ -223,6 +278,22 @@ pub fn encode_delete_ok_payload(affected: u64) -> Vec<u8> {
     let mut obj = JsonMap::new();
     obj.insert("affected".into(), JsonValue::Number(affected.into()));
     serde_json::to_vec(&JsonValue::Object(obj)).expect("delete ok payload JSON is serializable")
+}
+
+fn expect_payload_or_error<'a>(
+    actual: MessageKind,
+    payload: &'a [u8],
+    ok: MessageKind,
+    expected: &'static str,
+) -> Result<&'a [u8], OperationReplyError> {
+    match actual {
+        kind if kind == ok => Ok(payload),
+        MessageKind::Error => Err(OperationReplyError::Engine(decode_error_payload(payload))),
+        other => Err(OperationReplyError::UnexpectedKind {
+            expected,
+            actual: other,
+        }),
+    }
 }
 
 fn decode_key_payload(op: &'static str, bytes: &[u8]) -> Result<KeyPayload, OperationPayloadError> {
@@ -361,6 +432,22 @@ mod tests {
         assert_eq!(get["found"], JsonValue::Bool(false));
         assert_eq!(decode_text_payload(b"raw result"), "raw result");
         assert_eq!(decode_error_payload(b"engine failed"), "engine failed");
+        assert_eq!(
+            expect_result_or_error(MessageKind::Result, b"ok").unwrap(),
+            b"ok"
+        );
+        assert_eq!(
+            expect_bulk_ok_or_error(MessageKind::Error, b"failed").unwrap_err(),
+            OperationReplyError::Engine("failed".to_string())
+        );
+        assert_eq!(
+            expect_delete_ok_or_error(MessageKind::Pong, b"").unwrap_err(),
+            OperationReplyError::UnexpectedKind {
+                expected: "DeleteOk/Error",
+                actual: MessageKind::Pong
+            }
+        );
+        assert!(expect_pong_reply(MessageKind::Pong).is_ok());
 
         assert_eq!(
             decode_delete_ok_affected(&encode_delete_ok_payload(7)).unwrap(),
