@@ -161,11 +161,10 @@ pub fn publish_unified_manifest(
     prefix: &str,
     manifest: &UnifiedManifest,
 ) -> Result<String, BackendError> {
-    let key = unified_manifest_key(prefix);
-    let body = reddb_file::encode_unified_manifest_json(manifest)
-        .map_err(|err| BackendError::Internal(format!("encode unified manifest failed: {err}")))?;
-    write_json_bytes(backend, &key, &body)?;
-    Ok(key)
+    let artifact = reddb_file::unified_manifest_artifact(prefix, manifest)
+        .map_err(|err| BackendError::Internal(format!("build unified manifest failed: {err}")))?;
+    write_json_bytes(backend, &artifact.key, &artifact.body)?;
+    Ok(artifact.key)
 }
 
 pub fn load_unified_manifest(
@@ -268,12 +267,11 @@ pub fn publish_wal_segment_manifest(
     backend: &dyn RemoteBackend,
     manifest: &WalSegmentManifest,
 ) -> Result<String, BackendError> {
-    let key = wal_segment_manifest_key(&manifest.key);
-    let body = reddb_file::encode_wal_segment_manifest_json(manifest).map_err(|err| {
-        BackendError::Internal(format!("encode wal segment manifest failed: {err}"))
+    let artifact = reddb_file::wal_segment_manifest_artifact(manifest).map_err(|err| {
+        BackendError::Internal(format!("build wal segment manifest failed: {err}"))
     })?;
-    write_json_bytes(backend, &key, &body)?;
-    Ok(key)
+    write_json_bytes(backend, &artifact.key, &artifact.body)?;
+    Ok(artifact.key)
 }
 
 pub fn load_wal_segment_manifest(
@@ -294,9 +292,9 @@ pub fn publish_backup_head(
     head_key: &str,
     head: &BackupHead,
 ) -> Result<(), BackendError> {
-    let body = reddb_file::encode_backup_head_json(head)
-        .map_err(|err| BackendError::Internal(format!("encode backup head failed: {err}")))?;
-    write_json_bytes(backend, head_key, &body)
+    let artifact = reddb_file::backup_head_artifact(head_key, head)
+        .map_err(|err| BackendError::Internal(format!("build backup head failed: {err}")))?;
+    write_json_bytes(backend, &artifact.key, &artifact.body)
 }
 
 pub fn load_backup_head(
@@ -315,11 +313,10 @@ pub fn publish_snapshot_manifest(
     backend: &dyn RemoteBackend,
     manifest: &SnapshotManifest,
 ) -> Result<String, BackendError> {
-    let key = snapshot_manifest_key(&manifest.snapshot_key);
-    let body = reddb_file::encode_snapshot_manifest_json(manifest)
-        .map_err(|err| BackendError::Internal(format!("encode snapshot manifest failed: {err}")))?;
-    write_json_bytes(backend, &key, &body)?;
-    Ok(key)
+    let artifact = reddb_file::snapshot_manifest_artifact(manifest)
+        .map_err(|err| BackendError::Internal(format!("build snapshot manifest failed: {err}")))?;
+    write_json_bytes(backend, &artifact.key, &artifact.body)?;
+    Ok(artifact.key)
 }
 
 pub fn load_snapshot_manifest(
