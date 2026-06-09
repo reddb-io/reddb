@@ -242,6 +242,38 @@ fn server_does_not_own_main_wal_record_frame() {
 }
 
 #[test]
+fn server_wal_record_tests_do_not_assert_physical_tags() {
+    let root = repo_root();
+    let text = read(root.join("crates/reddb-server/src/storage/wal/record.rs"));
+    let test_source = text.split("#[cfg(test)]").nth(1).unwrap_or("");
+
+    for forbidden in [
+        "RecordType::from_u8(",
+        "encoded[0]",
+        "Type (1)",
+        "WAL_FILE_VERSION_V2",
+        "crc32fast::Hasher",
+    ] {
+        assert!(
+            !test_source.contains(forbidden),
+            "server WAL tests should not assert persisted WAL byte contracts, found {forbidden:?}"
+        );
+    }
+
+    let file = read(root.join("crates/reddb-file/src/wal_record.rs"));
+    for required in [
+        "main_wal_record_types_are_stable",
+        "main_wal_record_accepts_legacy_v2_without_term",
+        "main_wal_record_compresses_and_decompresses_page_writes",
+    ] {
+        assert!(
+            file.contains(required),
+            "reddb-file should own WAL byte-contract test {required}"
+        );
+    }
+}
+
+#[test]
 fn server_does_not_own_transaction_wal_record_envelope() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/transaction/log.rs"));
