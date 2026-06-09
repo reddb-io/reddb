@@ -445,8 +445,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&snapshot_dir).unwrap();
 
-        let snapshot1 = snapshot_dir.join("1-100.snapshot");
-        let snapshot2 = snapshot_dir.join("2-200.snapshot");
+        let snapshot1 = std::path::PathBuf::from(reddb_file::archived_snapshot_key(
+            &reddb_file::backup_snapshot_dir_prefix(&temp_dir),
+            1,
+            100,
+        ));
+        let snapshot2 = std::path::PathBuf::from(reddb_file::archived_snapshot_key(
+            &reddb_file::backup_snapshot_dir_prefix(&temp_dir),
+            2,
+            200,
+        ));
         RedDB::open(&snapshot1).unwrap().flush().unwrap();
         RedDB::open(&snapshot2).unwrap().flush().unwrap();
         publish_snapshot_manifest(
@@ -520,7 +528,11 @@ mod tests {
         std::fs::create_dir_all(&snapshot_dir).unwrap();
         std::fs::create_dir_all(&wal_dir).unwrap();
 
-        let snapshot_path = snapshot_dir.join("1-100.snapshot");
+        let snapshot_path = std::path::PathBuf::from(reddb_file::archived_snapshot_key(
+            &reddb_file::backup_snapshot_dir_prefix(&temp_dir),
+            1,
+            100,
+        ));
         RedDB::open(&snapshot_path).unwrap().flush().unwrap();
         publish_snapshot_manifest(
             &LocalBackend,
@@ -537,7 +549,7 @@ mod tests {
         )
         .unwrap();
 
-        let wal_prefix = format!("{}/", wal_dir.to_string_lossy());
+        let wal_prefix = reddb_file::backup_wal_dir_prefix(&temp_dir);
         let mk = |lsn: u64| {
             let timestamp = 100 + lsn;
             let mut entity = UnifiedEntity::new(

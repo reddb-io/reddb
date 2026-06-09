@@ -182,6 +182,14 @@ pub fn backup_wal_dir(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join("wal")
 }
 
+pub fn backup_snapshot_dir_prefix(root: impl AsRef<Path>) -> String {
+    path_prefix(backup_snapshot_dir(root))
+}
+
+pub fn backup_wal_dir_prefix(root: impl AsRef<Path>) -> String {
+    path_prefix(backup_wal_dir(root))
+}
+
 pub fn remote_database_key(root_prefix: &str) -> String {
     let trimmed = root_prefix.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -244,6 +252,14 @@ fn normalize_backup_root_prefix(prefix: &str) -> String {
     } else {
         format!("{trimmed}/")
     }
+}
+
+fn path_prefix(path: PathBuf) -> String {
+    let mut value = path.to_string_lossy().to_string();
+    if !value.ends_with(std::path::MAIN_SEPARATOR) {
+        value.push(std::path::MAIN_SEPARATOR);
+    }
+    value
 }
 
 pub fn encode_backup_head_json(head: &BackupHead) -> io::Result<Vec<u8>> {
@@ -781,6 +797,14 @@ mod tests {
         assert_eq!(
             backup_wal_dir(Path::new("/tmp/reddb")).as_path(),
             Path::new("/tmp/reddb/wal")
+        );
+        assert_eq!(
+            backup_snapshot_dir_prefix(Path::new("/tmp/reddb")),
+            format!("/tmp/reddb/snapshots{}", std::path::MAIN_SEPARATOR)
+        );
+        assert_eq!(
+            backup_wal_dir_prefix(Path::new("/tmp/reddb")),
+            format!("/tmp/reddb/wal{}", std::path::MAIN_SEPARATOR)
         );
         assert_eq!(remote_database_key("tenant/db/"), "tenant/db/data.rdb");
         assert_eq!(
