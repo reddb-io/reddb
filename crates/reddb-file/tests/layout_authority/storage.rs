@@ -196,8 +196,10 @@ fn server_does_not_own_transaction_wal_record_envelope() {
         .next()
         .expect("transaction/log.rs has non-test source");
     let file = read(root.join("crates/reddb-file/src/transaction_wal.rs"));
+    let layout = read(root.join("crates/reddb-file/src/layout.rs"));
 
     for forbidden in [
+        "PathBuf::from(\"wal.log\")",
         "buf.extend(&self.lsn.to_le_bytes())",
         "buf.extend(&self.txn_id.to_le_bytes())",
         "buf.extend(&self.prev_lsn.unwrap_or(0).to_le_bytes())",
@@ -228,6 +230,16 @@ fn server_does_not_own_transaction_wal_record_envelope() {
     }
 
     for required in [
+        "pub const TRANSACTION_WAL_FILE_NAME",
+        "pub fn default_transaction_wal_path",
+    ] {
+        assert!(
+            layout.contains(required),
+            "reddb-file layout should own transaction WAL path contract {required}"
+        );
+    }
+
+    for required in [
         "pub struct TransactionWalRecordFrame",
         "pub fn encode_transaction_wal_record_frame",
         "pub fn decode_transaction_wal_record_frame",
@@ -244,6 +256,7 @@ fn server_does_not_own_transaction_wal_record_envelope() {
 
     for required in [
         "reddb_file::TransactionWalRecordFrame",
+        "reddb_file::layout::default_transaction_wal_path",
         "reddb_file::encode_transaction_wal_record_frame",
         "reddb_file::decode_transaction_wal_record_frame",
         "reddb_file::transaction_wal_record_encoded_len",

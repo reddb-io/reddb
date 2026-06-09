@@ -298,7 +298,7 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            path: PathBuf::from("wal.log"),
+            path: reddb_file::layout::default_transaction_wal_path(),
             sync_on_commit: true,
             buffer_size: 64 * 1024,           // 64KB
             max_file_size: 100 * 1024 * 1024, // 100MB
