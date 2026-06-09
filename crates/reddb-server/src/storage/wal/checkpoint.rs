@@ -344,12 +344,16 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn temp_wal_path(dir: &Path, name: &str) -> std::path::PathBuf {
+        reddb_file::layout::wal_component_temp_path(dir, "checkpoint", name, std::process::id())
+    }
+
     #[test]
     fn test_checkpoint_empty_wal() {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "empty");
 
         // Create pager
         let pager = Pager::open_default(&db_path).unwrap();
@@ -369,7 +373,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "committed");
 
         // Create pager
         let pager = Pager::open_default(&db_path).unwrap();
@@ -422,7 +426,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "aborted");
 
         // Create pager
         let pager = Pager::open_default(&db_path).unwrap();
@@ -477,7 +481,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "truncate");
 
         // Create pager
         let pager = Pager::open_default(&db_path).unwrap();
@@ -559,7 +563,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "full-page-images");
 
         // Create pager
         let pager = Pager::open_default(&db_path).unwrap();

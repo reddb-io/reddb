@@ -291,12 +291,18 @@ fn server_checkpoint_tests_do_not_assert_wal_physical_sizes() {
         "Checkpoint record (1 + 8 + 4",
         "WAL should be truncated, but size",
         "fs::metadata(&wal_path).unwrap().len()",
+        "dir.join(\"test.wal\")",
     ] {
         assert!(
             !test_source.contains(forbidden),
             "server checkpoint tests should assert WAL semantics, not byte sizes: {forbidden:?}"
         );
     }
+
+    assert!(
+        test_source.contains("reddb_file::layout::wal_component_temp_path"),
+        "server checkpoint tests should derive WAL fixture names through reddb-file"
+    );
 
     assert!(
         test_source.contains("WalRecord::Checkpoint")
