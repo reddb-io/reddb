@@ -85,19 +85,14 @@ fn numeric_vector(
             len: raw.len(),
         });
     }
+    let n = raw.len() / 8;
     Ok(match kind {
         ColumnKind::Int64 => ColumnVector::Int64 {
-            data: raw
-                .chunks_exact(8)
-                .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
-                .collect(),
+            data: le_bytes_to_i64_vec(raw, n),
             validity: None,
         },
         ColumnKind::Float64 => ColumnVector::Float64 {
-            data: raw
-                .chunks_exact(8)
-                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
-                .collect(),
+            data: le_bytes_to_f64_vec(raw, n),
             validity: None,
         },
         // Bool/Text never reach here (the caller routes them away); keep the
@@ -110,6 +105,47 @@ fn numeric_vector(
             }))
         }
     })
+}
+
+/// Convert a slice of little-endian 8-byte values to `Vec<i64>` (#962 fast path).
+/// On LE targets a single memcpy suffices; on BE each element is byte-swapped.
+fn le_bytes_to_i64_vec(raw: &[u8], n: usize) -> Vec<i64> {
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: `raw` holds `n * 8` valid bytes. `Vec<i64>` is freshly allocated
+        // so source and destination never overlap. On LE platforms the bit pattern
+        // of LE-encoded i64 bytes equals the native i64 representation.
+        let mut v: Vec<i64> = Vec::with_capacity(n);
+        unsafe {
+            std::ptr::copy_nonoverlapping(raw.as_ptr(), v.as_mut_ptr() as *mut u8, n * 8);
+            v.set_len(n);
+        }
+        v
+    }
+    #[cfg(not(target_endian = "little"))]
+    raw.chunks_exact(8)
+        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+        .collect()
+}
+
+/// Convert a slice of little-endian 8-byte values to `Vec<f64>` (#962 fast path).
+fn le_bytes_to_f64_vec(raw: &[u8], n: usize) -> Vec<f64> {
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: same as `le_bytes_to_i64_vec`. Every 8-byte pattern is a valid
+        // f64 bit pattern (including NaN / ±inf / ±0), so no invalid values can
+        // be produced.
+        let mut v: Vec<f64> = Vec::with_capacity(n);
+        unsafe {
+            std::ptr::copy_nonoverlapping(raw.as_ptr(), v.as_mut_ptr() as *mut u8, n * 8);
+            v.set_len(n);
+        }
+        v
+    }
+    #[cfg(not(target_endian = "little"))]
+    raw.chunks_exact(8)
+        .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+        .collect()
 }
 
 /// Decode a sealed columnar chunk (`RDCC` bytes) into a [`ColumnBatch`],
