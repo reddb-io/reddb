@@ -49,6 +49,59 @@ fn redwire_frame_contracts_live_only_in_reddb_wire() {
 }
 
 #[test]
+fn redwire_stream_payload_contracts_live_only_in_reddb_wire() {
+    let root = repo_root();
+    let server_input = read(root.join("crates/reddb-server/src/wire/redwire/input_stream.rs"));
+    let server_non_test = non_test_source(&server_input);
+    let wire_stream = read(root.join("crates/reddb-wire/src/redwire/stream.rs"));
+
+    for forbidden in [
+        "pub struct InputChunk",
+        "struct InputChunk",
+        "pub enum ChunkParseError",
+        "enum ChunkParseError",
+        "pub struct OpenInputRequest",
+        "struct OpenInputRequest",
+        "pub enum OpenInputParseError",
+        "enum OpenInputParseError",
+        "build_input_stream_end_payload",
+        "build_input_stream_error_payload",
+    ] {
+        assert!(
+            !server_non_test.contains(forbidden),
+            "server RedWire input-stream payload contract must live in reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "pub struct InputChunk",
+        "pub enum ChunkParseError",
+        "pub struct OpenInputRequest",
+        "pub enum OpenInputParseError",
+        "pub fn parse_input_chunk",
+        "pub fn parse_input_chunk_json",
+        "pub fn build_input_stream_end_payload",
+        "pub fn build_input_stream_error_payload",
+    ] {
+        assert!(
+            wire_stream.contains(required),
+            "reddb-wire should own stream payload contract {required}"
+        );
+    }
+
+    for required in [
+        "reddb_wire::redwire::stream::parse_input_chunk_json",
+        "reddb_wire::redwire::stream::build_input_stream_error_frame",
+        "reddb_wire::redwire::stream::build_input_stream_end_frame",
+    ] {
+        assert!(
+            server_non_test.contains(required),
+            "server RedWire input-stream runtime should delegate through {required}"
+        );
+    }
+}
+
+#[test]
 fn server_public_reexport_describes_reddb_wire_as_protocol_authority() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/lib.rs"));
