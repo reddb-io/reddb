@@ -6,6 +6,7 @@
 //! works with bytes, offsets, locks, checkpoints, manifests, and recovery rules.
 
 pub mod ai_model_cache;
+pub mod audit_log;
 pub mod backup_manifest;
 pub mod backup_temp;
 pub mod blob_cache;
@@ -49,6 +50,7 @@ pub use ai_model_cache::{
     AI_MODEL_CACHE_DIR_NAME, AI_MODEL_CACHE_MANIFEST_FILE, AI_MODEL_CACHE_PURGE_DIR_NAME,
     AI_MODEL_CACHE_STAGING_DIR_NAME,
 };
+pub use audit_log::{rotate_audit_log, AuditLogRotation};
 pub use backup_manifest::{
     archived_snapshot_key, archived_wal_segment_key, backup_head_artifact, backup_head_key,
     backup_root_from_snapshot_prefix, backup_snapshot_dir, backup_snapshot_dir_prefix,
