@@ -2680,7 +2680,7 @@ impl RedDBRuntime {
                         "archive": crate::json!({
                             "enabled": false,
                             "retention_hours": 168,
-                            "prefix": "wal/"
+                            "prefix": reddb_file::backup_wal_prefix("")
                         })
                     }),
                 );

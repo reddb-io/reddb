@@ -1963,6 +1963,7 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/wal/archiver.rs"));
     let api = read(root.join("crates/reddb-server/src/api.rs"));
+    let runtime_core = read(root.join("crates/reddb-server/src/runtime/impl_core.rs"));
     let service_cli = read(root.join("crates/reddb-server/src/service_cli.rs"));
     let recovery = read(root.join("crates/reddb-server/src/storage/wal/recovery.rs"));
     let non_test_archiver = text
@@ -2050,6 +2051,14 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
             "API backup defaults should route through {required}"
         );
     }
+    assert!(
+        !runtime_core.contains("\"prefix\": \"wal/\""),
+        "runtime WAL archive default prefix belongs in reddb-file"
+    );
+    assert!(
+        runtime_core.contains("reddb_file::backup_wal_prefix(\"\")"),
+        "runtime WAL archive default prefix should route through reddb-file"
+    );
     assert!(
         non_test_recovery.contains("reddb_file::backup_head_key")
             && non_test_recovery.contains("reddb_file::backup_root_from_snapshot_prefix"),
