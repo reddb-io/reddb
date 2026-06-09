@@ -32,12 +32,13 @@ use reddb_server::auth::browser_token::{
 };
 use reddb_server::auth::{AuthConfig, AuthStore, Role};
 use reddb_server::server::RedDBServer;
-use reddb_server::wire::redwire::{
-    decode_frame, encode_frame, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_KNOWN_MINOR_VERSION,
-    REDWIRE_MAGIC,
-};
 use reddb_server::{RedDBOptions, RedDBRuntime};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use reddb_wire::redwire::{
+    build_auth_response_frame, build_auth_response_oauth_jwt_payload, build_client_hello_frame,
+    build_open_stream_frame, build_query_frame, read_frame_async, write_frame_async, Frame,
+    MessageKind, OpenStreamRequest, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
+};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
@@ -154,31 +155,14 @@ fn json_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 // --------------------------------------------------------------------
 
 async fn read_frame(stream: &mut TcpStream) -> Frame {
-    let mut header = [0u8; FRAME_HEADER_SIZE];
-    timeout(EXCHANGE_TIMEOUT, stream.read_exact(&mut header))
+    timeout(EXCHANGE_TIMEOUT, read_frame_async(stream))
         .await
-        .expect("frame header within budget")
-        .expect("read header");
-    let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    let mut buf = vec![0u8; length];
-    buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
-    if length > FRAME_HEADER_SIZE {
-        timeout(
-            EXCHANGE_TIMEOUT,
-            stream.read_exact(&mut buf[FRAME_HEADER_SIZE..]),
-        )
-        .await
-        .expect("frame payload within budget")
-        .expect("read payload");
-    }
-    decode_frame(&buf).expect("decode frame").0
+        .expect("frame within budget")
+        .expect("read frame")
 }
 
 async fn write_frame(stream: &mut TcpStream, frame: &Frame) {
-    stream
-        .write_all(&encode_frame(frame))
-        .await
-        .expect("write frame");
+    write_frame_async(stream, frame).await.expect("write frame");
 }
 
 /// Drive the `oauth-jwt` handshake to completion with `jwt`. Returns the
@@ -190,20 +174,17 @@ async fn oauth_jwt_handshake(addr: SocketAddr, jwt: &str) -> (TcpStream, Frame) 
     stream.write_all(&[MAX_KNOWN_MINOR_VERSION]).await.unwrap();
     write_frame(
         &mut stream,
-        &Frame::new(
-            MessageKind::Hello,
-            1,
-            br#"{"versions":[1],"auth_methods":["oauth-jwt"],"features":0,"client_name":"browser-cred-e2e"}"#.to_vec(),
-        ),
+        &build_client_hello_frame(1, ["oauth-jwt"], 0, Some("browser-cred-e2e"))
+            .expect("hello frame"),
     )
     .await;
     let ack = read_frame(&mut stream).await;
     assert_eq!(ack.kind, MessageKind::HelloAck, "expected HelloAck");
 
-    let auth = format!("{{\"jwt\":\"{jwt}\"}}");
     write_frame(
         &mut stream,
-        &Frame::new(MessageKind::AuthResponse, 2, auth.into_bytes()),
+        &build_auth_response_frame(2, build_auth_response_oauth_jwt_payload(jwt))
+            .expect("auth response frame"),
     )
     .await;
     let terminal = read_frame(&mut stream).await;
@@ -468,7 +449,7 @@ async fn established_session_survives_access_token_expiry() {
     ] {
         write_frame(
             &mut stream,
-            &Frame::new(MessageKind::Query, 10, sql.as_bytes().to_vec()),
+            &build_query_frame(10, sql).expect("query frame"),
         )
         .await;
         let reply = read_frame(&mut stream).await;
@@ -491,11 +472,7 @@ async fn established_session_survives_access_token_expiry() {
     // handshake, not each frame.
     write_frame(
         &mut stream,
-        &Frame::new(
-            MessageKind::Query,
-            11,
-            b"SELECT id, name FROM widgets".to_vec(),
-        ),
+        &build_query_frame(11, "SELECT id, name FROM widgets").expect("query frame"),
     )
     .await;
     let q = read_frame(&mut stream).await;
@@ -510,12 +487,15 @@ async fn established_session_survives_access_token_expiry() {
     // browser's access token never disturbs work on the live connection.
     write_frame(
         &mut stream,
-        &Frame::new(
-            MessageKind::OpenStream,
+        &build_open_stream_frame(
             12,
-            br#"{"sql":"SELECT id, name FROM widgets"}"#.to_vec(),
+            1,
+            &OpenStreamRequest {
+                sql: "SELECT id, name FROM widgets".to_string(),
+                opts_raw: Vec::new(),
+            },
         )
-        .with_stream(1),
+        .expect("open stream frame"),
     )
     .await;
 

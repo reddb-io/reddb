@@ -75,6 +75,42 @@ pub fn parse_queue_wait_open(payload: &[u8]) -> Result<QueueWaitOpenRequest, Que
     })
 }
 
+pub fn build_queue_wait_open_payload(request: &QueueWaitOpenRequest) -> Vec<u8> {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "queue".to_string(),
+        JsonValue::String(request.queue.clone()),
+    );
+    if let Some(group) = request.group.as_ref() {
+        obj.insert("group".to_string(), JsonValue::String(group.clone()));
+    }
+    obj.insert(
+        "consumer".to_string(),
+        JsonValue::String(request.consumer.clone()),
+    );
+    obj.insert(
+        "count".to_string(),
+        JsonValue::Number((request.count as u64).into()),
+    );
+    obj.insert(
+        "wait_ms".to_string(),
+        JsonValue::Number(request.wait_ms.into()),
+    );
+    serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+}
+
+pub fn build_queue_wait_open_frame(
+    correlation_id: u64,
+    stream_id: u16,
+    request: &QueueWaitOpenRequest,
+) -> Result<Frame, BuildError> {
+    FrameBuilder::request(correlation_id)
+        .kind(MessageKind::QueueWaitOpen)
+        .stream_id(stream_id)
+        .payload(build_queue_wait_open_payload(request))
+        .build()
+}
+
 pub fn build_event_push_payload(message: &JsonValue) -> Vec<u8> {
     serde_json::to_vec(message).unwrap_or_default()
 }
@@ -171,6 +207,22 @@ mod tests {
             parse_queue_wait_open(br#"{"queue":"jobs"}"#),
             Err(QueueWaitParseError::MissingConsumer)
         );
+    }
+
+    #[test]
+    fn queue_wait_open_builder_round_trips_request() {
+        let request = QueueWaitOpenRequest {
+            queue: "jobs".to_string(),
+            group: Some("workers".to_string()),
+            consumer: "w1".to_string(),
+            count: 2,
+            wait_ms: 5000,
+        };
+        let frame = build_queue_wait_open_frame(7, 3, &request).unwrap();
+        assert_eq!(frame.kind, MessageKind::QueueWaitOpen);
+        assert_eq!(frame.correlation_id, 7);
+        assert_eq!(frame.stream_id, 3);
+        assert_eq!(parse_queue_wait_open(&frame.payload).unwrap(), request);
     }
 
     #[test]
