@@ -167,6 +167,40 @@ fn client_auth_wire_vocabulary_lives_in_reddb_wire() {
 }
 
 #[test]
+fn server_replication_basebackup_payload_fields_live_in_reddb_wire() {
+    let root = repo_root();
+    let replica = read(root.join("crates/reddb-server/src/replication/replica.rs"));
+    let wire = read(root.join("crates/reddb-wire/src/replication/basebackup.rs"));
+    let non_test = non_test_source(&replica);
+
+    for forbidden in [
+        "\"basebackup_manifest_hex\"",
+        "\"basebackup_chunk_ordinal\"",
+        "\"basebackup_chunk_hex\"",
+        "\"basebackup_chunk_ordinal/basebackup_chunk_hex\"",
+    ] {
+        assert!(
+            !non_test.contains(forbidden),
+            "server replica should import basebackup payload field contracts from reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "BASEBACKUP_MANIFEST_HEX_FIELD",
+        "BASEBACKUP_CHUNK_ORDINAL_FIELD",
+        "BASEBACKUP_CHUNK_HEX_FIELD",
+        "BASEBACKUP_CHUNK_PAIR_FIELD",
+        "required_basebackup_manifest",
+        "basebackup_chunk_part",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire should own basebackup payload contract {required}"
+        );
+    }
+}
+
+#[test]
 fn server_redwire_frame_header_length_routes_through_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));

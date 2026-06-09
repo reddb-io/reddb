@@ -5,6 +5,11 @@ use super::util::{
     object_from_slice, ReplicationPayloadError, Result,
 };
 
+pub const BASEBACKUP_MANIFEST_HEX_FIELD: &str = "basebackup_manifest_hex";
+pub const BASEBACKUP_CHUNK_ORDINAL_FIELD: &str = "basebackup_chunk_ordinal";
+pub const BASEBACKUP_CHUNK_HEX_FIELD: &str = "basebackup_chunk_hex";
+pub const BASEBACKUP_CHUNK_PAIR_FIELD: &str = "basebackup_chunk_ordinal/basebackup_chunk_hex";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseBackupRequest {
     pub replica_id: Option<String>,
@@ -127,6 +132,12 @@ pub struct BaseBackupChunk {
     pub basebackup_chunk: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaseBackupChunkPart<'a> {
+    pub ordinal: u32,
+    pub bytes: &'a [u8],
+}
+
 impl BaseBackupChunk {
     pub fn new(replica_id: impl Into<String>, slot_restart_lsn: u64) -> Self {
         Self {
@@ -245,7 +256,7 @@ impl BaseBackupChunk {
         );
         if let Some(bytes) = &self.basebackup_manifest {
             obj.insert(
-                "basebackup_manifest_hex".to_string(),
+                BASEBACKUP_MANIFEST_HEX_FIELD.to_string(),
                 JsonValue::String(hex_encode(bytes)),
             );
         }
@@ -260,13 +271,13 @@ impl BaseBackupChunk {
         );
         if let Some(ordinal) = self.basebackup_chunk_ordinal {
             obj.insert(
-                "basebackup_chunk_ordinal".to_string(),
+                BASEBACKUP_CHUNK_ORDINAL_FIELD.to_string(),
                 JsonValue::Number(ordinal.into()),
             );
         }
         if let Some(bytes) = &self.basebackup_chunk {
             obj.insert(
-                "basebackup_chunk_hex".to_string(),
+                BASEBACKUP_CHUNK_HEX_FIELD.to_string(),
                 JsonValue::String(hex_encode(bytes)),
             );
         }
@@ -283,13 +294,12 @@ impl BaseBackupChunk {
             Some(_) => return Err(ReplicationPayloadError::InvalidField("basebackup_chunks")),
             None => Vec::new(),
         };
-        let basebackup_chunk_ordinal =
-            match get_opt_u64(&obj, "basebackup_chunk_ordinal") {
-                Some(value) => Some(u32::try_from(value).map_err(|_| {
-                    ReplicationPayloadError::InvalidField("basebackup_chunk_ordinal")
-                })?),
-                None => None,
-            };
+        let basebackup_chunk_ordinal = match get_opt_u64(&obj, BASEBACKUP_CHUNK_ORDINAL_FIELD) {
+            Some(value) => Some(u32::try_from(value).map_err(|_| {
+                ReplicationPayloadError::InvalidField(BASEBACKUP_CHUNK_ORDINAL_FIELD)
+            })?),
+            None => None,
+        };
         Ok(Self {
             snapshot_available: get_bool_default(&obj, "snapshot_available", false),
             replica_id: get_string(&obj, "replica_id")?,
@@ -313,11 +323,36 @@ impl BaseBackupChunk {
             basebackup_checkpoint_lsn: get_opt_u64(&obj, "basebackup_checkpoint_lsn"),
             basebackup_snapshot_bytes: get_opt_u64(&obj, "basebackup_snapshot_bytes"),
             basebackup_snapshot_checksum: get_opt_u64(&obj, "basebackup_snapshot_checksum"),
-            basebackup_manifest: decode_opt_hex(&obj, "basebackup_manifest_hex")?,
+            basebackup_manifest: decode_opt_hex(&obj, BASEBACKUP_MANIFEST_HEX_FIELD)?,
             basebackup_chunks,
             basebackup_chunk_ordinal,
-            basebackup_chunk: decode_opt_hex(&obj, "basebackup_chunk_hex")?,
+            basebackup_chunk: decode_opt_hex(&obj, BASEBACKUP_CHUNK_HEX_FIELD)?,
         })
+    }
+
+    pub fn required_basebackup_manifest(&self) -> Result<Option<&[u8]>> {
+        if !self.basebackup_available {
+            return Ok(None);
+        }
+        self.basebackup_manifest
+            .as_deref()
+            .map(Some)
+            .ok_or(ReplicationPayloadError::MissingField(
+                BASEBACKUP_MANIFEST_HEX_FIELD,
+            ))
+    }
+
+    pub fn basebackup_chunk_part(&self) -> Result<Option<BaseBackupChunkPart<'_>>> {
+        match (
+            self.basebackup_chunk_ordinal,
+            self.basebackup_chunk.as_deref(),
+        ) {
+            (Some(ordinal), Some(bytes)) => Ok(Some(BaseBackupChunkPart { ordinal, bytes })),
+            (None, None) => Ok(None),
+            _ => Err(ReplicationPayloadError::InvalidField(
+                BASEBACKUP_CHUNK_PAIR_FIELD,
+            )),
+        }
     }
 }
 
@@ -416,6 +451,37 @@ mod tests {
         assert_eq!(
             BaseBackupChunk::decode_json(&chunk.encode_json()).unwrap(),
             chunk
+        );
+    }
+
+    #[test]
+    fn basebackup_chunk_helpers_own_required_wire_field_validation() {
+        let mut chunk = BaseBackupChunk::new("replica-a", 7);
+        chunk.basebackup_available = true;
+        assert_eq!(
+            chunk.required_basebackup_manifest().unwrap_err(),
+            ReplicationPayloadError::MissingField(BASEBACKUP_MANIFEST_HEX_FIELD)
+        );
+
+        chunk.basebackup_manifest = Some(b"manifest".to_vec());
+        assert_eq!(
+            chunk.required_basebackup_manifest().unwrap(),
+            Some(&b"manifest"[..])
+        );
+
+        chunk.basebackup_chunk_ordinal = Some(2);
+        assert_eq!(
+            chunk.basebackup_chunk_part().unwrap_err(),
+            ReplicationPayloadError::InvalidField(BASEBACKUP_CHUNK_PAIR_FIELD)
+        );
+
+        chunk.basebackup_chunk = Some(b"part".to_vec());
+        assert_eq!(
+            chunk.basebackup_chunk_part().unwrap(),
+            Some(BaseBackupChunkPart {
+                ordinal: 2,
+                bytes: &b"part"[..],
+            })
         );
     }
 }

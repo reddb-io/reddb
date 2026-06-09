@@ -63,6 +63,24 @@ impl From<std::io::Error> for ReplicaBaseBackupError {
     }
 }
 
+impl From<reddb_wire::replication::ReplicationPayloadError> for ReplicaBaseBackupError {
+    fn from(value: reddb_wire::replication::ReplicationPayloadError) -> Self {
+        match value {
+            reddb_wire::replication::ReplicationPayloadError::MissingField(field) => {
+                Self::MissingField(field)
+            }
+            reddb_wire::replication::ReplicationPayloadError::InvalidField(field)
+            | reddb_wire::replication::ReplicationPayloadError::InvalidHex(field) => {
+                Self::InvalidField(field)
+            }
+            reddb_wire::replication::ReplicationPayloadError::NotJson
+            | reddb_wire::replication::ReplicationPayloadError::NotObject => {
+                Self::Decode(value.to_string())
+            }
+        }
+    }
+}
+
 /// Stage the basebackup chunk carried by one `replication_snapshot` response.
 ///
 /// The wire payload carries a binary manifest plus at most one matching chunk
@@ -76,13 +94,9 @@ pub fn stage_basebackup_snapshot_chunk(
         return Ok(None);
     }
 
-    let manifest_bytes =
-        payload
-            .basebackup_manifest
-            .as_deref()
-            .ok_or(ReplicaBaseBackupError::MissingField(
-                "basebackup_manifest_hex",
-            ))?;
+    let manifest_bytes = payload
+        .required_basebackup_manifest()?
+        .expect("basebackup_available checked above");
     let manifest = reddb_file::PrimaryReplicaBaseBackupManifest::decode(&manifest_bytes)?;
     manifest.validate()?;
 
@@ -90,22 +104,18 @@ pub fn stage_basebackup_snapshot_chunk(
     let next_snapshot_offset = payload.next_snapshot_offset;
     let snapshot_complete = payload.snapshot_complete;
 
-    let chunk_ordinal = match (payload.basebackup_chunk_ordinal, &payload.basebackup_chunk) {
-        (Some(ordinal), Some(bytes)) => {
+    let chunk_ordinal = match payload.basebackup_chunk_part()? {
+        Some(part) => {
+            let ordinal = part.ordinal;
             if !manifest.chunks.iter().any(|chunk| chunk.ordinal == ordinal) {
                 return Err(ReplicaBaseBackupError::InvalidField(
-                    "basebackup_chunk_ordinal",
+                    reddb_wire::replication::BASEBACKUP_CHUNK_ORDINAL_FIELD,
                 ));
             }
-            manifest.stage_chunk_part(parts_root.as_ref(), ordinal, bytes)?;
+            manifest.stage_chunk_part(parts_root.as_ref(), ordinal, part.bytes)?;
             Some(ordinal)
         }
-        (None, None) => None,
-        _ => {
-            return Err(ReplicaBaseBackupError::InvalidField(
-                "basebackup_chunk_ordinal/basebackup_chunk_hex",
-            ));
-        }
+        None => None,
     };
 
     Ok(Some(StagedBaseBackupChunk {
