@@ -1141,28 +1141,14 @@ fn append_line_with_rotation(path: &Path, line: &str, max_bytes: u64) -> std::io
 /// filename.
 fn rotate(active: &Path) -> std::io::Result<()> {
     let ts = crate::utils::now_unix_nanos();
-    let plain = reddb_file::layout::audit_log_rotated_plain_path(active, ts);
-    std::fs::rename(active, &plain)?;
-    let raw = std::fs::read(&plain)?;
-    let compressed = match zstd::bulk::compress(&raw, 3) {
-        Ok(c) => c,
-        Err(err) => {
-            // Compression failed: leave the rotated file uncompressed
-            // rather than lose audit data.
-            tracing::warn!(
-                target: "reddb::audit",
-                error = %err,
-                "audit rotation: zstd compress failed; leaving plaintext"
-            );
-            return Ok(());
-        }
-    };
-    let zst = reddb_file::layout::audit_log_rotated_compressed_path(active, ts);
-    let mut out = std::fs::File::create(&zst)?;
-    out.write_all(&compressed)?;
-    out.sync_data()?;
-    drop(out);
-    let _ = std::fs::remove_file(&plain);
+    let rotation = reddb_file::rotate_audit_log(active, ts)?;
+    if let Some(err) = rotation.compression_error {
+        tracing::warn!(
+            target: "reddb::audit",
+            error = %err,
+            "audit rotation: zstd compress failed; leaving plaintext"
+        );
+    }
     Ok(())
 }
 

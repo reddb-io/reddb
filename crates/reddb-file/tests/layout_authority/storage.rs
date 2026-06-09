@@ -493,6 +493,9 @@ fn server_uses_reddb_file_for_audit_log_paths() {
         "unwrap_or(\".audit.log\")",
         "format!(\"{stem}.{ts}\")",
         "format!(\"{stem}.{ts}.zst\")",
+        "std::fs::rename(active",
+        "zstd::bulk::compress",
+        "std::fs::remove_file(&plain)",
     ] {
         assert!(
             !non_test_log.contains(forbidden),
@@ -501,12 +504,24 @@ fn server_uses_reddb_file_for_audit_log_paths() {
     }
     for required in [
         "reddb_file::layout::legacy_audit_log_path",
-        "reddb_file::layout::audit_log_rotated_plain_path",
-        "reddb_file::layout::audit_log_rotated_compressed_path",
+        "reddb_file::rotate_audit_log",
     ] {
         assert!(
             non_test_log.contains(required),
             "audit log path handling should route through {required}"
+        );
+    }
+
+    let file_audit = read(root.join("crates/reddb-file/src/audit_log.rs"));
+    for required in [
+        "pub fn rotate_audit_log",
+        "crate::layout::audit_log_rotated_plain_path",
+        "crate::layout::audit_log_rotated_compressed_path",
+        "zstd::bulk::compress",
+    ] {
+        assert!(
+            file_audit.contains(required),
+            "reddb-file should own audit log rotation lifecycle {required}"
         );
     }
 
