@@ -26,7 +26,7 @@ static TIER_GUARD: Mutex<()> = Mutex::new(());
 fn performance_tier_creates_slow_log_file_under_support_dir() {
     let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     let data = support::temp_db_file("audit-slow-perf");
-    let options = RedDBOptions::persistent(&data).with_layout(StorageLayout::Performance);
+    let options = RedDBOptions::persistent(data.path()).with_layout(StorageLayout::Performance);
     let _rt = RedDBRuntime::with_options(options).expect("runtime opens");
 
     let (audit_dest, slow_dest) = tier_wiring::current_log_destinations();
@@ -87,7 +87,7 @@ fn syslog_override_falls_back_without_panicking() {
         },
         ..LayoutOverrides::default()
     };
-    let options = RedDBOptions::persistent(&data)
+    let options = RedDBOptions::persistent(data.path())
         .with_layout(StorageLayout::Performance)
         .with_layout_overrides(overrides);
     let _rt = RedDBRuntime::with_options(options).expect("runtime opens with syslog override");

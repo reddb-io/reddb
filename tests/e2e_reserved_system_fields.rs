@@ -1,25 +1,16 @@
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::{CreateDocumentInput, EntityUseCases};
 use reddb::json::json;
 use reddb::{PhysicalMetadataFile, RedDBOptions, RedDBRuntime};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
-
-fn cleanup_path(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(PhysicalMetadataFile::metadata_path_for(path));
-    let _ = std::fs::remove_file(PhysicalMetadataFile::metadata_binary_path_for(path));
+fn persistent_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn assert_reserved_error(message: &str, field: &str, context: &str) {
@@ -86,10 +77,9 @@ fn graph_payloads_reject_reserved_top_level_properties() {
 #[test]
 fn startup_rejects_persisted_table_contract_reserved_columns() {
     let path = persistent_path("reserved_startup");
-    cleanup_path(&path);
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
             .expect("persistent runtime should open");
         rt.execute_query("CREATE TABLE persisted_rows (name TEXT)")
             .expect("table should be created");
@@ -122,11 +112,10 @@ fn startup_rejects_persisted_table_contract_reserved_columns() {
         .save_for_data_path(&path)
         .expect("metadata should be saved");
 
-    let err = match RedDBRuntime::with_options(RedDBOptions::persistent(&path)) {
+    let err = match RedDBRuntime::with_options(RedDBOptions::persistent(path.path())) {
         Ok(_) => panic!("reserved persisted contract should fail startup"),
         Err(err) => err,
     };
 
     assert_reserved_error(&err.to_string(), "collection", "table 'persisted_rows'");
-    cleanup_path(&path);
 }

@@ -57,7 +57,6 @@ fn embedded_runtime_persists_table_data_inside_single_rdb_file() {
     }
 
     assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
-
 }
 
 #[test]
@@ -110,7 +109,6 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
     );
     assert!(checkpointed.manifest.snapshot_bytes > 0);
     assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
-
 }
 
 #[test]
@@ -152,5 +150,4 @@ fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
 
     let frames = EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read wal payloads");
     assert!(!frames.is_empty(), "expected retried wal frame");
-
 }

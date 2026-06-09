@@ -7,23 +7,15 @@
 //! crash, not silently produce an empty DB. This is the exact case
 //! a freshly-rotated bucket or misconfigured `RED_BACKEND` would hit.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::storage::backend::{BackendError, LocalBackend};
 use reddb::storage::wal::PointInTimeRecovery;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-chaos-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn temp_dir(tag: &str) -> support::TempDataDir {
+    support::temp_data_dir(tag)
 }
 
 #[test]
@@ -60,8 +52,6 @@ fn restore_against_empty_backend_fails_with_not_found() {
         !restore_path.exists(),
         "no destination DB must be created when restore fails"
     );
-
-    let _ = std::fs::remove_dir_all(&work);
 }
 
 #[test]
@@ -93,6 +83,4 @@ fn restore_against_missing_prefix_fails_with_not_found_or_transport() {
         other => panic!("expected NotFound or Transport, got {other:?}"),
     }
     assert!(!restore_path.exists());
-
-    let _ = std::fs::remove_dir_all(&work);
 }

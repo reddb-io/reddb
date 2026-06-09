@@ -302,7 +302,6 @@ fn post_create_index_inserts_at_scale_keeps_index_fresh() {
             expected_filtered
         );
     }
-
 }
 
 /// Mirror of the bench `reddb_wire` `insert_one` path: single-row

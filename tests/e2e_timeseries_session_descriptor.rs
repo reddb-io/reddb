@@ -3,20 +3,14 @@
 //! and surfaces it through the catalog descriptor (and `red.collections`)
 //! across an engine restart.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::application::ExecuteQueryInput;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
 
-fn unique_dir(prefix: &str) -> PathBuf {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut path = std::env::temp_dir();
-    path.push(format!("reddb-{prefix}-{pid}-{nanos}"));
-    std::fs::create_dir_all(&path).unwrap();
-    path
+fn unique_dir(prefix: &str) -> support::TempDataDir {
+    support::temp_data_dir(prefix)
 }
 
 #[test]
@@ -91,8 +85,6 @@ fn session_clause_persists_across_restart() {
             other => panic!("expected integer, got {other:?}"),
         }
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

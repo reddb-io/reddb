@@ -13,8 +13,7 @@ use reddb::{RedDBOptions, RedDBRuntime};
 
 fn db_open(db: &support::TempDbFile) -> RedDBRuntime {
     RedDBRuntime::with_options(
-        RedDBOptions::persistent(db.path())
-            .with_durability_mode(DurabilityMode::WalDurableGrouped),
+        RedDBOptions::persistent(db.path()).with_durability_mode(DurabilityMode::WalDurableGrouped),
     )
     .expect("persistent runtime")
 }

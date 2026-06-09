@@ -39,7 +39,7 @@ fn temp_data_path(name: &str) -> TempDataPath {
         .prefix(&format!("reddb-test-{name}-"))
         .tempdir()
         .expect("temp dir");
-    let path = dir.path().join(format!("reddb_{name}.rdb"));
+    let path = dir.path().join(format!("{name}.rdb"));
     TempDataPath { _dir: dir, path }
 }
 

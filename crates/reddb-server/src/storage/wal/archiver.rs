@@ -462,8 +462,13 @@ mod tests {
 
     #[test]
     fn test_archive_and_download() {
-        let temp_dir = std::env::temp_dir().join("reddb_archiver_test");
-        let _ = std::fs::create_dir_all(&temp_dir);
+        // Auto-cleaning temp dir: removed on drop (incl. panic), so the test
+        // leaves no residue even if an assertion fails.
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-archiver-test-")
+            .tempdir()
+            .unwrap();
+        let temp_dir = dir.path().to_path_buf();
         let backend_dir = temp_dir.join("backend");
         let _ = std::fs::create_dir_all(&backend_dir);
 
@@ -471,8 +476,7 @@ mod tests {
         // Anchor the archive prefix inside the temp dir. `backup_wal_prefix("")`
         // yields a cwd-relative `wal/` directory, which leaks archived segments
         // into the working tree (`crates/reddb-server/wal/`) and is never cleaned.
-        let wal_prefix =
-            reddb_file::backup_wal_prefix(&format!("{}/", temp_dir.to_string_lossy()));
+        let wal_prefix = reddb_file::backup_wal_prefix(&format!("{}/", temp_dir.to_string_lossy()));
         let archiver = WalArchiver::new(backend, &wal_prefix);
 
         // Create a fake WAL file
@@ -505,8 +509,7 @@ mod tests {
         assert!(found);
         assert!(dest.exists());
 
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // `dir` (TempDir) auto-removes the whole tree on drop.
     }
 
     #[test]

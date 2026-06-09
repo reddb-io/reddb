@@ -15,24 +15,13 @@ use reddb::storage::wal::{
     SnapshotManifest,
 };
 use reddb::storage::RedDB;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[allow(dead_code)]
 mod support;
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-drill-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn temp_dir(tag: &str) -> support::TempDataDir {
+    support::temp_data_dir(tag)
 }
 
 fn record_at(lsn: u64, ts: u64, payload: &[u8]) -> ChangeRecord {
@@ -122,6 +111,4 @@ fn restore_to_target_time_skips_records_after_t() {
         result.recovered_to_time,
         target_time
     );
-
-    let _ = std::fs::remove_dir_all(&work);
 }

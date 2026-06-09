@@ -88,8 +88,8 @@ fn ddl_and_rls_control_events_record_allowed_denied_and_error_outcomes() {
 fn backup_control_event_records_snapshot_and_wal_metadata() {
     let path = support::temp_db_file("control-events-backup-654");
 
-    let rt =
-        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime should open");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
+        .expect("runtime should open");
     rt.execute_query("CREATE TABLE docs (id INT)")
         .expect("table should be created before backup");
 
