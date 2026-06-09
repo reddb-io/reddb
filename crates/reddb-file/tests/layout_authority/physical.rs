@@ -337,8 +337,11 @@ fn server_does_not_own_physical_metadata_document_codec() {
 fn server_does_not_redeclare_shm_file_format() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/physical/shm.rs"));
+    let file_layout = read(root.join("crates/reddb-file/src/layout.rs"));
+    let file_shm = read(root.join("crates/reddb-file/src/shm.rs"));
 
     for forbidden in [
+        "<data>.shm",
         "pub const SHM_MAGIC",
         "pub const SHM_VERSION",
         "pub const SHM_HEADER_SIZE",
@@ -354,6 +357,12 @@ fn server_does_not_redeclare_shm_file_format() {
             "SHM binary file format belongs in reddb-file, found {forbidden:?}"
         );
     }
+    assert!(
+        file_layout.contains("pub fn shm_path")
+            && file_layout.contains("SHM_FILE_SUFFIX")
+            && file_shm.contains("layout::shm_path"),
+        "reddb-file should own both SHM path and binary file contracts"
+    );
     assert!(
         text.contains("pub use reddb_file::{ShmHeader"),
         "server should reexport the SHM file contract from reddb-file"

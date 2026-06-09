@@ -1,7 +1,8 @@
-//! `<data>.shm` shared-memory file contract.
+//! Shared-memory file contract.
 //!
 //! The server owns provisioning policy and owner-pid recovery decisions.
-//! This crate owns the binary header and the file operations that preserve it.
+//! This crate owns the path contract in `layout::shm_path`, the binary header,
+//! and the file operations that preserve it.
 //!
 //! ## Binary layout (v1, little-endian, 64-byte fixed header)
 //!
