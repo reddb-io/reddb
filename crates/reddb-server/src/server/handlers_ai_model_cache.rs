@@ -31,7 +31,7 @@ use crate::RedDBServer;
 use reddb_file::{
     ai_model_cache_manifest_path, ai_model_cache_manifest_temp_path, ai_model_cache_purge_dir,
     ai_model_cache_purge_root, ai_model_cache_root, ai_model_cache_staging_dir,
-    ai_model_cache_staging_root, decode_ai_model_cache_manifest_json,
+    ai_model_cache_staging_root, copy_ai_model_cache_artifact, decode_ai_model_cache_manifest_json,
     encode_ai_model_cache_manifest_json, AiModelCacheManifest as Manifest,
     AiModelCacheManifestFile as ManifestFile, AI_MODEL_CACHE_MANIFEST_FILE,
 };
@@ -537,11 +537,7 @@ fn install_artifacts(
         for entry in entries {
             let src = entry.absolute;
             let dst = staging_dir.join(&entry.relative);
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|err| format!("failed to create dir '{}': {err}", parent.display()))?;
-            }
-            fs::copy(&src, &dst)
+            copy_ai_model_cache_artifact(&src, &dst)
                 .map_err(|err| format!("failed to copy '{}': {err}", src.display()))?;
             let (sha, size) = sha256_file(&dst)
                 .map_err(|err| format!("failed to hash '{}': {err}", dst.display()))?;

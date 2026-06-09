@@ -4,6 +4,7 @@
 //! process locks. This module owns the persisted cache layout and manifest
 //! JSON shape.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -60,6 +61,13 @@ pub fn ai_model_cache_manifest_path(model_dir: &Path) -> PathBuf {
 
 pub fn ai_model_cache_manifest_temp_path(dir: &Path) -> PathBuf {
     dir.join(format!("{AI_MODEL_CACHE_MANIFEST_FILE}.tmp"))
+}
+
+pub fn copy_ai_model_cache_artifact(source: &Path, destination: &Path) -> io::Result<u64> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, destination)
 }
 
 pub fn encode_ai_model_cache_manifest_json(manifest: &AiModelCacheManifest) -> io::Result<Vec<u8>> {

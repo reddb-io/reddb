@@ -715,6 +715,7 @@ fn server_ai_model_cache_uses_file_owned_manifest_contract() {
         "purge_root.join(format!",
         "model_dir.join(MANIFEST_FILE)",
         "staging_dir.join(MANIFEST_FILE)",
+        "fs::copy(",
     ] {
         assert!(
             !server.contains(forbidden),
@@ -729,6 +730,7 @@ fn server_ai_model_cache_uses_file_owned_manifest_contract() {
         "ai_model_cache_staging_dir",
         "ai_model_cache_purge_dir",
         "ai_model_cache_manifest_path",
+        "copy_ai_model_cache_artifact",
         "encode_ai_model_cache_manifest_json",
         "decode_ai_model_cache_manifest_json",
     ] {
@@ -744,6 +746,7 @@ fn server_ai_model_cache_uses_file_owned_manifest_contract() {
         "pub fn encode_ai_model_cache_manifest_json",
         "pub fn decode_ai_model_cache_manifest_json",
         "pub fn ai_model_cache_manifest_path",
+        "pub fn copy_ai_model_cache_artifact",
         "pub const AI_MODEL_CACHE_MANIFEST_FILE",
     ] {
         assert!(
