@@ -14,7 +14,11 @@ pub mod change_record;
 pub mod timeline;
 pub mod wal_stream;
 
-pub use basebackup::{BaseBackupChunk, BaseBackupManifestChunk, BaseBackupRequest};
+pub use basebackup::{
+    BaseBackupChunk, BaseBackupChunkPart, BaseBackupManifestChunk, BaseBackupRequest,
+    BASEBACKUP_CHUNK_HEX_FIELD, BASEBACKUP_CHUNK_ORDINAL_FIELD, BASEBACKUP_CHUNK_PAIR_FIELD,
+    BASEBACKUP_MANIFEST_HEX_FIELD,
+};
 pub use bookmark::{BookmarkDecodeError, CausalBookmark};
 pub use catchup::{CatchupMode, CatchupModeReply};
 pub use change_record::{
