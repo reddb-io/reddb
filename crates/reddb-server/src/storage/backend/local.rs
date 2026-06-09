@@ -45,41 +45,14 @@ impl RemoteBackend for LocalBackend {
     }
 
     fn download(&self, remote_key: &str, local_path: &Path) -> Result<bool, BackendError> {
-        let source = Path::new(remote_key);
-        if !source.exists() {
-            return Ok(false);
-        }
-        fs::copy(source, local_path)
-            .map_err(|e| BackendError::Transport(format!("copy failed: {e}")))?;
-        Ok(true)
+        reddb_file::local_backend_download(remote_key, local_path)
+            .map_err(|e| BackendError::Transport(format!("local download failed: {e}")))
     }
 
     fn upload(&self, local_path: &Path, remote_key: &str) -> Result<(), BackendError> {
-        let dest = Path::new(remote_key);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| BackendError::Transport(format!("mkdir failed: {e}")))?;
-        }
         let unique = LOCAL_UPLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp = reddb_file::layout::local_upload_temp_path(dest, std::process::id(), unique);
-
-        let copy_result = fs::copy(local_path, &temp)
-            .map_err(|e| BackendError::Transport(format!("copy failed: {e}")));
-        if let Err(err) = copy_result {
-            let _ = fs::remove_file(&temp);
-            return Err(err);
-        }
-        fs::File::open(&temp)
-            .and_then(|file| file.sync_all())
-            .map_err(|e| BackendError::Transport(format!("sync failed: {e}")))?;
-        fs::rename(&temp, dest).map_err(|e| {
-            let _ = fs::remove_file(&temp);
-            BackendError::Transport(format!("rename failed: {e}"))
-        })?;
-        if let Some(parent) = dest.parent() {
-            let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
-        }
-        Ok(())
+        reddb_file::local_backend_atomic_upload(local_path, remote_key, std::process::id(), unique)
+            .map_err(|e| BackendError::Transport(format!("local upload failed: {e}")))
     }
 
     fn exists(&self, remote_key: &str) -> Result<bool, BackendError> {

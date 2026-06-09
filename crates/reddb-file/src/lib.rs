@@ -20,6 +20,7 @@ pub mod graph_record;
 pub mod graph_store;
 pub mod graph_table_index;
 pub mod layout;
+pub mod local_backend;
 pub mod logical_wal;
 pub mod native_store;
 pub mod operational_manifest;
@@ -169,6 +170,7 @@ pub use layout::{
     LogDestination, LogRoutingOverrides, StorageLayout, TieredLayoutPaths,
     DEFAULT_DATABASE_FILE_NAME, DEFAULT_SERVICE_DATABASE_PATH,
 };
+pub use local_backend::{local_backend_atomic_upload, local_backend_download};
 pub use logical_wal::{
     build_logical_wal_seek_index, encode_logical_wal_v2_for_compat, encode_logical_wal_v3,
     read_and_repair_logical_wal_entries, read_logical_wal_entries_from,
