@@ -38,8 +38,7 @@ fn runtime_promotes_ready_rebootstrap_pending_file_on_restart() {
         let plan = source_runtime
             .primary_replica_file_plan()
             .expect("source primary-replica plan");
-        let pending_path =
-            reddb_server::replication::replica::rebootstrap_pending_path_for(&data_path);
+        let pending_path = reddb_file::layout::rebootstrap_pending_path(&data_path);
         let checkpoint_lsn = source_runtime
             .materialize_primary_replica_basebackup_snapshot(
                 &manifest,
@@ -47,9 +46,9 @@ fn runtime_promotes_ready_rebootstrap_pending_file_on_restart() {
                 &pending_path,
             )
             .expect("materialize pending rebootstrap");
-        reddb_server::replication::replica::write_rebootstrap_ready_marker(
+        reddb_file::write_rebootstrap_ready_marker(
             &data_path,
-            &reddb_server::replication::replica::ReplicaRebootstrapReady {
+            &reddb_file::ReplicaRebootstrapReadyMarker {
                 pending_path,
                 checkpoint_lsn,
                 timeline: manifest.timeline,
@@ -82,15 +81,15 @@ fn runtime_promotes_ready_rebootstrap_pending_file_on_restart() {
         .execute_query("SELECT id, name FROM old_items WHERE id = 1")
         .is_err());
     assert!(
-        reddb_server::replication::replica::rebootstrap_previous_path_for(&data_path).exists(),
+        reddb_file::layout::rebootstrap_previous_path(&data_path).exists(),
         "old active database should be retained as previous"
     );
     assert!(
-        !reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path).exists(),
+        !reddb_file::layout::rebootstrap_ready_marker_path(&data_path).exists(),
         "ready marker should be consumed after promotion"
     );
     assert!(
-        !reddb_server::replication::replica::rebootstrap_pending_path_for(&data_path).exists(),
+        !reddb_file::layout::rebootstrap_pending_path(&data_path).exists(),
         "pending database should be promoted into active path"
     );
     let config = promoted
@@ -139,9 +138,7 @@ fn runtime_promotes_ready_rebootstrap_pending_file_on_restart() {
         1,
         "post-checkpoint WAL row should be visible after replay"
     );
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_previous_path_for(&data_path),
-    );
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_previous_path(&data_path));
     primary_replica_file::cleanup(&data_path);
     primary_replica_file::cleanup(&source_path);
 }
@@ -163,7 +160,7 @@ fn runtime_consumes_leftover_rebootstrap_marker_after_completed_rename_crash() {
         old_runtime.flush().expect("flush old runtime");
     }
 
-    let pending_path = reddb_server::replication::replica::rebootstrap_pending_path_for(&data_path);
+    let pending_path = reddb_file::layout::rebootstrap_pending_path(&data_path);
     let checkpoint_lsn = {
         let source_runtime = RedDBRuntime::with_options(
             RedDBOptions::persistent(&source_path).with_replication(ReplicationConfig::primary()),
@@ -186,9 +183,9 @@ fn runtime_consumes_leftover_rebootstrap_marker_after_completed_rename_crash() {
                 &pending_path,
             )
             .expect("materialize pending rebootstrap");
-        reddb_server::replication::replica::write_rebootstrap_ready_marker(
+        reddb_file::write_rebootstrap_ready_marker(
             &data_path,
-            &reddb_server::replication::replica::ReplicaRebootstrapReady {
+            &reddb_file::ReplicaRebootstrapReadyMarker {
                 pending_path: pending_path.clone(),
                 checkpoint_lsn,
                 timeline: manifest.timeline,
@@ -198,13 +195,12 @@ fn runtime_consumes_leftover_rebootstrap_marker_after_completed_rename_crash() {
         checkpoint_lsn
     };
 
-    let previous_path =
-        reddb_server::replication::replica::rebootstrap_previous_path_for(&data_path);
+    let previous_path = reddb_file::layout::rebootstrap_previous_path(&data_path);
     let _ = fs::remove_file(&previous_path);
     fs::rename(&data_path, &previous_path).expect("simulate old data renamed to previous");
     fs::rename(&pending_path, &data_path).expect("simulate pending promoted to active");
     assert!(
-        reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path).exists(),
+        reddb_file::layout::rebootstrap_ready_marker_path(&data_path).exists(),
         "crash simulation leaves ready marker behind"
     );
 
@@ -221,7 +217,7 @@ fn runtime_consumes_leftover_rebootstrap_marker_after_completed_rename_crash() {
         "active database must prove it is the checkpointed rebootstrap snapshot, got {config_value}"
     );
     assert!(
-        !reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path).exists(),
+        !reddb_file::layout::rebootstrap_ready_marker_path(&data_path).exists(),
         "leftover ready marker should be consumed only after active snapshot matches checkpoint"
     );
     assert!(
@@ -248,11 +244,11 @@ fn runtime_fails_closed_on_ready_rebootstrap_marker_with_missing_pending_file() 
         runtime.flush().expect("flush runtime");
     }
 
-    let pending_path = reddb_server::replication::replica::rebootstrap_pending_path_for(&data_path);
+    let pending_path = reddb_file::layout::rebootstrap_pending_path(&data_path);
     let _ = fs::remove_file(&pending_path);
-    reddb_server::replication::replica::write_rebootstrap_ready_marker(
+    reddb_file::write_rebootstrap_ready_marker(
         &data_path,
-        &reddb_server::replication::replica::ReplicaRebootstrapReady {
+        &reddb_file::ReplicaRebootstrapReadyMarker {
             pending_path: pending_path.clone(),
             checkpoint_lsn: 123_456,
             timeline: reddb_file::TimelineId::initial(),
@@ -271,17 +267,17 @@ fn runtime_fails_closed_on_ready_rebootstrap_marker_with_missing_pending_file() 
     );
     assert!(data_path.exists(), "active database must remain in place");
     assert!(
-        reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path).exists(),
+        reddb_file::layout::rebootstrap_ready_marker_path(&data_path).exists(),
         "failed closed path must preserve ready marker for operator recovery"
     );
     assert!(
-        !reddb_server::replication::replica::rebootstrap_previous_path_for(&data_path).exists(),
+        !reddb_file::layout::rebootstrap_previous_path(&data_path).exists(),
         "active database must not be renamed when pending file is missing"
     );
 
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path),
-    );
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_ready_marker_path(
+        &data_path,
+    ));
     let reopened =
         RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("reopen active db");
     let result = reopened
@@ -306,7 +302,7 @@ fn runtime_ignores_incomplete_rebootstrap_staging_without_ready_marker() {
         runtime.flush().expect("flush runtime");
     }
 
-    let staging_root = reddb_server::replication::replica::rebootstrap_staging_root_for(&data_path);
+    let staging_root = reddb_file::layout::rebootstrap_staging_root(&data_path);
     fs::create_dir_all(&staging_root).expect("create staging root");
     fs::write(staging_root.join("partial.chunk"), b"incomplete").expect("write partial chunk");
 
@@ -321,7 +317,7 @@ fn runtime_ignores_incomplete_rebootstrap_staging_without_ready_marker() {
         "incomplete basebackup staging without a ready marker must not replace active data"
     );
     assert!(
-        !reddb_server::replication::replica::rebootstrap_previous_path_for(&data_path).exists(),
+        !reddb_file::layout::rebootstrap_previous_path(&data_path).exists(),
         "active database should not be renamed when ready marker is absent"
     );
 
@@ -342,11 +338,11 @@ fn runtime_fails_closed_on_corrupt_ready_rebootstrap_pending_file() {
         runtime.flush().expect("flush runtime");
     }
 
-    let pending_path = reddb_server::replication::replica::rebootstrap_pending_path_for(&data_path);
+    let pending_path = reddb_file::layout::rebootstrap_pending_path(&data_path);
     fs::write(&pending_path, b"not an embedded rdb").expect("write corrupt pending rdb");
-    reddb_server::replication::replica::write_rebootstrap_ready_marker(
+    reddb_file::write_rebootstrap_ready_marker(
         &data_path,
-        &reddb_server::replication::replica::ReplicaRebootstrapReady {
+        &reddb_file::ReplicaRebootstrapReadyMarker {
             pending_path: pending_path.clone(),
             checkpoint_lsn: 9,
             timeline: reddb_file::TimelineId::initial(),
@@ -368,13 +364,13 @@ fn runtime_fails_closed_on_corrupt_ready_rebootstrap_pending_file() {
         "active database must remain in place after corrupt pending rebootstrap"
     );
     assert!(
-        !reddb_server::replication::replica::rebootstrap_previous_path_for(&data_path).exists(),
+        !reddb_file::layout::rebootstrap_previous_path(&data_path).exists(),
         "active database must not be renamed before pending validation succeeds"
     );
 
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path),
-    );
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_ready_marker_path(
+        &data_path,
+    ));
     let _ = fs::remove_file(&pending_path);
     let reopened =
         RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("reopen active db");
@@ -407,7 +403,7 @@ fn runtime_fails_closed_on_corrupt_ready_rebootstrap_marker() {
         runtime.flush().expect("flush runtime");
     }
 
-    let pending_path = reddb_server::replication::replica::rebootstrap_pending_path_for(&data_path);
+    let pending_path = reddb_file::layout::rebootstrap_pending_path(&data_path);
     {
         let source_runtime = RedDBRuntime::with_options(
             RedDBOptions::persistent(&source_path).with_replication(ReplicationConfig::primary()),
@@ -432,7 +428,7 @@ fn runtime_fails_closed_on_corrupt_ready_rebootstrap_marker() {
             .expect("materialize valid pending rebootstrap");
     }
     fs::write(
-        reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path),
+        reddb_file::layout::rebootstrap_ready_marker_path(&data_path),
         b"not json",
     )
     .expect("write corrupt ready marker");
@@ -455,13 +451,13 @@ fn runtime_fails_closed_on_corrupt_ready_rebootstrap_marker() {
         "pending database must not be promoted when marker is corrupt"
     );
     assert!(
-        !reddb_server::replication::replica::rebootstrap_previous_path_for(&data_path).exists(),
+        !reddb_file::layout::rebootstrap_previous_path(&data_path).exists(),
         "active database must not be renamed before marker validation succeeds"
     );
 
-    let _ = fs::remove_file(
-        reddb_server::replication::replica::rebootstrap_ready_marker_path_for(&data_path),
-    );
+    let _ = fs::remove_file(reddb_file::layout::rebootstrap_ready_marker_path(
+        &data_path,
+    ));
     let _ = fs::remove_file(&pending_path);
     let reopened =
         RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("reopen active db");

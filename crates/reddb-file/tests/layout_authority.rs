@@ -1692,6 +1692,9 @@ fn server_does_not_redeclare_blob_cache_l2_file_format() {
 fn server_uses_reddb_file_for_replica_rebootstrap_paths() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/replication/replica.rs"));
+    let runtime = read(root.join("crates/reddb-server/src/runtime/impl_primary_replica_file.rs"));
+    let open = read(root.join("crates/reddb-server/src/storage/unified/devx/reddb/impl_core_a.rs"));
+    let combined = format!("{text}\n{runtime}\n{open}");
 
     for forbidden in [
         "with_extension(\"rebootstrap.redbase\")",
@@ -1705,10 +1708,17 @@ fn server_uses_reddb_file_for_replica_rebootstrap_paths() {
         "\"timeline\": ready.timeline.0",
         "from_slice(&std::fs::read(&marker_path)",
         "InvalidField(\"pending_path\")",
+        "pub fn rebootstrap_staging_root_for",
+        "pub fn rebootstrap_pending_path_for",
+        "pub fn rebootstrap_ready_marker_path_for",
+        "pub fn rebootstrap_intent_log_path_for",
+        "pub fn rebootstrap_previous_path_for",
+        "pub fn write_rebootstrap_ready_marker",
+        "pub fn read_rebootstrap_ready_marker",
     ] {
         assert!(
-            !text.contains(forbidden),
-            "replica rebootstrap artifact names belong in reddb-file, found {forbidden:?}"
+            !combined.contains(forbidden),
+            "replica rebootstrap artifact contracts belong in reddb-file, found {forbidden:?}"
         );
     }
 
@@ -1717,12 +1727,11 @@ fn server_uses_reddb_file_for_replica_rebootstrap_paths() {
         "reddb_file::layout::rebootstrap_pending_path",
         "reddb_file::layout::rebootstrap_ready_marker_path",
         "reddb_file::layout::rebootstrap_intent_log_path",
-        "reddb_file::layout::rebootstrap_previous_path",
         "reddb_file::write_rebootstrap_ready_marker",
         "reddb_file::read_rebootstrap_ready_marker",
     ] {
         assert!(
-            text.contains(required),
+            combined.contains(required),
             "replica rebootstrap pathing should route through {required}"
         );
     }

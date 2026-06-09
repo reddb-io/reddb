@@ -99,16 +99,12 @@ impl RedDBRuntime {
 
     pub fn replica_rebootstrap_staging_root(&self) -> Option<std::path::PathBuf> {
         let data_path = self.inner.db.options().data_path.as_ref()?;
-        Some(crate::replication::replica::rebootstrap_staging_root_for(
-            data_path,
-        ))
+        Some(reddb_file::layout::rebootstrap_staging_root(data_path))
     }
 
     pub fn replica_rebootstrap_pending_path(&self) -> Option<std::path::PathBuf> {
         let data_path = self.inner.db.options().data_path.as_ref()?;
-        Some(crate::replication::replica::rebootstrap_pending_path_for(
-            data_path,
-        ))
+        Some(reddb_file::layout::rebootstrap_pending_path(data_path))
     }
 
     pub(crate) async fn stage_primary_replica_rebootstrap_from_snapshot(
@@ -129,8 +125,7 @@ impl RedDBRuntime {
             .data_path
             .as_ref()
             .ok_or_else(|| RedDBError::Internal("replica data path unavailable".into()))?;
-        let intent_log_path =
-            crate::replication::replica::rebootstrap_intent_log_path_for(data_path);
+        let intent_log_path = reddb_file::layout::rebootstrap_intent_log_path(data_path);
         let intent_log = crate::telemetry::admin_intent_log::AdminIntentLog::open(intent_log_path)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         let replica_id = self.resolve_replica_id();
@@ -250,9 +245,9 @@ impl RedDBRuntime {
                     self.inner.db.options().data_path.as_ref().ok_or_else(|| {
                         RedDBError::Internal("replica data path unavailable".into())
                     })?;
-                crate::replication::replica::write_rebootstrap_ready_marker(
+                reddb_file::write_rebootstrap_ready_marker(
                     data_path,
-                    &crate::replication::replica::ReplicaRebootstrapReady {
+                    &reddb_file::ReplicaRebootstrapReadyMarker {
                         pending_path: pending_path.clone(),
                         checkpoint_lsn,
                         timeline: current.timeline,
