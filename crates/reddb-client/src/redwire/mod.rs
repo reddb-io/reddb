@@ -49,9 +49,9 @@ use reddb_wire::redwire::{
     build_bulk_insert_binary_frame, build_bulk_insert_frame, build_bye_frame, build_delete_frame,
     build_get_frame, build_ping_frame, build_query_frame, build_query_with_params_frame,
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
-    decode_get_result_payload, decode_query_result_payload, encode_bulk_binary_payload,
-    encode_bulk_insert_payload, encode_insert_payload, encode_key_payload,
-    supported_client_preface, BuildError,
+    decode_error_payload, decode_get_result_payload, decode_query_result_payload,
+    decode_text_payload, encode_bulk_binary_payload, encode_bulk_insert_payload,
+    encode_insert_payload, encode_key_payload, supported_client_preface, BuildError,
 };
 
 /// Authentication credentials for the RedWire handshake.
@@ -227,10 +227,10 @@ impl RedWireClient {
         io::write_frame(&mut self.stream, &req).await?;
         let resp = self.read_frame().await?;
         match resp.kind {
-            MessageKind::Result => Ok(String::from_utf8_lossy(&resp.payload).to_string()),
+            MessageKind::Result => Ok(decode_text_payload(&resp.payload)),
             MessageKind::Error => Err(ClientError::new(
                 ErrorCode::Engine,
-                String::from_utf8_lossy(&resp.payload).to_string(),
+                decode_error_payload(&resp.payload),
             )),
             other => Err(ClientError::new(
                 ErrorCode::Protocol,
@@ -269,7 +269,7 @@ impl RedWireClient {
                 Ok(QueryResult::from_envelope(value))
             }
             MessageKind::Error => {
-                let msg = String::from_utf8_lossy(&resp.payload).to_string();
+                let msg = decode_error_payload(&resp.payload);
                 Err(ClientError::new(ErrorCode::Engine, msg))
             }
             other => Err(ClientError::new(
@@ -314,7 +314,7 @@ impl RedWireClient {
                 })
             }
             MessageKind::Error => {
-                let msg = String::from_utf8_lossy(&resp.payload).to_string();
+                let msg = decode_error_payload(&resp.payload);
                 Err(ClientError::new(ErrorCode::Engine, msg))
             }
             other => Err(ClientError::new(
@@ -337,7 +337,7 @@ impl RedWireClient {
                 .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode get: {e}"))),
             MessageKind::Error => Err(ClientError::new(
                 ErrorCode::Engine,
-                String::from_utf8_lossy(&resp.payload).to_string(),
+                decode_error_payload(&resp.payload),
             )),
             other => Err(ClientError::new(
                 ErrorCode::Protocol,
@@ -359,7 +359,7 @@ impl RedWireClient {
             }),
             MessageKind::Error => Err(ClientError::new(
                 ErrorCode::Engine,
-                String::from_utf8_lossy(&resp.payload).to_string(),
+                decode_error_payload(&resp.payload),
             )),
             other => Err(ClientError::new(
                 ErrorCode::Protocol,
@@ -398,7 +398,7 @@ impl RedWireClient {
                 .map_err(|e| ClientError::new(ErrorCode::Protocol, e.to_string())),
             MessageKind::Error => Err(ClientError::new(
                 ErrorCode::Engine,
-                String::from_utf8_lossy(&resp.payload).to_string(),
+                decode_error_payload(&resp.payload),
             )),
             other => Err(ClientError::new(
                 ErrorCode::Protocol,

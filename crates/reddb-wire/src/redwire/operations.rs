@@ -142,6 +142,14 @@ pub fn decode_get_result_payload(bytes: &[u8]) -> Result<JsonValue, OperationPay
     json_value_from_payload("GetResult", bytes)
 }
 
+pub fn decode_text_payload(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+pub fn decode_error_payload(bytes: &[u8]) -> String {
+    decode_text_payload(bytes)
+}
+
 pub fn encode_bulk_ok_payload(affected: u64, ids: Vec<JsonValue>) -> Vec<u8> {
     let mut obj = JsonMap::new();
     obj.insert("affected".into(), JsonValue::Number(affected.into()));
@@ -351,6 +359,8 @@ mod tests {
         let get = decode_get_result_payload(&encode_get_result_payload(false)).unwrap();
         assert_eq!(get["ok"], JsonValue::Bool(true));
         assert_eq!(get["found"], JsonValue::Bool(false));
+        assert_eq!(decode_text_payload(b"raw result"), "raw result");
+        assert_eq!(decode_error_payload(b"engine failed"), "engine failed");
 
         assert_eq!(
             decode_delete_ok_affected(&encode_delete_ok_payload(7)).unwrap(),
