@@ -9,11 +9,11 @@
 //! Results feed docs/perf/2026-06-03-columnar-read.md.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
 use reddb_server::storage::query::batch::column_batch_from_block;
 use reddb_server::storage::timeseries::chunk::{
     points_from_column_block, TimeSeriesChunk, COLUMNAR_TS_COLUMN_ID, COLUMNAR_VALUE_COLUMN_ID,
 };
+use std::hint::black_box;
 
 /// Seal a synthetic chunk of `n` rows: timestamps 1 ms apart starting at a
 /// realistic epoch, values cycling over a small range to reproduce the codec
