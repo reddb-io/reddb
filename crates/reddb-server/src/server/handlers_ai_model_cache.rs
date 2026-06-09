@@ -29,10 +29,10 @@ use crate::json::{parse_json, to_string as json_to_string, Map, Value as JsonVal
 use crate::storage::schema::Value;
 use crate::RedDBServer;
 use reddb_file::{
-    ai_model_cache_manifest_path, ai_model_cache_manifest_temp_path, ai_model_cache_purge_dir,
-    ai_model_cache_purge_root, ai_model_cache_root, ai_model_cache_staging_dir,
+    ai_model_cache_manifest_path, ai_model_cache_root, ai_model_cache_staging_dir,
     ai_model_cache_staging_root, copy_ai_model_cache_artifact, decode_ai_model_cache_manifest_json,
-    encode_ai_model_cache_manifest_json, AiModelCacheManifest as Manifest,
+    drop_ai_model_cache_dir, encode_ai_model_cache_manifest_json, promote_ai_model_cache_staging,
+    write_ai_model_cache_manifest, AiModelCacheManifest as Manifest,
     AiModelCacheManifestFile as ManifestFile, AI_MODEL_CACHE_MANIFEST_FILE,
 };
 
@@ -586,10 +586,7 @@ fn install_artifacts(
 
         let manifest_bytes = encode_ai_model_cache_manifest_json(&manifest)
             .map_err(|err| format!("failed to encode manifest: {err}"))?;
-        let manifest_tmp = ai_model_cache_manifest_temp_path(&staging_dir);
-        fs::write(&manifest_tmp, &manifest_bytes)
-            .map_err(|err| format!("failed to write manifest tmp: {err}"))?;
-        fs::rename(&manifest_tmp, ai_model_cache_manifest_path(&staging_dir))
+        write_ai_model_cache_manifest(&staging_dir, &manifest_bytes)
             .map_err(|err| format!("failed to finalize manifest: {err}"))?;
         Ok(manifest)
     })();
@@ -607,33 +604,8 @@ fn install_artifacts(
     // purge dir. That keeps the active path coherent at every step: a
     // crash mid-promotion leaves either the new or the old artifact
     // valid, never a half-merged tree.
-    let purge_root = ai_model_cache_purge_root(cache_root);
-    ensure_dir(&purge_root)?;
-    let purge_dir = ai_model_cache_purge_dir(cache_root, &name, &unique);
-    if model_dir.exists() {
-        fs::rename(model_dir, &purge_dir).map_err(|err| {
-            format!(
-                "failed to move existing cache aside ('{}' → '{}'): {err}",
-                model_dir.display(),
-                purge_dir.display()
-            )
-        })?;
-    }
-    if let Err(err) = fs::rename(&staging_dir, model_dir) {
-        // Best-effort rollback of the existing install.
-        if purge_dir.exists() {
-            let _ = fs::rename(&purge_dir, model_dir);
-        }
-        let _ = fs::remove_dir_all(&staging_dir);
-        return Err(format!(
-            "failed to promote staging dir '{}' → '{}': {err}",
-            staging_dir.display(),
-            model_dir.display()
-        ));
-    }
-    if purge_dir.exists() {
-        let _ = fs::remove_dir_all(&purge_dir);
-    }
+    promote_ai_model_cache_staging(cache_root, &name, &unique, &staging_dir, model_dir)
+        .map_err(|err| format!("failed to promote staging dir: {err}"))?;
 
     Ok(manifest)
 }
@@ -682,26 +654,9 @@ fn collect_files_relative(root: &Path) -> Result<Vec<CollectedFile>, String> {
 }
 
 fn drop_cache(cache_root: &Path, model_dir: &Path) -> Result<bool, String> {
-    if !model_dir.exists() {
-        return Ok(false);
-    }
-    let purge_root = ai_model_cache_purge_root(cache_root);
-    ensure_dir(&purge_root)?;
     let unique = unique_suffix();
-    let model_name = model_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("model");
-    let purge_dir = ai_model_cache_purge_dir(cache_root, model_name, &unique);
-    fs::rename(model_dir, &purge_dir).map_err(|err| {
-        format!(
-            "failed to move cache aside ('{}' → '{}'): {err}",
-            model_dir.display(),
-            purge_dir.display()
-        )
-    })?;
-    let _ = fs::remove_dir_all(&purge_dir);
-    Ok(true)
+    drop_ai_model_cache_dir(cache_root, model_dir, &unique)
+        .map_err(|err| format!("failed to drop cache dir '{}': {err}", model_dir.display()))
 }
 
 #[derive(Debug)]

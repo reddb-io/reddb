@@ -70,6 +70,58 @@ pub fn copy_ai_model_cache_artifact(source: &Path, destination: &Path) -> io::Re
     fs::copy(source, destination)
 }
 
+pub fn write_ai_model_cache_manifest(dir: &Path, bytes: &[u8]) -> io::Result<()> {
+    let manifest_tmp = ai_model_cache_manifest_temp_path(dir);
+    fs::write(&manifest_tmp, bytes)?;
+    fs::rename(&manifest_tmp, ai_model_cache_manifest_path(dir))
+}
+
+pub fn promote_ai_model_cache_staging(
+    cache_root: &Path,
+    model_name: &str,
+    unique: &str,
+    staging_dir: &Path,
+    model_dir: &Path,
+) -> io::Result<()> {
+    let purge_root = ai_model_cache_purge_root(cache_root);
+    fs::create_dir_all(&purge_root)?;
+    let purge_dir = ai_model_cache_purge_dir(cache_root, model_name, unique);
+    if model_dir.exists() {
+        fs::rename(model_dir, &purge_dir)?;
+    }
+    if let Err(err) = fs::rename(staging_dir, model_dir) {
+        if purge_dir.exists() {
+            let _ = fs::rename(&purge_dir, model_dir);
+        }
+        let _ = fs::remove_dir_all(staging_dir);
+        return Err(err);
+    }
+    if purge_dir.exists() {
+        let _ = fs::remove_dir_all(&purge_dir);
+    }
+    Ok(())
+}
+
+pub fn drop_ai_model_cache_dir(
+    cache_root: &Path,
+    model_dir: &Path,
+    unique: &str,
+) -> io::Result<bool> {
+    if !model_dir.exists() {
+        return Ok(false);
+    }
+    let purge_root = ai_model_cache_purge_root(cache_root);
+    fs::create_dir_all(&purge_root)?;
+    let model_name = model_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
+    let purge_dir = ai_model_cache_purge_dir(cache_root, model_name, unique);
+    fs::rename(model_dir, &purge_dir)?;
+    let _ = fs::remove_dir_all(&purge_dir);
+    Ok(true)
+}
+
 pub fn encode_ai_model_cache_manifest_json(manifest: &AiModelCacheManifest) -> io::Result<Vec<u8>> {
     serde_json::to_vec(&manifest_to_json(manifest)).map_err(|err| {
         io::Error::new(
