@@ -29,12 +29,14 @@ use reddb_server::runtime::mvcc::{
 use reddb_server::server::RedDBServer;
 use reddb_server::storage::query::unified::UnifiedRecord;
 use reddb_server::storage::schema::Value;
-use reddb_server::wire::redwire::{
-    decode_frame, encode_frame, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_KNOWN_MINOR_VERSION,
-    REDWIRE_MAGIC,
-};
 use reddb_server::{RedDBOptions, RedDBRuntime};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use reddb_wire::redwire::{
+    build_auth_response_anonymous_payload, build_auth_response_bearer_payload,
+    build_auth_response_frame, build_client_hello_frame, build_ping_frame,
+    build_queue_wait_open_frame, read_frame_async, write_frame_async, Frame, MessageKind,
+    QueueWaitOpenRequest, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
+};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
@@ -114,32 +116,14 @@ fn attach_policy(store: &AuthStore, principal: UserId, id: &str, statements: &st
 /// Read one full RedWire frame off the socket: 16-byte header, then the
 /// declared payload length, then decode.
 async fn read_frame(stream: &mut TcpStream) -> Frame {
-    let mut header = [0u8; FRAME_HEADER_SIZE];
-    timeout(EXCHANGE_TIMEOUT, stream.read_exact(&mut header))
+    timeout(EXCHANGE_TIMEOUT, read_frame_async(stream))
         .await
-        .expect("frame header within budget")
-        .expect("read header");
-    let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    let mut buf = vec![0u8; length];
-    buf[..FRAME_HEADER_SIZE].copy_from_slice(&header);
-    if length > FRAME_HEADER_SIZE {
-        timeout(
-            EXCHANGE_TIMEOUT,
-            stream.read_exact(&mut buf[FRAME_HEADER_SIZE..]),
-        )
-        .await
-        .expect("frame payload within budget")
-        .expect("read payload");
-    }
-    let (frame, _) = decode_frame(&buf).expect("decode frame");
-    frame
+        .expect("frame within budget")
+        .expect("read frame")
 }
 
 async fn write_frame(stream: &mut TcpStream, frame: &Frame) {
-    stream
-        .write_all(&encode_frame(frame))
-        .await
-        .expect("write frame");
+    write_frame_async(stream, frame).await.expect("write frame");
 }
 
 fn scrape_metrics(runtime: &RedDBRuntime) -> String {
@@ -220,11 +204,7 @@ async fn connect_and_handshake(addr: SocketAddr) -> TcpStream {
     // Hello: advertise v1 + anonymous.
     write_frame(
         &mut stream,
-        &Frame::new(
-            MessageKind::Hello,
-            1,
-            br#"{"versions":[1],"auth_methods":["anonymous"],"features":0,"client_name":"redwire-smoke"}"#.to_vec(),
-        ),
+        &build_client_hello_frame(1, ["anonymous"], 0, Some("redwire-smoke")).expect("hello frame"),
     )
     .await;
     let ack = read_frame(&mut stream).await;
@@ -232,7 +212,8 @@ async fn connect_and_handshake(addr: SocketAddr) -> TcpStream {
     // AuthResponse: anonymous carries no proof.
     write_frame(
         &mut stream,
-        &Frame::new(MessageKind::AuthResponse, 2, b"{}".to_vec()),
+        &build_auth_response_frame(2, build_auth_response_anonymous_payload())
+            .expect("auth response frame"),
     )
     .await;
     let ok = read_frame(&mut stream).await;
@@ -246,23 +227,15 @@ async fn connect_and_handshake_bearer(addr: SocketAddr, token: &str) -> TcpStrea
     stream.write_all(&[MAX_KNOWN_MINOR_VERSION]).await.unwrap();
     write_frame(
         &mut stream,
-        &Frame::new(
-            MessageKind::Hello,
-            1,
-            br#"{"versions":[1],"auth_methods":["bearer"],"features":0,"client_name":"redwire-smoke"}"#.to_vec(),
-        ),
+        &build_client_hello_frame(1, ["bearer"], 0, Some("redwire-smoke")).expect("hello frame"),
     )
     .await;
     let ack = read_frame(&mut stream).await;
     assert_eq!(ack.kind, MessageKind::HelloAck, "expected HelloAck");
-    let auth = serde_json::json!({ "token": token });
     write_frame(
         &mut stream,
-        &Frame::new(
-            MessageKind::AuthResponse,
-            2,
-            serde_json::to_vec(&auth).unwrap(),
-        ),
+        &build_auth_response_frame(2, build_auth_response_bearer_payload(token))
+            .expect("auth response frame"),
     )
     .await;
     let ok = read_frame(&mut stream).await;
@@ -271,19 +244,29 @@ async fn connect_and_handshake_bearer(addr: SocketAddr, token: &str) -> TcpStrea
 }
 
 fn queue_wait_open(correlation_id: u64, stream_id: u16, queue: &str, consumer: &str) -> Frame {
-    let payload = serde_json::json!({
-        "queue": queue,
-        "group": "workers",
-        "consumer": consumer,
-        "count": 1,
-        "wait_ms": 700
-    });
-    Frame::new(
-        MessageKind::QueueWaitOpen,
+    queue_wait_open_with(correlation_id, stream_id, queue, consumer, 1, 700)
+}
+
+fn queue_wait_open_with(
+    correlation_id: u64,
+    stream_id: u16,
+    queue: &str,
+    consumer: &str,
+    count: usize,
+    wait_ms: u64,
+) -> Frame {
+    build_queue_wait_open_frame(
         correlation_id,
-        serde_json::to_vec(&payload).unwrap(),
+        stream_id,
+        &QueueWaitOpenRequest {
+            queue: queue.to_string(),
+            group: Some("workers".to_string()),
+            consumer: consumer.to_string(),
+            count,
+            wait_ms,
+        },
     )
-    .with_stream(stream_id)
+    .expect("queue wait open frame")
 }
 
 fn text(row: &UnifiedRecord, key: &str) -> String {
@@ -339,12 +322,7 @@ async fn wait_opened_then_post_open_push_is_delivered() {
     let mut client = connect_and_handshake(server.addr).await;
 
     // Open the wait on the (currently empty) queue, stream_id 3.
-    let open = Frame::new(
-        MessageKind::QueueWaitOpen,
-        77,
-        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":5000}"#.to_vec(),
-    )
-    .with_stream(3);
+    let open = queue_wait_open_with(77, 3, "jobs", "c1", 1, 5000);
     write_frame(&mut client, &open).await;
 
     // Make a message deliverable AFTER the wait opened — it did not
@@ -630,12 +608,7 @@ async fn wait_times_out_with_distinct_frame() {
 
     // Open a 300 ms wait on the (empty) queue, stream_id 9. No producer
     // ever makes a message deliverable, so the budget elapses.
-    let open = Frame::new(
-        MessageKind::QueueWaitOpen,
-        42,
-        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":300}"#.to_vec(),
-    )
-    .with_stream(9);
+    let open = queue_wait_open_with(42, 9, "jobs", "c1", 1, 300);
     let started = std::time::Instant::now();
     write_frame(&mut client, &open).await;
 
@@ -678,7 +651,7 @@ async fn wait_times_out_with_distinct_frame() {
     // The session is still reading frames on this connection — Ping →
     // Pong proves the expired wait released its worker (AC #4) and did
     // not wedge the session loop.
-    write_frame(&mut client, &Frame::new(MessageKind::Ping, 43, Vec::new())).await;
+    write_frame(&mut client, &build_ping_frame(43).expect("ping frame")).await;
     let pong = read_frame(&mut client).await;
     assert_eq!(
         pong.kind,
@@ -726,12 +699,7 @@ async fn wait_cancelled_records_prometheus_counter() {
         .expect("create group");
 
     let mut client = connect_and_handshake(server.addr).await;
-    let open = Frame::new(
-        MessageKind::QueueWaitOpen,
-        66,
-        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":5000}"#.to_vec(),
-    )
-    .with_stream(13);
+    let open = queue_wait_open_with(66, 13, "jobs", "c1", 1, 5000);
     write_frame(&mut client, &open).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -788,24 +756,12 @@ async fn wake_all_waiters_record_prometheus_counters() {
 
     write_frame(
         &mut c1,
-        &Frame::new(
-            MessageKind::QueueWaitOpen,
-            81,
-            br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":5000}"#
-                .to_vec(),
-        )
-        .with_stream(21),
+        &queue_wait_open_with(81, 21, "jobs", "c1", 1, 5000),
     )
     .await;
     write_frame(
         &mut c2,
-        &Frame::new(
-            MessageKind::QueueWaitOpen,
-            82,
-            br#"{"queue":"jobs","group":"workers","consumer":"c2","count":1,"wait_ms":5000}"#
-                .to_vec(),
-        )
-        .with_stream(22),
+        &queue_wait_open_with(82, 22, "jobs", "c2", 1, 5000),
     )
     .await;
 
@@ -866,13 +822,7 @@ async fn wait_above_server_cap_is_rejected() {
 
     // Default cap is 60_000 ms; ask for 1 hour. The request must be
     // refused before any parking, so the reply arrives promptly.
-    let open = Frame::new(
-        MessageKind::QueueWaitOpen,
-        55,
-        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":3600000}"#
-            .to_vec(),
-    )
-    .with_stream(11);
+    let open = queue_wait_open_with(55, 11, "jobs", "c1", 1, 3_600_000);
     let started = std::time::Instant::now();
     write_frame(&mut client, &open).await;
 
@@ -933,12 +883,7 @@ async fn server_shutdown_mid_wait_emits_distinct_cancellation_error() {
 
     // Open a long wait on the empty queue — it will still be parked when
     // the shutdown signal fires.
-    let open = Frame::new(
-        MessageKind::QueueWaitOpen,
-        91,
-        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":5000}"#.to_vec(),
-    )
-    .with_stream(4);
+    let open = queue_wait_open_with(91, 4, "jobs", "c1", 1, 5000);
     write_frame(&mut client, &open).await;
 
     // Give the session time to register its waiter and park, then drive
@@ -997,12 +942,7 @@ async fn connection_close_mid_wait_releases_registry_slot() {
 
     // A 30s budget: a release observed within a couple of seconds is
     // unambiguously the connection-close abort, not the wait deadline.
-    let open = Frame::new(
-        MessageKind::QueueWaitOpen,
-        55,
-        br#"{"queue":"jobs","group":"workers","consumer":"c1","count":1,"wait_ms":30000}"#.to_vec(),
-    )
-    .with_stream(6);
+    let open = queue_wait_open_with(55, 6, "jobs", "c1", 1, 30_000);
     write_frame(&mut client, &open).await;
 
     let registry = server.runtime.queue_wait_registry();

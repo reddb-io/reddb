@@ -78,6 +78,28 @@ pub fn parse_stream_cancel(payload: &[u8]) -> StreamCancelRequest {
     StreamCancelRequest { reason }
 }
 
+pub fn build_open_stream_payload(request: &OpenStreamRequest) -> Vec<u8> {
+    let mut obj = serde_json::Map::new();
+    obj.insert("sql".to_string(), JsonValue::String(request.sql.clone()));
+    if !request.opts_raw.is_empty() {
+        let opts = serde_json::from_slice(&request.opts_raw).unwrap_or(JsonValue::Null);
+        obj.insert("opts".to_string(), opts);
+    }
+    serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+}
+
+pub fn build_open_stream_frame(
+    correlation_id: u64,
+    stream_id: u16,
+    request: &OpenStreamRequest,
+) -> Result<Frame, BuildError> {
+    FrameBuilder::request(correlation_id)
+        .kind(MessageKind::OpenStream)
+        .stream_id(stream_id)
+        .payload(build_open_stream_payload(request))
+        .build()
+}
+
 pub fn build_open_ack_payload(lease_id: u64, snapshot_lsn: u64, resumable: bool) -> Vec<u8> {
     let mut obj = serde_json::Map::new();
     obj.insert(
@@ -469,6 +491,24 @@ mod tests {
             .expect("parse open stream");
         assert_eq!(req.sql, "SELECT 1");
         assert!(!req.opts_raw.is_empty());
+    }
+
+    #[test]
+    fn output_open_stream_builder_round_trips_request() {
+        let request = OpenStreamRequest {
+            sql: "SELECT id FROM widgets".to_string(),
+            opts_raw: br#"{"resume_after_rid":42}"#.to_vec(),
+        };
+        let frame = build_open_stream_frame(12, 4, &request).unwrap();
+        assert_eq!(frame.kind, MessageKind::OpenStream);
+        assert_eq!(frame.correlation_id, 12);
+        assert_eq!(frame.stream_id, 4);
+        let parsed = parse_open_stream(&frame.payload).unwrap();
+        assert_eq!(parsed.sql, request.sql);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&parsed.opts_raw).unwrap(),
+            serde_json::from_slice::<JsonValue>(&request.opts_raw).unwrap()
+        );
     }
 
     #[test]

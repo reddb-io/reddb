@@ -115,6 +115,8 @@ fn redwire_stream_payload_contracts_live_only_in_reddb_wire() {
         "pub struct StreamCancelRequest",
         "pub fn parse_open_stream",
         "pub fn parse_stream_cancel",
+        "pub fn build_open_stream_payload",
+        "pub fn build_open_stream_frame",
         "pub fn build_stream_chunk_payload",
         "pub fn build_stream_error_payload",
         "pub fn build_stream_end_payload",
@@ -192,6 +194,8 @@ fn redwire_queue_payload_contracts_live_only_in_reddb_wire() {
         "pub struct QueueWaitOpenRequest",
         "pub enum QueueWaitParseError",
         "pub fn parse_queue_wait_open",
+        "pub fn build_queue_wait_open_payload",
+        "pub fn build_queue_wait_open_frame",
         "pub fn build_event_push_payload",
         "pub fn build_queue_wait_timeout_payload",
         "pub fn build_queue_wait_error_payload",
@@ -747,6 +751,52 @@ fn client_redwire_client_type_has_single_definition() {
         vec![PathBuf::from("crates/reddb-client/src/redwire/mod.rs")],
         "reddb-client should expose exactly one RedWireClient implementation"
     );
+}
+
+#[test]
+fn server_redwire_tests_build_fixtures_through_reddb_wire() {
+    let root = repo_root();
+    for path in rust_files_under(&root.join("crates/reddb-server/tests")) {
+        let text = read(&path);
+        for forbidden in [
+            "Frame::new(",
+            "FrameBuilder::",
+            "decode_frame(",
+            "encode_frame(",
+            "FRAME_HEADER_SIZE",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{} RedWire fixtures should use reddb-wire builders and frame I/O, found {forbidden:?}",
+                path.display()
+            );
+        }
+    }
+
+    for (file, required) in [
+        (
+            "crates/reddb-server/tests/queue_read_wait_redwire_smoke.rs",
+            "build_queue_wait_open_frame",
+        ),
+        (
+            "crates/reddb-server/tests/queue_read_wait_redwire_smoke.rs",
+            "read_frame_async",
+        ),
+        (
+            "crates/reddb-server/tests/e2e_issue_936_browser_credential_layer.rs",
+            "build_open_stream_frame",
+        ),
+        (
+            "crates/reddb-server/tests/e2e_issue_936_browser_credential_layer.rs",
+            "write_frame_async",
+        ),
+    ] {
+        let text = read(root.join(file));
+        assert!(
+            text.contains(required),
+            "{file} should route RedWire fixtures through reddb-wire {required}"
+        );
+    }
 }
 
 #[test]
