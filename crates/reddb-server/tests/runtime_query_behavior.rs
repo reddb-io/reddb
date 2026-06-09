@@ -1206,7 +1206,7 @@ fn vector_turbo_collection_reopens_without_tv_snapshot() {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
+    let _ = std::fs::remove_file(reddb_file::layout::unified_wal_path(&path));
 
     {
         let rt =
@@ -1227,7 +1227,7 @@ fn vector_turbo_collection_reopens_without_tv_snapshot() {
     assert!(!path.with_extension("tv").exists());
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
+    let _ = std::fs::remove_file(reddb_file::layout::unified_wal_path(&path));
 }
 
 /// Acceptance check for issue #693 — `vector.turbo` SEARCH must
