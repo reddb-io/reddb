@@ -1141,10 +1141,8 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     };
     match runtime.execute_query(sql) {
         Ok(result) => {
-            let payload = encode_query_result_summary_payload(
-                &result.statement_type.to_string(),
-                result.affected_rows,
-            );
+            let payload =
+                encode_query_result_summary_payload(result.statement_type, result.affected_rows);
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
         Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),

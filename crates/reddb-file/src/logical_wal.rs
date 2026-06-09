@@ -210,6 +210,7 @@ pub fn read_logical_wal_entries_from(
     Ok(entries)
 }
 
+#[allow(clippy::type_complexity)]
 pub fn build_logical_wal_seek_index(path: &Path) -> io::Result<(Vec<(u64, u64)>, u64, u64)> {
     if !path.exists() {
         return Ok((Vec::new(), 0, 0));

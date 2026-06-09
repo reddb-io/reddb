@@ -712,7 +712,7 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn from_hex(value: &str) -> Result<Vec<u8>, &'static str> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("odd-length hex string");
     }
 

@@ -117,11 +117,9 @@ fn promote_ready_replica_rebootstrap(
     })?;
     let pending = ready.pending_path.clone();
     if !pending.exists() {
-        if data_path.exists() {
-            if active_rebootstrap_matches_ready_marker(data_path, &ready)? {
-                reddb_file::discard_ready_rebootstrap_marker(data_path)?;
-                return Ok(false);
-            }
+        if data_path.exists() && active_rebootstrap_matches_ready_marker(data_path, &ready)? {
+            reddb_file::discard_ready_rebootstrap_marker(data_path)?;
+            return Ok(false);
         }
         return Err(format!(
             "replica rebootstrap marker exists but pending database is missing: {}",
