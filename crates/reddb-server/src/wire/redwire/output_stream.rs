@@ -29,7 +29,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::runtime::RedDBRuntime;
-use crate::serde_json::{self, Value as JsonValue};
+use crate::serde_json::Value as JsonValue;
 use crate::server::output_stream::{
     self as outs, Clock, OpenStreamError, StreamConfig, SystemClock,
 };
@@ -252,7 +252,7 @@ pub async fn run_output_stream(
                     ));
                     break;
                 }
-                let row_bytes = serde_json::to_vec(&row).unwrap_or_default();
+                let row_bytes = row.to_string_compact().into_bytes();
                 let frame =
                     match reddb_wire::redwire::stream::build_stream_chunk_frame_from_json_bytes(
                         correlation_id,
