@@ -367,20 +367,7 @@ impl PointInTimeRecovery {
         let snapshots = self.backend.list(&self.snapshot_prefix)?;
         let mut out = Vec::new();
         for key in snapshots {
-            let Some(file_name) = std::path::Path::new(&key)
-                .file_name()
-                .and_then(|s| s.to_str())
-            else {
-                continue;
-            };
-            let Some(base) = file_name.strip_suffix(".snapshot") else {
-                continue;
-            };
-            let Some((snapshot_id, snapshot_time)) = base.split_once('-') else {
-                continue;
-            };
-            let (Ok(snapshot_id), Ok(snapshot_time)) =
-                (snapshot_id.parse::<u64>(), snapshot_time.parse::<u64>())
+            let Some((snapshot_id, snapshot_time)) = reddb_file::parse_archived_snapshot_key(&key)
             else {
                 continue;
             };

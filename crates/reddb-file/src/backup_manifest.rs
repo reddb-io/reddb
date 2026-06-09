@@ -211,6 +211,17 @@ pub fn archived_snapshot_key(prefix: &str, snapshot_id: u64, timestamp_ms: u64) 
     format!("{prefix}{snapshot_id:012}-{timestamp_ms}.snapshot")
 }
 
+pub fn parse_archived_snapshot_key(key: &str) -> Option<(u64, u64)> {
+    let path = PathBuf::from(key);
+    let file_name = path.file_name()?.to_str()?;
+    let (snapshot_id, snapshot_time) = file_name.strip_suffix(".snapshot")?.split_once('-')?;
+    Some((snapshot_id.parse().ok()?, snapshot_time.parse().ok()?))
+}
+
+pub fn is_archived_snapshot_key(key: &str) -> bool {
+    parse_archived_snapshot_key(key).is_some()
+}
+
 pub fn archived_wal_segment_key(prefix: &str, lsn_start: u64, lsn_end: u64) -> String {
     format!("{prefix}{lsn_start:012}-{lsn_end:012}.wal")
 }
@@ -781,6 +792,16 @@ mod tests {
             archived_snapshot_key("tenant/db/snapshots/", 7, 1730000000000),
             "tenant/db/snapshots/000000000007-1730000000000.snapshot"
         );
+        assert_eq!(
+            parse_archived_snapshot_key("tenant/db/snapshots/000000000007-1730000000000.snapshot"),
+            Some((7, 1730000000000))
+        );
+        assert!(is_archived_snapshot_key(
+            "tenant/db/snapshots/000000000007-1730000000000.snapshot"
+        ));
+        assert!(!is_archived_snapshot_key(
+            "tenant/db/snapshots/000000000007-1730000000000.snapshot.manifest.json"
+        ));
         assert_eq!(
             backup_root_from_snapshot_prefix("tenant/db/snapshots/"),
             "tenant/db/"
