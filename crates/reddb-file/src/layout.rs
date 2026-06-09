@@ -354,9 +354,14 @@ pub fn data_file_name(path: &Path) -> String {
 }
 
 pub const DEFAULT_DATABASE_FILE_NAME: &str = "data.rdb";
+pub const DEFAULT_SERVICE_DATABASE_PATH: &str = "/var/lib/reddb/data.rdb";
 
 pub fn default_database_path() -> PathBuf {
     PathBuf::from(DEFAULT_DATABASE_FILE_NAME)
+}
+
+pub fn default_service_database_path() -> PathBuf {
+    PathBuf::from(DEFAULT_SERVICE_DATABASE_PATH)
 }
 
 pub fn sibling_path(path: &Path, file_name: &str) -> PathBuf {

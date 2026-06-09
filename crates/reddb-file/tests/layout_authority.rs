@@ -253,6 +253,16 @@ fn server_runtime_uses_file_owned_default_database_path() {
             "{file} should route default database path through reddb-file"
         );
     }
+
+    let cli_commands = read(root.join("crates/reddb-server/src/cli/commands.rs"));
+    assert!(
+        !cli_commands.contains(".with_default(\"/var/lib/reddb/data.rdb\")"),
+        "service CLI database path default should route through reddb-file"
+    );
+    assert!(
+        cli_commands.contains("reddb_file::DEFAULT_SERVICE_DATABASE_PATH"),
+        "service CLI database path default should use reddb-file's service default"
+    );
 }
 
 #[test]
