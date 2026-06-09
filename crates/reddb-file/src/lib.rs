@@ -44,7 +44,8 @@ pub use ai_model_cache::{
     ai_model_cache_manifest_path, ai_model_cache_manifest_temp_path, ai_model_cache_purge_dir,
     ai_model_cache_purge_root, ai_model_cache_root, ai_model_cache_staging_dir,
     ai_model_cache_staging_root, copy_ai_model_cache_artifact, decode_ai_model_cache_manifest_json,
-    encode_ai_model_cache_manifest_json, AiModelCacheManifest, AiModelCacheManifestFile,
+    drop_ai_model_cache_dir, encode_ai_model_cache_manifest_json, promote_ai_model_cache_staging,
+    write_ai_model_cache_manifest, AiModelCacheManifest, AiModelCacheManifestFile,
     AI_MODEL_CACHE_DIR_NAME, AI_MODEL_CACHE_MANIFEST_FILE, AI_MODEL_CACHE_PURGE_DIR_NAME,
     AI_MODEL_CACHE_STAGING_DIR_NAME,
 };

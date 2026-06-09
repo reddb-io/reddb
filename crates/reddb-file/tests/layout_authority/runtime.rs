@@ -724,6 +724,11 @@ fn server_ai_model_cache_uses_file_owned_manifest_contract() {
         "model_dir.join(MANIFEST_FILE)",
         "staging_dir.join(MANIFEST_FILE)",
         "fs::copy(",
+        "fs::rename(",
+        "fs::write(&manifest_tmp",
+        "ai_model_cache_manifest_temp_path",
+        "ai_model_cache_purge_root",
+        "ai_model_cache_purge_dir",
     ] {
         assert!(
             !server.contains(forbidden),
@@ -736,11 +741,13 @@ fn server_ai_model_cache_uses_file_owned_manifest_contract() {
         "AiModelCacheManifestFile as ManifestFile",
         "ai_model_cache_root",
         "ai_model_cache_staging_dir",
-        "ai_model_cache_purge_dir",
         "ai_model_cache_manifest_path",
         "copy_ai_model_cache_artifact",
         "encode_ai_model_cache_manifest_json",
         "decode_ai_model_cache_manifest_json",
+        "write_ai_model_cache_manifest",
+        "promote_ai_model_cache_staging",
+        "drop_ai_model_cache_dir",
     ] {
         assert!(
             server.contains(required),
@@ -755,6 +762,9 @@ fn server_ai_model_cache_uses_file_owned_manifest_contract() {
         "pub fn decode_ai_model_cache_manifest_json",
         "pub fn ai_model_cache_manifest_path",
         "pub fn copy_ai_model_cache_artifact",
+        "pub fn write_ai_model_cache_manifest",
+        "pub fn promote_ai_model_cache_staging",
+        "pub fn drop_ai_model_cache_dir",
         "pub const AI_MODEL_CACHE_MANIFEST_FILE",
     ] {
         assert!(
