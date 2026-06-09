@@ -280,6 +280,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn promote_request() -> Vec<u8> {
+        reddb_wire::replication::FailoverPromotionRequest {
+            holder_id: Some("replica-a".to_string()),
+            ttl_ms: Some(30_000),
+        }
+        .encode_json()
+    }
+
     const CHILD_ENV: &str = "REDDB_FAILOVER_PROMOTE_CRASH_CHILD";
     const DATA_PATH_ENV: &str = "REDDB_FAILOVER_PROMOTE_CRASH_DATA_PATH";
     const DATABASE_KEY_ENV: &str = "REDDB_FAILOVER_PROMOTE_CRASH_DATABASE_KEY";
@@ -332,8 +340,7 @@ mod tests {
         let runtime = replica_runtime_for_promote(&data_path, &database_key);
         let server = RedDBServer::new(runtime.clone());
 
-        let response = server
-            .handle_admin_failover_promote(br#"{"holder_id":"replica-a","ttl_ms":30000}"#.to_vec());
+        let response = server.handle_admin_failover_promote(promote_request());
         let body = String::from_utf8(response.body).expect("response body");
 
         assert_eq!(response.status, 200, "{body}");
@@ -417,8 +424,7 @@ mod tests {
         let database_key = std::env::var(DATABASE_KEY_ENV).expect("database key env");
         let runtime = replica_runtime_for_promote(&data_path, &database_key);
         let server = RedDBServer::new(runtime);
-        let _ = server
-            .handle_admin_failover_promote(br#"{"holder_id":"replica-a","ttl_ms":30000}"#.to_vec());
+        let _ = server.handle_admin_failover_promote(promote_request());
         ExitCode::from(1)
     }
 }

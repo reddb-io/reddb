@@ -175,6 +175,20 @@ pub struct FailoverPromotionRequest {
 }
 
 impl FailoverPromotionRequest {
+    pub fn encode_json(&self) -> Vec<u8> {
+        let mut obj = serde_json::Map::new();
+        if let Some(holder_id) = &self.holder_id {
+            obj.insert(
+                "holder_id".to_string(),
+                JsonValue::String(holder_id.clone()),
+            );
+        }
+        if let Some(ttl_ms) = self.ttl_ms.filter(|ttl| *ttl > 0) {
+            obj.insert("ttl_ms".to_string(), JsonValue::Number(ttl_ms.into()));
+        }
+        serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    }
+
     pub fn decode_json(bytes: &[u8]) -> Result<Self> {
         let obj = object_from_slice(bytes)?;
         Ok(Self {
@@ -323,9 +337,11 @@ mod tests {
 
     #[test]
     fn failover_promotion_payloads_round_trip() {
-        let request =
-            FailoverPromotionRequest::decode_json(br#"{"holder_id":"replica-a","ttl_ms":30000}"#)
-                .unwrap();
+        let request = FailoverPromotionRequest {
+            holder_id: Some("replica-a".to_string()),
+            ttl_ms: Some(30_000),
+        };
+        let request = FailoverPromotionRequest::decode_json(&request.encode_json()).unwrap();
         assert_eq!(request.holder_id.as_deref(), Some("replica-a"));
         assert_eq!(request.ttl_ms, Some(30_000));
 

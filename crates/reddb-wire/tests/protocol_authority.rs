@@ -545,6 +545,13 @@ fn server_failover_promotion_payload_lives_in_reddb_wire() {
         );
     }
 
+    for required in ["FailoverPromotionRequest {", ".encode_json()"] {
+        assert!(
+            handler.contains(required),
+            "server failover promotion tests should use reddb-wire request encoder {required}"
+        );
+    }
+
     for required in [
         "pub struct FailoverPromotionRequest",
         "pub struct FailoverPromotionReply",
@@ -556,6 +563,11 @@ fn server_failover_promotion_payload_lives_in_reddb_wire() {
             "reddb-wire should own failover promotion payload contract {required}"
         );
     }
+
+    assert!(
+        !handler.contains(r#"{"holder_id":"replica-a","ttl_ms":30000}"#),
+        "server failover promotion tests should use reddb-wire request encoders"
+    );
 }
 
 #[test]
