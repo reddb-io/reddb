@@ -8,7 +8,8 @@
 //!
 //! Results feed docs/perf/2026-06-03-columnar-read.md.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use reddb_server::storage::query::batch::column_batch_from_block;
 use reddb_server::storage::timeseries::chunk::{
     points_from_column_block, TimeSeriesChunk, COLUMNAR_TS_COLUMN_ID, COLUMNAR_VALUE_COLUMN_ID,
