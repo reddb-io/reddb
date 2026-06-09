@@ -4,6 +4,9 @@
 //! executor actually consults IAM policies instead of only the legacy
 //! GRANT table.
 
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,16 +17,8 @@ use reddb::runtime::mvcc::{
 };
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-iam-policy-runtime-{}-{now_nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("tempdir");
+fn runtime_with_auth() -> (support::TempDataDir, RedDBRuntime, Arc<AuthStore>) {
+    let dir = support::temp_data_dir("iam-policy-runtime");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
@@ -37,7 +32,7 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&store));
-    (rt, store)
+    (dir, rt, store)
 }
 
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
@@ -147,7 +142,7 @@ fn admin_explicit_deny_matches_between_simulator_and_sql_path() {
     // be denied by an explicit Deny. The policy simulator and the runtime
     // SQL projection gate must report the same decision for the
     // allow-all-plus-deny shape.
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_users_table(&rt);
     attach_policy(
         &store,
@@ -203,7 +198,7 @@ fn admin_explicit_deny_matches_between_simulator_and_sql_path() {
 
 #[test]
 fn select_column_policy_allows_safe_projection() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_users_table(&rt);
     attach_alice_policy(
         &store,
@@ -224,7 +219,7 @@ fn select_column_policy_allows_safe_projection() {
 
 #[test]
 fn subscription_create_requires_select_on_source() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     attach_alice_policy(
         &store,
         "events-target-only",
@@ -247,7 +242,7 @@ fn subscription_create_requires_select_on_source() {
 
 #[test]
 fn subscription_alter_requires_write_on_target_queue() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE users (id INT, email TEXT)")
         .unwrap();
     attach_alice_policy(
@@ -272,7 +267,7 @@ fn subscription_alter_requires_write_on_target_queue() {
 
 #[test]
 fn subscription_redact_covers_column_policy_without_warning() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE users (id INT, email TEXT)")
         .unwrap();
     attach_alice_policy(
@@ -299,7 +294,7 @@ fn subscription_redact_covers_column_policy_without_warning() {
 
 #[test]
 fn subscription_redact_gap_warns_but_allows_ddl() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE users (id INT, email TEXT, name TEXT)")
         .unwrap();
     attach_alice_policy(
@@ -335,7 +330,7 @@ fn subscription_redact_gap_warns_but_allows_ddl() {
 
 #[test]
 fn select_column_policy_denies_explicit_column() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_users_table(&rt);
     attach_alice_policy(
         &store,
@@ -354,7 +349,7 @@ fn select_column_policy_denies_explicit_column() {
 
 #[test]
 fn select_column_policy_requires_table_allow_even_with_column_allow() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_users_table(&rt);
     attach_alice_policy(
         &store,
@@ -372,7 +367,7 @@ fn select_column_policy_requires_table_allow_even_with_column_allow() {
 
 #[test]
 fn select_column_policy_denies_wildcard_when_any_declared_column_denied() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     setup_users_table(&rt);
     attach_alice_policy(
         &store,
@@ -391,7 +386,7 @@ fn select_column_policy_denies_wildcard_when_any_declared_column_denied() {
 
 #[test]
 fn select_column_policy_resolves_aliases_across_table_joins() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE users (id INT, name TEXT, email TEXT)")
         .unwrap();
     rt.execute_query("CREATE TABLE orders (id INT, user_id INT, total INT)")
@@ -427,7 +422,7 @@ fn select_column_policy_resolves_aliases_across_table_joins() {
 
 #[test]
 fn runtime_uses_attached_iam_policy_for_dml() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();
     rt.execute_query("INSERT INTO orders (id) VALUES (1)")
         .unwrap();
@@ -462,7 +457,7 @@ fn runtime_uses_attached_iam_policy_for_dml() {
 
 #[test]
 fn update_set_column_policy_allows_allowed_target() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
         .unwrap();
     rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
@@ -494,7 +489,7 @@ fn update_set_column_policy_allows_allowed_target() {
 
 #[test]
 fn update_set_column_policy_blocks_denied_target_column() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
         .unwrap();
     rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
@@ -530,7 +525,7 @@ fn update_set_column_policy_blocks_denied_target_column() {
 
 #[test]
 fn update_set_column_policy_blocks_multi_column_update_when_one_target_is_denied() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
         .unwrap();
     rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
@@ -567,7 +562,7 @@ fn update_set_column_policy_blocks_multi_column_update_when_one_target_is_denied
 
 #[test]
 fn update_set_column_allow_does_not_bypass_missing_table_allow() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE accounts (id INT, status TEXT)")
         .unwrap();
     rt.execute_query("INSERT INTO accounts (id, status) VALUES (1, 'old')")
@@ -602,7 +597,7 @@ fn update_set_column_allow_does_not_bypass_missing_table_allow() {
 
 #[test]
 fn update_set_column_policy_uses_tenant_context() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
         .unwrap();
     rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
@@ -646,7 +641,7 @@ fn update_set_column_policy_uses_tenant_context() {
 
 #[test]
 fn vector_search_blocks_denied_content_projection() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query(
         "INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'secret')",
     )
@@ -681,7 +676,7 @@ fn vector_search_blocks_denied_content_projection() {
 
 #[test]
 fn graph_match_blocks_denied_node_property_projection() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query(
         "INSERT INTO social NODE (label, name, secret) VALUES ('User', 'alice', 'pii')",
     )
@@ -711,7 +706,7 @@ fn graph_match_blocks_denied_node_property_projection() {
 
 #[test]
 fn timeseries_select_blocks_denied_tags_projection() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TIMESERIES metrics RETENTION 7 d")
         .unwrap();
     rt.execute_query(
@@ -744,7 +739,7 @@ fn timeseries_select_blocks_denied_tags_projection() {
 
 #[test]
 fn kv_invalidate_tags_requires_iam_action() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("KV PUT sessions.blob = 'payload' TAGS [user:42]")
         .unwrap();
 
@@ -788,7 +783,7 @@ fn kv_invalidate_tags_requires_iam_action() {
 
 #[test]
 fn destructive_ddl_requires_drop_or_truncate_policy_before_mutation() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE ddl_drop_guard (id INT)")
         .unwrap();
     rt.execute_query("INSERT INTO ddl_drop_guard (id) VALUES (1)")
@@ -881,7 +876,7 @@ fn destructive_ddl_requires_drop_or_truncate_policy_before_mutation() {
 
 #[test]
 fn group_policy_applies_through_alter_user_membership() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();
     rt.execute_query("INSERT INTO orders (id) VALUES (1)")
         .unwrap();
@@ -953,7 +948,7 @@ fn group_policy_applies_through_alter_user_membership() {
 
 #[test]
 fn grant_to_public_compiles_to_implicit_public_policy() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();
     rt.execute_query("INSERT INTO orders (id) VALUES (1)")
         .unwrap();
@@ -985,7 +980,7 @@ fn grant_to_public_compiles_to_implicit_public_policy() {
 
 #[test]
 fn revoke_removes_synthetic_grant_policy() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();
     rt.execute_query("INSERT INTO orders (id) VALUES (1)")
         .unwrap();
@@ -1040,7 +1035,7 @@ fn revoke_removes_synthetic_grant_policy() {
 
 #[test]
 fn insert_column_policy_allows_named_columns_with_table_allow() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT, note TEXT)")
         .unwrap();
 
@@ -1067,7 +1062,7 @@ fn insert_column_policy_allows_named_columns_with_table_allow() {
 
 #[test]
 fn insert_column_policy_denies_explicit_denied_column() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT, public TEXT, secret TEXT)")
         .unwrap();
 
@@ -1096,7 +1091,7 @@ fn insert_column_policy_denies_explicit_denied_column() {
 
 #[test]
 fn insert_column_policy_ignores_omitted_denied_columns() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT, public TEXT, secret TEXT)")
         .unwrap();
 
@@ -1124,7 +1119,7 @@ fn insert_column_policy_ignores_omitted_denied_columns() {
 
 #[test]
 fn insert_column_policy_denies_tenant_auto_fill_target() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE events (id INT, tenant_id TEXT) TENANT BY (tenant_id)")
         .unwrap();
 
@@ -1156,7 +1151,7 @@ fn insert_column_policy_denies_tenant_auto_fill_target() {
 
 #[test]
 fn insert_column_policy_applies_to_multi_row_insert() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT, note TEXT)")
         .unwrap();
 
@@ -1181,7 +1176,7 @@ fn insert_column_policy_applies_to_multi_row_insert() {
 
 #[test]
 fn insert_column_allow_does_not_bypass_missing_table_allow() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();
 
     attach_policy(
@@ -1208,7 +1203,7 @@ fn insert_column_allow_does_not_bypass_missing_table_allow() {
 
 #[test]
 fn document_json_path_projection_allows_non_denied_path() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_document(&rt);
     attach_alice_policy(
         &store,
@@ -1227,7 +1222,7 @@ fn document_json_path_projection_allows_non_denied_path() {
 
 #[test]
 fn document_json_path_projection_denies_explicit_path() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_document(&rt);
     attach_alice_policy(
         &store,
@@ -1246,7 +1241,7 @@ fn document_json_path_projection_denies_explicit_path() {
 
 #[test]
 fn document_json_column_projection_denies_base_document_column() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_document(&rt);
     attach_alice_policy(
         &store,
@@ -1265,7 +1260,7 @@ fn document_json_column_projection_denies_base_document_column() {
 
 #[test]
 fn document_json_wildcard_projection_checks_column_wildcard_policy() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_document(&rt);
     attach_alice_policy(
         &store,
@@ -1287,7 +1282,7 @@ fn document_json_wildcard_projection_checks_column_wildcard_policy() {
 
 #[test]
 fn document_json_table_allow_does_not_bypass_document_path_deny() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_document(&rt);
     attach_alice_policy(
         &store,

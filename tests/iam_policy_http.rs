@@ -5,6 +5,9 @@
 //! simulator) over plain HTTP. The admin token gate is left unset so
 //! the assertions exercise pure routing + handler behaviour.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -15,25 +18,16 @@ use reddb::auth::{AuthConfig, AuthStore};
 use reddb::server::RedDBServer;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn isolated_runtime(tag: &str) -> RedDBRuntime {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "reddb-iam-http-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+fn isolated_runtime(tag: &str) -> (support::TempDataDir, RedDBRuntime) {
+    let dir = support::temp_data_dir(&format!("iam-http-{tag}"));
     let opts = RedDBOptions::in_memory().with_data_path(dir.join("data.rdb"));
-    RedDBRuntime::with_options(opts).expect("runtime")
+    let rt = RedDBRuntime::with_options(opts).expect("runtime");
+    (dir, rt)
 }
 
-fn spawn_server() -> String {
+fn spawn_server() -> (support::TempDataDir, String) {
     std::env::remove_var("RED_ADMIN_TOKEN");
-    let rt = isolated_runtime("base");
+    let (dir, rt) = isolated_runtime("base");
     let store = Arc::new(AuthStore::new(AuthConfig {
         enabled: false,
         ..AuthConfig::default()
@@ -48,7 +42,7 @@ fn spawn_server() -> String {
         let _ = server.serve_on(listener);
     });
     thread::sleep(Duration::from_millis(80));
-    addr.to_string()
+    (dir, addr.to_string())
 }
 
 fn http_request(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
@@ -82,7 +76,7 @@ fn http_request(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u1
 
 #[test]
 fn list_policy_actions_returns_catalog() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let (status, body) = http_request(&addr, "GET", "/admin/policies/actions", None);
     assert_eq!(status, 200, "body={body}");
     // Every catalog entry surfaces with its six columns.
@@ -112,7 +106,7 @@ fn list_policy_actions_returns_catalog() {
 
 #[test]
 fn lint_policy_returns_diagnostics() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     // Clean policy — empty diagnostics array.
     let clean = r#"{"id":"p1","version":1,"statements":[
         {"effect":"allow","actions":["select"],"resources":["table:public.orders"]}
@@ -157,21 +151,21 @@ fn lint_policy_returns_diagnostics() {
 
 #[test]
 fn lint_policy_rejects_non_post() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let (status, _) = http_request(&addr, "GET", "/admin/policies/lint", None);
     assert_eq!(status, 405);
 }
 
 #[test]
 fn list_policy_actions_rejects_non_get() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let (status, _) = http_request(&addr, "POST", "/admin/policies/actions", Some("{}"));
     assert_eq!(status, 405);
 }
 
 #[test]
 fn put_get_delete_policy_roundtrip() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let body = r#"{"id":"p1","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["table:public.orders"]}]}"#;
 
     // PUT (create)
@@ -199,7 +193,7 @@ fn put_get_delete_policy_roundtrip() {
 
 #[test]
 fn attach_then_detach_user() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let body = r#"{"id":"p1","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["table:public.orders"]}]}"#;
 
     let (s1, _) = http_request(&addr, "PUT", "/admin/policies/p1", Some(body));
@@ -223,7 +217,7 @@ fn attach_then_detach_user() {
 
 #[test]
 fn group_membership_makes_group_policy_effective() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let body = r#"{"id":"p1","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["table:public.orders"]}]}"#;
 
     let (s1, _) = http_request(&addr, "PUT", "/admin/policies/p1", Some(body));
@@ -259,7 +253,7 @@ fn group_membership_makes_group_policy_effective() {
 
 #[test]
 fn simulate_returns_decision_envelope() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let body = r#"{"id":"p1","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["table:public.orders"],"condition":{"source_ip":["10.0.0.5"]}}]}"#;
 
     let _ = http_request(&addr, "PUT", "/admin/policies/p1", Some(body));
@@ -283,7 +277,7 @@ fn simulate_returns_decision_envelope() {
 
 #[test]
 fn simulate_default_deny_when_no_attachments() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let sim_body =
         r#"{"principal":"bob","action":"select","resource":{"kind":"table","name":"public.x"}}"#;
     let (status, body_text) =
@@ -301,7 +295,7 @@ fn migrate_policy_mode_dry_run_returns_delta() {
     // legacy_rbac access to writes; under `policy_only` they would
     // lose everything. DRY RUN must return that delta in the body
     // without mutating the live enforcement mode.
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     // Pre-seed a table so the catalog snapshot has a concrete
     // resource to probe.
     let (status, _) = http_request(
@@ -336,7 +330,7 @@ fn migrate_policy_mode_dry_run_returns_delta() {
 
 #[test]
 fn migrate_policy_mode_refuses_with_delta() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let (status, _) = http_request(
         &addr,
         "POST",
@@ -357,7 +351,7 @@ fn migrate_policy_mode_refuses_with_delta() {
 
 #[test]
 fn migrate_policy_mode_rejects_non_policy_only_target() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let body = r#"{"target":"legacy_rbac","dry_run":true}"#;
     let (status, body_text) =
         http_request(&addr, "POST", "/admin/policies/migrate-mode", Some(body));
@@ -366,7 +360,7 @@ fn migrate_policy_mode_rejects_non_policy_only_target() {
 
 #[test]
 fn migrate_policy_mode_rejects_non_post() {
-    let addr = spawn_server();
+    let (_dir, addr) = spawn_server();
     let (status, _) = http_request(&addr, "GET", "/admin/policies/migrate-mode", None);
     assert_eq!(status, 405);
 }

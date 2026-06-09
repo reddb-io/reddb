@@ -3,6 +3,9 @@
 //! shape, the DRY RUN no-op, the refusal path, and the actual mode
 //! flip when the delta is empty.
 
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::enforcement_mode::PolicyEnforcementMode;
@@ -10,16 +13,8 @@ use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-iam-migrate-mode-{}-{now_nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+fn runtime_with_auth() -> (support::TempDataDir, RedDBRuntime, Arc<AuthStore>) {
+    let dir = support::temp_data_dir("iam-migrate-mode");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
@@ -29,7 +24,7 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&store));
-    (rt, store)
+    (dir, rt, store)
 }
 
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
@@ -46,7 +41,7 @@ fn seed_orders(rt: &RedDBRuntime) {
 
 #[test]
 fn dry_run_returns_delta_without_changing_mode() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_orders(&rt);
     let result = as_user("admin", Role::Admin, || {
         rt.execute_query("MIGRATE POLICY MODE TO 'policy_only' DRY RUN")
@@ -75,7 +70,7 @@ fn dry_run_returns_delta_without_changing_mode() {
 
 #[test]
 fn non_dry_run_refuses_with_delta() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     seed_orders(&rt);
     let result = as_user("admin", Role::Admin, || {
         rt.execute_query("MIGRATE POLICY MODE TO 'policy_only'")
@@ -92,7 +87,7 @@ fn non_dry_run_refuses_with_delta() {
 
 #[test]
 fn non_dry_run_succeeds_when_delta_empty() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     // Attach an allow-all policy to alice so her delta is empty.
     let policy = reddb::auth::policies::Policy::from_json_str(
         r#"{"id":"p-alice-all","version":1,
@@ -134,7 +129,7 @@ fn non_dry_run_succeeds_when_delta_empty() {
 
 #[test]
 fn invalid_target_is_rejected() {
-    let (rt, _store) = runtime_with_auth();
+    let (_dir, rt, _store) = runtime_with_auth();
     let err = as_user("admin", Role::Admin, || {
         rt.execute_query("MIGRATE POLICY MODE TO 'banana' DRY RUN")
     })
@@ -151,7 +146,7 @@ fn legacy_rbac_as_target_is_rejected() {
     // Only `policy_only` is a valid destination — migrating back to
     // legacy_rbac is supported via direct config writes, not this
     // command.
-    let (rt, _store) = runtime_with_auth();
+    let (_dir, rt, _store) = runtime_with_auth();
     let err = as_user("admin", Role::Admin, || {
         rt.execute_query("MIGRATE POLICY MODE TO 'legacy_rbac' DRY RUN")
     })

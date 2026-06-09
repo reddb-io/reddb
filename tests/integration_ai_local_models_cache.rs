@@ -4,11 +4,14 @@
 //! #678 registry. Artifact acquisition is fixture-based — these
 //! tests never reach out to HuggingFace.
 
+#[allow(dead_code)]
+mod support;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::time::Duration;
 
 use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
@@ -61,22 +64,11 @@ const MINIMAL_VALID: &str = r#"{
     "dimensions":384
 }"#;
 
-fn unique_temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let p = std::env::temp_dir().join(format!(
-        "reddb_cache_it_{label}_{}_{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = fs::remove_dir_all(&p);
-    fs::create_dir_all(&p).unwrap();
-    p
+fn unique_temp_dir(label: &str) -> support::TempDataDir {
+    support::temp_data_dir(&format!("ai-cache-{label}"))
 }
 
-fn make_fixture(label: &str) -> PathBuf {
+fn make_fixture(label: &str) -> support::TempDataDir {
     let dir = unique_temp_dir(label);
     fs::write(dir.join("config.json"), b"{\"model_type\":\"bert\"}").unwrap();
     fs::write(dir.join("model.safetensors"), b"fake-weights-bytes").unwrap();

@@ -7,6 +7,9 @@
 //!   re-executing,
 //! * oversize batches reject with 413 before any storage write.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -15,25 +18,16 @@ use std::time::Duration;
 use reddb::server::RedDBServer;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn isolated_runtime(tag: &str) -> RedDBRuntime {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "reddb-batch-http-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+fn isolated_runtime(tag: &str) -> (support::TempDataDir, RedDBRuntime) {
+    let dir = support::temp_data_dir(&format!("batch-http-{tag}"));
     let opts = RedDBOptions::in_memory().with_data_path(dir.join("data.rdb"));
-    RedDBRuntime::with_options(opts).expect("runtime")
+    let rt = RedDBRuntime::with_options(opts).expect("runtime");
+    (dir, rt)
 }
 
-fn spawn_server(tag: &str) -> String {
+fn spawn_server(tag: &str) -> (support::TempDataDir, String) {
     std::env::remove_var("RED_ADMIN_TOKEN");
-    let rt = isolated_runtime(tag);
+    let (dir, rt) = isolated_runtime(tag);
     let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap();
@@ -48,7 +42,7 @@ fn spawn_server(tag: &str) -> String {
     let ddl = r#"{"query": "CREATE TABLE events (id INTEGER, name TEXT)"}"#;
     let (status, body) = http_post(&addr, "/query", ddl, None);
     assert_eq!(status, 200, "ddl failed: {body}");
-    addr
+    (dir, addr)
 }
 
 fn http_post(addr: &str, path: &str, body: &str, idempotency_key: Option<&str>) -> (u16, String) {
@@ -101,7 +95,7 @@ fn http_get(addr: &str, path: &str) -> (u16, String) {
 
 #[test]
 fn batch_happy_path_commits_every_row() {
-    let addr = spawn_server("happy");
+    let (_dir, addr) = spawn_server("happy");
     let body = r#"[
         {"fields": {"id": 1, "name": "alpha"}},
         {"fields": {"id": 2, "name": "beta"}},
@@ -120,7 +114,7 @@ fn batch_happy_path_commits_every_row() {
 
 #[test]
 fn batch_idempotency_key_replay_does_not_re_execute() {
-    let addr = spawn_server("idem");
+    let (_dir, addr) = spawn_server("idem");
     let body1 = r#"[{"fields": {"id": 10, "name": "only-once"}}]"#;
     let (s1, r1) = http_post(&addr, "/collections/events/batch", body1, Some("k-abc"));
     assert_eq!(s1, 200, "{r1}");
@@ -142,7 +136,7 @@ fn batch_idempotency_key_replay_does_not_re_execute() {
 
 #[test]
 fn batch_row_failure_rolls_back_whole_batch() {
-    let addr = spawn_server("rollback");
+    let (_dir, addr) = spawn_server("rollback");
     // Row index 1 is shaped wrong on purpose — the batch must reject
     // with a typed error and leave storage empty.
     let body = r#"[

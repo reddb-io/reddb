@@ -18,6 +18,9 @@
 //! * No `ai.credential.resolve` audit event fires when the planner
 //!   denied the query.
 
+#[allow(dead_code)]
+mod support;
+
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
@@ -26,16 +29,8 @@ use reddb::runtime::mvcc::{
 };
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "reddb-ai-provider-gate-{}-{now_nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("tempdir");
+fn runtime_with_auth() -> (support::TempDataDir, RedDBRuntime, Arc<AuthStore>) {
+    let dir = support::temp_data_dir("ai-provider-gate");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
@@ -45,7 +40,7 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     store.create_user("alice", "p", Role::Admin).unwrap();
     store.create_user("bob", "p", Role::Admin).unwrap();
     rt.set_auth_store(Arc::clone(&store));
-    (rt, store)
+    (dir, rt, store)
 }
 
 fn attach_user_policy(store: &AuthStore, user: &str, policy_json: &str) {
@@ -80,7 +75,7 @@ fn gate_error_msg(principal: &str, token: &str) -> String {
 
 #[test]
 fn ask_using_denied_provider_fails_at_planner() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     attach_user_policy(
         &store,
         "alice",
@@ -104,7 +99,7 @@ fn ask_using_denied_provider_fails_at_planner() {
 
 #[test]
 fn ask_using_allowed_provider_passes_the_gate() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     attach_user_policy(
         &store,
         "alice",
@@ -131,7 +126,7 @@ fn ask_using_allowed_provider_passes_the_gate() {
 
 #[test]
 fn ask_back_compat_no_policy_attached_passes_the_gate() {
-    let (rt, _store) = runtime_with_auth();
+    let (_dir, rt, _store) = runtime_with_auth();
     // bob has no `ai:provider:*` policy attached — default-allow.
     let err = err_text(as_user("bob", Role::Admin, || {
         rt.execute_query("ASK 'hello' USING openai")
@@ -144,7 +139,7 @@ fn ask_back_compat_no_policy_attached_passes_the_gate() {
 
 #[test]
 fn ask_gate_records_planner_audit_event_on_deny() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     attach_user_policy(
         &store,
         "alice",
@@ -183,7 +178,7 @@ fn ask_gate_records_planner_audit_event_on_deny() {
 
 #[test]
 fn insert_auto_embed_using_denied_provider_fails_at_planner() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE notes (id INT, body TEXT)")
         .unwrap();
     attach_user_policy(
@@ -213,7 +208,7 @@ fn insert_auto_embed_using_denied_provider_fails_at_planner() {
 
 #[test]
 fn insert_auto_embed_using_allowed_provider_passes_the_gate() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE notes (id INT, body TEXT)")
         .unwrap();
     attach_user_policy(
@@ -245,7 +240,7 @@ fn insert_auto_embed_using_allowed_provider_passes_the_gate() {
 
 #[test]
 fn search_similar_using_denied_provider_fails_at_planner() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE notes (id INT, body TEXT)")
         .unwrap();
     attach_user_policy(
@@ -273,7 +268,7 @@ fn search_similar_using_denied_provider_fails_at_planner() {
 
 #[test]
 fn wildcard_ai_provider_deny_blocks_all_providers() {
-    let (rt, store) = runtime_with_auth();
+    let (_dir, rt, store) = runtime_with_auth();
     attach_user_policy(
         &store,
         "alice",
