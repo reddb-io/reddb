@@ -190,37 +190,14 @@ impl PhysicalMetadataFile {
     }
 
     pub fn journal_paths_for_data_path(data_path: &Path) -> io::Result<Vec<PathBuf>> {
-        let Some(parent) = data_path.parent() else {
-            return Ok(Vec::new());
-        };
-        let prefix = reddb_file::layout::physical_metadata_journal_prefix(data_path);
-
-        let mut paths = Vec::new();
-        for entry in fs::read_dir(parent)? {
-            let entry = entry?;
-            let path = entry.path();
-            let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
-                continue;
-            };
-            if name.starts_with(&prefix) {
-                paths.push(path);
-            }
-        }
-        paths.sort();
-        Ok(paths)
+        reddb_file::list_physical_metadata_journal_paths(data_path)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
     }
 
     pub fn prune_journal_for_data_path(&self, data_path: &Path) -> io::Result<()> {
         let retention = super::seqn_journal_retention();
-        let mut paths = Self::journal_paths_for_data_path(data_path)?;
-        if paths.len() <= retention {
-            return Ok(());
-        }
-        let delete_count = paths.len() - retention;
-        for path in paths.drain(0..delete_count) {
-            let _ = fs::remove_file(path);
-        }
-        Ok(())
+        reddb_file::prune_physical_metadata_journal_paths(data_path, retention)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
     }
 
     pub fn heal_primary_metadata_for_data_path(&self, data_path: &Path) -> io::Result<()> {
