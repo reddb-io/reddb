@@ -33,7 +33,7 @@ use reddb::storage::{
 fn tmp_path(name: &str) -> (support::TempDataDir, PathBuf) {
     let base = support::temp_data_dir("wal-crash");
     let path = base.join(format!(
-        "reddb_wal_crash_{}_{}_{}.rdb",
+        "wal_crash_{}_{}_{}.rdb",
         name,
         std::process::id(),
         std::time::SystemTime::now()

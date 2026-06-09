@@ -8,27 +8,16 @@
 //! backing-collection count (mirroring the slice-10 invariant on
 //! `queue_pending_gauge` in #527).
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{RedDBOptions, RedDBRuntime};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
-
-fn cleanup(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
-    for ext in ["-wal", "-hdr", "-meta", "-dwb"] {
-        let mut p = path.to_path_buf().into_os_string();
-        p.push(ext);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
+fn persistent_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
@@ -189,11 +178,10 @@ fn concurrent_reader_sees_old_or_new_never_partial() {
 #[test]
 fn refresh_survives_clean_restart() {
     let path = persistent_path("mv_atomic_refresh_clean");
-    cleanup(&path);
 
     // First boot: source → MV → REFRESH → 2 rows visible through MV.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("open");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path())).expect("open");
         exec(&rt, "CREATE TABLE orders (id INT, status TEXT)");
         exec(
             &rt,
@@ -214,7 +202,7 @@ fn refresh_survives_clean_restart() {
     // Second boot: REFRESH result is durable — backing collection
     // still holds the 2 rows after restart.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path())).expect("reopen");
         let r = exec(&rt, "SELECT * FROM paid_orders");
         assert_eq!(
             r.result.records.len(),
@@ -229,8 +217,6 @@ fn refresh_survives_clean_restart() {
             .current_row_count;
         assert_eq!(count, 2, "scraped count survives reopen");
     }
-
-    cleanup(&path);
 }
 
 #[test]

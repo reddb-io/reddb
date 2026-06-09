@@ -1,6 +1,8 @@
-use std::path::{Path, PathBuf};
+#[allow(dead_code)]
+mod support;
+
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::control_events::CONTROL_EVENTS_COLLECTION;
@@ -8,35 +10,6 @@ use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identit
 use reddb::storage::schema::Value;
 use reddb::storage::EntityData;
 use reddb::{RedDBOptions, RedDBRuntime};
-
-fn temp_db_path(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
-}
-
-fn cleanup_related(path: &Path) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let Some(stem) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name == stem || name.starts_with(&format!("{stem}-")) {
-                let _ = std::fs::remove_file(&entry_path);
-                let _ = std::fs::remove_dir_all(&entry_path);
-            }
-        }
-    }
-}
 
 fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
     let rt =
@@ -152,12 +125,12 @@ fn named_text(row: &std::collections::HashMap<String, Value>, name: &str) -> Str
 
 #[test]
 fn vault_put_seals_payload_before_persistence() {
-    let path = temp_db_path("vault_sealed_storage");
-    cleanup_related(&path);
+    let guard = support::temp_db_file("vault-sealed-storage");
+    let path = guard.path();
 
     let secret = "vault_plaintext_probe_324";
     {
-        let (rt, auth) = open_runtime_with_vault(&path, "vault-pass");
+        let (rt, auth) = open_runtime_with_vault(path, "vault-pass");
         rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
             .expect("create vault");
         assert!(
@@ -213,7 +186,7 @@ fn vault_put_seals_payload_before_persistence() {
             .expect("checkpoint should flush sealed payload");
     }
 
-    let persisted = read_related_bytes(&path);
+    let persisted = read_related_bytes(path);
     assert!(
         !persisted
             .windows(secret.len())
@@ -222,7 +195,7 @@ fn vault_put_seals_payload_before_persistence() {
     );
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
             .expect("runtime should reopen without key provider");
         let get = rt
             .execute_query("VAULT GET secrets.api_key")
@@ -236,16 +209,16 @@ fn vault_put_seals_payload_before_persistence() {
         assert!(matches!(record.get("fingerprint"), Some(Value::Text(_))));
     }
 
-    cleanup_related(&path);
+    drop(guard);
 }
 
 #[test]
 fn vault_metadata_and_unseal_control_events_minimize_evidence() {
-    let path = temp_db_path("vault_control_events_unseal_653");
-    cleanup_related(&path);
+    let guard = support::temp_db_file("vault-control-events-unseal-653");
+    let path = guard.path();
 
     let secret = "tok_live_653_probe BEGIN_PRIVATE_KEY_653 BEGIN_CERTIFICATE_653";
-    let (rt, auth) = open_runtime_with_vault(&path, "vault-pass-653");
+    let (rt, auth) = open_runtime_with_vault(path, "vault-pass-653");
     auth.create_user("alice", "p", Role::Write).unwrap();
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
         .expect("create vault");
@@ -352,17 +325,17 @@ fn vault_metadata_and_unseal_control_events_minimize_evidence() {
         );
     }
 
-    cleanup_related(&path);
+    drop(guard);
 }
 
 #[test]
 fn vault_rotation_and_purge_control_events_minimize_evidence() {
-    let path = temp_db_path("vault_control_events_lifecycle_653");
-    cleanup_related(&path);
+    let guard = support::temp_db_file("vault-control-events-lifecycle-653");
+    let path = guard.path();
 
     let secret_v1 = "rotate_tok_live_653 BEGIN_PRIVATE_KEY_ROTATE_653";
     let secret_v2 = "purge_certificate_probe_653 BEGIN_CERTIFICATE_PURGE_653";
-    let (rt, auth) = open_runtime_with_vault(&path, "vault-pass-lifecycle-653");
+    let (rt, auth) = open_runtime_with_vault(path, "vault-pass-lifecycle-653");
     auth.create_user("alice", "p", Role::Write).unwrap();
 
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
@@ -431,20 +404,20 @@ fn vault_rotation_and_purge_control_events_minimize_evidence() {
         );
     }
 
-    cleanup_related(&path);
+    drop(guard);
 }
 
 #[test]
 fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited() {
-    let path = temp_db_path("vault_unseal_audit");
-    cleanup_related(&path);
+    let guard = support::temp_db_file("vault-unseal-audit");
+    let path = guard.path();
 
     let secret = "vault_plaintext_probe_330";
     let ciphertext_hex;
     let rt;
     let auth;
     {
-        let opened = open_runtime_with_vault(&path, "vault-pass-330");
+        let opened = open_runtime_with_vault(path, "vault-pass-330");
         rt = opened.0;
         auth = opened.1;
     }
@@ -545,17 +518,17 @@ fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited() {
         "audit must not include ciphertext: {audit_body}"
     );
 
-    cleanup_related(&path);
+    drop(guard);
 }
 
 #[test]
 fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited() {
-    let path = temp_db_path("vault_lifecycle_325");
-    cleanup_related(&path);
+    let guard = support::temp_db_file("vault-lifecycle-325");
+    let path = guard.path();
 
     let secret_v1 = "vault_plaintext_probe_325_v1";
     let secret_v2 = "vault_plaintext_probe_325_v2";
-    let (rt, auth) = open_runtime_with_vault(&path, "vault-pass-325");
+    let (rt, auth) = open_runtime_with_vault(path, "vault-pass-325");
     auth.create_user("alice", "p", Role::Write).unwrap();
 
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
@@ -684,20 +657,19 @@ fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited() {
     assert!(!audit_body.contains(secret_v1));
     assert!(!audit_body.contains(secret_v2));
 
-    cleanup_related(&path);
+    drop(guard);
 }
 
 #[test]
 fn create_vault_requires_unsealed_key_provider() {
-    let path = temp_db_path("vault_create_requires_key");
-    cleanup_related(&path);
-    let rt =
-        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime should open");
+    let guard = support::temp_db_file("vault-create-requires-key");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(guard.path()))
+        .expect("runtime should open");
 
     let err = rt
         .execute_query("CREATE VAULT secrets")
         .expect_err("CREATE VAULT must not simulate key material");
     assert!(err.to_string().contains("enabled, unsealed vault"));
 
-    cleanup_related(&path);
+    drop(guard);
 }

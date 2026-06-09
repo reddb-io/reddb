@@ -5,8 +5,10 @@
 //! absolute expiry has already passed while they are still waiting for
 //! that delete to arrive.
 
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+#[allow(dead_code)]
+mod support;
+
+use std::path::Path;
 
 use reddb::application::NativeUseCases;
 use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
@@ -16,24 +18,8 @@ use reddb::replication::ReplicationConfig;
 use reddb::storage::RedDB;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn temp_path(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "reddb-824-{prefix}-{}-{nanos}.rdb",
-        std::process::id()
-    ))
-}
-
-fn cleanup(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    for ext in ["-wal", "-hdr", "-meta", "-dwb", "-uwal", ".logical.wal"] {
-        let mut p = path.to_path_buf().into_os_string();
-        p.push(ext);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
+fn temp_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn read_spool(path: &Path) -> Vec<ChangeRecord> {
@@ -105,8 +91,6 @@ fn primary_ttl_sweep_replicates_delete_to_replica() {
     );
 
     drop(replica);
-    cleanup(&primary_path);
-    cleanup(&replica_path);
 }
 
 #[test]
@@ -167,8 +151,6 @@ fn lagging_replica_filters_expired_row_before_delete_arrives() {
     );
 
     drop(replica);
-    cleanup(&primary_path);
-    cleanup(&replica_path);
 }
 
 #[test]
@@ -217,5 +199,4 @@ fn replica_hypertable_expiry_sweep_is_read_only_noop() {
     );
 
     drop(replica);
-    cleanup(&path);
 }

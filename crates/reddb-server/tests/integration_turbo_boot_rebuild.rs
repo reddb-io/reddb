@@ -152,7 +152,6 @@ fn turbo_collection_recovers_partial_block_tail_after_restart() {
         runtime_contents, oracle_contents,
         "runtime ordering must match scalar oracle after boot rebuild",
     );
-
 }
 
 /// Determinism contract: two independent restarts of the same
@@ -201,5 +200,4 @@ fn turbo_recovery_is_deterministic_across_restarts() {
     let a = run();
     let b = run();
     assert_eq!(a, b, "two restarts produce identical recovery state");
-
 }

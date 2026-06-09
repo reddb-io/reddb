@@ -84,7 +84,6 @@ fn standard_layout_writes_tv_snapshot_at_checkpoint() {
         ".tv snapshot should exist at {} after checkpoint",
         snap.display()
     );
-
 }
 
 #[test]
@@ -120,7 +119,6 @@ fn minimal_layout_writes_no_tv_snapshot() {
         "Minimal layout must not write a .tv anywhere — found {} on disk",
         standard_path.display()
     );
-
 }
 
 #[test]
@@ -184,7 +182,6 @@ fn deleting_tv_snapshot_falls_back_to_rebuild() {
         !hits.result.records.is_empty(),
         "rebuild fallback path must surface the inserted vectors"
     );
-
 }
 
 #[test]
@@ -237,5 +234,4 @@ fn corrupt_tv_snapshot_is_ignored_on_boot() {
         !hits.result.records.is_empty(),
         "boot must succeed and rebuild from extent when .tv is corrupt"
     );
-
 }

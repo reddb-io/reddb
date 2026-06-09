@@ -156,7 +156,9 @@ fn pull_with_missing_fixture_dir_returns_400() {
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
 
-    let bogus = std::env::temp_dir().join(format!("does_not_exist_{}", std::process::id()));
+    // A path that is guaranteed not to exist: the temp dir is created and then
+    // immediately removed when the guard drops, so the joined child is absent.
+    let bogus = support::temp_data_dir("ai-bogus").join("does_not_exist");
     let body_json = format!(r#"{{"fixture_dir":"{}"}}"#, bogus.display());
     let (status, body) = send(&addr, "POST", "/ai/models/minilm-l6-v2/pull", &body_json);
     assert_eq!(status, 400, "{body}");

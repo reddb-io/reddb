@@ -11,9 +11,7 @@
 #[allow(dead_code)]
 mod support;
 
-use reddb::{
-    fold_pager_meta_enabled, set_fold_pager_meta_enabled, RedDBOptions, RedDBRuntime,
-};
+use reddb::{fold_pager_meta_enabled, set_fold_pager_meta_enabled, RedDBOptions, RedDBRuntime};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 

@@ -22,24 +22,13 @@ use reddb::storage::wal::{
 };
 use reddb::storage::RedDB;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[allow(dead_code)]
 mod support;
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-drill-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn temp_dir(tag: &str) -> support::TempDataDir {
+    support::temp_data_dir(tag)
 }
 
 /// Snapshot of every collection's name and entity count. Sorted to
@@ -138,6 +127,4 @@ fn snapshot_and_restored_db_have_same_collection_inventory() {
         snap_sha, snap_sha_again,
         "snapshot SHA-256 must be deterministic across reads"
     );
-
-    let _ = std::fs::remove_dir_all(&work);
 }

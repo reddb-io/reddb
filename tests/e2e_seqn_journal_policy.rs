@@ -5,34 +5,21 @@
 //! present, absent, corrupt (passive — load falls through to the next
 //! viable source without panicking).
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::{
     seqn_journal_enabled, seqn_journal_retention, set_seqn_journal_enabled,
     set_seqn_journal_retention, PhysicalMetadataFile, RedDBOptions, RedDBRuntime,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // Process-globals — serialise tests.
 static POLICY_GUARD: Mutex<()> = Mutex::new(());
 
-fn persistent_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reddb_{prefix}_{unique}.rdb"))
-}
-
-fn cleanup(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(PhysicalMetadataFile::metadata_path_for(path));
-    let _ = std::fs::remove_file(PhysicalMetadataFile::metadata_binary_path_for(path));
-    if let Ok(journals) = PhysicalMetadataFile::journal_paths_for_data_path(path) {
-        for j in journals {
-            let _ = std::fs::remove_file(j);
-        }
-    }
+fn persistent_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn reset_policy() {
@@ -60,7 +47,6 @@ fn journal_absent_by_default_outside_max_tier() {
     reset_policy();
 
     let path = persistent_path("seqn_off");
-    cleanup(&path);
 
     run_a_few_saves(&path, "seqn_off", 3);
 
@@ -71,8 +57,6 @@ fn journal_absent_by_default_outside_max_tier() {
     );
     let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
     assert!(binary.exists(), "binary metadata is always written");
-
-    cleanup(&path);
 }
 
 #[test]
@@ -86,7 +70,6 @@ fn journal_written_when_opt_in_with_bounded_retention() {
     assert_eq!(seqn_journal_retention(), 4);
 
     let path = persistent_path("seqn_on");
-    cleanup(&path);
 
     run_a_few_saves(&path, "seqn_on", 10);
 
@@ -101,7 +84,6 @@ fn journal_written_when_opt_in_with_bounded_retention() {
         journals.len(),
     );
 
-    cleanup(&path);
     reset_policy();
 }
 
@@ -113,34 +95,32 @@ fn recovery_handles_present_absent_and_corrupt_binary() {
     set_seqn_journal_retention(4);
 
     // === Case 1: PRESENT — binary intact, journals present, loader uses binary.
-    let path = persistent_path("seqn_present");
-    cleanup(&path);
-    run_a_few_saves(&path, "present", 3);
-    let (_, source) =
-        PhysicalMetadataFile::load_for_data_path_with_source(&path).expect("present binary loads");
-    assert_eq!(source.as_str(), "binary");
-
     // === Case 2: CORRUPT — overwrite the binary with garbage; loader heals from journal.
-    let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
-    std::fs::write(&binary, b"not-valid-metadata-bytes").expect("corrupt binary");
-    let (_, source) = PhysicalMetadataFile::load_for_data_path_with_source(&path)
-        .expect("corrupt binary heals from journal");
-    assert_eq!(
-        source.as_str(),
-        "binary_journal",
-        "corrupt binary must heal from seq-N journal entry",
-    );
-    cleanup(&path);
+    {
+        let path = persistent_path("seqn_present");
+        run_a_few_saves(&path, "present", 3);
+        let (_, source) = PhysicalMetadataFile::load_for_data_path_with_source(&path)
+            .expect("present binary loads");
+        assert_eq!(source.as_str(), "binary");
+
+        let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
+        std::fs::write(&binary, b"not-valid-metadata-bytes").expect("corrupt binary");
+        let (_, source) = PhysicalMetadataFile::load_for_data_path_with_source(&path)
+            .expect("corrupt binary heals from journal");
+        assert_eq!(
+            source.as_str(),
+            "binary_journal",
+            "corrupt binary must heal from seq-N journal entry",
+        );
+    }
 
     // === Case 3: ABSENT — no binary, no journal, no JSON sidecar. Loader returns Err.
     let path = persistent_path("seqn_absent");
-    cleanup(&path);
     let result = PhysicalMetadataFile::load_for_data_path_with_source(&path);
     assert!(
         result.is_err(),
         "absent metadata must surface a load error: {result:?}",
     );
 
-    cleanup(&path);
     reset_policy();
 }

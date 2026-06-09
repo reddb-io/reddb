@@ -6,25 +6,17 @@
 //! the active file and the rotated archives; that is verified in
 //! `audit_query_endpoint.rs`.
 
+#[allow(dead_code)]
+mod support;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use reddb::runtime::audit_log::{AuditEvent, AuditLogger};
 use reddb::runtime::audit_query::{run_query, AuditQuery};
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "reddb-audit-rotation-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn temp_dir(tag: &str) -> support::TempDataDir {
+    support::temp_data_dir(tag)
 }
 
 #[test]

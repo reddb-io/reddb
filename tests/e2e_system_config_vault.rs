@@ -10,12 +10,15 @@ use reddb::{RedDBOptions, RedDBRuntime};
 
 fn runtime(name: &str) -> (support::TempDbFile, RedDBRuntime) {
     let path = support::temp_db_file(name);
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
         .expect("runtime should open");
     (path, rt)
 }
 
-fn runtime_with_vault(name: &str, passphrase: &str) -> (support::TempDbFile, RedDBRuntime, Arc<AuthStore>) {
+fn runtime_with_vault(
+    name: &str,
+    passphrase: &str,
+) -> (support::TempDbFile, RedDBRuntime, Arc<AuthStore>) {
     let (path, rt) = runtime(name);
     let pager = Arc::clone(
         rt.db()

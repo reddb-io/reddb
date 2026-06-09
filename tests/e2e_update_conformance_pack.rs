@@ -80,7 +80,6 @@ fn read_event_payload(rt: &RedDBRuntime, queue: &str) -> serde_json::Value {
     }
 }
 
-
 fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
     set_current_auth_identity(name.to_string(), role);
     let out = f();

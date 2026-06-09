@@ -43,18 +43,16 @@ impl AsRef<OsStr> for TempDataPath {
     }
 }
 
-impl From<&TempDataPath> for PathBuf {
-    fn from(value: &TempDataPath) -> PathBuf {
-        value.path.clone()
-    }
-}
+// `From<&TempDataPath> for PathBuf` is provided by std's blanket
+// `impl<T: AsRef<OsStr>> From<&T> for PathBuf` via the `AsRef<OsStr>` impl above,
+// so an explicit impl would conflict (E0119).
 
 pub fn temp_data_path(name: &str) -> TempDataPath {
     let dir = tempfile::Builder::new()
         .prefix(&format!("reddb-test-{name}-"))
         .tempdir()
         .expect("temp dir");
-    let path = dir.path().join(format!("reddb_{name}.rdb"));
+    let path = dir.path().join(format!("{name}.rdb"));
     TempDataPath { _dir: dir, path }
 }
 

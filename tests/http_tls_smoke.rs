@@ -44,7 +44,10 @@ fn write_self_signed(dir: &std::path::Path) -> (PathBuf, PathBuf, Vec<u8>) {
     (cert_path, key_path, cert_der)
 }
 
-fn spawn_https_server(rt: RedDBRuntime, cert_der: Vec<u8>) -> (support::TempDataDir, String, Vec<u8>) {
+fn spawn_https_server(
+    rt: RedDBRuntime,
+    cert_der: Vec<u8>,
+) -> (support::TempDataDir, String, Vec<u8>) {
     let dir = support::temp_data_dir("http-tls-smoke-server");
     let (cert_path, key_path, der) = write_self_signed(&dir);
     let _ = cert_der; // shadow path: caller passes empty; we use generated

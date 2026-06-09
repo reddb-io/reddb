@@ -39,6 +39,14 @@ impl AsRef<Path> for TempDataDir {
     }
 }
 
+// Lets `&TempDataDir` satisfy `Into<PathBuf>` (via the std blanket
+// `From<&T> for PathBuf where T: AsRef<OsStr>`) and `Command::arg`.
+impl AsRef<std::ffi::OsStr> for TempDataDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.inner.path().as_os_str()
+    }
+}
+
 /// An auto-cleaning `.rdb` file path guard inside a private temp directory.
 /// Derefs to `&Path`.  The parent directory (and the path itself if created)
 /// are removed on drop.
@@ -63,6 +71,15 @@ impl Deref for TempDbFile {
 impl AsRef<Path> for TempDbFile {
     fn as_ref(&self) -> &Path {
         &self.path
+    }
+}
+
+// Lets `&TempDbFile` satisfy `Into<PathBuf>` (via the std blanket
+// `From<&T> for PathBuf where T: AsRef<OsStr>`) and `Command::arg`, so
+// `RedDBOptions::persistent(&db_file)` and CLI subprocess args work.
+impl AsRef<std::ffi::OsStr> for TempDbFile {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
     }
 }
 

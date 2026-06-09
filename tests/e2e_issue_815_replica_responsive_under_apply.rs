@@ -28,34 +28,19 @@
 //! a timeout. A store-lock wedge would blow the per-call budget; the
 //! decoupled scans keep it fast.
 
-use std::path::PathBuf;
+#[allow(dead_code)]
+mod support;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn temp_path(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "reddb-815-{prefix}-{}-{}.rdb",
-        std::process::id(),
-        nanos
-    ))
-}
-
-fn cleanup(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
-    for ext in ["-wal", "-hdr", "-meta", "-dwb", "-uwal", ".logical.wal"] {
-        let mut p = path.to_path_buf().into_os_string();
-        p.push(ext);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
+fn temp_path(prefix: &str) -> support::TempDbFile {
+    support::temp_db_file(prefix)
 }
 
 fn exec(query: &QueryUseCases<'_, RedDBRuntime>, sql: &str) {
@@ -69,12 +54,8 @@ fn exec(query: &QueryUseCases<'_, RedDBRuntime>, sql: &str) {
 #[test]
 fn catalog_and_readiness_stay_responsive_during_large_reapply() {
     let path = temp_path("responsive");
-    cleanup(&path);
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(
-        &path.to_string_lossy().to_string(),
-    ))
-    .expect("open store");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path())).expect("open store");
 
     // Seed several collections with rows so a catalog/health scan does
     // real work — a no-op snapshot could pass the budget trivially.
@@ -162,5 +143,4 @@ fn catalog_and_readiness_stay_responsive_during_large_reapply() {
     );
 
     drop(rt);
-    cleanup(&path);
 }

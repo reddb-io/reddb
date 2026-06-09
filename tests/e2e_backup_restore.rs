@@ -11,6 +11,9 @@
 //!   4. Manifests written before the checksum field was introduced
 //!      (`snapshot_sha256: None`) still restore — backward compat.
 
+#[allow(dead_code)]
+mod support;
+
 use reddb::storage::backend::LocalBackend;
 use reddb::storage::wal::{
     archive_snapshot, publish_snapshot_manifest, PointInTimeRecovery, SnapshotManifest,
@@ -20,16 +23,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-fn temp_dir(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    p.push(format!("reddb-backup-{prefix}-{pid}-{nanos}"));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn temp_dir(prefix: &str) -> support::TempDataDir {
+    support::temp_data_dir(prefix)
 }
 
 fn write_dummy_snapshot(dir: &std::path::Path, name: &str, body: &[u8]) -> PathBuf {
