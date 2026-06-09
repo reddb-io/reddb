@@ -2088,8 +2088,14 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         "format!(\"{}/wal/\"",
     ] {
         assert!(
-            !text.contains(forbidden),
+            !text.contains(forbidden) && !recovery.contains(forbidden),
             "backup artifact test keys should route through reddb-file, found {forbidden:?}"
+        );
+    }
+    for forbidden in ["1-100.snapshot", "2-200.snapshot"] {
+        assert!(
+            !recovery.contains(forbidden),
+            "backup snapshot test keys should route through reddb-file, found {forbidden:?}"
         );
     }
     for required in [
@@ -2119,6 +2125,11 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
         recovery.contains("reddb_file::backup_snapshot_dir")
             && recovery.contains("reddb_file::backup_wal_dir"),
         "recovery backup test paths should route through reddb-file"
+    );
+    assert!(
+        recovery.contains("reddb_file::backup_snapshot_dir_prefix")
+            && recovery.contains("reddb_file::backup_wal_dir_prefix"),
+        "recovery local backend test prefixes should route through reddb-file"
     );
     for forbidden in ["join(\"snapshots\")", "join(\"wal\")"] {
         assert!(
