@@ -33,7 +33,7 @@ pub fn build_event_push_frame(
     stream_id: u16,
     message: &JsonValue,
 ) -> Result<Frame, super::BuildError> {
-    let bytes = serde_json::to_vec(message).unwrap_or_default();
+    let bytes = message.to_string_compact().into_bytes();
     reddb_wire::redwire::queue::build_queue_event_push_frame_from_json_bytes(
         correlation_id,
         stream_id,

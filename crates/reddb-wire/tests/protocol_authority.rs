@@ -823,6 +823,7 @@ fn redwire_queue_wait_payload_and_frame_builders_live_in_reddb_wire() {
         "kind(MessageKind::StreamError)",
         "obj.insert(\"code\"",
         "obj.insert(\"message\"",
+        "serde_json::to_vec",
         "pub fn build_event_push_payload",
         "build_event_push_payload_from_json_bytes",
         "build_queue_wait_timeout_payload(queue, wait_ms)",
@@ -873,6 +874,7 @@ fn redwire_stream_frame_builders_live_in_reddb_wire() {
             "pub fn build_stream_end_payload",
             "pub fn build_input_stream_end_payload",
             "pub fn build_input_stream_error_payload",
+            "serde_json::to_vec",
         ] {
             assert!(
                 !text.contains(forbidden),
