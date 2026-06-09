@@ -3,6 +3,10 @@
 //! Runtime code owns the semantic meaning of each record. This module owns the
 //! persisted record tags, body framing, compression tag, term envelope, and
 //! record checksum.
+//!
+//! Main WAL files are a sequence of frames after the file header. Every frame
+//! starts with a stable record type tag, carries a versioned body, and ends with
+//! a CRC32 checksum over the persisted bytes that precede the checksum.
 
 use crate::{WAL_FILE_VERSION, WAL_FILE_VERSION_V2};
 use std::io::{self, Read};

@@ -2,6 +2,12 @@
 //!
 //! The storage engine owns WAL record semantics. This module owns the file
 //! header bytes that let readers identify and version a WAL artifact.
+//!
+//! ```text
+//! [magic    4 bytes = b"RDBW"]
+//! [version  1 byte  = current format version]
+//! [reserved 3 bytes = zero]
+//! ```
 
 use std::io;
 

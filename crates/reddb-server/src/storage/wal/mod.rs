@@ -2,11 +2,9 @@
 //!
 //! Handles crash recovery by logging all changes before they are applied to the database file.
 //!
-//! # Format
-//!
-//! - **Header:** `RDBW` (4 bytes) + Version (1 byte) + Reserved (3 bytes)
-//! - **Records:** Sequence of variable-length records.
-//! - **Checksum:** Each record ends with a CRC32 checksum.
+//! The persisted WAL header, record envelope, segment sizing, compression tags,
+//! and checksums are `reddb-file` contracts. This module owns runtime
+//! orchestration: append buffering, fsync policy, checkpointing, and recovery.
 
 pub mod append_coordinator;
 pub mod archiver;
