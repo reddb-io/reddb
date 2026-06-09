@@ -439,6 +439,8 @@ fn server_source_does_not_embed_owned_file_suffixes() {
             ".rdb-hdr",
             "wal.log",
             "rdb-wal",
+            "rdb-uwal",
+            "with_extension(\"rdb-uwal\")",
             "with_extension(\"rdb-wal\")",
             "with_extension(\"rdb-hdr\")",
             "with_extension(\"rdb-meta\")",
