@@ -433,6 +433,7 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
     let root = repo_root();
     let server = read(root.join("crates/reddb-server/src/physical.rs"));
     let file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
+    let types = read(root.join("crates/reddb-file/src/physical_metadata/types.rs"));
     let policy = read(root.join("crates/reddb-file/src/physical_metadata_policy.rs"));
 
     for forbidden in [
@@ -484,7 +485,7 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
         "pub fn fold_dwb_into_wal_enabled",
     ] {
         assert!(
-            file.contains(required) || policy.contains(required),
+            file.contains(required) || types.contains(required) || policy.contains(required),
             "reddb-file should own physical metadata core contract {required}"
         );
     }
@@ -813,6 +814,8 @@ fn server_does_not_redeclare_core_file_format_constants() {
     let file_vector_value_codec = read(root.join("crates/reddb-file/src/vector_value_codec.rs"));
     let file_btree_value_layout = read(root.join("crates/reddb-file/src/btree_value_layout.rs"));
     let physical_metadata = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
+    let physical_metadata_types =
+        read(root.join("crates/reddb-file/src/physical_metadata/types.rs"));
     let column_block_non_test = column_block
         .split("#[cfg(test)]")
         .next()
@@ -956,7 +959,8 @@ fn server_does_not_redeclare_core_file_format_constants() {
         );
     }
     assert!(
-        physical_metadata.contains("pub const PHYSICAL_METADATA_PROTOCOL_VERSION"),
+        physical_metadata.contains("pub const PHYSICAL_METADATA_PROTOCOL_VERSION")
+            || physical_metadata_types.contains("pub const PHYSICAL_METADATA_PROTOCOL_VERSION"),
         "reddb-file should own physical metadata protocol version"
     );
     for required in [
