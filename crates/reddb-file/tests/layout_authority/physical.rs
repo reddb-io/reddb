@@ -108,6 +108,8 @@ fn server_does_not_redeclare_physical_metadata_core_json_format() {
 fn server_uses_reddb_file_for_physical_metadata_paths() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/physical/metadata_file.rs"));
+    let registry =
+        read(root.join("crates/reddb-server/src/storage/unified/devx/reddb/impl_registry.rs"));
 
     for forbidden in [
         ".meta.json",
@@ -150,6 +152,14 @@ fn server_uses_reddb_file_for_physical_metadata_paths() {
             "physical metadata journal discovery/pruning belongs in reddb-file, found {forbidden:?}"
         );
     }
+    assert!(
+        registry.contains("reddb_file::copy_physical_export_data_file"),
+        "physical export data-file copy should route through reddb-file"
+    );
+    assert!(
+        !registry.contains("fs::copy(path, &export_data_path)"),
+        "physical export data-file copy belongs in reddb-file"
+    );
 }
 
 #[test]

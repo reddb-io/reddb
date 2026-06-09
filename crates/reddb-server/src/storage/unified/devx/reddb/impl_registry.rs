@@ -1004,12 +1004,10 @@ impl RedDB {
         self.flush()?;
 
         let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
-        let export_data_path = PhysicalMetadataFile::export_data_path_for(path, &name);
+        let export_data_path = reddb_file::copy_physical_export_data_file(path, &name)?;
         let export_metadata_path = PhysicalMetadataFile::metadata_path_for(&export_data_path);
         let export_metadata_binary_path =
             PhysicalMetadataFile::metadata_binary_path_for(&export_data_path);
-
-        fs::copy(path, &export_data_path)?;
 
         let descriptor = ExportDescriptor {
             name: name.clone(),
