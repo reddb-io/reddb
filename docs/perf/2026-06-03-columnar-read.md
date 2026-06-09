@@ -12,8 +12,10 @@ Bench harness: `crates/reddb-server/benches/columnar_read_bench.rs` (criterion, 
 (row 806 µs, batch 1 205 µs).  Dominant cost: Zstd decompression + redundant intermediate
 allocations in the XOR/DoubleDelta codec decode chain.
 
-**Post-optimisation (#962):** Batch path beats the row path at every measured chunk size.
-See §Post-optimisation results below.
+**Post-optimisation (#962):** Batch path beats the row path at every measured chunk size by
+a robust ~8–11% (batch/row ≈ 0.89–0.92×) — 50 K: batch 851 µs vs row 950 µs. The decisive
+change was a typed zero-copy decode that removes a redundant column-sized `memcpy`; without
+it the batch path only reached parity (within noise). See §Post-optimisation results below.
 
 ## Setup
 
@@ -97,6 +99,14 @@ Two independent bottlenecks drove the 50 K regression:
 3. **Per-element `from_le_bytes` loop in `numeric_vector`** where a single memcpy suffices
    on all little-endian targets.
 
+4. **A redundant second copy on the batch read path.** Even after (1)–(3), the batch path
+   still made *two* full passes over every column after LZ4: `decode_bytes` built the decoded
+   bytes into a `Vec<u8>`, and `numeric_vector` then `memcpy`d that `Vec<u8>` into the typed
+   `Vec<i64>`/`Vec<f64>` (a second 50 K × 8 B copy per column, ~800 KB at 50 K for two
+   columns). With this copy in place the batch path measured at **parity** with the row path
+   (batch/row ≈ 0.97–1.01× — within run-to-run noise, *not* a robust win). Eliminating it is
+   what moves the batch path to a stable ~10% lead.
+
 ## Optimisations applied (#962)
 
 1. **`select_codecs`: outer codec changed from `Zstd(3)` to `LZ4`** — ~3–5× faster
@@ -119,48 +129,71 @@ Two independent bottlenecks drove the 50 K regression:
    is passed directly to the first (outermost) codec (`apply_decode`) rather than being
    copied into a new `Vec<u8>` first.  Saves one heap allocation + copy per column decode.
 
+5. **Typed zero-copy decode for the batch path** — the decisive change. A new
+   `segment_codec::decode_bytes_to_u64` decodes a column whose innermost codec is numeric
+   (`Delta`/`DoubleDelta`/`Xor`) straight into an 8-byte-aligned `Vec<u64>` (bit-identical to
+   `decode_bytes`, asserted by a parity unit test), and a new
+   `column_block::read_column_block_projected_typed` drives it (also skipping granule/bloom
+   parsing a full materialising scan never reads). The batch reader
+   (`column_batch_from_block`) then reinterprets the `Vec<u64>` as `Vec<i64>`/`Vec<f64>` in
+   place via `Vec::from_raw_parts` — sound because the three types share size (8) and
+   alignment (8). This removes the second `memcpy` from root-cause (4) entirely: the batch
+   path now does **one** pass to materialise each column, strictly less work than the row
+   path's decode-then-build-`TimeSeriesPoint` two passes. Columns with a non-numeric inner
+   codec (`Dict`/`Generic` LZ4-only) transparently fall back to the byte path. The row path
+   and every other `decode_bytes` caller are untouched (additive change, zero regression
+   surface).
+
 ## Post-optimisation results (#962)
 
 <!-- Measured: cargo bench -p reddb-io-server --bench columnar_read_bench  (2026-06-09) -->
 <!-- Codec (post-#962): DoubleDelta+LZ4 timestamps, Xor+LZ4 values. -->
-<!-- Note: absolute µs differ from §Baseline because they were measured under different -->
-<!-- system load; the *ratio* batch/row is the load-invariant signal. -->
+<!-- All six numbers below come from a SINGLE bench invocation so the batch/row -->
+<!-- comparison is load-consistent. Absolute µs vary run-to-run with system load -->
+<!-- (this host serialises builds under a memory-capped guard); the batch/row ratio -->
+<!-- is the load-invariant signal and held at ~0.89–0.92× across repeated runs. -->
 
 ### Row path — `points_from_column_block`
 
 | Rows | p50 (median) | High bound | ns/row |
 |------|-------------|------------|--------|
-| 1 K  | 24.53 µs | 27.02 µs | 24.5 ns |
-| 10 K | 194.67 µs | 200.07 µs | 19.5 ns |
-| 50 K | 957.16 µs | 979.77 µs | 19.1 ns |
+| 1 K  | 20.07 µs | 20.96 µs | 20.1 ns |
+| 10 K | 187.99 µs | 190.27 µs | 18.8 ns |
+| 50 K | 950.21 µs | 965.03 µs | 19.0 ns |
 
 ### Columnar batch path — both columns
 
 | Rows | p50 (median) | High bound | ns/row |
 |------|-------------|------------|--------|
-| 1 K  | 24.81 µs | 26.09 µs | 24.8 ns |
-| 10 K | 189.02 µs | 193.35 µs | 18.9 ns |
-| 50 K | 936.32 µs | 943.40 µs | 18.7 ns |
+| 1 K  | 17.81 µs | 18.06 µs | 17.8 ns |
+| 10 K | 172.16 µs | 175.59 µs | 17.2 ns |
+| 50 K | 850.89 µs | 864.08 µs | 17.0 ns |
 
 ### Projection pushdown — timestamp column only
 
 | Rows | p50 (median) | High bound | ns/row |
 |------|-------------|------------|--------|
-| 1 K  | 15.04 µs | 15.19 µs | 15.0 ns |
-| 10 K | 145.52 µs | 147.42 µs | 14.6 ns |
-| 50 K | 770.00 µs | 798.91 µs | 15.4 ns |
+| 1 K  | 14.39 µs | 14.76 µs | 14.4 ns |
+| 10 K | 137.26 µs | 138.92 µs | 13.7 ns |
+| 50 K | 684.77 µs | 691.27 µs | 13.7 ns |
 
 ### Summary ratio: batch / row post-optimisation
 
 | Rows | batch p50 | row p50 | batch / row | Winner |
 |------|-----------|---------|-------------|--------|
-| 1 K  | 24.81 µs | 24.53 µs | 1.01× | effectively equal |
-| 10 K | 189.02 µs | 194.67 µs | **0.97×** | **batch ~3% faster** |
-| 50 K | 936.32 µs | 957.16 µs | **0.98×** | **batch ~2% faster** |
+| 1 K  | 17.81 µs | 20.07 µs | **0.89×** | **batch ~11% faster** |
+| 10 K | 172.16 µs | 187.99 µs | **0.92×** | **batch ~8% faster** |
+| 50 K | 850.89 µs | 950.21 µs | **0.90×** | **batch ~10% faster** |
 
 p99 / high bounds all satisfy batch ≤ row:
-— 1 K: 26.09 µs ≤ 27.02 µs ✓
-— 10 K: 193.35 µs ≤ 200.07 µs ✓
-— 50 K: 943.40 µs ≤ 979.77 µs ✓
+— 1 K: 18.06 µs ≤ 20.96 µs ✓
+— 10 K: 175.59 µs ≤ 190.27 µs ✓
+— 50 K: 864.08 µs ≤ 965.03 µs ✓
 
-**Acceptance criteria met**: batch p50 AND p99 ≤ row path at every measured workload.
+Projection pushdown (1 of 2 columns) is a further ~20% below the both-columns batch path
+at every size (e.g. 50 K: 684.77 µs vs 850.89 µs) — an analytical scan touching a subset of
+columns pays only for what it reads.
+
+**Acceptance criteria met**: batch p50 AND p99 ≤ row path at every measured workload, with a
+robust ~8–11% margin (well outside the ~2–4% run-to-run noise floor — the pre-step-(5) build
+sat at parity inside that floor, so the margin is the typed zero-copy decode's contribution).

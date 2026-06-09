@@ -71,7 +71,8 @@
 //! ```
 
 use super::segment_codec::{
-    decode_bytes, encode_bytes, select_codecs, CodecError, ColumnCodec, ColumnSemantics,
+    decode_bytes, decode_bytes_to_u64, encode_bytes, select_codecs, CodecError, ColumnCodec,
+    ColumnSemantics,
 };
 use crate::storage::primitives::split_block_bloom::{hash_bytes_u32, SplitBlockBloom};
 
@@ -641,6 +642,62 @@ fn read_column_block_filtered(
         max_ts_ns: frame.max_ts_ns,
         columns,
     })
+}
+
+/// One projected column decoded for the vectorised batch reader (#962):
+/// either an 8-byte-aligned `Vec<u64>` produced directly by the codec (numeric
+/// inner codec — no `Vec<u8>` → typed-`Vec` copy) or the raw little-endian
+/// bytes (`decode_bytes` fallback for non-numeric inner codecs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectedColumnData {
+    /// Fixed-width 8-byte values, ready to reinterpret as `i64`/`f64`.
+    Words(Vec<u64>),
+    /// Raw little-endian column bytes (codec did not emit u64 words).
+    Bytes(Vec<u8>),
+}
+
+/// A projected column for the batch reader: its id, stored logical-type tag,
+/// and decoded payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedColumn {
+    pub column_id: u32,
+    pub logical_type: u8,
+    pub data: ProjectedColumnData,
+}
+
+/// Projection-pushdown decode tuned for the vectorised batch reader (#962):
+/// like [`read_column_block_projected`] but, for columns whose innermost codec
+/// is numeric, decodes straight into an aligned `Vec<u64>` so the batch layer
+/// reinterprets the words as `i64`/`f64` without a second copy. Columns whose
+/// inner codec is not numeric fall back to the raw-bytes decode. Granule and
+/// bloom indices are not parsed — a full materialising scan does not consult
+/// them — but the whole-block CRC is still verified by the frame decoder.
+///
+/// Returns exactly the wanted columns in directory order. Unwanted columns'
+/// streams are never touched.
+pub fn read_column_block_projected_typed(
+    bytes: &[u8],
+    want: &[u32],
+) -> Result<Vec<ProjectedColumn>, ColumnBlockError> {
+    let frame = reddb_file::decode_column_block_frame(bytes)?;
+    let mut columns = Vec::with_capacity(want.len().min(frame.columns.len()));
+    for col in frame.columns {
+        if !want.contains(&col.column_id) {
+            continue;
+        }
+        // Prefer the typed fast path; fall back to the byte decode when the
+        // stream's inner codec cannot emit u64 words (Dict / Generic LZ4-only).
+        let data = match decode_bytes_to_u64(col.stream)? {
+            Some(words) => ProjectedColumnData::Words(words),
+            None => ProjectedColumnData::Bytes(decode_bytes(col.stream)?),
+        };
+        columns.push(ProjectedColumn {
+            column_id: col.column_id,
+            logical_type: col.logical_type,
+            data,
+        });
+    }
+    Ok(columns)
 }
 
 #[cfg(test)]
