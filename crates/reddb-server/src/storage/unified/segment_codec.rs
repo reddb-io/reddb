@@ -112,19 +112,25 @@ pub enum ColumnSemantics {
 /// The full chain is always self-described by the stream header, so the
 /// reader never consults this function.
 pub fn select_codecs(logical_type: u8, semantics: ColumnSemantics) -> Vec<ColumnCodec> {
-    let zstd = ColumnCodec::Zstd { level: 3 };
+    // LZ4 as the outer compression layer: decompresses at ~4–6 GB/s vs ~2 GB/s
+    // for Zstd(3), removing the dominant bottleneck on the read path (#962).
+    // The semantic codecs (DoubleDelta/XOR/Delta/Dict) reshape column bytes into
+    // near-zero residuals before LZ4 sees them, so the compression ratio stays
+    // competitive with Zstd for these structured columns.
+    // Old data written with Zstd is still decodeable — the stream is self-describing.
+    let outer = ColumnCodec::Lz4;
     match semantics {
-        ColumnSemantics::Timestamp => vec![ColumnCodec::DoubleDelta, zstd],
-        ColumnSemantics::Gauge => vec![ColumnCodec::Xor, zstd],
-        ColumnSemantics::Counter => vec![ColumnCodec::Delta, zstd],
-        ColumnSemantics::LowCardinality => vec![ColumnCodec::Dict, zstd],
+        ColumnSemantics::Timestamp => vec![ColumnCodec::DoubleDelta, outer],
+        ColumnSemantics::Gauge => vec![ColumnCodec::Xor, outer],
+        ColumnSemantics::Counter => vec![ColumnCodec::Delta, outer],
+        ColumnSemantics::LowCardinality => vec![ColumnCodec::Dict, outer],
         // `Generic` ignores the logical type today — there is no
-        // type-only heuristic that beats ZSTD without a semantic hint.
+        // type-only heuristic that beats LZ4 without a semantic hint.
         // The parameter is kept so a future slice can refine the fallback
-        // (e.g. bit-pack narrow ints) without changing this signature.
+        // without changing this signature.
         ColumnSemantics::Generic => {
             let _ = logical_type;
-            vec![zstd]
+            vec![outer]
         }
     }
 }
@@ -214,12 +220,21 @@ pub fn decode_bytes(buf: &[u8]) -> CodecResult<Vec<u8>> {
         };
         codecs.push(codec);
     }
-    let mut payload = buf[cursor..].to_vec();
-    // Decode in reverse order.
-    for codec in codecs.iter().rev() {
-        payload = apply_decode(codec, &payload)?;
+    // Start decoding from the raw bytes without a copy (#962): pass the
+    // buffer slice directly to the first (outermost) codec, which is
+    // typically LZ4/Zstd.  Subsequent codecs work on owned Vecs as before.
+    let start = &buf[cursor..];
+    let mut rev = codecs.iter().rev();
+    match rev.next() {
+        None => Ok(start.to_vec()),
+        Some(first) => {
+            let mut payload = apply_decode(first, start)?;
+            for codec in rev {
+                payload = apply_decode(codec, &payload)?;
+            }
+            Ok(payload)
+        }
     }
-    Ok(payload)
 }
 
 fn apply_encode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
@@ -267,6 +282,7 @@ fn apply_encode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
             }
             Ok(out)
         }
+
         ColumnCodec::Dict => encode_dict(data),
     }
 }
@@ -294,15 +310,26 @@ fn apply_decode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
             if payload.len() < count * 8 {
                 return Err(CodecError::Truncated);
             }
-            let encoded: Vec<i64> = payload
-                .chunks_exact(8)
-                .take(count)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-            let decoded = delta_decode_timestamps(&encoded);
-            let mut out = Vec::with_capacity(decoded.len() * 8);
-            for v in decoded {
-                out.extend_from_slice(&v.to_le_bytes());
+            // Inline delta_decode_timestamps to output directly to Vec<u8>,
+            // eliminating the intermediate Vec<i64> + Vec<u64> round-trip (#962).
+            // Use chunks_exact(8) so the compiler can eliminate per-iteration bounds checks.
+            let mut out = Vec::with_capacity(count * 8);
+            if count > 0 {
+                let mut chunks = payload.chunks_exact(8);
+                let v0 = u64::from_le_bytes(chunks.next().unwrap().try_into().unwrap());
+                out.extend_from_slice(&v0.to_le_bytes());
+                if count >= 2 {
+                    let d1_bytes = chunks.next().unwrap();
+                    let mut prev_delta = i64::from_le_bytes(d1_bytes.try_into().unwrap());
+                    let v1 = (v0 as i64 + prev_delta) as u64;
+                    out.extend_from_slice(&v1.to_le_bytes());
+                    let mut prev_val = v1 as i64;
+                    for chunk in chunks.take(count - 2) {
+                        prev_delta += i64::from_le_bytes(chunk.try_into().unwrap());
+                        prev_val += prev_delta;
+                        out.extend_from_slice(&(prev_val as u64).to_le_bytes());
+                    }
+                }
             }
             Ok(out)
         }
@@ -315,15 +342,20 @@ fn apply_decode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
             if payload.len() < count * 8 {
                 return Err(CodecError::Truncated);
             }
-            let encoded: Vec<u64> = payload
-                .chunks_exact(8)
-                .take(count)
-                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-            let decoded = xor_decode_values(&encoded);
-            let mut out = Vec::with_capacity(decoded.len() * 8);
-            for v in decoded {
-                out.extend_from_slice(&v.to_le_bytes());
+            // Inline xor_decode_values to output directly to Vec<u8>,
+            // eliminating the intermediate Vec<u64> + Vec<f64> round-trip (#962).
+            // Use chunks_exact(8) so the compiler can eliminate per-iteration bounds checks.
+            // The XOR accumulator is kept as u64 bits; f64::from_bits(bits).to_le_bytes()
+            // == bits.to_le_bytes() on all LE targets so we skip the from_bits call.
+            let mut out = Vec::with_capacity(count * 8);
+            if count > 0 {
+                let mut chunks = payload.chunks_exact(8);
+                let mut prev = u64::from_le_bytes(chunks.next().unwrap().try_into().unwrap());
+                out.extend_from_slice(&prev.to_le_bytes());
+                for chunk in chunks.take(count - 1) {
+                    prev ^= u64::from_le_bytes(chunk.try_into().unwrap());
+                    out.extend_from_slice(&prev.to_le_bytes());
+                }
             }
             Ok(out)
         }
@@ -607,24 +639,25 @@ mod tests {
 
     #[test]
     fn select_codecs_maps_semantics_to_expected_chains() {
-        let z = ColumnCodec::Zstd { level: 3 };
+        // Outer codec is LZ4 since #962 (was Zstd(3)).
+        let outer = ColumnCodec::Lz4;
         assert_eq!(
             select_codecs(0, ColumnSemantics::Timestamp),
-            vec![ColumnCodec::DoubleDelta, z.clone()]
+            vec![ColumnCodec::DoubleDelta, outer.clone()]
         );
         assert_eq!(
             select_codecs(0, ColumnSemantics::Gauge),
-            vec![ColumnCodec::Xor, z.clone()]
+            vec![ColumnCodec::Xor, outer.clone()]
         );
         assert_eq!(
             select_codecs(0, ColumnSemantics::Counter),
-            vec![ColumnCodec::Delta, z.clone()]
+            vec![ColumnCodec::Delta, outer.clone()]
         );
         assert_eq!(
             select_codecs(0, ColumnSemantics::LowCardinality),
-            vec![ColumnCodec::Dict, z.clone()]
+            vec![ColumnCodec::Dict, outer.clone()]
         );
-        assert_eq!(select_codecs(0, ColumnSemantics::Generic), vec![z]);
+        assert_eq!(select_codecs(0, ColumnSemantics::Generic), vec![outer]);
     }
 
     /// Criterion 2: round-trip stays lossless for every codec/type
