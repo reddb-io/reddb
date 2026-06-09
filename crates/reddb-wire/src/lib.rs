@@ -20,7 +20,8 @@ pub mod sanitizer;
 pub mod topology;
 
 pub use conn_string::{
-    parse, parse_with_limits, ConnStringLimits, ConnectionTarget, ParseError, ParseErrorKind,
+    is_embedded_connection_uri, parse, parse_with_limits, ConnStringLimits, ConnectionTarget,
+    ParseError, ParseErrorKind,
 };
 pub use redwire::{BuildError, FrameBuilder};
 pub use sanitizer::{

@@ -33,7 +33,7 @@ use std::process::ExitCode;
 use reddb_client::connector::http::{query_one_shot as http_query_one_shot, Auth as HttpAuth};
 use reddb_client::redwire::{Auth as RedWireAuth, ConnectOptions, RedWireClient};
 use reddb_client::{repl::run_repl, RedDBClient};
-use reddb_wire::{parse, ConnectionTarget, ParseErrorKind};
+use reddb_wire::{is_embedded_connection_uri, parse, ConnectionTarget, ParseErrorKind};
 
 const EXIT_USAGE: u8 = 1;
 const EXIT_EMBEDDED_REJECTED: u8 = 2;
@@ -267,7 +267,7 @@ enum ResolvedTarget {
 }
 
 fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
-    if is_embedded_uri(uri) {
+    if is_embedded_connection_uri(uri) {
         return Err(EndpointError::Embedded);
     }
     if uri.contains("?proto=pg") {
@@ -288,18 +288,6 @@ fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
             Ok(ResolvedTarget::RedWire { host, port, tls })
         }
     }
-}
-
-/// Heuristic for embedded URIs that the parser would otherwise route
-/// to the gRPC branch. The doc form `red://` (no host) and the
-/// SQLite-style `red://:memory:` aliases never resolve to a remote
-/// target — they are explicit "use the embedded engine" requests.
-fn is_embedded_uri(uri: &str) -> bool {
-    let trimmed = uri.trim();
-    matches!(
-        trimmed,
-        "red://" | "red:" | "red:///" | "red://:memory" | "red://:memory:"
-    ) || trimmed.starts_with("red:///")
 }
 
 fn print_usage_to_stdout() {
