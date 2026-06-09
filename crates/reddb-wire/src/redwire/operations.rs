@@ -173,24 +173,24 @@ pub fn decode_error_payload(bytes: &[u8]) -> String {
     decode_text_payload(bytes)
 }
 
-pub fn expect_result_or_error<'a>(
+pub fn expect_result_or_error(
     kind: MessageKind,
-    payload: &'a [u8],
-) -> Result<&'a [u8], OperationReplyError> {
+    payload: &[u8],
+) -> Result<&[u8], OperationReplyError> {
     expect_payload_or_error(kind, payload, MessageKind::Result, "Result/Error")
 }
 
-pub fn expect_bulk_ok_or_error<'a>(
+pub fn expect_bulk_ok_or_error(
     kind: MessageKind,
-    payload: &'a [u8],
-) -> Result<&'a [u8], OperationReplyError> {
+    payload: &[u8],
+) -> Result<&[u8], OperationReplyError> {
     expect_payload_or_error(kind, payload, MessageKind::BulkOk, "BulkOk/Error")
 }
 
-pub fn expect_delete_ok_or_error<'a>(
+pub fn expect_delete_ok_or_error(
     kind: MessageKind,
-    payload: &'a [u8],
-) -> Result<&'a [u8], OperationReplyError> {
+    payload: &[u8],
+) -> Result<&[u8], OperationReplyError> {
     expect_payload_or_error(kind, payload, MessageKind::DeleteOk, "DeleteOk/Error")
 }
 

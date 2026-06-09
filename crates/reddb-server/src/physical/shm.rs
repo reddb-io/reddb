@@ -144,10 +144,7 @@ pub fn provision_shm(data_path: &Path) -> io::Result<ShmHandle> {
         });
     }
 
-    let existing = match reddb_file::read_shm_header_from_file(&mut file) {
-        Ok(header) => Some(header),
-        Err(_) => None,
-    };
+    let existing = reddb_file::read_shm_header_from_file(&mut file).ok();
 
     let (header, state) = match existing {
         Some(prev) if pid_alive(prev.owner_pid) && prev.owner_pid != current_pid() => {

@@ -97,7 +97,7 @@ pub fn stage_basebackup_snapshot_chunk(
     let manifest_bytes = payload
         .required_basebackup_manifest()?
         .expect("basebackup_available checked above");
-    let manifest = reddb_file::PrimaryReplicaBaseBackupManifest::decode(&manifest_bytes)?;
+    let manifest = reddb_file::PrimaryReplicaBaseBackupManifest::decode(manifest_bytes)?;
     manifest.validate()?;
 
     let snapshot_offset = payload.snapshot_offset;

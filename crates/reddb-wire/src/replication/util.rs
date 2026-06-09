@@ -88,7 +88,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 
 pub(crate) fn hex_decode(field: &'static str, value: &str) -> Result<Vec<u8>> {
     let bytes = value.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(ReplicationPayloadError::InvalidHex(field));
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
