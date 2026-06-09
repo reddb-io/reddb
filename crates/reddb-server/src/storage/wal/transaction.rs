@@ -472,12 +472,16 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn temp_wal_path(dir: &Path, name: &str) -> PathBuf {
+        reddb_file::layout::wal_component_temp_path(dir, "transaction", name, std::process::id())
+    }
+
     #[test]
     fn test_transaction_commit() {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "commit");
 
         // Create pager
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
@@ -517,7 +521,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "rollback");
 
         // Create pager
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
@@ -558,7 +562,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "multiple");
 
         // Create pager
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
@@ -600,7 +604,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "isolation");
 
         // Create pager
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
@@ -643,7 +647,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "tracking");
 
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
         let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
@@ -674,7 +678,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "double-commit");
 
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
         let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
@@ -698,7 +702,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
-        let wal_path = dir.join("test.wal");
+        let wal_path = temp_wal_path(&dir, "panic-lock-holder");
 
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
         let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
@@ -728,7 +732,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("ro_durable.db");
-        let wal_path = dir.join("ro_durable.wal");
+        let wal_path = temp_wal_path(&dir, "ro-durable");
 
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
         let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
@@ -763,7 +767,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("ro_size.db");
-        let wal_path = dir.join("ro_size.wal");
+        let wal_path = temp_wal_path(&dir, "ro-size");
 
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
         let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
@@ -795,7 +799,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("ro_state.db");
-        let wal_path = dir.join("ro_state.wal");
+        let wal_path = temp_wal_path(&dir, "ro-state");
 
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
         let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
@@ -822,7 +826,7 @@ mod tests {
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("rw_after_ro.db");
-        let wal_path = dir.join("rw_after_ro.wal");
+        let wal_path = temp_wal_path(&dir, "rw-after-ro");
 
         let pager = Arc::new(Pager::open_default(&db_path).unwrap());
         let allocated = pager.allocate_page(PageType::BTreeLeaf).unwrap();

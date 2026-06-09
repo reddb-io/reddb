@@ -318,11 +318,16 @@ fn server_wal_tests_use_reddb_file_temp_wal_names() {
         "crates/reddb-server/src/storage/wal/mod.rs",
         "crates/reddb-server/src/storage/wal/archiver.rs",
         "crates/reddb-server/src/storage/wal/checkpoint.rs",
+        "crates/reddb-server/src/storage/wal/transaction.rs",
     ] {
         let text = read(root.join(file));
         let test_source = text.split("#[cfg(test)]").nth(1).unwrap_or("");
         for forbidden in [
             "dir.join(\"test.wal\")",
+            "dir.join(\"ro_durable.wal\")",
+            "dir.join(\"ro_size.wal\")",
+            "dir.join(\"ro_state.wal\")",
+            "dir.join(\"rw_after_ro.wal\")",
             "temp_dir.join(\"test.wal\")",
             "temp_dir.join(\"downloaded.wal\")",
         ] {
