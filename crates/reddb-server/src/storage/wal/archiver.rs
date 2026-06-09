@@ -3,7 +3,7 @@
 //! Enables Point-in-Time Recovery (PITR) by preserving WAL history.
 //! Integrates with the checkpoint flow to archive segments before they are truncated.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -355,18 +355,17 @@ pub fn archive_change_records(
     // matches what gets uploaded byte-for-byte.
     let sha = sha256_bytes_hex(&body);
 
-    let temp = temp_json_path(
+    let temp = reddb_file::BackupTempJsonFile::new(
         "reddb-archived-change-records",
         Some(*lsn_start),
         Some(*lsn_end),
     );
-    std::fs::write(&temp, &body)
+    let size_bytes = temp
+        .write_bytes(&body)
         .map_err(|err| BackendError::Transport(format!("write temp logical wal failed: {err}")))?;
 
     let key = reddb_file::archived_wal_segment_key(prefix, *lsn_start, *lsn_end);
-    backend.upload(&temp, &key)?;
-    let size_bytes = std::fs::metadata(&temp).map(|meta| meta.len()).unwrap_or(0);
-    let _ = std::fs::remove_file(&temp);
+    backend.upload(temp.path(), &key)?;
 
     let meta = WalSegmentMeta {
         key,
@@ -414,15 +413,15 @@ pub fn load_archived_change_records_with_sha256(
     backend: &dyn RemoteBackend,
     segment_key: &str,
 ) -> Result<(Vec<ChangeRecord>, Option<String>), BackendError> {
-    let temp = temp_json_path("reddb-archived-change-records-read", None, None);
-    let found = backend.download(segment_key, &temp)?;
+    let temp =
+        reddb_file::BackupTempJsonFile::new("reddb-archived-change-records-read", None, None);
+    let found = backend.download(segment_key, temp.path())?;
     if !found {
-        let _ = std::fs::remove_file(&temp);
         return Ok((Vec::new(), None));
     }
-    let bytes = std::fs::read(&temp)
+    let bytes = temp
+        .read_bytes()
         .map_err(|err| BackendError::Transport(format!("read temp logical wal failed: {err}")))?;
-    let _ = std::fs::remove_file(&temp);
     let digest = sha256_bytes_hex(&bytes);
 
     let archived = reddb_file::decode_archived_logical_wal_records(&bytes).map_err(|err| {
@@ -442,41 +441,25 @@ fn write_json_bytes(
     key: &str,
     bytes: &[u8],
 ) -> Result<(), BackendError> {
-    let temp = temp_json_path("reddb-json-object", None, None);
-    std::fs::write(&temp, bytes)
+    let temp = reddb_file::BackupTempJsonFile::new("reddb-json-object", None, None);
+    temp.write_bytes(bytes)
         .map_err(|err| BackendError::Transport(format!("write temp json object failed: {err}")))?;
-    let upload_result = backend.upload(&temp, key);
-    let _ = std::fs::remove_file(&temp);
-    upload_result
+    backend.upload(temp.path(), key)
 }
 
 fn read_json_bytes(
     backend: &dyn RemoteBackend,
     key: &str,
 ) -> Result<Option<Vec<u8>>, BackendError> {
-    let temp = temp_json_path("reddb-json-object-read", None, None);
-    let found = backend.download(key, &temp)?;
+    let temp = reddb_file::BackupTempJsonFile::new("reddb-json-object-read", None, None);
+    let found = backend.download(key, temp.path())?;
     if !found {
         return Ok(None);
     }
-    let bytes = std::fs::read(&temp)
+    let bytes = temp
+        .read_bytes()
         .map_err(|err| BackendError::Transport(format!("read temp json object failed: {err}")))?;
-    let _ = std::fs::remove_file(&temp);
     Ok(Some(bytes))
-}
-
-fn temp_json_path(prefix: &str, start: Option<u64>, end: Option<u64>) -> PathBuf {
-    reddb_file::layout::backup_temp_json_path(
-        &std::env::temp_dir(),
-        prefix,
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-        start,
-        end,
-    )
 }
 
 #[cfg(test)]

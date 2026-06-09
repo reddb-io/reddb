@@ -7,6 +7,7 @@
 
 pub mod ai_model_cache;
 pub mod backup_manifest;
+pub mod backup_temp;
 pub mod blob_cache;
 pub mod bloom_segment;
 pub mod btree_value_layout;
@@ -58,6 +59,7 @@ pub use backup_manifest::{
     ArchivedLogicalWalRecord, BackupHead, SnapshotManifest, UnifiedManifest, UnifiedSnapshotEntry,
     UnifiedWalEntry, WalSegmentManifest, WalSegmentMeta, BACKUP_MANIFEST_FORMAT_VERSION,
 };
+pub use backup_temp::BackupTempJsonFile;
 pub use blob_cache::{
     blob_cache_control_path, blob_cache_control_temp_path, blob_cache_double_write_path,
     blob_cache_l2_backup_control_key, blob_cache_l2_backup_pager_key, decode_l2_v2_frame,
