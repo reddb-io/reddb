@@ -14,6 +14,26 @@ fn read(path: impl AsRef<Path>) -> String {
         .unwrap_or_else(|err| panic!("read {}: {err}", path.as_ref().display()))
 }
 
+fn rust_files_under(path: impl AsRef<Path>) -> Vec<PathBuf> {
+    let path = path.as_ref();
+    let mut files = Vec::new();
+    for entry in
+        fs::read_dir(path).unwrap_or_else(|err| panic!("read dir {}: {err}", path.display()))
+    {
+        let entry = entry.unwrap_or_else(|err| panic!("read dir entry {}: {err}", path.display()));
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            files.extend(rust_files_under(&entry_path));
+        } else if entry_path
+            .extension()
+            .is_some_and(|extension| extension == "rs")
+        {
+            files.push(entry_path);
+        }
+    }
+    files
+}
+
 fn non_test_source(text: &str) -> &str {
     text.split("#[cfg(test)]").next().unwrap_or(text)
 }
@@ -738,6 +758,26 @@ fn server_redwire_test_request_frames_use_reddb_wire_builders() {
             bulk_stream.contains(required),
             "bulk stream RedWire tests should use reddb-wire {required}"
         );
+    }
+}
+
+#[test]
+fn server_and_client_do_not_construct_redwire_frames_inline() {
+    let root = repo_root();
+    for source_root in [
+        root.join("crates/reddb-server/src"),
+        root.join("crates/reddb-client/src"),
+    ] {
+        for file in rust_files_under(&source_root) {
+            let text = read(&file);
+            for forbidden in ["Frame::new(", "FrameBuilder::"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} should delegate RedWire frame construction to reddb-wire helpers; found {forbidden:?}",
+                    file.display()
+                );
+            }
+        }
     }
 }
 
