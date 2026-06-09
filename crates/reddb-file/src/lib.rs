@@ -23,6 +23,7 @@ pub mod graph_table_index;
 pub mod layout;
 pub mod local_backend;
 pub mod logical_wal;
+pub mod native_index_artifact;
 pub mod native_store;
 pub mod operational_manifest;
 pub mod physical_metadata;
@@ -33,9 +34,12 @@ pub mod serverless;
 pub mod shm;
 pub mod spill;
 pub mod store_wal;
+pub mod table_def;
 pub mod transaction_wal;
 pub mod turboquant_snapshot;
 pub mod vector_btree_page_format;
+pub mod vector_hnsw_index;
+pub mod vector_ivf_index;
 pub mod vector_value_codec;
 pub mod wal_header;
 pub mod wal_record;
@@ -221,6 +225,14 @@ pub use native_store::{
     STORE_VERSION_V1, STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5,
     STORE_VERSION_V6, STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
 };
+pub use native_index_artifact::{
+    decode_native_doc_pathvalue_frame, decode_native_fulltext_frame,
+    decode_native_graph_adjacency_frame, encode_native_doc_pathvalue_frame,
+    encode_native_fulltext_frame, encode_native_graph_adjacency_frame, NativeArtifactFrameError,
+    NativeDocPathValue, NativeDocPathValueEntry, NativeDocPathValueFrame, NativeFulltextFrame,
+    NativeFulltextPosting, NativeFulltextTerm, NativeGraphAdjacencyFrame, NativeGraphEdge,
+    NATIVE_DOC_PATHVALUE_MAGIC, NATIVE_FULLTEXT_MAGIC, NATIVE_GRAPH_ADJACENCY_MAGIC,
+};
 pub use operational_manifest::OperationalManifest;
 pub use physical_metadata::{
     copy_physical_export_data_file, copy_physical_metadata_binary_to_journal,
@@ -305,6 +317,10 @@ pub use store_wal::{
     decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
     STORE_WAL_ACTION_VERSION,
 };
+pub use table_def::{
+    decode_table_def_frame, encode_table_def_frame, ColumnDefFrame, ConstraintFrame, IndexDefFrame,
+    TableDefFrame, TableDefFrameError, TABLE_DEF_MAGIC,
+};
 pub use transaction_wal::{
     decode_transaction_wal_entry_payload, decode_transaction_wal_record_frame,
     encode_transaction_wal_entry_payload, encode_transaction_wal_record_frame,
@@ -315,6 +331,15 @@ pub use transaction_wal::{
 pub use turboquant_snapshot::{
     read_turboquant_snapshot, write_turboquant_snapshot, TurboQuantSnapshotError,
     TurboQuantSnapshotPayload, TURBOQUANT_SNAPSHOT_HEADER_BYTES,
+};
+pub use vector_hnsw_index::{
+    decode_hnsw_index_frame, encode_hnsw_index_frame, HnswIndexFrame, HnswIndexFrameError,
+    HnswNodeFrame, HNSW_INDEX_HEADER_LEN, HNSW_INDEX_MAGIC, HNSW_INDEX_NO_ENTRY_POINT,
+    HNSW_INDEX_VERSION_V1,
+};
+pub use vector_ivf_index::{
+    decode_ivf_index_frame, encode_ivf_index_frame, IvfIndexFrame, IvfIndexFrameError,
+    IvfListFrame, IVF_INDEX_HEADER_LEN, IVF_INDEX_MAGIC,
 };
 pub use wal_header::{
     decode_wal_file_header, encode_wal_file_header, next_main_wal_segment_boundary, WalFileHeader,
