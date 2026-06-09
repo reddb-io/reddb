@@ -306,6 +306,29 @@ fn tiered_layout_matrix_lives_in_reddb_file_tests() {
 }
 
 #[test]
+fn embedded_rdb_artifact_contract_tests_live_in_reddb_file() {
+    let root = repo_root();
+    let file_test = read(root.join("crates/reddb-file/tests/embedded_rdb_artifact.rs"));
+    let server_test = read(root.join("crates/reddb-server/tests/embedded_rdb_skeleton.rs"));
+
+    for required in [
+        "open_falls_back_to_older_superblock_when_newer_copy_is_invalid",
+        "open_validates_manifest_checksum_from_selected_superblock",
+        "embedded_wal_frames_are_versioned_ordered_and_chained",
+        "embedded_snapshot_crash_injection_preserves_published_snapshot",
+    ] {
+        assert!(
+            file_test.contains(required),
+            "embedded .rdb artifact contract test should live in reddb-file: {required}"
+        );
+        assert!(
+            !server_test.contains(required),
+            "server embedded tests should stay runtime-level and not own {required}"
+        );
+    }
+}
+
+#[test]
 fn server_runtime_uses_file_owned_default_database_path() {
     let root = repo_root();
     let runtime_files = [
