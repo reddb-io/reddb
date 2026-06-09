@@ -1,9 +1,15 @@
 //! Shared cluster identity and membership model.
 
+pub mod control_plane;
 pub mod identity;
 pub mod join;
 pub mod membership;
 
+pub use control_plane::{
+    ControlPlaneConsensus, ControlPlaneEntry, ControlPlaneError, ControlPlaneIndex,
+    ControlPlaneTerm, DurableVoteState, MembershipChange, OwnershipTransition,
+    SingleNodeControlPlane,
+};
 pub use identity::{
     ClusterVoterIdentity, NodeIdentity, NodeIdentityError, ReplicationPeerIdentity,
 };
