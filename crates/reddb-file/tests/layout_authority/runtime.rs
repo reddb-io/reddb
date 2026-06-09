@@ -591,6 +591,77 @@ fn server_does_not_redeclare_replication_slot_file_contracts() {
 }
 
 #[test]
+fn server_primary_replica_wal_segments_are_file_owned() {
+    let root = repo_root();
+    let files = [
+        "crates/reddb-server/src/replication/primary.rs",
+        "crates/reddb-server/src/runtime/impl_primary_replica_file.rs",
+        "crates/reddb-server/src/runtime/impl_backup.rs",
+        "crates/reddb-server/src/server/handlers_replication.rs",
+        "crates/reddb-server/src/grpc/service_impl.rs",
+    ];
+
+    for file in files {
+        let text = read(root.join(file));
+        let non_test = if file == "crates/reddb-server/src/replication/primary.rs" {
+            text.as_str()
+        } else {
+            non_test_source(&text)
+        };
+        for forbidden in [
+            ".redwal",
+            "redwal",
+            "wal_segment_path(",
+            "existing_wal_segments",
+            "removable_segments.push",
+            "let mut removable_segments",
+            "fs::read_dir",
+            "std::fs::read_dir",
+            "extension()",
+        ] {
+            assert!(
+                !non_test.contains(forbidden),
+                "{file} must let reddb-file own primary-replica WAL segment contracts, found {forbidden:?}"
+            );
+        }
+    }
+
+    let primary = read(root.join("crates/reddb-server/src/replication/primary.rs"));
+    assert!(
+        primary.contains("plan.append_wal_record("),
+        "primary runtime should append primary-replica WAL through reddb-file"
+    );
+
+    let runtime = read(root.join("crates/reddb-server/src/runtime/impl_primary_replica_file.rs"));
+    let runtime_non_test = non_test_source(&runtime);
+    for required in [
+        "plan.plan_wal_retention(&catalog, current_lsn)",
+        "plan.prune_wal_segments(&catalog, current_lsn)",
+    ] {
+        assert!(
+            runtime_non_test.contains(required),
+            "runtime should delegate primary-replica WAL retention/pruning through {required}"
+        );
+    }
+
+    let file_wal = read(root.join("crates/reddb-file/src/primary_replica/wal.rs"));
+    for required in [
+        "pub fn append_wal_record",
+        "pub fn plan_wal_retention",
+        "pub fn prune_wal_segments",
+        "fn existing_wal_segments",
+        "fs::read_dir(&wal_dir)",
+        "ext.to_str()) != Some(\"redwal\")",
+        "fs::remove_file(path)",
+    ] {
+        assert!(
+            file_wal.contains(required),
+            "reddb-file should own primary-replica WAL segment behavior {required}"
+        );
+    }
+}
+
+#[test]
 fn server_operational_manifest_is_runtime_alias_only() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/operational_manifest.rs"));

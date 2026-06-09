@@ -14,6 +14,10 @@ pub(crate) fn read(path: impl AsRef<Path>) -> String {
         .unwrap_or_else(|err| panic!("read {}: {err}", path.as_ref().display()))
 }
 
+pub(crate) fn non_test_source(text: &str) -> &str {
+    text.split("#[cfg(test)]").next().unwrap_or(text)
+}
+
 pub(crate) fn rust_files_under(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
