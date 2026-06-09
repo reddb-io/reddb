@@ -26,7 +26,8 @@ pub use change_record::{
     ChangeOperation, ChangeRecord, ChangeRecordJsonValue, DEFAULT_REPLICATION_TERM,
 };
 pub use timeline::{
-    RejoinPlanNotice, RejoinRewindConfirmation, RejoinRewindConfirmationReply, TimelineForkNotice,
+    FailoverPromotionReply, FailoverPromotionRequest, RejoinPlanNotice, RejoinRewindConfirmation,
+    RejoinRewindConfirmationReply, TimelineForkNotice,
 };
 pub use util::ReplicationPayloadError;
 pub use wal_stream::{

@@ -106,22 +106,13 @@ impl RedDBServer {
         let (holder_id, ttl_ms) = if body.is_empty() {
             (default_holder_id(), 60_000u64)
         } else {
-            match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
-                Ok(v) => {
-                    let holder = v
-                        .get("holder_id")
-                        .and_then(|n| n.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(default_holder_id);
-                    let ttl = v
-                        .get("ttl_ms")
-                        .and_then(|n| n.as_u64())
-                        .filter(|t| *t > 0)
-                        .unwrap_or(60_000);
-                    (holder, ttl)
-                }
+            match reddb_wire::replication::FailoverPromotionRequest::decode_json(&body) {
+                Ok(request) => (
+                    request.holder_id.unwrap_or_else(default_holder_id),
+                    request.ttl_ms.unwrap_or(60_000),
+                ),
                 Err(err) => {
-                    let reason = format!("invalid JSON body: {err}");
+                    let reason = err.to_string();
                     if let Err(emit_err) = self.runtime.emit_control_event(
                         crate::runtime::control_events::EventKind::FailoverPromotion,
                         crate::runtime::control_events::Outcome::Error,
@@ -234,37 +225,21 @@ impl RedDBServer {
                 ) {
                     return json_error(500, err.to_string());
                 }
-                let mut object = Map::new();
-                object.insert("ok".to_string(), JsonValue::Bool(true));
-                object.insert("holder_id".to_string(), JsonValue::String(lease.holder_id));
-                object.insert(
-                    "generation".to_string(),
-                    JsonValue::Number(lease.generation as f64),
+                let reply = reddb_wire::replication::FailoverPromotionReply::promoted(
+                    lease.holder_id,
+                    lease.generation,
+                    lease.acquired_at_ms,
+                    lease.expires_at_ms,
+                    timeline_id.0,
+                    applied_lsn,
                 );
-                object.insert(
-                    "acquired_at_ms".to_string(),
-                    JsonValue::Number(lease.acquired_at_ms as f64),
-                );
-                object.insert(
-                    "expires_at_ms".to_string(),
-                    JsonValue::Number(lease.expires_at_ms as f64),
-                );
-                object.insert(
-                    "timeline".to_string(),
-                    JsonValue::Number(timeline_id.0 as f64),
-                );
-                object.insert(
-                    "applied_lsn".to_string(),
-                    JsonValue::Number(applied_lsn as f64),
-                );
-                object.insert(
-                    "next_step".to_string(),
-                    JsonValue::String(
-                        "restart with RED_REPLICATION_MODE=primary to start accepting writes"
-                            .to_string(),
-                    ),
-                );
-                json_response(200, JsonValue::Object(object))
+                let value: JsonValue = crate::json::from_slice(&reply.encode_json())
+                    .unwrap_or_else(|_| {
+                        let mut object = Map::new();
+                        object.insert("ok".to_string(), JsonValue::Bool(true));
+                        JsonValue::Object(object)
+                    });
+                json_response(200, value)
             }
             Err(err) => {
                 let reason = format!("promotion refused: {err}");

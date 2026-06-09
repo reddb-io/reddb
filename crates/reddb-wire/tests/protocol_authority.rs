@@ -474,6 +474,54 @@ fn server_rejoin_rewind_confirmation_payload_lives_in_reddb_wire() {
 }
 
 #[test]
+fn server_failover_promotion_payload_lives_in_reddb_wire() {
+    let root = repo_root();
+    let handler = read(root.join("crates/reddb-server/src/server/handlers_failover.rs"));
+    let non_test = non_test_source(&handler);
+    let wire = read(root.join("crates/reddb-wire/src/replication/timeline.rs"));
+
+    for forbidden in [
+        "serde_json::from_slice::<crate::serde_json::Value>(&body)",
+        ".get(\"holder_id\")",
+        ".get(\"ttl_ms\")",
+        "object.insert(\"holder_id\"",
+        "object.insert(\"generation\"",
+        "object.insert(\"acquired_at_ms\"",
+        "object.insert(\"expires_at_ms\"",
+        "object.insert(\"timeline\"",
+        "object.insert(\"applied_lsn\"",
+        "object.insert(\"next_step\"",
+    ] {
+        assert!(
+            !non_test.contains(forbidden),
+            "server failover promotion payload must live in reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "FailoverPromotionRequest::decode_json",
+        "FailoverPromotionReply::promoted",
+    ] {
+        assert!(
+            non_test.contains(required),
+            "server failover promotion should route through reddb-wire {required}"
+        );
+    }
+
+    for required in [
+        "pub struct FailoverPromotionRequest",
+        "pub struct FailoverPromotionReply",
+        "pub fn decode_json(bytes: &[u8]) -> Result<Self>",
+        "pub fn encode_json(&self) -> Vec<u8>",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire should own failover promotion payload contract {required}"
+        );
+    }
+}
+
+#[test]
 fn server_redwire_frame_header_length_routes_through_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
