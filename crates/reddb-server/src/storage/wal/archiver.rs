@@ -472,7 +472,12 @@ mod tests {
         let archiver = WalArchiver::new(backend, &wal_prefix);
 
         // Create a fake WAL file
-        let wal_path = temp_dir.join("test.wal");
+        let wal_path = reddb_file::layout::wal_component_temp_path(
+            &temp_dir,
+            "archiver",
+            "source",
+            std::process::id(),
+        );
         {
             let mut f = std::fs::File::create(&wal_path).unwrap();
             f.write_all(b"fake wal data").unwrap();
@@ -486,7 +491,12 @@ mod tests {
         assert!(is_archived_wal_segment_key(&meta.key));
 
         // Download it
-        let dest = temp_dir.join("downloaded.wal");
+        let dest = reddb_file::layout::wal_component_temp_path(
+            &temp_dir,
+            "archiver",
+            "downloaded",
+            std::process::id(),
+        );
         let found = archiver.download_segment(&meta.key, &dest).unwrap();
         assert!(found);
         assert!(dest.exists());
