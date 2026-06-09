@@ -384,6 +384,52 @@ fn server_replication_basebackup_payload_fields_live_in_reddb_wire() {
 }
 
 #[test]
+fn server_replication_wal_ack_payloads_live_in_reddb_wire() {
+    let root = repo_root();
+    let grpc = read(root.join("crates/reddb-server/src/grpc/service_impl.rs"));
+    let non_test = non_test_source(&grpc);
+    let wire = read(root.join("crates/reddb-wire/src/replication/wal_stream.rs"));
+
+    for forbidden in [
+        "reply.insert(\"replica_id\"",
+        "reply.insert(\"applied_lsn\"",
+        "reply.insert(\"durable_lsn\"",
+        "reply.insert(\"apply_errors_total\"",
+        "reply.insert(\"divergence_total\"",
+        "\"apply_errors_total\".into()",
+        "\"divergence_total\".into()",
+    ] {
+        assert!(
+            !non_test.contains(forbidden),
+            "server ack_replica_lsn should not own WAL ack reply payload fields, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "WalStreamAck::decode_json",
+        "WalStreamAckReply::from_ack",
+        "reply.encode_json()",
+    ] {
+        assert!(
+            non_test.contains(required),
+            "server ack_replica_lsn should route WAL ack payload through reddb-wire {required}"
+        );
+    }
+
+    for required in [
+        "pub struct WalStreamAck",
+        "pub struct WalStreamAckReply",
+        "pub fn encode_json(&self) -> Vec<u8>",
+        "pub fn decode_json(bytes: &[u8]) -> Result<Self>",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire should own WAL ack payload contract {required}"
+        );
+    }
+}
+
+#[test]
 fn server_redwire_frame_header_length_routes_through_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
