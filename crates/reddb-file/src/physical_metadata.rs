@@ -411,6 +411,16 @@ pub fn write_physical_metadata_binary_document(
     Ok(())
 }
 
+pub fn copy_physical_metadata_binary_to_journal(
+    data_path: &Path,
+    source_path: &Path,
+    sequence: u64,
+) -> RdbFileResult<PathBuf> {
+    let journal_path = crate::layout::physical_metadata_journal_path(data_path, sequence);
+    fs::copy(source_path, &journal_path)?;
+    Ok(journal_path)
+}
+
 pub fn list_physical_metadata_journal_paths(data_path: &Path) -> RdbFileResult<Vec<PathBuf>> {
     let Some(parent) = data_path.parent() else {
         return Ok(Vec::new());

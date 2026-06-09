@@ -145,8 +145,11 @@ impl PhysicalMetadataFile {
             let sequence = Self::load_from_binary_path(&binary_path)
                 .map(|metadata| metadata.superblock.sequence)
                 .unwrap_or(self.superblock.sequence);
-            let journal_path = Self::metadata_journal_path_for(data_path, sequence);
-            let _ = fs::copy(&binary_path, journal_path);
+            let _ = reddb_file::copy_physical_metadata_binary_to_journal(
+                data_path,
+                &binary_path,
+                sequence,
+            );
         }
         self.save_to_binary_path(&binary_path)?;
         self.prune_journal_for_data_path(data_path)?;

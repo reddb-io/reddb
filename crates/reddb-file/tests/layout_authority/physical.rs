@@ -132,6 +132,7 @@ fn server_uses_reddb_file_for_physical_metadata_paths() {
         "reddb_file::read_physical_metadata_document",
         "reddb_file::write_physical_metadata_json_document",
         "reddb_file::write_physical_metadata_binary_document",
+        "reddb_file::copy_physical_metadata_binary_to_journal",
     ] {
         assert!(
             text.contains(required),
@@ -141,6 +142,7 @@ fn server_uses_reddb_file_for_physical_metadata_paths() {
     for forbidden in [
         "fs::read_dir",
         "starts_with(&prefix)",
+        "fs::copy(",
         "fs::remove_file(path)",
     ] {
         assert!(
