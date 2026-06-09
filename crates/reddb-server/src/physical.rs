@@ -14,158 +14,16 @@ pub const DEFAULT_GRID_BLOCK_SIZE: usize = 512 * 1024;
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 pub use reddb_file::layout::PHYSICAL_METADATA_BINARY_EXTENSION;
 pub use reddb_file::{
-    BlockReference, ExportDescriptor, ManifestEvent, ManifestEventKind, ManifestPointers,
-    PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalTreeDefinition, SnapshotDescriptor,
-    SuperblockHeader, DEFAULT_SUPERBLOCK_COPIES, PHYSICAL_METADATA_PROTOCOL_VERSION,
+    fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled,
+    seqn_journal_enabled, seqn_journal_retention, set_fold_dwb_into_wal_enabled,
+    set_fold_pager_meta_enabled, set_meta_json_sidecar_enabled, set_seqn_journal_enabled,
+    set_seqn_journal_retention, BlockReference, ExportDescriptor, ManifestEvent, ManifestEventKind,
+    ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalTreeDefinition,
+    SnapshotDescriptor, SuperblockHeader, DEFAULT_METADATA_JOURNAL_RETENTION,
+    DEFAULT_SUPERBLOCK_COPIES, OPT_IN_METADATA_JOURNAL_RETENTION,
+    PHYSICAL_METADATA_PROTOCOL_VERSION,
 };
 pub const DEFAULT_MANIFEST_EVENT_HISTORY: usize = 256;
-/// Retention applied when the seq-N catalog journal is enabled at the `Max`
-/// tier. See [`seqn_journal_retention`].
-pub const DEFAULT_METADATA_JOURNAL_RETENTION: usize = 32;
-/// Retention applied when the seq-N catalog journal is opt-in enabled outside
-/// of the `Max` tier — keeps forensics surface minimal on lower tiers.
-pub const OPT_IN_METADATA_JOURNAL_RETENTION: usize = 4;
-
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-
-// JSON sidecar policy. 0 = unset (consult env, default off), 1 = enabled,
-// 2 = disabled. Threaded as a process-global because the metadata save path
-// is reached from many call sites that do not currently carry a layout
-// handle. Tier wiring (#469/#471/#472) flips this on at startup for `Max`;
-// minimal/standard/performance leave it off and emit only the binary
-// `<data>.meta.rdbx` + journal entries.
-static META_JSON_SIDECAR_POLICY: AtomicU8 = AtomicU8::new(0);
-
-/// Process-wide opt-in for the legacy `<data>.meta.json` sidecar.
-/// Call once at startup after resolving the active [`StorageLayout`].
-pub fn set_meta_json_sidecar_enabled(enabled: bool) {
-    META_JSON_SIDECAR_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
-}
-
-/// Whether new metadata writes should additionally emit the JSON sidecar.
-/// Defaults to `false`; opt-in via [`set_meta_json_sidecar_enabled`] or the
-/// `REDDB_META_JSON_SIDECAR=1` env var (escape hatch for ad-hoc debugging
-/// of a non-Max instance). Reads always tolerate either JSON or binary.
-pub fn meta_json_sidecar_enabled() -> bool {
-    match META_JSON_SIDECAR_POLICY.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => std::env::var("REDDB_META_JSON_SIDECAR")
-            .ok()
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false),
-    }
-}
-
-// Seq-N catalog journal policy. 0 = unset (consult env, default off), 1 =
-// enabled, 2 = disabled. Mirrors the meta-json sidecar toggle but governs the
-// `<data>.meta.rdbx.seq-{N}` forensic trail emitted on every metadata save.
-// Tier wiring (deferred) flips this on for `Max` with retention 32; opt-in
-// elsewhere lands with retention 4. See `seqn_journal_retention`.
-static SEQN_JOURNAL_POLICY: AtomicU8 = AtomicU8::new(0);
-// Retention override. 0 = unset (consult env, default off-tier retention).
-static SEQN_JOURNAL_RETENTION: AtomicUsize = AtomicUsize::new(0);
-
-/// Process-wide opt-in for the seq-N catalog journal (`<data>.meta.rdbx.seq-N`
-/// snapshot trail). Defaults off so non-`Max` tiers don't accumulate forensic
-/// artifacts. Tier wiring should call this with `true` for `Max`. Escape
-/// hatch: `REDDB_SEQN_JOURNAL=1`.
-pub fn set_seqn_journal_enabled(enabled: bool) {
-    SEQN_JOURNAL_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
-}
-
-/// Whether new metadata saves should also emit a seq-N journal entry.
-pub fn seqn_journal_enabled() -> bool {
-    match SEQN_JOURNAL_POLICY.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => std::env::var("REDDB_SEQN_JOURNAL")
-            .ok()
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false),
-    }
-}
-
-// Pager-meta sidecar policy (#477). 0 = unset (consult env, default off — keep
-// `<data>-meta` shadow), 1 = enabled (fold meta into page 1 + overflow chain;
-// no `-meta` sidecar), 2 = disabled (current behavior). Tier wiring (deferred)
-// flips this on for tiers that prefer a single datafile artifact. Escape hatch:
-// `REDDB_FOLD_PAGER_META=1`.
-static FOLD_PAGER_META_POLICY: AtomicU8 = AtomicU8::new(0);
-
-/// Process-wide opt-in for folding pager metadata (page 1) into the datafile
-/// without an adjacent `<data>-meta` shadow. When enabled, the corruption-
-/// recovery shadow at `<data>-meta` is not written; readers trust page 1
-/// (plus its overflow chain) as the single source of truth. Defaults off.
-pub fn set_fold_pager_meta_enabled(enabled: bool) {
-    FOLD_PAGER_META_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
-}
-
-/// Whether the pager should fold metadata into page 1 only and skip the
-/// `<data>-meta` sidecar shadow. Reads still tolerate the sidecar so existing
-/// databases keep working through the flag flip.
-pub fn fold_pager_meta_enabled() -> bool {
-    match FOLD_PAGER_META_POLICY.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => std::env::var("REDDB_FOLD_PAGER_META")
-            .ok()
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false),
-    }
-}
-
-// Fold-DWB-into-WAL policy (#478). 0 = unset (consult env, default off — keep
-// `-dwb` sidecar), 1 = enabled (emit FullPageImage WAL records before first
-// page modification per checkpoint cycle; no `-dwb` sidecar), 2 = disabled.
-// Tier wiring (deferred) flips this on for tiers that prefer a single WAL-
-// rooted recovery path. Escape hatch: `REDDB_FOLD_DWB_INTO_WAL=1`.
-static FOLD_DWB_INTO_WAL_POLICY: AtomicU8 = AtomicU8::new(0);
-
-/// Process-wide opt-in for folding the double-write buffer into the WAL via
-/// full-page-image (FPI) records. When enabled, the pager does not open or
-/// write `<data>-dwb`; recovery rebuilds torn pages from FPI records replayed
-/// before normal redo. Defaults off.
-pub fn set_fold_dwb_into_wal_enabled(enabled: bool) {
-    FOLD_DWB_INTO_WAL_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
-}
-
-/// Whether the pager should fold DWB into WAL (no `<data>-dwb` sidecar).
-/// Reads still tolerate the legacy sidecar so existing databases keep
-/// working through the flag flip.
-pub fn fold_dwb_into_wal_enabled() -> bool {
-    match FOLD_DWB_INTO_WAL_POLICY.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => std::env::var("REDDB_FOLD_DWB_INTO_WAL")
-            .ok()
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false),
-    }
-}
-
-/// Process-wide retention for the seq-N catalog journal. Tier wiring should
-/// call this with `DEFAULT_METADATA_JOURNAL_RETENTION` (32) for `Max` and
-/// `OPT_IN_METADATA_JOURNAL_RETENTION` (4) for opt-in non-`Max` use.
-/// `0` resets to defaults (env or off-tier baseline).
-pub fn set_seqn_journal_retention(retention: usize) {
-    SEQN_JOURNAL_RETENTION.store(retention, Ordering::Relaxed);
-}
-
-/// Resolved retention bound for the seq-N journal. Falls back to env
-/// `REDDB_SEQN_JOURNAL_RETENTION`, then to `OPT_IN_METADATA_JOURNAL_RETENTION`
-/// (4) — the conservative off-tier baseline.
-pub fn seqn_journal_retention() -> usize {
-    let stored = SEQN_JOURNAL_RETENTION.load(Ordering::Relaxed);
-    if stored > 0 {
-        return stored;
-    }
-    std::env::var("REDDB_SEQN_JOURNAL_RETENTION")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(OPT_IN_METADATA_JOURNAL_RETENTION)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalMetadataSource {

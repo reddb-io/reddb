@@ -230,8 +230,11 @@ pub use physical_metadata::{
     encode_physical_metadata_document_root_json, encode_physical_metadata_json_document,
     encode_physical_schema_manifest_json, encode_physical_snapshot_descriptor_json,
     encode_physical_subscription_descriptor_json, encode_physical_superblock_json,
-    encode_physical_tree_definition_json, list_physical_metadata_journal_paths,
-    prune_physical_metadata_journal_paths, read_physical_metadata_document,
+    encode_physical_tree_definition_json, fold_dwb_into_wal_enabled, fold_pager_meta_enabled,
+    list_physical_metadata_journal_paths, meta_json_sidecar_enabled,
+    prune_physical_metadata_journal_paths, read_physical_metadata_document, seqn_journal_enabled,
+    seqn_journal_retention, set_fold_dwb_into_wal_enabled, set_fold_pager_meta_enabled,
+    set_meta_json_sidecar_enabled, set_seqn_journal_enabled, set_seqn_journal_retention,
     write_physical_metadata_binary_document, write_physical_metadata_json_document, BlockReference,
     ExportDescriptor, ManifestEvent, ManifestEventKind, ManifestPointers,
     PersistedPhysicalHypertable, PersistedPhysicalHypertableChunk, PersistedPhysicalIndexState,
@@ -240,8 +243,9 @@ pub use physical_metadata::{
     PhysicalDeclaredColumnContract, PhysicalGraphProjection, PhysicalMetadataDocumentEnvelope,
     PhysicalPageLocation, PhysicalSchemaManifest, PhysicalSchemaOptions, PhysicalSqlTypeName,
     PhysicalSubscriptionDescriptor, PhysicalTreeDefinition, PhysicalTypeModifier,
-    SnapshotDescriptor, SuperblockHeader, DEFAULT_PHYSICAL_FORMAT_VERSION,
-    DEFAULT_SUPERBLOCK_COPIES, PHYSICAL_METADATA_PROTOCOL_VERSION,
+    SnapshotDescriptor, SuperblockHeader, DEFAULT_METADATA_JOURNAL_RETENTION,
+    DEFAULT_PHYSICAL_FORMAT_VERSION, DEFAULT_SUPERBLOCK_COPIES, OPT_IN_METADATA_JOURNAL_RETENTION,
+    PHYSICAL_METADATA_PROTOCOL_VERSION,
 };
 
 pub use primary_replica::{
