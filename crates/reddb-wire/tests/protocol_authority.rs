@@ -1017,6 +1017,7 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
         "kind(MessageKind::HelloAck)",
         "kind(MessageKind::AuthOk)",
         "kind(MessageKind::AuthFail)",
+        "!= MessageKind::AuthResponse",
         "crate::serde_json::from_slice::<JsonValue>(&resp.payload)",
         "o.get(\"jwt\")",
     ] {
@@ -1046,6 +1047,14 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
             "reddb-wire should own handshake frame builder {required}"
         );
     }
+    assert!(
+        session.contains("expect_auth_response_payload"),
+        "server session AuthResponse kind checks should route through reddb-wire"
+    );
+    assert!(
+        wire.contains("pub fn expect_auth_response_payload"),
+        "reddb-wire should own AuthResponse kind expectation"
+    );
     assert!(
         session.contains("parse_auth_response_oauth_jwt"),
         "server session OAuth AuthResponse parsing should route through reddb-wire"

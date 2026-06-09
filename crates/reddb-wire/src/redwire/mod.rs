@@ -57,7 +57,8 @@ pub use handshake::{
     build_auth_response_bearer_payload, build_auth_response_frame,
     build_auth_response_oauth_jwt_payload, build_client_hello_frame, build_client_hello_payload,
     build_hello_ack, build_hello_ack_frame, build_hello_payload, choose_hello_minor_version,
-    AuthFail, AuthOk, Hello, HelloAck, SUPPORTED_METHODS,
+    expect_auth_response_payload, AuthFail, AuthOk, AuthResponseKindError, Hello, HelloAck,
+    SUPPORTED_METHODS,
 };
 pub use io::{read_frame_async, write_frame_async, RedWireIoError};
 pub use operations::{

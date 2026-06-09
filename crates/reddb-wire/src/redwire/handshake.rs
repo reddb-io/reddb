@@ -5,6 +5,7 @@
 //! Hello, HelloAck, AuthResponse, AuthOk, and AuthFail.
 
 use serde_json::Value as JsonValue;
+use std::fmt;
 
 use super::{BuildError, Frame, FrameBuilder, MessageKind, MAX_KNOWN_MINOR_VERSION};
 
@@ -145,6 +146,20 @@ impl AuthFail {
         })
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthResponseKindError {
+    pub expected: &'static str,
+    pub actual: MessageKind,
+}
+
+impl fmt::Display for AuthResponseKindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "expected {}", self.expected)
+    }
+}
+
+impl std::error::Error for AuthResponseKindError {}
 
 pub fn build_hello_payload<'a, I>(
     versions: &[u8],
@@ -311,6 +326,21 @@ pub fn build_auth_response_frame(
 pub fn parse_auth_response_oauth_jwt(payload: &[u8]) -> Result<String, String> {
     let obj = object_from_payload("AuthResponse", payload)?;
     required_string(&obj, "AuthResponse", "jwt")
+}
+
+pub fn expect_auth_response_payload<'a>(
+    kind: MessageKind,
+    payload: &'a [u8],
+    expected: &'static str,
+) -> Result<&'a [u8], AuthResponseKindError> {
+    if kind == MessageKind::AuthResponse {
+        Ok(payload)
+    } else {
+        Err(AuthResponseKindError {
+            expected,
+            actual: kind,
+        })
+    }
 }
 
 pub fn build_auth_ok_payload(
@@ -661,6 +691,20 @@ mod tests {
         let oauth: JsonValue =
             serde_json::from_slice(&build_auth_response_oauth_jwt_payload("jwt")).unwrap();
         assert_eq!(oauth["jwt"], "jwt");
+    }
+
+    #[test]
+    fn auth_response_kind_expectation_is_pinned() {
+        assert_eq!(
+            expect_auth_response_payload(MessageKind::AuthResponse, b"proof", "AuthResponse")
+                .unwrap(),
+            b"proof"
+        );
+
+        let err =
+            expect_auth_response_payload(MessageKind::Hello, b"{}", "AuthResponse").unwrap_err();
+        assert_eq!(err.actual, MessageKind::Hello);
+        assert_eq!(err.to_string(), "expected AuthResponse");
     }
 
     #[test]
