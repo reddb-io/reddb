@@ -92,6 +92,69 @@ impl RejoinPlanNotice {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejoinRewindConfirmation {
+    pub target_timeline: u64,
+    pub rewind_to_lsn: u64,
+}
+
+impl RejoinRewindConfirmation {
+    pub fn decode_json(bytes: &[u8]) -> Result<Self> {
+        let obj = object_from_slice(bytes)?;
+        Ok(Self {
+            target_timeline: get_u64(&obj, "target_timeline")?,
+            rewind_to_lsn: get_u64(&obj, "rewind_to_lsn")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejoinRewindConfirmationReply {
+    pub ok: bool,
+    pub target_timeline: u64,
+    pub rewind_to_lsn: u64,
+    pub next_step: String,
+}
+
+impl RejoinRewindConfirmationReply {
+    pub fn confirmed(target_timeline: u64, rewind_to_lsn: u64) -> Self {
+        Self {
+            ok: true,
+            target_timeline,
+            rewind_to_lsn,
+            next_step: "restart or resume replica apply from the confirmed LSN".to_string(),
+        }
+    }
+
+    pub fn encode_json(&self) -> Vec<u8> {
+        let mut obj = serde_json::Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(self.ok));
+        obj.insert(
+            "target_timeline".to_string(),
+            JsonValue::Number(self.target_timeline.into()),
+        );
+        obj.insert(
+            "rewind_to_lsn".to_string(),
+            JsonValue::Number(self.rewind_to_lsn.into()),
+        );
+        obj.insert(
+            "next_step".to_string(),
+            JsonValue::String(self.next_step.clone()),
+        );
+        serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
+    }
+
+    pub fn decode_json(bytes: &[u8]) -> Result<Self> {
+        let obj = object_from_slice(bytes)?;
+        Ok(Self {
+            ok: obj.get("ok").and_then(JsonValue::as_bool).unwrap_or(false),
+            target_timeline: get_u64(&obj, "target_timeline")?,
+            rewind_to_lsn: get_u64(&obj, "rewind_to_lsn")?,
+            next_step: get_string(&obj, "next_step")?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +190,20 @@ mod tests {
         .unwrap();
         assert_eq!(plan.target_timeline, 3);
         assert_eq!(plan.rewind_to_lsn, Some(42));
+    }
+
+    #[test]
+    fn rejoin_rewind_confirmation_contract_round_trips() {
+        let request =
+            RejoinRewindConfirmation::decode_json(br#"{"target_timeline":3,"rewind_to_lsn":42}"#)
+                .unwrap();
+        assert_eq!(request.target_timeline, 3);
+        assert_eq!(request.rewind_to_lsn, 42);
+
+        let reply = RejoinRewindConfirmationReply::confirmed(3, 42);
+        assert_eq!(
+            RejoinRewindConfirmationReply::decode_json(&reply.encode_json()).unwrap(),
+            reply
+        );
     }
 }

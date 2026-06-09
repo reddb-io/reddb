@@ -430,6 +430,50 @@ fn server_replication_wal_ack_payloads_live_in_reddb_wire() {
 }
 
 #[test]
+fn server_rejoin_rewind_confirmation_payload_lives_in_reddb_wire() {
+    let root = repo_root();
+    let handler = read(root.join("crates/reddb-server/src/server/handlers_replication.rs"));
+    let non_test = non_test_source(&handler);
+    let wire = read(root.join("crates/reddb-wire/src/replication/timeline.rs"));
+
+    for forbidden in [
+        "serde_json::from_slice::<crate::serde_json::Value>(&body)",
+        "payload.get(\"target_timeline\")",
+        "payload.get(\"rewind_to_lsn\")",
+        "object.insert(\"target_timeline\"",
+        "object.insert(\"rewind_to_lsn\"",
+        "object.insert(\"next_step\"",
+    ] {
+        assert!(
+            !non_test.contains(forbidden),
+            "server rejoin rewind confirmation payload must live in reddb-wire, found {forbidden:?}"
+        );
+    }
+
+    for required in [
+        "RejoinRewindConfirmation::decode_json",
+        "RejoinRewindConfirmationReply::confirmed",
+    ] {
+        assert!(
+            non_test.contains(required),
+            "server rejoin rewind confirmation should route through reddb-wire {required}"
+        );
+    }
+
+    for required in [
+        "pub struct RejoinRewindConfirmation",
+        "pub struct RejoinRewindConfirmationReply",
+        "pub fn decode_json(bytes: &[u8]) -> Result<Self>",
+        "pub fn encode_json(&self) -> Vec<u8>",
+    ] {
+        assert!(
+            wire.contains(required),
+            "reddb-wire should own rejoin rewind confirmation payload contract {required}"
+        );
+    }
+}
+
+#[test]
 fn server_redwire_frame_header_length_routes_through_reddb_wire() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));

@@ -25,7 +25,9 @@ pub use change_record::{
     change_record_json_value_to_string, parse_change_record_json_value, public_item_kind,
     ChangeOperation, ChangeRecord, ChangeRecordJsonValue, DEFAULT_REPLICATION_TERM,
 };
-pub use timeline::{RejoinPlanNotice, TimelineForkNotice};
+pub use timeline::{
+    RejoinPlanNotice, RejoinRewindConfirmation, RejoinRewindConfirmationReply, TimelineForkNotice,
+};
 pub use util::ReplicationPayloadError;
 pub use wal_stream::{
     WalStreamAck, WalStreamAckReply, WalStreamChunk, WalStreamOpen, WalStreamRecord,
