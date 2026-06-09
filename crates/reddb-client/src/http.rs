@@ -16,6 +16,7 @@
 //!   auth.login         → POST /auth/login
 //!   auth.whoami        → GET  /auth/whoami
 
+use reddb_wire::auth::bearer_authorization_value;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, ClientBuilder, Method, StatusCode};
 use serde_json::Value;
@@ -294,7 +295,7 @@ impl HttpClient {
         let mut h = HeaderMap::new();
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(t) = &self.token {
-            if let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}")) {
+            if let Ok(v) = HeaderValue::from_str(&bearer_authorization_value(t)) {
                 h.insert(AUTHORIZATION, v);
             }
         }

@@ -2284,6 +2284,7 @@ name = "reddb-io-client-connector"
 version = "1.10.0"
 dependencies = [
  "reddb-io-grpc-proto",
+ "reddb-io-wire",
  "tonic",
 ]
 

@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+use reddb_wire::auth::{bearer_authorization_value, AUTHORIZATION_HEADER};
+
 #[derive(Debug, Clone)]
 pub enum Auth {
     Anonymous,
@@ -49,7 +51,7 @@ pub fn query_one_shot(base_url: &str, sql: &str, auth: &Auth) -> Result<String> 
     let body = serde_json::json!({ "query": sql }).to_string();
     let mut req = ureq::post(&url).header("content-type", "application/json");
     if let Auth::Bearer(token) = auth {
-        req = req.header("authorization", &format!("Bearer {token}"));
+        req = req.header(AUTHORIZATION_HEADER, &bearer_authorization_value(token));
     }
     let mut resp = req
         .send(body.as_bytes())
