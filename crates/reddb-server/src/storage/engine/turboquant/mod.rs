@@ -12,5 +12,4 @@ pub mod extent;
 pub mod index;
 pub mod rotation;
 pub mod scoring;
-pub mod snapshot;
 pub mod storage;

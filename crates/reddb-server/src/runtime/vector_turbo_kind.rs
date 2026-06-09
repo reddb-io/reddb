@@ -20,7 +20,10 @@ use parking_lot::{Condvar, Mutex};
 use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::engine::turboquant::extent::TurboExtent;
 use crate::storage::engine::turboquant::index::TurboQuantIndex;
-use crate::storage::engine::turboquant::snapshot::{read_snapshot, write_snapshot, SnapshotError};
+use reddb_file::{
+    read_turboquant_snapshot as read_snapshot, write_turboquant_snapshot as write_snapshot,
+    TurboQuantSnapshotError as SnapshotError,
+};
 use crate::storage::engine::Pager;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};

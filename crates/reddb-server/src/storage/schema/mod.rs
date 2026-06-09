@@ -16,7 +16,6 @@ pub mod function_catalog;
 pub mod operator_catalog;
 pub mod parametric;
 pub mod polymorphic;
-pub mod registry;
 pub mod row_slot;
 pub mod table;
 pub mod types;
@@ -25,6 +24,5 @@ pub mod value_codec;
 // Re-export common types
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
 pub use coerce::coerce;
-pub use registry::{SchemaError, SchemaRegistry};
 pub use table::{ColumnDef, Constraint, ConstraintType, IndexDef, IndexType, TableDef};
 pub use types::{DataType, Row, SqlTypeName, TypeModifier, Value, ValueError};
