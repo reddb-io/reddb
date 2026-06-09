@@ -1387,10 +1387,8 @@ mod overflow_pipeline_tests {
 
     fn cleanup(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
-        for suffix in ["-hdr", "-meta", "-dwb"] {
-            let mut p = path.to_path_buf().into_os_string();
-            p.push(suffix);
-            let _ = std::fs::remove_file(&p);
+        for sidecar in reddb_file::layout::pager_shadow_sidecar_paths(path) {
+            let _ = std::fs::remove_file(sidecar);
         }
     }
 
@@ -1621,10 +1619,8 @@ mod overflow_free_tests {
 
     fn cleanup(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
-        for suffix in ["-hdr", "-meta", "-dwb"] {
-            let mut p = path.to_path_buf().into_os_string();
-            p.push(suffix);
-            let _ = std::fs::remove_file(&p);
+        for sidecar in reddb_file::layout::pager_shadow_sidecar_paths(path) {
+            let _ = std::fs::remove_file(sidecar);
         }
     }
 

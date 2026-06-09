@@ -66,6 +66,34 @@ fn server_uses_reddb_file_for_unified_wal_paths() {
 }
 
 #[test]
+fn server_uses_reddb_file_for_pager_shadow_sidecar_groups() {
+    let root = repo_root();
+    let files = [
+        "crates/reddb-server/src/storage/engine/btree.rs",
+        "crates/reddb-server/src/storage/engine/overflow.rs",
+        "crates/reddb-server/src/storage/engine/btree/value_layout.rs",
+    ];
+
+    for file in files {
+        let text = read(root.join(file));
+        assert!(
+            !text.contains("[\"-hdr\", \"-meta\", \"-dwb\"]"),
+            "{file} should not rebuild pager shadow sidecar suffix groups"
+        );
+        assert!(
+            text.contains("reddb_file::layout::pager_shadow_sidecar_paths"),
+            "{file} should route pager shadow sidecar groups through reddb-file"
+        );
+    }
+
+    let layout = read(root.join("crates/reddb-file/src/layout.rs"));
+    assert!(
+        layout.contains("pub fn pager_shadow_sidecar_paths"),
+        "reddb-file should own the pager shadow sidecar group"
+    );
+}
+
+#[test]
 fn server_does_not_own_unified_store_wal_action_frame() {
     let root = repo_root();
     let text = read(root.join("crates/reddb-server/src/storage/unified/store/commit.rs"));
