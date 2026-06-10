@@ -16,5 +16,5 @@ pub use membership::{
 pub use ownership::{
     CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
     PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership,
-    ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
+    RangeRole, RangeWriteReject, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
 };
