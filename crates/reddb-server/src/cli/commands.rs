@@ -433,9 +433,9 @@ fn replica_flags() -> Vec<FlagSchema> {
 fn ui_flags() -> Vec<FlagSchema> {
     vec![
         FlagSchema::boolean("server")
-            .with_description("Force the browser-served bridge path (default for file:// targets)"),
+            .with_description("Force the browser-served bridge path (skip the desktop deep link)"),
         FlagSchema::boolean("desktop").with_description(
-            "Reserved: open the native desktop UI (lands in the deep-link slice)",
+            "Force the desktop app via the redui:// deep link (no browser fallback)",
         ),
         FlagSchema::new("ui-dir").with_description(
             "Directory to serve the UI bundle from (defaults to the built-in fixture)",
