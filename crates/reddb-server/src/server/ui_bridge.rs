@@ -43,7 +43,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tokio::sync::oneshot;
 
-use super::ws_edge::{pump_ws_stream, run_ws_session, REDWIRE_WS_PATH, REDWIRE_WS_SUBPROTOCOL};
+use super::ui_auth::{inject_auth_mode_config, UiAuthMode};
+use super::ws_edge::{
+    inject_bearer_handshake, pump_ws_stream, run_injected_ws_session, run_ws_session,
+    REDWIRE_WS_PATH, REDWIRE_WS_SUBPROTOCOL,
+};
 use super::RedDBServer;
 
 /// The checked-in minimal UI fixture served when no `--ui-dir` is given.
@@ -61,6 +65,14 @@ pub struct UiBridgeConfig {
     /// Loopback port to bind. `0` (the default) picks an ephemeral port —
     /// the resolved address is read back from [`UiBridge::local_addr`].
     pub port: u16,
+    /// Credential handoff (issue #1048). When `Some`, `red` holds the bearer
+    /// token and presents it in the RedWire handshake on the UI's behalf
+    /// (injected-auth mode) — the UI never sees the secret. When `None`, the
+    /// UI drives its own handshake (anonymous, or prompting per `auth_mode`).
+    pub injected_token: Option<String>,
+    /// Which auth mode the served page runs in (injected / prompt / open).
+    /// Injected into the page as `window.REDDB_AUTH_MODE` — credential-free.
+    pub auth_mode: UiAuthMode,
 }
 
 /// A remote RedWire endpoint the bridge fronts for a `red://` / `reds://`
@@ -176,6 +188,13 @@ struct BridgeState {
     /// `window.REDDB_WS_URL` into HTML responses so the UI page can
     /// connect directly rather than deriving from `location.host`.
     direct_ws_url: Option<Arc<String>>,
+    /// Bearer token held by `red` (issue #1048). When `Some`, the `/redwire`
+    /// session runs in injected-auth mode — the token is presented in the
+    /// handshake on the UI's behalf and never reaches the page.
+    injected_token: Option<Arc<String>>,
+    /// Auth mode injected into the served page as `window.REDDB_AUTH_MODE`
+    /// (credential-free) so the UI knows whether to prompt.
+    auth_mode: UiAuthMode,
 }
 
 /// A running loopback UI bridge. Holds the bound address plus the handles
@@ -288,6 +307,8 @@ async fn spawn_ui_bridge_backend(
         allowed_origins: Arc::new(seed_loopback_origins(local_addr.port())),
         ui_dir: config.ui_dir.map(Arc::new),
         direct_ws_url: None,
+        injected_token: config.injected_token.map(Arc::new),
+        auth_mode: config.auth_mode,
     };
 
     let router = axum::Router::new()
@@ -328,6 +349,11 @@ pub async fn spawn_direct_ui_server(
         allowed_origins: Arc::new(vec![]),
         ui_dir: config.ui_dir.map(Arc::new),
         direct_ws_url: Some(Arc::new(ws_url.clone())),
+        // Direct targets run no loopback relay, so `red` cannot inject auth
+        // into the handshake — the browser connects to the remote endpoint
+        // itself. Auth mode still drives whether the page prompts.
+        injected_token: None,
+        auth_mode: config.auth_mode,
     };
 
     // No /redwire route — the browser owns its own WS connection.
@@ -371,16 +397,26 @@ async fn loopback_redwire_upgrade(
     }
 
     let backend = Arc::clone(&state.backend);
+    let injected_token = state.injected_token.clone();
     ws.protocols([REDWIRE_WS_SUBPROTOCOL])
         .on_upgrade(move |socket| async move {
             match &*backend {
                 // `file://` — RedWire over the in-process embedded engine.
-                BridgeBackend::Embedded(server) => {
-                    run_ws_session(socket, server.clone()).await;
-                }
-                // `red://` / `reds://` — relay to a remote RedWire instance.
+                // In injected-auth mode `red` presents the held bearer token
+                // in the handshake so the UI never sees it (issue #1048).
+                BridgeBackend::Embedded(server) => match injected_token.as_deref() {
+                    Some(token) => run_injected_ws_session(socket, server.clone(), token).await,
+                    None => run_ws_session(socket, server.clone()).await,
+                },
+                // `red://` / `reds://` — relay to a remote RedWire instance,
+                // injecting the held bearer token into the handshake when set.
                 BridgeBackend::Remote(target) => {
-                    run_remote_ws_session(socket, target).await;
+                    run_remote_ws_session(
+                        socket,
+                        target,
+                        injected_token.as_deref().map(String::as_str),
+                    )
+                    .await;
                 }
                 // `red+wss://` / `red+ws://` — the `/redwire` route is not
                 // mounted for direct targets, so this arm is unreachable.
@@ -400,7 +436,11 @@ async fn loopback_redwire_upgrade(
 /// pure byte relay and never parses RedWire frames. On a connection
 /// failure the WS is closed so the UI surfaces the error rather than
 /// hanging.
-async fn run_remote_ws_session(socket: WebSocket, target: &RemoteRedwireTarget) {
+async fn run_remote_ws_session(
+    socket: WebSocket,
+    target: &RemoteRedwireTarget,
+    injected_token: Option<&str>,
+) {
     let addr = (target.host.as_str(), target.port);
     let tcp = match tokio::net::TcpStream::connect(addr).await {
         Ok(tcp) => tcp,
@@ -417,12 +457,20 @@ async fn run_remote_ws_session(socket: WebSocket, target: &RemoteRedwireTarget) 
     };
 
     if !target.tls {
-        pump_ws_stream(socket, tcp).await;
+        match injected_token {
+            // Injected-auth: `red` presents the held bearer token in the
+            // handshake to the remote target on the UI's behalf (issue #1048).
+            Some(token) => inject_bearer_handshake(socket, tcp, token).await,
+            None => pump_ws_stream(socket, tcp).await,
+        }
         return;
     }
 
     match wrap_remote_tls(tcp, target).await {
-        Ok(tls) => pump_ws_stream(socket, tls).await,
+        Ok(tls) => match injected_token {
+            Some(token) => inject_bearer_handshake(socket, tls, token).await,
+            None => pump_ws_stream(socket, tls).await,
+        },
         Err(err) => {
             tracing::warn!(
                 host = %target.host,
@@ -523,9 +571,12 @@ async fn serve_ui(State(state): State<BridgeState>, uri: Uri) -> Response {
         }
     };
 
-    // For direct targets, inject `window.REDDB_WS_URL` before </head> so
-    // the UI page knows the remote WS endpoint without a loopback relay.
+    // Inject the page config before </head> (HTML only). The auth mode
+    // (issue #1048) tells the UI whether to prompt — credential-free, never
+    // the token. For direct targets, the WS URL config is injected too so the
+    // page knows the remote endpoint without a loopback relay.
     if content_type.starts_with("text/html") {
+        body = inject_auth_mode_config(body, state.auth_mode);
         if let Some(ws_url) = &state.direct_ws_url {
             body = inject_ws_url_config(body, ws_url);
         }
