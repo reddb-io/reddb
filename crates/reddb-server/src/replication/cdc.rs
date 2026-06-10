@@ -14,6 +14,13 @@ pub use reddb_wire::replication::{public_item_kind, ChangeOperation, ChangeRecor
 // contract; re-exported separately to keep the pinned contract line above
 // byte-for-byte (see `protocol_authority` reddb-wire test).
 pub use reddb_wire::replication::{RangeAdmitError, RangeAuthority};
+// Issue #992 — range-indexed WAL streaming / per-range catch-up primitives.
+// The filtering and per-range progress contract lives in reddb-wire; the
+// server drives them over the single physical WAL's derived stream.
+pub use reddb_wire::replication::{
+    classify_range_record, plan_range_catchup, RangeCatchupPlan, RangeProgressTracker,
+    RangeStreamDecision, RangeStreamPosition, RangeStreamProgress, RangeStreamReject,
+};
 
 /// A single change event.
 #[derive(Debug, Clone)]

@@ -1160,6 +1160,74 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // Issue #992 — end-to-end range-indexed catch-up over the single physical
+    // WAL: a follower plans its range's work out of the shared stream, then
+    // applies exactly that work through the same `apply_fenced` gate. The other
+    // range's records and a deposed-owner write never reach apply.
+    #[test]
+    fn range_catchup_plan_applies_only_its_range_through_the_fence() {
+        use crate::replication::cdc::{plan_range_catchup, RangeStreamPosition, RangeStreamReject};
+
+        let (db, path) = open_db();
+        let applier = LogicalChangeApplier::new(0);
+
+        // One sequential WAL slice: range 7 at LSN 1..3 (epoch 5), range 9 at
+        // 4..5, and a returning ex-owner of range 7 at LSN 6 on a stale epoch.
+        let stream = vec![
+            record(1, b"a").with_range_authority(7, 5),
+            record(2, b"b").with_range_authority(7, 5),
+            record(3, b"c").with_range_authority(7, 5),
+            record(4, b"d").with_range_authority(9, 2),
+            record(5, b"e").with_range_authority(9, 2),
+            record(6, b"f").with_range_authority(7, 4),
+        ];
+
+        // Range-7 follower resumes from origin, already knowing owner epoch 5.
+        let position = RangeStreamPosition::new(7, 0, 1, 5);
+        let plan = plan_range_catchup(&position, &stream);
+
+        // Only range 7's current records were selected; the stale-epoch write
+        // is rejected, not selected.
+        assert_eq!(plan.apply, vec![0, 1, 2]);
+        assert_eq!(
+            plan.rejected,
+            vec![RangeStreamReject {
+                lsn: 6,
+                error: RangeAdmitError::StaleOwnershipEpoch {
+                    record_epoch: 4,
+                    accepted_epoch: 5,
+                },
+            }]
+        );
+        assert_eq!(plan.resume.applied_lsn, 3);
+
+        // Apply exactly the planned records through the per-range fence.
+        let fence = position.authority();
+        for index in &plan.apply {
+            applier
+                .apply_fenced(&db, &stream[*index], ApplyMode::Replica, Some(&fence))
+                .expect("planned record applies through the fence");
+        }
+        assert_eq!(applier.last_applied_lsn(), 3);
+
+        // The deposed-owner record the plan refused is exactly what the apply
+        // fence would also reject, never advancing the chain.
+        let stale = &stream[5];
+        let err = applier
+            .apply_fenced(&db, stale, ApplyMode::Replica, Some(&fence))
+            .unwrap_err();
+        assert!(
+            matches!(err, LogicalApplyError::RangeFenced { range_id: 7, .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            applier.last_applied_lsn(),
+            3,
+            "stale write must not advance"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn apply_skips_older_lsn() {
         let (db, path) = open_db();
