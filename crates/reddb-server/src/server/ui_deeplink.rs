@@ -125,6 +125,20 @@ pub fn build_deep_link(canonical_uri: &str) -> String {
     format!("redui://?connect={}", percent_encode_connect(canonical_uri))
 }
 
+/// Build a deep link that *also* tells the desktop app where to fetch the
+/// held credential from (issue #1048). The `handoff` query value is the
+/// **loopback handoff URL** — `http://127.0.0.1:<port>/handoff/<nonce>` — which
+/// carries the single-use nonce, never the secret. The desktop app fetches the
+/// token from there over the local secret channel; nothing sensitive rides the
+/// deep link, so the token never lands in `ps`, shell history, or URL logs.
+pub fn build_deep_link_with_handoff(canonical_uri: &str, handoff_url: &str) -> String {
+    format!(
+        "redui://?connect={}&handoff={}",
+        percent_encode_connect(canonical_uri),
+        percent_encode_connect(handoff_url),
+    )
+}
+
 /// Percent-encode a target URI for the `connect=` query value. Keeps the
 /// characters that are already query-safe and shape-significant for our
 /// supported schemes (`A-Za-z0-9` and `-._~:/`), and encodes everything else —
@@ -452,6 +466,23 @@ mod tests {
         let outcome = dispatch(DispatchMode::Desktop, "file:///work/data.rdb", &env).unwrap();
         assert_eq!(outcome, DispatchOutcome::DesktopNotInstalled);
         assert!(env.opened.borrow().is_empty());
+    }
+
+    #[test]
+    fn handoff_deep_link_carries_the_nonce_url_not_the_secret() {
+        // The handoff URL holds the single-use nonce; the secret token is
+        // never an argument to the builder, so it cannot appear in the link.
+        let handoff = "http://127.0.0.1:54321/handoff/0123456789abcdef0123456789abcdef";
+        let link = build_deep_link_with_handoff("red://db.internal:5050", handoff);
+        assert_eq!(
+            link,
+            "redui://?connect=red://db.internal:5050\
+             &handoff=http://127.0.0.1:54321/handoff/0123456789abcdef0123456789abcdef"
+        );
+        // No credential material rides the link.
+        assert!(!link.contains("token"));
+        assert!(!link.contains("Bearer"));
+        assert!(link.contains("/handoff/"));
     }
 
     #[test]

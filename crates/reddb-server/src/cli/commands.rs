@@ -445,6 +445,10 @@ fn ui_flags() -> Vec<FlagSchema> {
         FlagSchema::new("tls-ca").with_description(
             "PEM CA bundle to trust for a reds:// target (on top of system roots)",
         ),
+        FlagSchema::new("token").with_short('t').with_description(
+            "Bearer token (session/API key). Held by red and injected into the \
+             RedWire handshake — the UI never sees it (env: RED_UI_TOKEN)",
+        ),
         FlagSchema::boolean("no-browser").with_description(
             "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",
         ),

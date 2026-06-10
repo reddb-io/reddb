@@ -79,6 +79,62 @@ fn desktop_with_registered_handler_emits_canonical_deep_link() {
 }
 
 #[test]
+fn desktop_with_token_hands_off_via_nonce_not_url() {
+    // Issue #1048: with `--token`, the secret crosses via the one-time
+    // loopback channel — the deep link carries only the `&handoff=` nonce URL,
+    // never the token itself.
+    if cfg!(not(target_os = "linux")) || !xdg_open_present() {
+        eprintln!("skipping: no spawnable xdg-open on this platform");
+        return;
+    }
+
+    let secret = "rk_cli_handoff_secret_value";
+    let output = Command::new(red_binary())
+        .args([
+            "ui",
+            "--desktop",
+            "--json",
+            "--token",
+            secret,
+            "file://./data.rdb",
+        ])
+        .env("RED_UI_DEEPLINK_REGISTERED", "1")
+        // Bound the one-time-handoff wait so the test doesn't block 60s.
+        .env("RED_UI_HANDOFF_WAIT_MS", "300")
+        .current_dir(std::env::temp_dir())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run red ui --desktop --token");
+
+    assert!(
+        output.status.success(),
+        "expected clean handoff exit; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The deep link uses the local secret channel…
+    assert!(
+        stdout.contains("\"auth\":\"handoff\""),
+        "expected a credential-channel handoff: {stdout}"
+    );
+    assert!(
+        stdout.contains("&handoff=http://127.0.0.1") && stdout.contains("/handoff/"),
+        "deep link must carry the nonce handoff URL: {stdout}"
+    );
+    // …and the secret never appears in the dispatched URL or anywhere on stdout.
+    assert!(
+        !stdout.contains(secret),
+        "the token must never appear in the dispatched deep link: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(secret),
+        "the token must never appear in logs: {stderr}"
+    );
+}
+
+#[test]
 fn desktop_without_handler_errors_with_install_guidance() {
     let output = Command::new(red_binary())
         .args(["ui", "--desktop", "--json", "file://./data.rdb"])

@@ -22,8 +22,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use reddb_server::auth::{AuthConfig, AuthStore, Role};
-use reddb_server::server::ui_bridge::{spawn_ui_bridge, UiBridgeConfig};
 use reddb_server::server::ui_auth::{spawn_handoff_server, UiAuthMode};
+use reddb_server::server::ui_bridge::{spawn_ui_bridge, UiBridgeConfig};
 use reddb_server::server::RedDBServer;
 use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_wire::redwire::{
@@ -174,7 +174,9 @@ async fn injected_auth_opens_session_without_ui_sending_token() {
         auth_mode: UiAuthMode::Injected,
         ..Default::default()
     };
-    let bridge = spawn_ui_bridge(server, config).await.expect("bridge starts");
+    let bridge = spawn_ui_bridge(server, config)
+        .await
+        .expect("bridge starts");
 
     let origin = format!("http://127.0.0.1:{}", bridge.local_addr().port());
     let (mut ws, _resp) = connect_async(ws_request(&bridge.ws_url(), &origin))
@@ -230,7 +232,9 @@ async fn auth_enabled_db_rejects_anonymous_without_injection() {
         auth_mode: UiAuthMode::Prompt,
         ..Default::default()
     };
-    let bridge = spawn_ui_bridge(server, config).await.expect("bridge starts");
+    let bridge = spawn_ui_bridge(server, config)
+        .await
+        .expect("bridge starts");
 
     let origin = format!("http://127.0.0.1:{}", bridge.local_addr().port());
     let (mut ws, _resp) = connect_async(ws_request(&bridge.ws_url(), &origin))
@@ -276,7 +280,9 @@ async fn served_page_never_contains_the_token() {
         auth_mode: UiAuthMode::Injected,
         ..Default::default()
     };
-    let bridge = spawn_ui_bridge(server, config).await.expect("bridge starts");
+    let bridge = spawn_ui_bridge(server, config)
+        .await
+        .expect("bridge starts");
     let addr = bridge.local_addr();
 
     let response = http_get(addr, "/").await;
@@ -309,7 +315,9 @@ async fn authenticated_db_without_token_serves_prompt_mode() {
         auth_mode: UiAuthMode::Prompt,
         ..Default::default()
     };
-    let bridge = spawn_ui_bridge(server, config).await.expect("bridge starts");
+    let bridge = spawn_ui_bridge(server, config)
+        .await
+        .expect("bridge starts");
     let addr = bridge.local_addr();
 
     let response = http_get(addr, "/").await;
@@ -329,7 +337,9 @@ async fn unauthenticated_db_serves_open_mode() {
         auth_mode: UiAuthMode::Open,
         ..Default::default()
     };
-    let bridge = spawn_ui_bridge(server, config).await.expect("bridge starts");
+    let bridge = spawn_ui_bridge(server, config)
+        .await
+        .expect("bridge starts");
     let addr = bridge.local_addr();
 
     let response = http_get(addr, "/").await;
@@ -367,12 +377,15 @@ async fn handoff_server_yields_token_once_via_nonce_url() {
     // First fetch returns the credential.
     let path = url.split(&handoff.local_addr().to_string()).nth(1).unwrap();
     let first = http_get(handoff.local_addr(), path).await;
-    assert!(first.starts_with("HTTP/1.1 200"), "first fetch 200: {first}");
     assert!(
-        first.contains(&token),
-        "first fetch returns the token body"
+        first.starts_with("HTTP/1.1 200"),
+        "first fetch 200: {first}"
     );
-    assert!(handoff.is_consumed(), "the secret is consumed after one fetch");
+    assert!(first.contains(&token), "first fetch returns the token body");
+    assert!(
+        handoff.is_consumed(),
+        "the secret is consumed after one fetch"
+    );
 
     // A replay (or any second fetch) gets nothing.
     let second = http_get(handoff.local_addr(), path).await;
@@ -380,10 +393,7 @@ async fn handoff_server_yields_token_once_via_nonce_url() {
         second.starts_with("HTTP/1.1 404"),
         "second fetch must be 404 (single-use): {second}"
     );
-    assert!(
-        !second.contains(&token),
-        "a replay must not leak the token"
-    );
+    assert!(!second.contains(&token), "a replay must not leak the token");
 
     // A wrong nonce never reveals the secret.
     let wrong = http_get(handoff.local_addr(), "/handoff/deadbeef").await;
