@@ -3,19 +3,22 @@
 # ============================================================================
 # RedDB - Multi-stage Docker build
 # ============================================================================
-# Stage 1: Build release binaries with protobuf support
-# Stage 2: distroless runtime with non-root user
+# Stage 1: Build release binaries with protobuf support (musl static)
+# Stage 2: distroless static runtime with non-root user
 # ============================================================================
 
 FROM rust:1.95-slim-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG REDDB_CARGO_FEATURES=""
-ENV CARGO_PROFILE_RELEASE_STRIP=symbols
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends protobuf-compiler musl-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-unknown-linux-musl
+
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+    CC_x86_64_unknown_linux_musl=musl-gcc
 
 WORKDIR /app
 
@@ -28,19 +31,19 @@ COPY docs/spec/ docs/spec/
 RUN mkdir -p src/bin \
     && echo 'fn main() {}' > src/bin/red.rs \
     && echo '' > src/lib.rs \
-    && cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} 2>/dev/null || true \
+    && cargo build --profile release-static --locked --target x86_64-unknown-linux-musl --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} 2>/dev/null || true \
     && rm -rf src
 
 # Copy full source and build for real
 COPY src/ src/
 
-RUN cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} \
+RUN cargo build --profile release-static --locked --target x86_64-unknown-linux-musl --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} \
     && mkdir -p /image/data /image/etc/reddb \
     && touch /image/data/.keep /image/etc/reddb/.keep
 
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
-COPY --from=builder --chown=nonroot:nonroot /app/target/release/red /usr/local/bin/red
+COPY --from=builder --chown=nonroot:nonroot /app/target/x86_64-unknown-linux-musl/release-static/red /usr/local/bin/red
 COPY --from=builder --chown=nonroot:nonroot /image/data /data
 COPY --from=builder --chown=nonroot:nonroot /image/etc/reddb /etc/reddb
 

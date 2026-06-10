@@ -248,6 +248,7 @@ jobs:
         run: |
           docker run --rm -v "${PWD}:/volume" -w /volume messense/rust-musl-cross:aarch64-musl \
             bash -lc '
+              set -euo pipefail
               rm -f rust-toolchain.toml
               curl -sSL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip -o /tmp/protoc.zip
               unzip -o /tmp/protoc.zip -d /usr/local >/dev/null
@@ -531,6 +532,7 @@ jobs:
           publish_one reddb-io-wire
           publish_one reddb-io-grpc-proto
           publish_one reddb-io-client-connector
+          publish_one reddb-io-file
           publish_one reddb-io-server
           publish_one reddb-io-client
           publish_one reddb-io
