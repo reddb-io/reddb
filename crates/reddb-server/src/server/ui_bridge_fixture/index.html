@@ -91,7 +91,9 @@
     }
 
     async function connectAndQuery(sql) {
-      const wsUrl = `ws://${location.host}/redwire`
+      // Direct targets inject window.REDDB_WS_URL; bridge targets derive
+      // the WS endpoint from the page's own origin (loopback).
+      const wsUrl = window.REDDB_WS_URL || `ws://${location.host}/redwire`
       const ws = new WebSocket(wsUrl)
       ws.binaryType = 'arraybuffer'
       const reader = new FrameReader()
