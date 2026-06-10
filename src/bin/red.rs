@@ -1795,6 +1795,15 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         }
     };
 
+    // Credential handoff (issue #1048, ADR 0051): when a token is supplied,
+    // `red` owns it and the UI never sees it. On the served path it is
+    // injected into the RedWire handshake (below); on the deep-link/desktop
+    // path it crosses via a one-time loopback secret channel keyed by a nonce
+    // — never the URL. `RED_UI_TOKEN` is honoured as an env fallback.
+    let token = flag_string(flags, "token")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("RED_UI_TOKEN"));
+
     // Deep-link dispatch (issue #1046, ADR 0051): the default `red ui <uri>`
     // (no `--server`) prefers the installed desktop app via the `redui://`
     // scheme and only falls back to the served browser bridge when no handler
@@ -1823,50 +1832,81 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                 std::process::exit(1);
             });
         let env = reddb::server::ui_deeplink::OsDeepLinkEnv;
-        match reddb::server::ui_deeplink::dispatch(mode, &canonical, &env) {
-            Ok(reddb::server::ui_deeplink::DispatchOutcome::HandedOff { deep_link }) => {
-                if json_mode {
-                    json_ok(
-                        "ui",
-                        &format!(
-                            "{{\"dispatch\":\"desktop\",\"deep_link\":\"{}\",\"target\":\"{}\"}}",
-                            json_escape(&deep_link),
-                            json_escape(&canonical),
-                        ),
-                    );
-                } else {
-                    println!("red ui: handing off to the desktop app");
-                    println!("  {deep_link}");
-                }
+
+        // Injected-auth deep-link path: with a token in hand and the desktop
+        // handler registered, hand the credential over a one-time loopback
+        // channel — the deep link carries only the nonce. When the handler
+        // isn't registered, fall through to the served browser bridge (which
+        // injects the token into the handshake instead).
+        if let Some(tok) = &token {
+            use reddb::server::ui_deeplink::DeepLinkEnv as _;
+            if env.handler_registered() {
+                run_ui_desktop_handoff(&canonical, tok, json_mode);
                 return;
             }
-            Ok(reddb::server::ui_deeplink::DispatchOutcome::DesktopNotInstalled) => {
+            if mode == reddb::server::ui_deeplink::DispatchMode::Desktop {
                 let msg = "no redui:// handler registered; the desktop app is not installed. \
                            Install it from https://reddb.io/download, or run \
-                           `red ui --server <uri>` to use the browser.";
+                           `red ui --server <uri> --token <X>` to use the browser.";
                 if json_mode {
                     json_error("ui", msg);
                 }
                 eprintln!("error: {msg}");
                 std::process::exit(1);
             }
-            Ok(reddb::server::ui_deeplink::DispatchOutcome::ServeBrowser { upsell }) => {
-                if upsell && !json_mode {
-                    // Auto fallback: nudge the native shell, then serve.
-                    eprintln!(
-                        "note: desktop app not installed — serving the browser UI. \
-                         Install it from https://reddb.io/download for a faster native shell."
-                    );
-                }
-                // Fall through to the served browser-bridge path below.
+            if !json_mode {
+                eprintln!(
+                    "note: desktop app not installed — serving the browser UI \
+                     (the token is injected into the handshake, never sent to the page)."
+                );
             }
-            Err(err) => {
-                let msg = format!("deep-link dispatch: {err}");
-                if json_mode {
-                    json_error("ui", &msg);
+            // Fall through to the served browser-bridge path below.
+        } else {
+            match reddb::server::ui_deeplink::dispatch(mode, &canonical, &env) {
+                Ok(reddb::server::ui_deeplink::DispatchOutcome::HandedOff { deep_link }) => {
+                    if json_mode {
+                        json_ok(
+                            "ui",
+                            &format!(
+                            "{{\"dispatch\":\"desktop\",\"deep_link\":\"{}\",\"target\":\"{}\"}}",
+                            json_escape(&deep_link),
+                            json_escape(&canonical),
+                        ),
+                        );
+                    } else {
+                        println!("red ui: handing off to the desktop app");
+                        println!("  {deep_link}");
+                    }
+                    return;
                 }
-                eprintln!("error: {msg}");
-                std::process::exit(1);
+                Ok(reddb::server::ui_deeplink::DispatchOutcome::DesktopNotInstalled) => {
+                    let msg = "no redui:// handler registered; the desktop app is not installed. \
+                           Install it from https://reddb.io/download, or run \
+                           `red ui --server <uri>` to use the browser.";
+                    if json_mode {
+                        json_error("ui", msg);
+                    }
+                    eprintln!("error: {msg}");
+                    std::process::exit(1);
+                }
+                Ok(reddb::server::ui_deeplink::DispatchOutcome::ServeBrowser { upsell }) => {
+                    if upsell && !json_mode {
+                        // Auto fallback: nudge the native shell, then serve.
+                        eprintln!(
+                            "note: desktop app not installed — serving the browser UI. \
+                         Install it from https://reddb.io/download for a faster native shell."
+                        );
+                    }
+                    // Fall through to the served browser-bridge path below.
+                }
+                Err(err) => {
+                    let msg = format!("deep-link dispatch: {err}");
+                    if json_mode {
+                        json_error("ui", &msg);
+                    }
+                    eprintln!("error: {msg}");
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -1884,8 +1924,9 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     });
 
     // `target_label` is what we report as the bridged target; `backend`
-    // is what the bridge fronts.
-    let (target_label, backend) = match target {
+    // is what the bridge fronts; `db_auth_required` is whether the target DB
+    // requires authentication (issue #1048 — drives whether the UI prompts).
+    let (target_label, backend, db_auth_required) = match target {
         reddb::server::ui_bridge::UiTarget::File => {
             let file_uri = canonicalize_file_uri(&uri).unwrap_or_else(|err| {
                 if json_mode {
@@ -1909,7 +1950,14 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                         std::process::exit(1);
                     });
             let server = reddb::server::RedDBServer::new(runtime);
-            (file_uri, UiBackend::Embedded(server))
+            // The embedded engine's auth config is the source of truth for
+            // whether the UI prompts when no token is supplied (issue #1048).
+            let db_auth_required = server
+                .runtime()
+                .auth_store()
+                .map(|store| store.is_enabled())
+                .unwrap_or(false);
+            (file_uri, UiBackend::Embedded(server), db_auth_required)
         }
         reddb::server::ui_bridge::UiTarget::Remote(spec) => {
             // Optional `--tls-ca <pem>` is trusted on top of the webpki
@@ -1934,13 +1982,15 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                 tls: spec.tls,
                 ca_pem,
             };
-            (uri.clone(), UiBackend::Remote(target))
+            // A remote DB's auth config is not knowable without connecting; be
+            // conservative and prompt when no token is supplied.
+            (uri.clone(), UiBackend::Remote(target), true)
         }
         reddb::server::ui_bridge::UiTarget::Direct { ws_url } => {
             // ADR 0047: browser-reachable WS target — no loopback relay.
             // Serve the UI bundle locally and let the browser connect
             // directly to ws_url (already a wss:// or ws:// URL).
-            (uri.clone(), UiBackend::Direct { ws_url })
+            (uri.clone(), UiBackend::Direct { ws_url }, true)
         }
     };
 
@@ -1972,7 +2022,34 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         .unwrap_or(0);
     let no_browser = flag_bool(flags, "no-browser") || env_truthy("RED_UI_NO_BROWSER");
 
-    let config = reddb::server::ui_bridge::UiBridgeConfig { ui_dir, port };
+    // Credential handoff on the served path (issue #1048): `red` holds the
+    // token and injects it into the RedWire handshake. The direct
+    // (`red+wss://`) path has no loopback relay, so injection isn't possible
+    // there — the browser connects to the target itself and prompts.
+    let direct_target = matches!(backend, UiBackend::Direct { .. });
+    let injected_token = if direct_target {
+        if token.is_some() && !json_mode {
+            eprintln!(
+                "note: --token cannot be injected on the direct (red+wss://) path — \
+                 the browser connects to the target itself; the UI will prompt."
+            );
+        }
+        None
+    } else {
+        token.clone()
+    };
+    let auth_mode = if direct_target && token.is_some() {
+        reddb::server::ui_auth::UiAuthMode::Prompt
+    } else {
+        reddb::server::ui_auth::UiAuthMode::resolve(injected_token.is_some(), db_auth_required)
+    };
+
+    let config = reddb::server::ui_bridge::UiBridgeConfig {
+        ui_dir,
+        port,
+        injected_token,
+        auth_mode,
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -2033,6 +2110,106 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
             println!("\nred ui: shutting down…");
         }
         bridge.shutdown().await;
+    });
+}
+
+/// Hand a credential to the desktop app over the local secret channel
+/// (issue #1048): start a one-time loopback handoff server holding the token,
+/// dispatch the `redui://` deep link carrying only the nonce/handoff URL, and
+/// wait until the desktop app fetches the secret (or a short window elapses).
+/// The token never rides the deep link, so nothing sensitive lands in `ps`,
+/// shell history, or URL logs.
+fn run_ui_desktop_handoff(canonical: &str, token: &str, json_mode: bool) {
+    // The desktop app polls the loopback endpoint right after the OS hands it
+    // the deep link; give it a generous window, then exit regardless so we
+    // never leak a lingering listener. `RED_UI_HANDOFF_WAIT_MS` overrides the
+    // window (tests and impatient operators).
+    let handoff_wait = env_string("RED_UI_HANDOFF_WAIT_MS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or_else(|| std::time::Duration::from_secs(60));
+    const POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    rt.block_on(async move {
+        let handoff = match reddb::server::ui_auth::spawn_handoff_server(token.to_string()).await {
+            Ok(server) => server,
+            Err(err) => {
+                let msg = format!("start credential handoff server: {err}");
+                if json_mode {
+                    json_error("ui", &msg);
+                }
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        };
+
+        let deep_link = reddb::server::ui_deeplink::build_deep_link_with_handoff(
+            canonical,
+            &handoff.handoff_url(),
+        );
+
+        {
+            use reddb::server::ui_deeplink::DeepLinkEnv as _;
+            let env = reddb::server::ui_deeplink::OsDeepLinkEnv;
+            if let Err(err) = env.open_url(&deep_link) {
+                let msg = format!("open deep link: {err}");
+                if json_mode {
+                    json_error("ui", &msg);
+                }
+                eprintln!("error: {msg}");
+                handoff.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+
+        if json_mode {
+            json_ok(
+                "ui",
+                &format!(
+                    "{{\"dispatch\":\"desktop\",\"deep_link\":\"{}\",\"target\":\"{}\",\"auth\":\"handoff\"}}",
+                    json_escape(&deep_link),
+                    json_escape(canonical),
+                ),
+            );
+        } else {
+            println!("red ui: handing off to the desktop app (credential via local channel)");
+            println!("  {deep_link}");
+            println!("Waiting for the desktop app to collect the credential…");
+        }
+
+        // Wait until the desktop app collects the credential, the window
+        // elapses, or the user interrupts.
+        let waited = tokio::time::timeout(handoff_wait, async {
+            loop {
+                if handoff.is_consumed() {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(POLL) => {}
+                    _ = tokio::signal::ctrl_c() => break,
+                }
+            }
+        })
+        .await;
+
+        if !json_mode {
+            if handoff.is_consumed() {
+                println!("red ui: credential delivered.");
+            } else if waited.is_err() {
+                eprintln!(
+                    "note: the desktop app did not collect the credential within {}s; \
+                     the one-time handoff has expired.",
+                    handoff_wait.as_secs()
+                );
+            }
+        }
+
+        handoff.shutdown().await;
     });
 }
 
@@ -3068,6 +3245,12 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("tls-ca").with_description(
                     "PEM CA bundle to trust for a reds:// target (on top of system roots)",
                 ),
+                cli::types::FlagSchema::new("token")
+                    .with_short('t')
+                    .with_description(
+                        "Bearer token (session/API key). Held by red and injected into the \
+                         RedWire handshake — the UI never sees it (env: RED_UI_TOKEN)",
+                    ),
                 cli::types::FlagSchema::boolean("no-browser").with_description(
                     "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",
                 ),
