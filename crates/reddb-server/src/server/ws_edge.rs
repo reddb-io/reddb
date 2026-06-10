@@ -36,6 +36,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::axum_edge::EdgeState;
 use super::http_handler_metrics::HttpTransport;
 use crate::wire::redwire::listener::handle_session_consume_magic;
+use reddb_wire::redwire::{
+    build_auth_response_bearer_payload, build_auth_response_frame, build_client_hello_frame,
+    decode_frame, encode_frame, read_frame_async, write_frame_async, Frame, MessageKind,
+    FRAME_HEADER_SIZE, REDWIRE_MAGIC,
+};
 
 /// Path the browser client (`red+wss://host:port`) resolves to.
 pub(super) const REDWIRE_WS_PATH: &str = "/redwire";
@@ -188,6 +193,217 @@ pub(crate) async fn run_ws_session(socket: WebSocket, server: super::RedDBServer
     // session side); abort backstops any task still parked (e.g. on a live
     // queue wait).
     session.abort();
+}
+
+/// Like [`run_ws_session`] but in **injected-auth mode** (issue #1048): the
+/// `red ui` bridge holds the bearer `token` and presents it in the RedWire
+/// handshake on the UI's behalf, so the UI never sees or persists the secret.
+///
+/// The session runs against the embedded engine over the same in-memory
+/// duplex; [`inject_bearer_handshake`] mediates the handshake (swapping the
+/// UI's auth turn for a bearer `AuthResponse` carrying `token`) before the
+/// byte pump takes over.
+pub(crate) async fn run_injected_ws_session(
+    socket: WebSocket,
+    server: super::RedDBServer,
+    token: &str,
+) {
+    let runtime = Arc::new(server.runtime().clone());
+    let auth_store = runtime.auth_store();
+    let oauth = runtime.oauth_validator();
+
+    let (session_io, net_io) = tokio::io::duplex(WS_BRIDGE_BUF);
+    let session = tokio::spawn(async move {
+        let _ = handle_session_consume_magic(session_io, runtime, auth_store, oauth).await;
+    });
+
+    inject_bearer_handshake(socket, net_io, token).await;
+
+    session.abort();
+}
+
+/// Mediate the RedWire handshake in injected-auth mode, then pump the rest of
+/// the session byte-for-byte ([`pump_ws_stream`]).
+///
+/// The UI speaks RedWire as usual (preamble → Hello → wait HelloAck →
+/// AuthResponse → wait AuthOk), but the bridge owns the credential: it opens
+/// its own handshake with `backend` advertising `bearer`, relays the
+/// backend's `HelloAck`/`AuthOk` back to the UI, and **discards the UI's own
+/// `AuthResponse`** — substituting a bearer `AuthResponse` carrying `token`
+/// toward the backend. Correlation ids are mirrored from the UI's frames so
+/// the relayed replies line up with the UI's client state machine. The token
+/// thus appears only in the backend-bound handshake, never in anything the UI
+/// sent.
+pub(crate) async fn inject_bearer_handshake<S>(mut socket: WebSocket, mut backend: S, token: &str)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    let mut reader = WsFrameReader::new();
+
+    // 1. UI preamble: discriminator magic + minor-version byte.
+    let preamble = match reader.read_exact_bytes(&mut socket, 2).await {
+        Some(bytes) => bytes,
+        None => return close_ws(socket).await,
+    };
+    if preamble[0] != REDWIRE_MAGIC {
+        return close_ws(socket).await;
+    }
+    let minor = preamble[1];
+
+    // 2. UI Hello — we keep only its correlation id so the backend's HelloAck
+    //    reply_to lines up with what the UI is waiting for.
+    let ui_hello = match reader.read_frame(&mut socket).await {
+        Some(frame) if frame.kind == MessageKind::Hello => frame,
+        _ => return close_ws(socket).await,
+    };
+
+    // 3. Open the backend handshake ourselves, advertising bearer first.
+    //    `anonymous` is offered as a fallback so a `--token` against an
+    //    unauthenticated DB still connects (the server picks anonymous and
+    //    ignores the bearer payload); an authenticated DB blocks anonymous
+    //    and negotiates bearer, validating the injected token.
+    if backend.write_all(&[REDWIRE_MAGIC, minor]).await.is_err() {
+        return close_ws(socket).await;
+    }
+    let our_hello = match build_client_hello_frame(
+        ui_hello.correlation_id,
+        ["bearer", "anonymous"],
+        0,
+        Some("red-ui-bridge"),
+    ) {
+        Ok(frame) => frame,
+        Err(_) => return close_ws(socket).await,
+    };
+    if write_frame_async(&mut backend, &our_hello).await.is_err() {
+        return close_ws(socket).await;
+    }
+
+    // 4. HelloAck from the backend → relay verbatim to the UI.
+    let ack = match read_frame_async(&mut backend).await {
+        Ok(frame) => frame,
+        Err(_) => return close_ws(socket).await,
+    };
+    if send_frame(&mut socket, &ack).await.is_err() {
+        return;
+    }
+
+    // 5. UI AuthResponse — discarded (it carries no secret in injected mode);
+    //    we keep only its correlation id for the substituted bearer frame.
+    let ui_auth = match reader.read_frame(&mut socket).await {
+        Some(frame) => frame,
+        None => return close_ws(socket).await,
+    };
+
+    // 6. Inject the held bearer token toward the backend.
+    let bearer = match build_auth_response_frame(
+        ui_auth.correlation_id,
+        build_auth_response_bearer_payload(token),
+    ) {
+        Ok(frame) => frame,
+        Err(_) => return close_ws(socket).await,
+    };
+    if write_frame_async(&mut backend, &bearer).await.is_err() {
+        return close_ws(socket).await;
+    }
+
+    // 7. AuthOk / AuthFail from the backend → relay verbatim to the UI, so the
+    //    UI opens already authenticated (or sees the failure).
+    let auth_reply = match read_frame_async(&mut backend).await {
+        Ok(frame) => frame,
+        Err(_) => return close_ws(socket).await,
+    };
+    if send_frame(&mut socket, &auth_reply).await.is_err() {
+        return;
+    }
+
+    // 8. Any post-handshake bytes the UI already pipelined must reach the
+    //    backend before the pump's read loop takes over.
+    if !reader.buffered().is_empty() {
+        let pending = reader.take_buffered();
+        if backend.write_all(&pending).await.is_err() {
+            return close_ws(socket).await;
+        }
+    }
+
+    pump_ws_stream(socket, backend).await;
+}
+
+/// Encode and send a RedWire frame as one binary WS message.
+async fn send_frame(socket: &mut WebSocket, frame: &Frame) -> Result<(), axum::Error> {
+    socket
+        .send(Message::Binary(Bytes::from(encode_frame(frame))))
+        .await
+}
+
+/// Best-effort close on a WS the bridge is abandoning mid-handshake.
+async fn close_ws(mut socket: WebSocket) {
+    let _ = socket.send(Message::Close(None)).await;
+}
+
+/// Buffered reader that reassembles the self-delimiting RedWire byte stream
+/// (raw preamble bytes + framed messages) out of a binary WebSocket's
+/// messages, which need not align with frame boundaries.
+struct WsFrameReader {
+    buf: Vec<u8>,
+}
+
+impl WsFrameReader {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// Bytes buffered past the last frame/preamble already returned.
+    fn buffered(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Take the buffered tail, leaving the reader empty.
+    fn take_buffered(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
+
+    /// Pull binary messages until at least `n` bytes are buffered, then split
+    /// the first `n` off and return them. `None` on close/EOF beforehand.
+    async fn read_exact_bytes(&mut self, socket: &mut WebSocket, n: usize) -> Option<Vec<u8>> {
+        while self.buf.len() < n {
+            if !self.fill(socket).await {
+                return None;
+            }
+        }
+        let tail = self.buf.split_off(n);
+        Some(std::mem::replace(&mut self.buf, tail))
+    }
+
+    /// Reassemble and return the next full RedWire frame. `None` on close/EOF
+    /// before a frame completes.
+    async fn read_frame(&mut self, socket: &mut WebSocket) -> Option<Frame> {
+        loop {
+            if self.buf.len() >= FRAME_HEADER_SIZE {
+                if let Ok((frame, consumed)) = decode_frame(&self.buf) {
+                    self.buf.drain(..consumed);
+                    return Some(frame);
+                }
+            }
+            if !self.fill(socket).await {
+                return None;
+            }
+        }
+    }
+
+    /// Append one inbound binary message; skip control/text frames. Returns
+    /// `false` on close, error, or stream end.
+    async fn fill(&mut self, socket: &mut WebSocket) -> bool {
+        loop {
+            match socket.recv().await {
+                Some(Ok(Message::Binary(bytes))) => {
+                    self.buf.extend_from_slice(&bytes);
+                    return true;
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return false,
+                Some(Ok(_)) => continue,
+            }
+        }
+    }
 }
 
 /// Pump bytes between a binary WebSocket and an arbitrary byte stream.
