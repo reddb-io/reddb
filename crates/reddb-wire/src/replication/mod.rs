@@ -23,7 +23,8 @@ pub use bookmark::{BookmarkDecodeError, CausalBookmark};
 pub use catchup::{CatchupMode, CatchupModeReply};
 pub use change_record::{
     change_record_json_value_to_string, parse_change_record_json_value, public_item_kind,
-    ChangeOperation, ChangeRecord, ChangeRecordJsonValue, DEFAULT_REPLICATION_TERM,
+    ChangeOperation, ChangeRecord, ChangeRecordJsonValue, RangeAdmitError, RangeAuthority,
+    DEFAULT_REPLICATION_TERM,
 };
 pub use timeline::{
     FailoverPromotionReply, FailoverPromotionRequest, RejoinPlanNotice, RejoinRewindConfirmation,
