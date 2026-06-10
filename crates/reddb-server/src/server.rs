@@ -136,6 +136,11 @@ pub mod ui_bridge;
 // HTTPS download, SHA-256 verification, tgz extraction, and local cache
 // management for the pinned red-ui release asset.
 pub mod ui_bundle_resolver;
+// `red ui <uri>` deep-link dispatch (issue #1046, ADR 0051): prefer the
+// installed desktop app via the `redui://` scheme, fall back to the served
+// browser bridge when no handler is registered. Decision + canonical
+// deep-link string live behind a testable seam.
+pub mod ui_deeplink;
 // `pub(crate)` so the RedWire input-stream path (issue #764 / S5)
 // can reuse the canonical S4 INSERT builders / identifier checks
 // (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
