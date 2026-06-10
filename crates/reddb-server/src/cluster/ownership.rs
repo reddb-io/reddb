@@ -464,6 +464,65 @@ impl RangeOwnership {
             ..self.clone()
         }
     }
+
+    /// This node's [`RangeRole`] for *this* range (issue #990).
+    ///
+    /// A data member is the single writer ([`Owner`](RangeRole::Owner)) of a
+    /// range, holds a read/catch-up copy ([`Replica`](RangeRole::Replica)), or
+    /// holds no copy at all ([`NoCopy`](RangeRole::NoCopy)). The role is
+    /// per-range, not a global node role: the same node can be owner of one
+    /// range, replica of another, and uninvolved in a third — which is why this
+    /// is the input to the ownership-aware public-write gate rather than the
+    /// instance-wide [`WriteGate`](crate::runtime::write_gate::WriteGate).
+    pub fn role_of(&self, node: &NodeIdentity) -> RangeRole {
+        if self.owner == *node {
+            RangeRole::Owner
+        } else if self.replicas.iter().any(|replica| replica == node) {
+            RangeRole::Replica
+        } else {
+            RangeRole::NoCopy
+        }
+    }
+}
+
+/// A data member's role for one specific range (issue #990, PRD #987).
+///
+/// Distinguishes the three positions a node can hold relative to a range, which
+/// the ownership-aware write gate
+/// ([`admit_public_write`](ShardOwnershipCatalog::admit_public_write)) turns
+/// into an allow/reject decision: only the current [`Owner`](Self::Owner) may
+/// take a *public* write for the range; a [`Replica`](Self::Replica) and a
+/// [`NoCopy`](Self::NoCopy) node both reject it and the caller must route to the
+/// owner. (A replica still applies the owner's changes through the privileged
+/// internal apply path — that path is gated by the range-authority fence from
+/// issue #991, not by this public gate.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeRole {
+    /// The current single writer for the range — the only role a public write
+    /// may land on.
+    Owner,
+    /// Holds a read/catch-up copy but is not the writer. Public writes are
+    /// rejected and routed to the owner; replicated changes still flow in via
+    /// the privileged internal apply path.
+    Replica,
+    /// Holds no copy of the range at all.
+    NoCopy,
+}
+
+impl RangeRole {
+    /// Whether this role may accept a *public* write for the range. Only the
+    /// owner may; replica and no-copy may not.
+    pub fn may_write_public(self) -> bool {
+        matches!(self, RangeRole::Owner)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RangeRole::Owner => "owner",
+            RangeRole::Replica => "replica",
+            RangeRole::NoCopy => "no-copy",
+        }
+    }
 }
 
 /// Whether an accepted update created a new range or advanced an existing one.
@@ -536,6 +595,76 @@ impl std::fmt::Display for CatalogError {
 }
 
 impl std::error::Error for CatalogError {}
+
+/// Why an ownership-aware *public* write was rejected (issue #990).
+///
+/// This is a **routing/ownership** error, deliberately distinct from the
+/// instance-wide read-only rejection raised by
+/// [`WriteGate`](crate::runtime::write_gate::WriteGate): a replica/non-holder
+/// rejecting a public write is not "this node is read-only", it is "this node is
+/// not the authority for *this range* — route to the owner". Crucially, none of
+/// these rejections fall back to the privileged internal replica-apply path; a
+/// public write that is not for this node's owned range never reaches storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeWriteReject {
+    /// No range of the collection covers the routed key, so the write cannot be
+    /// placed. The caller must (re)resolve routing against a fresher catalog.
+    NoRange { collection: CollectionId },
+    /// This node holds the range but is not its owner (a [`Replica`]), or holds
+    /// no copy at all ([`NoCopy`]). Either way a public write must be routed to
+    /// `owner`, never applied locally.
+    ///
+    /// [`Replica`]: RangeRole::Replica
+    /// [`NoCopy`]: RangeRole::NoCopy
+    NotOwner {
+        collection: CollectionId,
+        range_id: RangeId,
+        role: RangeRole,
+        owner: NodeIdentity,
+    },
+    /// This node *is* the range owner, but the write was authorised under an
+    /// ownership epoch that no longer matches the catalog — a write fenced out
+    /// because ownership has since moved (its epoch advanced). Carries both
+    /// epochs so the caller can see how far the routing decision was behind.
+    StaleEpoch {
+        collection: CollectionId,
+        range_id: RangeId,
+        expected: OwnershipEpoch,
+        current: OwnershipEpoch,
+    },
+}
+
+impl std::fmt::Display for RangeWriteReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRange { collection } => write!(
+                f,
+                "no range of collection {collection} covers the routed key — re-resolve routing"
+            ),
+            Self::NotOwner {
+                collection,
+                range_id,
+                role,
+                owner,
+            } => write!(
+                f,
+                "this node is {} of {collection}/{range_id}, not its owner — route the write to {owner}",
+                role.label()
+            ),
+            Self::StaleEpoch {
+                collection,
+                range_id,
+                expected,
+                current,
+            } => write!(
+                f,
+                "stale ownership epoch for {collection}/{range_id}: write authorised under epoch {expected}, current is {current}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RangeWriteReject {}
 
 /// The global shard ownership catalog held by every data member.
 ///
@@ -679,6 +808,67 @@ impl ShardOwnershipCatalog {
     pub fn route(&self, collection: &CollectionId, key: &[u8]) -> Option<&RangeOwnership> {
         self.ranges_for(collection)
             .find(|r| r.bounds().contains(key))
+    }
+
+    /// This node's [`RangeRole`] for a directly-addressed range (issue #990).
+    /// Returns `None` when no such range exists in the catalog — distinct from
+    /// [`NoCopy`](RangeRole::NoCopy), which means the range exists but this node
+    /// holds no copy of it.
+    pub fn role_at(
+        &self,
+        node: &NodeIdentity,
+        collection: &CollectionId,
+        range_id: RangeId,
+    ) -> Option<RangeRole> {
+        self.range(collection, range_id)
+            .map(|range| range.role_of(node))
+    }
+
+    /// Ownership-aware gate for a **public** write (issue #990, PRD #987).
+    ///
+    /// Routes `key` to its range, then admits the write only when `node` is the
+    /// range's current [`Owner`](RangeRole::Owner) **and** `expected_epoch`
+    /// matches the range's current ownership epoch. On success returns the owned
+    /// [`RangeOwnership`] (so the caller can proceed with the write against the
+    /// authoritative epoch); otherwise a [`RangeWriteReject`] explaining why.
+    ///
+    /// This is the public surface's gate — the counterpart of the instance-wide
+    /// [`WriteGate`](crate::runtime::write_gate::WriteGate) for multi-writer,
+    /// per-range ownership. The internal replica-apply path does **not** consult
+    /// it: replicated changes flow into a replica through the privileged apply
+    /// path (fenced by issue #991's range-authority watermark), so a node that
+    /// rejects a *public* write here can still legitimately apply the owner's
+    /// replicated changes for the very same range.
+    pub fn admit_public_write(
+        &self,
+        node: &NodeIdentity,
+        collection: &CollectionId,
+        key: &[u8],
+        expected_epoch: OwnershipEpoch,
+    ) -> Result<&RangeOwnership, RangeWriteReject> {
+        let range = self
+            .route(collection, key)
+            .ok_or_else(|| RangeWriteReject::NoRange {
+                collection: collection.clone(),
+            })?;
+        let role = range.role_of(node);
+        if !role.may_write_public() {
+            return Err(RangeWriteReject::NotOwner {
+                collection: collection.clone(),
+                range_id: range.range_id(),
+                role,
+                owner: range.owner().clone(),
+            });
+        }
+        if expected_epoch != range.epoch() {
+            return Err(RangeWriteReject::StaleEpoch {
+                collection: collection.clone(),
+                range_id: range.range_id(),
+                expected: expected_epoch,
+                current: range.epoch(),
+            });
+        }
+        Ok(range)
     }
 
     /// Total number of owned ranges across all collections.
@@ -1026,5 +1216,291 @@ mod tests {
         assert!(RangeBounds::new(RangeBound::key([0x20]), RangeBound::key([0x10])).is_err());
         assert!(RangeBounds::new(RangeBound::Max, RangeBound::Min).is_err());
         assert!(RangeBounds::full().contains(b"anything"));
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #990 — per-range role model and ownership-aware write gate.
+    // ---------------------------------------------------------------
+
+    /// A range owned by `owner` with an explicit replica set.
+    fn range_with(
+        coll: &CollectionId,
+        id: u64,
+        bnds: RangeBounds,
+        owner: &str,
+        replicas: &[&str],
+    ) -> RangeOwnership {
+        RangeOwnership::establish(
+            coll.clone(),
+            RangeId::new(id),
+            ShardKeyMode::Hash,
+            bnds,
+            ident(owner),
+            replicas.iter().map(|r| ident(r)).collect::<Vec<_>>(),
+            PlacementMetadata::with_replication_factor(3),
+        )
+    }
+
+    #[test]
+    fn role_of_distinguishes_owner_replica_and_no_copy() {
+        let orders = collection("orders");
+        let range = range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-b"]);
+
+        assert_eq!(range.role_of(&ident("CN=node-a")), RangeRole::Owner);
+        assert_eq!(range.role_of(&ident("CN=node-b")), RangeRole::Replica);
+        assert_eq!(range.role_of(&ident("CN=node-c")), RangeRole::NoCopy);
+        assert!(RangeRole::Owner.may_write_public());
+        assert!(!RangeRole::Replica.may_write_public());
+        assert!(!RangeRole::NoCopy.may_write_public());
+    }
+
+    #[test]
+    fn role_is_per_range_not_a_global_node_role() {
+        // node-a owns range 1 and is only a replica of range 2 — the same node
+        // holds different roles for different ranges of the same collection.
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        catalog
+            .apply_update(range_with(
+                &orders,
+                1,
+                RangeBounds::new(RangeBound::Min, RangeBound::key([0x80])).unwrap(),
+                "CN=node-a",
+                &["CN=node-b"],
+            ))
+            .unwrap();
+        catalog
+            .apply_update(range_with(
+                &orders,
+                2,
+                RangeBounds::new(RangeBound::key([0x80]), RangeBound::Max).unwrap(),
+                "CN=node-b",
+                &["CN=node-a"],
+            ))
+            .unwrap();
+
+        let node_a = ident("CN=node-a");
+        assert_eq!(
+            catalog.role_at(&node_a, &orders, RangeId::new(1)),
+            Some(RangeRole::Owner)
+        );
+        assert_eq!(
+            catalog.role_at(&node_a, &orders, RangeId::new(2)),
+            Some(RangeRole::Replica)
+        );
+        // A range that does not exist is None, not NoCopy.
+        assert_eq!(catalog.role_at(&node_a, &orders, RangeId::new(99)), None);
+        // And a collection nobody placed yet routes nowhere.
+        assert_eq!(
+            catalog.role_at(&node_a, &collection("ghost"), RangeId::new(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn public_write_admitted_on_owner_at_matching_epoch() {
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        catalog
+            .apply_update(range_with(
+                &orders,
+                1,
+                RangeBounds::full(),
+                "CN=node-a",
+                &["CN=node-b"],
+            ))
+            .unwrap();
+
+        let admitted = catalog
+            .admit_public_write(
+                &ident("CN=node-a"),
+                &orders,
+                b"k",
+                OwnershipEpoch::initial(),
+            )
+            .expect("owner at current epoch may write");
+        assert_eq!(admitted.owner(), &ident("CN=node-a"));
+        assert_eq!(admitted.range_id(), RangeId::new(1));
+    }
+
+    #[test]
+    fn public_write_rejected_on_replica_with_routing_error() {
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        catalog
+            .apply_update(range_with(
+                &orders,
+                1,
+                RangeBounds::full(),
+                "CN=node-a",
+                &["CN=node-b"],
+            ))
+            .unwrap();
+
+        // node-b holds a copy but is a replica — a public write must be routed
+        // to the owner, not applied locally.
+        let err = catalog
+            .admit_public_write(
+                &ident("CN=node-b"),
+                &orders,
+                b"k",
+                OwnershipEpoch::initial(),
+            )
+            .unwrap_err();
+        match err {
+            RangeWriteReject::NotOwner {
+                role, ref owner, ..
+            } => {
+                assert_eq!(role, RangeRole::Replica);
+                assert_eq!(owner, &ident("CN=node-a"));
+            }
+            other => panic!("expected NotOwner(Replica), got {other:?}"),
+        }
+        // The rejection names the owner so the caller can re-route.
+        assert!(err.to_string().contains("route the write to"));
+    }
+
+    #[test]
+    fn public_write_rejected_on_no_copy_holder() {
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        catalog
+            .apply_update(range_with(
+                &orders,
+                1,
+                RangeBounds::full(),
+                "CN=node-a",
+                &["CN=node-b"],
+            ))
+            .unwrap();
+
+        // node-c holds no copy of the range at all.
+        let err = catalog
+            .admit_public_write(
+                &ident("CN=node-c"),
+                &orders,
+                b"k",
+                OwnershipEpoch::initial(),
+            )
+            .unwrap_err();
+        match err {
+            RangeWriteReject::NotOwner { role, .. } => assert_eq!(role, RangeRole::NoCopy),
+            other => panic!("expected NotOwner(NoCopy), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn public_write_rejected_on_stale_ownership_epoch() {
+        // Ownership moved a→b and back to a, advancing the epoch twice. A write
+        // the routing layer authorised under the original epoch must be fenced
+        // even though node-a is, once again, the current owner.
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        let v1 = range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-b"]);
+        let original_epoch = v1.epoch();
+        catalog.apply_update(v1.clone()).unwrap();
+
+        let v2 = v1.transfer_to(ident("CN=node-b"), [ident("CN=node-a")]);
+        catalog.apply_update(v2.clone()).unwrap();
+        let v3 = v2.transfer_to(ident("CN=node-a"), [ident("CN=node-b")]);
+        catalog.apply_update(v3.clone()).unwrap();
+
+        // node-a is the current owner again, but at a newer epoch.
+        assert_ne!(original_epoch, v3.epoch());
+        let err = catalog
+            .admit_public_write(&ident("CN=node-a"), &orders, b"k", original_epoch)
+            .unwrap_err();
+        match err {
+            RangeWriteReject::StaleEpoch {
+                expected, current, ..
+            } => {
+                assert_eq!(expected, original_epoch);
+                assert_eq!(current, v3.epoch());
+            }
+            other => panic!("expected StaleEpoch, got {other:?}"),
+        }
+        // The same owner at the *current* epoch is admitted.
+        assert!(catalog
+            .admit_public_write(&ident("CN=node-a"), &orders, b"k", v3.epoch())
+            .is_ok());
+    }
+
+    #[test]
+    fn public_write_rejected_when_no_range_covers_the_key() {
+        let catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        let err = catalog
+            .admit_public_write(
+                &ident("CN=node-a"),
+                &orders,
+                b"k",
+                OwnershipEpoch::initial(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, RangeWriteReject::NoRange { .. }));
+    }
+
+    #[test]
+    fn internal_apply_path_stays_privileged_for_a_public_write_replica() {
+        // A node that rejects a *public* write because it is only a replica must
+        // still admit the owner's replicated changes through the privileged
+        // internal apply path — that path is gated by issue #991's range
+        // authority fence, not by this public ownership gate.
+        use crate::replication::cdc::{ChangeOperation, ChangeRecord, RangeAuthority};
+
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        catalog
+            .apply_update(range_with(
+                &orders,
+                7,
+                RangeBounds::full(),
+                "CN=node-a",
+                &["CN=node-b"],
+            ))
+            .unwrap();
+
+        // Public gate: node-b is a replica → rejected, never reaches storage.
+        assert!(matches!(
+            catalog
+                .admit_public_write(
+                    &ident("CN=node-b"),
+                    &orders,
+                    b"k",
+                    OwnershipEpoch::initial()
+                )
+                .unwrap_err(),
+            RangeWriteReject::NotOwner {
+                role: RangeRole::Replica,
+                ..
+            }
+        ));
+
+        // Internal apply: the owner's replicated change for the same range is
+        // admitted by the range-authority fence on the replica.
+        let record = ChangeRecord {
+            term: 1,
+            lsn: 1,
+            timestamp: 0,
+            operation: ChangeOperation::Insert,
+            collection: orders.as_str().to_string(),
+            entity_id: 1,
+            entity_kind: "row".to_string(),
+            entity_bytes: Some(vec![1]),
+            metadata: None,
+            refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
+        }
+        .with_range_authority(7, OwnershipEpoch::initial().value());
+        let fence = RangeAuthority {
+            range_id: 7,
+            min_term: 1,
+            min_ownership_epoch: OwnershipEpoch::initial().value(),
+        };
+        assert!(
+            fence.admit(&record).is_ok(),
+            "replica internal apply must remain privileged for the owner's changes"
+        );
     }
 }
