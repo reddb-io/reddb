@@ -240,6 +240,30 @@ impl RangeBounds {
         self.lower.position() < other.upper.position()
             && other.lower.position() < self.upper.position()
     }
+
+    /// Split this `[lower, upper)` range at `at` into a lower child
+    /// `[lower, at)` and an upper child `[at, upper)`. The split point must fall
+    /// **strictly inside** the range (`lower < at < upper`); a point at or
+    /// outside a bound would carve off an empty child and is rejected with
+    /// [`RangeBoundsError`]. The two children tile the original exactly — no gap,
+    /// no overlap — which is what lets a [split-and-move](super::move_range) shrink
+    /// the retained child and create the moved child without making routing
+    /// ambiguous.
+    pub fn split_at(&self, at: &[u8]) -> Result<(RangeBounds, RangeBounds), RangeBoundsError> {
+        let at_pos = Position::Key(at);
+        if at_pos <= self.lower.position() || at_pos >= self.upper.position() {
+            return Err(RangeBoundsError);
+        }
+        let lower = RangeBounds {
+            lower: self.lower.clone(),
+            upper: RangeBound::key(at.to_vec()),
+        };
+        let upper = RangeBounds {
+            lower: RangeBound::key(at.to_vec()),
+            upper: self.upper.clone(),
+        };
+        Ok((lower, upper))
+    }
 }
 
 /// Monotonic write version of a single catalog entry.
@@ -460,6 +484,19 @@ impl RangeOwnership {
     pub fn update_placement(&self, placement: PlacementMetadata) -> Self {
         Self {
             placement,
+            version: self.version.next(),
+            ..self.clone()
+        }
+    }
+
+    /// A transition that **re-bounds** the range without moving write authority —
+    /// the retained-child step of a range split, which narrows this entry to the
+    /// keys its owner keeps while a sibling entry takes the carved-off subrange.
+    /// Advances the version but **not** the epoch: the same owner keeps writing
+    /// the retained keys, so no one is fenced.
+    pub fn with_bounds(&self, bounds: RangeBounds) -> Self {
+        Self {
+            bounds,
             version: self.version.next(),
             ..self.clone()
         }
