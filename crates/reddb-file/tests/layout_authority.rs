@@ -4,6 +4,8 @@ mod backup;
 mod boundary;
 #[path = "layout_authority/common.rs"]
 mod common;
+#[path = "layout_authority/native_artifacts.rs"]
+mod native_artifacts;
 #[path = "layout_authority/physical.rs"]
 mod physical;
 #[path = "layout_authority/runtime.rs"]

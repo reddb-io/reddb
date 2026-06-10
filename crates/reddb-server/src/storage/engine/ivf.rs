@@ -438,137 +438,56 @@ impl IvfIndex {
         }
     }
 
-    /// Serialize the index to bytes for storage
+    /// Serialize the index to bytes for storage.
+    ///
+    /// The `IVF1` payload byte layout is owned by `reddb-file` (ADR 0046); this
+    /// only projects the engine state into [`reddb_file::IvfIndexLayout`].
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"IVF1");
-        bytes.extend_from_slice(&(self.config.n_lists as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.config.n_probes as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.config.dimension as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.config.max_iterations as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.config.convergence_threshold.to_le_bytes());
-        bytes.push(if self.trained { 1 } else { 0 });
-        bytes.extend_from_slice(&(self.count as u64).to_le_bytes());
-        bytes.extend_from_slice(&self.next_id.to_le_bytes());
-        bytes.extend_from_slice(&(self.lists.len() as u32).to_le_bytes());
-
-        for list in &self.lists {
-            bytes.extend_from_slice(&(list.centroid.len() as u32).to_le_bytes());
-            for value in &list.centroid {
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
-
-            bytes.extend_from_slice(&(list.ids.len() as u32).to_le_bytes());
-            for id in &list.ids {
-                bytes.extend_from_slice(&id.to_le_bytes());
-            }
-
-            bytes.extend_from_slice(&(list.vectors.len() as u32).to_le_bytes());
-            for vector in &list.vectors {
-                bytes.extend_from_slice(&(vector.len() as u32).to_le_bytes());
-                for value in vector {
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-        }
-
-        bytes
+        let lists = self
+            .lists
+            .iter()
+            .map(|list| reddb_file::IvfListLayout {
+                centroid: list.centroid.clone(),
+                ids: list.ids.clone(),
+                vectors: list.vectors.clone(),
+            })
+            .collect();
+        let layout = reddb_file::IvfIndexLayout {
+            n_lists: self.config.n_lists,
+            n_probes: self.config.n_probes,
+            dimension: self.config.dimension,
+            max_iterations: self.config.max_iterations,
+            convergence_threshold: self.config.convergence_threshold,
+            trained: self.trained,
+            count: self.count,
+            next_id: self.next_id,
+            lists,
+        };
+        reddb_file::encode_ivf_index(&layout)
     }
 
-    /// Deserialize an index from bytes
+    /// Deserialize an index from bytes via the `reddb-file` codec.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() < 41 {
-            return Err("data too short".to_string());
-        }
-        if &bytes[0..4] != b"IVF1" {
-            return Err("invalid IVF magic".to_string());
-        }
-
-        let mut pos = 4usize;
-        let read_u32 = |buf: &[u8], pos: &mut usize| -> Result<u32, String> {
-            if *pos + 4 > buf.len() {
-                return Err("truncated IVF payload".to_string());
-            }
-            let value =
-                u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
-            *pos += 4;
-            Ok(value)
-        };
-        let read_u64 = |buf: &[u8], pos: &mut usize| -> Result<u64, String> {
-            if *pos + 8 > buf.len() {
-                return Err("truncated IVF payload".to_string());
-            }
-            let value = u64::from_le_bytes([
-                buf[*pos],
-                buf[*pos + 1],
-                buf[*pos + 2],
-                buf[*pos + 3],
-                buf[*pos + 4],
-                buf[*pos + 5],
-                buf[*pos + 6],
-                buf[*pos + 7],
-            ]);
-            *pos += 8;
-            Ok(value)
-        };
-        let read_f32 = |buf: &[u8], pos: &mut usize| -> Result<f32, String> {
-            if *pos + 4 > buf.len() {
-                return Err("truncated IVF payload".to_string());
-            }
-            let value =
-                f32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
-            *pos += 4;
-            Ok(value)
-        };
+        let layout = reddb_file::decode_ivf_index(bytes).map_err(|e| e.to_string())?;
 
         let config = IvfConfig {
-            n_lists: read_u32(bytes, &mut pos)? as usize,
-            n_probes: read_u32(bytes, &mut pos)? as usize,
-            dimension: read_u32(bytes, &mut pos)? as usize,
-            max_iterations: read_u32(bytes, &mut pos)? as usize,
-            convergence_threshold: read_f32(bytes, &mut pos)?,
+            n_lists: layout.n_lists,
+            n_probes: layout.n_probes,
+            dimension: layout.dimension,
+            max_iterations: layout.max_iterations,
+            convergence_threshold: layout.convergence_threshold,
         };
-        if pos >= bytes.len() {
-            return Err("truncated IVF payload".to_string());
-        }
-        let trained = bytes[pos] == 1;
-        pos += 1;
-        let count = read_u64(bytes, &mut pos)? as usize;
-        let next_id = read_u64(bytes, &mut pos)?;
-        let list_count = read_u32(bytes, &mut pos)? as usize;
 
-        let mut lists = Vec::with_capacity(list_count);
+        let mut lists = Vec::with_capacity(layout.lists.len());
         let mut id_to_list = HashMap::new();
-        for list_idx in 0..list_count {
-            let centroid_len = read_u32(bytes, &mut pos)? as usize;
-            let mut centroid = Vec::with_capacity(centroid_len);
-            for _ in 0..centroid_len {
-                centroid.push(read_f32(bytes, &mut pos)?);
-            }
-
-            let id_count = read_u32(bytes, &mut pos)? as usize;
-            let mut ids = Vec::with_capacity(id_count);
-            for _ in 0..id_count {
-                let id = read_u64(bytes, &mut pos)?;
+        for (list_idx, list) in layout.lists.into_iter().enumerate() {
+            for &id in &list.ids {
                 id_to_list.insert(id, list_idx);
-                ids.push(id);
             }
-
-            let vector_count = read_u32(bytes, &mut pos)? as usize;
-            let mut vectors = Vec::with_capacity(vector_count);
-            for _ in 0..vector_count {
-                let vector_len = read_u32(bytes, &mut pos)? as usize;
-                let mut vector = Vec::with_capacity(vector_len);
-                for _ in 0..vector_len {
-                    vector.push(read_f32(bytes, &mut pos)?);
-                }
-                vectors.push(vector);
-            }
-
             lists.push(IvfList {
-                centroid,
-                ids,
-                vectors,
+                centroid: list.centroid,
+                ids: list.ids,
+                vectors: list.vectors,
             });
         }
 
@@ -576,9 +495,9 @@ impl IvfIndex {
             config,
             lists,
             id_to_list,
-            trained,
-            count,
-            next_id,
+            trained: layout.trained,
+            count: layout.count,
+            next_id: layout.next_id,
         })
     }
 }
