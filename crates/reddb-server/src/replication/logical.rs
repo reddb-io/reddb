@@ -7,6 +7,7 @@ use crate::api::{RedDBError, RedDBResult};
 use crate::application::entity::metadata_from_json;
 use crate::replication::cdc::{
     change_record_from_entity, wire_json_to_server_json, ChangeOperation, ChangeRecord,
+    RangeAdmitError, RangeAuthority,
 };
 use crate::storage::{EntityId, EntityKind, RedDB, UnifiedStore};
 
@@ -119,6 +120,7 @@ impl LogicalApplyError {
             Self::Divergence { .. } => ApplyErrorKind::Divergence,
             Self::Apply { .. } => ApplyErrorKind::Apply,
             Self::StaleTermFenced { .. } => ApplyErrorKind::Fenced,
+            Self::RangeFenced { .. } => ApplyErrorKind::Fenced,
         }
     }
 }
@@ -164,6 +166,18 @@ pub enum LogicalApplyError {
         current_term: u64,
         lsn: u64,
     },
+    /// Issue #991 — the record is stamped for a range whose authority
+    /// watermark has moved past it: a write from a deposed range owner
+    /// (stale ownership epoch) or a superseded timeline (stale term) for the
+    /// target range. Rejected at the apply boundary before the LSN state
+    /// machine runs — fail-closed, so a stale owner cannot apply or advance
+    /// the chain/watermark for that range. Shares the `Fenced` metrics lane
+    /// with the global stale-term fence.
+    RangeFenced {
+        range_id: u64,
+        lsn: u64,
+        reason: RangeAdmitError,
+    },
 }
 
 impl std::fmt::Display for LogicalApplyError {
@@ -178,6 +192,26 @@ impl std::fmt::Display for LogicalApplyError {
                 f,
                 "stale-term record fenced at lsn={lsn}: record term {record_term} is behind current term {current_term}"
             ),
+            Self::RangeFenced {
+                range_id,
+                lsn,
+                reason,
+            } => match reason {
+                RangeAdmitError::StaleTerm {
+                    record_term,
+                    accepted_term,
+                } => write!(
+                    f,
+                    "range-stale record fenced at lsn={lsn} for range {range_id}: record term {record_term} is behind accepted term {accepted_term}"
+                ),
+                RangeAdmitError::StaleOwnershipEpoch {
+                    record_epoch,
+                    accepted_epoch,
+                } => write!(
+                    f,
+                    "range-stale record fenced at lsn={lsn} for range {range_id}: ownership epoch {record_epoch} is behind accepted epoch {accepted_epoch}"
+                ),
+            },
             Self::Divergence {
                 expected_term,
                 got_term,
@@ -350,8 +384,41 @@ impl LogicalChangeApplier {
         record: &ChangeRecord,
         mode: ApplyMode,
     ) -> Result<ApplyOutcome, LogicalApplyError> {
+        self.apply_fenced(db, record, mode, None)
+    }
+
+    /// Apply one record, first gating it against the target range's authority
+    /// watermark (issue #991). When `range_fence` is `Some`, a record stamped
+    /// for that range whose term or ownership epoch is behind the watermark is
+    /// rejected before the global term fence and the LSN state machine run —
+    /// fail-closed, so a deposed range owner cannot advance anything. Records
+    /// for a different range, or with no range identity (legacy /
+    /// non-range-replicated), pass the range fence untouched. `apply` is the
+    /// unfenced shorthand for callers that do not yet hold range authority.
+    pub fn apply_fenced(
+        &self,
+        db: &RedDB,
+        record: &ChangeRecord,
+        mode: ApplyMode,
+        range_fence: Option<&RangeAuthority>,
+    ) -> Result<ApplyOutcome, LogicalApplyError> {
         let last = self.last_applied_lsn.load(Ordering::Acquire);
         let last_term = self.last_applied_term.load(Ordering::Acquire);
+
+        // Per-range authority fence (issue #991). Runs before the global
+        // term fence so a stale ownership epoch is rejected even when the
+        // record's term is otherwise current. Only records stamped for the
+        // fence's range are gated; the rest fall through.
+        if let Some(fence) = range_fence {
+            if let Err(reason) = fence.admit(record) {
+                self.metrics.record(ApplyErrorKind::Fenced);
+                return Err(LogicalApplyError::RangeFenced {
+                    range_id: fence.range_id,
+                    lsn: record.lsn,
+                    reason,
+                });
+            }
+        }
 
         // Stale-term fence (issue #835, ADR 0030). A record from a term
         // *behind* the highest term this replica has adopted is a returning
@@ -596,6 +663,13 @@ fn record_payload_hash(record: &ChangeRecord) -> [u8; 32] {
     hasher.update(&[record.operation as u8]);
     hasher.update(record.collection.as_bytes());
     hasher.update(&record.entity_id.to_le_bytes());
+    // Issue #991 — range authority participates in the payload hash so two
+    // records at the same LSN that differ only in range identity or ownership
+    // epoch are flagged divergent rather than silently treated as idempotent.
+    // `u64::MAX` stands in for an absent field (a value real epochs/ids never
+    // reach) so `None` and `Some(MAX)` stay distinguishable.
+    hasher.update(&record.range_id.unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(&record.ownership_epoch.unwrap_or(u64::MAX).to_le_bytes());
     if let Some(bytes) = &record.entity_bytes {
         hasher.update(bytes);
     }
@@ -678,6 +752,8 @@ mod tests {
             entity_bytes: None,
             metadata: None,
             refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
         }
     }
 
@@ -964,6 +1040,123 @@ mod tests {
             matches!(err, LogicalApplyError::StaleTermFenced { .. }),
             "got {err:?}"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #991 — a record stamped for the target range but carrying an
+    // ownership epoch behind the range's accepted epoch is a write from a
+    // deposed owner. It is fenced at the apply boundary: rejected, counted on
+    // the Fenced lane, and the LSN/term chain does not advance.
+    #[test]
+    fn apply_fenced_rejects_stale_ownership_epoch() {
+        let (db, path) = open_db();
+        let applier = LogicalChangeApplier::new(0);
+        let fence = RangeAuthority {
+            range_id: 7,
+            min_term: 1,
+            min_ownership_epoch: 5,
+        };
+
+        let stale = record(1, b"a").with_range_authority(7, 4);
+        let before = applier.metrics().fenced_total.load(Ordering::Relaxed);
+        let err = applier
+            .apply_fenced(&db, &stale, ApplyMode::Replica, Some(&fence))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LogicalApplyError::RangeFenced {
+                    range_id: 7,
+                    lsn: 1,
+                    reason: RangeAdmitError::StaleOwnershipEpoch {
+                        record_epoch: 4,
+                        accepted_epoch: 5,
+                    },
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(err.kind(), ApplyErrorKind::Fenced);
+        assert_eq!(
+            applier.metrics().fenced_total.load(Ordering::Relaxed),
+            before + 1
+        );
+        assert_eq!(applier.last_applied_lsn(), 0, "watermark must not advance");
+        assert_eq!(
+            applier.received_frontier_lsn(),
+            0,
+            "a range-fenced record must not advance the received frontier"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #991 — the same fence applies on the recovery/restore path: a
+    // record on a stale term for the target range is rejected there too.
+    #[test]
+    fn apply_fenced_rejects_stale_range_term_on_restore() {
+        let (db, path) = open_db();
+        let applier = LogicalChangeApplier::new(0);
+        let fence = RangeAuthority {
+            range_id: 3,
+            min_term: 6,
+            min_ownership_epoch: 1,
+        };
+
+        let stale = record(1, b"a").with_term(4).with_range_authority(3, 9);
+        let err = applier
+            .apply_fenced(&db, &stale, ApplyMode::Restore, Some(&fence))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LogicalApplyError::RangeFenced {
+                    range_id: 3,
+                    reason: RangeAdmitError::StaleTerm {
+                        record_term: 4,
+                        accepted_term: 6,
+                    },
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #991 — a record current for the range applies through the fence,
+    // and a record for a *different* range is not gated by this fence.
+    #[test]
+    fn apply_fenced_admits_current_and_ignores_other_ranges() {
+        let (db, path) = open_db();
+        let applier = LogicalChangeApplier::new(0);
+        let fence = RangeAuthority {
+            range_id: 7,
+            min_term: 1,
+            min_ownership_epoch: 5,
+        };
+
+        // Current epoch for the fenced range → applies and advances.
+        applier
+            .apply_fenced(
+                &db,
+                &record(1, b"a").with_range_authority(7, 5),
+                ApplyMode::Replica,
+                Some(&fence),
+            )
+            .expect("current record applies");
+        assert_eq!(applier.last_applied_lsn(), 1);
+
+        // A record stamped for a different (stale-looking) range is not this
+        // fence's concern and still applies.
+        applier
+            .apply_fenced(
+                &db,
+                &record(2, b"b").with_range_authority(99, 1),
+                ApplyMode::Replica,
+                Some(&fence),
+            )
+            .expect("other-range record bypasses this fence");
+        assert_eq!(applier.last_applied_lsn(), 2);
         let _ = std::fs::remove_file(path);
     }
 

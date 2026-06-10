@@ -58,6 +58,8 @@ impl RedDBRuntime {
                     .map(|e| UnifiedStore::serialize_entity(e, store.format_version())),
                 metadata: self.latest_metadata_for(collection, entity_id),
                 refresh_records: None,
+                range_id: None,
+                ownership_epoch: None,
             };
             let encoded = record.encode();
             primary.append_logical_record(record.lsn, encoded);
@@ -143,6 +145,8 @@ impl RedDBRuntime {
                     .map(|entity| UnifiedStore::serialize_entity(entity, store.format_version())),
                 metadata: self.latest_metadata_for(collection, entity_id),
                 refresh_records: None,
+                range_id: None,
+                ownership_epoch: None,
             };
             let encoded = record.encode();
             primary.append_logical_record(record.lsn, encoded);
@@ -272,6 +276,8 @@ impl RedDBRuntime {
                     .map(server_json_to_wire_json)
                     .or_else(|| self.latest_metadata_for(collection, entity.id.raw())),
                 refresh_records: None,
+                range_id: None,
+                ownership_epoch: None,
             };
             let encoded = record.encode();
             primary.append_logical_record(record.lsn, encoded);

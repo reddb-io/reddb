@@ -63,6 +63,18 @@ pub struct ChangeRecord {
     pub entity_bytes: Option<Vec<u8>>,
     pub metadata: Option<JsonValue>,
     pub refresh_records: Option<Vec<Vec<u8>>>,
+    /// Issue #991 — stable identity of the range this user-data change
+    /// belongs to (`RangeId`, from the #989 ownership catalog), or `None`
+    /// for records that predate range replication. Carried so replicas and
+    /// recovery can route a change to its range and gate it against that
+    /// range's authority watermark.
+    pub range_id: Option<u64>,
+    /// Issue #991 — the owning range's `OwnershipEpoch` at the moment this
+    /// change was produced. The epoch bumps only when write authority moves
+    /// to a new owner, so a record whose epoch is behind the target range's
+    /// accepted epoch is a write from a deposed owner and is fenced. `None`
+    /// for legacy records and non-range-replicated changes.
+    pub ownership_epoch: Option<u64>,
 }
 
 impl ChangeRecord {
@@ -83,7 +95,18 @@ impl ChangeRecord {
             entity_bytes: None,
             metadata: None,
             refresh_records: Some(records),
+            range_id: None,
+            ownership_epoch: None,
         }
+    }
+
+    /// Stamp this record with the authority metadata of the range that owns
+    /// it (issue #991): the stable range identity and the owner's current
+    /// ownership epoch. The term is set independently via [`Self::with_term`].
+    pub fn with_range_authority(mut self, range_id: u64, ownership_epoch: u64) -> Self {
+        self.range_id = Some(range_id);
+        self.ownership_epoch = Some(ownership_epoch);
+        self
     }
 
     pub fn to_json_value(&self) -> JsonValue {
@@ -122,6 +145,17 @@ impl ChangeRecord {
                 .map(|bytes| JsonValue::String(hex_encode(bytes)))
                 .collect();
             object.insert("refresh_records_hex".to_string(), JsonValue::Array(arr));
+        }
+        // Issue #991 — range authority is omitted entirely when absent so a
+        // non-range-replicated record stays byte-for-byte the legacy shape.
+        if let Some(range_id) = self.range_id {
+            object.insert("range_id".to_string(), JsonValue::Number(range_id.into()));
+        }
+        if let Some(epoch) = self.ownership_epoch {
+            object.insert(
+                "ownership_epoch".to_string(),
+                JsonValue::Number(epoch.into()),
+            );
         }
         JsonValue::Object(object)
     }
@@ -194,7 +228,75 @@ impl ChangeRecord {
                 None | Some(JsonValue::Null) => None,
                 _ => return Err("refresh_records_hex is not an array".to_string()),
             },
+            // Issue #991 — absent on legacy records (decodes to `None`), so
+            // old payloads keep round-tripping unchanged.
+            range_id: value.get("range_id").and_then(JsonValue::as_u64),
+            ownership_epoch: value.get("ownership_epoch").and_then(JsonValue::as_u64),
         })
+    }
+}
+
+/// Issue #991 — the range-authority watermark a replica or recovery target
+/// holds for a single range: the minimum term and ownership epoch it will
+/// accept for that range's user-data changes.
+///
+/// The physical WAL stays the source of truth; this fence operates purely on
+/// the derived metadata each [`ChangeRecord`] carries. A record stamped for
+/// this range whose term or ownership epoch is behind the watermark is a write
+/// from a stale (deposed) owner or a superseded timeline and must be rejected
+/// before it is applied. Records for a *different* range, or records with no
+/// range identity at all (legacy / non-range-replicated), are not this fence's
+/// concern and pass through untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeAuthority {
+    pub range_id: u64,
+    pub min_term: u64,
+    pub min_ownership_epoch: u64,
+}
+
+/// Why a [`RangeAuthority`] rejected a record (issue #991).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeAdmitError {
+    /// The record's term is behind the term this range has accepted — a
+    /// returning ex-owner streaming on a superseded timeline.
+    StaleTerm {
+        record_term: u64,
+        accepted_term: u64,
+    },
+    /// The record's ownership epoch is behind the range's accepted epoch — a
+    /// write produced by an owner that has since lost write authority.
+    StaleOwnershipEpoch {
+        record_epoch: u64,
+        accepted_epoch: u64,
+    },
+}
+
+impl RangeAuthority {
+    /// Decide whether `record` may be applied to this range. Only records
+    /// explicitly stamped for `self.range_id` are gated; everything else is
+    /// admitted. Term is checked before epoch so a stale timeline is reported
+    /// as such even when its epoch also lags.
+    pub fn admit(&self, record: &ChangeRecord) -> Result<(), RangeAdmitError> {
+        if record.range_id != Some(self.range_id) {
+            return Ok(());
+        }
+        if record.term < self.min_term {
+            return Err(RangeAdmitError::StaleTerm {
+                record_term: record.term,
+                accepted_term: self.min_term,
+            });
+        }
+        // A record stamped for this range but missing an epoch predates epoch
+        // fencing; admit it on term alone rather than fail closed on absence.
+        if let Some(epoch) = record.ownership_epoch {
+            if epoch < self.min_ownership_epoch {
+                return Err(RangeAdmitError::StaleOwnershipEpoch {
+                    record_epoch: epoch,
+                    accepted_epoch: self.min_ownership_epoch,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -234,6 +336,8 @@ mod tests {
             entity_bytes: Some(vec![1, 2, 3]),
             metadata: Some(serde_json::json!({"role": "admin"})),
             refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
         };
 
         let decoded = ChangeRecord::decode(&record.encode()).expect("decode");
@@ -244,6 +348,122 @@ mod tests {
         assert_eq!(decoded.entity_id, record.entity_id);
         assert_eq!(decoded.entity_bytes, record.entity_bytes);
         assert_eq!(decoded.metadata, record.metadata);
+    }
+
+    #[test]
+    fn range_authority_round_trips_on_the_json_wire() {
+        let record = ChangeRecord {
+            term: 5,
+            lsn: 12,
+            timestamp: 999,
+            operation: ChangeOperation::Insert,
+            collection: "orders".to_string(),
+            entity_id: 8,
+            entity_kind: "row".to_string(),
+            entity_bytes: Some(vec![9, 9]),
+            metadata: None,
+            refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
+        }
+        .with_range_authority(7, 3);
+
+        let decoded = ChangeRecord::decode(&record.encode()).expect("decode");
+
+        assert_eq!(decoded.range_id, Some(7));
+        assert_eq!(decoded.ownership_epoch, Some(3));
+        assert_eq!(decoded.term, 5);
+    }
+
+    #[test]
+    fn legacy_record_without_range_authority_decodes_to_none() {
+        // A payload from before #991 carries neither field; decoding must
+        // leave both absent rather than fabricate a default that would later
+        // collide with a real range fence.
+        let legacy =
+            br#"{"term":2,"lsn":4,"timestamp":1,"operation":"insert","collection":"users","rid":1,"kind":"row"}"#;
+
+        let decoded = ChangeRecord::decode(legacy).expect("decode legacy");
+
+        assert_eq!(decoded.range_id, None);
+        assert_eq!(decoded.ownership_epoch, None);
+    }
+
+    #[test]
+    fn unstamped_record_omits_range_keys_from_the_wire() {
+        let record = ChangeRecord::for_refresh(1, 1, "mv", Vec::new());
+        let text = String::from_utf8(record.encode()).expect("utf8");
+        assert!(!text.contains("range_id"), "got {text}");
+        assert!(!text.contains("ownership_epoch"), "got {text}");
+    }
+
+    fn stamped(term: u64, range_id: u64, epoch: u64) -> ChangeRecord {
+        ChangeRecord {
+            term,
+            lsn: 1,
+            timestamp: 1,
+            operation: ChangeOperation::Insert,
+            collection: "c".to_string(),
+            entity_id: 1,
+            entity_kind: "row".to_string(),
+            entity_bytes: Some(vec![1]),
+            metadata: None,
+            refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
+        }
+        .with_range_authority(range_id, epoch)
+    }
+
+    #[test]
+    fn range_authority_admits_current_term_and_epoch() {
+        let fence = RangeAuthority {
+            range_id: 7,
+            min_term: 3,
+            min_ownership_epoch: 4,
+        };
+        assert_eq!(fence.admit(&stamped(3, 7, 4)), Ok(()));
+        assert_eq!(fence.admit(&stamped(9, 7, 9)), Ok(()));
+    }
+
+    #[test]
+    fn range_authority_rejects_stale_epoch_and_term() {
+        let fence = RangeAuthority {
+            range_id: 7,
+            min_term: 3,
+            min_ownership_epoch: 4,
+        };
+        assert_eq!(
+            fence.admit(&stamped(3, 7, 2)),
+            Err(RangeAdmitError::StaleOwnershipEpoch {
+                record_epoch: 2,
+                accepted_epoch: 4,
+            })
+        );
+        // Term is checked first, so a doubly-stale record reports the term.
+        assert_eq!(
+            fence.admit(&stamped(1, 7, 1)),
+            Err(RangeAdmitError::StaleTerm {
+                record_term: 1,
+                accepted_term: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn range_authority_ignores_other_ranges_and_unstamped_records() {
+        let fence = RangeAuthority {
+            range_id: 7,
+            min_term: 5,
+            min_ownership_epoch: 5,
+        };
+        // Stale, but for a different range — not this fence's business.
+        assert_eq!(fence.admit(&stamped(1, 99, 1)), Ok(()));
+        // No range identity at all — legacy record passes through.
+        let mut legacy = stamped(1, 7, 1);
+        legacy.range_id = None;
+        legacy.ownership_epoch = None;
+        assert_eq!(fence.admit(&legacy), Ok(()));
     }
 
     #[test]
