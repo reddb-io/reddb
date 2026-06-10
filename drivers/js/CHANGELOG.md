@@ -1,5 +1,11 @@
 # @reddb-io/sdk
 
+## 1.10.1
+
+### Patch Changes
+
+- [#1065](https://github.com/reddb-io/reddb/pull/1065) [`3bed23b`](https://github.com/reddb-io/reddb/commit/3bed23b9fe7fc6124fdf2090e05b032c8a9d0478) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix `reds://` and `grpc(s)://` connection strings dropping userinfo and query params: `reds://user:pass@host:5050` parsed host as `user` and port as `NaN`, so credentials never reached the server and the HTTPS auto-login leg never fired. The legacy branch now decodes userinfo, host, port and `token`/`apiKey`/`loginUrl` with standard URL rules; bare-host shapes keep their previous behaviour.
+
 ## 1.10.0
 
 ## 1.5.0
