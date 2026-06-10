@@ -111,6 +111,37 @@ impl MemberKind {
     }
 }
 
+/// A member's lifecycle state in the cluster (issue #1000, PRD #987).
+///
+/// A member is [`Active`](Self::Active) for its whole serving life; planned
+/// removal first marks it [`Draining`](Self::Draining) via
+/// [`MembershipCatalog::begin_drain`]. The distinction drives two rules of the
+/// cluster drain flow ([`super::drain`]): a draining member stops receiving new
+/// range placements, and its ranges are scheduled off it through ordinary
+/// ownership transitions before membership is finally removed. The state is
+/// *cluster-membership* lifecycle, separate from per-range health
+/// ([`HealthClass`](super::supervisor::HealthClass)): a draining member can be
+/// perfectly healthy, and an unhealthy member is not automatically draining.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberState {
+    /// Fully serving: may own and replicate ranges and receive new placements.
+    Active,
+    /// Marked for planned removal: holds its current ranges until they are moved
+    /// off, but receives **no** new range placements. The terminal state before
+    /// the member is removed from the catalog.
+    Draining,
+}
+
+impl MemberState {
+    /// Whether a member in this state may receive *new* range placements. Only an
+    /// [`Active`](Self::Active) member may; a draining member is excluded so drain
+    /// never has to chase ranges it just handed back. This is the "a draining
+    /// member stops receiving new range placements" rule.
+    pub fn accepts_new_placements(self) -> bool {
+        matches!(self, MemberState::Active)
+    }
+}
+
 /// One authorized cluster member.
 ///
 /// The [`NodeIdentity`] is the member's stable cluster identity — the same
@@ -122,17 +153,20 @@ impl MemberKind {
 pub struct ClusterMember {
     identity: NodeIdentity,
     kind: MemberKind,
+    state: MemberState,
     owned_range_count: usize,
 }
 
 impl ClusterMember {
     /// A member as it exists immediately after a successful join: authorized,
-    /// of the granted kind, and holding **no** user ranges. Ranges are only
-    /// assigned later by rebalancing or ownership transitions.
+    /// [`Active`](MemberState::Active), of the granted kind, and holding **no**
+    /// user ranges. Ranges are only assigned later by rebalancing or ownership
+    /// transitions.
     pub fn joined_empty(identity: NodeIdentity, kind: MemberKind) -> Self {
         Self {
             identity,
             kind,
+            state: MemberState::Active,
             owned_range_count: 0,
         }
     }
@@ -143,6 +177,33 @@ impl ClusterMember {
 
     pub fn kind(&self) -> MemberKind {
         self.kind
+    }
+
+    /// This member's lifecycle state ([`Active`](MemberState::Active) or
+    /// [`Draining`](MemberState::Draining)).
+    pub fn state(&self) -> MemberState {
+        self.state
+    }
+
+    /// Is this member draining (marked for planned removal)?
+    pub fn is_draining(&self) -> bool {
+        self.state == MemberState::Draining
+    }
+
+    /// Mark this member draining. Idempotent: re-marking a draining member is a
+    /// no-op. Returns whether the state changed (false if it was already
+    /// draining), so a caller can tell a fresh drain from a repeated request.
+    pub fn begin_drain(&mut self) -> bool {
+        let changed = self.state == MemberState::Active;
+        self.state = MemberState::Draining;
+        changed
+    }
+
+    /// Whether this member may receive *new* range placements: only an active
+    /// data member can. A witness never holds user data, and a draining member is
+    /// being emptied, so neither is a placement target.
+    pub fn is_placement_eligible(&self) -> bool {
+        self.kind.holds_data() && self.state.accepts_new_placements()
     }
 
     /// How many user ranges this member currently owns. Distinct from cluster
@@ -234,9 +295,37 @@ impl MembershipCatalog {
         AdmissionOutcome::Admitted
     }
 
+    /// Mark an authorized member draining (planned-removal flow, issue #1000).
+    /// Returns `None` if `identity` is not a member, otherwise whether the state
+    /// changed (false if it was already draining). A draining member keeps its
+    /// ranges until drain moves them off, but is no longer a placement target.
+    pub fn begin_drain(&mut self, identity: &NodeIdentity) -> Option<bool> {
+        self.members
+            .get_mut(identity)
+            .map(ClusterMember::begin_drain)
+    }
+
+    /// Remove a member from the authorized set, returning the removed
+    /// [`ClusterMember`] (or `None` if it was not a member). This is the final
+    /// step of both the planned drain and the force-remove flows; callers gate it
+    /// on the range-dependency checks in [`super::drain`] — the catalog itself
+    /// does not re-check, so a force remove of a dead member can drop it even
+    /// while ranges still nominally list it.
+    pub fn remove(&mut self, identity: &NodeIdentity) -> Option<ClusterMember> {
+        self.members.remove(identity)
+    }
+
     /// Every authorized member, in stable identity order.
     pub fn members(&self) -> impl Iterator<Item = &ClusterMember> {
         self.members.values()
+    }
+
+    /// The members eligible to receive *new* range placements — active data
+    /// members only, in stable identity order. Draining members and witnesses are
+    /// excluded, so a rebalancer or a drain's replica-evacuation never targets a
+    /// member that is itself on the way out.
+    pub fn placement_eligible_members(&self) -> impl Iterator<Item = &ClusterMember> {
+        self.members().filter(|m| m.is_placement_eligible())
     }
 
     /// The members autodetect of health/topology is allowed to range over —
