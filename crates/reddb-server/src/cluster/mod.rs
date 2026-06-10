@@ -8,6 +8,7 @@ pub mod ownership;
 pub mod ownership_force;
 pub mod ownership_lease;
 pub mod ownership_transition;
+pub mod placement;
 pub mod routing;
 pub mod supervisor;
 pub mod topology;
@@ -43,6 +44,10 @@ pub use ownership_transition::{
     prepare, run_transition, CatchUpEvidence, CommitWatermark, InvalidCandidateReason,
     PreparedTransition, TransitionError, TransitionKind, TransitionOutcome, TransitionRejection,
     TransitionRequest,
+};
+pub use placement::{
+    HotspotRange, MemberCapacity, MoveReason, PlacementPolicy, PlacementSignals, PlannedMove,
+    RangeLoad, RebalancePlan, WeightedPlacementPlanner, NEUTRAL_OPERATOR_WEIGHT,
 };
 pub use routing::{
     RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint, RoutingPolicy,
