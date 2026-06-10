@@ -130,132 +130,129 @@ impl TableDef {
         Ok(())
     }
 
-    /// Serialize table definition to bytes
+    /// Serialize table definition to bytes.
+    ///
+    /// The `RTBL` payload byte layout is owned by `reddb-file` (ADR 0046); this
+    /// projects the typed definition into [`reddb_file::TableDefLayout`], mapping
+    /// the SQL-level type/index/constraint enums to their on-disk discriminant
+    /// bytes. The framing (magic, version, varints, strings) lives in the codec.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        // Magic bytes for table definition
-        buf.extend_from_slice(b"RTBL");
-
-        // Version
-        buf.extend_from_slice(&self.version.to_le_bytes());
-
-        // Table name
-        write_string(&mut buf, &self.name);
-
-        // Timestamps
-        buf.extend_from_slice(&self.created_at.to_le_bytes());
-        buf.extend_from_slice(&self.updated_at.to_le_bytes());
-
-        // Columns
-        write_varint(&mut buf, self.columns.len() as u64);
-        for col in &self.columns {
-            col.write_to(&mut buf);
-        }
-
-        // Primary key
-        write_varint(&mut buf, self.primary_key.len() as u64);
-        for pk in &self.primary_key {
-            write_string(&mut buf, pk);
-        }
-
-        // Indexes
-        write_varint(&mut buf, self.indexes.len() as u64);
-        for idx in &self.indexes {
-            idx.write_to(&mut buf);
-        }
-
-        // Constraints
-        write_varint(&mut buf, self.constraints.len() as u64);
-        for constraint in &self.constraints {
-            constraint.write_to(&mut buf);
-        }
-
-        buf
+        let columns = self
+            .columns
+            .iter()
+            .map(|col| reddb_file::ColumnLayout {
+                name: col.name.clone(),
+                data_type: col.data_type.to_byte(),
+                nullable: col.nullable,
+                default: col.default.clone(),
+                vector_dim: col.vector_dim,
+                compress: col.compress,
+                enum_variants: col.enum_variants.clone(),
+                decimal_precision: col.decimal_precision,
+                element_type: col.element_type.map(|et| et.to_byte()),
+                metadata: col
+                    .metadata
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            })
+            .collect();
+        let indexes = self
+            .indexes
+            .iter()
+            .map(|idx| reddb_file::IndexLayout {
+                name: idx.name.clone(),
+                index_type: idx.index_type as u8,
+                unique: idx.unique,
+                columns: idx.columns.clone(),
+            })
+            .collect();
+        let constraints = self
+            .constraints
+            .iter()
+            .map(|c| reddb_file::ConstraintLayout {
+                name: c.name.clone(),
+                constraint_type: c.constraint_type as u8,
+                columns: c.columns.clone(),
+                ref_table: c.ref_table.clone(),
+                ref_columns: c.ref_columns.clone(),
+            })
+            .collect();
+        let layout = reddb_file::TableDefLayout {
+            version: self.version,
+            name: self.name.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            columns,
+            primary_key: self.primary_key.clone(),
+            indexes,
+            constraints,
+        };
+        reddb_file::encode_table_def(&layout)
     }
 
-    /// Deserialize table definition from bytes
+    /// Deserialize table definition from bytes via the `reddb-file` codec.
     pub fn from_bytes(data: &[u8]) -> Result<Self, TableDefError> {
-        if data.len() < 4 {
-            return Err(TableDefError::TruncatedData);
+        let layout = reddb_file::decode_table_def(data).map_err(TableDefError::from_codec)?;
+
+        let mut columns = Vec::with_capacity(layout.columns.len());
+        for col in layout.columns {
+            let data_type =
+                DataType::from_byte(col.data_type).ok_or(TableDefError::InvalidDataType)?;
+            let element_type = match col.element_type {
+                Some(byte) => {
+                    Some(DataType::from_byte(byte).ok_or(TableDefError::InvalidDataType)?)
+                }
+                None => None,
+            };
+            columns.push(ColumnDef {
+                name: col.name,
+                data_type,
+                nullable: col.nullable,
+                default: col.default,
+                vector_dim: col.vector_dim,
+                compress: col.compress,
+                enum_variants: col.enum_variants,
+                decimal_precision: col.decimal_precision,
+                element_type,
+                metadata: col.metadata.into_iter().collect(),
+            });
         }
 
-        // Check magic
-        if &data[0..4] != b"RTBL" {
-            return Err(TableDefError::InvalidMagic);
+        let mut indexes = Vec::with_capacity(layout.indexes.len());
+        for idx in layout.indexes {
+            let index_type =
+                IndexType::from_byte(idx.index_type).ok_or(TableDefError::InvalidIndexType)?;
+            indexes.push(IndexDef {
+                name: idx.name,
+                columns: idx.columns,
+                index_type,
+                unique: idx.unique,
+            });
         }
 
-        let mut offset = 4;
-
-        // Version
-        if data.len() < offset + 4 {
-            return Err(TableDefError::TruncatedData);
-        }
-        let version = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
-        offset += 4;
-
-        // Table name
-        let (name, name_len) = read_string(&data[offset..])?;
-        offset += name_len;
-
-        // Timestamps
-        if data.len() < offset + 16 {
-            return Err(TableDefError::TruncatedData);
-        }
-        let created_at = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-        offset += 8;
-        let updated_at = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-        offset += 8;
-
-        // Columns
-        let (col_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-        let mut columns = Vec::with_capacity(col_count as usize);
-        for _ in 0..col_count {
-            let (col, col_len) = ColumnDef::read_from(&data[offset..])?;
-            offset += col_len;
-            columns.push(col);
-        }
-
-        // Primary key
-        let (pk_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-        let mut primary_key = Vec::with_capacity(pk_count as usize);
-        for _ in 0..pk_count {
-            let (pk, pk_len) = read_string(&data[offset..])?;
-            offset += pk_len;
-            primary_key.push(pk);
-        }
-
-        // Indexes
-        let (idx_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-        let mut indexes = Vec::with_capacity(idx_count as usize);
-        for _ in 0..idx_count {
-            let (idx, idx_len) = IndexDef::read_from(&data[offset..])?;
-            offset += idx_len;
-            indexes.push(idx);
-        }
-
-        // Constraints
-        let (constraint_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-        let mut constraints = Vec::with_capacity(constraint_count as usize);
-        for _ in 0..constraint_count {
-            let (constraint, constraint_len) = Constraint::read_from(&data[offset..])?;
-            offset += constraint_len;
-            constraints.push(constraint);
+        let mut constraints = Vec::with_capacity(layout.constraints.len());
+        for c in layout.constraints {
+            let constraint_type = ConstraintType::from_byte(c.constraint_type)
+                .ok_or(TableDefError::InvalidConstraintType)?;
+            constraints.push(Constraint {
+                name: c.name,
+                constraint_type,
+                columns: c.columns,
+                ref_table: c.ref_table,
+                ref_columns: c.ref_columns,
+            });
         }
 
         Ok(Self {
-            name,
+            name: layout.name,
             columns,
-            primary_key,
+            primary_key: layout.primary_key,
             indexes,
             constraints,
-            version,
-            created_at,
-            updated_at,
+            version: layout.version,
+            created_at: layout.created_at,
+            updated_at: layout.updated_at,
         })
     }
 }
@@ -369,180 +366,6 @@ impl ColumnDef {
         self.element_type = Some(dt);
         self
     }
-
-    /// Serialize column definition
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        write_string(buf, &self.name);
-        buf.push(self.data_type.to_byte());
-        buf.push(if self.nullable { 1 } else { 0 });
-
-        // Default value
-        if let Some(ref default) = self.default {
-            buf.push(1);
-            write_varint(buf, default.len() as u64);
-            buf.extend_from_slice(default);
-        } else {
-            buf.push(0);
-        }
-
-        // Vector dimension
-        if let Some(dim) = self.vector_dim {
-            buf.push(1);
-            buf.extend_from_slice(&dim.to_le_bytes());
-        } else {
-            buf.push(0);
-        }
-
-        // Compress flag
-        buf.push(if self.compress { 1 } else { 0 });
-
-        // Enum variants
-        write_varint(buf, self.enum_variants.len() as u64);
-        for variant in &self.enum_variants {
-            write_string(buf, variant);
-        }
-
-        // Decimal precision
-        buf.push(self.decimal_precision);
-
-        // Element type (for Array)
-        if let Some(et) = self.element_type {
-            buf.push(1);
-            buf.push(et.to_byte());
-        } else {
-            buf.push(0);
-        }
-
-        // Metadata
-        write_varint(buf, self.metadata.len() as u64);
-        for (k, v) in &self.metadata {
-            write_string(buf, k);
-            write_string(buf, v);
-        }
-    }
-
-    /// Deserialize column definition
-    fn read_from(data: &[u8]) -> Result<(Self, usize), TableDefError> {
-        let mut offset = 0;
-
-        let (name, name_len) = read_string(&data[offset..])?;
-        offset += name_len;
-
-        if data.len() < offset + 2 {
-            return Err(TableDefError::TruncatedData);
-        }
-
-        let data_type = DataType::from_byte(data[offset]).ok_or(TableDefError::InvalidDataType)?;
-        offset += 1;
-
-        let nullable = data[offset] != 0;
-        offset += 1;
-
-        // Default value
-        if data.len() < offset + 1 {
-            return Err(TableDefError::TruncatedData);
-        }
-        let has_default = data[offset] != 0;
-        offset += 1;
-        let default = if has_default {
-            let (len, varint_len) = read_varint(&data[offset..])?;
-            offset += varint_len;
-            if data.len() < offset + len as usize {
-                return Err(TableDefError::TruncatedData);
-            }
-            let default_data = data[offset..offset + len as usize].to_vec();
-            offset += len as usize;
-            Some(default_data)
-        } else {
-            None
-        };
-
-        // Vector dimension
-        if data.len() < offset + 1 {
-            return Err(TableDefError::TruncatedData);
-        }
-        let has_vector_dim = data[offset] != 0;
-        offset += 1;
-        let vector_dim = if has_vector_dim {
-            if data.len() < offset + 4 {
-                return Err(TableDefError::TruncatedData);
-            }
-            let dim = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
-            offset += 4;
-            Some(dim)
-        } else {
-            None
-        };
-
-        // Compress flag
-        if data.len() < offset + 1 {
-            return Err(TableDefError::TruncatedData);
-        }
-        let compress = data[offset] != 0;
-        offset += 1;
-
-        // Enum variants
-        let (variant_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-        let mut enum_variants = Vec::with_capacity(variant_count as usize);
-        for _ in 0..variant_count {
-            let (variant, variant_len) = read_string(&data[offset..])?;
-            offset += variant_len;
-            enum_variants.push(variant);
-        }
-
-        // Decimal precision
-        if data.len() < offset + 1 {
-            return Err(TableDefError::TruncatedData);
-        }
-        let decimal_precision = data[offset];
-        offset += 1;
-
-        // Element type
-        if data.len() < offset + 1 {
-            return Err(TableDefError::TruncatedData);
-        }
-        let has_element_type = data[offset] != 0;
-        offset += 1;
-        let element_type = if has_element_type {
-            if data.len() < offset + 1 {
-                return Err(TableDefError::TruncatedData);
-            }
-            let et = DataType::from_byte(data[offset]).ok_or(TableDefError::InvalidDataType)?;
-            offset += 1;
-            Some(et)
-        } else {
-            None
-        };
-
-        // Metadata
-        let (meta_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-        let mut metadata = HashMap::with_capacity(meta_count as usize);
-        for _ in 0..meta_count {
-            let (k, k_len) = read_string(&data[offset..])?;
-            offset += k_len;
-            let (v, v_len) = read_string(&data[offset..])?;
-            offset += v_len;
-            metadata.insert(k, v);
-        }
-
-        Ok((
-            Self {
-                name,
-                data_type,
-                nullable,
-                default,
-                vector_dim,
-                compress,
-                enum_variants,
-                decimal_precision,
-                element_type,
-                metadata,
-            },
-            offset,
-        ))
-    }
 }
 
 impl fmt::Display for ColumnDef {
@@ -595,56 +418,6 @@ impl IndexDef {
     pub fn with_type(mut self, index_type: IndexType) -> Self {
         self.index_type = index_type;
         self
-    }
-
-    /// Serialize index
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        write_string(buf, &self.name);
-        buf.push(self.index_type as u8);
-        buf.push(if self.unique { 1 } else { 0 });
-        write_varint(buf, self.columns.len() as u64);
-        for col in &self.columns {
-            write_string(buf, col);
-        }
-    }
-
-    /// Deserialize index
-    fn read_from(data: &[u8]) -> Result<(Self, usize), TableDefError> {
-        let mut offset = 0;
-
-        let (name, name_len) = read_string(&data[offset..])?;
-        offset += name_len;
-
-        if data.len() < offset + 2 {
-            return Err(TableDefError::TruncatedData);
-        }
-
-        let index_type =
-            IndexType::from_byte(data[offset]).ok_or(TableDefError::InvalidIndexType)?;
-        offset += 1;
-
-        let unique = data[offset] != 0;
-        offset += 1;
-
-        let (col_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-
-        let mut columns = Vec::with_capacity(col_count as usize);
-        for _ in 0..col_count {
-            let (col, col_len) = read_string(&data[offset..])?;
-            offset += col_len;
-            columns.push(col);
-        }
-
-        Ok((
-            Self {
-                name,
-                columns,
-                index_type,
-                unique,
-            },
-            offset,
-        ))
     }
 }
 
@@ -728,95 +501,6 @@ impl Constraint {
         self.ref_columns = Some(columns);
         self
     }
-
-    /// Serialize constraint
-    fn write_to(&self, buf: &mut Vec<u8>) {
-        write_string(buf, &self.name);
-        buf.push(self.constraint_type as u8);
-
-        write_varint(buf, self.columns.len() as u64);
-        for col in &self.columns {
-            write_string(buf, col);
-        }
-
-        if let Some(ref table) = self.ref_table {
-            buf.push(1);
-            write_string(buf, table);
-            if let Some(ref cols) = self.ref_columns {
-                write_varint(buf, cols.len() as u64);
-                for col in cols {
-                    write_string(buf, col);
-                }
-            } else {
-                write_varint(buf, 0);
-            }
-        } else {
-            buf.push(0);
-        }
-    }
-
-    /// Deserialize constraint
-    fn read_from(data: &[u8]) -> Result<(Self, usize), TableDefError> {
-        let mut offset = 0;
-
-        let (name, name_len) = read_string(&data[offset..])?;
-        offset += name_len;
-
-        if data.len() < offset + 1 {
-            return Err(TableDefError::TruncatedData);
-        }
-
-        let constraint_type =
-            ConstraintType::from_byte(data[offset]).ok_or(TableDefError::InvalidConstraintType)?;
-        offset += 1;
-
-        let (col_count, varint_len) = read_varint(&data[offset..])?;
-        offset += varint_len;
-
-        let mut columns = Vec::with_capacity(col_count as usize);
-        for _ in 0..col_count {
-            let (col, col_len) = read_string(&data[offset..])?;
-            offset += col_len;
-            columns.push(col);
-        }
-
-        if data.len() < offset + 1 {
-            return Err(TableDefError::TruncatedData);
-        }
-
-        let has_ref = data[offset] != 0;
-        offset += 1;
-
-        let (ref_table, ref_columns) = if has_ref {
-            let (table, table_len) = read_string(&data[offset..])?;
-            offset += table_len;
-
-            let (ref_col_count, varint_len) = read_varint(&data[offset..])?;
-            offset += varint_len;
-
-            let mut ref_cols = Vec::with_capacity(ref_col_count as usize);
-            for _ in 0..ref_col_count {
-                let (col, col_len) = read_string(&data[offset..])?;
-                offset += col_len;
-                ref_cols.push(col);
-            }
-
-            (Some(table), Some(ref_cols))
-        } else {
-            (None, None)
-        };
-
-        Ok((
-            Self {
-                name,
-                constraint_type,
-                columns,
-                ref_table,
-                ref_columns,
-            },
-            offset,
-        ))
-    }
 }
 
 /// Constraint type
@@ -899,66 +583,18 @@ impl fmt::Display for TableDefError {
 
 impl std::error::Error for TableDefError {}
 
-/// Write a variable-length integer
-fn write_varint(buf: &mut Vec<u8>, mut value: u64) {
-    loop {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        buf.push(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-/// Read a variable-length integer
-fn read_varint(data: &[u8]) -> Result<(u64, usize), TableDefError> {
-    let mut result: u64 = 0;
-    let mut shift = 0;
-    let mut offset = 0;
-
-    loop {
-        if offset >= data.len() {
-            return Err(TableDefError::TruncatedData);
-        }
-        let byte = data[offset];
-        offset += 1;
-
-        if shift >= 64 {
-            return Err(TableDefError::VarintOverflow);
-        }
-
-        result |= ((byte & 0x7F) as u64) << shift;
-        shift += 7;
-
-        if byte & 0x80 == 0 {
-            break;
+impl TableDefError {
+    /// Map a `reddb-file` table-def codec error onto the server error type,
+    /// preserving the legacy variant semantics (invalid UTF-8 surfaces as
+    /// truncated data, as the previous hand-rolled reader did).
+    fn from_codec(err: reddb_file::TableDefCodecError) -> Self {
+        match err {
+            reddb_file::TableDefCodecError::TruncatedData => TableDefError::TruncatedData,
+            reddb_file::TableDefCodecError::InvalidMagic => TableDefError::InvalidMagic,
+            reddb_file::TableDefCodecError::VarintOverflow => TableDefError::VarintOverflow,
+            reddb_file::TableDefCodecError::InvalidUtf8 => TableDefError::TruncatedData,
         }
     }
-
-    Ok((result, offset))
-}
-
-/// Write a length-prefixed string
-fn write_string(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    write_varint(buf, bytes.len() as u64);
-    buf.extend_from_slice(bytes);
-}
-
-/// Read a length-prefixed string
-fn read_string(data: &[u8]) -> Result<(String, usize), TableDefError> {
-    let (len, varint_len) = read_varint(data)?;
-    let offset = varint_len;
-    if data.len() < offset + len as usize {
-        return Err(TableDefError::TruncatedData);
-    }
-    let s = String::from_utf8(data[offset..offset + len as usize].to_vec())
-        .map_err(|_| TableDefError::TruncatedData)?;
-    Ok((s, offset + len as usize))
 }
 
 #[cfg(test)]

@@ -20,9 +20,12 @@ pub mod graph_label_registry;
 pub mod graph_record;
 pub mod graph_store;
 pub mod graph_table_index;
+pub mod hnsw_index_codec;
+pub mod ivf_index_codec;
 pub mod layout;
 pub mod local_backend;
 pub mod logical_wal;
+pub mod native_artifact_codec;
 pub mod native_store;
 pub mod operational_manifest;
 pub mod physical_metadata;
@@ -33,6 +36,7 @@ pub mod serverless;
 pub mod shm;
 pub mod spill;
 pub mod store_wal;
+pub mod table_def_codec;
 pub mod transaction_wal;
 pub mod turboquant_snapshot;
 pub mod vector_btree_page_format;
@@ -155,6 +159,14 @@ pub use graph_table_index::{
     GraphTableIndexFrameError, GRAPH_TABLE_INDEX_ENTRY_HEADER_LEN, GRAPH_TABLE_INDEX_HEADER_LEN,
     GRAPH_TABLE_INDEX_MAX_NODE_ID_LEN,
 };
+pub use hnsw_index_codec::{
+    decode_hnsw_index, encode_hnsw_index, HnswCodecError, HnswIndexLayout, HnswNodeLayout,
+    HNSW_INDEX_MAGIC, HNSW_INDEX_VERSION,
+};
+pub use ivf_index_codec::{
+    decode_ivf_index, encode_ivf_index, IvfCodecError, IvfIndexLayout, IvfListLayout,
+    IVF_INDEX_MAGIC,
+};
 pub use layout::{
     audit_log_rotated_compressed_path, audit_log_rotated_plain_path, data_file_name,
     default_database_path, default_service_database_path, engine_wal_path, legacy_audit_log_path,
@@ -181,6 +193,12 @@ pub use logical_wal::{
     LOGICAL_WAL_SEEK_INDEX_INTERVAL, LOGICAL_WAL_SPOOL_MAGIC, LOGICAL_WAL_SPOOL_VERSION_CURRENT,
     LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2, LOGICAL_WAL_SPOOL_VERSION_V3,
     LOGICAL_WAL_V3_HEADER_LEN,
+};
+pub use native_artifact_codec::{
+    decode_document_pathvalue, decode_fulltext_index, decode_graph_adjacency,
+    encode_document_pathvalue, encode_fulltext_index, encode_graph_adjacency, DocPathValueIndex,
+    DocPathValueRecord, FulltextIndex, GraphAdjacencyEdge, NativeArtifactError,
+    DOC_PATHVALUE_MAGIC, FULLTEXT_INDEX_MAGIC, GRAPH_ADJACENCY_MAGIC,
 };
 pub use native_store::{
     append_native_store_crc32_footer, decode_native_blob_page, decode_native_catalog_summary_page,
@@ -304,6 +322,10 @@ pub use spill::{
 pub use store_wal::{
     decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
     STORE_WAL_ACTION_VERSION,
+};
+pub use table_def_codec::{
+    decode_table_def, encode_table_def, ColumnLayout, ConstraintLayout, IndexLayout,
+    TableDefCodecError, TableDefLayout, TABLE_DEF_MAGIC,
 };
 pub use transaction_wal::{
     decode_transaction_wal_entry_payload, decode_transaction_wal_record_frame,
