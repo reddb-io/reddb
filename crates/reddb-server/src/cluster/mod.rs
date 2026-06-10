@@ -4,6 +4,7 @@ pub mod identity;
 pub mod join;
 pub mod membership;
 pub mod ownership;
+pub mod ownership_force;
 pub mod ownership_lease;
 pub mod ownership_transition;
 pub mod routing;
@@ -22,6 +23,10 @@ pub use ownership::{
     CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
     PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership,
     RangeRole, RangeWriteReject, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
+};
+pub use ownership_force::{
+    force_transition, EmptyOperatorReason, ForceDenial, ForceFailure, ForceTransitionCapability,
+    ForcedTransitionAudit, ForcedTransitionDisposition, ForcedTransitionRequest, OperatorReason,
 };
 pub use ownership_lease::{
     admit_durable_write, DurableWriteReject, FenceReason, LeaseFenceRejection, LeasedOwner,
