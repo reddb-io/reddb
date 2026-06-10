@@ -1817,9 +1817,29 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         });
     let server = reddb::server::RedDBServer::new(runtime);
 
-    let ui_dir = flag_string(flags, "ui-dir")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+    let ui_dir = if let Some(explicit) = flag_string(flags, "ui-dir").filter(|v| !v.is_empty()) {
+        // Explicit --ui-dir: use as-is (no download).
+        Some(PathBuf::from(explicit))
+    } else {
+        // No --ui-dir: resolve the pinned bundle from the local cache,
+        // downloading it on first use (ADR 0050 / issue #1043).
+        let cache_root = reddb::server::ui_bundle_resolver::reddb_user_cache_root()
+            .unwrap_or_else(|_| std::env::temp_dir().join("reddb"));
+        match reddb::server::ui_bundle_resolver::resolve_ui_bundle(
+            &cache_root,
+            &reddb::server::ui_bundle_resolver::HttpFetcher,
+        ) {
+            Ok(bundle_dir) => Some(bundle_dir),
+            Err(err) => {
+                let msg = format!("fetch red-ui bundle: {err}");
+                if json_mode {
+                    json_error("ui", &msg);
+                }
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        }
+    };
     let port = flag_string(flags, "port")
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(0);
