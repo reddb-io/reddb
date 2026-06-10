@@ -141,6 +141,11 @@ pub mod ui_bundle_resolver;
 // browser bridge when no handler is registered. Decision + canonical
 // deep-link string live behind a testable seam.
 pub mod ui_deeplink;
+// `red ui` credential handoff (issue #1048, ADR 0051 / 0036): the
+// injected-auth mode decision, the credential-free page config snippet, and
+// the one-time loopback secret channel for the deep-link/desktop path. The
+// handshake injection itself lives in `ui_bridge`.
+pub mod ui_auth;
 // `pub(crate)` so the RedWire input-stream path (issue #764 / S5)
 // can reuse the canonical S4 INSERT builders / identifier checks
 // (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
