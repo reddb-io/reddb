@@ -4,6 +4,7 @@ pub mod identity;
 pub mod join;
 pub mod membership;
 pub mod ownership;
+pub mod routing;
 
 pub use identity::{
     ClusterVoterIdentity, NodeIdentity, NodeIdentityError, ReplicationPeerIdentity,
@@ -17,4 +18,8 @@ pub use ownership::{
     CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
     PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership,
     RangeRole, RangeWriteReject, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
+};
+pub use routing::{
+    RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint, RoutingPolicy,
+    DEFAULT_MAX_FORWARD_PAYLOAD,
 };
