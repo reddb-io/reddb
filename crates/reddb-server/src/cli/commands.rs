@@ -206,6 +206,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       usage: "red vcs <commit|branch|branches|tag|tags|checkout|merge|log|status|lca|resolve> [args] [flags]",
       flags: vcs_flags(),
     },
+    CommandDef {
+      name: "ui",
+      summary: "Open a graphical UI against a local .rdb over a RedWire-over-WS bridge",
+      usage: "red ui --server file://./data.rdb [--ui-dir DIR] [--port N] [--no-browser]",
+      flags: ui_flags(),
+    },
   ]
 }
 
@@ -421,6 +427,24 @@ fn replica_flags() -> Vec<FlagSchema> {
         FlagSchema::new("vault")
             .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
             .with_default("false"),
+    ]
+}
+
+fn ui_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::boolean("server")
+            .with_description("Force the browser-served bridge path (default for file:// targets)"),
+        FlagSchema::boolean("desktop").with_description(
+            "Reserved: open the native desktop UI (lands in the deep-link slice)",
+        ),
+        FlagSchema::new("ui-dir").with_description(
+            "Directory to serve the UI bundle from (defaults to the built-in fixture)",
+        ),
+        FlagSchema::new("port")
+            .with_description("Loopback port for the bridge (0 / omit picks an ephemeral port)"),
+        FlagSchema::boolean("no-browser").with_description(
+            "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",
+        ),
     ]
 }
 

@@ -181,6 +181,12 @@ proptest = "1"
 insta = { version = "1", features = ["filters"] }
 regex = "1"
 toml = "1.1"
+# RedWire-over-WS bridge e2e (issue #1042): a browser-style WS client
+# drives the anonymous handshake + a query over the loopback bridge.
+# Pinned to 0.29 to match the axum-resolved tungstenite in Cargo.lock.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+http = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

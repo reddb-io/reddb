@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RedDB UI — local bridge</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 2rem; max-width: 56rem; }
+    h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+    .sub { opacity: .7; margin: 0 0 1.5rem; }
+    .row { display: flex; gap: .5rem; margin-bottom: 1rem; }
+    textarea { flex: 1; font: 13px/1.4 ui-monospace, monospace; padding: .5rem; min-height: 3rem; }
+    button { padding: .5rem 1rem; font: inherit; cursor: pointer; }
+    pre { background: rgba(127,127,127,.12); padding: 1rem; border-radius: 6px; overflow: auto; }
+    .pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: 12px; }
+    .ok { background: #1a7f37; color: #fff; }
+    .bad { background: #b22; color: #fff; }
+    .pending { background: #946; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>RedDB UI <span id="status" class="pill pending">connecting…</span></h1>
+  <p class="sub">Minimal bridge fixture — RedWire over a local WebSocket against the embedded engine.</p>
+
+  <div class="row">
+    <textarea id="sql">SELECT 1 AS one</textarea>
+  </div>
+  <div class="row">
+    <button id="run" disabled>Run query</button>
+  </div>
+  <pre id="out">No result yet.</pre>
+
+  <script type="module">
+    // Compact, dependency-free RedWire-over-WebSocket codec. This mirrors
+    // the canonical drivers/js-client/src/redwire-core.js framing (16-byte
+    // little-endian header) but inlines only the slice this spine fixture
+    // needs: anonymous handshake + a single buffered query. A later slice
+    // swaps this for the shared redwire-core bundle (PRD #1041).
+    const MAGIC = 0xfe, VERSION = 0x01, HEADER = 16
+    const Kind = { Query: 0x01, Result: 0x02, Error: 0x03, Hello: 0x10, HelloAck: 0x11, AuthResponse: 0x13, AuthOk: 0x14, AuthFail: 0x15 }
+    const enc = new TextEncoder(), dec = new TextDecoder()
+
+    const statusEl = document.getElementById('status')
+    const outEl = document.getElementById('out')
+    const runEl = document.getElementById('run')
+    const sqlEl = document.getElementById('sql')
+
+    function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = 'pill ' + cls }
+
+    function encodeFrame(kind, corr, payload) {
+      const total = HEADER + payload.length
+      const buf = new Uint8Array(total)
+      const dv = new DataView(buf.buffer)
+      dv.setUint32(0, total, true)
+      buf[4] = kind
+      buf[5] = 0 // flags
+      dv.setUint16(6, 0, true) // stream_id
+      dv.setBigUint64(8, BigInt(corr), true)
+      buf.set(payload, HEADER)
+      return buf
+    }
+
+    // Accumulate inbound bytes and hand back one decoded frame at a time.
+    class FrameReader {
+      constructor() { this.buf = new Uint8Array(0); this.waiters = []; this.queue = [] }
+      push(bytes) {
+        const merged = new Uint8Array(this.buf.length + bytes.length)
+        merged.set(this.buf); merged.set(bytes, this.buf.length)
+        this.buf = merged
+        this.drain()
+      }
+      drain() {
+        while (this.buf.length >= HEADER) {
+          const dv = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.length)
+          const total = dv.getUint32(0, true)
+          if (this.buf.length < total) break
+          const kind = this.buf[4]
+          const payload = this.buf.slice(HEADER, total)
+          this.buf = this.buf.slice(total)
+          const frame = { kind, payload }
+          const w = this.waiters.shift()
+          if (w) w(frame); else this.queue.push(frame)
+        }
+      }
+      next() {
+        const q = this.queue.shift()
+        if (q) return Promise.resolve(q)
+        return new Promise((res) => this.waiters.push(res))
+      }
+    }
+
+    async function connectAndQuery(sql) {
+      const wsUrl = `ws://${location.host}/redwire`
+      const ws = new WebSocket(wsUrl)
+      ws.binaryType = 'arraybuffer'
+      const reader = new FrameReader()
+      ws.addEventListener('message', (ev) => reader.push(new Uint8Array(ev.data)))
+
+      await new Promise((res, rej) => {
+        ws.addEventListener('open', res, { once: true })
+        ws.addEventListener('error', () => rej(new Error('websocket error')), { once: true })
+      })
+
+      // Preamble: magic + minor version.
+      ws.send(Uint8Array.from([MAGIC, VERSION]))
+      // Hello advertising the anonymous method.
+      ws.send(encodeFrame(Kind.Hello, 1, enc.encode(JSON.stringify({
+        versions: [VERSION], auth_methods: ['anonymous'], features: 0, client_name: 'red-ui-fixture',
+      }))))
+      const ack = await reader.next()
+      if (ack.kind !== Kind.HelloAck) throw new Error('expected HelloAck, got ' + ack.kind)
+
+      // AuthResponse: anonymous carries no proof.
+      ws.send(encodeFrame(Kind.AuthResponse, 2, new Uint8Array()))
+      const authed = await reader.next()
+      if (authed.kind !== Kind.AuthOk) throw new Error('auth refused: ' + dec.decode(authed.payload))
+
+      // Query.
+      ws.send(encodeFrame(Kind.Query, 3, enc.encode(sql)))
+      const res = await reader.next()
+      ws.close()
+      if (res.kind === Kind.Error) throw new Error(dec.decode(res.payload))
+      if (res.kind !== Kind.Result) throw new Error('unexpected frame kind ' + res.kind)
+      return dec.decode(res.payload)
+    }
+
+    async function run() {
+      runEl.disabled = true
+      setStatus('querying…', 'pending')
+      outEl.textContent = '…'
+      try {
+        const json = await connectAndQuery(sqlEl.value)
+        setStatus('ok', 'ok')
+        try { outEl.textContent = JSON.stringify(JSON.parse(json), null, 2) }
+        catch { outEl.textContent = json }
+      } catch (err) {
+        setStatus('error', 'bad')
+        outEl.textContent = String(err)
+      } finally {
+        runEl.disabled = false
+      }
+    }
+
+    // Probe the connection once on load so the page reflects a live bridge.
+    connectAndQuery('SELECT 1 AS one')
+      .then(() => { setStatus('connected', 'ok'); outEl.textContent = 'Bridge is live. Run a query.'; runEl.disabled = false })
+      .catch((err) => { setStatus('error', 'bad'); outEl.textContent = String(err); runEl.disabled = false })
+
+    runEl.addEventListener('click', run)
+  </script>
+</body>
+</html>
