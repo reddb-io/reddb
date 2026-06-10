@@ -49,8 +49,9 @@
 //!   transition move the epoch, fencing the old owner at the cutover instant.
 //!
 //! Forced (disaster-recovery) transitions, which may proceed without ordinary
-//! safety checks, are explicitly out of scope here (ADR 0037 reserves them for a
-//! separate `FORCE` capability path).
+//! safety checks, are out of scope here: ADR 0037 reserves them for a separate
+//! `FORCE` capability path, implemented in
+//! [`ownership_force`](super::ownership_force).
 //!
 //! Everything is a pure data model over the catalog, with no I/O, so the CAS,
 //! fencing, and audit story is exercised deterministically.
