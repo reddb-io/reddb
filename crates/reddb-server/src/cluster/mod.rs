@@ -6,6 +6,7 @@ pub mod drain;
 pub mod identity;
 pub mod join;
 pub mod membership;
+pub mod move_range;
 pub mod ownership;
 pub mod ownership_force;
 pub mod ownership_lease;
@@ -37,6 +38,10 @@ pub use join::{ControlPlaneSnapshot, JoinGrant, JoinRejection, JoinRequest, Seed
 pub use membership::{
     AdmissionOutcome, BaselineAssessment, ClusterId, ClusterIdError, ClusterMember, MemberKind,
     MemberState, MembershipCatalog, RESILIENT_DATA_MEMBER_BASELINE,
+};
+pub use move_range::{
+    classify_move, recover_interrupted_move, split_range, MoveError, MoveKind, MovePhase,
+    MoveRange, MoveRecovery, RangeSplit, SplitError, SplitPolicy, SplitSide,
 };
 pub use ownership::{
     CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
