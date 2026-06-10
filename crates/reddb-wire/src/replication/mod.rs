@@ -11,6 +11,7 @@ pub mod basebackup;
 pub mod bookmark;
 pub mod catchup;
 pub mod change_record;
+pub mod range_stream;
 pub mod timeline;
 pub mod wal_stream;
 
@@ -25,6 +26,10 @@ pub use change_record::{
     change_record_json_value_to_string, parse_change_record_json_value, public_item_kind,
     ChangeOperation, ChangeRecord, ChangeRecordJsonValue, RangeAdmitError, RangeAuthority,
     DEFAULT_REPLICATION_TERM,
+};
+pub use range_stream::{
+    classify_range_record, plan_range_catchup, RangeCatchupPlan, RangeProgressTracker,
+    RangeStreamDecision, RangeStreamPosition, RangeStreamProgress, RangeStreamReject,
 };
 pub use timeline::{
     FailoverPromotionReply, FailoverPromotionRequest, RejoinPlanNotice, RejoinRewindConfirmation,
