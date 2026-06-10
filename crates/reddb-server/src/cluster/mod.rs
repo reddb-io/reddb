@@ -5,6 +5,7 @@ pub mod join;
 pub mod membership;
 pub mod ownership;
 pub mod routing;
+pub mod topology;
 
 pub use identity::{
     ClusterVoterIdentity, NodeIdentity, NodeIdentityError, ReplicationPeerIdentity,
@@ -22,4 +23,7 @@ pub use ownership::{
 pub use routing::{
     RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint, RoutingPolicy,
     DEFAULT_MAX_FORWARD_PAYLOAD,
+};
+pub use topology::{
+    ClientTopology, HintOutcome, RefreshOutcome, TopologyRange, TopologySnapshot, TopologyUpdate,
 };
