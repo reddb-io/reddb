@@ -526,7 +526,14 @@ jobs:
           publish_one() {
             local crate="$1"
             echo "==> publish ${crate}@${VERSION}"
-            cargo publish --locked --allow-dirty -p "$crate"
+            local out
+            out=$(cargo publish --locked --allow-dirty -p "$crate" 2>&1) && { echo "$out"; return 0; }
+            if echo "$out" | grep -qE "already uploaded|already exists"; then
+              echo "  ${crate}@${VERSION} already on crates.io — skipping"
+            else
+              echo "$out" >&2
+              return 1
+            fi
           }
 
           publish_one reddb-io-wire
