@@ -46,7 +46,10 @@ fn linux_fstatfs_type(file: &File) -> Option<i64> {
         return None;
     }
     let stat = unsafe { stat.assume_init() };
-    Some(stat.f_type)
+    // `statfs.f_type` is i32 on 32-bit glibc targets (armv7) and i64 on
+    // 64-bit ones — widen explicitly so both compile.
+    #[allow(clippy::unnecessary_cast)]
+    Some(stat.f_type as i64)
 }
 
 #[cfg(target_os = "linux")]
