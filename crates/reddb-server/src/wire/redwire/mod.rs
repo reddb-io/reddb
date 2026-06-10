@@ -22,7 +22,8 @@ pub mod session;
 #[cfg(unix)]
 pub use listener::start_redwire_unix_listener;
 pub use listener::{
-    start_redwire_listener, start_redwire_listener_on, start_redwire_tls_listener, RedWireConfig,
+    start_redwire_listener, start_redwire_listener_on, start_redwire_tls_listener,
+    start_redwire_tls_listener_on, RedWireConfig,
 };
 
 pub use reddb_wire::redwire::{
