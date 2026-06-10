@@ -84,6 +84,11 @@ fs2 = "0.4"
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
+# webpki system trust roots for the `red ui` outbound TLS connection to a
+# `reds://` remote RedWire target (issue #1044). Already in the lock via
+# the wider rustls graph; pinned here so the bridge connector can seed its
+# RootCertStore with public CAs without an explicit `--tls-ca`.
+webpki-roots = "1"
 x509-parser = "0.18"
 rcgen = "0.14"
 tracing = "0.1"

@@ -208,8 +208,8 @@ pub fn all_commands() -> Vec<CommandDef> {
     },
     CommandDef {
       name: "ui",
-      summary: "Open a graphical UI against a local .rdb over a RedWire-over-WS bridge",
-      usage: "red ui --server file://./data.rdb [--ui-dir DIR] [--port N] [--no-browser]",
+      summary: "Open a graphical UI against a local .rdb or a remote red:///reds:// instance over a RedWire-over-WS bridge",
+      usage: "red ui file://./data.rdb | red ui red://host:port [--ui-dir DIR] [--port N] [--tls-ca PEM] [--no-browser]",
       flags: ui_flags(),
     },
   ]
@@ -442,6 +442,9 @@ fn ui_flags() -> Vec<FlagSchema> {
         ),
         FlagSchema::new("port")
             .with_description("Loopback port for the bridge (0 / omit picks an ephemeral port)"),
+        FlagSchema::new("tls-ca").with_description(
+            "PEM CA bundle to trust for a reds:// target (on top of system roots)",
+        ),
         FlagSchema::boolean("no-browser").with_description(
             "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",
         ),

@@ -126,6 +126,26 @@ pub async fn start_redwire_tls_listener(
     let acceptor = crate::wire::tls::build_tls_acceptor(tls_config)?;
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!(transport = "redwire+tls", bind = %bind_addr, "listener online");
+    serve_redwire_tls(listener, acceptor, runtime).await
+}
+
+/// Start a TLS RedWire listener on an already-bound TCP listener. Mirror
+/// of [`start_redwire_listener_on`] for the TLS edge — lets a caller pick
+/// the bound address (e.g. an ephemeral `127.0.0.1:0` port) before serving.
+pub async fn start_redwire_tls_listener_on(
+    listener: TcpListener,
+    runtime: Arc<RedDBRuntime>,
+    tls_config: &crate::wire::tls::WireTlsConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let acceptor = crate::wire::tls::build_tls_acceptor(tls_config)?;
+    serve_redwire_tls(listener, acceptor, runtime).await
+}
+
+async fn serve_redwire_tls(
+    listener: TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    runtime: Arc<RedDBRuntime>,
+) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let (tcp_stream, peer) = listener.accept().await?;
         let acceptor = acceptor.clone();

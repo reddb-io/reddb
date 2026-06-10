@@ -162,14 +162,14 @@ fn classify_inbound(inbound: Option<Result<Message, axum::Error>>) -> WsInbound 
     }
 }
 
-/// Bridge the binary WebSocket data channel to a RedWire session.
+/// Bridge the binary WebSocket data channel to a RedWire session over the
+/// **embedded engine**.
 ///
-/// The session runs on the application side of an in-memory duplex; this
-/// loop pumps bytes between the network side of the duplex and the WS:
-/// inbound `Binary` messages become session input, session output becomes
-/// outbound `Binary` messages. When either side closes, both halves drop
-/// and the peer observes EOF.
-pub(crate) async fn run_ws_session(mut socket: WebSocket, server: super::RedDBServer) {
+/// The session runs on the application side of an in-memory duplex; the
+/// pump loop ([`pump_ws_stream`]) moves bytes between the network side of
+/// the duplex and the WS. When either side closes, both halves drop and
+/// the peer observes EOF.
+pub(crate) async fn run_ws_session(socket: WebSocket, server: super::RedDBServer) {
     let runtime = Arc::new(server.runtime().clone());
     // Same auth wiring as the socket listener path: bearer/JWT are
     // negotiated in the RedWire handshake from the runtime's stores.
@@ -181,7 +181,32 @@ pub(crate) async fn run_ws_session(mut socket: WebSocket, server: super::RedDBSe
         let _ = handle_session_consume_magic(session_io, runtime, auth_store, oauth).await;
     });
 
-    let (mut net_read, mut net_write) = tokio::io::split(net_io);
+    // Pump the WS data channel against the network side of the duplex.
+    pump_ws_stream(socket, net_io).await;
+
+    // The pump already dropped its stream halves (signalling EOF to the
+    // session side); abort backstops any task still parked (e.g. on a live
+    // queue wait).
+    session.abort();
+}
+
+/// Pump bytes between a binary WebSocket and an arbitrary byte stream.
+///
+/// This is the transport-agnostic seam (ADR 0036): inbound `Binary`
+/// messages are written to `stream`, and bytes read back from `stream`
+/// are sent as outbound `Binary` messages. The byte stream may be the
+/// network side of the embedded-engine duplex ([`run_ws_session`]) or a
+/// remote RedWire-over-TCP/TLS connection (the `red ui` bridge to a
+/// `red://` / `reds://` target, issue #1044) — the loop is identical
+/// because RedWire framing is self-delimiting on either end.
+///
+/// Returns once either side closes; both stream halves are dropped on the
+/// way out so the peer observes EOF.
+pub(crate) async fn pump_ws_stream<S>(mut socket: WebSocket, stream: S)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
+    let (mut net_read, mut net_write) = tokio::io::split(stream);
     let mut out_buf = vec![0u8; WS_READ_CHUNK];
 
     loop {
@@ -199,7 +224,7 @@ pub(crate) async fn run_ws_session(mut socket: WebSocket, server: super::RedDBSe
             }
             outbound = net_read.read(&mut out_buf) => {
                 match outbound {
-                    // Session closed its write half → no more output.
+                    // Stream closed its write half → no more output.
                     Ok(0) => break,
                     Ok(n) => {
                         let msg = Message::Binary(Bytes::copy_from_slice(&out_buf[..n]));
@@ -213,12 +238,10 @@ pub(crate) async fn run_ws_session(mut socket: WebSocket, server: super::RedDBSe
         }
     }
 
-    // Dropping the network halves signals EOF to the session side; abort
-    // backstops any task still parked (e.g. on a live queue wait).
+    // Dropping the network halves signals EOF to the stream side.
     drop(net_write);
     drop(net_read);
     let _ = socket.send(Message::Close(None)).await;
-    session.abort();
 }
 
 #[cfg(test)]

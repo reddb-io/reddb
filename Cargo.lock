@@ -2388,6 +2388,7 @@ dependencies = [
  "tracing-subscriber",
  "trybuild",
  "ureq",
+ "webpki-roots",
  "x509-parser",
  "zstd",
 ]
