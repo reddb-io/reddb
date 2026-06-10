@@ -189,17 +189,31 @@ export function parseLegacyUrl(uri) {
     || uri.startsWith('reds://')
   ) {
     const scheme = uri.split('://', 1)[0]
-    const stripped = uri.slice(`${scheme}://`.length)
-    const [hostPort] = stripped.split(/[/?]/, 1)
-    const [host, portStr] = hostPort.split(':')
-    if (!host) {
+    let parsed
+    try {
+      // Borrow the URL parser via an `https://` authority (same trick as
+      // parseRedWssUrl) so userinfo / host / port / query all decode with
+      // the standard rules — a naive `hostPort.split(':')` breaks on
+      // `reds://user:pass@host:5050` (host becomes `user`, port NaN).
+      parsed = new URL('https://' + uri.slice(`${scheme}://`.length))
+    } catch (err) {
+      throw new RedDBError('UNPARSEABLE_URI', `failed to parse '${uri}': ${err.message}`)
+    }
+    if (!parsed.hostname) {
       throw new TypeError(`invalid ${scheme}:// URI: missing host in '${uri}'`)
     }
-    const legacyKind = scheme === 'reds' ? 'reds' : scheme === 'grpcs' ? 'grpcs' : scheme === 'grpc' ? 'grpc' : 'red'
+    const legacyKind = scheme === 'reds' ? 'reds' : scheme === 'grpcs' ? 'grpcs' : 'grpc'
+    const params = parsed.searchParams
     return {
       kind: legacyKind,
-      host,
-      port: portStr ? Number(portStr) : defaultPortFor(legacyKind),
+      host: parsed.hostname,
+      port: parsed.port ? Number(parsed.port) : defaultPortFor(legacyKind),
+      username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+      password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+      token: params.get('token') ?? undefined,
+      apiKey: params.get('apiKey') ?? params.get('api_key') ?? undefined,
+      loginUrl: params.get('loginUrl') ?? params.get('login_url') ?? undefined,
+      params,
       originalUri: uri,
     }
   }
