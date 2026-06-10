@@ -1,6 +1,7 @@
 //! Shared cluster identity and membership model.
 
 pub mod commit_resolution;
+pub mod cross_range;
 pub mod drain;
 pub mod identity;
 pub mod join;
@@ -17,6 +18,11 @@ pub mod topology;
 pub use commit_resolution::{
     is_local_ack, resolve_commit_policy, CollectionDataModel, CommitPolicyResolution,
     CommitPolicyViolation, FailoverEligibility, GuardrailDisposition, HaIntent, ResolutionSource,
+};
+pub use cross_range::{
+    ConsistentReadLeg, ConsistentReadPlan, ConsistentReadReject, GlobalReadWatermark, KeyTarget,
+    PinnedTarget, RangeParticipant, ReadFanout, ReadFanoutReject, ReadLeg, ResolvedTarget,
+    WriteTransactionPlan, WriteTransactionReject, WriterParticipation,
 };
 pub use drain::{
     drain_status, plan_drain, plan_force_remove, run_drain, run_force_remove, DrainBlock,
