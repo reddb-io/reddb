@@ -56,6 +56,214 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
+/// Lexically normalize a path: drop `.` segments and resolve `..` against
+/// the preceding segment. Pure string work — never touches the filesystem,
+/// so the target need not exist yet.
+fn lexical_normalize(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Canonicalize a `file://` URI to an absolute `file:///…` form (issue
+/// #1042). A relative path is resolved against `cwd`; the result is both the
+/// canonical URI string and the absolute filesystem path it denotes. Lexical
+/// only — the path need not exist (the engine creates it on open).
+fn canonicalize_file_uri(uri: &str, cwd: &std::path::Path) -> Result<(String, PathBuf), String> {
+    let rest = uri
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("expected a file:// URI, got: {uri}"))?;
+    // Everything after `file://` is treated as a path: `file:///abs` →
+    // `/abs`, `file://./rel` → `./rel`, `file://rel` → `rel`. A remote host
+    // component is not meaningful for a local embedded engine.
+    if rest.is_empty() {
+        return Err("file:// URI is missing a path".to_string());
+    }
+    let candidate = std::path::Path::new(rest);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        cwd.join(candidate)
+    };
+    let absolute = lexical_normalize(&absolute);
+    let canonical_uri = format!("file://{}", absolute.display());
+    Ok((canonical_uri, absolute))
+}
+
+/// Open the default browser at `url`. Best-effort: the spawned launcher is
+/// detached and its stdio discarded so it never blocks or noisily writes to
+/// the terminal hosting the bridge.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let (program, args): (&str, Vec<&str>) = ("open", vec![url]);
+    #[cfg(target_os = "windows")]
+    let (program, args): (&str, Vec<&str>) = ("cmd", vec!["/C", "start", "", url]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (program, args): (&str, Vec<&str>) = ("xdg-open", vec![url]);
+
+    std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+/// `red ui <uri>` — open a graphical UI against a local `.rdb` over the
+/// loopback RedWire-over-WebSocket bridge (issue #1042, PRD #1041). For a
+/// `file://` URI this serves the UI bundle and fronts the **embedded engine**
+/// opened from the file; `--desktop` is reserved for the deep-link slice.
+fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) -> i32 {
+    let json_mode = wants_json(flags);
+
+    let Some(uri_arg) = remaining.first() else {
+        let msg = "red ui requires a <uri> positional, e.g. red ui --server file://./data.rdb";
+        if json_mode {
+            json_error("ui", msg);
+        }
+        eprintln!("error: {msg}");
+        return 1;
+    };
+
+    let cwd = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            let msg = format!("cannot resolve current directory: {err}");
+            if json_mode {
+                json_error("ui", &msg);
+            }
+            eprintln!("error: {msg}");
+            return 1;
+        }
+    };
+
+    // file:// is the only scheme this slice serves (the embedded engine).
+    let (canonical_uri, db_path) = match canonicalize_file_uri(uri_arg, &cwd) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            if json_mode {
+                json_error("ui", &err);
+            }
+            eprintln!("error: {err}");
+            return 1;
+        }
+    };
+
+    if flags.get("desktop").is_some_and(|v| v.is_truthy()) {
+        eprintln!(
+            "note: --desktop is reserved; serving the browser UI (the deep-link slice lands desktop)"
+        );
+    }
+
+    let ui_dir = flag_string(flags, "ui-dir")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    let port = match flag_string(flags, "port").filter(|value| !value.is_empty()) {
+        Some(raw) => match raw.parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                let msg = format!("invalid --port value: {raw}");
+                if json_mode {
+                    json_error("ui", &msg);
+                }
+                eprintln!("error: {msg}");
+                return 1;
+            }
+        },
+        None => 0,
+    };
+
+    let no_browser =
+        flags.get("no-browser").is_some_and(|v| v.is_truthy()) || env_truthy("RED_UI_NO_BROWSER");
+
+    let server = match reddb::server::RedDBServer::from_database_options(
+        reddb::api::RedDBOptions::persistent(&db_path),
+        reddb::server::ServerOptions::default(),
+    ) {
+        Ok(server) => server,
+        Err(err) => {
+            let msg = format!("open {}: {err}", db_path.display());
+            if json_mode {
+                json_error("ui", &msg);
+            }
+            eprintln!("error: {msg}");
+            return 1;
+        }
+    };
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    rt.block_on(async move {
+        let bridge = match reddb::server::ui_bridge::spawn_ui_bridge(
+            server,
+            reddb::server::ui_bridge::UiBridgeConfig { port, ui_dir },
+        )
+        .await
+        {
+            Ok(bridge) => bridge,
+            Err(err) => {
+                let msg = format!("could not bind the UI bridge: {err}");
+                if json_mode {
+                    json_error("ui", &msg);
+                }
+                eprintln!("error: {msg}");
+                return 1;
+            }
+        };
+
+        let ui_url = bridge.ui_url();
+        let ws_url = bridge.ws_url();
+
+        if json_mode {
+            json_ok(
+                "ui",
+                &format!(
+                    "{{\"uri\":{:?},\"ui_url\":{:?},\"ws_url\":{:?}}}",
+                    canonical_uri, ui_url, ws_url
+                ),
+            );
+        } else {
+            println!("red ui — serving {canonical_uri}");
+            println!("  UI:      {ui_url}");
+            println!("  RedWire: {ws_url}");
+        }
+
+        if no_browser {
+            if !json_mode {
+                println!("  (browser auto-open suppressed)");
+            }
+        } else if let Err(err) = open_in_browser(&ui_url) {
+            eprintln!("warning: could not open the browser ({err}); open {ui_url} manually");
+        }
+
+        if !json_mode {
+            println!("Press Ctrl-C to stop.");
+        }
+
+        // Session-scoped: wait for an interrupt, then tear the bridge down
+        // cleanly so the port is released and no listener is orphaned.
+        let _ = tokio::signal::ctrl_c().await;
+        if !json_mode {
+            println!("\nshutting down…");
+        }
+        bridge.shutdown().await;
+        0
+    })
+}
+
 fn has_cli_vault_key() -> bool {
     std::env::var("REDDB_CERTIFICATE")
         .map(|value| !value.is_empty())
@@ -518,6 +726,10 @@ fn main() {
                 eprintln!("red server: {err}");
                 std::process::exit(1);
             }
+        }
+
+        "ui" => {
+            std::process::exit(run_ui_command(&result.flags, remaining));
         }
 
         "service" => {
@@ -2696,6 +2908,23 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Read the admin password from stdin (one line)"),
                 cli::types::FlagSchema::boolean("print-certificate")
                     .with_description("Print only the issued certificate to stdout"),
+            ]);
+        }
+        Some("ui") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::boolean("server").with_description(
+                    "Force the browser-served UI (RedWire-over-WebSocket bridge)",
+                ),
+                cli::types::FlagSchema::boolean("desktop").with_description(
+                    "Reserved: open in the desktop app (lands in the deep-link slice)",
+                ),
+                cli::types::FlagSchema::new("ui-dir").with_description(
+                    "Directory to serve the UI bundle from (default: built-in fixture)",
+                ),
+                cli::types::FlagSchema::new("port")
+                    .with_description("Loopback HTTP port for the bridge (0 = ephemeral)"),
+                cli::types::FlagSchema::boolean("no-browser")
+                    .with_description("Bind the bridge but do not open the default browser"),
             ]);
         }
         _ => {}
@@ -4949,6 +5178,46 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::{Mutex, OnceLock};
+
+    // ---- `red ui` file:// canonicalization (issue #1042) ----
+
+    #[test]
+    fn ui_relative_file_uri_resolves_to_absolute() {
+        let cwd = std::path::Path::new("/work/project");
+        let (uri, path) = canonicalize_file_uri("file://./relative.rdb", cwd).unwrap();
+        assert_eq!(uri, "file:///work/project/relative.rdb");
+        assert_eq!(path, std::path::Path::new("/work/project/relative.rdb"));
+    }
+
+    #[test]
+    fn ui_bare_relative_file_uri_resolves_to_absolute() {
+        let cwd = std::path::Path::new("/work/project");
+        let (uri, path) = canonicalize_file_uri("file://data/app.rdb", cwd).unwrap();
+        assert_eq!(uri, "file:///work/project/data/app.rdb");
+        assert_eq!(path, std::path::Path::new("/work/project/data/app.rdb"));
+    }
+
+    #[test]
+    fn ui_absolute_file_uri_is_preserved() {
+        let cwd = std::path::Path::new("/elsewhere");
+        let (uri, path) = canonicalize_file_uri("file:///var/lib/reddb/data.rdb", cwd).unwrap();
+        assert_eq!(uri, "file:///var/lib/reddb/data.rdb");
+        assert_eq!(path, std::path::Path::new("/var/lib/reddb/data.rdb"));
+    }
+
+    #[test]
+    fn ui_parent_segments_are_normalized_lexically() {
+        let cwd = std::path::Path::new("/work/project");
+        let (uri, _) = canonicalize_file_uri("file://../sibling/data.rdb", cwd).unwrap();
+        assert_eq!(uri, "file:///work/sibling/data.rdb");
+    }
+
+    #[test]
+    fn ui_rejects_non_file_scheme() {
+        let cwd = std::path::Path::new("/work");
+        assert!(canonicalize_file_uri("red://localhost:5050", cwd).is_err());
+        assert!(canonicalize_file_uri("file://", cwd).is_err());
+    }
 
     #[test]
     fn doctor_parses_simple_metric_line() {

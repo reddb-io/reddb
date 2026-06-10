@@ -181,6 +181,13 @@ proptest = "1"
 insta = { version = "1", features = ["filters"] }
 regex = "1"
 toml = "1.1"
+# `red ui` loopback bridge e2e (issue #1042): a real WebSocket client drives
+# the RedWire-over-WS handshake + query against the bridge. Pinned to 0.29 to
+# match the tokio-tungstenite version axum's `ws` feature already resolves, so
+# no second copy enters the graph. `futures-util` provides the Sink/Stream
+# extension traits (`send`/`next`) on the WebSocket stream.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

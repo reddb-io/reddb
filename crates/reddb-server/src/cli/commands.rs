@@ -147,6 +147,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: mcp_flags(),
     },
     CommandDef {
+      name: "ui",
+      summary: "Open a graphical UI against a local .rdb over a RedWire-over-WebSocket bridge",
+      usage: "red ui [--server|--desktop] <uri> [--ui-dir DIR] [--port N] [--no-browser]   (e.g. red ui --server file://./data.rdb)",
+      flags: ui_flags(),
+    },
+    CommandDef {
       name: "auth",
       summary: "Manage authentication (users, tokens, roles)",
       usage: "red auth <subcommand>",
@@ -492,6 +498,21 @@ fn query_flags() -> Vec<FlagSchema> {
             .with_short('p')
             .with_description("Positional parameter for $1, $2, ... (repeatable)"),
         FlagSchema::new("param-type").with_description("Type override for the preceding --param"),
+    ]
+}
+
+fn ui_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::boolean("server")
+            .with_description("Force the browser-served UI (RedWire-over-WebSocket bridge)"),
+        FlagSchema::boolean("desktop")
+            .with_description("Reserved: open in the desktop app (lands in the deep-link slice)"),
+        FlagSchema::new("ui-dir")
+            .with_description("Directory to serve the UI bundle from (default: built-in fixture)"),
+        FlagSchema::new("port")
+            .with_description("Loopback HTTP port for the bridge (0 = ephemeral)"),
+        FlagSchema::boolean("no-browser")
+            .with_description("Bind the bridge but do not open the default browser"),
     ]
 }
 

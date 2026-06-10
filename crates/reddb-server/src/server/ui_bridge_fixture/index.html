@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<!--
+  red ui — minimal checked-in fixture page (issue #1042, PRD #1041).
+
+  This is the tracer-bullet bundle: it opens a RedWire-over-WebSocket
+  session against the embedded engine the `red ui` bridge serves, runs a
+  query, and renders the result. The full UI bundle (with runtime download)
+  lands in a later slice; this page exists so `red ui --server file://…`
+  has something real to serve and so the transport is exercised end to end.
+
+  The RedWire binary framing implemented inline here mirrors
+  crates/reddb-wire/src/redwire (16-byte little-endian header + JSON/text
+  payloads). It is deliberately self-contained — no build step, no imports.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RedDB — red ui</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      margin: 0; padding: 2rem; line-height: 1.5;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+    .sub { opacity: 0.7; margin: 0 0 1.5rem; font-size: 0.85rem; }
+    .row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+    input {
+      flex: 1; padding: 0.5rem 0.75rem; font: inherit;
+      border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit;
+    }
+    button {
+      padding: 0.5rem 1rem; font: inherit; cursor: pointer;
+      border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #status { font-size: 0.85rem; margin-bottom: 1rem; }
+    #status[data-state="open"] { color: #2e7d32; }
+    #status[data-state="error"] { color: #c62828; }
+    pre {
+      border: 1px solid currentColor; border-radius: 6px; padding: 1rem;
+      overflow: auto; white-space: pre-wrap; word-break: break-word; min-height: 3rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>RedDB</h1>
+  <p class="sub">red ui — local file bridge over RedWire-over-WebSocket</p>
+  <div id="status" data-state="connecting">connecting…</div>
+  <div class="row">
+    <input id="sql" value="SELECT 1 AS one" aria-label="query" />
+    <button id="run" disabled>Run</button>
+  </div>
+  <pre id="out">(no result yet)</pre>
+
+  <script>
+    // ---- RedWire wire constants (mirror crates/reddb-wire) ----
+    const MAGIC = 0xFE;
+    const MINOR = 0x01;
+    const HEADER = 16;
+    const KIND = {
+      Query: 0x01, Result: 0x02, Error: 0x03,
+      Hello: 0x10, HelloAck: 0x11, AuthResponse: 0x13, AuthOk: 0x14, AuthFail: 0x15,
+    };
+
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    function encodeFrame(kind, correlationId, payloadBytes) {
+      const total = HEADER + payloadBytes.length;
+      const buf = new Uint8Array(total);
+      const dv = new DataView(buf.buffer);
+      dv.setUint32(0, total, true);     // length
+      buf[4] = kind;                    // kind
+      buf[5] = 0;                       // flags
+      dv.setUint16(6, 0, true);         // stream_id
+      dv.setBigUint64(8, BigInt(correlationId), true); // correlation_id
+      buf.set(payloadBytes, HEADER);
+      return buf;
+    }
+
+    function jsonPayload(obj) { return enc.encode(JSON.stringify(obj)); }
+
+    // Reassemble self-delimiting frames out of a growing byte buffer.
+    let inbound = new Uint8Array(0);
+    function pushBytes(bytes) {
+      const merged = new Uint8Array(inbound.length + bytes.length);
+      merged.set(inbound); merged.set(bytes, inbound.length);
+      inbound = merged;
+    }
+    function nextFrame() {
+      if (inbound.length < HEADER) return null;
+      const dv = new DataView(inbound.buffer, inbound.byteOffset, inbound.byteLength);
+      const total = dv.getUint32(0, true);
+      if (inbound.length < total) return null;
+      const kind = inbound[4];
+      const payload = inbound.slice(HEADER, total);
+      inbound = inbound.slice(total);
+      return { kind, payload };
+    }
+
+    const statusEl = document.getElementById("status");
+    const outEl = document.getElementById("out");
+    const runBtn = document.getElementById("run");
+    const sqlEl = document.getElementById("sql");
+
+    function setStatus(text, state) { statusEl.textContent = text; statusEl.dataset.state = state; }
+
+    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/redwire";
+    const ws = new WebSocket(wsUrl, "reddb.redwire.v1");
+    ws.binaryType = "arraybuffer";
+
+    let phase = "hello";
+    let corr = 1;
+
+    ws.onopen = () => {
+      setStatus("handshaking…", "connecting");
+      // Preamble: magic + minor version, then the Hello frame.
+      ws.send(new Uint8Array([MAGIC, MINOR]));
+      ws.send(encodeFrame(KIND.Hello, corr++, jsonPayload({
+        versions: [MINOR],
+        auth_methods: ["anonymous", "bearer"],
+        features: 0,
+        client_name: "red-ui-fixture",
+      })));
+    };
+
+    ws.onmessage = (ev) => {
+      pushBytes(new Uint8Array(ev.data));
+      let frame;
+      while ((frame = nextFrame()) !== null) handleFrame(frame);
+    };
+
+    function handleFrame(frame) {
+      const text = dec.decode(frame.payload);
+      if (phase === "hello" && frame.kind === KIND.HelloAck) {
+        phase = "auth";
+        // Anonymous AuthResponse has an empty payload.
+        ws.send(encodeFrame(KIND.AuthResponse, corr++, new Uint8Array(0)));
+      } else if (phase === "auth" && frame.kind === KIND.AuthOk) {
+        phase = "ready";
+        setStatus("connected to embedded engine", "open");
+        runBtn.disabled = false;
+      } else if (phase === "auth" && frame.kind === KIND.AuthFail) {
+        setStatus("auth failed: " + text, "error");
+      } else if (frame.kind === KIND.Result) {
+        try { outEl.textContent = JSON.stringify(JSON.parse(text), null, 2); }
+        catch (_e) { outEl.textContent = text; }
+      } else if (frame.kind === KIND.Error) {
+        outEl.textContent = "error: " + text;
+      }
+    }
+
+    runBtn.onclick = () => {
+      if (phase !== "ready") return;
+      outEl.textContent = "(running…)";
+      ws.send(encodeFrame(KIND.Query, corr++, enc.encode(sqlEl.value)));
+    };
+    sqlEl.addEventListener("keydown", (e) => { if (e.key === "Enter") runBtn.click(); });
+
+    ws.onerror = () => setStatus("websocket error", "error");
+    ws.onclose = () => { if (phase !== "ready") setStatus("connection closed", "error"); runBtn.disabled = true; };
+  </script>
+</body>
+</html>

@@ -169,7 +169,12 @@ fn classify_inbound(inbound: Option<Result<Message, axum::Error>>) -> WsInbound 
 /// inbound `Binary` messages become session input, session output becomes
 /// outbound `Binary` messages. When either side closes, both halves drop
 /// and the peer observes EOF.
-async fn run_ws_session(mut socket: WebSocket, server: super::RedDBServer) {
+///
+/// Reused verbatim by the loopback `red ui` bridge (issue #1042,
+/// [`super::ui_bridge`]): the async-transport ↔ sync-engine seam is the
+/// same whether the WebSocket arrived on the internet TLS edge or on the
+/// 127.0.0.1 bridge — only the upgrade gate differs.
+pub(crate) async fn run_ws_session(mut socket: WebSocket, server: super::RedDBServer) {
     let runtime = Arc::new(server.runtime().clone());
     // Same auth wiring as the socket listener path: bearer/JWT are
     // negotiated in the RedWire handshake from the runtime's stores.
