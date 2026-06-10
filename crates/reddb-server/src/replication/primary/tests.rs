@@ -27,6 +27,8 @@ fn logical_wal_spool_roundtrip_and_prune() {
         entity_bytes: Some(vec![1, 2, 3]),
         metadata: None,
         refresh_records: None,
+        range_id: None,
+        ownership_epoch: None,
     };
     let record2 = ChangeRecord {
         term: 2,
@@ -39,6 +41,8 @@ fn logical_wal_spool_roundtrip_and_prune() {
         entity_bytes: Some(vec![4, 5, 6]),
         metadata: None,
         refresh_records: None,
+        range_id: None,
+        ownership_epoch: None,
     };
 
     spool
@@ -64,6 +68,47 @@ fn logical_wal_spool_roundtrip_and_prune() {
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].0, 8);
     assert_eq!(ChangeRecord::decode(&retained[0].1).unwrap().term, 2);
+
+    let _ = fs::remove_file(spool_path);
+}
+
+// Issue #991 — a logical record stamped with range identity and ownership
+// epoch must survive derivation through the logical-WAL spool: the primary
+// appends the encoded ChangeRecord, and a replica/recovery read decodes the
+// range authority unchanged. The binary v3 envelope carries the payload
+// opaquely, so no format bump is needed for the range metadata to flow.
+#[test]
+fn logical_wal_spool_preserves_range_authority() {
+    let data_path = temp_data_path("logical_spool_range");
+    let spool_path = LogicalWalSpool::path_for(&data_path);
+    let spool = LogicalWalSpool::open(&data_path).expect("open spool");
+
+    let record = ChangeRecord {
+        term: 5,
+        lsn: 21,
+        timestamp: 7,
+        operation: ChangeOperation::Insert,
+        collection: "orders".to_string(),
+        entity_id: 99,
+        entity_kind: "row".to_string(),
+        entity_bytes: Some(vec![7, 7, 7]),
+        metadata: None,
+        refresh_records: None,
+        range_id: None,
+        ownership_epoch: None,
+    }
+    .with_range_authority(13, 4);
+
+    spool
+        .append_with_term_and_timestamp(record.term, record.lsn, 7, &record.encode())
+        .expect("append stamped record");
+
+    let entries = spool.read_since(0, usize::MAX).expect("read");
+    assert_eq!(entries.len(), 1);
+    let derived = ChangeRecord::decode(&entries[0].1).expect("decode derived record");
+    assert_eq!(derived.range_id, Some(13));
+    assert_eq!(derived.ownership_epoch, Some(4));
+    assert_eq!(derived.term, 5);
 
     let _ = fs::remove_file(spool_path);
 }
