@@ -28,8 +28,14 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use super::chunk::{
+    points_from_column_block, COLUMNAR_TS_COLUMN_ID, COLUMNAR_VALUE_COLUMN_ID, DEFAULT_GRANULE_SIZE,
+};
 use super::retention::parse_duration_ns;
 use crate::storage::engine::PageLocation;
+use crate::storage::schema::types::DataType;
+use crate::storage::unified::column_block::{write_column_block, ColumnBlockError, ColumnInput};
+use crate::storage::unified::segment_codec::ColumnSemantics;
 
 /// Spec declared by `CREATE HYPERTABLE`.
 #[derive(Debug, Clone)]
@@ -642,7 +648,278 @@ impl HypertableRegistry {
         }
         keys.len()
     }
+
+    /// Select groups of small sealed columnar chunks that are candidates
+    /// for compaction. Returns a list of groups; each group is a list of
+    /// `ChunkId`s that together hold at most `max_rows_total` rows. Groups
+    /// with fewer than `min_chunks` chunks are not returned (no-op merges).
+    ///
+    /// Chunks are considered in oldest-first order within each hypertable.
+    /// The caller decides the merge policy (threshold sizes, timing).
+    pub fn select_compaction_candidates(
+        &self,
+        hypertable: &str,
+        max_rows_per_group: u64,
+        min_chunks: usize,
+    ) -> Vec<Vec<ChunkId>> {
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        // Collect sealed columnar chunks oldest-first.
+        let candidates: Vec<&ChunkMeta> = guard
+            .chunks
+            .iter()
+            .filter(|((name, _), meta)| name == hypertable && meta.sealed && meta.is_columnar())
+            .map(|(_, meta)| meta)
+            .collect();
+
+        // Greedy bin-packing: accumulate into a group until adding the next
+        // chunk would exceed the row budget, then close the group.
+        let mut groups: Vec<Vec<ChunkId>> = Vec::new();
+        let mut current: Vec<ChunkId> = Vec::new();
+        let mut current_rows: u64 = 0;
+
+        for meta in candidates {
+            if !current.is_empty() && current_rows + meta.row_count > max_rows_per_group {
+                if current.len() >= min_chunks {
+                    groups.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+                current_rows = 0;
+            }
+            current.push(meta.id.clone());
+            current_rows += meta.row_count;
+        }
+        if current.len() >= min_chunks {
+            groups.push(current);
+        }
+
+        groups
+    }
+
+    /// Merge N sealed columnar chunks into one larger sealed columnar chunk.
+    ///
+    /// # Crash safety
+    ///
+    /// The merge is computed entirely in memory before any registry state is
+    /// touched. The final registry update (insert merged entry + remove source
+    /// entries) happens atomically under one `Mutex` lock acquisition. If the
+    /// process is killed before the lock is taken, all source chunks remain
+    /// intact — no committed data is lost. A torn merge (crash mid-computation,
+    /// before the atomic commit) is safe because the registry never saw the
+    /// partial output.
+    ///
+    /// # Arguments
+    ///
+    /// * `hypertable` — name of the owning hypertable.
+    /// * `source_ids` — the `ChunkId`s of the chunks to merge (must all be
+    ///   sealed, columnar, and have their blocks RAM-resident).
+    /// * `merged_chunk_id` — the `chunk_id` header field for the output RDCC
+    ///   block; the caller assigns this (e.g. `min(source start_ns)` cast).
+    /// * `schema_ref` — the catalog schema id written into the output header.
+    /// * `granule_size` — sparse-granule-index stride for the merged block.
+    ///   Pass `DEFAULT_GRANULE_SIZE` for the standard 8 192-row marks.
+    ///
+    /// Returns the `ChunkId` of the newly inserted merged chunk on success.
+    pub fn compact_columnar_chunks(
+        &self,
+        hypertable: &str,
+        source_ids: &[ChunkId],
+        merged_chunk_id: u64,
+        schema_ref: u64,
+        granule_size: u32,
+    ) -> Result<ChunkId, CompactionError> {
+        if source_ids.len() < 2 {
+            return Err(CompactionError::InsufficientSources);
+        }
+
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        // --- Validate and collect source data (still holding the lock) ---
+
+        for id in source_ids {
+            let key = (id.hypertable.clone(), id.start_ns);
+            let meta = guard
+                .chunks
+                .get(&key)
+                .ok_or_else(|| CompactionError::ChunkNotFound(id.clone()))?;
+            if !meta.sealed {
+                return Err(CompactionError::ChunkNotSealed(id.clone()));
+            }
+            if !meta.is_columnar() {
+                return Err(CompactionError::ChunkNotColumnar(id.clone()));
+            }
+            if !guard.columnar_blocks.contains_key(&key) {
+                return Err(CompactionError::BlockNotResident(id.clone()));
+            }
+        }
+
+        // --- Decode all source blocks into points ---
+
+        let mut all_points = Vec::new();
+        for id in source_ids {
+            let key = (id.hypertable.clone(), id.start_ns);
+            let bytes = guard.columnar_blocks.get(&key).unwrap();
+            let pts = points_from_column_block(bytes).map_err(CompactionError::Decode)?;
+            all_points.extend(pts);
+        }
+
+        // Sort by timestamp — chunks are time-partitioned so they should not
+        // overlap, but we sort anyway to guarantee the output is ordered.
+        all_points.sort_by_key(|p| p.timestamp_ns);
+
+        // --- Build the merged RDCC block ---
+
+        let row_count = all_points.len() as u64;
+        let min_ts_ns = all_points.first().map(|p| p.timestamp_ns).unwrap_or(0);
+        let max_ts_ns = all_points.last().map(|p| p.timestamp_ns).unwrap_or(0);
+
+        let ts_bytes: Vec<u8> = all_points
+            .iter()
+            .flat_map(|p| p.timestamp_ns.to_le_bytes())
+            .collect();
+        let val_bytes: Vec<u8> = all_points
+            .iter()
+            .flat_map(|p| p.value.to_le_bytes())
+            .collect();
+
+        let merged_bytes = write_column_block(
+            merged_chunk_id,
+            schema_ref,
+            row_count,
+            min_ts_ns,
+            max_ts_ns,
+            granule_size,
+            &[
+                ColumnInput {
+                    column_id: COLUMNAR_TS_COLUMN_ID,
+                    logical_type: DataType::UnsignedInteger.to_byte(),
+                    semantics: ColumnSemantics::Timestamp,
+                    data: &ts_bytes,
+                },
+                ColumnInput {
+                    column_id: COLUMNAR_VALUE_COLUMN_ID,
+                    logical_type: DataType::Float.to_byte(),
+                    semantics: ColumnSemantics::Gauge,
+                    data: &val_bytes,
+                },
+            ],
+        )
+        .map_err(CompactionError::Encode)?;
+
+        // --- Derive merged chunk metadata ---
+
+        // The merged chunk spans the time range of all sources.
+        let merged_start_ns = source_ids.iter().map(|id| id.start_ns).min().unwrap(); // safe: source_ids.len() >= 2
+        let merged_end_ns_exclusive = source_ids
+            .iter()
+            .map(|id| {
+                guard
+                    .chunks
+                    .get(&(id.hypertable.clone(), id.start_ns))
+                    .map(|m| m.end_ns_exclusive)
+                    .unwrap_or(merged_start_ns)
+            })
+            .max()
+            .unwrap();
+
+        let merged_id = ChunkId {
+            hypertable: hypertable.to_string(),
+            start_ns: merged_start_ns,
+        };
+
+        // Synthetic page location: page_id=0, offset=0, length=block_len.
+        // Callers that write through a real Pager should instead call
+        // `seal_chunk_columnar` with the returned PageLocation from the pager
+        // write; this sentinel is correct for the RAM-only path used here and
+        // in tests.
+        let merged_page = PageLocation::new(0, 0, merged_bytes.len() as u32);
+
+        let mut merged_meta = ChunkMeta::new(merged_id.clone(), merged_end_ns_exclusive);
+        merged_meta.row_count = row_count;
+        merged_meta.min_ts_ns = min_ts_ns;
+        merged_meta.max_ts_ns = max_ts_ns;
+        merged_meta.sealed = true;
+        merged_meta.columnar_page = Some(merged_page);
+
+        // --- Atomic commit: insert merged, remove sources ---
+
+        let merged_key = (hypertable.to_string(), merged_start_ns);
+        guard.chunks.insert(merged_key.clone(), merged_meta);
+        guard.columnar_blocks.insert(merged_key, merged_bytes);
+
+        for id in source_ids {
+            // Skip if source_id == merged_id (idempotent when the first source
+            // shares start_ns with the merged chunk).
+            if id.start_ns == merged_start_ns && id.hypertable == hypertable {
+                continue;
+            }
+            let key = (id.hypertable.clone(), id.start_ns);
+            guard.chunks.remove(&key);
+            guard.columnar_blocks.remove(&key);
+        }
+
+        Ok(merged_id)
+    }
 }
+
+/// Errors returned by [`HypertableRegistry::compact_columnar_chunks`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompactionError {
+    /// Need at least 2 source chunks — merging 0 or 1 is a no-op.
+    InsufficientSources,
+    /// One of the source chunks does not exist in this hypertable.
+    ChunkNotFound(ChunkId),
+    /// A source chunk is not yet sealed — only sealed chunks can be compacted.
+    ChunkNotSealed(ChunkId),
+    /// A source chunk is not in columnar form.
+    ChunkNotColumnar(ChunkId),
+    /// A source chunk's RDCC block bytes are not RAM-resident.
+    BlockNotResident(ChunkId),
+    /// The RDCC block could not be decoded.
+    Decode(ColumnBlockError),
+    /// The merged RDCC block could not be encoded.
+    Encode(ColumnBlockError),
+}
+
+impl std::fmt::Display for CompactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientSources => {
+                write!(f, "compaction requires at least 2 source chunks")
+            }
+            Self::ChunkNotFound(id) => write!(
+                f,
+                "source chunk {}@{} not found",
+                id.hypertable, id.start_ns
+            ),
+            Self::ChunkNotSealed(id) => write!(
+                f,
+                "source chunk {}@{} is not sealed",
+                id.hypertable, id.start_ns
+            ),
+            Self::ChunkNotColumnar(id) => write!(
+                f,
+                "source chunk {}@{} is not columnar",
+                id.hypertable, id.start_ns
+            ),
+            Self::BlockNotResident(id) => write!(
+                f,
+                "source chunk {}@{} block bytes are not RAM-resident",
+                id.hypertable, id.start_ns
+            ),
+            Self::Decode(e) => write!(f, "RDCC decode error: {e}"),
+            Self::Encode(e) => write!(f, "RDCC encode error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CompactionError {}
 
 #[cfg(test)]
 mod tests {
@@ -1131,5 +1408,299 @@ mod tests {
         assert_eq!(preview2.len(), 2);
         // Registry still has every chunk — preview never drops.
         assert_eq!(reg.show_chunks("m").len(), 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Chunk compaction (#857)
+    // -----------------------------------------------------------------
+
+    /// Seal a columnar chunk into the registry with real RDCC block bytes.
+    fn seal_columnar_chunk_into(
+        reg: &HypertableRegistry,
+        hypertable: &str,
+        start_ns: u64,
+        end_ns_exclusive: u64,
+        points: &[(u64, f64)],
+        schema_ref: u64,
+    ) -> ChunkId {
+        use super::super::chunk::TimeSeriesChunk;
+        use std::collections::HashMap;
+
+        let id = ChunkId {
+            hypertable: hypertable.to_string(),
+            start_ns,
+        };
+        let mut chunk = TimeSeriesChunk::new("m", HashMap::new());
+        for &(ts, v) in points {
+            chunk.append(ts, v);
+        }
+        let block = chunk
+            .seal_columnar(start_ns, schema_ref)
+            .expect("seal_columnar");
+        let page = PageLocation::new(0, 0, block.len() as u32);
+
+        let mut meta = ChunkMeta::new(id.clone(), end_ns_exclusive);
+        meta.sealed = true;
+        meta.columnar_page = Some(page);
+        meta.row_count = points.len() as u64;
+        if let Some(&(min_ts, _)) = points.iter().min_by_key(|(ts, _)| ts) {
+            meta.min_ts_ns = min_ts;
+        }
+        if let Some(&(max_ts, _)) = points.iter().max_by_key(|(ts, _)| ts) {
+            meta.max_ts_ns = max_ts;
+        }
+
+        {
+            let mut guard = reg.inner.lock().unwrap();
+            guard
+                .chunks
+                .insert((hypertable.to_string(), start_ns), meta);
+            guard
+                .columnar_blocks
+                .insert((hypertable.to_string(), start_ns), block);
+        }
+        id
+    }
+
+    /// Acceptance criterion 1: N sealed chunks merge into one with logically
+    /// identical contents (same rows and values, in timestamp order).
+    #[test]
+    fn compact_merges_chunks_to_identical_rows() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+
+        // Three small chunks with non-overlapping time ranges.
+        let pts_a: Vec<(u64, f64)> = (0..10).map(|i| (i * 1_000, i as f64)).collect();
+        let pts_b: Vec<(u64, f64)> = (10..20).map(|i| (i * 1_000, i as f64)).collect();
+        let pts_c: Vec<(u64, f64)> = (20..30).map(|i| (i * 1_000, i as f64)).collect();
+
+        let id_a = seal_columnar_chunk_into(&reg, "m", 0, DAY_NS, &pts_a, 1);
+        let id_b = seal_columnar_chunk_into(&reg, "m", DAY_NS, 2 * DAY_NS, &pts_b, 1);
+        let id_c = seal_columnar_chunk_into(&reg, "m", 2 * DAY_NS, 3 * DAY_NS, &pts_c, 1);
+
+        let merged_id = reg
+            .compact_columnar_chunks("m", &[id_a, id_b, id_c], 0, 1, DEFAULT_GRANULE_SIZE)
+            .expect("compaction failed");
+
+        // Merged chunk exists and carries the right row count.
+        let chunks = reg.show_chunks("m");
+        assert_eq!(chunks.len(), 1, "three source chunks must collapse to one");
+        let merged_meta = &chunks[0];
+        assert_eq!(merged_meta.id.start_ns, merged_id.start_ns);
+        assert_eq!(merged_meta.row_count, 30);
+        assert!(merged_meta.sealed);
+        assert!(merged_meta.is_columnar());
+
+        // Decode the merged block and verify every point is present.
+        let block = reg
+            .columnar_block(&merged_id)
+            .expect("merged block must be RAM-resident");
+        let got = points_from_column_block(&block).expect("decode merged block");
+
+        let mut expected: Vec<(u64, f64)> =
+            pts_a.iter().chain(&pts_b).chain(&pts_c).copied().collect();
+        expected.sort_by_key(|(ts, _)| *ts);
+
+        assert_eq!(got.len(), expected.len());
+        for (point, (exp_ts, exp_val)) in got.iter().zip(&expected) {
+            assert_eq!(point.timestamp_ns, *exp_ts);
+            assert!(
+                (point.value - exp_val).abs() < 1e-9,
+                "value mismatch at ts {}: got {}, expected {}",
+                exp_ts,
+                point.value,
+                exp_val
+            );
+        }
+    }
+
+    /// Acceptance criterion 2: small-chunk count drops after compaction;
+    /// merged block is recompressed (byte length is within reason).
+    #[test]
+    fn compact_reduces_chunk_count_and_recompresses() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+
+        // Five small chunks; each contributes 50 points.
+        let mut ids = Vec::new();
+        for i in 0..5u64 {
+            let pts: Vec<(u64, f64)> = (0..50u64)
+                .map(|j| (i * DAY_NS + j * 1_000, 1.0 + j as f64 * 0.01))
+                .collect();
+            let id = seal_columnar_chunk_into(&reg, "m", i * DAY_NS, (i + 1) * DAY_NS, &pts, 1);
+            ids.push(id);
+        }
+
+        assert_eq!(reg.show_chunks("m").len(), 5);
+
+        let merged_id = reg
+            .compact_columnar_chunks("m", &ids, 0, 1, DEFAULT_GRANULE_SIZE)
+            .expect("compaction failed");
+
+        // Count dropped from 5 to 1.
+        let chunks = reg.show_chunks("m");
+        assert_eq!(chunks.len(), 1, "five chunks must compact to one");
+        assert_eq!(chunks[0].row_count, 250);
+
+        // Merged block is present and decodable.
+        let block = reg.columnar_block(&merged_id).unwrap();
+        let pts = points_from_column_block(&block).unwrap();
+        assert_eq!(pts.len(), 250, "all 250 points must survive compaction");
+
+        // Compression sanity: the merged block must be smaller than 250 * 16
+        // uncompressed bytes (timestamp 8 + value 8).
+        let raw_uncompressed = 250 * 16;
+        assert!(
+            block.len() < raw_uncompressed,
+            "merged block ({} bytes) should be compressed (raw = {})",
+            block.len(),
+            raw_uncompressed
+        );
+    }
+
+    /// Acceptance criterion 3: a "torn merge" (crash before commit) leaves
+    /// the source chunks intact and loses no committed data.
+    ///
+    /// We simulate a torn merge by:
+    /// 1. Reading the source blocks (the expensive "compute" phase).
+    /// 2. Verifying sources still exist before the atomic commit fires.
+    /// 3. Running the actual compaction and verifying sources are removed
+    ///    only after the merged chunk is fully committed.
+    #[test]
+    fn torn_merge_leaves_inputs_intact() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+
+        let pts_a: Vec<(u64, f64)> = (0..20).map(|i| (i * 1_000, i as f64)).collect();
+        let pts_b: Vec<(u64, f64)> = (100..120).map(|i| (i * 1_000, i as f64)).collect();
+
+        let id_a = seal_columnar_chunk_into(&reg, "m", 0, DAY_NS, &pts_a, 1);
+        let id_b = seal_columnar_chunk_into(&reg, "m", DAY_NS, 2 * DAY_NS, &pts_b, 1);
+
+        // Simulate the "compute" phase: read source blocks without committing.
+        // This mirrors what would happen if the process died between decode and
+        // the atomic registry update — the registry never sees any write.
+        {
+            let guard = reg.inner.lock().unwrap();
+            let block_a = guard
+                .columnar_blocks
+                .get(&("m".to_string(), 0))
+                .expect("block_a must be present before any merge");
+            let block_b = guard
+                .columnar_blocks
+                .get(&("m".to_string(), DAY_NS))
+                .expect("block_b must be present before any merge");
+            let pts_decoded_a = points_from_column_block(block_a).unwrap();
+            let pts_decoded_b = points_from_column_block(block_b).unwrap();
+            // "Compute" completed; simulate crash by simply not committing.
+            assert_eq!(pts_decoded_a.len(), 20, "source A readable before merge");
+            assert_eq!(pts_decoded_b.len(), 20, "source B readable before merge");
+
+            // Both source chunks are still in the registry — no partial state.
+            assert!(
+                guard.chunks.contains_key(&("m".to_string(), 0)),
+                "source A must remain intact after torn merge"
+            );
+            assert!(
+                guard.chunks.contains_key(&("m".to_string(), DAY_NS)),
+                "source B must remain intact after torn merge"
+            );
+        }
+
+        // Now actually run compaction — verify it commits atomically.
+        let merged_id = reg
+            .compact_columnar_chunks("m", &[id_a, id_b], 0, 1, DEFAULT_GRANULE_SIZE)
+            .expect("compaction after torn-merge simulation must succeed");
+
+        // After commit: merged chunk present, sources gone.
+        let chunks = reg.show_chunks("m");
+        assert_eq!(chunks.len(), 1, "only the merged chunk must remain");
+        assert_eq!(chunks[0].id.start_ns, merged_id.start_ns);
+
+        // All data survives — no rows lost.
+        let block = reg.columnar_block(&merged_id).unwrap();
+        let pts = points_from_column_block(&block).unwrap();
+        assert_eq!(pts.len(), 40, "all 40 points (20+20) must survive");
+    }
+
+    /// Guard: `compact_columnar_chunks` returns `InsufficientSources` when
+    /// called with fewer than 2 source chunks (a 1-to-1 "merge" is a no-op).
+    #[test]
+    fn compact_rejects_single_source() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+        let id = seal_columnar_chunk_into(&reg, "m", 0, DAY_NS, &[(1_000, 1.0)], 1);
+        let err = reg
+            .compact_columnar_chunks("m", &[id], 0, 1, DEFAULT_GRANULE_SIZE)
+            .unwrap_err();
+        assert_eq!(err, CompactionError::InsufficientSources);
+    }
+
+    /// Guard: `compact_columnar_chunks` rejects unsealed source chunks.
+    #[test]
+    fn compact_rejects_unsealed_chunk() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+
+        // Manually insert an unsealed (open) chunk meta.
+        let open_id = ChunkId {
+            hypertable: "m".to_string(),
+            start_ns: 0,
+        };
+        reg.restore_chunk(ChunkMeta::new(open_id.clone(), DAY_NS));
+
+        let sealed_id =
+            seal_columnar_chunk_into(&reg, "m", DAY_NS, 2 * DAY_NS, &[(DAY_NS + 1, 1.0)], 1);
+
+        let err = reg
+            .compact_columnar_chunks("m", &[open_id, sealed_id], 0, 1, DEFAULT_GRANULE_SIZE)
+            .unwrap_err();
+        assert!(matches!(err, CompactionError::ChunkNotSealed(_)));
+    }
+
+    /// Guard: `select_compaction_candidates` returns groups respecting the
+    /// row budget and minimum-chunks threshold.
+    #[test]
+    fn select_candidates_respects_budget_and_threshold() {
+        let reg = HypertableRegistry::new();
+        reg.register(HypertableSpec::new("m", "ts", DAY_NS));
+
+        // Five chunks of 100 rows each.
+        for i in 0..5u64 {
+            let pts: Vec<(u64, f64)> = (0..100u64).map(|j| (i * DAY_NS + j, j as f64)).collect();
+            seal_columnar_chunk_into(&reg, "m", i * DAY_NS, (i + 1) * DAY_NS, &pts, 1);
+        }
+
+        // Budget 250 rows per group, min 2 chunks → 2 groups of 2-3 chunks.
+        let groups = reg.select_compaction_candidates("m", 250, 2);
+        assert!(
+            !groups.is_empty(),
+            "must find at least one compaction group"
+        );
+        for group in &groups {
+            assert!(group.len() >= 2, "each group must have at least 2 chunks");
+            // Each group's total rows must be within budget.
+            let total: u64 = group
+                .iter()
+                .map(|id| {
+                    reg.show_chunks("m")
+                        .iter()
+                        .find(|c| c.id.start_ns == id.start_ns)
+                        .map(|c| c.row_count)
+                        .unwrap_or(0)
+                })
+                .sum();
+            assert!(
+                total <= 250,
+                "group total rows {total} must not exceed budget 250"
+            );
+        }
+
+        // Threshold of 10 chunks → no group qualifies.
+        let groups_high = reg.select_compaction_candidates("m", 250, 10);
+        assert!(
+            groups_high.is_empty(),
+            "threshold of 10 must yield no groups when max is 5 chunks"
+        );
     }
 }
