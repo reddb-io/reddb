@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-wire"
-version = "1.10.0"
+version = "1.10.1"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "RedDB wire protocol vocabulary: connection-string parser, RedWire frames, payload codecs, topology, sanitizers, and replication messages."
