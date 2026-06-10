@@ -7,6 +7,7 @@ pub mod ownership;
 pub mod ownership_lease;
 pub mod ownership_transition;
 pub mod routing;
+pub mod supervisor;
 pub mod topology;
 
 pub use identity::{
@@ -34,6 +35,10 @@ pub use ownership_transition::{
 pub use routing::{
     RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint, RoutingPolicy,
     DEFAULT_MAX_FORWARD_PAYLOAD,
+};
+pub use supervisor::{
+    BlockedFailover, BlockedReason, ClusterSignals, ClusterSupervisor, FailoverPlan, HealthClass,
+    HealthPolicy, HealthScore, MemberSignals, PlannedPromotion,
 };
 pub use topology::{
     ClientTopology, HintOutcome, RefreshOutcome, TopologyRange, TopologySnapshot, TopologyUpdate,
