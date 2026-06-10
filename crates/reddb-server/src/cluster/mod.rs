@@ -1,5 +1,6 @@
 //! Shared cluster identity and membership model.
 
+pub mod drain;
 pub mod identity;
 pub mod join;
 pub mod membership;
@@ -11,13 +12,19 @@ pub mod routing;
 pub mod supervisor;
 pub mod topology;
 
+pub use drain::{
+    drain_status, plan_drain, plan_force_remove, run_drain, run_force_remove, DrainBlock,
+    DrainBlockReason, DrainOutcome, DrainPlan, DrainStatus, DrainStep, ForceCapability,
+    ForceRemoveAudit, ForceRemoveOrder, ForceRemoveOrderError, ForceRemovePlan, ForceRemoveResult,
+    ForcedBlock, ForcedPromotion, OwnedHandoff, RemovalRejection, ReplicaEvacuation,
+};
 pub use identity::{
     ClusterVoterIdentity, NodeIdentity, NodeIdentityError, ReplicationPeerIdentity,
 };
 pub use join::{ControlPlaneSnapshot, JoinGrant, JoinRejection, JoinRequest, SeedAuthority};
 pub use membership::{
     AdmissionOutcome, BaselineAssessment, ClusterId, ClusterIdError, ClusterMember, MemberKind,
-    MembershipCatalog, RESILIENT_DATA_MEMBER_BASELINE,
+    MemberState, MembershipCatalog, RESILIENT_DATA_MEMBER_BASELINE,
 };
 pub use ownership::{
     CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
