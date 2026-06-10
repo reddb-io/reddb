@@ -33,7 +33,7 @@ use tokio::sync::oneshot;
 /// the database's auth configuration and whether a token was supplied. The
 /// mode is injected into the page (credential-free) so the UI knows whether
 /// to prompt without ever holding the secret itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UiAuthMode {
     /// A token was supplied: `red` holds it and presents it in the RedWire
     /// handshake. The UI must **not** prompt and never sees the secret.
@@ -42,7 +42,8 @@ pub enum UiAuthMode {
     /// credentials through its own connect flow.
     Prompt,
     /// No token and the database is unauthenticated: the UI connects
-    /// anonymously with no prompt.
+    /// anonymously with no prompt. The conservative default.
+    #[default]
     Open,
 }
 
