@@ -25,6 +25,7 @@ pub mod cascade;
 pub mod cdc;
 pub mod commit_policy;
 pub mod commit_waiter;
+pub mod control_plane;
 pub mod election;
 pub mod failover;
 pub mod fence;
@@ -47,6 +48,10 @@ pub use cascade::{
 };
 pub use commit_policy::CommitPolicy;
 pub use commit_waiter::{AwaitOutcome, CommitWaiter};
+pub use control_plane::{
+    ControlPlaneConsensus, ControlPlaneEntry, ControlPlaneEntryKind, ControlPlaneLogIndex,
+    ControlPlanePayload, ControlPlaneRole, MemberId, ProposeRefusal,
+};
 pub use election::{
     quorum_threshold, randomized_election_timeout, ElectionCoordinator, ElectionOutcome,
     ElectionRequest, ElectionTransport, FileLastVoteStore, LastVote, LastVoteError, LastVoteStore,
