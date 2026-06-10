@@ -10,6 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::json::{Map, Value as JsonValue};
 
 pub use reddb_wire::replication::{public_item_kind, ChangeOperation, ChangeRecord};
+// Issue #991 — range-authority fence types travel with the ChangeRecord
+// contract; re-exported separately to keep the pinned contract line above
+// byte-for-byte (see `protocol_authority` reddb-wire test).
+pub use reddb_wire::replication::{RangeAdmitError, RangeAuthority};
 
 /// A single change event.
 #[derive(Debug, Clone)]
@@ -118,6 +122,11 @@ pub fn change_record_from_entity(
         entity_bytes,
         metadata: metadata.map(server_json_to_wire_json),
         refresh_records: None,
+        // Issue #991 — range authority is stamped by callers that route the
+        // change through the ownership catalog via `with_range_authority`;
+        // the base builder leaves it unset so non-range paths are unaffected.
+        range_id: None,
+        ownership_epoch: None,
     }
 }
 
@@ -520,6 +529,8 @@ mod tests {
             entity_bytes: Some(vec![1, 2, 3]),
             metadata: Some(server_json_to_wire_json(crate::json!({"role": "admin"}))),
             refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
         };
 
         let decoded = ChangeRecord::decode(&record.encode()).expect("decode");

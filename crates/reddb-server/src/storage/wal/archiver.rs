@@ -606,6 +606,8 @@ mod tests {
             entity_bytes: Some(vec![1, 2, 3]),
             metadata: None,
             refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
         };
 
         let meta =
@@ -642,6 +644,8 @@ mod tests {
             entity_bytes: Some(b"x".to_vec()),
             metadata: None,
             refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
         };
         let meta =
             archive_change_records(&backend, &prefix, &[(record.lsn, record.encode())], None)
@@ -765,6 +769,8 @@ mod tests {
             entity_bytes: Some(format!("payload-{lsn}").into_bytes()),
             metadata: None,
             refresh_records: None,
+            range_id: None,
+            ownership_epoch: None,
         };
 
         let r1 = mk(10);
