@@ -22,7 +22,7 @@ pub mod topology;
 
 pub use conn_string::{
     is_embedded_connection_uri, parse, parse_with_limits, ConnStringLimits, ConnectionTarget,
-    ParseError, ParseErrorKind,
+    ParseError, ParseErrorKind, DEFAULT_PORT_GRPC, DEFAULT_PORT_RED,
 };
 pub use redwire::{BuildError, FrameBuilder};
 pub use sanitizer::{

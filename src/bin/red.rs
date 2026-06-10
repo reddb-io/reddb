@@ -1752,12 +1752,22 @@ fn open_in_browser(url: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// What the `red ui` bridge fronts, resolved from the target URI.
+enum UiBackend {
+    /// `file://` / bare path — the embedded engine opened in-process.
+    Embedded(reddb::server::RedDBServer),
+    /// `red://` / `reds://` — a remote RedWire-over-TCP/TLS endpoint.
+    Remote(reddb::server::ui_bridge::RemoteRedwireTarget),
+}
+
 /// `red ui <uri> [--server] [--desktop] [--ui-dir DIR] [--port N]
-/// [--no-browser]` — the tracer-bullet spine of the red-ui integration
-/// (issue #1042, PRD #1041). For a `file://` target it opens the embedded
-/// engine from the file, stands up a loopback RedWire-over-WS bridge that
-/// serves the UI bundle and fronts the engine, opens the browser at it,
-/// and tears the bridge down cleanly on Ctrl-C.
+/// [--tls-ca PEM] [--no-browser]` — the spine of the red-ui integration
+/// (issues #1042 / #1044, PRD #1041). For a `file://` target it opens the
+/// embedded engine from the file; for a `red://` / `reds://` target it
+/// fronts a remote RedWire-over-TCP/TLS instance (e.g. a container). In
+/// both cases it stands up a loopback RedWire-over-WS bridge that serves
+/// the UI bundle and the WS endpoint the served page connects to, opens
+/// the browser at it, and tears the bridge down cleanly on Ctrl-C.
 fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     let json_mode = wants_json(flags);
 
@@ -1774,31 +1784,6 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         }
     };
 
-    // This slice supports only `file://` (and bare-path) targets; the
-    // `red://` / `reds://` direct-connect forms land in a later slice
-    // (ADR 0047).
-    let is_file_target = uri.starts_with("file://") || !uri.contains("://");
-    if !is_file_target {
-        let msg = format!("red ui currently supports only file:// targets, got: {uri}");
-        if json_mode {
-            json_error("ui", &msg);
-        }
-        eprintln!("error: {msg}");
-        std::process::exit(1);
-    }
-
-    let file_uri = canonicalize_file_uri(&uri).unwrap_or_else(|err| {
-        if json_mode {
-            json_error("ui", &err);
-        }
-        eprintln!("error: {err}");
-        std::process::exit(1);
-    });
-    let db_path = file_uri
-        .strip_prefix("file://")
-        .unwrap_or(&file_uri)
-        .to_string();
-
     if flag_bool(flags, "desktop") && !flag_bool(flags, "server") {
         // `--desktop` is reserved for the deep-link slice; the served
         // bridge is the only path today, so note it and continue rather
@@ -1806,16 +1791,72 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         eprintln!("note: --desktop is reserved; opening the browser-served bridge for now");
     }
 
-    let runtime = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&db_path))
-        .unwrap_or_else(|err| {
-            let msg = format!("open {db_path}: {err}");
-            if json_mode {
-                json_error("ui", &msg);
-            }
-            eprintln!("error: {msg}");
-            std::process::exit(1);
-        });
-    let server = reddb::server::RedDBServer::new(runtime);
+    // Classify the target: `file://` / bare path → embedded engine;
+    // `red://` / `reds://` → remote RedWire endpoint fronted by the
+    // bridge (issue #1044, ADR 0047 / 0049). Either way the served UI
+    // only ever talks to the loopback WS endpoint.
+    let target = reddb::server::ui_bridge::classify_ui_target(&uri).unwrap_or_else(|err| {
+        if json_mode {
+            json_error("ui", &err);
+        }
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    });
+
+    // `target_label` is what we report as the bridged target; `backend`
+    // is what the bridge fronts.
+    let (target_label, backend) = match target {
+        reddb::server::ui_bridge::UiTarget::File => {
+            let file_uri = canonicalize_file_uri(&uri).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("ui", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+            let db_path = file_uri
+                .strip_prefix("file://")
+                .unwrap_or(&file_uri)
+                .to_string();
+            let runtime =
+                reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&db_path))
+                    .unwrap_or_else(|err| {
+                        let msg = format!("open {db_path}: {err}");
+                        if json_mode {
+                            json_error("ui", &msg);
+                        }
+                        eprintln!("error: {msg}");
+                        std::process::exit(1);
+                    });
+            let server = reddb::server::RedDBServer::new(runtime);
+            (file_uri, UiBackend::Embedded(server))
+        }
+        reddb::server::ui_bridge::UiTarget::Remote(spec) => {
+            // Optional `--tls-ca <pem>` is trusted on top of the webpki
+            // system roots for a self-signed / private-CA `reds://` target.
+            let ca_pem = match flag_string(flags, "tls-ca").filter(|v| !v.is_empty()) {
+                Some(path) => match std::fs::read(&path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(err) => {
+                        let msg = format!("read --tls-ca {path}: {err}");
+                        if json_mode {
+                            json_error("ui", &msg);
+                        }
+                        eprintln!("error: {msg}");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            let target = reddb::server::ui_bridge::RemoteRedwireTarget {
+                host: spec.host,
+                port: spec.port,
+                tls: spec.tls,
+                ca_pem,
+            };
+            (uri.clone(), UiBackend::Remote(target))
+        }
+    };
 
     let ui_dir = if let Some(explicit) = flag_string(flags, "ui-dir").filter(|v| !v.is_empty()) {
         // Explicit --ui-dir: use as-is (no download).
@@ -1853,7 +1894,15 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         .expect("tokio runtime");
 
     rt.block_on(async move {
-        let bridge = match reddb::server::ui_bridge::spawn_ui_bridge(server, config).await {
+        let spawn_result = match backend {
+            UiBackend::Embedded(server) => {
+                reddb::server::ui_bridge::spawn_ui_bridge(server, config).await
+            }
+            UiBackend::Remote(remote) => {
+                reddb::server::ui_bridge::spawn_ui_bridge_remote(remote, config).await
+            }
+        };
+        let bridge = match spawn_result {
             Ok(bridge) => bridge,
             Err(err) => {
                 let msg = format!("start ui bridge: {err}");
@@ -1871,14 +1920,14 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
             json_ok(
                 "ui",
                 &format!(
-                    "{{\"file\":\"{}\",\"ui_url\":\"{}\",\"ws_url\":\"{}\"}}",
-                    json_escape(&file_uri),
+                    "{{\"target\":\"{}\",\"ui_url\":\"{}\",\"ws_url\":\"{}\"}}",
+                    json_escape(&target_label),
                     json_escape(&ui_url),
                     json_escape(&ws_url),
                 ),
             );
         } else {
-            println!("red ui: serving {file_uri}");
+            println!("red ui: serving {target_label}");
             println!("  UI:      {ui_url}");
             println!("  RedWire: {ws_url}");
             println!("Press Ctrl-C to stop.");
@@ -2926,6 +2975,9 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 ),
                 cli::types::FlagSchema::new("port").with_description(
                     "Loopback port for the bridge (0 / omit picks an ephemeral port)",
+                ),
+                cli::types::FlagSchema::new("tls-ca").with_description(
+                    "PEM CA bundle to trust for a reds:// target (on top of system roots)",
                 ),
                 cli::types::FlagSchema::boolean("no-browser").with_description(
                     "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",

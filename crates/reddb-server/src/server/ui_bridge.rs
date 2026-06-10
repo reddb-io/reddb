@@ -36,14 +36,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tokio::sync::oneshot;
 
-use super::ws_edge::{REDWIRE_WS_PATH, REDWIRE_WS_SUBPROTOCOL};
+use super::ws_edge::{pump_ws_stream, run_ws_session, REDWIRE_WS_PATH, REDWIRE_WS_SUBPROTOCOL};
 use super::RedDBServer;
 
 /// The checked-in minimal UI fixture served when no `--ui-dir` is given.
@@ -63,12 +63,97 @@ pub struct UiBridgeConfig {
     pub port: u16,
 }
 
+/// A remote RedWire endpoint the bridge fronts for a `red://` / `reds://`
+/// target (issue #1044, ADR 0047 bridge, ADR 0049 transport). The local
+/// loopback WS endpoint pumps its data channel straight into a fresh
+/// TCP (or TLS) connection to this host — the UI is unaware that the
+/// engine lives in another process / container.
+#[derive(Debug, Clone)]
+pub struct RemoteRedwireTarget {
+    /// Host to dial (the `red://`/`reds://` authority).
+    pub host: String,
+    /// Port to dial (defaults to `DEFAULT_PORT_RED` via the URI parser).
+    pub port: u16,
+    /// Negotiate TLS to the target (`reds://`). The handshake is
+    /// transparent to the UI.
+    pub tls: bool,
+    /// Optional CA bundle (PEM) to trust for the TLS handshake, on top of
+    /// the webpki system roots. Needed for a self-signed / private-CA
+    /// `reds://` target (a dev container); `None` trusts system roots only.
+    pub ca_pem: Option<Vec<u8>>,
+}
+
+/// What a running bridge fronts: the embedded engine opened from a
+/// `file://` target, or a remote RedWire endpoint (`red://` / `reds://`).
+/// Both are reached through the *same* loopback WS endpoint and the same
+/// byte-pump seam — only the far end of the pump differs.
+enum BridgeBackend {
+    /// `file://` — RedWire runs over the embedded engine in-process.
+    Embedded(RedDBServer),
+    /// `red://` / `reds://` — RedWire bytes are relayed to a remote
+    /// RedWire-over-TCP/TLS instance.
+    Remote(RemoteRedwireTarget),
+}
+
+/// How `red ui` should bridge a target URI: against the local embedded
+/// engine (`file://`, bare path) or a remote RedWire endpoint
+/// (`red://` / `reds://`). Both are *bridge-required* — the UI only ever
+/// talks to the loopback WS endpoint; this enum says what that endpoint
+/// fronts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiTarget {
+    /// A local file / embedded-engine target. The caller canonicalises
+    /// the `file://` path and opens the engine itself.
+    File,
+    /// A remote RedWire-over-TCP (`red://`) or -TLS (`reds://`) target.
+    Remote(RemoteRedwireTargetSpec),
+}
+
+/// Host / port / TLS triple parsed from a `red://` / `reds://` URI —
+/// the connection-independent part of [`RemoteRedwireTarget`] (no CA
+/// bytes), so it can derive `PartialEq` for classification tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRedwireTargetSpec {
+    pub host: String,
+    pub port: u16,
+    pub tls: bool,
+}
+
+/// Classify a `red ui` target URI into the bridge backend it requires.
+///
+/// `file://` and bare filesystem paths resolve to [`UiTarget::File`];
+/// `red://host[:port]` and `reds://host[:port]` resolve to
+/// [`UiTarget::Remote`] with the parser's default port
+/// ([`reddb_wire::DEFAULT_PORT_RED`], 5050) when none is given and `tls`
+/// set for `reds://`. Any other scheme (or a cluster URI) is an error —
+/// `red ui` bridges exactly one endpoint.
+pub fn classify_ui_target(uri: &str) -> Result<UiTarget, String> {
+    // A bare path with no scheme is a file target (matches the existing
+    // `red ui ./data.rdb` shorthand).
+    if !uri.contains("://") {
+        return Ok(UiTarget::File);
+    }
+    match reddb_wire::parse(uri) {
+        Ok(reddb_wire::ConnectionTarget::File { .. }) => Ok(UiTarget::File),
+        Ok(reddb_wire::ConnectionTarget::RedWire { host, port, tls }) => {
+            Ok(UiTarget::Remote(RemoteRedwireTargetSpec {
+                host,
+                port,
+                tls,
+            }))
+        }
+        Ok(_) => Err(format!(
+            "red ui bridges file://, red://, or reds:// targets, got: {uri}"
+        )),
+        Err(err) => Err(err.message),
+    }
+}
+
 /// State threaded into the bridge's axum handlers. Cheap to clone (the
-/// server clone shares its inner `Arc`s; the origin list and bundle dir
-/// are shared via `Arc`).
+/// backend is shared via `Arc`; the origin list and bundle dir likewise).
 #[derive(Clone)]
 struct BridgeState {
-    server: RedDBServer,
+    backend: Arc<BridgeBackend>,
     allowed_origins: Arc<Vec<String>>,
     ui_dir: Option<Arc<PathBuf>>,
 }
@@ -146,11 +231,30 @@ pub async fn spawn_ui_bridge(
     server: RedDBServer,
     config: UiBridgeConfig,
 ) -> std::io::Result<UiBridge> {
+    spawn_ui_bridge_backend(BridgeBackend::Embedded(server), config).await
+}
+
+/// Like [`spawn_ui_bridge`] but fronting a *remote* RedWire endpoint
+/// (`red://` / `reds://`, issue #1044) rather than the embedded engine.
+/// The served UI still talks only to the loopback WS endpoint; each WS
+/// session opens a fresh TCP/TLS connection to `target`, and the byte
+/// stream is pumped through transparently.
+pub async fn spawn_ui_bridge_remote(
+    target: RemoteRedwireTarget,
+    config: UiBridgeConfig,
+) -> std::io::Result<UiBridge> {
+    spawn_ui_bridge_backend(BridgeBackend::Remote(target), config).await
+}
+
+async fn spawn_ui_bridge_backend(
+    backend: BridgeBackend,
+    config: UiBridgeConfig,
+) -> std::io::Result<UiBridge> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
     let local_addr = listener.local_addr()?;
 
     let state = BridgeState {
-        server,
+        backend: Arc::new(backend),
         allowed_origins: Arc::new(seed_loopback_origins(local_addr.port())),
         ui_dir: config.ui_dir.map(Arc::new),
     };
@@ -196,11 +300,109 @@ async fn loopback_redwire_upgrade(
             .into_response();
     }
 
-    let server = state.server.clone();
+    let backend = Arc::clone(&state.backend);
     ws.protocols([REDWIRE_WS_SUBPROTOCOL])
         .on_upgrade(move |socket| async move {
-            super::ws_edge::run_ws_session(socket, server).await;
+            match &*backend {
+                // `file://` — RedWire over the in-process embedded engine.
+                BridgeBackend::Embedded(server) => {
+                    run_ws_session(socket, server.clone()).await;
+                }
+                // `red://` / `reds://` — relay to a remote RedWire instance.
+                BridgeBackend::Remote(target) => {
+                    run_remote_ws_session(socket, target).await;
+                }
+            }
         })
+}
+
+/// Bridge the binary WebSocket to a remote RedWire-over-TCP/TLS endpoint.
+///
+/// Opens a fresh connection to `target` per WS session and pumps the byte
+/// stream straight through ([`pump_ws_stream`]). The browser sends the
+/// exact native preamble (`0xFE` magic + minor + `Hello`), so the remote
+/// listener's standalone session handles it unchanged — the bridge is a
+/// pure byte relay and never parses RedWire frames. On a connection
+/// failure the WS is closed so the UI surfaces the error rather than
+/// hanging.
+async fn run_remote_ws_session(socket: WebSocket, target: &RemoteRedwireTarget) {
+    let addr = (target.host.as_str(), target.port);
+    let tcp = match tokio::net::TcpStream::connect(addr).await {
+        Ok(tcp) => tcp,
+        Err(err) => {
+            tracing::warn!(
+                host = %target.host,
+                port = target.port,
+                err = %err,
+                "ui bridge: connect to remote redwire target failed"
+            );
+            close_ws(socket).await;
+            return;
+        }
+    };
+
+    if !target.tls {
+        pump_ws_stream(socket, tcp).await;
+        return;
+    }
+
+    match wrap_remote_tls(tcp, target).await {
+        Ok(tls) => pump_ws_stream(socket, tls).await,
+        Err(err) => {
+            tracing::warn!(
+                host = %target.host,
+                port = target.port,
+                err = %err,
+                "ui bridge: TLS handshake to remote redwire target failed"
+            );
+            close_ws(socket).await;
+        }
+    }
+}
+
+/// Send a best-effort close frame on a WS the bridge is abandoning.
+async fn close_ws(mut socket: WebSocket) {
+    let _ = socket.send(axum::extract::ws::Message::Close(None)).await;
+}
+
+/// Negotiate client-side TLS to a `reds://` target. Trusts the webpki
+/// system roots, plus any caller-supplied CA bundle (PEM) — enough for a
+/// public-cert target out of the box and a self-signed / private-CA dev
+/// container when a `--tls-ca` bundle is passed. Server-only TLS (no
+/// client cert): RedWire auth is negotiated inside the handshake, exactly
+/// as on the native socket transports.
+async fn wrap_remote_tls(
+    tcp: tokio::net::TcpStream,
+    target: &RemoteRedwireTarget,
+) -> std::io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+    use rustls::pki_types::ServerName;
+    use rustls::{ClientConfig, RootCertStore};
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut roots = RootCertStore::empty();
+    // Seed the webpki system roots so a public-cert `reds://` works
+    // without an explicit CA.
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    // Add any caller-supplied CA (a self-signed dev container / private CA).
+    if let Some(pem) = &target.ca_pem {
+        let mut reader = std::io::BufReader::new(&pem[..]);
+        for cert in rustls_pemfile::certs(&mut reader) {
+            let cert = cert.map_err(std::io::Error::other)?;
+            roots
+                .add(cert)
+                .map_err(|e| std::io::Error::other(format!("add CA cert: {e}")))?;
+        }
+    }
+
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let server_name = ServerName::try_from(target.host.clone())
+        .map_err(|e| std::io::Error::other(format!("invalid TLS server name: {e}")))?;
+    connector.connect(server_name, tcp).await
 }
 
 /// Static-file fallback: serve the UI bundle. With a `--ui-dir`, files are
@@ -328,6 +530,76 @@ mod tests {
             Some("http://127.0.0.1:7777"),
             &[]
         ));
+    }
+
+    // ----------------------------------------------------------------
+    // Scheme classification (issue #1044). `red://` / `reds://` are
+    // bridge-required remote targets and resolve to the parser's default
+    // port; `file://` and bare paths stay local.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn red_scheme_classifies_as_remote_plaintext_default_port() {
+        // No port → the shared parser's DEFAULT_PORT_RED (5050), no TLS.
+        assert_eq!(
+            classify_ui_target("red://db.internal").unwrap(),
+            UiTarget::Remote(RemoteRedwireTargetSpec {
+                host: "db.internal".to_string(),
+                port: reddb_wire::DEFAULT_PORT_RED,
+                tls: false,
+            })
+        );
+        assert_eq!(reddb_wire::DEFAULT_PORT_RED, 5050);
+    }
+
+    #[test]
+    fn reds_scheme_classifies_as_remote_tls_default_port() {
+        assert_eq!(
+            classify_ui_target("reds://db.internal").unwrap(),
+            UiTarget::Remote(RemoteRedwireTargetSpec {
+                host: "db.internal".to_string(),
+                port: reddb_wire::DEFAULT_PORT_RED,
+                tls: true,
+            })
+        );
+    }
+
+    #[test]
+    fn red_scheme_honours_explicit_port() {
+        assert_eq!(
+            classify_ui_target("red://127.0.0.1:6000").unwrap(),
+            UiTarget::Remote(RemoteRedwireTargetSpec {
+                host: "127.0.0.1".to_string(),
+                port: 6000,
+                tls: false,
+            })
+        );
+        assert_eq!(
+            classify_ui_target("reds://host:7001").unwrap(),
+            UiTarget::Remote(RemoteRedwireTargetSpec {
+                host: "host".to_string(),
+                port: 7001,
+                tls: true,
+            })
+        );
+    }
+
+    #[test]
+    fn file_and_bare_path_classify_as_local() {
+        assert_eq!(
+            classify_ui_target("file:///var/lib/db.rdb").unwrap(),
+            UiTarget::File
+        );
+        assert_eq!(classify_ui_target("./data.rdb").unwrap(), UiTarget::File);
+        assert_eq!(classify_ui_target("data.rdb").unwrap(), UiTarget::File);
+    }
+
+    #[test]
+    fn unsupported_scheme_is_rejected() {
+        // gRPC / http / a cluster URI are not single RedWire endpoints.
+        assert!(classify_ui_target("grpc://host:5055").is_err());
+        assert!(classify_ui_target("http://host").is_err());
+        assert!(classify_ui_target("red://a,b").is_err());
     }
 
     #[test]
