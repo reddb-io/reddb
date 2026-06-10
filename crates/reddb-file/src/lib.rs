@@ -39,6 +39,7 @@ pub mod store_wal;
 pub mod table_def_codec;
 pub mod transaction_wal;
 pub mod turboquant_snapshot;
+pub mod ui_bundle_cache;
 pub mod vector_btree_page_format;
 pub mod vector_value_codec;
 pub mod wal_header;
@@ -284,6 +285,13 @@ pub use physical_metadata_policy::{
     set_fold_pager_meta_enabled, set_meta_json_sidecar_enabled, set_seqn_journal_enabled,
     set_seqn_journal_retention, DEFAULT_METADATA_JOURNAL_RETENTION,
     OPT_IN_METADATA_JOURNAL_RETENTION,
+};
+pub use ui_bundle_cache::{
+    decode_ui_bundle_manifest_json, encode_ui_bundle_manifest_json, promote_ui_bundle_staging,
+    ui_bundle_cache_root, ui_bundle_manifest_path, ui_bundle_manifest_temp_path,
+    ui_bundle_purge_dir, ui_bundle_purge_root, ui_bundle_staging_dir, ui_bundle_staging_root,
+    ui_bundle_version_dir, write_ui_bundle_manifest, UiBundleManifest, UI_BUNDLE_CACHE_DIR_NAME,
+    UI_BUNDLE_MANIFEST_FILE, UI_BUNDLE_PURGE_DIR_NAME, UI_BUNDLE_STAGING_DIR_NAME,
 };
 
 pub use primary_replica::{

@@ -62,6 +62,12 @@ tonic-prost = "0.14"
 prost = "0.14"
 snap = "1"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+# `red ui` bundle resolver (issue #1043, ADR 0050): tgz extraction for the
+# pinned red-ui release asset. `flate2` decompresses the gz layer; `tar`
+# iterates the archive entries. Both are already transitive in Cargo.lock;
+# made explicit here so the UI bundle resolver can import them directly.
+flate2 = "1"
+tar = "0.4"
 roaring = "0.11"
 parking_lot = "0.12"
 # crossbeam-queue::SegQueue powers the lock-free WAL append path
