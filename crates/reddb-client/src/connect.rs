@@ -96,6 +96,16 @@ fn map_target(t: ConnectionTarget) -> Target {
                 endpoint: format!("http://{host}:{port}"),
             }
         }
+        // `red+wss://` / `red+ws://` is a browser-native WS transport
+        // (ADR 0047). The legacy client has no WS transport, so fold onto
+        // the HTTP base URL — callers that need the WS path should use
+        // `reddb_wire::parse` and the `WsNative` variant directly.
+        ConnectionTarget::WsNative { host, port, tls } => {
+            let scheme = if tls { "https" } else { "http" };
+            Target::Http {
+                base_url: format!("{scheme}://{host}:{port}"),
+            }
+        }
     }
 }
 
