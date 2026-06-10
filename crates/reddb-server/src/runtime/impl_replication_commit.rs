@@ -98,6 +98,30 @@ impl RedDBRuntime {
         crate::replication::CommitPolicy::from_env()
     }
 
+    /// Issue #1001 — resolve the *effective* commit policy for one collection by
+    /// combining the cluster default ([`commit_policy`](Self::commit_policy)),
+    /// the collection's declared override, the collection data model, and the
+    /// deployment's HA intent (`RED_CLUSTER_HA_INTENT`).
+    ///
+    /// Both write admission and failover eligibility call this so they read the
+    /// same decision: a durable model (transactional/queue/audit/config/vault)
+    /// may not silently use local-only acknowledgement under declared HA intent
+    /// — that returns [`CommitPolicyViolation`] and the caller must fail closed.
+    /// Explicitly ephemeral/cache-like collections may opt into local commit
+    /// with the documented failover-eligibility data-loss window.
+    pub fn resolve_commit_policy(
+        &self,
+        model: crate::cluster::CollectionDataModel,
+        collection_override: Option<crate::replication::CommitPolicy>,
+    ) -> Result<crate::cluster::CommitPolicyResolution, crate::cluster::CommitPolicyViolation> {
+        crate::cluster::resolve_commit_policy(
+            self.commit_policy(),
+            collection_override,
+            model,
+            crate::cluster::HaIntent::from_env(),
+        )
+    }
+
     pub fn primary_replica_durability(&self) -> reddb_file::ReplicationDurability {
         Self::primary_replica_durability_for_policy(self.commit_policy())
     }
