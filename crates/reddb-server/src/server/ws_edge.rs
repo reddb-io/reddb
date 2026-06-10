@@ -169,7 +169,7 @@ fn classify_inbound(inbound: Option<Result<Message, axum::Error>>) -> WsInbound 
 /// inbound `Binary` messages become session input, session output becomes
 /// outbound `Binary` messages. When either side closes, both halves drop
 /// and the peer observes EOF.
-async fn run_ws_session(mut socket: WebSocket, server: super::RedDBServer) {
+pub(crate) async fn run_ws_session(mut socket: WebSocket, server: super::RedDBServer) {
     let runtime = Arc::new(server.runtime().clone());
     // Same auth wiring as the socket listener path: bearer/JWT are
     // negotiated in the RedWire handshake from the runtime's stores.

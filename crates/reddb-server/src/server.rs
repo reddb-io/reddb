@@ -128,6 +128,10 @@ mod handlers_metrics;
 mod handlers_ops;
 mod handlers_ops_policy;
 mod ws_edge;
+// Local `red ui` bridge (issue #1042, PRD #1041): a loopback server that
+// serves the UI bundle and mounts RedWire-over-WS over the embedded
+// engine, reusing the ADR 0036 async-transport ↔ sync-engine seam.
+pub mod ui_bridge;
 // `pub(crate)` so the RedWire input-stream path (issue #764 / S5)
 // can reuse the canonical S4 INSERT builders / identifier checks
 // (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
