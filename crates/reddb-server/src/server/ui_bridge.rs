@@ -93,13 +93,19 @@ enum BridgeBackend {
     /// `red://` / `reds://` — RedWire bytes are relayed to a remote
     /// RedWire-over-TCP/TLS instance.
     Remote(RemoteRedwireTarget),
+    /// `red+wss://` / `red+ws://` — no loopback relay; the browser
+    /// connects directly to the target. The `/redwire` route is not
+    /// mounted for this backend.
+    Direct,
 }
 
-/// How `red ui` should bridge a target URI: against the local embedded
-/// engine (`file://`, bare path) or a remote RedWire endpoint
-/// (`red://` / `reds://`). Both are *bridge-required* — the UI only ever
-/// talks to the loopback WS endpoint; this enum says what that endpoint
-/// fronts.
+/// How `red ui` should connect the browser to a target URI.
+///
+/// - [`UiTarget::File`] and [`UiTarget::Remote`] are *bridge-required*:
+///   a loopback WS relay is started and the UI only talks to that.
+/// - [`UiTarget::Direct`] is *bridge-free* (ADR 0047 direct-when-reachable):
+///   the browser connects to `ws_url` directly — only a static HTTP server
+///   to serve the UI bundle is started, with no WS relay process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiTarget {
     /// A local file / embedded-engine target. The caller canonicalises
@@ -107,6 +113,10 @@ pub enum UiTarget {
     File,
     /// A remote RedWire-over-TCP (`red://`) or -TLS (`reds://`) target.
     Remote(RemoteRedwireTargetSpec),
+    /// A browser-reachable WS endpoint (`red+wss://` or `red+ws://`).
+    /// The browser connects to `ws_url` directly; no loopback relay is
+    /// started. The UI bundle is still served from a local HTTP server.
+    Direct { ws_url: String },
 }
 
 /// Host / port / TLS triple parsed from a `red://` / `reds://` URI —
@@ -142,10 +152,16 @@ pub fn classify_ui_target(uri: &str) -> Result<UiTarget, String> {
                 tls,
             }))
         }
-        Ok(_) => Err(format!(
-            "red ui bridges file://, red://, or reds:// targets, got: {uri}"
+        Ok(reddb_wire::ConnectionTarget::WsNative { host, port, tls }) => {
+            // ADR 0047: browser-reachable WS target — no loopback relay.
+            let scheme = if tls { "wss" } else { "ws" };
+            let ws_url = format!("{scheme}://{host}:{port}/redwire");
+            Ok(UiTarget::Direct { ws_url })
+        }
+        Ok(_) | Err(_) => Err(format!(
+            "unsupported target for red ui; supported schemes: \
+             file://, red://, reds://, red+ws://, red+wss://; got: {uri}"
         )),
-        Err(err) => Err(err.message),
     }
 }
 
@@ -156,6 +172,10 @@ struct BridgeState {
     backend: Arc<BridgeBackend>,
     allowed_origins: Arc<Vec<String>>,
     ui_dir: Option<Arc<PathBuf>>,
+    /// Set for `Direct` targets. When `Some`, the WS URL is injected as
+    /// `window.REDDB_WS_URL` into HTML responses so the UI page can
+    /// connect directly rather than deriving from `location.host`.
+    direct_ws_url: Option<Arc<String>>,
 }
 
 /// A running loopback UI bridge. Holds the bound address plus the handles
@@ -166,6 +186,10 @@ pub struct UiBridge {
     local_addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join: tokio::task::JoinHandle<()>,
+    /// For `Direct` targets, the WS URL the browser connects to (the
+    /// remote endpoint). `None` for bridge targets — `ws_url()` derives
+    /// the loopback URL from `local_addr` in that case.
+    direct_ws_url: Option<String>,
 }
 
 impl UiBridge {
@@ -179,10 +203,16 @@ impl UiBridge {
         format!("http://{}/", self.local_addr)
     }
 
-    /// URL of the RedWire-over-WebSocket endpoint the served page opens a
-    /// session against.
+    /// The WebSocket URL the served page connects to.
+    ///
+    /// For bridge targets (`file://`, `red://`, `reds://`) this is the
+    /// loopback endpoint on the same server. For direct targets
+    /// (`red+wss://`, `red+ws://`) this is the remote endpoint the browser
+    /// connects to without a relay.
     pub fn ws_url(&self) -> String {
-        format!("ws://{}{}", self.local_addr, REDWIRE_WS_PATH)
+        self.direct_ws_url
+            .clone()
+            .unwrap_or_else(|| format!("ws://{}{}", self.local_addr, REDWIRE_WS_PATH))
     }
 
     /// Signal graceful shutdown and wait for the serve task to wind down.
@@ -257,6 +287,7 @@ async fn spawn_ui_bridge_backend(
         backend: Arc::new(backend),
         allowed_origins: Arc::new(seed_loopback_origins(local_addr.port())),
         ui_dir: config.ui_dir.map(Arc::new),
+        direct_ws_url: None,
     };
 
     let router = axum::Router::new()
@@ -277,6 +308,45 @@ async fn spawn_ui_bridge_backend(
         local_addr,
         shutdown_tx: Some(shutdown_tx),
         join,
+        direct_ws_url: None,
+    })
+}
+
+/// Serve the UI bundle for a **direct** `red+wss://` / `red+ws://` target
+/// (ADR 0047). No loopback WS relay is started — the browser connects to
+/// `ws_url` directly. A `window.REDDB_WS_URL` config is injected into HTML
+/// responses so the UI page knows the target without user input.
+pub async fn spawn_direct_ui_server(
+    ws_url: String,
+    config: UiBridgeConfig,
+) -> std::io::Result<UiBridge> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
+    let local_addr = listener.local_addr()?;
+
+    let state = BridgeState {
+        backend: Arc::new(BridgeBackend::Direct),
+        allowed_origins: Arc::new(vec![]),
+        ui_dir: config.ui_dir.map(Arc::new),
+        direct_ws_url: Some(Arc::new(ws_url.clone())),
+    };
+
+    // No /redwire route — the browser owns its own WS connection.
+    let router = axum::Router::new().fallback(serve_ui).with_state(state);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let join = tokio::spawn(async move {
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+
+    Ok(UiBridge {
+        local_addr,
+        shutdown_tx: Some(shutdown_tx),
+        join,
+        direct_ws_url: Some(ws_url),
     })
 }
 
@@ -311,6 +381,11 @@ async fn loopback_redwire_upgrade(
                 // `red://` / `reds://` — relay to a remote RedWire instance.
                 BridgeBackend::Remote(target) => {
                     run_remote_ws_session(socket, target).await;
+                }
+                // `red+wss://` / `red+ws://` — the `/redwire` route is not
+                // mounted for direct targets, so this arm is unreachable.
+                BridgeBackend::Direct => {
+                    close_ws(socket).await;
                 }
             }
         })
@@ -409,17 +484,24 @@ async fn wrap_remote_tls(
 /// read from that directory (`/` → `index.html`), guarded against path
 /// traversal; without one, the embedded fixture answers `/` and
 /// `/index.html` and everything else is 404.
+///
+/// For direct targets (`BridgeBackend::Direct`), the WS URL config
+/// (`window.REDDB_WS_URL`) is injected before `</head>` in HTML responses
+/// so the UI page can connect to the remote endpoint directly.
 async fn serve_ui(State(state): State<BridgeState>, uri: Uri) -> Response {
     let raw = uri.path();
     let rel = raw.trim_start_matches('/');
     let rel = if rel.is_empty() { "index.html" } else { rel };
 
-    match &state.ui_dir {
+    let (content_type, mut body) = match &state.ui_dir {
         None => {
             if rel == "index.html" {
-                html_response(FIXTURE_INDEX.as_bytes().to_vec())
+                (
+                    "text/html; charset=utf-8",
+                    FIXTURE_INDEX.as_bytes().to_vec(),
+                )
             } else {
-                not_found()
+                return not_found();
             }
         }
         Some(dir) => {
@@ -435,10 +517,40 @@ async fn serve_ui(State(state): State<BridgeState>, uri: Uri) -> Response {
             // Read off the async runtime — `tokio::fs` is not enabled, and
             // these are small local bundle assets on loopback anyway.
             match tokio::task::spawn_blocking(move || std::fs::read(&full)).await {
-                Ok(Ok(bytes)) => content_type_response(rel, bytes),
-                _ => not_found(),
+                Ok(Ok(bytes)) => (content_type_for(rel), bytes),
+                _ => return not_found(),
             }
         }
+    };
+
+    // For direct targets, inject `window.REDDB_WS_URL` before </head> so
+    // the UI page knows the remote WS endpoint without a loopback relay.
+    if content_type.starts_with("text/html") {
+        if let Some(ws_url) = &state.direct_ws_url {
+            body = inject_ws_url_config(body, ws_url);
+        }
+    }
+
+    (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
+/// Inject `<script>window.REDDB_WS_URL="<ws_url>";</script>` just before
+/// `</head>` in an HTML document. The ws_url is constructed from a
+/// validated URI (scheme + host + port) and contains no `"` or `\`, so
+/// simple string interpolation is safe. Returns the original bytes
+/// unchanged when `</head>` is not found.
+fn inject_ws_url_config(html: Vec<u8>, ws_url: &str) -> Vec<u8> {
+    let snippet = format!("<script>window.REDDB_WS_URL=\"{ws_url}\";</script>");
+    let marker = b"</head>";
+    match html.windows(marker.len()).position(|w| w == marker) {
+        Some(pos) => {
+            let mut out = Vec::with_capacity(html.len() + snippet.len());
+            out.extend_from_slice(&html[..pos]);
+            out.extend_from_slice(snippet.as_bytes());
+            out.extend_from_slice(&html[pos..]);
+            out
+        }
+        None => html,
     }
 }
 
@@ -600,6 +712,76 @@ mod tests {
         assert!(classify_ui_target("grpc://host:5055").is_err());
         assert!(classify_ui_target("http://host").is_err());
         assert!(classify_ui_target("red://a,b").is_err());
+    }
+
+    // ----------------------------------------------------------------
+    // Direct targets (issue #1045, ADR 0047 direct-when-reachable).
+    // `red+wss://` and `red+ws://` are browser-reachable WS endpoints —
+    // no loopback relay is needed.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn red_plus_wss_classifies_as_direct_default_port() {
+        assert_eq!(
+            classify_ui_target("red+wss://mydb.db.reddb.io").unwrap(),
+            UiTarget::Direct {
+                ws_url: "wss://mydb.db.reddb.io:443/redwire".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn red_plus_wss_with_explicit_port_classifies_as_direct() {
+        assert_eq!(
+            classify_ui_target("red+wss://host:5055").unwrap(),
+            UiTarget::Direct {
+                ws_url: "wss://host:5055/redwire".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn red_plus_ws_classifies_as_direct_plaintext() {
+        assert_eq!(
+            classify_ui_target("red+ws://host:8080").unwrap(),
+            UiTarget::Direct {
+                ws_url: "ws://host:8080/redwire".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_scheme_error_names_supported_set() {
+        let err = classify_ui_target("mongodb://host").unwrap_err();
+        for scheme in ["file://", "red://", "reds://", "red+ws://", "red+wss://"] {
+            assert!(
+                err.contains(scheme),
+                "error must mention {scheme}: got: {err}"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // inject_ws_url_config — config injection into HTML.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn inject_ws_url_inserts_before_head_close() {
+        let html = b"<html><head></head><body></body></html>".to_vec();
+        let out = inject_ws_url_config(html, "wss://host:443/redwire");
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("<script>window.REDDB_WS_URL=\"wss://host:443/redwire\";</script></head>"),
+            "snippet must appear before </head>: {s}"
+        );
+    }
+
+    #[test]
+    fn inject_ws_url_noop_when_no_head_close() {
+        let html = b"<html><body>no head close</body></html>".to_vec();
+        let orig = html.clone();
+        let out = inject_ws_url_config(html, "wss://host/redwire");
+        assert_eq!(out, orig, "html without </head> must be returned unchanged");
     }
 
     #[test]

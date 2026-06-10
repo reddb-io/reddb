@@ -404,6 +404,11 @@ impl ParsedConnString {
                 port: *port,
                 tls: *tls,
             },
+            ConnectionTarget::WsNative { host, port, tls } => TaintedTarget::WsNative {
+                host: TaintedRef(host),
+                port: *port,
+                tls: *tls,
+            },
         }
     }
 
@@ -457,6 +462,11 @@ pub enum TaintedTarget<'a> {
         base_url: TaintedRef<'a>,
     },
     RedWire {
+        host: TaintedRef<'a>,
+        port: u16,
+        tls: bool,
+    },
+    WsNative {
         host: TaintedRef<'a>,
         port: u16,
         tls: bool,

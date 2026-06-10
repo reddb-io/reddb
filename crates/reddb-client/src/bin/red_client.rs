@@ -287,6 +287,13 @@ fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
         ConnectionTarget::RedWire { host, port, tls } => {
             Ok(ResolvedTarget::RedWire { host, port, tls })
         }
+        // `red+wss://` / `red+ws://` is a browser-native WS transport;
+        // the CLI client has no WS transport, so reject with a clear error.
+        ConnectionTarget::WsNative { .. } => Err(EndpointError::ParseFailed(
+            "red+wss:// / red+ws:// targets require a browser UI; \
+             use red://host or reds://host for the CLI client"
+                .to_string(),
+        )),
     }
 }
 

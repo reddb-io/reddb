@@ -1752,12 +1752,14 @@ fn open_in_browser(url: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-/// What the `red ui` bridge fronts, resolved from the target URI.
+/// What the `red ui` command fronts, resolved from the target URI.
 enum UiBackend {
     /// `file://` / bare path — the embedded engine opened in-process.
     Embedded(reddb::server::RedDBServer),
     /// `red://` / `reds://` — a remote RedWire-over-TCP/TLS endpoint.
     Remote(reddb::server::ui_bridge::RemoteRedwireTarget),
+    /// `red+wss://` / `red+ws://` — browser connects directly; no relay.
+    Direct { ws_url: String },
 }
 
 /// `red ui <uri> [--server] [--desktop] [--ui-dir DIR] [--port N]
@@ -1856,6 +1858,12 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
             };
             (uri.clone(), UiBackend::Remote(target))
         }
+        reddb::server::ui_bridge::UiTarget::Direct { ws_url } => {
+            // ADR 0047: browser-reachable WS target — no loopback relay.
+            // Serve the UI bundle locally and let the browser connect
+            // directly to ws_url (already a wss:// or ws:// URL).
+            (uri.clone(), UiBackend::Direct { ws_url })
+        }
     };
 
     let ui_dir = if let Some(explicit) = flag_string(flags, "ui-dir").filter(|v| !v.is_empty()) {
@@ -1900,6 +1908,9 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
             }
             UiBackend::Remote(remote) => {
                 reddb::server::ui_bridge::spawn_ui_bridge_remote(remote, config).await
+            }
+            UiBackend::Direct { ws_url } => {
+                reddb::server::ui_bridge::spawn_direct_ui_server(ws_url, config).await
             }
         };
         let bridge = match spawn_result {

@@ -77,6 +77,11 @@ impl std::error::Error for ParseError {}
 /// (the connector, server-side dispatch) can stay consistent.
 pub const DEFAULT_PORT_RED: u16 = 5050;
 pub const DEFAULT_PORT_GRPC: u16 = 5055;
+/// Default ports for `red+ws://` and `red+wss://` — align with the
+/// standard WS / WSS browser defaults (80 and 443) so a hosted endpoint
+/// like `*.db.reddb.io` works without an explicit port.
+pub const DEFAULT_PORT_WS: u16 = 80;
+pub const DEFAULT_PORT_WSS: u16 = 443;
 
 /// DoS guardrails applied by [`parse`] before any URI work happens.
 ///
@@ -135,6 +140,10 @@ pub enum ConnectionTarget {
     /// speaks framed binary directly; it does NOT route through
     /// tonic.
     RedWire { host: String, port: u16, tls: bool },
+    /// `red+ws://host:port` (plain WS) or `red+wss://host:port` (WSS).
+    /// Browser-native WebSocket transport (ADR 0047 direct-when-reachable).
+    /// The UI connects directly — no local RedWire-over-TCP bridge needed.
+    WsNative { host: String, port: u16, tls: bool },
 }
 
 /// Parse a connection URI into a [`ConnectionTarget`] under the
@@ -233,6 +242,25 @@ pub fn parse_with_limits(
                 host: host.to_string(),
                 port,
                 tls: parsed.scheme() == "reds",
+            })
+        }
+        "red+ws" | "red+wss" => {
+            let host = parsed.host_str().ok_or_else(|| {
+                ParseError::new(
+                    ParseErrorKind::InvalidUri,
+                    "red+ws(s):// URI is missing a host",
+                )
+            })?;
+            let tls = parsed.scheme() == "red+wss";
+            let port = parsed.port().unwrap_or(if tls {
+                DEFAULT_PORT_WSS
+            } else {
+                DEFAULT_PORT_WS
+            });
+            Ok(ConnectionTarget::WsNative {
+                host: host.to_string(),
+                port,
+                tls,
             })
         }
         "grpc" | "grpcs" => {
