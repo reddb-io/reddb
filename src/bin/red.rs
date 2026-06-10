@@ -1764,12 +1764,21 @@ enum UiBackend {
 
 /// `red ui <uri> [--server] [--desktop] [--ui-dir DIR] [--port N]
 /// [--tls-ca PEM] [--no-browser]` — the spine of the red-ui integration
-/// (issues #1042 / #1044, PRD #1041). For a `file://` target it opens the
-/// embedded engine from the file; for a `red://` / `reds://` target it
-/// fronts a remote RedWire-over-TCP/TLS instance (e.g. a container). In
-/// both cases it stands up a loopback RedWire-over-WS bridge that serves
-/// the UI bundle and the WS endpoint the served page connects to, opens
-/// the browser at it, and tears the bridge down cleanly on Ctrl-C.
+/// (issues #1042 / #1044 / #1046, PRD #1041, ADR 0051).
+///
+/// By default it prefers the installed desktop app: when the `redui://`
+/// handler is registered it hands off via `xdg-open redui://?connect=<uri>`
+/// (the URI canonicalized, carrying the target only — never a credential)
+/// and exits. With no handler registered it falls back to the served browser
+/// path and nudges the user to install the desktop app. `--server` forces the
+/// browser path; `--desktop` forces the desktop deep link.
+///
+/// On the browser path: for a `file://` target it opens the embedded engine
+/// from the file; for a `red://` / `reds://` target it fronts a remote
+/// RedWire-over-TCP/TLS instance (e.g. a container). In both cases it stands
+/// up a loopback RedWire-over-WS bridge that serves the UI bundle and the WS
+/// endpoint the served page connects to, opens the browser at it, and tears
+/// the bridge down cleanly on Ctrl-C.
 fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     let json_mode = wants_json(flags);
 
@@ -1786,11 +1795,80 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         }
     };
 
-    if flag_bool(flags, "desktop") && !flag_bool(flags, "server") {
-        // `--desktop` is reserved for the deep-link slice; the served
-        // bridge is the only path today, so note it and continue rather
-        // than failing the command.
-        eprintln!("note: --desktop is reserved; opening the browser-served bridge for now");
+    // Deep-link dispatch (issue #1046, ADR 0051): the default `red ui <uri>`
+    // (no `--server`) prefers the installed desktop app via the `redui://`
+    // scheme and only falls back to the served browser bridge when no handler
+    // is registered. `--server` forces the browser path; `--desktop` forces
+    // the desktop path. The decision + canonical deep-link string live behind
+    // a testable seam in `reddb::server::ui_deeplink`.
+    let mode = reddb::server::ui_deeplink::DispatchMode::from_flags(
+        flag_bool(flags, "server"),
+        flag_bool(flags, "desktop"),
+    );
+    if mode != reddb::server::ui_deeplink::DispatchMode::Server {
+        let cwd = std::env::current_dir().unwrap_or_else(|err| {
+            let msg = format!("resolve current directory: {err}");
+            if json_mode {
+                json_error("ui", &msg);
+            }
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        });
+        let canonical = reddb::server::ui_deeplink::canonicalize_target_uri(&uri, &cwd)
+            .unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("ui", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+        let env = reddb::server::ui_deeplink::OsDeepLinkEnv;
+        match reddb::server::ui_deeplink::dispatch(mode, &canonical, &env) {
+            Ok(reddb::server::ui_deeplink::DispatchOutcome::HandedOff { deep_link }) => {
+                if json_mode {
+                    json_ok(
+                        "ui",
+                        &format!(
+                            "{{\"dispatch\":\"desktop\",\"deep_link\":\"{}\",\"target\":\"{}\"}}",
+                            json_escape(&deep_link),
+                            json_escape(&canonical),
+                        ),
+                    );
+                } else {
+                    println!("red ui: handing off to the desktop app");
+                    println!("  {deep_link}");
+                }
+                return;
+            }
+            Ok(reddb::server::ui_deeplink::DispatchOutcome::DesktopNotInstalled) => {
+                let msg = "no redui:// handler registered; the desktop app is not installed. \
+                           Install it from https://reddb.io/download, or run \
+                           `red ui --server <uri>` to use the browser.";
+                if json_mode {
+                    json_error("ui", msg);
+                }
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+            Ok(reddb::server::ui_deeplink::DispatchOutcome::ServeBrowser { upsell }) => {
+                if upsell && !json_mode {
+                    // Auto fallback: nudge the native shell, then serve.
+                    eprintln!(
+                        "note: desktop app not installed — serving the browser UI. \
+                         Install it from https://reddb.io/download for a faster native shell."
+                    );
+                }
+                // Fall through to the served browser-bridge path below.
+            }
+            Err(err) => {
+                let msg = format!("deep-link dispatch: {err}");
+                if json_mode {
+                    json_error("ui", &msg);
+                }
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Classify the target: `file://` / bare path → embedded engine;
@@ -2976,10 +3054,10 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
         Some("ui") => {
             flags.extend(vec![
                 cli::types::FlagSchema::boolean("server").with_description(
-                    "Force the browser-served bridge path (default for file:// targets)",
+                    "Force the browser-served bridge path (skip the desktop deep link)",
                 ),
                 cli::types::FlagSchema::boolean("desktop").with_description(
-                    "Reserved: open the native desktop UI (lands in the deep-link slice)",
+                    "Force the desktop app via the redui:// deep link (no browser fallback)",
                 ),
                 cli::types::FlagSchema::new("ui-dir").with_description(
                     "Directory to serve the UI bundle from (defaults to the built-in fixture)",
