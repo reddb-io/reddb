@@ -40,6 +40,7 @@ pub mod table_def_codec;
 pub mod transaction_wal;
 pub mod turboquant_snapshot;
 pub mod ui_bundle_cache;
+pub mod vault_export_envelope;
 pub mod vector_btree_page_format;
 pub mod vector_value_codec;
 pub mod wal_header;
@@ -345,6 +346,11 @@ pub use transaction_wal::{
 pub use turboquant_snapshot::{
     read_turboquant_snapshot, write_turboquant_snapshot, TurboQuantSnapshotError,
     TurboQuantSnapshotPayload, TURBOQUANT_SNAPSHOT_HEADER_BYTES,
+};
+pub use vault_export_envelope::{
+    decode as decode_vault_logical_export, encode as encode_vault_logical_export,
+    VaultExportEnvelope, VaultExportEnvelopeError, VAULT_EXPORT_NONCE_SIZE, VAULT_EXPORT_SALT_SIZE,
+    VAULT_LOGICAL_EXPORT_AAD, VAULT_LOGICAL_EXPORT_MAGIC, VAULT_LOGICAL_EXPORT_VERSION,
 };
 pub use wal_header::{
     decode_wal_file_header, encode_wal_file_header, next_main_wal_segment_boundary, WalFileHeader,
