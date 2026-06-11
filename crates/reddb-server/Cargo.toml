@@ -17,6 +17,9 @@ name = "reddb_server"
 path = "src/lib.rs"
 
 [dependencies]
+# Neutral keystone: the logical type vocabulary (Value/DataType/...) re-homed
+# from storage::schema (#1061, ADR 0052). storage::schema keeps a re-export shim.
+reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
 reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "../reddb-wire" }
 reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
 reddb-file = { package = "reddb-io-file", version = "1.0", path = "../reddb-file" }

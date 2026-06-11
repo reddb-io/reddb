@@ -1,0 +1,22 @@
+[package]
+name = "reddb-io-types"
+version = "1.0.0"
+edition = "2021"
+authors = ["RedDB.io <hello@reddb.io>"]
+description = "RedDB logical type system: the neutral keystone vocabulary — Value, DataType, SqlTypeName, TypeModifier, TypeCategory, ValueError, Row — depended on by every authority crate and depending on none."
+license = "AGPL-3.0-only"
+homepage = "https://github.com/reddb-io/reddb"
+repository = "https://github.com/reddb-io/reddb"
+documentation = "https://docs.rs/reddb-io-types"
+keywords = ["database", "type-system", "value", "sql-types"]
+categories = ["database-implementations", "data-structures"]
+
+[lib]
+name = "reddb_types"
+path = "src/lib.rs"
+
+[dependencies]
+zstd = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+proptest = "1"

@@ -2371,6 +2371,7 @@ dependencies = [
  "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-grpc-proto",
+ "reddb-io-types",
  "reddb-io-wire",
  "regex",
  "reqwest",
@@ -2399,6 +2400,14 @@ dependencies = [
  "ureq",
  "webpki-roots",
  "x509-parser",
+ "zstd",
+]
+
+[[package]]
+name = "reddb-io-types"
+version = "1.0.0"
+dependencies = [
+ "proptest",
  "zstd",
 ]
 
