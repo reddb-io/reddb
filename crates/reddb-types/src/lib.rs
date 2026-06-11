@@ -21,6 +21,7 @@
 // locally; carrying the allow here keeps the move a pure relocation.
 #![allow(unused_imports)]
 
+mod conversions;
 pub mod types;
 pub mod value_codec;
 

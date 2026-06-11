@@ -17,6 +17,10 @@ name = "reddb_wire"
 path = "src/lib.rs"
 
 [dependencies]
+# Keystone type vocabulary (ADR 0052). Owns the engine `Value`; the legacy
+# protocol's WireValue<->Value conversions live in `legacy` because the orphan
+# rule pins them to WireValue's home crate once Value moved below wire.
+reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["io-util"] }
 url = "2"

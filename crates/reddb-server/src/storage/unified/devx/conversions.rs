@@ -4,53 +4,15 @@
 
 use super::super::{MetadataValue, RefTarget};
 use super::refs::{NodeRef, TableRef, VectorRef};
-use crate::storage::schema::Value;
 
 // ============================================================================
 // Value Conversions
 // ============================================================================
-
-impl From<&str> for Value {
-    fn from(s: &str) -> Self {
-        Value::text(s.to_string())
-    }
-}
-
-impl From<String> for Value {
-    fn from(s: String) -> Self {
-        Value::text(s)
-    }
-}
-
-impl From<i32> for Value {
-    fn from(n: i32) -> Self {
-        Value::Integer(n as i64)
-    }
-}
-
-impl From<i64> for Value {
-    fn from(n: i64) -> Self {
-        Value::Integer(n)
-    }
-}
-
-impl From<f32> for Value {
-    fn from(n: f32) -> Self {
-        Value::Float(n as f64)
-    }
-}
-
-impl From<f64> for Value {
-    fn from(n: f64) -> Self {
-        Value::Float(n)
-    }
-}
-
-impl From<bool> for Value {
-    fn from(b: bool) -> Self {
-        Value::Boolean(b)
-    }
-}
+//
+// The `From<primitive> for Value` impls were re-homed to the keystone crate
+// `reddb-io-types` alongside `Value` itself (ADR 0052, #1061): with `Value`
+// no longer local here, the orphan rule requires those impls to live in
+// `Value`'s home crate. See `reddb_types::conversions`.
 
 // ============================================================================
 // MetadataValue Conversions

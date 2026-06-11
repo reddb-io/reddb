@@ -2419,6 +2419,7 @@ dependencies = [
  "proptest",
  "prost",
  "reddb-io-grpc-proto",
+ "reddb-io-types",
  "regex",
  "serde_json",
  "tokio",
