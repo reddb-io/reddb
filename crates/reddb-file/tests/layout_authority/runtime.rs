@@ -344,7 +344,10 @@ fn server_does_not_redeclare_zone_map_file_format() {
 #[test]
 fn server_does_not_redeclare_turboquant_snapshot_format() {
     let root = repo_root();
-    let text = read(root.join("crates/reddb-server/src/storage/engine/turboquant/snapshot.rs"));
+    // The server's `turboquant/snapshot.rs` re-export alias was deleted (commit
+    // 8a2e6fc6); `runtime/vector_turbo_kind.rs` is now the sole consumer and
+    // imports the snapshot codec directly from reddb-file.
+    let text = read(root.join("crates/reddb-server/src/runtime/vector_turbo_kind.rs"));
 
     for forbidden in [
         ".TVSNAP",
@@ -363,8 +366,10 @@ fn server_does_not_redeclare_turboquant_snapshot_format() {
     }
 
     assert!(
-        text.contains("reddb_file::{"),
-        "server turboquant snapshot module should only reexport reddb-file contracts"
+        text.contains("reddb_file::{")
+            && text.contains("read_turboquant_snapshot")
+            && text.contains("write_turboquant_snapshot"),
+        "server turboquant consumer should import the snapshot codec from reddb-file"
     );
 }
 
