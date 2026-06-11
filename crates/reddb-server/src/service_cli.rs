@@ -144,6 +144,15 @@ pub struct ServerCommandConfig {
     /// are applied later by [`crate::server::http_limits::resolve_http_limits`]
     /// once the runtime is open.
     pub http_limits_cli: crate::server::HttpLimitsCliInput,
+    /// `red server --ui` (issue #1047, ADR 0051). When `true`, the HTTP
+    /// listener also serves the pinned red-ui bundle as static assets.
+    /// The bundle directory is resolved at boot from the local cache
+    /// (downloading on first use, ADR 0050) unless `ui_dir` overrides it.
+    pub ui: bool,
+    /// Explicit bundle directory for `--ui` (`--ui-dir <DIR>`). When set,
+    /// it is served as-is with no download — the seam tests and an
+    /// air-gapped deploy use this. `None` resolves the pinned bundle.
+    pub ui_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1437,6 +1446,7 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
         router_bind_addr.clone(),
     );
     let http_server = apply_http_limits(http_server, &config, &runtime);
+    let http_server = apply_ui_bundle(http_server, &config)?;
 
     let grpc_server = RedDBGrpcServer::with_options(
         runtime.clone(),
@@ -2501,6 +2511,38 @@ fn apply_http_limits(
     server.with_http_limits(resolved)
 }
 
+/// `red server --ui` (issue #1047, ADR 0051): attach the resolved red-ui
+/// bundle directory to an HTTP server so it also serves the bundle as
+/// static assets. No-op when `--ui` is off.
+///
+/// An explicit `--ui-dir <DIR>` is served as-is (no download); otherwise
+/// the pinned bundle is resolved from the local cache, downloading on
+/// first use (ADR 0050). A resolution failure is fatal: the operator
+/// explicitly asked for the UI, so silently serving API-only would be
+/// surprising and would mask an offline/checksum problem.
+fn apply_ui_bundle(
+    server: RedDBServer,
+    config: &ServerCommandConfig,
+) -> Result<RedDBServer, String> {
+    if !config.ui {
+        return Ok(server);
+    }
+    let ui_dir = match &config.ui_dir {
+        Some(dir) => dir.clone(),
+        None => {
+            let cache_root = crate::server::ui_bundle_resolver::reddb_user_cache_root()
+                .unwrap_or_else(|_| std::env::temp_dir().join("reddb"));
+            crate::server::ui_bundle_resolver::resolve_ui_bundle(
+                &cache_root,
+                &crate::server::ui_bundle_resolver::HttpFetcher,
+            )
+            .map_err(|err| format!("resolve red-ui bundle for --ui: {err}"))?
+        }
+    };
+    tracing::info!(target: "reddb::ui", dir = %ui_dir.display(), "serving red-ui bundle on HTTP surface");
+    Ok(server.with_ui_dir(ui_dir))
+}
+
 #[inline(never)]
 fn build_http_server_with_transport_readiness(
     runtime: RedDBRuntime,
@@ -2604,6 +2646,7 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
         transport_readiness,
     );
     let server = apply_http_limits(server, &config, &runtime);
+    let server = apply_ui_bundle(server, &config)?;
     tracing::info!(transport = "http", bind = %bind_addr, "listener online");
     server.serve_on(listener).map_err(|err| err.to_string())
 }
@@ -2779,6 +2822,7 @@ fn run_dual_server(
             transport_readiness.clone(),
         );
         let http_server = apply_http_limits(http_server, &config, &runtime);
+        let http_server = apply_ui_bundle(http_server, &config)?;
         Some(http_server.serve_in_background_on(listener))
     } else {
         None
@@ -2990,6 +3034,8 @@ mod tests {
             workers: None,
             telemetry: None,
             http_limits_cli: crate::server::HttpLimitsCliInput::default(),
+            ui: false,
+            ui_dir: None,
         }
     }
 
