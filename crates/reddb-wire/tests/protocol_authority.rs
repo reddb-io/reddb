@@ -1805,3 +1805,70 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
         );
     }
 }
+
+/// Issue #1055: the WebSocket edge's protocol-visible contracts — the WS
+/// subprotocol/path constants (item 2), the pure upgrade-gate decision
+/// (item 3), and the `0xFE` magic detector (item 4) — must be owned by
+/// reddb-wire, with the server crate delegating to them.
+#[test]
+fn redwire_ws_edge_contracts_live_in_reddb_wire() {
+    let root = repo_root();
+    let wire_mod = read(root.join("crates/reddb-wire/src/redwire/mod.rs"));
+    let wire_gate = read(root.join("crates/reddb-wire/src/redwire/ws_gate.rs"));
+    let ws_edge = read(root.join("crates/reddb-server/src/server/ws_edge.rs"));
+    let detector = read(root.join("crates/reddb-server/src/service_router/detector.rs"));
+
+    // ---- Item 2: WS subprotocol/path constants live in reddb-wire ----
+    for required in ["REDWIRE_WS_SUBPROTOCOL", "REDWIRE_WS_PATH"] {
+        assert!(
+            wire_mod.contains(&format!("pub const {required}")),
+            "reddb-wire should own WS edge constant {required}"
+        );
+    }
+    // The subprotocol token is the authority's single source of truth: the
+    // literal must appear only in reddb-wire, never inline in server src.
+    for file in rust_files_under(root.join("crates/reddb-server/src")) {
+        let text = read(&file);
+        assert!(
+            !non_test_source(&text).contains("\"reddb.redwire.v1\""),
+            "{} must import REDWIRE_WS_SUBPROTOCOL from reddb-wire, not inline the token",
+            file.display()
+        );
+    }
+    assert!(
+        ws_edge.contains("use reddb_wire::redwire::{REDWIRE_WS_PATH, REDWIRE_WS_SUBPROTOCOL}"),
+        "ws_edge should source the WS constants from reddb-wire"
+    );
+
+    // ---- Item 3: pure WS upgrade-gate decision lives in reddb-wire ----
+    for required in ["pub fn evaluate_ws_upgrade", "pub enum WsUpgradeRefusal"] {
+        assert!(
+            wire_gate.contains(required),
+            "reddb-wire should own WS upgrade-gate contract {required}"
+        );
+    }
+    assert!(
+        ws_edge.contains("reddb_wire::redwire::evaluate_ws_upgrade"),
+        "ws_edge gate must delegate to reddb_wire::redwire::evaluate_ws_upgrade"
+    );
+    assert!(
+        !non_test_source(&ws_edge).contains("allowlist.iter().any(|allowed| allowed == o)"),
+        "ws_edge must not re-implement the origin allowlist match inline"
+    );
+
+    // ---- Item 4: 0xFE magic detector lives in reddb-wire ----
+    for required in ["pub fn redwire_magic_match", "pub enum RedWireMagicMatch"] {
+        assert!(
+            wire_mod.contains(required),
+            "reddb-wire should own RedWire magic detector {required}"
+        );
+    }
+    assert!(
+        detector.contains("reddb_wire::redwire::redwire_magic_match"),
+        "service_router RedWireDetector must delegate to reddb_wire::redwire::redwire_magic_match"
+    );
+    assert!(
+        !non_test_source(&detector).contains("peek[0] == 0xFE"),
+        "service_router must not hard-code the 0xFE magic match inline"
+    );
+}

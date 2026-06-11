@@ -50,13 +50,14 @@ pub struct RedWireDetector;
 
 impl ProtocolDetector for RedWireDetector {
     fn detect(&self, peek: &[u8]) -> DetectOutcome {
-        if peek.is_empty() {
-            return DetectOutcome::Pending;
-        }
-        if peek[0] == 0xFE {
-            DetectOutcome::Match(Protocol::Wire)
-        } else {
-            DetectOutcome::NoMatch
+        // The `0xFE` magic match is owned by reddb-wire (issue #1055);
+        // this detector only maps the pure classifier onto the router's
+        // protocol-tagged outcome.
+        use reddb_wire::redwire::RedWireMagicMatch;
+        match reddb_wire::redwire::redwire_magic_match(peek) {
+            RedWireMagicMatch::Pending => DetectOutcome::Pending,
+            RedWireMagicMatch::Match => DetectOutcome::Match(Protocol::Wire),
+            RedWireMagicMatch::NoMatch => DetectOutcome::NoMatch,
         }
     }
 }

@@ -20,6 +20,7 @@ pub mod operations;
 pub mod prepared;
 pub mod queue;
 pub mod stream;
+pub mod ws_gate;
 
 pub use builder::{
     build_bulk_insert_binary_frame, build_bulk_insert_frame, build_bye_frame, build_delete_frame,
@@ -97,6 +98,7 @@ pub use stream::{
     OpenInputParseError, OpenInputRequest, OpenStreamParseError, OpenStreamRequest,
     StreamCancelRequest,
 };
+pub use ws_gate::{evaluate_ws_upgrade, WsUpgradeRefusal};
 
 /// Discriminator byte every RedWire client sends as the very first
 /// byte off the wire. The service-router detector keys off this
@@ -110,6 +112,17 @@ pub const MAX_KNOWN_MINOR_VERSION: u8 = 0x01;
 
 /// Default port for the RedWire listener.
 pub const DEFAULT_REDWIRE_PORT: u16 = 5050;
+
+/// WebSocket subprotocol token advertised by the RedWire-over-WSS edge
+/// (issue #935, ADR 0036). Versioned so a future framing revision can
+/// coexist with v1 clients. reddb-wire is the single source of truth —
+/// the server's axum upgrade handler consumes this constant rather than
+/// defining its own.
+pub const REDWIRE_WS_SUBPROTOCOL: &str = "reddb.redwire.v1";
+
+/// HTTP path the browser client (`red+wss://host:port`) upgrades on to
+/// reach the RedWire-over-WebSocket edge (ADR 0036).
+pub const REDWIRE_WS_PATH: &str = "/redwire";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupError {
@@ -165,6 +178,31 @@ pub fn validate_minor_version(got: u8) -> Result<(), StartupError> {
     }
 }
 
+/// Outcome of matching an inbound peek buffer against the RedWire magic
+/// discriminator. Mirrors the service-router's three-way detect result
+/// but stays free of router types so reddb-wire owns the classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedWireMagicMatch {
+    /// Buffer is empty — need at least one byte before we can classify.
+    Pending,
+    /// First byte is the RedWire magic ([`REDWIRE_MAGIC`]).
+    Match,
+    /// First byte is present and is not the RedWire magic.
+    NoMatch,
+}
+
+/// Classify an inbound peek buffer against the RedWire magic byte
+/// ([`REDWIRE_MAGIC`]). Pure and allocation-free so the service-router's
+/// hot-path classifier can delegate the discriminator decision here:
+/// empty → `Pending`, leading `0xFE` → `Match`, anything else → `NoMatch`.
+pub fn redwire_magic_match(peek: &[u8]) -> RedWireMagicMatch {
+    match peek.first() {
+        None => RedWireMagicMatch::Pending,
+        Some(&first) if first == REDWIRE_MAGIC => RedWireMagicMatch::Match,
+        Some(_) => RedWireMagicMatch::NoMatch,
+    }
+}
+
 #[cfg(test)]
 mod startup_tests {
     use super::*;
@@ -186,5 +224,23 @@ mod startup_tests {
             validate_minor_version(MAX_KNOWN_MINOR_VERSION.saturating_add(1)),
             Err(StartupError::UnsupportedMinor { .. })
         ));
+    }
+
+    #[test]
+    fn magic_match_classifies_peek_buffer() {
+        // Empty → Pending: not enough bytes to decide yet.
+        assert_eq!(redwire_magic_match(&[]), RedWireMagicMatch::Pending);
+        // Leading magic → Match, regardless of trailing bytes.
+        assert_eq!(
+            redwire_magic_match(&[REDWIRE_MAGIC]),
+            RedWireMagicMatch::Match
+        );
+        assert_eq!(
+            redwire_magic_match(&[0xFE, 0x01, 0x10]),
+            RedWireMagicMatch::Match
+        );
+        // Any other leading byte (HTTP 'G', H2 'P', binary 0x10) → NoMatch.
+        assert_eq!(redwire_magic_match(b"GET "), RedWireMagicMatch::NoMatch);
+        assert_eq!(redwire_magic_match(&[0x10]), RedWireMagicMatch::NoMatch);
     }
 }
