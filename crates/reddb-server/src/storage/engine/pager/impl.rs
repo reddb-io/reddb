@@ -662,7 +662,9 @@ impl Pager {
         if page_id == 0 || self.encryption.is_none() {
             return self.write_page(page_id, page);
         }
-        const OVERHEAD: usize = 12 + 16; // nonce + GCM tag
+        // Canonical per-page envelope overhead (nonce + GCM tag),
+        // owned by reddb-io-crypto (#1053, ADR 0054).
+        const OVERHEAD: usize = crate::storage::encryption::page_encryptor::OVERHEAD;
         let plaintext_len = PAGE_SIZE - OVERHEAD;
         let plaintext = &page.as_bytes()[..plaintext_len];
         let (enc, _) = self

@@ -1,89 +1,58 @@
-//! Per-page Encryption using AES-256-GCM
+//! Per-page encryption adapter binding a [`SecureKey`] to the
+//! canonical `reddb-io-crypto` envelope (#1053, ADR 0054).
 //!
-//! Handles encryption and decryption of individual pages.
-//! Uses a unique nonce per page (stored with the page) and authenticates
-//! the Page ID to prevent page swapping attacks.
+//! This type used to carry its own AES-256-GCM framing (a magic-less
+//! `nonce ‖ ct ‖ tag` layout with a UUIDv4-truncated nonce). That
+//! framing is **retired**: the byte-format and parameters now live in
+//! `reddb-io-crypto`, and the rival self-describing `RDEP` envelope is
+//! retired too. `PageEncryptor` survives only as a server-local
+//! convenience wrapper that holds a key (with secure zeroing on drop)
+//! and delegates to the canonical free functions. The on-disk frame is
+//! byte-identical to the previous `PageEncryptor` output, so the
+//! dormant pager wiring and the page-0 `key_check` blob are unchanged.
 
 use super::key::SecureKey;
-use crate::crypto::aes_gcm::{aes256_gcm_decrypt, aes256_gcm_encrypt};
-use crate::crypto::uuid::Uuid;
 
-/// Size of the nonce (IV) in bytes
-pub const NONCE_SIZE: usize = 12;
-/// Size of the authentication tag in bytes
-pub const TAG_SIZE: usize = 16;
-/// Total encryption overhead per page (Nonce + Tag)
-pub const OVERHEAD: usize = NONCE_SIZE + TAG_SIZE;
+/// Size of the nonce (IV) in bytes.
+pub const NONCE_SIZE: usize = reddb_crypto::NONCE_SIZE;
+/// Size of the authentication tag in bytes.
+pub const TAG_SIZE: usize = reddb_crypto::TAG_SIZE;
+/// Total encryption overhead per page (nonce + tag = 28).
+pub const OVERHEAD: usize = reddb_crypto::PAGE_ENVELOPE_OVERHEAD;
 
-/// Handles page encryption/decryption
+/// Binds a [`SecureKey`] to the canonical per-page envelope.
 pub struct PageEncryptor {
     key: SecureKey,
 }
 
 impl PageEncryptor {
-    /// Create a new page encryptor
+    /// Create a new page encryptor.
     pub fn new(key: SecureKey) -> Self {
         Self { key }
     }
 
-    /// Encrypt a page
+    /// Encrypt a page through the canonical envelope.
     ///
-    /// Layout:
-    /// `[Nonce (12 bytes)] [Ciphertext (N bytes)] [Tag (16 bytes)]`
-    ///
-    /// The `plaintext` size N will result in an output of size N + 28 bytes.
-    /// The caller is responsible for ensuring the plaintext fits within the
-    /// target page size (e.g., passing 4068 bytes to get a 4096 byte page).
+    /// Layout: `[nonce (12)] [ciphertext (N)] [tag (16)]`; the
+    /// `plaintext` of size N yields N + [`OVERHEAD`] bytes. The caller
+    /// ensures the plaintext fits the target page size (e.g. 4068
+    /// bytes → a 4096-byte page). `page_id` is bound as AAD.
     pub fn encrypt(&self, page_id: u32, plaintext: &[u8]) -> Vec<u8> {
-        // Generate random nonce (12 bytes)
-        // We use uuid v4 (16 random bytes) and truncate to 12
-        let uuid = Uuid::new_v4();
-        let mut nonce = [0u8; NONCE_SIZE];
-        nonce.copy_from_slice(&uuid.as_bytes()[0..NONCE_SIZE]);
-
-        // AAD is the Page ID (prevents moving pages to different IDs)
-        let aad = page_id.to_le_bytes();
-
-        let key: &[u8; 32] = self
-            .key
-            .as_bytes()
-            .try_into()
-            .expect("Key must be 32 bytes");
-
-        // Encrypt: returns Ciphertext || Tag
-        let ciphertext_with_tag = aes256_gcm_encrypt(key, &nonce, &aad, plaintext);
-
-        // Result: Nonce || Ciphertext || Tag
-        let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext_with_tag.len());
-        result.extend_from_slice(&nonce);
-        result.extend_from_slice(&ciphertext_with_tag);
-
-        result
+        reddb_crypto::encrypt_page(self.key_bytes(), page_id, plaintext)
+            .expect("page envelope encryption failed (CSPRNG)")
     }
 
-    /// Decrypt a page
+    /// Decrypt a page produced by [`Self::encrypt`].
     pub fn decrypt(&self, page_id: u32, encrypted_data: &[u8]) -> Result<Vec<u8>, String> {
-        if encrypted_data.len() < OVERHEAD {
-            return Err("Encrypted data too short".to_string());
-        }
+        reddb_crypto::decrypt_page(self.key_bytes(), page_id, encrypted_data)
+            .map_err(|e| e.to_string())
+    }
 
-        // Extract parts
-        let nonce = &encrypted_data[..NONCE_SIZE];
-        let ciphertext_with_tag = &encrypted_data[NONCE_SIZE..];
-
-        let mut nonce_arr = [0u8; NONCE_SIZE];
-        nonce_arr.copy_from_slice(nonce);
-
-        // AAD must match
-        let aad = page_id.to_le_bytes();
-
-        let key: &[u8; 32] = self
-            .key
+    fn key_bytes(&self) -> &[u8; 32] {
+        self.key
             .as_bytes()
             .try_into()
-            .expect("Key must be 32 bytes");
-
-        aes256_gcm_decrypt(key, &nonce_arr, &aad, ciphertext_with_tag)
+            .expect("Key must be 32 bytes")
     }
 }
 
