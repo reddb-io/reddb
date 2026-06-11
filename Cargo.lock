@@ -2306,6 +2306,7 @@ dependencies = [
  "blake3",
  "crc32fast",
  "fs2",
+ "hex",
  "lz4_flex",
  "serde",
  "serde_json",

@@ -89,9 +89,11 @@ const VAULT_VERSION: u8 = 2;
 const VAULT_LEGACY_VERSION: u8 = 1;
 
 const VAULT_AAD: &[u8] = b"reddb-vault";
-const VAULT_LOGICAL_EXPORT_MAGIC: &[u8; 4] = b"RDVX";
-const VAULT_LOGICAL_EXPORT_VERSION: u8 = 1;
-const VAULT_LOGICAL_EXPORT_AAD: &[u8] = b"reddb-vault-logical-export-v1";
+
+// The logical-export envelope framing (`RDVX` magic + version + salt + nonce +
+// ciphertext, hex-encoded) lives in `reddb-file`. Key derivation and AES-GCM
+// stay here; we only borrow the AAD, which is part of the frozen wire contract.
+use reddb_file::VAULT_LOGICAL_EXPORT_AAD;
 
 /// Header content layout sizes (after the page's own 32-byte header).
 const VAULT_MAGIC_SIZE: usize = 4;
@@ -660,15 +662,13 @@ impl Vault {
         let key_arr: &[u8; 32] = key_bytes.try_into().map_err(|_| VaultError::Encryption)?;
         let ciphertext = aes256_gcm_encrypt(key_arr, &nonce, VAULT_LOGICAL_EXPORT_AAD, &plaintext);
 
-        let mut out = Vec::with_capacity(
-            VAULT_MAGIC_SIZE + VAULT_VERSION_SIZE + VAULT_SALT_SIZE + NONCE_SIZE + ciphertext.len(),
-        );
-        out.extend_from_slice(VAULT_LOGICAL_EXPORT_MAGIC);
-        out.push(VAULT_LOGICAL_EXPORT_VERSION);
-        out.extend_from_slice(&self.salt);
-        out.extend_from_slice(&nonce);
-        out.extend_from_slice(&ciphertext);
-        Ok(hex::encode(out))
+        // Envelope framing (magic + version + salt + nonce + ciphertext, hex)
+        // lives in reddb-file; we only supply the encrypted parts.
+        Ok(reddb_file::encode_vault_logical_export(
+            &self.salt,
+            &nonce,
+            &ciphertext,
+        ))
     }
 
     /// Decrypt a logical export blob using the same key precedence as
@@ -709,33 +709,11 @@ impl Vault {
     fn decode_logical_export(
         blob_hex: &str,
     ) -> Result<([u8; VAULT_SALT_SIZE], [u8; NONCE_SIZE], Vec<u8>), VaultError> {
-        let blob = hex::decode(blob_hex).map_err(|_| VaultError::Corrupt("bad hex".into()))?;
-        let min_len = VAULT_MAGIC_SIZE + VAULT_VERSION_SIZE + VAULT_SALT_SIZE + NONCE_SIZE + 16;
-        if blob.len() < min_len {
-            return Err(VaultError::Corrupt("logical vault export too short".into()));
-        }
-        if &blob[0..VAULT_MAGIC_SIZE] != VAULT_LOGICAL_EXPORT_MAGIC {
-            return Err(VaultError::Corrupt(
-                "bad logical vault export magic".to_string(),
-            ));
-        }
-        let version = blob[VAULT_MAGIC_SIZE];
-        if version != VAULT_LOGICAL_EXPORT_VERSION {
-            return Err(VaultError::Corrupt(format!(
-                "unsupported logical vault export version: {version}"
-            )));
-        }
-
-        let mut off = VAULT_MAGIC_SIZE + VAULT_VERSION_SIZE;
-        let salt: [u8; VAULT_SALT_SIZE] = blob[off..off + VAULT_SALT_SIZE]
-            .try_into()
-            .map_err(|_| VaultError::Corrupt("bad logical export salt".into()))?;
-        off += VAULT_SALT_SIZE;
-        let nonce: [u8; NONCE_SIZE] = blob[off..off + NONCE_SIZE]
-            .try_into()
-            .map_err(|_| VaultError::Corrupt("bad logical export nonce".into()))?;
-        off += NONCE_SIZE;
-        Ok((salt, nonce, blob[off..].to_vec()))
+        // Envelope parsing lives in reddb-file; map its framing error onto our
+        // operator-facing VaultError::Corrupt with the same message text.
+        let env = reddb_file::decode_vault_logical_export(blob_hex)
+            .map_err(|e| VaultError::Corrupt(e.to_string()))?;
+        Ok((env.salt, env.nonce, env.ciphertext))
     }
 
     fn decrypt_logical_export(
