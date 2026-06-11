@@ -21,10 +21,10 @@
 // locally; carrying the allow here keeps the move a pure relocation.
 #![allow(unused_imports)]
 
-mod conversions;
 pub mod cast_catalog;
 pub mod coerce;
 pub mod coercion_spine;
+mod conversions;
 pub mod function_catalog;
 pub mod operator;
 pub mod operator_catalog;
