@@ -136,16 +136,15 @@ pub mod ui_bridge;
 // HTTPS download, SHA-256 verification, tgz extraction, and local cache
 // management for the pinned red-ui release asset.
 pub mod ui_bundle_resolver;
+// `red server --ui` static bundle surface (issue #1047, ADR 0051): serve
+// the resolved red-ui bundle as inert static assets on the server's HTTP
+// edge so a remote browser can load it and connect back over RedWire-over-WS.
+mod ui_static;
 // `red ui <uri>` deep-link dispatch (issue #1046, ADR 0051): prefer the
 // installed desktop app via the `redui://` scheme, fall back to the served
 // browser bridge when no handler is registered. Decision + canonical
 // deep-link string live behind a testable seam.
 pub mod ui_deeplink;
-// `red ui` credential handoff (issue #1048, ADR 0051 / 0036): the
-// injected-auth mode decision, the credential-free page config snippet, and
-// the one-time loopback secret channel for the deep-link/desktop path. The
-// handshake injection itself lives in `ui_bridge`.
-pub mod ui_auth;
 // `pub(crate)` so the RedWire input-stream path (issue #764 / S5)
 // can reuse the canonical S4 INSERT builders / identifier checks
 // (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
@@ -230,6 +229,15 @@ pub struct ServerOptions {
     /// least one origin. Matched exactly (scheme+host+port), e.g.
     /// `https://app.example.com`.
     pub websocket_allowed_origins: Vec<String>,
+    /// `red server --ui` (issue #1047, ADR 0051). When `Some`, this
+    /// listener also serves the resolved red-ui bundle from this directory
+    /// as inert static assets (`/` → `index.html`), alongside the existing
+    /// API. The assets carry no credential, so exposing them is safe by
+    /// construction — auth lives on the RedWire data endpoint, not the
+    /// asset path. Network reach is governed entirely by `bind_addr`
+    /// (default localhost), so this never widens reach on its own.
+    /// `None` (the default) leaves the listener API-only.
+    pub ui_dir: Option<std::path::PathBuf>,
 }
 
 pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -245,6 +253,7 @@ impl Default for ServerOptions {
             surface: ServerSurface::Public,
             transport_readiness: crate::service_cli::TransportReadiness::default(),
             websocket_allowed_origins: Vec::new(),
+            ui_dir: None,
         }
     }
 }
@@ -563,6 +572,22 @@ impl RedDBServer {
     /// The configured RedWire-over-WSS `Origin` allowlist (issue #935).
     pub(crate) fn websocket_allowed_origins(&self) -> &[String] {
         &self.options.websocket_allowed_origins
+    }
+
+    /// Serve the resolved red-ui bundle from `dir` as inert static assets
+    /// on this listener (`red server --ui`, issue #1047, ADR 0051). The
+    /// bundle is served as a fallback after the API routing table, so it
+    /// can never shadow a real endpoint; `GET /` resolves to the bundle's
+    /// `index.html`.
+    pub fn with_ui_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.options.ui_dir = Some(dir);
+        self
+    }
+
+    /// The directory this listener serves the red-ui bundle from, if
+    /// `--ui` is active (issue #1047).
+    pub(crate) fn ui_dir(&self) -> Option<&std::path::Path> {
+        self.options.ui_dir.as_deref()
     }
 
     /// Enable the browser credential layer (issue #936, PRD #930) by
