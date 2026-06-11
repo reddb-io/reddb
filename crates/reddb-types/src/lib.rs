@@ -22,7 +22,14 @@
 #![allow(unused_imports)]
 
 mod conversions;
+pub mod cast_catalog;
+pub mod coerce;
+pub mod coercion_spine;
+pub mod function_catalog;
+pub mod operator;
+pub mod operator_catalog;
 pub mod types;
 pub mod value_codec;
 
+pub use operator::BinOp;
 pub use types::{DataType, Row, SqlTypeName, TypeCategory, TypeModifier, Value, ValueError};
