@@ -6,6 +6,7 @@ members = [
     "crates/reddb-file",
     "crates/reddb-grpc-proto",
     "crates/reddb-server",
+    "crates/reddb-types",
     "crates/reddb-wire",
 ]
 resolver = "2"

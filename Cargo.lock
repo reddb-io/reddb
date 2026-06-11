@@ -2371,6 +2371,7 @@ dependencies = [
  "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-grpc-proto",
+ "reddb-io-types",
  "reddb-io-wire",
  "regex",
  "reqwest",
@@ -2403,6 +2404,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-types"
+version = "1.0.0"
+dependencies = [
+ "proptest",
+ "zstd",
+]
+
+[[package]]
 name = "reddb-io-wire"
 version = "1.10.1"
 dependencies = [
@@ -2410,6 +2419,7 @@ dependencies = [
  "proptest",
  "prost",
  "reddb-io-grpc-proto",
+ "reddb-io-types",
  "regex",
  "serde_json",
  "tokio",

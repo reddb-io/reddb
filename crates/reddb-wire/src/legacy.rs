@@ -7,8 +7,12 @@
 //! [total_len: u32 LE][msg_type: u8][payload...]
 //! ```
 //!
-//! The crate owns the byte-level contract. Engine-specific conversion
-//! to storage values belongs in `reddb-server`.
+//! The crate owns the byte-level contract. The conversions between the
+//! engine `Value` (now in the keystone crate `reddb-io-types`, below wire)
+//! and `WireValue` live here: the orphan rule pins `From`/`TryFrom` impls
+//! that mention `WireValue` to this, its home crate (ADR 0052, #1061).
+
+use reddb_types::Value;
 
 // Message type constants.
 pub const MSG_QUERY: u8 = 0x01;
@@ -51,6 +55,64 @@ pub enum WireValue {
     Bool(bool),
     Bytes(Vec<u8>),
     Timestamp(u64),
+}
+
+// Conversions between the engine `Value` (keystone crate `reddb-io-types`)
+// and the legacy `WireValue`. Re-homed from `reddb-server`'s
+// `wire::protocol` (ADR 0052, #1061): once `Value` moved below wire, the
+// orphan rule required these impls to live in `WireValue`'s home crate.
+// Bodies are byte-faithful relocations; the byte contract is unchanged.
+
+impl From<&Value> for WireValue {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::Null => WireValue::Null,
+            Value::Integer(n) => WireValue::I64(*n),
+            Value::UnsignedInteger(n) => WireValue::U64(*n),
+            Value::Float(f) => WireValue::F64(*f),
+            Value::Text(s) => WireValue::Text(s.to_string()),
+            Value::Blob(bytes) => WireValue::Bytes(bytes.clone()),
+            Value::Boolean(b) => WireValue::Bool(*b),
+            Value::Timestamp(t) => WireValue::Timestamp(*t as u64),
+            _ => WireValue::Null,
+        }
+    }
+}
+
+impl From<Value> for WireValue {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Null => WireValue::Null,
+            Value::Integer(n) => WireValue::I64(n),
+            Value::UnsignedInteger(n) => WireValue::U64(n),
+            Value::Float(f) => WireValue::F64(f),
+            Value::Text(s) => WireValue::Text(s.to_string()),
+            Value::Blob(bytes) => WireValue::Bytes(bytes),
+            Value::Boolean(b) => WireValue::Bool(b),
+            Value::Timestamp(t) => WireValue::Timestamp(t as u64),
+            _ => WireValue::Null,
+        }
+    }
+}
+
+impl TryFrom<WireValue> for Value {
+    type Error = &'static str;
+
+    fn try_from(value: WireValue) -> Result<Self, Self::Error> {
+        match value {
+            WireValue::Null => Ok(Value::Null),
+            WireValue::I64(n) => Ok(Value::Integer(n)),
+            WireValue::U64(n) => Ok(Value::UnsignedInteger(n)),
+            WireValue::F64(f) => Ok(Value::Float(f)),
+            WireValue::Text(s) => Ok(Value::text(s)),
+            WireValue::Bool(b) => Ok(Value::Boolean(b)),
+            WireValue::Bytes(bytes) => Ok(Value::Blob(bytes)),
+            WireValue::Timestamp(t) => {
+                let timestamp = i64::try_from(t).map_err(|_| "timestamp exceeds i64 range")?;
+                Ok(Value::Timestamp(timestamp))
+            }
+        }
+    }
 }
 
 /// Write a legacy frame header: [total_len: u32 LE][msg_type: u8].
@@ -237,6 +299,40 @@ pub fn set_result_payload_row_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins the WireValue<->Value field mapping re-homed here from
+    // reddb-server's wire::protocol (ADR 0052, #1061). The conversion is a
+    // byte-faithful relocation, so this round-trips every losslessly-mapped
+    // variant and locks the supported tag correspondence.
+    #[test]
+    fn value_wirevalue_field_mapping_round_trips() {
+        let cases = [
+            (Value::Null, WireValue::Null),
+            (Value::Integer(-7), WireValue::I64(-7)),
+            (Value::UnsignedInteger(9), WireValue::U64(9)),
+            (Value::Float(1.5), WireValue::F64(1.5)),
+            (Value::text("hi"), WireValue::Text("hi".to_string())),
+            (Value::Blob(vec![1, 2, 3]), WireValue::Bytes(vec![1, 2, 3])),
+            (Value::Boolean(true), WireValue::Bool(true)),
+            (Value::Timestamp(42), WireValue::Timestamp(42)),
+        ];
+        for (value, wire) in cases {
+            // Value -> WireValue (owned and borrowed paths agree).
+            assert_eq!(WireValue::from(value.clone()), wire);
+            assert_eq!(WireValue::from(&value), wire);
+            // WireValue -> Value round-trips back to the original.
+            assert_eq!(Value::try_from(wire.clone()), Ok(value));
+        }
+    }
+
+    #[test]
+    fn wirevalue_timestamp_rejects_i64_overflow() {
+        let overflow = WireValue::Timestamp(u64::MAX);
+        assert_eq!(
+            Value::try_from(overflow),
+            Err("timestamp exceeds i64 range")
+        );
+    }
 
     #[test]
     fn frame_header_keeps_legacy_length_shape() {
