@@ -9,3 +9,6 @@
 #     defaults:
 #       cargo: true               # ship cargo isolation on Rust projects
 #       gradle: true              # ship gradle isolation when GRADLE_USER_HOME_BASE is set
+
+dev:
+  lock-primary-branch: true
