@@ -42,12 +42,11 @@ use reddb_wire::redwire::{
     FRAME_HEADER_SIZE, REDWIRE_MAGIC,
 };
 
-/// Path the browser client (`red+wss://host:port`) resolves to.
-pub(super) const REDWIRE_WS_PATH: &str = "/redwire";
-
-/// WebSocket subprotocol the upgrade advertises. Versioned so a future
-/// framing revision can coexist with v1 clients.
-pub(super) const REDWIRE_WS_SUBPROTOCOL: &str = "reddb.redwire.v1";
+/// Path the browser client (`red+wss://host:port`) resolves to, and the
+/// WebSocket subprotocol the upgrade advertises. Both are owned by
+/// reddb-wire (ADR 0036) — re-exported here so the server's routing and
+/// upgrade handler keep their existing `ws_edge::` references.
+pub(super) use reddb_wire::redwire::{REDWIRE_WS_PATH, REDWIRE_WS_SUBPROTOCOL};
 
 /// Duplex buffer bridging the WS data channel and the RedWire session.
 /// Sized to hold a couple of typical frames without round-tripping the
@@ -99,21 +98,29 @@ impl IntoResponse for WsRejection {
     }
 }
 
-/// Pure upgrade gate (ADR 0036): TLS-only, then exact-match `Origin`
-/// against the allowlist. Factored out so the policy is tested directly.
+impl From<reddb_wire::redwire::WsUpgradeRefusal> for WsRejection {
+    fn from(refusal: reddb_wire::redwire::WsUpgradeRefusal) -> Self {
+        use reddb_wire::redwire::WsUpgradeRefusal as R;
+        match refusal {
+            R::NotTls => WsRejection::NotTls,
+            R::OriginMissing => WsRejection::OriginMissing,
+            R::OriginRejected => WsRejection::OriginRejected,
+        }
+    }
+}
+
+/// Upgrade gate (ADR 0036): TLS-only, then exact-match `Origin` against
+/// the allowlist. The pure policy lives in reddb-wire
+/// ([`reddb_wire::redwire::evaluate_ws_upgrade`]); this thin wrapper only
+/// maps the server's [`HttpTransport`] onto the `is_tls_edge` bool and
+/// the refusal back onto the axum-rendered [`WsRejection`].
 pub(super) fn ws_upgrade_decision(
     transport: HttpTransport,
     origin: Option<&str>,
     allowlist: &[String],
 ) -> Result<(), WsRejection> {
-    if transport != HttpTransport::Https {
-        return Err(WsRejection::NotTls);
-    }
-    match origin {
-        None => Err(WsRejection::OriginMissing),
-        Some(o) if allowlist.iter().any(|allowed| allowed == o) => Ok(()),
-        Some(_) => Err(WsRejection::OriginRejected),
-    }
+    reddb_wire::redwire::evaluate_ws_upgrade(transport == HttpTransport::Https, origin, allowlist)
+        .map_err(WsRejection::from)
 }
 
 /// axum handler for `GET /redwire`. Validates the upgrade gate, then —
