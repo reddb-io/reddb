@@ -165,29 +165,13 @@ pub fn auto_generate_dev_cert(dir: &Path) -> Result<HttpTlsConfig, Box<dyn std::
     })
 }
 
+/// HTTP dev cert: CN `"RedDB HTTP {hostname}"` with **no** organization.
+/// Shares the rcgen block with the wire edge via the parameterized
+/// [`crate::wire::tls::generate_self_signed_dev_cert`] (issue #1055) — the
+/// HTTP cert deliberately passes `org = None` so it does not carry
+/// `O=RedDB`.
 fn generate_self_signed(hostname: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    use rcgen::{CertificateParams, KeyPair};
-    let mut params = CertificateParams::new(vec![hostname.to_string()])?;
-    params.distinguished_name.push(
-        rcgen::DnType::CommonName,
-        rcgen::DnValue::Utf8String(format!("RedDB HTTP {hostname}")),
-    );
-    params
-        .subject_alt_names
-        .push(rcgen::SanType::DnsName(hostname.try_into()?));
-    if hostname != "localhost" {
-        params
-            .subject_alt_names
-            .push(rcgen::SanType::DnsName("localhost".try_into()?));
-    }
-    params
-        .subject_alt_names
-        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
-            std::net::Ipv4Addr::LOCALHOST,
-        )));
-    let key_pair = KeyPair::generate()?;
-    let cert = params.self_signed(&key_pair)?;
-    Ok((cert.pem(), key_pair.serialize_pem()))
+    crate::wire::tls::generate_self_signed_dev_cert(hostname, "RedDB HTTP", None)
 }
 
 fn sha256_fingerprint_hex(cert: &CertificateDer<'_>) -> String {

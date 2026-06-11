@@ -22,20 +22,44 @@ pub struct WireTlsConfig {
 
 /// Generate a self-signed certificate for development.
 /// Returns (cert_pem, key_pem) as strings.
+///
+/// The wire cert carries CN `"RedDB Wire {hostname}"` **and**
+/// `OrganizationName "RedDB"`. The HTTP edge shares this generator but
+/// passes `org = None` (see [`generate_self_signed_dev_cert`]) so its
+/// cert keeps no organization.
 pub fn generate_self_signed_cert(
     hostname: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    generate_self_signed_dev_cert(hostname, "RedDB Wire", Some("RedDB"))
+}
+
+/// Shared self-signed dev-cert generator for the wire and HTTP edges.
+///
+/// Behaviour-preserving parameterization of two formerly near-identical
+/// rcgen blocks (issue #1055): the CN is `"{cn_label} {hostname}"`, and
+/// `org` — when `Some` — sets `OrganizationName`. The wire edge passes
+/// `Some("RedDB")`; the HTTP edge passes `None` so its cert keeps CN
+/// `"RedDB HTTP …"` with **no** organization (do NOT silently add
+/// `O=RedDB` to the HTTP cert). The SAN block (`hostname`, `localhost`
+/// when distinct, and `127.0.0.1`) is identical for both.
+pub(crate) fn generate_self_signed_dev_cert(
+    hostname: &str,
+    cn_label: &str,
+    org: Option<&str>,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     use rcgen::{CertificateParams, KeyPair};
 
     let mut params = CertificateParams::new(vec![hostname.to_string()])?;
     params.distinguished_name.push(
         rcgen::DnType::CommonName,
-        rcgen::DnValue::Utf8String(format!("RedDB Wire {hostname}")),
+        rcgen::DnValue::Utf8String(format!("{cn_label} {hostname}")),
     );
-    params.distinguished_name.push(
-        rcgen::DnType::OrganizationName,
-        rcgen::DnValue::Utf8String("RedDB".to_string()),
-    );
+    if let Some(org) = org {
+        params.distinguished_name.push(
+            rcgen::DnType::OrganizationName,
+            rcgen::DnValue::Utf8String(org.to_string()),
+        );
+    }
 
     // Add localhost + IP SANs for dev
     params
@@ -120,4 +144,52 @@ pub fn build_tls_acceptor(
         .with_single_cert(certs, key)?;
 
     Ok(TlsAcceptor::from(Arc::new(server_config)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse the subject CN + Organization out of a self-signed PEM cert,
+    /// so the wire-vs-HTTP DN difference is pinned end-to-end (issue #1055).
+    fn subject_cn_and_orgs(cert_pem: &str) -> (Vec<String>, Vec<String>) {
+        let der = rustls_pemfile::certs(&mut io::BufReader::new(cert_pem.as_bytes()))
+            .next()
+            .expect("one certificate in PEM")
+            .expect("valid certificate PEM");
+        let (_, parsed) =
+            x509_parser::parse_x509_certificate(der.as_ref()).expect("parse generated X.509");
+        let subject = parsed.subject();
+        let cns = subject
+            .iter_common_name()
+            .filter_map(|cn| cn.as_str().ok().map(str::to_string))
+            .collect();
+        let orgs = subject
+            .iter_organization()
+            .filter_map(|o| o.as_str().ok().map(str::to_string))
+            .collect();
+        (cns, orgs)
+    }
+
+    #[test]
+    fn wire_cert_keeps_wire_cn_and_reddb_org() {
+        let (cert_pem, key_pem) =
+            generate_self_signed_cert("localhost").expect("generate wire cert");
+        assert!(key_pem.contains("PRIVATE KEY"), "key PEM emitted");
+        let (cns, orgs) = subject_cn_and_orgs(&cert_pem);
+        assert_eq!(cns, vec!["RedDB Wire localhost".to_string()]);
+        assert_eq!(orgs, vec!["RedDB".to_string()]);
+    }
+
+    #[test]
+    fn http_cert_keeps_http_cn_and_no_org() {
+        // The non-obvious diff (issue #1055): the HTTP cert must keep CN
+        // "RedDB HTTP …" and carry NO organization. The shared generator
+        // passes org = None so we never silently add O=RedDB to it.
+        let (cert_pem, _key) = generate_self_signed_dev_cert("localhost", "RedDB HTTP", None)
+            .expect("generate http cert");
+        let (cns, orgs) = subject_cn_and_orgs(&cert_pem);
+        assert_eq!(cns, vec!["RedDB HTTP localhost".to_string()]);
+        assert!(orgs.is_empty(), "HTTP cert must not carry an Organization");
+    }
 }
