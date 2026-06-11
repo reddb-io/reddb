@@ -378,7 +378,15 @@ impl RedDBServer {
             ("GET", "/ai/models") => self.handle_ai_model_list(),
 
             // Self-describing entrypoints for first-run/devex.
-            ("GET", "/") => self.handle_root_discovery(),
+            // With `red server --ui` (#1047), `/` serves the bundle's
+            // `index.html` so a browser hitting the root loads the UI;
+            // the API discovery document stays the answer when `--ui`
+            // is off.
+            ("GET", "/") => match self.ui_dir() {
+                Some(ui_dir) => crate::server::ui_static::serve_bundle_asset(ui_dir, "/")
+                    .unwrap_or_else(|| self.handle_root_discovery()),
+                None => self.handle_root_discovery(),
+            },
             ("GET", "/query") => self.handle_query_contract(),
             ("GET", "/grpc") => self.handle_grpc_discovery(),
 
@@ -1939,6 +1947,20 @@ impl RedDBServer {
                         return self.handle_delete_entity(collection, id);
                     }
                 }
+                // `red server --ui` (#1047, ADR 0051): no API route
+                // matched — fall back to the static bundle surface. This
+                // runs last so a bundle asset can never shadow a real
+                // endpoint; a missing asset returns `None` and we drop to
+                // the canonical 404 below.
+                if method == "GET" {
+                    if let Some(ui_dir) = self.ui_dir() {
+                        if let Some(response) =
+                            crate::server::ui_static::serve_bundle_asset(ui_dir, &path)
+                        {
+                            return response;
+                        }
+                    }
+                }
                 json_error(404, format!("route not found: {} {}", method, path))
             }
         }
@@ -1991,6 +2013,28 @@ impl RedDBServer {
             ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
         ) {
             return true;
+        }
+
+        // `red server --ui` (#1047, ADR 0051) — the served bundle is inert
+        // static assets with no embedded credential, so they are public by
+        // design even on an authed database: the browser loads them and
+        // then authenticates against the RedWire data endpoint. Only a
+        // `GET` that resolves to a *real file* in the bundle bypasses auth,
+        // so an authenticated API route is never accidentally opened (it
+        // has no matching file). The 401-vs-asset decision is made here,
+        // before dispatch, to keep the gate in lock-step with `route`.
+        // Operator surfaces (`/admin/*`, `/v1/_admin/*`, `/metrics`) are
+        // excluded so a bundle file can never relax the admin-token gate.
+        if method == "GET"
+            && !path.starts_with("/admin/")
+            && !path.starts_with("/v1/_admin/")
+            && path != "/metrics"
+        {
+            if let Some(ui_dir) = self.ui_dir() {
+                if crate::server::ui_static::bundle_asset_exists(ui_dir, path) {
+                    return true;
+                }
+            }
         }
 
         // PLAN.md Phase 6.1 — operator endpoints (/admin/*, /metrics)
