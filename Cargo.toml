@@ -2,6 +2,7 @@
 members = [
     "crates/reddb-client",
     "crates/reddb-client-connector",
+    "crates/reddb-crypto",
     "crates/reddb-file",
     "crates/reddb-grpc-proto",
     "crates/reddb-server",
