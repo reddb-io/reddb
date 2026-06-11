@@ -21,6 +21,7 @@
 // locally; carrying the allow here keeps the move a pure relocation.
 #![allow(unused_imports)]
 
+pub mod canonical_key;
 pub mod cast_catalog;
 pub mod coerce;
 pub mod coercion_spine;
@@ -28,8 +29,11 @@ mod conversions;
 pub mod function_catalog;
 pub mod operator;
 pub mod operator_catalog;
+pub mod parametric;
+pub mod polymorphic;
 pub mod types;
 pub mod value_codec;
 
+pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
 pub use operator::BinOp;
 pub use types::{DataType, Row, SqlTypeName, TypeCategory, TypeModifier, Value, ValueError};
