@@ -1,123 +1,65 @@
 //! JSON-RPC protocol handling for MCP server.
 //!
-//! Implements the Content-Length framed JSON-RPC transport used by the
-//! Model Context Protocol over stdio.
+//! The Content-Length framed JSON-RPC 2.0 transport used by the Model Context
+//! Protocol over stdio is a message-framing wire codec and lives in the
+//! protocol-authority crate (`reddb_wire::jsonrpc`), per ADR 0046. This module
+//! binds the server's JSON value type to that codec via [`ServerJson`] and
+//! re-exports the framing functions, so call sites keep using
+//! `protocol::read_payload`, `protocol::build_result_message`, etc. unchanged.
 
 use crate::json::{Map, Value as JsonValue};
-use std::io::{BufRead, Write};
+use reddb_wire::jsonrpc::{self, JsonRpcSerializer};
 
-/// Read a JSON-RPC payload from a buffered reader.
+pub use reddb_wire::jsonrpc::{read_payload, write_message};
+
+/// Binds `reddb-server`'s JSON value type to the wire crate's framed JSON-RPC
+/// envelope builders.
 ///
-/// Reads headers until it finds `Content-Length: N`, then reads exactly N
-/// bytes of body. Returns `None` on EOF and `Err` on malformed input.
-pub fn read_payload<R: BufRead>(reader: &mut R) -> Result<Option<String>, String> {
-    let mut content_length: Option<usize> = None;
-    let mut header = String::new();
+/// Objects are backed by [`Map`] (a `BTreeMap`), which sorts keys on compact
+/// serialization — that sort order is what pins the emitted field order.
+pub struct ServerJson;
 
-    loop {
-        header.clear();
-        let bytes = reader
-            .read_line(&mut header)
-            .map_err(|e| format!("failed to read header: {}", e))?;
-        if bytes == 0 {
-            return Ok(None);
-        }
+impl JsonRpcSerializer for ServerJson {
+    type Value = JsonValue;
 
-        let trimmed = header.trim_end_matches(['\n', '\r']);
-        if trimmed.is_empty() {
-            break;
-        }
-
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("content-length:") {
-            let value = trimmed["Content-Length:".len()..].trim();
-            let length = value
-                .parse::<usize>()
-                .map_err(|_| "invalid Content-Length header".to_string())?;
-            content_length = Some(length);
-        }
+    fn null() -> JsonValue {
+        JsonValue::Null
     }
 
-    let length = content_length.ok_or_else(|| "missing Content-Length header".to_string())?;
-    let mut buffer = vec![0u8; length];
-    reader
-        .read_exact(&mut buffer)
-        .map_err(|e| format!("failed to read payload: {}", e))?;
-
-    // Consume optional trailing newline between messages.
-    if let Ok(buf) = reader.fill_buf() {
-        let to_consume = if buf.starts_with(b"\r\n") {
-            Some(2)
-        } else if buf.starts_with(b"\n") {
-            Some(1)
-        } else {
-            None
-        };
-        if let Some(count) = to_consume {
-            reader.consume(count);
-        }
+    fn string(value: &str) -> JsonValue {
+        JsonValue::String(value.to_string())
     }
 
-    String::from_utf8(buffer)
-        .map(Some)
-        .map_err(|_| "payload is not UTF-8".to_string())
-}
+    fn number(value: i64) -> JsonValue {
+        JsonValue::Number(value as f64)
+    }
 
-/// Write a Content-Length framed JSON-RPC message to a writer.
-pub fn write_message<W: Write>(writer: &mut W, body: &str) -> Result<(), String> {
-    write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)
-        .map_err(|e| format!("failed to write response: {}", e))?;
-    writer
-        .flush()
-        .map_err(|e| format!("failed to flush: {}", e))
+    fn object(entries: Vec<(&'static str, JsonValue)>) -> JsonValue {
+        let mut object = Map::new();
+        for (key, value) in entries {
+            object.insert(key.to_string(), value);
+        }
+        JsonValue::Object(object)
+    }
+
+    fn to_compact_string(value: &JsonValue) -> String {
+        value.to_string_compact()
+    }
 }
 
 /// Build a JSON-RPC 2.0 result message.
 pub fn build_result_message(id: Option<&JsonValue>, result: JsonValue) -> String {
-    let mut object = Map::new();
-    object.insert("jsonrpc".to_string(), JsonValue::String("2.0".to_string()));
-    match id {
-        Some(identifier) => {
-            object.insert("id".to_string(), identifier.clone());
-        }
-        None => {
-            object.insert("id".to_string(), JsonValue::Null);
-        }
-    }
-    object.insert("result".to_string(), result);
-    JsonValue::Object(object).to_string_compact()
+    jsonrpc::build_result_message::<ServerJson>(id, result)
 }
 
 /// Build a JSON-RPC 2.0 error message.
 pub fn build_error_message(id: Option<&JsonValue>, code: i64, message: &str) -> String {
-    let mut error = Map::new();
-    error.insert("code".to_string(), JsonValue::Number(code as f64));
-    error.insert(
-        "message".to_string(),
-        JsonValue::String(message.to_string()),
-    );
-
-    let mut object = Map::new();
-    object.insert("jsonrpc".to_string(), JsonValue::String("2.0".to_string()));
-    match id {
-        Some(identifier) => {
-            object.insert("id".to_string(), identifier.clone());
-        }
-        None => {
-            object.insert("id".to_string(), JsonValue::Null);
-        }
-    }
-    object.insert("error".to_string(), JsonValue::Object(error));
-    JsonValue::Object(object).to_string_compact()
+    jsonrpc::build_error_message::<ServerJson>(id, code, message)
 }
 
 /// Build a JSON-RPC 2.0 notification (no id, no response expected).
 pub fn build_notification(method: &str, params: JsonValue) -> String {
-    let mut object = Map::new();
-    object.insert("jsonrpc".to_string(), JsonValue::String("2.0".to_string()));
-    object.insert("method".to_string(), JsonValue::String(method.to_string()));
-    object.insert("params".to_string(), params);
-    JsonValue::Object(object).to_string_compact()
+    jsonrpc::build_notification::<ServerJson>(method, params)
 }
 
 #[cfg(test)]
@@ -133,6 +75,8 @@ mod tests {
         let parsed: JsonValue = from_str(&msg).unwrap();
         assert_eq!(parsed.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
         assert_eq!(parsed.get("id").and_then(|v| v.as_f64()), Some(1.0));
+        // Field order is pinned by the BTreeMap-backed serializer.
+        assert_eq!(msg, r#"{"id":1,"jsonrpc":"2.0","result":true}"#);
     }
 
     #[test]
@@ -147,6 +91,10 @@ mod tests {
             error.get("message").and_then(|v| v.as_str()),
             Some("method not found")
         );
+        assert_eq!(
+            msg,
+            r#"{"error":{"code":-32601,"message":"method not found"},"id":2,"jsonrpc":"2.0"}"#
+        );
     }
 
     #[test]
@@ -158,6 +106,10 @@ mod tests {
             Some("test/event")
         );
         assert!(parsed.get("id").is_none());
+        assert_eq!(
+            msg,
+            r#"{"jsonrpc":"2.0","method":"test/event","params":null}"#
+        );
     }
 
     #[test]
