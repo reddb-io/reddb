@@ -1,0 +1,129 @@
+name: Types Coverage
+
+# Report-only llvm-cov signal for the reddb-io-types keystone crate
+# (ADR 0052, PRD #1060). Aspirational target is ~95%+, but this workflow
+# NEVER blocks merge — it only surfaces the number in the job summary and,
+# on PRs, as an advisory comment. A hard merge gate is explicitly out of
+# scope per the PRD's Human Decisions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/reddb-types/**'
+      - '.github/workflows/types-coverage.yml'
+  pull_request:
+    paths:
+      - 'crates/reddb-types/**'
+      - '.github/workflows/types-coverage.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: types-coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  types-coverage:
+    name: Types Coverage Report
+    if: github.actor != 'dependabot[bot]'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 20
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: llvm-tools-preview
+
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.91.0-llvm-cov
+          cache-on-failure: "true"
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage (reddb-io-types)
+        run: |
+          # Collect profdata once, then render it twice (text table + JSON
+          # totals) without re-running the tests. reddb-io-types depends on no
+          # other workspace crate, so this is a fast, self-contained measure.
+          cargo llvm-cov --no-report -p reddb-io-types
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --json --summary-only > coverage-summary.json
+
+      - name: Build report
+        id: report
+        run: |
+          # Pull the headline line-coverage percentage straight from the JSON
+          # totals — robust against column-layout changes in the text table.
+          total_line=$(python3 -c "import json; print(f\"{json.load(open('coverage-summary.json'))['data'][0]['totals']['lines']['percent']:.2f}%\")" 2>/dev/null || echo "n/a")
+
+          {
+            echo "## Types Coverage Report"
+            echo ""
+            echo "Crate: \`reddb-io-types\` — line coverage: **${total_line}** (target ~95%, advisory)"
+            echo ""
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+            echo ""
+            echo "> ℹ️ Report-only — this never blocks merge (ADR 0052 / PRD #1060)."
+            echo "> Run locally: \`cargo llvm-cov -p reddb-io-types --summary-only\`"
+          } > coverage-report.md
+
+          # Mirror to the job summary so the signal is visible without a PR.
+          cat coverage-report.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Expose the rendered body for the PR-comment step.
+          {
+            echo "body<<TYPES_COV_EOF"
+            echo "<!-- types-coverage-comment -->"
+            cat coverage-report.md
+            echo "TYPES_COV_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post or update PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- types-coverage-comment -->';
+            const body = `${{ steps.report.outputs.body }}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
