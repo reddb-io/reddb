@@ -19,45 +19,16 @@
 //! migrations) construct a custom [`ParserLimits`] and pass it to
 //! [`Parser::with_limits`](super::Parser::with_limits).
 
-/// Hard limits enforced by the parser.
+/// Hard limits enforced by the front-end — re-export shim.
 ///
-/// The fields are public so the harness module (used by tests in
-/// `tests/support/parser_hardening`) can mutate them inline. Default
-/// values match production defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParserLimits {
-    /// Maximum recursion depth across recursive descent points
-    /// (expressions, parenthesised sub-queries, JOIN chains).
-    pub max_depth: usize,
-    /// Maximum input length in bytes. Checked at the lexer entry
-    /// before tokenization begins.
-    pub max_input_bytes: usize,
-    /// Maximum identifier length in characters. Checked when an
-    /// identifier token is constructed in the lexer.
-    pub max_identifier_chars: usize,
-}
-
-impl Default for ParserLimits {
-    fn default() -> Self {
-        Self {
-            max_depth: 128,
-            max_input_bytes: 1024 * 1024, // 1 MiB
-            max_identifier_chars: 256,
-        }
-    }
-}
-
-impl ParserLimits {
-    /// Permissive limits for tests that intentionally probe deep
-    /// nesting or long inputs without tripping DoS guards.
-    pub fn permissive() -> Self {
-        Self {
-            max_depth: 1024,
-            max_input_bytes: 16 * 1024 * 1024,
-            max_identifier_chars: 4096,
-        }
-    }
-}
+/// `ParserLimits` was re-homed into the `reddb-io-rql` front-end crate
+/// (#1102, ADR 0053) alongside the lexer that consumes its identifier and
+/// input-byte caps. This re-export preserves the historical
+/// `parser::ParserLimits` / `parser::limits::ParserLimits` paths so every
+/// call-site (and the `tests/support/parser_hardening` harness) keeps
+/// resolving unchanged. The recursion-depth machinery below stays in the
+/// server: it is parser-internal and the parser itself has not moved.
+pub use reddb_rql::limits::ParserLimits;
 
 /// Internal recursion-depth tracker. RAII-style: a guard
 /// [`DepthGuard`] increments on construction and decrements on
