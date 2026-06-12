@@ -27,8 +27,10 @@ pub mod conformance;
 pub mod filter_optimizer;
 pub mod lexer;
 pub mod limits;
+pub mod parser;
 pub mod sql_lowering;
 
 pub use conformance::{render_cell, CellType};
 pub use lexer::{Lexer, LexerError, Position, Spanned, Token};
 pub use limits::ParserLimits;
+pub use parser::{parse, ParseError, ParseErrorKind, Parser, SafeTokenDisplay};

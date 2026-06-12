@@ -1,7 +1,7 @@
 //! Parser for stable CONFIG keyed commands.
 
-use super::super::ast::{ConfigCommand, ConfigValueType, QueryExpr};
-use super::super::lexer::Token;
+use crate::ast::{ConfigCommand, ConfigValueType, QueryExpr};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 

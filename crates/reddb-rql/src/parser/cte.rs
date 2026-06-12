@@ -1,7 +1,7 @@
 //! CTE (Common Table Expression) parsing
 
-use super::super::ast::{CteDefinition, QueryExpr, QueryWithCte, WithClause};
-use super::super::lexer::Token;
+use crate::ast::{CteDefinition, QueryExpr, QueryWithCte, WithClause};
+use crate::lexer::Token;
 use super::error::{ParseError, SafeTokenDisplay};
 use super::Parser;
 

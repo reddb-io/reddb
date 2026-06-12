@@ -1,7 +1,7 @@
 //! Parser for probabilistic data structure commands: HLL, SKETCH, FILTER
 
-use super::super::ast::{ProbabilisticCommand, QueryExpr};
-use super::super::lexer::Token;
+use crate::ast::{ProbabilisticCommand, QueryExpr};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 

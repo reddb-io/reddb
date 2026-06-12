@@ -1,7 +1,7 @@
 //! DDL Parser for CREATE INDEX and DROP INDEX
 
-use super::super::ast::{CreateIndexQuery, DropIndexQuery, IndexMethod, QueryExpr};
-use super::super::lexer::Token;
+use crate::ast::{CreateIndexQuery, DropIndexQuery, IndexMethod, QueryExpr};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 

@@ -70,9 +70,9 @@ mod tests;
 pub use error::{ParseError, ParseErrorKind, SafeTokenDisplay};
 pub use limits::ParserLimits;
 
-use super::ast::{QueryExpr, QueryWithCte, Span};
-use super::lexer::{Lexer, Position, Spanned, Token};
-use crate::storage::schema::Value;
+use crate::ast::{QueryExpr, QueryWithCte, Span};
+use crate::lexer::{Lexer, Position, Spanned, Token};
+use reddb_types::types::Value;
 use limits::DepthCounter;
 
 /// RQL Parser
@@ -563,7 +563,7 @@ impl<'a> Parser<'a> {
     /// surface a "non-literal not supported in this position" error.
     pub fn parse_expr_value(&mut self) -> Result<Value, ParseError> {
         let expr = self.parse_expr()?;
-        super::sql_lowering::fold_expr_to_value(expr)
+        crate::sql_lowering::fold_expr_to_value(expr)
             .map_err(|msg| ParseError::new(msg, self.position()))
     }
 }
