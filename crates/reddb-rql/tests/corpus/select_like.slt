@@ -40,11 +40,6 @@ SELECT id FROM fruit WHERE name LIKE '_a%'
 3
 
 # Negated pattern: every name that does not start with `a`.
-# DIVERGENCE: RedDB's parser does not accept the infix `NOT LIKE` membership
-# form (it errors on the NOT after the column), the same seam as `NOT IN`.
-# Prefix `NOT <predicate>` and bare `LIKE` both parse. Tracked under PRD #1098;
-# SQLite-oracle value kept.
-skipif reddb-server
 query I rowsort
 SELECT id FROM fruit WHERE name NOT LIKE 'a%'
 ----
