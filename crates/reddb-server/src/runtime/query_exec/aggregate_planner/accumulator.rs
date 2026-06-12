@@ -147,7 +147,7 @@ impl GroupAccumulator {
                 }
                 Slot::Sum { sum, seen_any } => {
                     if seen_any {
-                        Value::Float(sum)
+                        sum_f64_to_value(sum)
                     } else {
                         Value::Null
                     }
@@ -162,6 +162,14 @@ impl GroupAccumulator {
                 Slot::Min { current } | Slot::Max { current } => current.unwrap_or(Value::Null),
             })
             .collect()
+    }
+}
+
+fn sum_f64_to_value(f: f64) -> Value {
+    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+        Value::Integer(f as i64)
+    } else {
+        Value::Float(f)
     }
 }
 
