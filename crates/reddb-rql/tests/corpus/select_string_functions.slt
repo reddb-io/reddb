@@ -39,28 +39,18 @@ statement ok
 INSERT INTO words (id, w) VALUES (4, '  padded  '), (5, '  left'), (6, 'right  ')
 
 # TRIM strips leading and trailing spaces from a column value.
-# DIVERGENCE: the TRIM family is catalogued but unimplemented in the SELECT
-# evaluation path — TRIM/LTRIM/RTRIM resolve to NULL rather than the trimmed
-# string. Tracked under PRD #1098; SQLite-oracle value kept.
-skipif reddb-server
 query T nosort
 SELECT TRIM(w) FROM words WHERE id = 4
 ----
 padded
 
 # LTRIM strips only the leading spaces; the result here has no trailing space.
-# DIVERGENCE: see TRIM above — LTRIM resolves to NULL in the SELECT path.
-# Tracked under PRD #1098; SQLite-oracle value kept.
-skipif reddb-server
 query T nosort
 SELECT LTRIM(w) FROM words WHERE id = 5
 ----
 left
 
 # RTRIM strips only the trailing spaces.
-# DIVERGENCE: see TRIM above — RTRIM resolves to NULL in the SELECT path.
-# Tracked under PRD #1098; SQLite-oracle value kept.
-skipif reddb-server
 query T nosort
 SELECT RTRIM(w) FROM words WHERE id = 6
 ----
