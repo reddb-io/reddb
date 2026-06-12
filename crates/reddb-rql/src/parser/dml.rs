@@ -1,12 +1,12 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
+use super::error::ParseError;
+use super::Parser;
 use crate::ast::{
     AskCacheClause, AskQuery, BinOp, DeleteQuery, Expr, FieldRef, Filter, InsertEntityType,
     InsertQuery, OrderByClause, QueryExpr, ReturningItem, UpdateQuery, UpdateTarget,
 };
 use crate::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
 use crate::sql_lowering::{filter_to_expr, fold_expr_to_value};
 use reddb_types::types::Value;
 
@@ -896,9 +896,8 @@ impl<'a> Parser<'a> {
                             Value::Integer(i) => reddb_types::json::Value::Number(i as f64),
                             Value::Float(f) => reddb_types::json::Value::Number(f),
                             Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
-                            Value::Json(ref bytes) => {
-                                reddb_types::json::from_slice(bytes).unwrap_or(reddb_types::json::Value::Null)
-                            }
+                            Value::Json(ref bytes) => reddb_types::json::from_slice(bytes)
+                                .unwrap_or(reddb_types::json::Value::Null),
                             _ => reddb_types::json::Value::Null,
                         };
                         map.insert(key, json_val);
@@ -1020,5 +1019,7 @@ fn secret_ref_value(store: &str, collection: &str, key: &str) -> Value {
         "key".to_string(),
         reddb_types::json::Value::String(key.to_string()),
     );
-    Value::Json(reddb_types::json::to_vec(&reddb_types::json::Value::Object(map)).unwrap_or_default())
+    Value::Json(
+        reddb_types::json::to_vec(&reddb_types::json::Value::Object(map)).unwrap_or_default(),
+    )
 }

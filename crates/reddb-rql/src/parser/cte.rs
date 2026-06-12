@@ -1,9 +1,9 @@
 //! CTE (Common Table Expression) parsing
 
-use crate::ast::{CteDefinition, QueryExpr, QueryWithCte, WithClause};
-use crate::lexer::Token;
 use super::error::{ParseError, SafeTokenDisplay};
 use super::Parser;
+use crate::ast::{CteDefinition, QueryExpr, QueryWithCte, WithClause};
+use crate::lexer::Token;
 
 impl<'a> Parser<'a> {
     /// Parse a complete query with optional WITH clause

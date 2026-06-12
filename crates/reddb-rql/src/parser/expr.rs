@@ -44,11 +44,11 @@
 //! any infix operator whose precedence is ≥ `min`, recursing with
 //! `prec + 1` on the right-hand side for left-associativity.
 
-use crate::ast::{BinOp, Expr, ExprSubquery, FieldRef, Span, UnaryOp};
-use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 use super::PlaceholderMode;
+use crate::ast::{BinOp, Expr, ExprSubquery, FieldRef, Span, UnaryOp};
+use crate::lexer::Token;
 use reddb_types::types::{DataType, Value};
 
 fn is_duration_unit(unit: &str) -> bool {
@@ -660,10 +660,7 @@ impl<'a> Parser<'a> {
     /// (quoted string, number, `?`/`$N` placeholder, parenthesised
     /// expression) falls through to the normal expression grammar so
     /// dynamic defaults still work.
-    fn parse_config_kv_arg(
-        &mut self,
-        start: crate::lexer::Position,
-    ) -> Result<Expr, ParseError> {
+    fn parse_config_kv_arg(&mut self, start: crate::lexer::Position) -> Result<Expr, ParseError> {
         // Literals, placeholders and parenthesised sub-expressions are
         // real expressions (dynamic defaults); everything else that can
         // open an argument here is an identifier or keyword that forms a
@@ -784,12 +781,11 @@ impl<'a> Parser<'a> {
                         ));
                     }
                 }
-                spec.order_by
-                    .push(crate::ast::WindowOrderItem {
-                        expr,
-                        ascending,
-                        nulls_first,
-                    });
+                spec.order_by.push(crate::ast::WindowOrderItem {
+                    expr,
+                    ascending,
+                    nulls_first,
+                });
                 if !self.consume(&Token::Comma)? {
                     break;
                 }
@@ -804,9 +800,7 @@ impl<'a> Parser<'a> {
         Ok(spec)
     }
 
-    fn parse_window_frame(
-        &mut self,
-    ) -> Result<crate::ast::WindowFrame, ParseError> {
+    fn parse_window_frame(&mut self) -> Result<crate::ast::WindowFrame, ParseError> {
         let unit = if self.consume(&Token::Rows)? {
             crate::ast::WindowFrameUnit::Rows
         } else if self.consume(&Token::Range)? {
@@ -837,9 +831,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_window_frame_bound(
-        &mut self,
-    ) -> Result<crate::ast::WindowFrameBound, ParseError> {
+    fn parse_window_frame_bound(&mut self) -> Result<crate::ast::WindowFrameBound, ParseError> {
         use crate::ast::WindowFrameBound;
         if self.consume(&Token::Unbounded)? {
             if self.consume(&Token::Preceding)? {
@@ -873,10 +865,7 @@ impl<'a> Parser<'a> {
 
     /// Parse `CASE WHEN cond THEN val [WHEN …] [ELSE val] END`.
     /// Assumes the caller has already peeked `CASE`.
-    fn parse_case_expr(
-        &mut self,
-        start: crate::lexer::Position,
-    ) -> Result<Expr, ParseError> {
+    fn parse_case_expr(&mut self, start: crate::lexer::Position) -> Result<Expr, ParseError> {
         self.advance()?; // consume CASE
         let mut branches: Vec<(Expr, Expr)> = Vec::new();
         loop {
@@ -1693,10 +1682,7 @@ mod tests {
         };
         assert_eq!(name.to_uppercase(), "SUM");
         let frame = window.frame.expect("frame present");
-        assert!(matches!(
-            frame.unit,
-            crate::ast::WindowFrameUnit::Rows
-        ));
+        assert!(matches!(frame.unit, crate::ast::WindowFrameUnit::Rows));
         assert!(matches!(
             frame.start,
             crate::ast::WindowFrameBound::Preceding(_)
@@ -1728,10 +1714,7 @@ mod tests {
             panic!("expected WindowFunctionCall");
         };
         let frame = window.frame.expect("frame present");
-        assert!(matches!(
-            frame.unit,
-            crate::ast::WindowFrameUnit::Range
-        ));
+        assert!(matches!(frame.unit, crate::ast::WindowFrameUnit::Range));
         assert!(matches!(
             frame.start,
             crate::ast::WindowFrameBound::UnboundedPreceding

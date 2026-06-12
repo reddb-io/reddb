@@ -72,8 +72,8 @@ pub use limits::ParserLimits;
 
 use crate::ast::{QueryExpr, QueryWithCte, Span};
 use crate::lexer::{Lexer, Position, Spanned, Token};
-use reddb_types::types::Value;
 use limits::DepthCounter;
+use reddb_types::types::Value;
 
 /// RQL Parser
 pub struct Parser<'a> {

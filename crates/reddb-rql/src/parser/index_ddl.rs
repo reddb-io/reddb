@@ -1,9 +1,9 @@
 //! DDL Parser for CREATE INDEX and DROP INDEX
 
-use crate::ast::{CreateIndexQuery, DropIndexQuery, IndexMethod, QueryExpr};
-use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::ast::{CreateIndexQuery, DropIndexQuery, IndexMethod, QueryExpr};
+use crate::lexer::Token;
 
 impl<'a> Parser<'a> {
     /// Parse: CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table (col1, ...) [USING method]

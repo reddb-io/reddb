@@ -1,12 +1,12 @@
 //! Parser for migration SQL statements.
 
+use super::error::ParseError;
+use super::Parser;
 use crate::ast::{
     ApplyMigrationQuery, ApplyMigrationTarget, CreateMigrationQuery, ExplainMigrationQuery,
     QueryExpr, RollbackMigrationQuery,
 };
 use crate::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
 
 impl<'a> Parser<'a> {
     /// Parse: CREATE MIGRATION name [DEPENDS ON dep1, dep2] [BATCH n ROWS] [NO ROLLBACK] body_sql

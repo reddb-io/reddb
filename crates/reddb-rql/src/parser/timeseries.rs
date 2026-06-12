@@ -1,12 +1,12 @@
 //! Parser for CREATE/DROP TIMESERIES
 
+use super::error::ParseError;
+use super::Parser;
 use crate::ast::{
     CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl,
     QueryExpr,
 };
 use crate::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
 use reddb_types::catalog::CollectionModel;
 
 impl<'a> Parser<'a> {
@@ -191,27 +191,25 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(QueryExpr::CreateMetric(
-            crate::ast::CreateMetricQuery {
-                path,
-                kind: kind.ok_or_else(|| {
-                    ParseError::new(
-                        "metric descriptor requires TYPE or KIND".to_string(),
-                        self.position(),
-                    )
-                })?,
-                role: role.ok_or_else(|| {
-                    ParseError::new(
-                        "metric descriptor requires ROLE".to_string(),
-                        self.position(),
-                    )
-                })?,
-                source,
-                query,
-                window_ms,
-                time_field,
-            },
-        ))
+        Ok(QueryExpr::CreateMetric(crate::ast::CreateMetricQuery {
+            path,
+            kind: kind.ok_or_else(|| {
+                ParseError::new(
+                    "metric descriptor requires TYPE or KIND".to_string(),
+                    self.position(),
+                )
+            })?,
+            role: role.ok_or_else(|| {
+                ParseError::new(
+                    "metric descriptor requires ROLE".to_string(),
+                    self.position(),
+                )
+            })?,
+            source,
+            query,
+            window_ms,
+            time_field,
+        }))
     }
 
     /// Parse ALTER METRIC body (after ALTER METRIC consumed).
@@ -262,14 +260,12 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        Ok(QueryExpr::AlterMetric(
-            crate::ast::AlterMetricQuery {
-                path,
-                set_role,
-                attempted_kind,
-                attempted_path,
-            },
-        ))
+        Ok(QueryExpr::AlterMetric(crate::ast::AlterMetricQuery {
+            path,
+            set_role,
+            attempted_kind,
+            attempted_path,
+        }))
     }
 
     /// Parse CREATE SLO body (after CREATE SLO consumed).

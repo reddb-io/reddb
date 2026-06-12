@@ -1,12 +1,12 @@
 //! Join query parsing (FROM ... JOIN GRAPH/PATH/TABLE/VECTOR ...)
 
+use super::error::ParseError;
+use super::Parser;
 use crate::ast::{
     FieldRef, GraphQuery, JoinCondition, JoinQuery, JoinType, Projection, QueryExpr, SelectItem,
     TableQuery,
 };
 use crate::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
 use crate::sql_lowering::{filter_to_expr, projection_to_select_item};
 impl<'a> Parser<'a> {
     /// Parse FROM ... JOIN (GRAPH / PATH / TABLE / VECTOR / HYBRID) query

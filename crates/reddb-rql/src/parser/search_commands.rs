@@ -1,9 +1,9 @@
 //! Search Command Parser: SEARCH SIMILAR | TEXT | HYBRID
 
-use crate::ast::{QueryExpr, SearchCommand};
-use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::ast::{QueryExpr, SearchCommand};
+use crate::lexer::Token;
 use reddb_types::types::Value;
 
 impl<'a> Parser<'a> {

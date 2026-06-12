@@ -1,14 +1,12 @@
 //! Table query parsing (SELECT ... FROM ...)
 
+use super::error::ParseError;
 use crate::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, QueryExpr,
     QueueSelectQuery, SelectItem, Span, TableQuery, UnaryOp,
 };
 use crate::lexer::Token;
-use super::error::ParseError;
-use crate::sql_lowering::{
-    expr_to_projection, filter_to_expr, select_item_to_projection,
-};
+use crate::sql_lowering::{expr_to_projection, filter_to_expr, select_item_to_projection};
 use reddb_types::types::Value;
 
 fn is_scalar_function(name: &str) -> bool {
@@ -500,9 +498,7 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::Table(query))
     }
 
-    fn parse_sessionize_clause(
-        &mut self,
-    ) -> Result<crate::ast::SessionizeClause, ParseError> {
+    fn parse_sessionize_clause(&mut self) -> Result<crate::ast::SessionizeClause, ParseError> {
         use crate::ast::SessionizeClause;
 
         let mut clause = SessionizeClause::default();
@@ -845,9 +841,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse EXPAND options: GRAPH [DEPTH n], CROSS_REFS, ALL
-    fn parse_expand_options(
-        &mut self,
-    ) -> Result<crate::ast::ExpandOptions, ParseError> {
+    fn parse_expand_options(&mut self) -> Result<crate::ast::ExpandOptions, ParseError> {
         use crate::ast::ExpandOptions;
         let mut opts = ExpandOptions::default();
 
@@ -1652,7 +1646,8 @@ mod tests {
             crate::parser::parse("SELECT * FROM components(nodes => (SELECT id FROM n))").is_err()
         );
         assert!(
-            crate::parser::parse("SELECT * FROM components(edges => (SELECT a, b FROM e))").is_err()
+            crate::parser::parse("SELECT * FROM components(edges => (SELECT a, b FROM e))")
+                .is_err()
         );
         // An unknown subquery key is rejected.
         assert!(crate::parser::parse(

@@ -1,9 +1,9 @@
 //! Vector query parsing (VECTOR SEARCH ... SIMILAR TO ...)
 
-use crate::ast::{QueryExpr, VectorQuery, VectorSource};
-use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::ast::{QueryExpr, VectorQuery, VectorSource};
+use crate::lexer::Token;
 use reddb_types::distance::DistanceMetric;
 use reddb_types::vector_metadata::{MetadataFilter, MetadataValue};
 
