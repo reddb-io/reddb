@@ -163,6 +163,7 @@ fn parameterize_table_query(query: &TableQuery, next_index: &mut usize) -> Optio
         expand: query.expand.clone(),
         as_of: query.as_of.clone(),
         sessionize: query.sessionize.clone(),
+        distinct: query.distinct,
     })
 }
 
@@ -1204,6 +1205,7 @@ fn bind_table_query(query: &TableQuery, binds: &[Value]) -> Option<TableQuery> {
         expand: query.expand.clone(),
         as_of: query.as_of.clone(),
         sessionize: query.sessionize.clone(),
+        distinct: query.distinct,
     })
 }
 
@@ -1367,6 +1369,7 @@ mod tests {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         });
 
         let prepared = parameterize_query_expr(&query).unwrap();
