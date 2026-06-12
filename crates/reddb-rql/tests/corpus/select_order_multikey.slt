@@ -1,0 +1,39 @@
+# RedDB RQL conformance — standard-SQL multi-key ORDER BY slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (ordering by two sort keys with independent ASC/DESC directions). Truth is
+# the SQLite oracle. These use `nosort` because ORDER BY makes the row order
+# itself the thing under test (ADR 0053).
+
+statement ok
+CREATE TABLE t (a INTEGER, b INTEGER, label TEXT)
+
+statement ok
+INSERT INTO t (a, b, label) VALUES (2, 5, 'p'), (1, 9, 'q'), (2, 3, 'r'), (1, 4, 's')
+
+# Primary ascending, secondary ascending.
+query T nosort
+SELECT label FROM t ORDER BY a ASC, b ASC
+----
+s
+q
+r
+p
+
+# Primary ascending, secondary descending.
+query T nosort
+SELECT label FROM t ORDER BY a ASC, b DESC
+----
+q
+s
+p
+r
+
+# Primary descending, secondary ascending.
+query T nosort
+SELECT label FROM t ORDER BY a DESC, b ASC
+----
+r
+p
+s
+q

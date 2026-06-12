@@ -1,0 +1,75 @@
+# RedDB RQL conformance — standard-SQL string-function slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (SUBSTR position/length slicing, TRIM/LTRIM/RTRIM whitespace stripping, and
+# nested function composition). Truth is the SQLite oracle: every expected block
+# is the value SQLite produces (ADR 0053).
+
+statement ok
+CREATE TABLE words (id INTEGER, w TEXT)
+
+statement ok
+INSERT INTO words (id, w) VALUES (1, 'Hello'), (2, 'world'), (3, 'RedDB')
+
+# SUBSTR with an explicit start and length (1-based start).
+query T rowsort
+SELECT SUBSTR(w, 1, 3) FROM words
+----
+Hel
+Red
+wor
+
+# SUBSTR with only a start position runs to the end of the string.
+query T rowsort
+SELECT SUBSTR(w, 2) FROM words
+----
+edDB
+ello
+orld
+
+# LENGTH counts characters.
+query I rowsort
+SELECT LENGTH(w) FROM words
+----
+5
+5
+5
+
+statement ok
+INSERT INTO words (id, w) VALUES (4, '  padded  '), (5, '  left'), (6, 'right  ')
+
+# TRIM strips leading and trailing spaces from a column value.
+# DIVERGENCE: the TRIM family is catalogued but unimplemented in the SELECT
+# evaluation path — TRIM/LTRIM/RTRIM resolve to NULL rather than the trimmed
+# string. Tracked under PRD #1098; SQLite-oracle value kept.
+skipif reddb-server
+query T nosort
+SELECT TRIM(w) FROM words WHERE id = 4
+----
+padded
+
+# LTRIM strips only the leading spaces; the result here has no trailing space.
+# DIVERGENCE: see TRIM above — LTRIM resolves to NULL in the SELECT path.
+# Tracked under PRD #1098; SQLite-oracle value kept.
+skipif reddb-server
+query T nosort
+SELECT LTRIM(w) FROM words WHERE id = 5
+----
+left
+
+# RTRIM strips only the trailing spaces.
+# DIVERGENCE: see TRIM above — RTRIM resolves to NULL in the SELECT path.
+# Tracked under PRD #1098; SQLite-oracle value kept.
+skipif reddb-server
+query T nosort
+SELECT RTRIM(w) FROM words WHERE id = 6
+----
+right
+
+# Function composition: upper-case a substring.
+query T rowsort
+SELECT UPPER(SUBSTR(w, 1, 2)) FROM words WHERE id <= 3
+----
+HE
+RE
+WO
