@@ -1,0 +1,66 @@
+# RedDB RQL conformance — standard-SQL scalar-expression slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (integer arithmetic, string concatenation, and the common scalar functions
+# UPPER / LOWER / LENGTH / ABS / CASE). Truth is the SQLite oracle.
+
+statement ok
+CREATE TABLE t (id INTEGER, name TEXT, delta INTEGER)
+
+statement ok
+INSERT INTO t (id, name, delta) VALUES (1, 'alice', -3), (2, 'BOB', 4), (3, 'Carol', -7)
+
+# Integer arithmetic in the projection.
+query I rowsort
+SELECT id * 10 + 1 FROM t
+----
+11
+21
+31
+
+# String concatenation with the || operator.
+query T rowsort
+SELECT name || '!' FROM t
+----
+BOB!
+Carol!
+alice!
+
+# UPPER / LOWER case folding.
+query T rowsort
+SELECT UPPER(name) FROM t
+----
+ALICE
+BOB
+CAROL
+
+query T rowsort
+SELECT LOWER(name) FROM t
+----
+alice
+bob
+carol
+
+# LENGTH counts characters.
+query I rowsort
+SELECT LENGTH(name) FROM t
+----
+3
+5
+5
+
+# ABS of a signed integer.
+query I rowsort
+SELECT ABS(delta) FROM t
+----
+3
+4
+7
+
+# CASE expression mapping a sign to a label.
+query T rowsort
+SELECT CASE WHEN delta < 0 THEN 'neg' ELSE 'pos' END FROM t
+----
+neg
+neg
+pos
