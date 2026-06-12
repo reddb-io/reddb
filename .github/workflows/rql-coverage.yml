@@ -61,12 +61,11 @@ jobs:
         run: |
           # Measure the language front-end through its embedded library unit
           # tests only (`--lib`): that exercises the lexer/parser/AST/analyzer/
-          # typer/optimizer code without pulling in the heavy `reddb-server`
-          # dev-dependency that the conformance harness reaches for. The crate's
-          # sole non-dev workspace edge is `reddb-io-types`, which we exclude
-          # below so the totals reflect reddb-io-rql alone. Collect profdata
-          # once, then render it twice (text table + JSON totals) without
-          # re-running the tests.
+          # typer/optimizer code. The server-backed sqllogictest harness lives
+          # in the umbrella crate, so the measured crate graph stays
+          # `reddb-io-rql -> reddb-io-types`. Exclude `reddb-io-types` below so
+          # the totals reflect reddb-io-rql alone. Collect profdata once, then
+          # render it twice (text table + JSON totals) without re-running tests.
           cargo llvm-cov --no-report -p reddb-io-rql --lib
           cargo llvm-cov report --summary-only \
             --ignore-filename-regex 'crates/reddb-types/' \
