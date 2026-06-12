@@ -2,10 +2,10 @@ use std::fmt;
 
 use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
 use crate::catalog::CollectionModel;
+use crate::storage::schema::{SqlTypeName, Value};
 pub use reddb_types::distance::DistanceMetric;
 pub use reddb_types::queue_mode::QueueMode;
 pub use reddb_types::vector_metadata::MetadataFilter;
-use crate::storage::schema::{SqlTypeName, Value};
 
 /// Root query expression
 #[derive(Debug, Clone)]
