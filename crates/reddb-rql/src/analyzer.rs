@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use super::CreateTableQuery;
-use crate::storage::schema::{DataType, SqlTypeName};
+use crate::ast::CreateTableQuery;
+use reddb_types::types::{DataType, SqlTypeName};
 
 #[derive(Debug, Clone)]
 pub enum AnalysisError {
