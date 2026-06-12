@@ -28,9 +28,9 @@
 //! emits Expr trees as the canonical projection / filter
 //! representation.
 
-use super::ast::{BinOp, Expr, FieldRef, UnaryOp};
-use crate::storage::schema::cast_catalog::{can_implicit_cast, CastContext};
-use crate::storage::schema::types::{DataType, TypeCategory, Value};
+use crate::ast::{BinOp, Expr, FieldRef, UnaryOp};
+use reddb_types::cast_catalog::{can_implicit_cast, CastContext};
+use reddb_types::types::{DataType, TypeCategory, Value};
 
 /// Errors reported by the expression typer. All variants are
 /// recoverable diagnostics — the analyzer can collect several and
@@ -230,7 +230,7 @@ pub fn type_expr(expr: &Expr, scope: &dyn Scope) -> Result<TypedExpr, TypeError>
             let inner_typed = type_expr(inner, scope)?;
             // Validate the cast against the catalog using Explicit
             // context — user wrote it, so the widest rule applies.
-            if !crate::storage::schema::cast_catalog::can_explicit_cast(inner_typed.ty, *target) {
+            if !reddb_types::cast_catalog::can_explicit_cast(inner_typed.ty, *target) {
                 return Err(TypeError::InvalidCast {
                     src: inner_typed.ty,
                     target: *target,
@@ -462,7 +462,7 @@ fn resolve_function_return_type(name: &str, arg_types: &[DataType]) -> DataType 
         // COALESCE is effectively `anycompatible`: ignore NULL/unknown
         // args, then widen left-to-right using the implicit-cast graph.
         "COALESCE" => resolve_coalesce_return_type(arg_types),
-        _ => crate::storage::schema::function_catalog::resolve(name, arg_types)
+        _ => reddb_types::function_catalog::resolve(name, arg_types)
             .map(|entry| entry.return_type)
             .unwrap_or(DataType::Nullable),
     }

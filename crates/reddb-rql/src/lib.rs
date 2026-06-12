@@ -39,8 +39,10 @@
     clippy::new_without_default
 )]
 
+pub mod analyzer;
 pub mod ast;
 pub mod conformance;
+pub mod expr_typing;
 pub mod filter_optimizer;
 pub mod lexer;
 pub mod limits;
