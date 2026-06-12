@@ -1,0 +1,58 @@
+# RedDB-only conformance — vector search (HAND-AUTHORED TRUTH, ADR 0053 S3).
+#
+# There is no external oracle for vector similarity, so every expectation here
+# is authored from the *semantics* of the query, not copied from engine output.
+# The fixture is deliberately tie-free so a strict ranking is well-defined:
+# against the unit query [1,0], the cosine similarity of each stored vector is
+#   near = [1.0, 0.0] -> 1.00   (colinear)
+#   mid  = [0.6, 0.8] -> 0.60
+#   far  = [0.0, 1.0] -> 0.00   (orthogonal)
+# so the correct nearest-first order is near, mid, far.
+#
+# The harness projects each result to its semantic `content` column; the
+# engine-internal id/score/timestamp columns are run-varying and intentionally
+# not pinned (see tests/reddb_conformance.rs).
+
+statement ok
+CREATE VECTOR v DIM 2 METRIC cosine
+
+statement ok
+INSERT INTO v VECTOR (embedding, content) VALUES ([1.0, 0.0], 'near')
+
+statement ok
+INSERT INTO v VECTOR (embedding, content) VALUES ([0.6, 0.8], 'mid')
+
+statement ok
+INSERT INTO v VECTOR (embedding, content) VALUES ([0.0, 1.0], 'far')
+
+# Nearest-first by cosine similarity.
+query T nosort
+VECTOR SEARCH v SIMILAR TO [1.0, 0.0] LIMIT 3
+----
+near
+mid
+far
+
+# LIMIT truncates to the top-k nearest, preserving the ranking.
+query T nosort
+VECTOR SEARCH v SIMILAR TO [1.0, 0.0] LIMIT 2
+----
+near
+mid
+
+# THRESHOLD drops everything below the cosine cut-off: 'far' (0.00) is excluded
+# at 0.5, leaving the two vectors with similarity >= 0.5.
+query T nosort
+VECTOR SEARCH v SIMILAR TO [1.0, 0.0] THRESHOLD 0.5 LIMIT 10
+----
+near
+mid
+
+# Vector extension: an explicit inner-product metric. On these unit-scaled
+# vectors the inner product equals the cosine similarity, so the ranking holds.
+query T nosort
+VECTOR SEARCH v SIMILAR TO [1.0, 0.0] METRIC inner_product LIMIT 3
+----
+near
+mid
+far
