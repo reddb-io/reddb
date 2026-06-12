@@ -1,10 +1,10 @@
 use std::fmt;
 
 use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
-use crate::catalog::CollectionModel;
-use crate::storage::schema::{SqlTypeName, Value};
+use reddb_types::catalog::CollectionModel;
 pub use reddb_types::distance::DistanceMetric;
 pub use reddb_types::queue_mode::QueueMode;
+use reddb_types::types::{SqlTypeName, Value};
 pub use reddb_types::vector_metadata::MetadataFilter;
 
 /// Root query expression
@@ -2207,7 +2207,7 @@ pub enum AlterOperation {
     /// Removes the output from `analytics_config`; the next read of
     /// `<graph>.<output>` no longer resolves. Dropping an output that is
     /// not currently enabled is a clean error (handled in the executor).
-    DropAnalytics(crate::catalog::AnalyticsOutput),
+    DropAnalytics(reddb_types::catalog::AnalyticsOutput),
 }
 
 // ============================================================================
@@ -2336,6 +2336,9 @@ impl Filter {
     }
 
     /// Negate
+    // Filter combinator wrapping `self` in `Filter::Not`; unrelated to
+    // `std::ops::Not`, so that trait is intentionally not implemented.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Self {
         Self::Not(Box::new(self))
     }
@@ -2344,7 +2347,7 @@ impl Filter {
     /// Inspired by MongoDB's `MatchExpression::optimize()`.
     /// Call on the result of `effective_table_filter()` before evaluation.
     pub fn optimize(self) -> Self {
-        crate::storage::query::filter_optimizer::optimize(self)
+        crate::filter_optimizer::optimize(self)
     }
 }
 

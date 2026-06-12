@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::query::sql_lowering::{filter_to_expr, projection_to_select_item};
+use crate::sql_lowering::{filter_to_expr, projection_to_select_item};
 
 pub struct TableQueryBuilder {
     query: TableQuery,
@@ -532,6 +532,9 @@ impl WithClause {
     }
 
     /// Add a CTE definition
+    // Builder method appending a CTE to the WITH clause; unrelated to
+    // `std::ops::Add`, so that trait is intentionally not implemented.
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, cte: CteDefinition) -> Self {
         if cte.recursive {
             self.has_recursive = true;
