@@ -955,6 +955,38 @@ fn test_parse_where_like() {
 }
 
 #[test]
+fn test_parse_where_not_like() {
+    let query = parse("SELECT * FROM hosts WHERE hostname NOT LIKE 'a%'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        match tq.filter {
+            Some(Filter::Not(inner)) => match *inner {
+                Filter::Like { .. } => {}
+                other => panic!("Expected NOT(LIKE), got NOT({other:?})"),
+            },
+            other => panic!("Expected NOT(LIKE) filter, got {other:?}"),
+        }
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_where_not_in() {
+    let query = parse("SELECT * FROM t1 WHERE a NOT IN (1, 3)").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        match tq.filter {
+            Some(Filter::Not(inner)) => match *inner {
+                Filter::In { .. } => {}
+                other => panic!("Expected NOT(IN), got NOT({other:?})"),
+            },
+            other => panic!("Expected NOT(IN) filter, got {other:?}"),
+        }
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
 fn test_parse_simple_match() {
     let query = parse("MATCH (h:Host) RETURN h").unwrap();
     if let QueryExpr::Graph(gq) = query {
