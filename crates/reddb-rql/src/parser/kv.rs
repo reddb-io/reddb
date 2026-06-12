@@ -19,10 +19,10 @@
 //! - Dotted: `sessions.abc`  → collection = "sessions", key = "abc"
 //! - Quoted: `'a:b'` or `sessions.'a:b'` for keys with special characters
 
-use crate::ast::{KvCommand, QueryExpr};
-use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::ast::{KvCommand, QueryExpr};
+use crate::lexer::Token;
 use reddb_types::catalog::CollectionModel;
 
 /// Default collection used when a bare (non-dotted) key is specified.

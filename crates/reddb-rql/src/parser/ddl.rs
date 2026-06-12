@@ -1,5 +1,7 @@
 //! DDL SQL Parser: CREATE TABLE, DROP TABLE, ALTER TABLE
 
+use super::error::ParseError;
+use super::Parser;
 use crate::ast::{
     AlterOperation, AlterTableQuery, CreateCollectionQuery, CreateColumnDef, CreateTableQuery,
     CreateVectorQuery, DropCollectionQuery, DropDocumentQuery, DropGraphQuery, DropKvQuery,
@@ -7,8 +9,6 @@ use crate::ast::{
     PartitionSpec, QueryExpr, TruncateQuery,
 };
 use crate::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
 use reddb_types::catalog::{CollectionModel, SubscriptionDescriptor, SubscriptionOperation};
 use reddb_types::types::{SqlTypeName, TypeModifier, Value};
 

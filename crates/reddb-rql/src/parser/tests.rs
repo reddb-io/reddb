@@ -1,13 +1,13 @@
 //! Parser tests
 
 use super::*;
-use reddb_types::catalog::SubscriptionOperation;
-use reddb_types::vector_metadata::MetadataValue;
 use crate::ast::{
     CompareOp, ConfigCommand, ConfigValueType, DistanceMetric, EdgeDirection, Expr, FieldRef,
     Filter, FusionStrategy, JoinType, KvCommand, MetadataFilter, Projection, QueueCommand,
     TableQuery, TreeCommand, TreePosition, VectorSource,
 };
+use reddb_types::catalog::SubscriptionOperation;
+use reddb_types::vector_metadata::MetadataValue;
 
 /// Test helper that returns the legacy `QueryExpr` shape. The
 /// top-level `parser::parse` returns `QueryWithCte` since #40; these
@@ -182,11 +182,11 @@ fn test_parse_create_graph_document_and_collection_forms() {
     assert_eq!(chain_signed.allowed_signers[0], [0x33u8; 32]);
 
     let hll = parse("CREATE HLL h PRECISION 14").unwrap();
-    let QueryExpr::ProbabilisticCommand(
-        crate::ast::ProbabilisticCommand::CreateHll {
-            name, precision, ..
-        },
-    ) = hll
+    let QueryExpr::ProbabilisticCommand(crate::ast::ProbabilisticCommand::CreateHll {
+        name,
+        precision,
+        ..
+    }) = hll
     else {
         panic!("Expected CreateHll");
     };
@@ -257,19 +257,13 @@ fn test_parse_create_vector_forms() {
     };
     assert_eq!(vector.name, "embeddings");
     assert_eq!(vector.dimension, 4);
-    assert_eq!(
-        vector.metric,
-        reddb_types::distance::DistanceMetric::Cosine
-    );
+    assert_eq!(vector.metric, reddb_types::distance::DistanceMetric::Cosine);
 
     let vector = parse("CREATE VECTOR embeddings DIM 4 METRIC cosine").unwrap();
     let QueryExpr::CreateVector(vector) = vector else {
         panic!("Expected CreateVectorQuery");
     };
-    assert_eq!(
-        vector.metric,
-        reddb_types::distance::DistanceMetric::Cosine
-    );
+    assert_eq!(vector.metric, reddb_types::distance::DistanceMetric::Cosine);
 
     let err = parse("CREATE VECTOR embeddings DIM 4 METRIC unknown").unwrap_err();
     assert!(err.to_string().contains("Unknown distance metric: unknown"));
@@ -1582,10 +1576,7 @@ fn test_parse_insert_returning_star() {
     if let QueryExpr::Insert(iq) = query {
         let items = iq.returning.as_ref().expect("RETURNING parsed");
         assert_eq!(items.len(), 1);
-        assert!(matches!(
-            items[0],
-            crate::ast::ReturningItem::All
-        ));
+        assert!(matches!(items[0], crate::ast::ReturningItem::All));
     } else {
         panic!("Expected InsertQuery");
     }
@@ -1640,10 +1631,7 @@ fn test_parse_update_returning_star() {
     if let QueryExpr::Update(uq) = query {
         let items = uq.returning.as_ref().expect("RETURNING parsed");
         assert_eq!(items.len(), 1);
-        assert!(matches!(
-            items[0],
-            crate::ast::ReturningItem::All
-        ));
+        assert!(matches!(items[0], crate::ast::ReturningItem::All));
     } else {
         panic!("Expected UpdateQuery");
     }
@@ -1667,10 +1655,7 @@ fn test_parse_delete_returning_star() {
     if let QueryExpr::Delete(dq) = query {
         let items = dq.returning.as_ref().expect("RETURNING parsed");
         assert_eq!(items.len(), 1);
-        assert!(matches!(
-            items[0],
-            crate::ast::ReturningItem::All
-        ));
+        assert!(matches!(items[0], crate::ast::ReturningItem::All));
     } else {
         panic!("Expected DeleteQuery");
     }
@@ -1894,10 +1879,7 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     let QueryExpr::Ask(ask) = query else {
         panic!("Expected AskQuery");
     };
-    assert!(matches!(
-        ask.cache,
-        crate::ast::AskCacheClause::NoCache
-    ));
+    assert!(matches!(ask.cache, crate::ast::AskCacheClause::NoCache));
 
     let query = parse("EXPLAIN ASK 'q' USING openai LIMIT 3 MIN_SCORE 0.7 DEPTH 2").unwrap();
     let QueryExpr::Ask(ask) = query else {
@@ -2585,7 +2567,10 @@ fn test_parse_dollar_config_reference_projection() {
 fn test_parse_create_table_simple() {
     let query = parse("CREATE TABLE hosts (ip TEXT, hostname TEXT, port INTEGER)").unwrap();
     if let QueryExpr::CreateTable(ct) = query {
-        assert_eq!(ct.collection_model, reddb_types::catalog::CollectionModel::Table);
+        assert_eq!(
+            ct.collection_model,
+            reddb_types::catalog::CollectionModel::Table
+        );
         assert_eq!(ct.name, "hosts");
         assert_eq!(ct.columns.len(), 3);
         assert!(!ct.if_not_exists);
@@ -2855,8 +2840,8 @@ fn test_parse_create_graph_with_analytics_rejects_duplicate_output() {
 
 #[test]
 fn test_parse_alter_graph_add_analytics() {
-    use reddb_types::catalog::AnalyticsOutput;
     use crate::ast::AlterOperation;
+    use reddb_types::catalog::AnalyticsOutput;
 
     let query = parse(
         "ALTER GRAPH g ADD ANALYTICS (communities (using = louvain, resolution = 1.5), centrality)",
@@ -2882,8 +2867,8 @@ fn test_parse_alter_graph_add_analytics() {
 
 #[test]
 fn test_parse_alter_graph_drop_analytics() {
-    use reddb_types::catalog::AnalyticsOutput;
     use crate::ast::AlterOperation;
+    use reddb_types::catalog::AnalyticsOutput;
 
     let query = parse("ALTER GRAPH g DROP ANALYTICS communities").unwrap();
     let QueryExpr::AlterTable(alter) = query else {
@@ -2899,8 +2884,8 @@ fn test_parse_alter_graph_drop_analytics() {
 
 #[test]
 fn test_parse_alter_graph_drop_analytics_keyword_output() {
-    use reddb_types::catalog::AnalyticsOutput;
     use crate::ast::AlterOperation;
+    use reddb_types::catalog::AnalyticsOutput;
 
     // `components` / `centrality` lex as keyword tokens, not idents — the
     // DROP grammar normalises them the same way the CREATE clause does.
@@ -3298,10 +3283,7 @@ fn test_parse_insert_row_default() {
     let query = parse("INSERT INTO hosts (ip, port) VALUES ('10.0.0.1', 22)").unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "hosts");
-        assert_eq!(
-            ins.entity_type,
-            crate::ast::InsertEntityType::Row
-        );
+        assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Row);
         assert_eq!(ins.columns, vec!["ip", "port"]);
         assert_eq!(ins.values.len(), 1);
     } else {
@@ -3317,10 +3299,7 @@ fn test_parse_insert_node() {
     .unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "network");
-        assert_eq!(
-            ins.entity_type,
-            crate::ast::InsertEntityType::Node
-        );
+        assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Node);
         assert_eq!(ins.columns, vec!["label", "node_type", "ip"]);
         assert_eq!(ins.values.len(), 1);
         assert_eq!(ins.values[0].len(), 3);
@@ -3336,10 +3315,7 @@ fn test_parse_insert_edge() {
             .unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "network");
-        assert_eq!(
-            ins.entity_type,
-            crate::ast::InsertEntityType::Edge
-        );
+        assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Edge);
         // Keywords as column names are returned uppercase
         assert_eq!(ins.columns.len(), 4);
         assert!(ins.columns[0].eq_ignore_ascii_case("label"));
@@ -3359,10 +3335,7 @@ fn test_parse_insert_vector() {
     .unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "embeddings");
-        assert_eq!(
-            ins.entity_type,
-            crate::ast::InsertEntityType::Vector
-        );
+        assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Vector);
         assert_eq!(ins.columns, vec!["dense", "content"]);
         assert_eq!(ins.values.len(), 1);
         // The vector literal should be parsed as Value::Vector
@@ -3384,10 +3357,7 @@ fn test_parse_insert_document() {
         parse(r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"name":"test","value":42}')"#).unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "docs");
-        assert_eq!(
-            ins.entity_type,
-            crate::ast::InsertEntityType::Document
-        );
+        assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Document);
         assert_eq!(ins.columns, vec!["body"]);
     } else {
         panic!("Expected InsertQuery with Document entity type");
@@ -3400,10 +3370,7 @@ fn test_parse_insert_kv() {
         parse("INSERT INTO cache KV (key, value) VALUES ('session:123', 'token-abc')").unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "cache");
-        assert_eq!(
-            ins.entity_type,
-            crate::ast::InsertEntityType::Kv
-        );
+        assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Kv);
         assert_eq!(ins.columns.len(), 2);
         assert!(ins.columns[0].eq_ignore_ascii_case("key"));
         assert!(ins.columns[1].eq_ignore_ascii_case("value"));
@@ -3515,10 +3482,7 @@ fn test_parse_graph_shortest_path() {
 #[test]
 fn test_parse_graph_shortest_path_astar() {
     let query = parse("GRAPH SHORTEST_PATH 'a' TO 'b' ALGORITHM astar").unwrap();
-    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::ShortestPath {
-        algorithm,
-        ..
-    }) = query
+    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::ShortestPath { algorithm, .. }) = query
     {
         assert_eq!(algorithm, "astar");
     } else {
@@ -3529,10 +3493,7 @@ fn test_parse_graph_shortest_path_astar() {
 #[test]
 fn test_parse_graph_shortest_path_bellman_ford() {
     let query = parse("GRAPH SHORTEST_PATH 'a' TO 'b' ALGORITHM bellman_ford").unwrap();
-    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::ShortestPath {
-        algorithm,
-        ..
-    }) = query
+    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::ShortestPath { algorithm, .. }) = query
     {
         assert_eq!(algorithm, "bellman_ford");
     } else {
@@ -3630,9 +3591,7 @@ fn test_parse_graph_shortest_path_docs_form() {
 fn test_parse_graph_centrality() {
     let query = parse("GRAPH CENTRALITY ALGORITHM pagerank").unwrap();
     if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Centrality {
-        algorithm,
-        limit,
-        ..
+        algorithm, limit, ..
     }) = query
     {
         assert_eq!(algorithm, "pagerank");
@@ -3646,9 +3605,7 @@ fn test_parse_graph_centrality() {
 fn test_parse_graph_centrality_default() {
     let query = parse("GRAPH CENTRALITY").unwrap();
     if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Centrality {
-        algorithm,
-        limit,
-        ..
+        algorithm, limit, ..
     }) = query
     {
         assert_eq!(algorithm, "degree");
@@ -3662,9 +3619,7 @@ fn test_parse_graph_centrality_default() {
 fn test_parse_graph_centrality_with_limit() {
     let query = parse("GRAPH CENTRALITY LIMIT 10").unwrap();
     if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Centrality {
-        algorithm,
-        limit,
-        ..
+        algorithm, limit, ..
     }) = query
     {
         assert_eq!(algorithm, "degree");
@@ -3675,9 +3630,7 @@ fn test_parse_graph_centrality_with_limit() {
 
     let query = parse("GRAPH CENTRALITY ALGORITHM pagerank LIMIT 5").unwrap();
     if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Centrality {
-        algorithm,
-        limit,
-        ..
+        algorithm, limit, ..
     }) = query
     {
         assert_eq!(algorithm, "pagerank");
@@ -3698,11 +3651,7 @@ fn test_parse_graph_centrality_negative_limit_errors() {
     assert!(msg.contains("expected: integer"), "unexpected error: {msg}");
 
     let query = parse("GRAPH CENTRALITY LIMIT 0").unwrap();
-    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Centrality {
-        limit,
-        ..
-    }) = query
-    {
+    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Centrality { limit, .. }) = query {
         assert_eq!(limit, Some(0));
     } else {
         panic!("Expected GraphCommand::Centrality LIMIT 0");
@@ -3728,11 +3677,7 @@ fn test_parse_graph_community() {
 #[test]
 fn test_parse_graph_components() {
     let query = parse("GRAPH COMPONENTS MODE strong").unwrap();
-    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Components {
-        mode,
-        limit,
-        ..
-    }) = query
+    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Components { mode, limit, .. }) = query
     {
         assert_eq!(mode, "strong");
         assert_eq!(limit, None);
@@ -3744,10 +3689,7 @@ fn test_parse_graph_components() {
 #[test]
 fn test_parse_graph_cycles() {
     let query = parse("GRAPH CYCLES MAX_LENGTH 5").unwrap();
-    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Cycles {
-        max_length,
-    }) = query
-    {
+    if let QueryExpr::GraphCommand(crate::ast::GraphCommand::Cycles { max_length }) = query {
         assert_eq!(max_length, 5);
     } else {
         panic!("Expected GraphCommand::Cycles");
@@ -3777,9 +3719,7 @@ fn test_parse_graph_properties() {
     let query = parse("GRAPH PROPERTIES").unwrap();
     assert!(matches!(
         query,
-        QueryExpr::GraphCommand(crate::ast::GraphCommand::Properties {
-            source: None
-        })
+        QueryExpr::GraphCommand(crate::ast::GraphCommand::Properties { source: None })
     ));
 }
 
@@ -3788,17 +3728,17 @@ fn test_parse_graph_properties_with_source() {
     // #423: GRAPH PROPERTIES '<id-or-label>' resolves per-node property bag.
     let query = parse("GRAPH PROPERTIES 'cinderella'").unwrap();
     match query {
-        QueryExpr::GraphCommand(crate::ast::GraphCommand::Properties {
-            source: Some(s),
-        }) => assert_eq!(s, "cinderella"),
+        QueryExpr::GraphCommand(crate::ast::GraphCommand::Properties { source: Some(s) }) => {
+            assert_eq!(s, "cinderella")
+        }
         other => panic!("expected Properties {{ source: Some(\"cinderella\") }}, got {other:?}"),
     }
 
     let numeric = parse("GRAPH PROPERTIES '177'").unwrap();
     match numeric {
-        QueryExpr::GraphCommand(crate::ast::GraphCommand::Properties {
-            source: Some(s),
-        }) => assert_eq!(s, "177"),
+        QueryExpr::GraphCommand(crate::ast::GraphCommand::Properties { source: Some(s) }) => {
+            assert_eq!(s, "177")
+        }
         other => panic!("expected numeric source, got {other:?}"),
     }
 }
@@ -3833,9 +3773,7 @@ fn test_parse_search_similar() {
 fn test_parse_search_similar_defaults() {
     let query = parse("SEARCH SIMILAR [1, 2, 3] COLLECTION vecs").unwrap();
     if let QueryExpr::SearchCommand(crate::ast::SearchCommand::Similar {
-        limit,
-        min_score,
-        ..
+        limit, min_score, ..
     }) = query
     {
         assert_eq!(limit, 10);
@@ -3912,9 +3850,7 @@ fn test_parse_search_hybrid() {
 fn test_parse_search_hybrid_text_only() {
     let query = parse("SEARCH HYBRID TEXT 'query' COLLECTION data").unwrap();
     if let QueryExpr::SearchCommand(crate::ast::SearchCommand::Hybrid {
-        vector,
-        query: q,
-        ..
+        vector, query: q, ..
     }) = query
     {
         assert!(vector.is_none());
@@ -3928,9 +3864,7 @@ fn test_parse_search_hybrid_text_only() {
 fn test_parse_search_hybrid_vector_only() {
     let query = parse("SEARCH HYBRID SIMILAR [1, 2, 3] COLLECTION data").unwrap();
     if let QueryExpr::SearchCommand(crate::ast::SearchCommand::Hybrid {
-        vector,
-        query: q,
-        ..
+        vector, query: q, ..
     }) = query
     {
         assert!(vector.is_some());
@@ -4361,7 +4295,8 @@ fn test_parse_insert_with_inline_json_object() {
         // The JSON value should be Value::Json(...)
         match &iq.values[0][0] {
             reddb_types::types::Value::Json(bytes) => {
-                let parsed: reddb_types::json::Value = reddb_types::json::from_slice(bytes).unwrap();
+                let parsed: reddb_types::json::Value =
+                    reddb_types::json::from_slice(bytes).unwrap();
                 assert_eq!(parsed.get("level").and_then(|v| v.as_str()), Some("info"));
                 assert_eq!(parsed.get("msg").and_then(|v| v.as_str()), Some("hello"));
             }
@@ -4380,7 +4315,8 @@ fn test_parse_insert_with_nested_json() {
     if let QueryExpr::Insert(iq) = query {
         match &iq.values[0][0] {
             reddb_types::types::Value::Json(bytes) => {
-                let parsed: reddb_types::json::Value = reddb_types::json::from_slice(bytes).unwrap();
+                let parsed: reddb_types::json::Value =
+                    reddb_types::json::from_slice(bytes).unwrap();
                 assert_eq!(parsed.get("type").and_then(|v| v.as_str()), Some("click"));
                 let meta = parsed.get("meta").unwrap();
                 assert_eq!(meta.get("x").and_then(|v| v.as_f64()), Some(100.0));
@@ -4401,7 +4337,8 @@ fn test_parse_insert_json_with_colon_separator() {
     if let QueryExpr::Insert(iq) = query {
         match &iq.values[0][0] {
             reddb_types::types::Value::Json(bytes) => {
-                let parsed: reddb_types::json::Value = reddb_types::json::from_slice(bytes).unwrap();
+                let parsed: reddb_types::json::Value =
+                    reddb_types::json::from_slice(bytes).unwrap();
                 assert_eq!(parsed.get("host").and_then(|v| v.as_str()), Some("srv1"));
                 assert_eq!(parsed.get("port").and_then(|v| v.as_f64()), Some(8080.0));
             }
@@ -4962,14 +4899,15 @@ fn test_parse_queue_push_inline_json_literal() {
         assert_eq!(queue, "tasks");
         match value {
             reddb_types::types::Value::Json(bytes) => {
-                let json: reddb_types::json::Value =
-                    reddb_types::json::from_slice(&bytes).expect("queue payload json should decode");
+                let json: reddb_types::json::Value = reddb_types::json::from_slice(&bytes)
+                    .expect("queue payload json should decode");
                 assert_eq!(
                     json.get("job").and_then(reddb_types::json::Value::as_str),
                     Some("hello")
                 );
                 assert_eq!(
-                    json.get("retries").and_then(reddb_types::json::Value::as_i64),
+                    json.get("retries")
+                        .and_then(reddb_types::json::Value::as_i64),
                     Some(3)
                 );
             }
@@ -5171,15 +5109,14 @@ fn test_parse_hll_commands() {
     let query = parse("CREATE HLL visitors").unwrap();
     assert!(matches!(
         query,
-        QueryExpr::ProbabilisticCommand(
-            crate::ast::ProbabilisticCommand::CreateHll { .. }
-        )
+        QueryExpr::ProbabilisticCommand(crate::ast::ProbabilisticCommand::CreateHll { .. })
     ));
 
     let query = parse("HLL ADD visitors 'user1' 'user2'").unwrap();
-    if let QueryExpr::ProbabilisticCommand(
-        crate::ast::ProbabilisticCommand::HllAdd { name, elements },
-    ) = query
+    if let QueryExpr::ProbabilisticCommand(crate::ast::ProbabilisticCommand::HllAdd {
+        name,
+        elements,
+    }) = query
     {
         assert_eq!(name, "visitors");
         assert_eq!(elements, vec!["user1", "user2"]);
@@ -5190,9 +5127,7 @@ fn test_parse_hll_commands() {
     let query = parse("HLL COUNT visitors").unwrap();
     assert!(matches!(
         query,
-        QueryExpr::ProbabilisticCommand(
-            crate::ast::ProbabilisticCommand::HllCount { .. }
-        )
+        QueryExpr::ProbabilisticCommand(crate::ast::ProbabilisticCommand::HllCount { .. })
     ));
 }
 

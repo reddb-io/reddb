@@ -1,9 +1,9 @@
 //! Filter parsing for WHERE clauses
 
-use crate::ast::{BinOp, CompareOp, Expr, FieldRef, Filter, Span, UnaryOp};
-use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::ast::{BinOp, CompareOp, Expr, FieldRef, Filter, Span, UnaryOp};
+use crate::lexer::Token;
 use reddb_types::types::Value;
 
 fn token_can_start_field_ref(token: &Token) -> bool {

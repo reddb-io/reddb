@@ -1,4 +1,3 @@
-use reddb_types::catalog::CollectionModel;
 use crate::ast::{
     AlterMetricQuery, AlterQueueQuery, AlterTableQuery, AlterUserStmt, ApplyMigrationQuery,
     AskQuery, BinOp, CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateCollectionQuery,
@@ -15,9 +14,10 @@ use crate::ast::{
     RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
     TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
+use crate::lexer::Token;
 use crate::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::sql_lowering::filter_to_expr;
-use crate::lexer::Token;
+use reddb_types::catalog::CollectionModel;
 use reddb_types::types::Value;
 
 /// Canonical SQL frontend command surface.

@@ -1,11 +1,11 @@
 //! Parser for TREE commands and CREATE/DROP TREE.
 
+use super::error::ParseError;
+use super::Parser;
 use crate::ast::{
     CreateTreeQuery, DropTreeQuery, QueryExpr, TreeCommand, TreeNodeSpec, TreePosition,
 };
 use crate::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
 use reddb_types::json::Value as JsonValue;
 use reddb_types::types::Value;
 
