@@ -20,6 +20,11 @@ path = "src/lib.rs"
 # Neutral keystone: the logical type vocabulary (Value/DataType/...) re-homed
 # from storage::schema (#1061, ADR 0052). storage::schema keeps a re-export shim.
 reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
+# RQL language front-end authority (#1102, ADR 0053): the lexer and front-end
+# DoS limits live here now; storage::query keeps re-export shims so every
+# existing call-site path resolves unchanged. (rql dev-depends back on the
+# server for its conformance harness — a dev-only edge, so no build cycle.)
+reddb-rql = { package = "reddb-io-rql", version = "1.0", path = "../reddb-rql" }
 reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "../reddb-wire" }
 reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
 reddb-file = { package = "reddb-io-file", version = "1.0", path = "../reddb-file" }
