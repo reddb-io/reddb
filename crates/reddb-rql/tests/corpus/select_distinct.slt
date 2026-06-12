@@ -4,12 +4,10 @@
 # (duplicate elimination over single and multiple projected columns). Truth is
 # the SQLite oracle.
 #
-# DIVERGENCE: RedDB's parser does not accept a `DISTINCT` quantifier on the
-# SELECT projection — it rejects `SELECT DISTINCT a FROM t` with a parse error
-# ("Unexpected token after query"). DISTINCT is only recognised inside an
-# aggregate argument. Every projection-level DISTINCT case below is therefore
-# recorded `skipif reddb-server` with the SQLite-oracle expectation kept on the
-# page; tracked under PRD #1098 rather than silently dropped (ADR 0053).
+# The parser accepts a projection-level `DISTINCT` quantifier
+# (`SELECT DISTINCT a FROM t`) and the executor deduplicates the projected
+# row-set, so these cases run directly against the reddb-server engine
+# (issue #1126, under PRD #1098 / ADR 0053).
 
 statement ok
 CREATE TABLE t (a INTEGER, b TEXT)
@@ -18,7 +16,6 @@ statement ok
 INSERT INTO t (a, b) VALUES (1, 'x'), (1, 'x'), (2, 'x'), (2, 'y'), (3, 'y')
 
 # DISTINCT over a single column collapses duplicate values.
-skipif reddb-server
 query I rowsort
 SELECT DISTINCT a FROM t
 ----
@@ -27,7 +24,6 @@ SELECT DISTINCT a FROM t
 3
 
 # DISTINCT over a single text column.
-skipif reddb-server
 query T rowsort
 SELECT DISTINCT b FROM t
 ----
@@ -35,7 +31,6 @@ x
 y
 
 # DISTINCT over a column pair keeps each unique combination.
-skipif reddb-server
 query IT rowsort
 SELECT DISTINCT a, b FROM t
 ----
