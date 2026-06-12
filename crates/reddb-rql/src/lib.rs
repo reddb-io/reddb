@@ -22,9 +22,12 @@
 //! rendering of an engine [`reddb_types::Value`] into the textual cell the
 //! sqllogictest comparator sees. [`conformance`] owns that rendering.
 
+pub mod ast;
 pub mod conformance;
+pub mod filter_optimizer;
 pub mod lexer;
 pub mod limits;
+pub mod sql_lowering;
 
 pub use conformance::{render_cell, CellType};
 pub use lexer::{Lexer, LexerError, Position, Spanned, Token};

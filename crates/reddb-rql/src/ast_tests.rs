@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::schema::Value;
+use reddb_types::types::Value;
 
 #[cfg(test)]
 mod query_tests {
