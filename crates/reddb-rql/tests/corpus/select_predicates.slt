@@ -61,10 +61,6 @@ SELECT a FROM t1 WHERE a IN (1, 3)
 3
 
 # NOT IN over a literal list.
-# DIVERGENCE: RedDB's parser does not accept the `NOT IN` membership form
-# (it errors on the NOT before IN), though prefix `NOT <predicate>` and bare
-# `IN (...)` both parse. Tracked under PRD #1098; SQLite-oracle value kept.
-skipif reddb-server
 query I rowsort
 SELECT a FROM t1 WHERE a NOT IN (1, 3)
 ----
