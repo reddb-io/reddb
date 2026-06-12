@@ -14,11 +14,11 @@
 //! 4. Relationship inference (connects, has, affects)
 //! 5. Generate equivalent graph query
 
-use crate::storage::query::ast::{
+use crate::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, NodePattern,
     Projection, PropertyFilter as AstPropertyFilter, QueryExpr,
 };
-use crate::storage::schema::Value;
+use reddb_types::types::Value;
 
 /// Natural language parse error
 #[derive(Debug, Clone)]

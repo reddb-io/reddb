@@ -44,6 +44,7 @@ pub mod conformance;
 pub mod filter_optimizer;
 pub mod lexer;
 pub mod limits;
+pub mod modes;
 pub mod parser;
 pub mod renderer;
 pub mod sql;
