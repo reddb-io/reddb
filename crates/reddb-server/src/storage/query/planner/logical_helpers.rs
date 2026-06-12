@@ -1001,6 +1001,7 @@ mod tests {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         })
     }
 
