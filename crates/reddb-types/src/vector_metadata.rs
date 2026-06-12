@@ -310,6 +310,9 @@ impl MetadataFilter {
     }
 
     /// Create a NOT filter
+    // Constructor wrapping a value in `MetadataFilter::Not`; unrelated to
+    // `std::ops::Not`, so that trait is intentionally not implemented.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(filter: MetadataFilter) -> Self {
         MetadataFilter::Not(Box::new(filter))
     }
