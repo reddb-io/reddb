@@ -546,6 +546,7 @@ mod tests {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         })
     }
 
@@ -583,6 +584,7 @@ mod tests {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         });
 
         let large = QueryExpr::Table(TableQuery {
@@ -605,6 +607,7 @@ mod tests {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         });
 
         let join = QueryExpr::Join(JoinQuery {
