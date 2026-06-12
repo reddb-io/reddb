@@ -1,13 +1,13 @@
 //! Parser for TREE commands and CREATE/DROP TREE.
 
-use super::super::ast::{
-    CreateTreeQuery, DropTreeQuery, QueryExpr, TreeCommand, TreeNodeSpec, TreePosition,
-};
-use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::json::Value as JsonValue;
-use crate::storage::schema::Value;
+use crate::ast::{
+    CreateTreeQuery, DropTreeQuery, QueryExpr, TreeCommand, TreeNodeSpec, TreePosition,
+};
+use crate::lexer::Token;
+use reddb_types::json::Value as JsonValue;
+use reddb_types::types::Value;
 
 impl<'a> Parser<'a> {
     pub fn parse_create_tree_body(&mut self) -> Result<QueryExpr, ParseError> {
@@ -254,7 +254,7 @@ impl<'a> Parser<'a> {
                 self.position(),
             ));
         };
-        let decoded = crate::json::from_slice::<JsonValue>(&bytes).map_err(|err| {
+        let decoded = reddb_types::json::from_slice::<JsonValue>(&bytes).map_err(|err| {
             ParseError::new(
                 // F-05: serde's parse error string can echo a user fragment.
                 // Render via `{:?}` so embedded control bytes / quotes are
@@ -298,12 +298,12 @@ fn tree_json_value_to_storage_value(value: &JsonValue) -> Result<Value, ParseErr
         }
         JsonValue::String(value) => Value::text(value.clone()),
         JsonValue::Array(_) | JsonValue::Object(_) => {
-            Value::Json(crate::json::to_vec(value).map_err(|err| {
+            Value::Json(reddb_types::json::to_vec(value).map_err(|err| {
                 ParseError::new(
                     // F-05: defensively escape encoder error in case it
                     // echoes a user fragment.
                     format!("failed to encode nested JSON value: {:?}", err.to_string()),
-                    crate::storage::query::lexer::Position::default(),
+                    crate::lexer::Position::default(),
                 )
             })?)
         }

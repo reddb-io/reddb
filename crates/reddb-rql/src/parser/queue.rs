@@ -1,13 +1,13 @@
 //! Parser for QUEUE commands and CREATE/DROP QUEUE
 
-use super::super::ast::{
+use super::error::ParseError;
+use super::Parser;
+use crate::ast::{
     AlterQueueQuery, CreateQueueQuery, DropQueueQuery, QueryExpr, QueueAvailability, QueueCommand,
     QueueMode, QueueSide, DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
     DEFAULT_QUEUE_MAX_ATTEMPTS,
 };
-use super::super::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
+use crate::lexer::Token;
 
 impl<'a> Parser<'a> {
     /// Parse CREATE QUEUE body (after CREATE QUEUE consumed)

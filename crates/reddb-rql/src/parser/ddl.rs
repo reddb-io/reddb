@@ -1,16 +1,16 @@
 //! DDL SQL Parser: CREATE TABLE, DROP TABLE, ALTER TABLE
 
-use super::super::ast::{
+use super::error::ParseError;
+use super::Parser;
+use crate::ast::{
     AlterOperation, AlterTableQuery, CreateCollectionQuery, CreateColumnDef, CreateTableQuery,
     CreateVectorQuery, DropCollectionQuery, DropDocumentQuery, DropGraphQuery, DropKvQuery,
     DropTableQuery, DropVectorQuery, ExplainAlterQuery, ExplainFormat, PartitionKind,
     PartitionSpec, QueryExpr, TruncateQuery,
 };
-use super::super::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
-use crate::catalog::{CollectionModel, SubscriptionDescriptor, SubscriptionOperation};
-use crate::storage::schema::{SqlTypeName, TypeModifier, Value};
+use crate::lexer::Token;
+use reddb_types::catalog::{CollectionModel, SubscriptionDescriptor, SubscriptionOperation};
+use reddb_types::types::{SqlTypeName, TypeModifier, Value};
 
 impl<'a> Parser<'a> {
     /// Parse: CREATE TABLE [IF NOT EXISTS] name (col1 TYPE [modifiers], ...)
@@ -415,8 +415,8 @@ impl<'a> Parser<'a> {
     /// names and option keys are rejected with a clear, structured error.
     fn parse_analytics_clause(
         &mut self,
-    ) -> Result<Vec<crate::catalog::AnalyticsViewDescriptor>, ParseError> {
-        use crate::catalog::{AnalyticsOutput, AnalyticsViewDescriptor};
+    ) -> Result<Vec<reddb_types::catalog::AnalyticsViewDescriptor>, ParseError> {
+        use reddb_types::catalog::{AnalyticsOutput, AnalyticsViewDescriptor};
 
         self.expect(Token::LParen)?;
         let mut views: Vec<AnalyticsViewDescriptor> = Vec::new();
@@ -559,7 +559,7 @@ impl<'a> Parser<'a> {
             let metric = if self.consume(&Token::Metric)? {
                 self.parse_distance_metric()?
             } else {
-                crate::storage::engine::distance::DistanceMetric::Cosine
+                reddb_types::distance::DistanceMetric::Cosine
             };
             (Some(dimension as usize), Some(metric))
         } else {
@@ -667,7 +667,7 @@ impl<'a> Parser<'a> {
         let metric = if self.consume(&Token::Metric)? {
             self.parse_distance_metric()?
         } else {
-            crate::storage::engine::distance::DistanceMetric::Cosine
+            reddb_types::distance::DistanceMetric::Cosine
         };
         Ok(QueryExpr::CreateVector(CreateVectorQuery {
             name,
@@ -817,7 +817,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             let output_name = self.parse_analytics_output_name()?;
-            let output = crate::catalog::AnalyticsOutput::from_str(&output_name).ok_or_else(|| {
+            let output = reddb_types::catalog::AnalyticsOutput::from_str(&output_name).ok_or_else(|| {
                 ParseError::new(
                     format!(
                         "unknown analytics output '{output_name}': expected communities, components, or centrality"

@@ -1,12 +1,12 @@
 //! Graph query parsing (MATCH pattern)
 
-use super::super::ast::{
+use super::error::ParseError;
+use super::Parser;
+use crate::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, GraphPattern, GraphQuery, NodePattern,
     Projection, PropertyFilter, QueryExpr,
 };
-use super::super::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
+use crate::lexer::Token;
 
 impl<'a> Parser<'a> {
     /// Parse MATCH ... RETURN query
