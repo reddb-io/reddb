@@ -131,6 +131,17 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // Infix `NOT IN` / `NOT LIKE`. A prefix `NOT` is consumed earlier at
+        // `parse_not_expr`, so reaching this point with `NOT` means the user
+        // wrote the infix negated form `lhs NOT IN (...)` / `lhs NOT LIKE '…'`.
+        // Only `IN` and `LIKE` follow an infix NOT here; anything else stays an
+        // error so we don't silently swallow malformed input.
+        let negated = matches!(self.peek(), Token::Not)
+            && matches!(self.peek_next()?, Token::In | Token::Like);
+        if negated {
+            self.advance()?;
+        }
+
         if self.consume(&Token::Between)? {
             if let Some(field) = lhs_field.clone() {
                 let low = self.parse_value_or_field()?;
@@ -207,46 +218,52 @@ impl<'a> Parser<'a> {
                 if self.check(&Token::Select) {
                     let query = self.parse_select_query()?;
                     self.expect(Token::RParen)?;
-                    return Ok(Filter::CompareExpr {
-                        lhs: Expr::InList {
-                            target: Box::new(lhs),
-                            values: vec![Expr::Subquery {
-                                query: crate::ast::ExprSubquery {
-                                    query: Box::new(query),
-                                },
+                    return Ok(negate_if(
+                        negated,
+                        Filter::CompareExpr {
+                            lhs: Expr::InList {
+                                target: Box::new(lhs),
+                                values: vec![Expr::Subquery {
+                                    query: crate::ast::ExprSubquery {
+                                        query: Box::new(query),
+                                    },
+                                    span: Span::synthetic(),
+                                }],
+                                negated: false,
                                 span: Span::synthetic(),
-                            }],
-                            negated: false,
-                            span: Span::synthetic(),
+                            },
+                            op: CompareOp::Eq,
+                            rhs: Expr::Literal {
+                                value: Value::Boolean(true),
+                                span: Span::synthetic(),
+                            },
                         },
-                        op: CompareOp::Eq,
-                        rhs: Expr::Literal {
-                            value: Value::Boolean(true),
-                            span: Span::synthetic(),
-                        },
-                    });
+                    ));
                 }
                 let values = self.parse_value_list()?;
                 self.expect(Token::RParen)?;
-                return Ok(Filter::In { field, values });
+                return Ok(negate_if(negated, Filter::In { field, values }));
             }
 
             self.expect(Token::LParen)?;
             let values = self.parse_filter_expr_list()?;
             self.expect(Token::RParen)?;
-            return Ok(Filter::CompareExpr {
-                lhs: Expr::InList {
-                    target: Box::new(lhs),
-                    values,
-                    negated: false,
-                    span: Span::synthetic(),
+            return Ok(negate_if(
+                negated,
+                Filter::CompareExpr {
+                    lhs: Expr::InList {
+                        target: Box::new(lhs),
+                        values,
+                        negated: false,
+                        span: Span::synthetic(),
+                    },
+                    op: CompareOp::Eq,
+                    rhs: Expr::Literal {
+                        value: Value::Boolean(true),
+                        span: Span::synthetic(),
+                    },
                 },
-                op: CompareOp::Eq,
-                rhs: Expr::Literal {
-                    value: Value::Boolean(true),
-                    span: Span::synthetic(),
-                },
-            });
+            ));
         }
 
         // LIKE
@@ -258,7 +275,7 @@ impl<'a> Parser<'a> {
                 ));
             };
             let pattern = self.parse_string()?;
-            return Ok(Filter::Like { field, pattern });
+            return Ok(negate_if(negated, Filter::Like { field, pattern }));
         }
 
         // STARTS WITH
@@ -547,6 +564,17 @@ impl<'a> Parser<'a> {
 pub(super) enum ValueOrField {
     Value(Value),
     Field(FieldRef),
+}
+
+/// Wrap `filter` in `Filter::Not` when `negated` is set. Used by the infix
+/// `NOT IN` / `NOT LIKE` forms, which reuse the positive predicate construction
+/// and negate the whole result.
+fn negate_if(negated: bool, filter: Filter) -> Filter {
+    if negated {
+        Filter::Not(Box::new(filter))
+    } else {
+        filter
+    }
 }
 
 fn expr_as_field_ref(expr: &Expr) -> Option<FieldRef> {
