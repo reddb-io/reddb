@@ -43,11 +43,6 @@ EU 40
 NA 20
 
 # GROUP BY filtered by HAVING on the per-group count.
-# DIVERGENCE: when the projection lists only the group key and no aggregate,
-# RedDB does not collapse to one row per group (it returns every base row and
-# ignores HAVING), where SQLite returns the single grouped row 'EU'. Tracked
-# under PRD #1098; expected block holds the SQLite oracle value.
-skipif reddb-server
 query T rowsort
 SELECT region FROM sales GROUP BY region HAVING COUNT(*) > 2
 ----
