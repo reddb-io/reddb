@@ -1,0 +1,58 @@
+# RedDB RQL conformance — standard-SQL integer-arithmetic slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (the binary arithmetic operators -, *, /, % plus unary minus, operator
+# precedence, and explicit parenthesised grouping over a small integer table).
+# Truth is the SQLite oracle: every expected block is the result SQLite
+# produces, not whatever the current engine emits (ADR 0053).
+
+statement ok
+CREATE TABLE nums (a INTEGER, b INTEGER)
+
+statement ok
+INSERT INTO nums (a, b) VALUES (7, 2), (10, 5), (9, 4), (-8, 3)
+
+# Subtraction.
+query I rowsort
+SELECT a - b FROM nums
+----
+-11
+5
+5
+5
+
+# Multiplication.
+query I rowsort
+SELECT a * b FROM nums
+----
+-24
+14
+36
+50
+
+# Addition then multiplication — * binds tighter than +.
+query I rowsort
+SELECT a + b * 2 FROM nums
+----
+-2
+11
+17
+20
+
+# Explicit parentheses override the default precedence.
+query I rowsort
+SELECT (a + b) * 2 FROM nums
+----
+-10
+18
+26
+30
+
+# Unary minus negates the column.
+query I rowsort
+SELECT -a FROM nums
+----
+-10
+-7
+-9
+8
