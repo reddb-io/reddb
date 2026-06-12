@@ -1,0 +1,52 @@
+# RedDB RQL conformance — standard-SQL CASE / COALESCE slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (a multi-branch searched CASE, the simple `CASE <expr> WHEN` form, a CASE
+# with no ELSE falling through to NULL, and multi-argument COALESCE). Truth is
+# the SQLite oracle (ADR 0053).
+
+statement ok
+CREATE TABLE scored (id INTEGER, score INTEGER)
+
+statement ok
+INSERT INTO scored (id, score) VALUES (1, 95), (2, 82), (3, 67), (4, 50)
+
+# Multi-branch searched CASE: first matching WHEN wins.
+query T rowsort
+SELECT CASE WHEN score >= 90 THEN 'A' WHEN score >= 80 THEN 'B' WHEN score >= 70 THEN 'C' ELSE 'F' END FROM scored
+----
+A
+B
+F
+F
+
+# A searched CASE with no ELSE yields NULL for the non-matching rows.
+query T rowsort
+SELECT CASE WHEN score >= 90 THEN 'top' END FROM scored
+----
+NULL
+NULL
+NULL
+top
+
+# Simple CASE compares the selector against each WHEN value.
+# DIVERGENCE: RedDB's parser only accepts the searched `CASE WHEN <cond>` form;
+# the simple `CASE <expr> WHEN <value>` form errors ("CASE must have at least
+# one WHEN branch"). Tracked under PRD #1098; SQLite-oracle value kept.
+skipif reddb-server
+query T rowsort
+SELECT CASE id WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'many' END FROM scored
+----
+many
+many
+one
+two
+
+# COALESCE returns the first non-NULL argument.
+query I rowsort
+SELECT COALESCE(NULL, NULL, score) FROM scored
+----
+50
+67
+82
+95
