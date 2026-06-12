@@ -1,0 +1,85 @@
+# RedDB-only conformance — native GRAPH command family (HAND-AUTHORED TRUTH,
+# ADR 0053 S3).
+#
+# Fixture: a directed KNOWS chain alice -> bob -> carol. Node identity is the
+# `label`; `name` is a display property. Every expectation below is derived from
+# graph semantics (reachability, hop distance, downstream PageRank flow), not
+# copied from engine output. The harness projects results to their semantic
+# columns (label/name/depth/path metrics); auto-assigned node ids and timestamps
+# are run-varying and not pinned (see tests/reddb_conformance.rs).
+
+statement ok
+INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')
+
+statement ok
+INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')
+
+statement ok
+INSERT INTO tales NODE (label, name) VALUES ('carol', 'Carol')
+
+statement ok
+INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', 'alice', 'bob')
+
+statement ok
+INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', 'bob', 'carol')
+
+# NEIGHBORHOOD depth 1 from alice reaches the source (depth 0) and its direct
+# successor bob (depth 1); carol is two hops away and excluded.
+query TI rowsort
+GRAPH NEIGHBORHOOD 'alice' DEPTH 1
+----
+alice 0
+bob 1
+
+# Depth 2 extends one further hop, picking up carol at depth 2.
+query TI rowsort
+GRAPH NEIGHBORHOOD 'alice' DEPTH 2
+----
+alice 0
+bob 1
+carol 2
+
+# EDGES IN restricts traversal to the named edge label; the whole chain is
+# KNOWS, so depth 1 still yields {alice@0, bob@1}.
+query TI rowsort
+GRAPH NEIGHBORHOOD 'alice' EDGES IN ('KNOWS') DEPTH 1
+----
+alice 0
+bob 1
+
+# TRAVERSE walks the full reachable set from alice with hop depths.
+query TI rowsort
+GRAPH TRAVERSE 'alice'
+----
+alice 0
+bob 1
+carol 2
+
+# PROPERTIES resolves a node by label and returns its stored properties.
+query TT nosort
+GRAPH PROPERTIES 'alice'
+----
+alice Alice
+
+# SHORTEST_PATH alice -> bob is the single KNOWS edge: 1 hop, unit weight,
+# 2 nodes visited, no negative cycle.
+query IIRIT nosort
+GRAPH SHORTEST_PATH 'alice' TO 'bob' ALGORITHM dijkstra
+----
+1 1 1.000 2 NULL
+
+# SHORTEST_PATH alice -> carol traverses both edges: 2 hops, total weight 2,
+# 3 nodes visited.
+query IIRIT nosort
+GRAPH SHORTEST_PATH 'alice' TO 'carol' ALGORITHM dijkstra
+----
+1 2 2.000 3 NULL
+
+# CENTRALITY (PageRank) scores every node. On a directed chain rank flows
+# downstream, so the strict order is carol > bob > alice.
+query T nosort
+GRAPH CENTRALITY ALGORITHM pagerank
+----
+carol
+bob
+alice

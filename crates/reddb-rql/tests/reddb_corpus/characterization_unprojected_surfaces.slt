@@ -1,0 +1,64 @@
+# RedDB-only conformance — CHARACTERIZATION ONLY (regression layer, ADR 0053).
+#
+# !!! NOT CONFORMANCE TRUTH !!!
+#
+# The four graph DSL modes (Gremlin / Cypher / SPARQL / Path) and the
+# natural-language and `SEARCH SIMILAR … COLLECTION` surfaces are parsed and
+# ACCEPTED by the in-server engine, but its executor does not yet *project*
+# semantic result columns for them — they currently return an empty column set.
+# There is therefore no hand-authorable result to pin: a `query` golden here
+# would freeze "what the engine emits today" as truth, which ADR 0053
+# explicitly forbids for RedDB-only surfaces.
+#
+# Instead each surface is pinned with `statement ok`, asserting only the durable
+# fact that today's engine ACCEPTS the query without error. This is a cheap
+# regression net (it will fail loudly if a surface starts rejecting input), and
+# is upgraded to a real `query` golden in graph_commands.slt / vector_search.slt
+# semantics the moment the executor begins projecting columns for the mode.
+
+statement ok
+INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')
+
+statement ok
+INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')
+
+statement ok
+INSERT INTO tales NODE (label, name) VALUES ('carol', 'Carol')
+
+statement ok
+INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', 'alice', 'bob')
+
+statement ok
+INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', 'bob', 'carol')
+
+# --- Cypher mode: pattern MATCH with a RETURN projection. ---
+statement ok
+MATCH (a)-[r:KNOWS]->(b) RETURN a.name, b.name
+
+# --- Gremlin mode: a vertex traversal. ---
+statement ok
+g.V().hasLabel('alice')
+
+# --- SPARQL mode: a triple-pattern SELECT. ---
+statement ok
+SELECT ?s WHERE { ?s ?p ?o }
+
+# --- Path mode: a standalone path query. ---
+statement ok
+PATH FROM 'alice' TO 'carol' ALGORITHM bfs
+
+# --- Natural-language mode. ---
+statement ok
+find all nodes
+
+# --- Vector extension: the `SEARCH SIMILAR … COLLECTION` surface form, which
+#     today projects only engine-internal id/score columns (both run-varying),
+#     so it has no semantic column to assert as truth. ---
+statement ok
+CREATE VECTOR vc DIM 2 METRIC cosine
+
+statement ok
+INSERT INTO vc VECTOR (embedding, content) VALUES ([1.0, 0.0], 'near')
+
+statement ok
+SEARCH SIMILAR [1.0, 0.0] COLLECTION vc LIMIT 2
