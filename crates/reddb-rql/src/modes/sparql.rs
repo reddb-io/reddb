@@ -20,11 +20,11 @@
 //! - Predicate → Edge type
 //! - Object → Node or literal value
 
-use crate::storage::query::ast::{
+use crate::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, NodePattern,
     Projection, QueryExpr,
 };
-use crate::storage::schema::Value;
+use reddb_types::types::Value;
 use std::collections::HashMap;
 
 /// SPARQL parse error

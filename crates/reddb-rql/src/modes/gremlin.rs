@@ -39,11 +39,11 @@
 //! - `aggregate(label)`, `store(label)`
 //! - `group()`, `groupCount()`
 
-use crate::storage::query::ast::{
+use crate::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, NodePattern,
     Projection, PropertyFilter, QueryExpr,
 };
-use crate::storage::schema::Value;
+use reddb_types::types::Value;
 
 /// Gremlin parse error
 #[derive(Debug, Clone)]
