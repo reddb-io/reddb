@@ -29,7 +29,7 @@ pub use gremlin::{GremlinParser, GremlinStep, GremlinTraversal};
 pub use natural::{NaturalParser, NaturalQuery, QueryIntent};
 pub use sparql::{SparqlParser, SparqlQuery, TriplePattern};
 
-use crate::storage::query::ast::QueryExpr;
+use crate::ast::QueryExpr;
 
 /// Parse a query string in any supported mode
 pub fn parse_multi(input: &str) -> Result<QueryExpr, MultiParseError> {
@@ -42,7 +42,7 @@ pub fn parse_multi(input: &str) -> Result<QueryExpr, MultiParseError> {
             // doesn't execute CTEs (the CTE-aware path lives in
             // `runtime::execute_query`). Inner query is the legacy
             // shape callers expect.
-            crate::storage::query::parser::parse(input)
+            crate::parser::parse(input)
                 .map(|q| q.query)
                 .map_err(|e| MultiParseError::Parse(e.to_string()))
         }
