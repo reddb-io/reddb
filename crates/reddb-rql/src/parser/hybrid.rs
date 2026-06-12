@@ -1,9 +1,9 @@
 //! Hybrid query parsing (combining structured and vector search)
 
-use super::super::ast::{FusionStrategy, HybridQuery, QueryExpr, VectorQuery};
-use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::ast::{FusionStrategy, HybridQuery, QueryExpr, VectorQuery};
+use crate::lexer::Token;
 
 impl<'a> Parser<'a> {
     /// Parse HYBRID query combining structured and vector search

@@ -7,6 +7,50 @@ use reddb_types::vector_metadata::MetadataFilter;
 
 pub const PARAMETER_PROJECTION_PREFIX: &str = "__user_param_projection__:";
 
+/// Recursively check whether `expr` contains any `Expr::Parameter` node.
+/// Used by the INSERT parser to know when to defer literal folding to
+/// the user_params binder.
+pub fn expr_contains_parameter(expr: &Expr) -> bool {
+    match expr {
+        Expr::Parameter { .. } => true,
+        Expr::Literal { .. } | Expr::Column { .. } => false,
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_contains_parameter(lhs) || expr_contains_parameter(rhs)
+        }
+        Expr::UnaryOp { operand, .. } => expr_contains_parameter(operand),
+        Expr::Cast { inner, .. } => expr_contains_parameter(inner),
+        Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_parameter),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches
+                .iter()
+                .any(|(c, v)| expr_contains_parameter(c) || expr_contains_parameter(v))
+                || else_.as_deref().is_some_and(expr_contains_parameter)
+        }
+        Expr::IsNull { operand, .. } => expr_contains_parameter(operand),
+        Expr::InList { target, values, .. } => {
+            expr_contains_parameter(target) || values.iter().any(expr_contains_parameter)
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            expr_contains_parameter(target)
+                || expr_contains_parameter(low)
+                || expr_contains_parameter(high)
+        }
+        Expr::Subquery { .. } => false,
+        Expr::WindowFunctionCall { args, window, .. } => {
+            args.iter().any(expr_contains_parameter)
+                || window.partition_by.iter().any(expr_contains_parameter)
+                || window
+                    .order_by
+                    .iter()
+                    .any(|o| expr_contains_parameter(&o.expr))
+        }
+    }
+}
+
 pub fn expr_to_projection(expr: &Expr) -> Option<Projection> {
     match expr {
         Expr::Literal { value, .. } => projection_from_literal(value),

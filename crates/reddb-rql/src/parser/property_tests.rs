@@ -8,12 +8,12 @@
 
 use proptest::prelude::*;
 
-use crate::storage::query::ast::{
+use crate::ast::{
     CompareOp, FieldRef, Filter, InsertEntityType, InsertQuery, Projection, QueryExpr,
     QueueCommand, QueueSide, TableQuery,
 };
-use crate::storage::query::renderer::render;
-use crate::storage::schema::Value;
+use crate::renderer::render;
+use reddb_types::types::Value;
 
 // ---------------------------------------------------------------------------
 // Identifier strategy — 2–4 lowercase letters + 1–2 digits.
@@ -171,8 +171,8 @@ fn arb_queue_push() -> impl Strategy<Value = QueryExpr> {
 // Helper: parse and immediately unwrap `QueryWithCte` to `QueryExpr`
 // ---------------------------------------------------------------------------
 
-fn parse_q(sql: &str) -> Result<QueryExpr, crate::storage::query::parser::ParseError> {
-    crate::storage::query::parser::parse(sql).map(|q| q.query)
+fn parse_q(sql: &str) -> Result<QueryExpr, crate::parser::ParseError> {
+    crate::parser::parse(sql).map(|q| q.query)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
 //! Parser for CREATE/DROP TIMESERIES
 
-use super::super::ast::{
+use super::error::ParseError;
+use super::Parser;
+use crate::ast::{
     CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl,
     QueryExpr,
 };
-use super::super::lexer::Token;
-use super::error::ParseError;
-use super::Parser;
-use crate::catalog::CollectionModel;
+use crate::lexer::Token;
+use reddb_types::catalog::CollectionModel;
 
 impl<'a> Parser<'a> {
     /// Parse CREATE TIMESERIES body (after CREATE TIMESERIES consumed)
@@ -172,7 +172,7 @@ impl<'a> Parser<'a> {
             } else if self.consume_ident_ci("QUERY")? {
                 let value = self.parse_literal_value()?;
                 match value {
-                    crate::storage::schema::Value::Text(s) => query = Some(s.to_string()),
+                    reddb_types::types::Value::Text(s) => query = Some(s.to_string()),
                     other => {
                         return Err(ParseError::new(
                             format!("derived metric QUERY expects a string literal, got {other:?}"),
@@ -191,27 +191,25 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(QueryExpr::CreateMetric(
-            crate::storage::query::ast::CreateMetricQuery {
-                path,
-                kind: kind.ok_or_else(|| {
-                    ParseError::new(
-                        "metric descriptor requires TYPE or KIND".to_string(),
-                        self.position(),
-                    )
-                })?,
-                role: role.ok_or_else(|| {
-                    ParseError::new(
-                        "metric descriptor requires ROLE".to_string(),
-                        self.position(),
-                    )
-                })?,
-                source,
-                query,
-                window_ms,
-                time_field,
-            },
-        ))
+        Ok(QueryExpr::CreateMetric(crate::ast::CreateMetricQuery {
+            path,
+            kind: kind.ok_or_else(|| {
+                ParseError::new(
+                    "metric descriptor requires TYPE or KIND".to_string(),
+                    self.position(),
+                )
+            })?,
+            role: role.ok_or_else(|| {
+                ParseError::new(
+                    "metric descriptor requires ROLE".to_string(),
+                    self.position(),
+                )
+            })?,
+            source,
+            query,
+            window_ms,
+            time_field,
+        }))
     }
 
     /// Parse ALTER METRIC body (after ALTER METRIC consumed).
@@ -262,14 +260,12 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        Ok(QueryExpr::AlterMetric(
-            crate::storage::query::ast::AlterMetricQuery {
-                path,
-                set_role,
-                attempted_kind,
-                attempted_path,
-            },
-        ))
+        Ok(QueryExpr::AlterMetric(crate::ast::AlterMetricQuery {
+            path,
+            set_role,
+            attempted_kind,
+            attempted_path,
+        }))
     }
 
     /// Parse CREATE SLO body (after CREATE SLO consumed).
@@ -415,8 +411,8 @@ impl<'a> Parser<'a> {
         let pos = self.position();
         let value = self.parse_literal_value()?;
         match value {
-            crate::storage::schema::Value::Text(s) => {
-                crate::storage::timeseries::retention::parse_duration_ns(&s).ok_or_else(|| {
+            reddb_types::types::Value::Text(s) => {
+                reddb_types::duration::parse_duration_ns(&s).ok_or_else(|| {
                     ParseError::new(
                         // F-05: `s` is caller-controlled string-literal bytes.
                         // Render via `{:?}` so CR/LF/NUL/quotes are escaped

@@ -1,9 +1,9 @@
 //! Parser for stable CONFIG keyed commands.
 
-use super::super::ast::{ConfigCommand, ConfigValueType, QueryExpr};
-use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::ast::{ConfigCommand, ConfigValueType, QueryExpr};
+use crate::lexer::Token;
 
 impl<'a> Parser<'a> {
     pub fn parse_config_command(&mut self) -> Result<QueryExpr, ParseError> {

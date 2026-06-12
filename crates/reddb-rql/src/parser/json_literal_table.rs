@@ -17,9 +17,9 @@
 
 #![cfg(test)]
 
-use crate::storage::query::ast::QueryExpr;
-use crate::storage::query::parser::parse;
-use crate::storage::schema::Value;
+use crate::ast::QueryExpr;
+use crate::parser::parse;
+use reddb_types::types::Value;
 
 /// Parse `INSERT INTO t (body) VALUES (<expr>)` and pull out the first
 /// row's first cell. Returns the literal `Value` so callers can assert
@@ -42,10 +42,10 @@ fn parse_first_value(insert_sql: &str) -> Value {
 /// pipeline the bare form uses internally. Returns the JSON bytes the
 /// quoted form would persist after the executor's text→Json conversion.
 fn canonical_json_bytes(raw: &str) -> Vec<u8> {
-    let parsed = crate::utils::json::parse_json(raw)
+    let parsed = reddb_types::utils::json::parse_json(raw)
         .unwrap_or_else(|err| panic!("parse_json failed for `{}`: {}", raw, err));
-    let canonical = crate::serde_json::Value::from(parsed);
-    crate::json::to_vec(&canonical).expect("to_vec must succeed for valid JSON")
+    let canonical = reddb_types::serde_json::Value::from(parsed);
+    reddb_types::json::to_vec(&canonical).expect("to_vec must succeed for valid JSON")
 }
 
 /// Assert that the bare form `({raw})` produces `Value::Json` bytes
@@ -498,7 +498,7 @@ fn dos_thousand_keys() {
 fn dos_payload_size_exceeded() {
     // Build a JSON literal whose raw text exceeds JSON_LITERAL_MAX_BYTES
     // (16 MiB). The lexer must bail out before allocating the value.
-    use crate::storage::query::lexer::JSON_LITERAL_MAX_BYTES;
+    use crate::lexer::JSON_LITERAL_MAX_BYTES;
     let pad = "x".repeat(JSON_LITERAL_MAX_BYTES + 16);
     let raw = format!(r#"{{"k":"{}"}}"#, pad);
     let sql = format!("INSERT INTO t (body) VALUES ({})", raw);
