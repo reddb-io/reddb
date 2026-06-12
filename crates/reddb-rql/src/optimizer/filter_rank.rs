@@ -473,7 +473,7 @@ impl Default for FilterRanker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::optimizer::stats::ColumnStats;
+    use crate::optimizer::stats::ColumnStats;
 
     #[test]
     fn test_simple_ranking() {

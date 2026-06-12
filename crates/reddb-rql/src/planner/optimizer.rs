@@ -10,8 +10,8 @@
 //! 4. **ProjectionPushdown**: Eliminate unused columns early
 //! 5. **ExpressionSimplification**: Simplify complex expressions
 
-use crate::storage::query::ast::{JoinQuery, JoinType, QueryExpr};
-use crate::storage::query::sql_lowering::{effective_table_filter, effective_vector_filter};
+use crate::ast::{JoinQuery, JoinType, QueryExpr};
+use crate::sql_lowering::{effective_table_filter, effective_vector_filter};
 
 /// An optimization pass that transforms query expressions
 pub trait OptimizationPass: Send + Sync {
@@ -409,12 +409,10 @@ impl OptimizationPass for IndexSelectionPass {
 
 impl IndexSelectionPass {
     /// Analyze a filter predicate and return the best index hint
-    fn analyze_filter(filter: &crate::storage::query::ast::Filter) -> Option<IndexHint> {
+    fn analyze_filter(filter: &crate::ast::Filter) -> Option<IndexHint> {
         match filter {
             // Equality on a single column → Hash index candidate
-            crate::storage::query::ast::Filter::Compare { field, op, .. }
-                if *op == crate::storage::query::ast::CompareOp::Eq =>
-            {
+            crate::ast::Filter::Compare { field, op, .. } if *op == crate::ast::CompareOp::Eq => {
                 let col = Self::field_name(field);
                 Some(IndexHint {
                     method: IndexHintMethod::Hash,
@@ -422,13 +420,13 @@ impl IndexSelectionPass {
                 })
             }
             // Range predicates → B-tree candidate
-            crate::storage::query::ast::Filter::Compare {
+            crate::ast::Filter::Compare {
                 field,
                 op:
-                    crate::storage::query::ast::CompareOp::Lt
-                    | crate::storage::query::ast::CompareOp::Le
-                    | crate::storage::query::ast::CompareOp::Gt
-                    | crate::storage::query::ast::CompareOp::Ge,
+                    crate::ast::CompareOp::Lt
+                    | crate::ast::CompareOp::Le
+                    | crate::ast::CompareOp::Gt
+                    | crate::ast::CompareOp::Ge,
                 ..
             } => {
                 let col = Self::field_name(field);
@@ -438,7 +436,7 @@ impl IndexSelectionPass {
                 })
             }
             // BETWEEN → B-tree candidate
-            crate::storage::query::ast::Filter::Between { field, .. } => {
+            crate::ast::Filter::Between { field, .. } => {
                 let col = Self::field_name(field);
                 Some(IndexHint {
                     method: IndexHintMethod::BTree,
@@ -446,7 +444,7 @@ impl IndexSelectionPass {
                 })
             }
             // IN with few values → Bitmap candidate
-            crate::storage::query::ast::Filter::In { field, values } if values.len() <= 10 => {
+            crate::ast::Filter::In { field, values } if values.len() <= 10 => {
                 let col = Self::field_name(field);
                 Some(IndexHint {
                     method: IndexHintMethod::Bitmap,
@@ -454,19 +452,19 @@ impl IndexSelectionPass {
                 })
             }
             // AND: pick the most selective hint from left or right
-            crate::storage::query::ast::Filter::And(left, right) => {
+            crate::ast::Filter::And(left, right) => {
                 Self::analyze_filter(left).or_else(|| Self::analyze_filter(right))
             }
             _ => None,
         }
     }
 
-    fn field_name(field: &crate::storage::query::ast::FieldRef) -> String {
+    fn field_name(field: &crate::ast::FieldRef) -> String {
         match field {
-            crate::storage::query::ast::FieldRef::TableColumn { column, .. } => column.clone(),
-            crate::storage::query::ast::FieldRef::NodeProperty { property, .. } => property.clone(),
-            crate::storage::query::ast::FieldRef::EdgeProperty { property, .. } => property.clone(),
-            crate::storage::query::ast::FieldRef::NodeId { alias } => {
+            crate::ast::FieldRef::TableColumn { column, .. } => column.clone(),
+            crate::ast::FieldRef::NodeProperty { property, .. } => property.clone(),
+            crate::ast::FieldRef::EdgeProperty { property, .. } => property.clone(),
+            crate::ast::FieldRef::NodeId { alias } => {
                 format!("{}.id", alias)
             }
         }
@@ -513,10 +511,8 @@ impl OptimizationPass for LimitPushdownPass {
 // Helper Functions
 // =============================================================================
 
-fn swap_condition(
-    condition: crate::storage::query::ast::JoinCondition,
-) -> crate::storage::query::ast::JoinCondition {
-    crate::storage::query::ast::JoinCondition {
+fn swap_condition(condition: crate::ast::JoinCondition) -> crate::ast::JoinCondition {
+    crate::ast::JoinCondition {
         left_field: condition.right_field,
         right_field: condition.left_field,
     }
@@ -525,7 +521,7 @@ fn swap_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::{
+    use crate::ast::{
         DistanceMetric, FieldRef, FusionStrategy, JoinCondition, Projection, TableQuery,
     };
 

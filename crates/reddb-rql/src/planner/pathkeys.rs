@@ -32,7 +32,7 @@
 //! order, merge-joins combine left+right pathkeys, sorts emit
 //! exactly their sort keys, and so on.
 
-use crate::storage::query::ast::FieldRef;
+use crate::ast::FieldRef;
 
 /// Direction component of a pathkey — matches `OrderBy::Direction`
 /// but intentionally decoupled so the planner can reason about

@@ -10,13 +10,11 @@
 //! 4. **PushdownPredicates**: Move filters closer to data source
 //! 5. **ValidateFunctions**: Check function calls against schema
 
-use crate::storage::query::ast::{
-    CompareOp, FieldRef, Filter as AstFilter, JoinQuery, Projection, QueryExpr,
-};
-use crate::storage::query::sql_lowering::{
+use crate::ast::{CompareOp, FieldRef, Filter as AstFilter, JoinQuery, Projection, QueryExpr};
+use crate::sql_lowering::{
     effective_graph_filter, effective_join_filter, effective_table_filter, effective_vector_filter,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Context for rewrite operations
 #[derive(Debug, Clone, Default)]
