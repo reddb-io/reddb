@@ -2525,6 +2525,7 @@ dependencies = [
 name = "reddb-io-rql"
 version = "1.0.0"
 dependencies = [
+ "proptest",
  "reddb-io-server",
  "reddb-io-types",
  "sqllogictest",

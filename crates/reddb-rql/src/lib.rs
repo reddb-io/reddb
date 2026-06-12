@@ -22,15 +22,25 @@
 //! rendering of an engine [`reddb_types::Value`] into the textual cell the
 //! sqllogictest comparator sees. [`conformance`] owns that rendering.
 
+// The parser family (#1103) and the AST cluster (#1113) were re-homed
+// byte-faithfully from `reddb-server`, which carries a crate-level
+// `#![allow(dead_code, unused_imports, unused_variables)]`. Carrying the same
+// blanket here keeps the relocation a pure move — the parser's helper methods,
+// keyword-import lists, and parse-loop bindings stay exactly as authored
+// (matching the precedent set by `reddb-io-types`, ADR 0052).
+#![allow(dead_code, unused_imports, unused_variables)]
+
 pub mod ast;
 pub mod conformance;
 pub mod filter_optimizer;
 pub mod lexer;
 pub mod limits;
 pub mod parser;
+pub mod sql;
 pub mod sql_lowering;
 
 pub use conformance::{render_cell, CellType};
 pub use lexer::{Lexer, LexerError, Position, Spanned, Token};
 pub use limits::ParserLimits;
 pub use parser::{parse, ParseError, ParseErrorKind, Parser, SafeTokenDisplay};
+pub use sql::{parse_frontend, FrontendStatement, SqlCommand, SqlStatement};
