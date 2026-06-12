@@ -1185,7 +1185,7 @@ fn aggregate_projection_result_slotted(
             if state.sum_agg_counts[idx] == 0 {
                 Value::Null
             } else {
-                Value::Float(state.sums[idx])
+                sum_f64_to_value(state.sums[idx])
             }
         }
         "AVG" => {
@@ -1863,6 +1863,14 @@ fn value_to_f64(val: &Value) -> Option<f64> {
         Value::Float(f) => Some(*f),
         Value::Decimal(d) => Some(*d as f64 / 10_000.0),
         _ => None,
+    }
+}
+
+fn sum_f64_to_value(f: f64) -> Value {
+    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+        Value::Integer(f as i64)
+    } else {
+        Value::Float(f)
     }
 }
 
@@ -3012,7 +3020,7 @@ fn try_execute_parallel_single_col_numeric_aggs(
                     let value = if state.counts.get(*slot).copied().unwrap_or(0) == 0 {
                         Value::Null
                     } else {
-                        Value::Float(state.sums.get(*slot).copied().unwrap_or_default())
+                        sum_f64_to_value(state.sums.get(*slot).copied().unwrap_or_default())
                     };
                     record.set(output_name, value);
                 }
