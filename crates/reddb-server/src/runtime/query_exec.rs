@@ -223,12 +223,47 @@ fn execute_runtime_table_query_materialized(
     }
     let columns = projected_columns(&records, &effective_projections);
 
+    // `SELECT DISTINCT` — collapse duplicate projected rows (issue
+    // #1126). Runs after projection (so dedup keys off the projected
+    // columns) and before the caller's ORDER BY / LIMIT semantics would
+    // slice the set. First occurrence wins, so any upstream ordering the
+    // scan already applied survives.
+    if query.distinct {
+        dedup_distinct_records(&mut records, &columns);
+    }
+
     Ok(UnifiedResult {
         columns,
         records,
         stats: Default::default(),
         pre_serialized_json: None,
     })
+}
+
+/// Collapse duplicate rows for a `SELECT DISTINCT` projection (issue
+/// #1126). Two rows are duplicates when every projected column holds an
+/// equal value; the first occurrence is kept. Like the UNION DISTINCT
+/// set operator (`storage::query::executors::set_ops`), dedup is keyed on
+/// a row hash — `Value` is not `Hash`/`Eq`, so each cell is folded in via
+/// its deterministic `Debug` rendering, which distinguishes both kind and
+/// payload (`Integer(1)` vs `Float(1.0)` vs `String("1")`).
+fn dedup_distinct_records(records: &mut Vec<UnifiedRecord>, columns: &[String]) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
+
+    let mut seen: HashSet<u64> = HashSet::with_capacity(records.len());
+    records.retain(|record| {
+        let mut hasher = DefaultHasher::new();
+        for col in columns {
+            col.hash(&mut hasher);
+            match record.get(col) {
+                Some(value) => format!("{value:?}").hash(&mut hasher),
+                None => 0u8.hash(&mut hasher),
+            }
+        }
+        seen.insert(hasher.finish())
+    });
 }
 
 fn resolve_table_row_by_logical_id(

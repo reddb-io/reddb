@@ -71,6 +71,7 @@ impl<'a> Parser<'a> {
                 expand: None,
                 as_of: None,
                 sessionize: None,
+                distinct: false,
             }
         };
 
@@ -239,6 +240,7 @@ impl<'a> Parser<'a> {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         };
 
         let mut expr = QueryExpr::Join(JoinQuery {

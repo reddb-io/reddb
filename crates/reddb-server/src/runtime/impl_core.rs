@@ -6540,6 +6540,7 @@ impl RedDBRuntime {
                 expand: None,
                 as_of: None,
                 sessionize: None,
+                distinct: false,
             };
             self.check_table_column_projection_authz(&query, frame)?;
         }

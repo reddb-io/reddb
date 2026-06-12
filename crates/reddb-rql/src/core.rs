@@ -953,6 +953,12 @@ pub struct TableQuery {
     /// without the other resolved at execution time is the typed
     /// `MissingSessionKey` error.
     pub sessionize: Option<SessionizeClause>,
+    /// `SELECT DISTINCT` projection quantifier. When `true` the executor
+    /// deduplicates the projected output row-set (over the projected
+    /// columns) before ORDER BY / LIMIT. `DISTINCT` inside an aggregate
+    /// argument (`COUNT(DISTINCT x)`) is unrelated and lives on the
+    /// aggregate call, not here.
+    pub distinct: bool,
 }
 
 /// `SESSIONIZE BY <actor_col> GAP <duration> [ORDER BY <ts_col>]`.
@@ -1063,6 +1069,7 @@ impl TableQuery {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         }
     }
 
@@ -1096,6 +1103,7 @@ impl TableQuery {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct: false,
         }
     }
 }
