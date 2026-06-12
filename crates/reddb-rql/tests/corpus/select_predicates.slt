@@ -1,0 +1,78 @@
+# RedDB RQL conformance — standard-SQL WHERE predicate slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (the canonical comparison / boolean / range / membership predicates over a
+# small integer+text table). Truth is the SQLite oracle: every expected block
+# is the result SQLite produces, not whatever the current engine emits.
+
+statement ok
+CREATE TABLE t1 (a INTEGER, b INTEGER, c TEXT)
+
+statement ok
+INSERT INTO t1 (a, b, c) VALUES (1, 10, 'x'), (2, 20, 'y'), (3, 30, 'z'), (4, 40, 'x')
+
+# Strict greater-than.
+query I rowsort
+SELECT a FROM t1 WHERE b > 20
+----
+3
+4
+
+# Inclusive range via two bounds.
+query I rowsort
+SELECT a FROM t1 WHERE b >= 20 AND b <= 30
+----
+2
+3
+
+# Inequality with the SQL-standard <> operator.
+query I rowsort
+SELECT a FROM t1 WHERE c <> 'x'
+----
+2
+3
+
+# Boolean OR.
+query I rowsort
+SELECT a FROM t1 WHERE a = 1 OR a = 4
+----
+1
+4
+
+# Boolean NOT.
+query I rowsort
+SELECT a FROM t1 WHERE NOT c = 'x'
+----
+2
+3
+
+# BETWEEN is inclusive on both bounds.
+query I rowsort
+SELECT a FROM t1 WHERE b BETWEEN 20 AND 30
+----
+2
+3
+
+# IN over a literal list.
+query I rowsort
+SELECT a FROM t1 WHERE a IN (1, 3)
+----
+1
+3
+
+# NOT IN over a literal list.
+# DIVERGENCE: RedDB's parser does not accept the `NOT IN` membership form
+# (it errors on the NOT before IN), though prefix `NOT <predicate>` and bare
+# `IN (...)` both parse. Tracked under PRD #1098; SQLite-oracle value kept.
+skipif reddb-server
+query I rowsort
+SELECT a FROM t1 WHERE a NOT IN (1, 3)
+----
+2
+4
+
+# Combined AND/OR with explicit grouping.
+query I rowsort
+SELECT a FROM t1 WHERE (a = 1 OR a = 2) AND b < 20
+----
+1
