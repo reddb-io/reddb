@@ -27,7 +27,6 @@ pub mod geo;
 pub mod grpc;
 pub mod health;
 pub mod index;
-pub mod json;
 pub mod json_field;
 pub mod log;
 pub mod mcp;
@@ -59,6 +58,15 @@ pub mod wire;
 /// existing `use reddb::...` callers can reach the shared protocol
 /// contracts without a separate dependency.
 pub use reddb_wire as wire_proto;
+
+/// Re-export shim for the in-house JSON aggregator + `json!` macro
+/// (ADR 0053). Both the `crate::json::{Value, Map, to_vec, ...}`
+/// aggregator module and the `crate::json!` macro now live in
+/// `reddb-io-types`; this single re-export carries both namespaces so
+/// every existing call-site (200+ uses of `crate::json::...` and
+/// `crate::json!(...)`) compiles unchanged. Replaces the former
+/// `pub mod json;` + local `json.rs` aggregator.
+pub use reddb_types::json;
 
 pub mod prelude {
     pub use crate::api::{
