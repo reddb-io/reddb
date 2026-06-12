@@ -146,7 +146,7 @@ fn execute_runtime_table_query_materialized(
     }
 
     // ── AGGREGATE PATH: COUNT, AVG, SUM, MIN, MAX, GROUP BY ──
-    if has_aggregate_projections(&effective_projections) {
+    if has_aggregate_projections(&effective_projections) || !effective_group_by.is_empty() {
         return execute_aggregate_query(db, query);
     }
 
