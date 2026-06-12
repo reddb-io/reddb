@@ -25,6 +25,9 @@ impl SubscriptionOperation {
         }
     }
 
+    // `from_str` returns `Option`, not `Result` — different semantics from the
+    // `std::str::FromStr` trait method, so the trait is intentionally not used.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value.to_ascii_uppercase().as_str() {
             "INSERT" => Some(Self::Insert),
@@ -75,6 +78,9 @@ impl AnalyticsOutput {
         }
     }
 
+    // `from_str` returns `Option`, not `Result` — different semantics from the
+    // `std::str::FromStr` trait method, so the trait is intentionally not used.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "communities" => Some(Self::Communities),
