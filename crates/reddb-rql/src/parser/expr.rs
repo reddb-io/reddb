@@ -863,16 +863,46 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Parse `CASE WHEN cond THEN val [WHEN …] [ELSE val] END`.
+    /// Parse both CASE forms:
+    /// - searched: `CASE WHEN cond THEN val [WHEN …] [ELSE val] END`
+    /// - simple:   `CASE expr WHEN val THEN val [WHEN …] [ELSE val] END`
+    ///
+    /// The simple form is desugared into the searched form: each
+    /// `WHEN <value>` becomes the equality condition `<selector> = <value>`,
+    /// which preserves SQL's three-valued comparison semantics (a NULL
+    /// selector never matches a WHEN value) without growing the `Expr::Case`
+    /// AST or the executor.
+    ///
     /// Assumes the caller has already peeked `CASE`.
     fn parse_case_expr(&mut self, start: crate::lexer::Position) -> Result<Expr, ParseError> {
         self.advance()?; // consume CASE
+                         // Simple CASE: a selector expression precedes the first WHEN.
+        let selector = if matches!(self.peek(), Token::Ident(id) if id.eq_ignore_ascii_case("WHEN"))
+        {
+            None
+        } else {
+            Some(self.parse_expr_prec(0)?)
+        };
         let mut branches: Vec<(Expr, Expr)> = Vec::new();
         loop {
             if !self.consume_ident_ci("WHEN")? {
                 break;
             }
-            let cond = self.parse_expr_prec(0)?;
+            let when_val = self.parse_expr_prec(0)?;
+            // Searched form keeps the WHEN expression as the condition;
+            // simple form rewrites it to `selector = when_val`.
+            let cond = match &selector {
+                None => when_val,
+                Some(sel) => {
+                    let span = Span::new(sel.span().start, when_val.span().end);
+                    Expr::BinaryOp {
+                        op: BinOp::Eq,
+                        lhs: Box::new(sel.clone()),
+                        rhs: Box::new(when_val),
+                        span,
+                    }
+                }
+            };
             if !self.consume_ident_ci("THEN")? {
                 return Err(ParseError::new(
                     "expected THEN after CASE WHEN condition".to_string(),
@@ -1367,6 +1397,27 @@ mod tests {
         };
         assert_eq!(branches.len(), 2);
         assert!(else_.is_some());
+    }
+
+    #[test]
+    fn simple_case_desugars_to_equality() {
+        let e = parse("CASE id WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'many' END");
+        let Expr::Case {
+            branches, else_, ..
+        } = e
+        else {
+            panic!("expected Case");
+        };
+        assert_eq!(branches.len(), 2);
+        assert!(else_.is_some());
+        // Each WHEN value is rewritten to `selector = value`.
+        for (cond, _) in &branches {
+            let Expr::BinaryOp { op, lhs, .. } = cond else {
+                panic!("expected desugared equality condition");
+            };
+            assert_eq!(*op, BinOp::Eq);
+            assert!(matches!(**lhs, Expr::Column { .. }));
+        }
     }
 
     #[test]
