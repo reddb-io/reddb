@@ -1,0 +1,53 @@
+# RedDB RQL conformance — standard-SQL LIKE pattern slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (the `%` multi-character and `_` single-character wildcards in a LIKE
+# predicate, plus the negated form). Truth is the SQLite oracle (ADR 0053).
+
+statement ok
+CREATE TABLE fruit (id INTEGER, name TEXT)
+
+statement ok
+INSERT INTO fruit (id, name) VALUES (1, 'apple'), (2, 'apricot'), (3, 'banana'), (4, 'cherry'), (5, 'grape')
+
+# Prefix match: `%` matches any trailing run of characters.
+query I rowsort
+SELECT id FROM fruit WHERE name LIKE 'ap%'
+----
+1
+2
+
+# Substring match: a `%` on both sides.
+query I rowsort
+SELECT id FROM fruit WHERE name LIKE '%a%'
+----
+1
+2
+3
+5
+
+# Suffix match.
+query I rowsort
+SELECT id FROM fruit WHERE name LIKE '%e'
+----
+1
+5
+
+# `_` matches exactly one character: second letter is `a`.
+query I rowsort
+SELECT id FROM fruit WHERE name LIKE '_a%'
+----
+3
+
+# Negated pattern: every name that does not start with `a`.
+# DIVERGENCE: RedDB's parser does not accept the infix `NOT LIKE` membership
+# form (it errors on the NOT after the column), the same seam as `NOT IN`.
+# Prefix `NOT <predicate>` and bare `LIKE` both parse. Tracked under PRD #1098;
+# SQLite-oracle value kept.
+skipif reddb-server
+query I rowsort
+SELECT id FROM fruit WHERE name NOT LIKE 'a%'
+----
+3
+4
+5
