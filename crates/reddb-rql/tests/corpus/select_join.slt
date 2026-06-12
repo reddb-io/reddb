@@ -1,0 +1,42 @@
+# RedDB RQL conformance — standard-SQL JOIN slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (INNER and LEFT joins on an equi-key, with the unmatched LEFT side carrying
+# NULLs). Truth is the SQLite oracle.
+
+statement ok
+CREATE TABLE users (id INTEGER, name TEXT)
+
+statement ok
+INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Linus'), (3, 'Grace')
+
+statement ok
+CREATE TABLE orders (id INTEGER, user_id INTEGER, total INTEGER)
+
+statement ok
+INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100), (11, 1, 50), (12, 2, 75)
+
+# INNER JOIN keeps only matched pairs.
+query TI rowsort
+SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id
+----
+Ada 100
+Ada 50
+Linus 75
+
+# LEFT JOIN keeps every left row; the unmatched right side is NULL.
+query TI rowsort
+SELECT u.name, o.total FROM users u LEFT JOIN orders o ON u.id = o.user_id
+----
+Ada 100
+Ada 50
+Grace NULL
+Linus 75
+
+# Ordered INNER JOIN projection.
+query TI nosort
+SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id ORDER BY o.total
+----
+Ada 50
+Linus 75
+Ada 100
