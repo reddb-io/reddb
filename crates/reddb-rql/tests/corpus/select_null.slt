@@ -1,0 +1,47 @@
+# RedDB RQL conformance — standard-SQL NULL-handling slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (IS NULL / IS NOT NULL predicates and NULL's three-valued behaviour under
+# comparison). Truth is the SQLite oracle: a NULL is never equal to anything,
+# including another NULL, so an `=` predicate filters NULL rows out.
+
+statement ok
+CREATE TABLE t (id INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO t (id, v) VALUES (1, 10), (2, NULL), (3, 30), (4, NULL)
+
+# IS NULL selects the rows whose value is NULL.
+query I rowsort
+SELECT id FROM t WHERE v IS NULL
+----
+2
+4
+
+# IS NOT NULL selects the complementary rows.
+query I rowsort
+SELECT id FROM t WHERE v IS NOT NULL
+----
+1
+3
+
+# An equality predicate never matches a NULL value (three-valued logic).
+query I rowsort
+SELECT id FROM t WHERE v = 10
+----
+1
+
+# Projecting a NULL value renders as the NULL keyword.
+query II nosort
+SELECT id, v FROM t WHERE id = 2
+----
+2 NULL
+
+# COALESCE substitutes a default for NULL.
+query II rowsort
+SELECT id, COALESCE(v, 0) FROM t
+----
+1 10
+2 0
+3 30
+4 0

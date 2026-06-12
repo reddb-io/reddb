@@ -1,0 +1,66 @@
+# RedDB RQL conformance — standard-SQL ORDER BY / LIMIT / OFFSET slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (deterministic ordering with ascending/descending sort keys and row
+# windowing). Truth is the SQLite oracle. These queries use `nosort` because the
+# ORDER BY makes the row order itself part of what is under test.
+
+statement ok
+CREATE TABLE t (id INTEGER, v INTEGER)
+
+statement ok
+INSERT INTO t (id, v) VALUES (1, 30), (2, 10), (3, 20), (4, 40)
+
+# Ascending ORDER BY (ASC is the default).
+query I nosort
+SELECT id FROM t ORDER BY v
+----
+2
+3
+1
+4
+
+# Descending ORDER BY.
+query I nosort
+SELECT id FROM t ORDER BY v DESC
+----
+4
+1
+3
+2
+
+# LIMIT caps the row count after ordering.
+query I nosort
+SELECT id FROM t ORDER BY v LIMIT 2
+----
+2
+3
+
+# LIMIT with OFFSET skips leading rows.
+query I nosort
+SELECT id FROM t ORDER BY v LIMIT 2 OFFSET 1
+----
+3
+1
+
+statement ok
+CREATE TABLE t2 (c TEXT, n INTEGER)
+
+statement ok
+INSERT INTO t2 (c, n) VALUES ('banana', 1), ('cherry', 3), ('apple', 5)
+
+# ORDER BY a numeric key, project the text column.
+query T nosort
+SELECT c FROM t2 ORDER BY n DESC
+----
+apple
+cherry
+banana
+
+# ORDER BY the text column directly (ascending, lexicographic).
+query T nosort
+SELECT c FROM t2 ORDER BY c
+----
+apple
+banana
+cherry
