@@ -1,14 +1,14 @@
 //! sqllogictest-format conformance harness (ADR 0053, S1 tracer bullet).
 //!
-//! Drives every `.slt` script under `tests/corpus/` end-to-end against the
-//! current **in-server engine** (`reddb-server`'s `RedDBRuntime`). The corpus
-//! is the standard-SQL slice sourced from the public SQLite sqllogictest
-//! corpus; this run is the behavioral net later extraction slices must keep
-//! green.
+//! Drives every `.slt` script under `crates/reddb-rql/tests/corpus/`
+//! end-to-end against the current **in-server engine** (`reddb-server`'s
+//! `RedDBRuntime`). The corpus is the standard-SQL slice sourced from the
+//! public SQLite sqllogictest corpus; this run is the behavioral net later
+//! extraction slices must keep green.
 //!
-//! The engine lives behind a dev-dependency so the published `reddb-io-rql`
-//! crate graph keeps its single edge to `reddb-io-types` — only this test
-//! target reaches `reddb-server`.
+//! The harness lives at the workspace umbrella level so the `reddb-io-rql`
+//! crate's own test graph stays focused on the language front-end and never
+//! pulls `reddb-server`/gRPC into pure lexer/parser/AST coverage.
 
 use std::path::{Path, PathBuf};
 
@@ -89,7 +89,7 @@ impl DB for EngineDb {
 }
 
 fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/reddb-rql/tests/corpus")
 }
 
 fn slt_files(dir: &Path) -> Vec<PathBuf> {

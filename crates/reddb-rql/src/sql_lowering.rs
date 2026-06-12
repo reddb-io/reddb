@@ -1105,3 +1105,486 @@ fn literal_expr_value(expr: &Expr) -> Option<Value> {
 fn all_literal_values(values: &[Expr]) -> Option<Vec<Value>> {
     values.iter().map(literal_expr_value).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{OrderByClause, WindowOrderItem, WindowSpec};
+
+    fn field(name: &str) -> FieldRef {
+        FieldRef::column("", name)
+    }
+
+    fn col(name: &str) -> Expr {
+        Expr::Column {
+            field: field(name),
+            span: Span::synthetic(),
+        }
+    }
+
+    fn lit(value: Value) -> Expr {
+        Expr::Literal {
+            value,
+            span: Span::synthetic(),
+        }
+    }
+
+    fn parameter(index: usize) -> Expr {
+        Expr::Parameter {
+            index,
+            span: Span::synthetic(),
+        }
+    }
+
+    fn bin(op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::BinaryOp {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            span: Span::synthetic(),
+        }
+    }
+
+    #[test]
+    fn expr_contains_parameter_walks_nested_expression_shapes() {
+        assert!(expr_contains_parameter(&bin(
+            BinOp::Add,
+            col("age"),
+            parameter(1)
+        )));
+
+        let case = Expr::Case {
+            branches: vec![(col("active"), lit(Value::Integer(1)))],
+            else_: Some(Box::new(parameter(2))),
+            span: Span::synthetic(),
+        };
+        assert!(expr_contains_parameter(&case));
+
+        let window = Expr::WindowFunctionCall {
+            name: "row_number".to_string(),
+            args: Vec::new(),
+            window: WindowSpec {
+                partition_by: vec![col("tenant_id")],
+                order_by: vec![WindowOrderItem {
+                    expr: parameter(3),
+                    ascending: true,
+                    nulls_first: false,
+                }],
+                frame: None,
+            },
+            span: Span::synthetic(),
+        };
+        assert!(expr_contains_parameter(&window));
+
+        let no_parameter = Expr::FunctionCall {
+            name: "lower".to_string(),
+            args: vec![col("name")],
+            span: Span::synthetic(),
+        };
+        assert!(!expr_contains_parameter(&no_parameter));
+    }
+
+    #[test]
+    fn expressions_lower_to_legacy_projections_with_aliases_preserved() {
+        assert!(matches!(
+            expr_to_projection(&col("*")),
+            Some(Projection::All)
+        ));
+
+        let param_projection = expr_to_projection(&parameter(7)).unwrap();
+        assert!(matches!(
+            param_projection,
+            Projection::Column(value) if value == format!("{PARAMETER_PROJECTION_PREFIX}7")
+        ));
+
+        let arithmetic = bin(BinOp::Add, col("age"), lit(Value::Integer(1)));
+        let projection = select_item_to_projection(&SelectItem::Expr {
+            expr: arithmetic,
+            alias: Some("age_plus_one".to_string()),
+        })
+        .unwrap();
+        assert!(matches!(
+            projection,
+            Projection::Function(ref name, ref args)
+                if name == "ADD:age_plus_one" && args.len() == 2
+        ));
+
+        let negated = Expr::UnaryOp {
+            op: UnaryOp::Neg,
+            operand: Box::new(col("age")),
+            span: Span::synthetic(),
+        };
+        assert!(matches!(
+            expr_to_projection(&negated),
+            Some(Projection::Function(name, args)) if name == "SUB" && args.len() == 2
+        ));
+
+        let cast = Expr::Cast {
+            inner: Box::new(col("age")),
+            target: reddb_types::types::DataType::Text,
+            span: Span::synthetic(),
+        };
+        assert!(matches!(
+            expr_to_projection(&cast),
+            Some(Projection::Function(name, args)) if name == "CAST" && args.len() == 2
+        ));
+
+        let window = Expr::WindowFunctionCall {
+            name: "sum".to_string(),
+            args: vec![col("amount")],
+            window: WindowSpec::default(),
+            span: Span::synthetic(),
+        };
+        assert!(matches!(
+            select_item_to_projection(&SelectItem::Expr {
+                expr: window,
+                alias: Some("running_sum".to_string()),
+            }),
+            Some(Projection::Window { name, alias, .. })
+                if name == "SUM" && alias.as_deref() == Some("running_sum")
+        ));
+    }
+
+    #[test]
+    fn projections_raise_back_to_select_items_and_expression_nodes() {
+        assert!(matches!(
+            projection_to_select_item(&Projection::All),
+            Some(SelectItem::Wildcard)
+        ));
+
+        let literal = projection_to_expr(&Projection::Column("LIT:42".to_string())).unwrap();
+        assert!(matches!(
+            literal,
+            (
+                Expr::Literal {
+                    value: Value::Integer(42),
+                    ..
+                },
+                None
+            )
+        ));
+
+        let float_literal = projection_to_expr(&Projection::Column("LIT:3.5".to_string())).unwrap();
+        assert!(matches!(
+            float_literal,
+            (Expr::Literal { value: Value::Float(v), .. }, None) if (v - 3.5).abs() < f64::EPSILON
+        ));
+
+        let null_literal = projection_to_expr(&Projection::Column("LIT:".to_string())).unwrap();
+        assert!(matches!(
+            null_literal,
+            (
+                Expr::Literal {
+                    value: Value::Null,
+                    ..
+                },
+                None
+            )
+        ));
+
+        let function = Projection::Function(
+            "LOWER:lower_name".to_string(),
+            vec![Projection::Field(field("name"), None)],
+        );
+        let (expr, alias) = projection_to_expr(&function).unwrap();
+        assert_eq!(alias.as_deref(), Some("lower_name"));
+        assert!(
+            matches!(expr, Expr::FunctionCall { name, args, .. } if name == "LOWER" && args.len() == 1)
+        );
+
+        let window = Projection::Window {
+            name: "ROW_NUMBER".to_string(),
+            args: Vec::new(),
+            window: Box::new(WindowSpec::default()),
+            alias: Some("rn".to_string()),
+        };
+        let (expr, alias) = projection_to_expr(&window).unwrap();
+        assert_eq!(alias.as_deref(), Some("rn"));
+        assert!(matches!(expr, Expr::WindowFunctionCall { name, .. } if name == "ROW_NUMBER"));
+    }
+
+    #[test]
+    fn filters_round_trip_through_expression_forms() {
+        let filters = vec![
+            Filter::Compare {
+                field: field("age"),
+                op: CompareOp::Ge,
+                value: Value::Integer(18),
+            },
+            Filter::CompareFields {
+                left: field("updated_at"),
+                op: CompareOp::Gt,
+                right: field("created_at"),
+            },
+            Filter::And(
+                Box::new(Filter::IsNotNull(field("email"))),
+                Box::new(Filter::Like {
+                    field: field("email"),
+                    pattern: "%@example.com".to_string(),
+                }),
+            ),
+            Filter::Or(
+                Box::new(Filter::StartsWith {
+                    field: field("path"),
+                    prefix: "infra/".to_string(),
+                }),
+                Box::new(Filter::EndsWith {
+                    field: field("path"),
+                    suffix: ".log".to_string(),
+                }),
+            ),
+            Filter::Not(Box::new(Filter::Contains {
+                field: field("body"),
+                substring: "secret".to_string(),
+            })),
+            Filter::IsNull(field("deleted_at")),
+            Filter::In {
+                field: field("status"),
+                values: vec![Value::text("open"), Value::text("pending")],
+            },
+            Filter::Between {
+                field: field("score"),
+                low: Value::Integer(10),
+                high: Value::Integer(20),
+            },
+        ];
+
+        for filter in filters {
+            let expr = filter_to_expr(&filter);
+            assert_eq!(expr_to_filter(&expr), filter);
+        }
+    }
+
+    #[test]
+    fn expression_filters_specialize_common_predicates_and_fallbacks() {
+        let flipped = expr_to_filter(&bin(BinOp::Lt, lit(Value::Integer(10)), col("age")));
+        assert_eq!(
+            flipped,
+            Filter::Compare {
+                field: field("age"),
+                op: CompareOp::Gt,
+                value: Value::Integer(10),
+            }
+        );
+
+        let field_to_field = expr_to_filter(&bin(BinOp::Eq, col("lhs"), col("rhs")));
+        assert_eq!(
+            field_to_field,
+            Filter::CompareFields {
+                left: field("lhs"),
+                op: CompareOp::Eq,
+                right: field("rhs"),
+            }
+        );
+
+        let arithmetic = expr_to_filter(&bin(BinOp::Add, col("age"), lit(Value::Integer(1))));
+        assert!(matches!(
+            arithmetic,
+            Filter::CompareExpr {
+                op: CompareOp::Eq,
+                rhs: Expr::Literal {
+                    value: Value::Boolean(true),
+                    ..
+                },
+                ..
+            }
+        ));
+
+        let negated_in = Expr::InList {
+            target: Box::new(col("status")),
+            values: vec![lit(Value::text("closed"))],
+            negated: true,
+            span: Span::synthetic(),
+        };
+        assert!(matches!(
+            expr_to_filter(&negated_in),
+            Filter::CompareExpr {
+                op: CompareOp::Eq,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn table_effective_helpers_prefer_canonical_expr_fields() {
+        let mut query = TableQuery::new("users");
+        query.select_items = vec![
+            SelectItem::Expr {
+                expr: col("name"),
+                alias: Some("display_name".to_string()),
+            },
+            SelectItem::Expr {
+                expr: bin(BinOp::Add, col("age"), lit(Value::Integer(1))),
+                alias: Some("next_age".to_string()),
+            },
+        ];
+        query.where_expr = Some(bin(BinOp::Eq, col("active"), lit(Value::Boolean(true))));
+        query.group_by_exprs = vec![col("name")];
+        query.group_by = vec!["legacy_group".to_string()];
+        query.having_expr = Some(bin(BinOp::Gt, col("age"), lit(Value::Integer(18))));
+
+        let projections = effective_table_projections(&query);
+        assert_eq!(projections.len(), 2);
+        assert!(matches!(
+            &projections[0],
+            Projection::Field(FieldRef::TableColumn { column, .. }, Some(alias))
+                if column == "name" && alias == "display_name"
+        ));
+
+        assert!(matches!(
+            effective_table_filter(&query),
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { column, .. },
+                op: CompareOp::Eq,
+                value: Value::Boolean(true)
+            }) if column == "active"
+        ));
+        assert_eq!(effective_table_group_by_exprs(&query), vec![col("name")]);
+        assert!(matches!(
+            effective_table_having_filter(&query),
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { column, .. },
+                op: CompareOp::Gt,
+                value: Value::Integer(18)
+            }) if column == "age"
+        ));
+
+        let mut legacy = TableQuery::new("users");
+        legacy.columns = vec![Projection::column("id")];
+        legacy.group_by = vec!["tenant_id".to_string()];
+        assert!(matches!(
+            effective_table_projections(&legacy).as_slice(),
+            [Projection::Column(column)] if column == "id"
+        ));
+        assert_eq!(
+            effective_table_group_by_exprs(&legacy),
+            vec![Expr::Column {
+                field: field("tenant_id"),
+                span: Span::synthetic(),
+            }]
+        );
+
+        let default_projection = TableQuery::new("users");
+        assert!(matches!(
+            effective_table_projections(&default_projection).as_slice(),
+            [Projection::All]
+        ));
+    }
+
+    #[test]
+    fn insert_update_delete_helpers_fold_canonical_expressions() {
+        let insert = InsertQuery {
+            table: "users".to_string(),
+            entity_type: crate::ast::InsertEntityType::Row,
+            columns: vec!["name".to_string(), "password".to_string()],
+            value_exprs: vec![vec![
+                lit(Value::text("ada")),
+                Expr::FunctionCall {
+                    name: "PASSWORD".to_string(),
+                    args: vec![lit(Value::text("pw"))],
+                    span: Span::synthetic(),
+                },
+            ]],
+            values: Vec::new(),
+            returning: None,
+            ttl_ms: None,
+            expires_at_ms: None,
+            with_metadata: Vec::new(),
+            auto_embed: None,
+            suppress_events: false,
+        };
+        let rows = effective_insert_rows(&insert).unwrap();
+        assert!(matches!(
+            rows.as_slice(),
+            [row] if row[0] == Value::text("ada")
+                && matches!(&row[1], Value::Password(value) if value == "@@plain@@pw")
+        ));
+
+        let update = UpdateQuery {
+            table: "users".to_string(),
+            target: crate::ast::UpdateTarget::Rows,
+            assignment_exprs: Vec::new(),
+            compound_assignment_ops: Vec::new(),
+            assignments: Vec::new(),
+            where_expr: Some(bin(BinOp::Eq, col("id"), lit(Value::Integer(1)))),
+            filter: None,
+            ttl_ms: None,
+            expires_at_ms: None,
+            with_metadata: Vec::new(),
+            returning: None,
+            order_by: vec![OrderByClause::asc(field("id"))],
+            limit: Some(1),
+            suppress_events: false,
+        };
+        assert!(matches!(
+            effective_update_filter(&update),
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { column, .. },
+                value: Value::Integer(1),
+                ..
+            }) if column == "id"
+        ));
+
+        let delete = DeleteQuery {
+            table: "users".to_string(),
+            where_expr: Some(Expr::IsNull {
+                operand: Box::new(col("deleted_at")),
+                negated: false,
+                span: Span::synthetic(),
+            }),
+            filter: None,
+            returning: None,
+            suppress_events: false,
+        };
+        assert!(matches!(
+            effective_delete_filter(&delete),
+            Some(Filter::IsNull(FieldRef::TableColumn { column, .. })) if column == "deleted_at"
+        ));
+    }
+
+    #[test]
+    fn fold_expr_to_value_handles_secret_constructors_unary_and_errors() {
+        assert_eq!(
+            fold_expr_to_value(Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                operand: Box::new(lit(Value::UnsignedInteger(7))),
+                span: Span::synthetic(),
+            })
+            .unwrap(),
+            Value::Integer(-7)
+        );
+        assert_eq!(
+            fold_expr_to_value(Expr::UnaryOp {
+                op: UnaryOp::Not,
+                operand: Box::new(lit(Value::Boolean(false))),
+                span: Span::synthetic(),
+            })
+            .unwrap(),
+            Value::Boolean(true)
+        );
+
+        let secret = fold_expr_to_value(Expr::FunctionCall {
+            name: "SECRET".to_string(),
+            args: vec![lit(Value::text("token"))],
+            span: Span::synthetic(),
+        })
+        .unwrap();
+        assert!(matches!(secret, Value::Secret(bytes) if bytes == b"@@plain@@token"));
+
+        let casted = fold_expr_to_value(Expr::Cast {
+            inner: Box::new(lit(Value::Integer(5))),
+            target: reddb_types::types::DataType::Text,
+            span: Span::synthetic(),
+        })
+        .unwrap();
+        assert_eq!(casted, Value::Integer(5));
+
+        assert!(fold_expr_to_value(bin(BinOp::Add, col("age"), lit(Value::Integer(1)))).is_err());
+        assert!(fold_expr_to_value(Expr::FunctionCall {
+            name: "PASSWORD".to_string(),
+            args: vec![lit(Value::Integer(1))],
+            span: Span::synthetic(),
+        })
+        .is_err());
+    }
+}
