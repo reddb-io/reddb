@@ -2528,6 +2528,7 @@ dependencies = [
  "proptest",
  "reddb-io-server",
  "reddb-io-types",
+ "serde_json",
  "sqllogictest",
 ]
 

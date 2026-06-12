@@ -12,11 +12,7 @@ use crate::ast::{
     CompareOp, FieldRef, Filter, InsertEntityType, InsertQuery, Projection, QueryExpr,
     QueueCommand, QueueSide, TableQuery,
 };
-// The AST→SQL renderer keeps server-runtime call-sites (`render_value_sql`
-// in `runtime::red_schema`), so it stays in `reddb-server`. This property
-// test reaches it through the crate's `reddb-server` dev-dependency (the same
-// edge the conformance harness uses); the published graph stays acyclic.
-use reddb_server::storage::query::renderer::render;
+use crate::renderer::render;
 use reddb_types::types::Value;
 
 // ---------------------------------------------------------------------------

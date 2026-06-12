@@ -29,6 +29,15 @@
 // keyword-import lists, and parse-loop bindings stay exactly as authored
 // (matching the precedent set by `reddb-io-types`, ADR 0052).
 #![allow(dead_code, unused_imports, unused_variables)]
+// The parser dispatch carries deep recursive-descent signatures the source
+// crate already opted out of linting; mirror that subset so the move stays a
+// pure relocation rather than a refactor.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::should_implement_trait,
+    clippy::new_without_default
+)]
 
 pub mod ast;
 pub mod conformance;
@@ -36,6 +45,7 @@ pub mod filter_optimizer;
 pub mod lexer;
 pub mod limits;
 pub mod parser;
+pub mod renderer;
 pub mod sql;
 pub mod sql_lowering;
 
