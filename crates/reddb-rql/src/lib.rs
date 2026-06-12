@@ -23,5 +23,9 @@
 //! sqllogictest comparator sees. [`conformance`] owns that rendering.
 
 pub mod conformance;
+pub mod lexer;
+pub mod limits;
 
 pub use conformance::{render_cell, CellType};
+pub use lexer::{Lexer, LexerError, Position, Spanned, Token};
+pub use limits::ParserLimits;
