@@ -30,10 +30,6 @@ NULL
 top
 
 # Simple CASE compares the selector against each WHEN value.
-# DIVERGENCE: RedDB's parser only accepts the searched `CASE WHEN <cond>` form;
-# the simple `CASE <expr> WHEN <value>` form errors ("CASE must have at least
-# one WHEN branch"). Tracked under PRD #1098; SQLite-oracle value kept.
-skipif reddb-server
 query T rowsort
 SELECT CASE id WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'many' END FROM scored
 ----
