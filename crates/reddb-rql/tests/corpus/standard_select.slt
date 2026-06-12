@@ -1,0 +1,38 @@
+# RedDB RQL conformance — standard-SQL slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (the canonical `CREATE / INSERT / SELECT` form). This slice is the S1 tracer
+# bullet for ADR 0053: one real text -> result conformance run, green
+# end-to-end against the current in-server engine.
+
+statement ok
+CREATE TABLE t1 (id INTEGER, name TEXT)
+
+statement ok
+INSERT INTO t1 (id, name) VALUES (1, 'Alice')
+
+statement ok
+INSERT INTO t1 (id, name) VALUES (2, 'Bob')
+
+statement ok
+INSERT INTO t1 (id, name) VALUES (3, 'Carol')
+
+# Full projection, deterministic order.
+query IT rowsort
+SELECT id, name FROM t1
+----
+1 Alice
+2 Bob
+3 Carol
+
+# Single-column projection with an equality filter.
+query I
+SELECT id FROM t1 WHERE name = 'Bob'
+----
+2
+
+# Text projection with a filter.
+query T
+SELECT name FROM t1 WHERE id = 3
+----
+Carol
