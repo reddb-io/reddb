@@ -325,6 +325,12 @@ impl<'a> Parser<'a> {
     fn parse_select_query_inner(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Select)?;
 
+        // `SELECT DISTINCT <projection>` — the projection-level quantifier
+        // (issue #1126). Detected immediately after SELECT, before the
+        // projection list, so it never collides with the aggregate-argument
+        // form `COUNT(DISTINCT x)`, which is parsed inside the call args.
+        let distinct = self.consume(&Token::Distinct)?;
+
         // Parse column list
         let (select_items, columns) = self.parse_select_items_and_projections()?;
 
@@ -465,6 +471,7 @@ impl<'a> Parser<'a> {
             expand: None,
             as_of: None,
             sessionize: None,
+            distinct,
         };
 
         if self.is_join_keyword() {
