@@ -473,23 +473,11 @@ impl IndexSelectionPass {
     }
 }
 
-/// Hint about which index method to prefer for a query
-#[derive(Debug, Clone)]
-pub struct IndexHint {
-    /// Preferred index method
-    pub method: IndexHintMethod,
-    /// Column the index applies to
-    pub column: String,
-}
-
-/// Which index method the optimizer recommends
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexHintMethod {
-    Hash,
-    BTree,
-    Bitmap,
-    Spatial,
-}
+// `IndexHint`/`IndexHintMethod` re-homed to the neutral keystone crate (ADR
+// 0053, RQL Phase 2 S4b) so the canonical SQL AST (`ExpandOptions.index_hint`)
+// resolves them without a `reddb-server` edge. This shim keeps the optimizer's
+// existing references valid; the passes that build hints stay here.
+pub use reddb_types::index_hint::{IndexHint, IndexHintMethod};
 
 /// Push LIMIT down through operations
 struct LimitPushdownPass;
