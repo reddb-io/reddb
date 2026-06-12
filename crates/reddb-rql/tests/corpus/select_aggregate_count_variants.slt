@@ -1,0 +1,53 @@
+# RedDB RQL conformance — standard-SQL COUNT / MIN / MAX variant slice.
+#
+# Shape and statements are sourced from the public SQLite sqllogictest corpus
+# (COUNT(*) vs COUNT(<column>) and their NULL-skipping difference, COUNT over a
+# DISTINCT argument, and MIN/MAX over a text column). Truth is the SQLite
+# oracle: COUNT(<column>) and MIN/MAX skip NULLs, COUNT(*) counts every row
+# (ADR 0053).
+
+statement ok
+CREATE TABLE t (g TEXT, v INTEGER)
+
+statement ok
+INSERT INTO t (g, v) VALUES ('a', 10), ('a', NULL), ('b', 20), ('b', 30), ('b', NULL)
+
+# COUNT(*) counts every row, NULLs included.
+query I nosort
+SELECT COUNT(*) FROM t
+----
+5
+
+# COUNT(<column>) skips the NULL values.
+query I nosort
+SELECT COUNT(v) FROM t
+----
+3
+
+# COUNT(DISTINCT <column>) counts distinct non-NULL values.
+query I nosort
+SELECT COUNT(DISTINCT v) FROM t
+----
+3
+
+# MIN / MAX skip NULLs.
+query I nosort
+SELECT MIN(v) FROM t
+----
+10
+
+query I nosort
+SELECT MAX(v) FROM t
+----
+30
+
+# MIN / MAX over a text column compare lexicographically.
+query T nosort
+SELECT MIN(g) FROM t
+----
+a
+
+query T nosort
+SELECT MAX(g) FROM t
+----
+b
