@@ -1,0 +1,31 @@
+[package]
+name = "reddb-io-rql"
+version = "1.0.0"
+edition = "2021"
+authors = ["RedDB.io <hello@reddb.io>"]
+description = "RedDB Query Language (RQL) front-end + conformance authority (ADR 0053). Owns the sqllogictest-format conformance suite whose truth comes from the public SQLite corpus; depends only on reddb-io-types."
+license = "AGPL-3.0-only"
+homepage = "https://github.com/reddb-io/reddb"
+repository = "https://github.com/reddb-io/reddb"
+documentation = "https://docs.rs/reddb-io-rql"
+keywords = ["database", "sql", "rql", "conformance", "sqllogictest"]
+categories = ["database-implementations", "parser-implementations"]
+
+[lib]
+name = "reddb_rql"
+path = "src/lib.rs"
+
+# The crate graph stays acyclic and shallow: the rql front-end depends only on
+# the neutral keystone type vocabulary (ADR 0052) and nothing else of the
+# workspace.
+[dependencies]
+reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
+
+# The conformance harness runs the corpus end-to-end against the *current
+# in-server engine* (ADR 0053: executors stay in reddb-server during the
+# extraction). It reaches the engine only from the integration-test target, so
+# `reddb-server` and the `sqllogictest` harness are dev-only — the published
+# crate graph keeps `reddb-io-rql -> reddb-io-types` as its sole edge.
+[dev-dependencies]
+reddb-server = { package = "reddb-io-server", version = "1.10", path = "../reddb-server" }
+sqllogictest = "0.29"
