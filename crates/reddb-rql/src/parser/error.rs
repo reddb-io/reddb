@@ -2,7 +2,7 @@
 
 use std::fmt::{self, Write};
 
-use super::super::lexer::{LexerError, LexerLimitHit, Position, Token};
+use crate::lexer::{LexerError, LexerLimitHit, Position, Token};
 
 /// Parse error
 #[derive(Debug, Clone)]

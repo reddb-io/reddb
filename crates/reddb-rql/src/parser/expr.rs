@@ -44,12 +44,12 @@
 //! any infix operator whose precedence is ≥ `min`, recursing with
 //! `prec + 1` on the right-hand side for left-associativity.
 
-use super::super::ast::{BinOp, Expr, ExprSubquery, FieldRef, Span, UnaryOp};
-use super::super::lexer::Token;
+use crate::ast::{BinOp, Expr, ExprSubquery, FieldRef, Span, UnaryOp};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 use super::PlaceholderMode;
-use crate::storage::schema::{DataType, Value};
+use reddb_types::types::{DataType, Value};
 
 fn is_duration_unit(unit: &str) -> bool {
     matches!(
@@ -500,7 +500,7 @@ impl<'a> Parser<'a> {
 
     fn parse_function_call_expr_with_name(
         &mut self,
-        start: crate::storage::query::lexer::Position,
+        start: crate::lexer::Position,
         function_name: String,
     ) -> Result<Expr, ParseError> {
         let call = self.parse_function_call_expr_with_name_inner(start, function_name)?;
@@ -517,7 +517,7 @@ impl<'a> Parser<'a> {
 
     fn parse_function_call_expr_with_name_inner(
         &mut self,
-        start: crate::storage::query::lexer::Position,
+        start: crate::lexer::Position,
         function_name: String,
     ) -> Result<Expr, ParseError> {
         self.expect(Token::LParen)?;
@@ -662,7 +662,7 @@ impl<'a> Parser<'a> {
     /// dynamic defaults still work.
     fn parse_config_kv_arg(
         &mut self,
-        start: crate::storage::query::lexer::Position,
+        start: crate::lexer::Position,
     ) -> Result<Expr, ParseError> {
         // Literals, placeholders and parenthesised sub-expressions are
         // real expressions (dynamic defaults); everything else that can
@@ -705,7 +705,7 @@ impl<'a> Parser<'a> {
     /// - Function names that are neither window-only nor aggregates.
     fn lift_to_window_call(
         &mut self,
-        start: crate::storage::query::lexer::Position,
+        start: crate::lexer::Position,
         call: Expr,
     ) -> Result<Expr, ParseError> {
         let (name, args) = match call {
@@ -743,11 +743,11 @@ impl<'a> Parser<'a> {
 
     /// Parse the `OVER ( [PARTITION BY ...] [ORDER BY ...] [frame] )`
     /// clause. The leading `OVER` keyword is consumed here.
-    fn parse_over_clause(&mut self) -> Result<crate::storage::query::ast::WindowSpec, ParseError> {
+    fn parse_over_clause(&mut self) -> Result<crate::ast::WindowSpec, ParseError> {
         self.expect(Token::Over)?;
         self.expect(Token::LParen)?;
 
-        let mut spec = crate::storage::query::ast::WindowSpec::default();
+        let mut spec = crate::ast::WindowSpec::default();
 
         if self.consume(&Token::Partition)? {
             self.expect(Token::By)?;
@@ -785,7 +785,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 spec.order_by
-                    .push(crate::storage::query::ast::WindowOrderItem {
+                    .push(crate::ast::WindowOrderItem {
                         expr,
                         ascending,
                         nulls_first,
@@ -806,11 +806,11 @@ impl<'a> Parser<'a> {
 
     fn parse_window_frame(
         &mut self,
-    ) -> Result<crate::storage::query::ast::WindowFrame, ParseError> {
+    ) -> Result<crate::ast::WindowFrame, ParseError> {
         let unit = if self.consume(&Token::Rows)? {
-            crate::storage::query::ast::WindowFrameUnit::Rows
+            crate::ast::WindowFrameUnit::Rows
         } else if self.consume(&Token::Range)? {
-            crate::storage::query::ast::WindowFrameUnit::Range
+            crate::ast::WindowFrameUnit::Range
         } else {
             return Err(ParseError::new(
                 "expected ROWS or RANGE in window frame".to_string(),
@@ -822,14 +822,14 @@ impl<'a> Parser<'a> {
             let start = self.parse_window_frame_bound()?;
             self.expect(Token::And)?;
             let end = self.parse_window_frame_bound()?;
-            Ok(crate::storage::query::ast::WindowFrame {
+            Ok(crate::ast::WindowFrame {
                 unit,
                 start,
                 end: Some(end),
             })
         } else {
             let start = self.parse_window_frame_bound()?;
-            Ok(crate::storage::query::ast::WindowFrame {
+            Ok(crate::ast::WindowFrame {
                 unit,
                 start,
                 end: None,
@@ -839,8 +839,8 @@ impl<'a> Parser<'a> {
 
     fn parse_window_frame_bound(
         &mut self,
-    ) -> Result<crate::storage::query::ast::WindowFrameBound, ParseError> {
-        use crate::storage::query::ast::WindowFrameBound;
+    ) -> Result<crate::ast::WindowFrameBound, ParseError> {
+        use crate::ast::WindowFrameBound;
         if self.consume(&Token::Unbounded)? {
             if self.consume(&Token::Preceding)? {
                 return Ok(WindowFrameBound::UnboundedPreceding);
@@ -875,7 +875,7 @@ impl<'a> Parser<'a> {
     /// Assumes the caller has already peeked `CASE`.
     fn parse_case_expr(
         &mut self,
-        start: crate::storage::query::lexer::Position,
+        start: crate::lexer::Position,
     ) -> Result<Expr, ParseError> {
         self.advance()?; // consume CASE
         let mut branches: Vec<(Expr, Expr)> = Vec::new();
@@ -1131,7 +1131,7 @@ impl<'a> Parser<'a> {
     /// synthetic case by falling back to the current parser cursor,
     /// which is good enough for the Pratt climb since the caller just
     /// parsed the atom.
-    fn span_start_of(&self, expr: &Expr) -> crate::storage::query::lexer::Position {
+    fn span_start_of(&self, expr: &Expr) -> crate::lexer::Position {
         let s = expr.span();
         if s.is_synthetic() {
             self.position()
@@ -1142,7 +1142,7 @@ impl<'a> Parser<'a> {
 
     /// Return the end position of an expression's span — same
     /// synthetic fallback as `span_start_of`.
-    fn span_end_of(&self, expr: &Expr) -> crate::storage::query::lexer::Position {
+    fn span_end_of(&self, expr: &Expr) -> crate::lexer::Position {
         let s = expr.span();
         if s.is_synthetic() {
             self.position()
@@ -1160,7 +1160,7 @@ fn _expr_module_used(_: Expr) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::FieldRef;
+    use crate::ast::FieldRef;
 
     fn parse(input: &str) -> Expr {
         let mut parser = Parser::new(input).expect("lexer init");
@@ -1695,15 +1695,15 @@ mod tests {
         let frame = window.frame.expect("frame present");
         assert!(matches!(
             frame.unit,
-            crate::storage::query::ast::WindowFrameUnit::Rows
+            crate::ast::WindowFrameUnit::Rows
         ));
         assert!(matches!(
             frame.start,
-            crate::storage::query::ast::WindowFrameBound::Preceding(_)
+            crate::ast::WindowFrameBound::Preceding(_)
         ));
         assert!(matches!(
             frame.end,
-            Some(crate::storage::query::ast::WindowFrameBound::CurrentRow)
+            Some(crate::ast::WindowFrameBound::CurrentRow)
         ));
     }
 
@@ -1730,15 +1730,15 @@ mod tests {
         let frame = window.frame.expect("frame present");
         assert!(matches!(
             frame.unit,
-            crate::storage::query::ast::WindowFrameUnit::Range
+            crate::ast::WindowFrameUnit::Range
         ));
         assert!(matches!(
             frame.start,
-            crate::storage::query::ast::WindowFrameBound::UnboundedPreceding
+            crate::ast::WindowFrameBound::UnboundedPreceding
         ));
         assert!(matches!(
             frame.end,
-            Some(crate::storage::query::ast::WindowFrameBound::UnboundedFollowing)
+            Some(crate::ast::WindowFrameBound::UnboundedFollowing)
         ));
     }
 

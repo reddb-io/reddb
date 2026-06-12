@@ -1,13 +1,13 @@
 //! Join query parsing (FROM ... JOIN GRAPH/PATH/TABLE/VECTOR ...)
 
-use super::super::ast::{
+use crate::ast::{
     FieldRef, GraphQuery, JoinCondition, JoinQuery, JoinType, Projection, QueryExpr, SelectItem,
     TableQuery,
 };
-use super::super::lexer::Token;
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::query::sql_lowering::{filter_to_expr, projection_to_select_item};
+use crate::sql_lowering::{filter_to_expr, projection_to_select_item};
 impl<'a> Parser<'a> {
     /// Parse FROM ... JOIN (GRAPH / PATH / TABLE / VECTOR / HYBRID) query
     pub fn parse_from_query(&mut self) -> Result<QueryExpr, ParseError> {
@@ -366,12 +366,12 @@ impl<'a> Parser<'a> {
         &mut self,
     ) -> Result<
         (
-            Option<super::super::ast::Filter>,
-            Vec<super::super::ast::OrderByClause>,
+            Option<crate::ast::Filter>,
+            Vec<crate::ast::OrderByClause>,
             Option<u64>,
             Option<u64>,
             Vec<SelectItem>,
-            Vec<super::super::ast::Projection>,
+            Vec<crate::ast::Projection>,
         ),
         ParseError,
     > {

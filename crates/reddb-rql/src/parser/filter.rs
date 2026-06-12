@@ -1,10 +1,10 @@
 //! Filter parsing for WHERE clauses
 
-use super::super::ast::{BinOp, CompareOp, Expr, FieldRef, Filter, Span, UnaryOp};
-use super::super::lexer::Token;
+use crate::ast::{BinOp, CompareOp, Expr, FieldRef, Filter, Span, UnaryOp};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::schema::Value;
+use reddb_types::types::Value;
 
 fn token_can_start_field_ref(token: &Token) -> bool {
     !matches!(
@@ -211,7 +211,7 @@ impl<'a> Parser<'a> {
                         lhs: Expr::InList {
                             target: Box::new(lhs),
                             values: vec![Expr::Subquery {
-                                query: crate::storage::query::ast::ExprSubquery {
+                                query: crate::ast::ExprSubquery {
                                     query: Box::new(query),
                                 },
                                 span: Span::synthetic(),

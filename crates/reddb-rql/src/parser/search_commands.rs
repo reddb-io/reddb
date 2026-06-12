@@ -1,10 +1,10 @@
 //! Search Command Parser: SEARCH SIMILAR | TEXT | HYBRID
 
-use super::super::ast::{QueryExpr, SearchCommand};
-use super::super::lexer::Token;
+use crate::ast::{QueryExpr, SearchCommand};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::schema::Value;
+use reddb_types::types::Value;
 
 impl<'a> Parser<'a> {
     /// Parse: SEARCH subcommand ...

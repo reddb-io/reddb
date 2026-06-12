@@ -1,7 +1,7 @@
 //! Graph Command Parser: GRAPH NEIGHBORHOOD | SHORTEST_PATH | TRAVERSE | CENTRALITY | ...
 
-use super::super::ast::{GraphCommand, GraphCommandOrderBy, QueryExpr};
-use super::super::lexer::Token;
+use crate::ast::{GraphCommand, GraphCommandOrderBy, QueryExpr};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 

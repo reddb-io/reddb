@@ -19,16 +19,16 @@
 //! migrations) construct a custom [`ParserLimits`] and pass it to
 //! [`Parser::with_limits`](super::Parser::with_limits).
 
-/// Hard limits enforced by the front-end — re-export shim.
+/// Hard limits enforced by the front-end — re-export.
 ///
-/// `ParserLimits` was re-homed into the `reddb-io-rql` front-end crate
-/// (#1102, ADR 0053) alongside the lexer that consumes its identifier and
-/// input-byte caps. This re-export preserves the historical
-/// `parser::ParserLimits` / `parser::limits::ParserLimits` paths so every
-/// call-site (and the `tests/support/parser_hardening` harness) keeps
-/// resolving unchanged. The recursion-depth machinery below stays in the
-/// server: it is parser-internal and the parser itself has not moved.
-pub use reddb_rql::limits::ParserLimits;
+/// `ParserLimits` lives at the crate root ([`crate::limits`]), re-homed there
+/// with the lexer that consumes its identifier and input-byte caps (#1102,
+/// ADR 0053). This re-export preserves the historical `parser::ParserLimits` /
+/// `parser::limits::ParserLimits` paths so every call-site (and the
+/// `tests/support/parser_hardening` harness) keeps resolving unchanged. The
+/// recursion-depth machinery below is parser-internal and moves with the
+/// parser into this crate (#1103).
+pub use crate::limits::ParserLimits;
 
 /// Internal recursion-depth tracker. RAII-style: a guard
 /// [`DepthGuard`] increments on construction and decrements on

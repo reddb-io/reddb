@@ -1,15 +1,15 @@
 //! Table query parsing (SELECT ... FROM ...)
 
-use super::super::ast::{
+use crate::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, QueryExpr,
     QueueSelectQuery, SelectItem, Span, TableQuery, UnaryOp,
 };
-use super::super::lexer::Token;
+use crate::lexer::Token;
 use super::error::ParseError;
-use crate::storage::query::sql_lowering::{
+use crate::sql_lowering::{
     expr_to_projection, filter_to_expr, select_item_to_projection,
 };
-use crate::storage::schema::Value;
+use reddb_types::types::Value;
 
 fn is_scalar_function(name: &str) -> bool {
     matches!(
@@ -233,8 +233,8 @@ impl<'a> Parser<'a> {
         args: Vec<String>,
         named_args: Vec<(String, f64)>,
         subquery_args: Vec<(String, QueryExpr)>,
-    ) -> Result<crate::storage::query::ast::TableSource, ParseError> {
-        use crate::storage::query::ast::TableSource;
+    ) -> Result<crate::ast::TableSource, ParseError> {
+        use crate::ast::TableSource;
 
         if subquery_args.is_empty() {
             return Ok(TableSource::Function {
@@ -336,7 +336,7 @@ impl<'a> Parser<'a> {
         // Optional structured FROM source. Currently populated only for
         // table-valued function calls such as `components(g)` (issue #795);
         // plain tables leave this `None` and rely on the legacy `table` slot.
-        let mut table_source: Option<crate::storage::query::ast::TableSource> = None;
+        let mut table_source: Option<crate::ast::TableSource> = None;
         let table = if has_from {
             if self.consume(&Token::Queue)? {
                 let queue = self.expect_ident()?;
@@ -502,8 +502,8 @@ impl<'a> Parser<'a> {
 
     fn parse_sessionize_clause(
         &mut self,
-    ) -> Result<crate::storage::query::ast::SessionizeClause, ParseError> {
-        use crate::storage::query::ast::SessionizeClause;
+    ) -> Result<crate::ast::SessionizeClause, ParseError> {
+        use crate::ast::SessionizeClause;
 
         let mut clause = SessionizeClause::default();
 
@@ -700,7 +700,7 @@ fn queue_projection_columns(columns: &[Projection]) -> Result<Vec<String>, Parse
                     format!(
                         "unsupported SELECT FROM QUEUE projection {other:?}; use `SELECT *` or bare column names, or use queue verbs (PUSH, POP, PEEK, LEN, ACK, NACK, …) for queue operations"
                     ),
-                    crate::storage::query::lexer::Position::default(),
+                    crate::lexer::Position::default(),
                 ));
             }
         }
@@ -785,8 +785,8 @@ impl<'a> Parser<'a> {
     ///   AS OF TAG      '<name>'
     ///   AS OF TIMESTAMP <integer-ms>
     ///   AS OF SNAPSHOT  <xid>
-    fn parse_as_of_spec(&mut self) -> Result<crate::storage::query::ast::AsOfClause, ParseError> {
-        use crate::storage::query::ast::AsOfClause;
+    fn parse_as_of_spec(&mut self) -> Result<crate::ast::AsOfClause, ParseError> {
+        use crate::ast::AsOfClause;
 
         // Keyword — accept both tokenized forms (e.g. Token::Commit
         // if present) and bare identifiers for flexibility.
@@ -847,8 +847,8 @@ impl<'a> Parser<'a> {
     /// Parse EXPAND options: GRAPH [DEPTH n], CROSS_REFS, ALL
     fn parse_expand_options(
         &mut self,
-    ) -> Result<crate::storage::query::ast::ExpandOptions, ParseError> {
-        use crate::storage::query::ast::ExpandOptions;
+    ) -> Result<crate::ast::ExpandOptions, ParseError> {
+        use crate::ast::ExpandOptions;
         let mut opts = ExpandOptions::default();
 
         loop {
@@ -923,7 +923,7 @@ impl<'a> Parser<'a> {
     /// populate `field` with a synthetic marker that runtime code
     /// never touches.
     pub fn parse_order_by_list(&mut self) -> Result<Vec<OrderByClause>, ParseError> {
-        use super::super::ast::Expr as AstExpr;
+        use crate::ast::Expr as AstExpr;
         let mut clauses = Vec::new();
         loop {
             let parsed = self.parse_expr()?;
@@ -1106,10 +1106,10 @@ fn render_group_by_function_arg(arg: &Projection) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::{AsOfClause, BinOp, CompareOp, ExpandOptions, TableSource};
+    use crate::ast::{AsOfClause, BinOp, CompareOp, ExpandOptions, TableSource};
 
     fn parse_table(sql: &str) -> TableQuery {
-        let parsed = super::super::parse(sql).unwrap().query;
+        let parsed = crate::parser::parse(sql).unwrap().query;
         let QueryExpr::Table(table) = parsed else {
             panic!("expected table query");
         };
@@ -1411,7 +1411,7 @@ mod tests {
 
         let cast = Expr::Cast {
             inner: Box::new(count.clone()),
-            target: crate::storage::schema::DataType::Integer,
+            target: reddb_types::types::DataType::Integer,
             span: Span::synthetic(),
         };
         assert!(contains_nested_aggregate(&cast));
@@ -1444,7 +1444,7 @@ mod tests {
             span: Span::synthetic()
         }));
 
-        assert!(super::super::parse("SELECT SUM(COUNT(id)) FROM t").is_err());
+        assert!(crate::parser::parse("SELECT SUM(COUNT(id)) FROM t").is_err());
     }
 
     #[test]
@@ -1501,8 +1501,8 @@ mod tests {
             })
         ));
 
-        assert!(super::super::parse("SELECT * FROM users AS OF SNAPSHOT -1").is_err());
-        assert!(super::super::parse("SELECT * FROM users AS OF UNKNOWN 'x'").is_err());
+        assert!(crate::parser::parse("SELECT * FROM users AS OF SNAPSHOT -1").is_err());
+        assert!(crate::parser::parse("SELECT * FROM users AS OF UNKNOWN 'x'").is_err());
     }
 
     #[test]
@@ -1534,7 +1534,7 @@ mod tests {
 
     #[test]
     fn from_subquery_source_is_preserved() {
-        let parsed = super::super::parse("FROM (SELECT id FROM users) AS u RETURN u.id")
+        let parsed = crate::parser::parse("FROM (SELECT id FROM users) AS u RETURN u.id")
             .unwrap()
             .query;
         let QueryExpr::Table(table) = parsed else {
@@ -1545,7 +1545,7 @@ mod tests {
         assert!(matches!(table.source, Some(TableSource::Subquery(_))));
         assert_eq!(table.select_items.len(), 1);
 
-        assert!(super::super::parse("FROM (MATCH (n) RETURN n) AS g").is_err());
+        assert!(crate::parser::parse("FROM (MATCH (n) RETURN n) AS g").is_err());
     }
 
     // ── Table-valued function arguments (issues #795 / #796) ──
@@ -1643,24 +1643,24 @@ mod tests {
     #[test]
     fn tvf_inline_form_rejects_malformed_shapes() {
         // A positional graph argument cannot mix with inline subqueries.
-        assert!(super::super::parse(
+        assert!(crate::parser::parse(
             "SELECT * FROM components(g, nodes => (SELECT id FROM n), edges => (SELECT a, b FROM e))"
         )
         .is_err());
         // The inline form requires both `nodes` and `edges`.
         assert!(
-            super::super::parse("SELECT * FROM components(nodes => (SELECT id FROM n))").is_err()
+            crate::parser::parse("SELECT * FROM components(nodes => (SELECT id FROM n))").is_err()
         );
         assert!(
-            super::super::parse("SELECT * FROM components(edges => (SELECT a, b FROM e))").is_err()
+            crate::parser::parse("SELECT * FROM components(edges => (SELECT a, b FROM e))").is_err()
         );
         // An unknown subquery key is rejected.
-        assert!(super::super::parse(
+        assert!(crate::parser::parse(
             "SELECT * FROM components(nodes => (SELECT id FROM n), verts => (SELECT a, b FROM e))"
         )
         .is_err());
         // A `=>` followed by a non-SELECT parenthesised group is rejected.
-        assert!(super::super::parse(
+        assert!(crate::parser::parse(
             "SELECT * FROM components(nodes => (1 + 2), edges => (SELECT a, b FROM e))"
         )
         .is_err());
@@ -1758,11 +1758,11 @@ mod tests {
     #[test]
     fn tvf_named_arg_grammar_rejects_malformed_forms() {
         // A positional argument after a named argument is rejected.
-        assert!(super::super::parse("SELECT * FROM louvain(g, resolution => 0.5, h)").is_err());
+        assert!(crate::parser::parse("SELECT * FROM louvain(g, resolution => 0.5, h)").is_err());
         // `=>` must be followed by a number.
-        assert!(super::super::parse("SELECT * FROM louvain(g, resolution => foo)").is_err());
+        assert!(crate::parser::parse("SELECT * FROM louvain(g, resolution => foo)").is_err());
         // Zero-argument form is still rejected (issue #795 invariant).
-        assert!(super::super::parse("SELECT * FROM louvain()").is_err());
+        assert!(crate::parser::parse("SELECT * FROM louvain()").is_err());
     }
 
     // ── SESSIONIZE operator (issue #585 slice 8) ──

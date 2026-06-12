@@ -29,3 +29,7 @@ reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-ty
 [dev-dependencies]
 reddb-server = { package = "reddb-io-server", version = "1.10", path = "../reddb-server" }
 sqllogictest = "0.29"
+# Parser property round-trip tests (issue #87) moved in with the parser family
+# (#1103); they reach the server-resident AST→SQL renderer via the
+# `reddb-server` dev-dependency above.
+proptest = "1"

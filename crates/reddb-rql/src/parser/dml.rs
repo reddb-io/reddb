@@ -1,14 +1,14 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
-use super::super::ast::{
+use crate::ast::{
     AskCacheClause, AskQuery, BinOp, DeleteQuery, Expr, FieldRef, Filter, InsertEntityType,
     InsertQuery, OrderByClause, QueryExpr, ReturningItem, UpdateQuery, UpdateTarget,
 };
-use super::super::lexer::Token;
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::query::sql_lowering::{filter_to_expr, fold_expr_to_value};
-use crate::storage::schema::Value;
+use crate::sql_lowering::{filter_to_expr, fold_expr_to_value};
+use reddb_types::types::Value;
 
 /// DoS guard: maximum JSON nesting depth accepted by the parser.
 /// Mirrors typical web-server JSON limits and bails out before stack
@@ -19,9 +19,9 @@ pub(crate) const JSON_LITERAL_MAX_DEPTH: u32 = 128;
 /// `JSON_LITERAL_MAX_DEPTH`. Iterative to avoid the very stack
 /// overflow we're trying to prevent.
 pub(crate) fn json_literal_depth_check(
-    value: &crate::utils::json::JsonValue,
+    value: &reddb_types::utils::json::JsonValue,
 ) -> Result<(), String> {
-    use crate::utils::json::JsonValue;
+    use reddb_types::utils::json::JsonValue;
     let mut stack: Vec<(&JsonValue, u32)> = vec![(value, 1)];
     while let Some((node, depth)) = stack.pop() {
         if depth > JSON_LITERAL_MAX_DEPTH {
@@ -122,7 +122,7 @@ impl<'a> Parser<'a> {
                 .map(|expr| match fold_expr_to_value(expr.clone()) {
                     Ok(value) => Ok(value),
                     Err(msg) => {
-                        if crate::storage::query::user_params::expr_contains_parameter(expr) {
+                        if crate::sql_lowering::expr_contains_parameter(expr) {
                             Ok(Value::Null)
                         } else {
                             Err(msg)
@@ -209,7 +209,7 @@ impl<'a> Parser<'a> {
             Option<u64>,
             Option<u64>,
             Vec<(String, Value)>,
-            Option<crate::storage::query::ast::AutoEmbedConfig>,
+            Option<crate::ast::AutoEmbedConfig>,
         ),
         ParseError,
     > {
@@ -253,7 +253,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                auto_embed = Some(crate::storage::query::ast::AutoEmbedConfig {
+                auto_embed = Some(crate::ast::AutoEmbedConfig {
                     fields,
                     provider,
                     model,
@@ -751,7 +751,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(Token::Comma)?;
                 let (collection, key) =
-                    self.parse_kv_key(crate::catalog::CollectionModel::Vault)?;
+                    self.parse_kv_key(reddb_types::catalog::CollectionModel::Vault)?;
                 self.expect(Token::RParen)?;
                 return Ok(secret_ref_value(&store, &collection, &key));
             }
@@ -769,7 +769,7 @@ impl<'a> Parser<'a> {
                 // canonical JsonValue then re-encode via `to_vec` so
                 // the on-disk bytes match the quoted form.
                 self.advance()?;
-                let json_value = crate::utils::json::parse_json(&raw).map_err(|err| {
+                let json_value = reddb_types::utils::json::parse_json(&raw).map_err(|err| {
                     ParseError::new(
                         // F-05: render the underlying parse-error string
                         // via `{:?}` so any user fragment serde echoed
@@ -782,8 +782,8 @@ impl<'a> Parser<'a> {
                 })?;
                 json_literal_depth_check(&json_value)
                     .map_err(|err| ParseError::new(err, self.position()))?;
-                let canonical = crate::serde_json::Value::from(json_value);
-                let bytes = crate::json::to_vec(&canonical).map_err(|err| {
+                let canonical = reddb_types::serde_json::Value::from(json_value);
+                let bytes = reddb_types::json::to_vec(&canonical).map_err(|err| {
                     ParseError::new(
                         // F-05: escape the encoder error via `{:?}` so any
                         // user fragment it carries cannot smuggle control
@@ -845,26 +845,26 @@ impl<'a> Parser<'a> {
                     Ok(Value::Vector(floats))
                 } else {
                     // Encode as JSON bytes
-                    let json_arr: Vec<crate::json::Value> = items
+                    let json_arr: Vec<reddb_types::json::Value> = items
                         .iter()
                         .map(|v| match v {
-                            Value::Null => crate::json::Value::Null,
-                            Value::Boolean(b) => crate::json::Value::Bool(*b),
-                            Value::Integer(i) => crate::json::Value::Number(*i as f64),
-                            Value::Float(f) => crate::json::Value::Number(*f),
-                            Value::Text(s) => crate::json::Value::String(s.to_string()),
-                            _ => crate::json::Value::Null,
+                            Value::Null => reddb_types::json::Value::Null,
+                            Value::Boolean(b) => reddb_types::json::Value::Bool(*b),
+                            Value::Integer(i) => reddb_types::json::Value::Number(*i as f64),
+                            Value::Float(f) => reddb_types::json::Value::Number(*f),
+                            Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
+                            _ => reddb_types::json::Value::Null,
                         })
                         .collect();
-                    let json_val = crate::json::Value::Array(json_arr);
-                    let bytes = crate::json::to_vec(&json_val).unwrap_or_default();
+                    let json_val = reddb_types::json::Value::Array(json_arr);
+                    let bytes = reddb_types::json::to_vec(&json_val).unwrap_or_default();
                     Ok(Value::Json(bytes))
                 }
             }
             Token::LBrace => {
                 // Parse JSON object literal {key: value, ...}
                 self.advance()?; // consume '{'
-                let mut map = crate::json::Map::new();
+                let mut map = reddb_types::json::Map::new();
                 if !self.check(&Token::RBrace) {
                     loop {
                         // Key: string or identifier. Reserved-word
@@ -891,15 +891,15 @@ impl<'a> Parser<'a> {
                         // Value: recursive
                         let val = self.parse_literal_value()?;
                         let json_val = match val {
-                            Value::Null => crate::json::Value::Null,
-                            Value::Boolean(b) => crate::json::Value::Bool(b),
-                            Value::Integer(i) => crate::json::Value::Number(i as f64),
-                            Value::Float(f) => crate::json::Value::Number(f),
-                            Value::Text(s) => crate::json::Value::String(s.to_string()),
+                            Value::Null => reddb_types::json::Value::Null,
+                            Value::Boolean(b) => reddb_types::json::Value::Bool(b),
+                            Value::Integer(i) => reddb_types::json::Value::Number(i as f64),
+                            Value::Float(f) => reddb_types::json::Value::Number(f),
+                            Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
                             Value::Json(ref bytes) => {
-                                crate::json::from_slice(bytes).unwrap_or(crate::json::Value::Null)
+                                reddb_types::json::from_slice(bytes).unwrap_or(reddb_types::json::Value::Null)
                             }
-                            _ => crate::json::Value::Null,
+                            _ => reddb_types::json::Value::Null,
                         };
                         map.insert(key, json_val);
                         if !self.consume(&Token::Comma)? {
@@ -908,8 +908,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RBrace)?;
-                let json_val = crate::json::Value::Object(map);
-                let bytes = crate::json::to_vec(&json_val).unwrap_or_default();
+                let json_val = reddb_types::json::Value::Object(map);
+                let bytes = reddb_types::json::to_vec(&json_val).unwrap_or_default();
                 Ok(Value::Json(bytes))
             }
             ref other => Err(ParseError::expected(
@@ -962,7 +962,7 @@ fn returning_expr_tail(token: &Token) -> bool {
 
 fn validate_update_order_by(
     clauses: &[OrderByClause],
-    position: super::super::lexer::Position,
+    position: crate::lexer::Position,
 ) -> Result<(), ParseError> {
     for clause in clauses {
         if clause.expr.is_some() {
@@ -995,7 +995,7 @@ fn update_order_by_mentions_rid(clauses: &[OrderByClause]) -> bool {
     })
 }
 
-fn returning_expr_not_supported(position: super::super::lexer::Position) -> ParseError {
+fn returning_expr_not_supported(position: crate::lexer::Position) -> ParseError {
     ParseError::new(
         "NOT_YET_SUPPORTED: RETURNING expressions are not supported yet; use RETURNING * or named columns. Track a follow-up issue for RETURNING <expr>.",
         position,
@@ -1003,22 +1003,22 @@ fn returning_expr_not_supported(position: super::super::lexer::Position) -> Pars
 }
 
 fn secret_ref_value(store: &str, collection: &str, key: &str) -> Value {
-    let mut map = crate::json::Map::new();
+    let mut map = reddb_types::json::Map::new();
     map.insert(
         "type".to_string(),
-        crate::json::Value::String("secret_ref".to_string()),
+        reddb_types::json::Value::String("secret_ref".to_string()),
     );
     map.insert(
         "store".to_string(),
-        crate::json::Value::String(store.to_string()),
+        reddb_types::json::Value::String(store.to_string()),
     );
     map.insert(
         "collection".to_string(),
-        crate::json::Value::String(collection.to_string()),
+        reddb_types::json::Value::String(collection.to_string()),
     );
     map.insert(
         "key".to_string(),
-        crate::json::Value::String(key.to_string()),
+        reddb_types::json::Value::String(key.to_string()),
     );
-    Value::Json(crate::json::to_vec(&crate::json::Value::Object(map)).unwrap_or_default())
+    Value::Json(reddb_types::json::to_vec(&reddb_types::json::Value::Object(map)).unwrap_or_default())
 }

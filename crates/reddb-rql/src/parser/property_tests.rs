@@ -8,12 +8,16 @@
 
 use proptest::prelude::*;
 
-use crate::storage::query::ast::{
+use crate::ast::{
     CompareOp, FieldRef, Filter, InsertEntityType, InsertQuery, Projection, QueryExpr,
     QueueCommand, QueueSide, TableQuery,
 };
-use crate::storage::query::renderer::render;
-use crate::storage::schema::Value;
+// The AST→SQL renderer keeps server-runtime call-sites (`render_value_sql`
+// in `runtime::red_schema`), so it stays in `reddb-server`. This property
+// test reaches it through the crate's `reddb-server` dev-dependency (the same
+// edge the conformance harness uses); the published graph stays acyclic.
+use reddb_server::storage::query::renderer::render;
+use reddb_types::types::Value;
 
 // ---------------------------------------------------------------------------
 // Identifier strategy — 2–4 lowercase letters + 1–2 digits.
@@ -171,8 +175,8 @@ fn arb_queue_push() -> impl Strategy<Value = QueryExpr> {
 // Helper: parse and immediately unwrap `QueryWithCte` to `QueryExpr`
 // ---------------------------------------------------------------------------
 
-fn parse_q(sql: &str) -> Result<QueryExpr, crate::storage::query::parser::ParseError> {
-    crate::storage::query::parser::parse(sql).map(|q| q.query)
+fn parse_q(sql: &str) -> Result<QueryExpr, crate::parser::ParseError> {
+    crate::parser::parse(sql).map(|q| q.query)
 }
 
 // ---------------------------------------------------------------------------

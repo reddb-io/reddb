@@ -1,10 +1,10 @@
 //! Parser for migration SQL statements.
 
-use super::super::ast::{
+use crate::ast::{
     ApplyMigrationQuery, ApplyMigrationTarget, CreateMigrationQuery, ExplainMigrationQuery,
     QueryExpr, RollbackMigrationQuery,
 };
-use super::super::lexer::Token;
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 

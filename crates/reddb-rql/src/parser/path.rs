@@ -1,7 +1,7 @@
 //! Path query parsing (PATH FROM ... TO ...)
 
-use super::super::ast::{CompareOp, NodeSelector, PathQuery, PropertyFilter, QueryExpr};
-use super::super::lexer::Token;
+use crate::ast::{CompareOp, NodeSelector, PathQuery, PropertyFilter, QueryExpr};
+use crate::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 

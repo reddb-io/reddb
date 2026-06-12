@@ -31,12 +31,12 @@
 //! a tenant-scoped account. `PUBLIC` is recognised as a reserved
 //! principal.
 
-use crate::storage::query::ast::{
+use crate::ast::{
     AlterUserAttribute, AlterUserStmt, GrantObject, GrantObjectKind, GrantPrincipalRef, GrantStmt,
     LintPolicySource, PolicyPrincipalRef, PolicyResourceRef, PolicyUserRef, QueryExpr, RevokeStmt,
 };
-use crate::storage::query::lexer::Token;
-use crate::storage::query::parser::{ParseError, Parser};
+use crate::lexer::Token;
+use crate::parser::{ParseError, Parser};
 
 impl<'a> Parser<'a> {
     /// Parse a `GRANT` statement. Caller must have already verified the
