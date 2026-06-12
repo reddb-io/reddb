@@ -13,24 +13,6 @@ use crate::storage::schema::Value;
 use crate::storage::unified::UnifiedStore;
 use crate::storage::{EntityKind, UnifiedEntity};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CollectionModel {
-    Table,
-    Document,
-    Graph,
-    Vector,
-    Hll,
-    Sketch,
-    Filter,
-    Kv,
-    Config,
-    Vault,
-    Mixed,
-    TimeSeries,
-    Queue,
-    Metrics,
-}
-
 /// Per-collection analytical-storage seam (PRD #850, Phase 1).
 ///
 /// Declares that a `Metrics`/`TimeSeries` collection's hypertable chunks
@@ -69,7 +51,8 @@ pub enum SchemaMode {
 // `reddb-server` edge. This shim keeps `crate::catalog::{...}` valid for
 // existing call-sites.
 pub use reddb_types::catalog::{
-    AnalyticsOutput, AnalyticsViewDescriptor, SubscriptionDescriptor, SubscriptionOperation,
+    AnalyticsOutput, AnalyticsViewDescriptor, CollectionModel, SubscriptionDescriptor,
+    SubscriptionOperation,
 };
 
 #[derive(Debug, Clone)]

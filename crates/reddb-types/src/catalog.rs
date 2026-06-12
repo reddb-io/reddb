@@ -9,6 +9,30 @@
 //! The server's `crate::catalog` module keeps a re-export shim so existing
 //! call-sites stay untouched (byte-faithful move, same pattern as #1061/#1062).
 
+/// The logical multi-structure model a collection presents (table, graph,
+/// vector, queue, …). Referenced as a field type by the canonical SQL AST
+/// (`CreateCollectionQuery`/`CreateTableQuery` and their builders), so it
+/// is re-homed here (ADR 0053, RQL Phase 2) to keep the AST free of a
+/// `reddb-server` leaf edge. The server's `crate::catalog` re-export shim
+/// keeps existing call-sites untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionModel {
+    Table,
+    Document,
+    Graph,
+    Vector,
+    Hll,
+    Sketch,
+    Filter,
+    Kv,
+    Config,
+    Vault,
+    Mixed,
+    TimeSeries,
+    Queue,
+    Metrics,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionOperation {
     Insert,
