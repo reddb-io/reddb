@@ -15,10 +15,6 @@ statement ok
 INSERT INTO nums (g, v) VALUES ('a', 10), ('a', 20), ('a', 30), ('b', 5), ('b', 15)
 
 # SUM over an integer column. SQLite yields the integer 80.
-# DIVERGENCE: RedDB surfaces SUM as a REAL, so the cell renders "80.000" where
-# SQLite renders the bare integer "80". Tracked under PRD #1098; expected block
-# holds the SQLite oracle value.
-skipif reddb-server
 query I nosort
 SELECT SUM(v) FROM nums
 ----
@@ -30,9 +26,7 @@ SELECT AVG(v) FROM nums
 ----
 16.000
 
-# Per-group SUM. Same REAL-vs-INTEGER seam as the table-wide SUM above:
-# RedDB renders "60.000" / "20.000" where SQLite renders "60" / "20".
-skipif reddb-server
+# Per-group SUM.
 query TI rowsort
 SELECT g, SUM(v) FROM nums GROUP BY g
 ----
