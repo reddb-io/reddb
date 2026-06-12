@@ -23,16 +23,22 @@
 
 pub mod canonical_key;
 pub mod cast_catalog;
+pub mod catalog;
 pub mod coerce;
 pub mod coercion_spine;
 mod conversions;
+pub mod distance;
 pub mod function_catalog;
+pub mod index_hint;
 pub mod operator;
 pub mod operator_catalog;
 pub mod parametric;
 pub mod polymorphic;
+pub mod queue_mode;
 pub mod types;
 pub mod value_codec;
+pub mod value_compare;
+pub mod vector_metadata;
 
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
 pub use operator::BinOp;

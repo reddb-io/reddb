@@ -2,10 +2,10 @@ use std::fmt;
 
 use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
 use crate::catalog::CollectionModel;
-pub use crate::storage::engine::distance::DistanceMetric;
-pub use crate::storage::engine::vector_metadata::MetadataFilter;
-pub use crate::storage::queue::QueueMode;
 use crate::storage::schema::{SqlTypeName, Value};
+pub use reddb_types::distance::DistanceMetric;
+pub use reddb_types::queue_mode::QueueMode;
+pub use reddb_types::vector_metadata::MetadataFilter;
 
 /// Root query expression
 #[derive(Debug, Clone)]
@@ -1037,7 +1037,7 @@ pub struct ExpandOptions {
     /// Expand via cross-references (WITH EXPAND CROSS_REFS)
     pub cross_refs: bool,
     /// Index hint from the optimizer (which index to prefer for this query)
-    pub index_hint: Option<crate::storage::query::planner::optimizer::IndexHint>,
+    pub index_hint: Option<reddb_types::index_hint::IndexHint>,
 }
 
 impl TableQuery {
@@ -1921,12 +1921,12 @@ pub struct CreateTableQuery {
     pub append_only: bool,
     /// Declarative event subscriptions for this table. #291 stores
     /// metadata only; event emission is intentionally out of scope.
-    pub subscriptions: Vec<crate::catalog::SubscriptionDescriptor>,
+    pub subscriptions: Vec<reddb_types::catalog::SubscriptionDescriptor>,
     /// Analytics views declared by `CREATE GRAPH ... WITH ANALYTICS (...)`
     /// (issue #800). Empty for every collection model except graphs that
     /// opt in. Threaded into the persisted `CollectionContract` at execution
     /// time so each `<graph>.<output>` view is durable.
-    pub analytics_config: Vec<crate::catalog::AnalyticsViewDescriptor>,
+    pub analytics_config: Vec<reddb_types::catalog::AnalyticsViewDescriptor>,
     /// `CREATE VAULT ... WITH OWN MASTER KEY`: provision per-vault
     /// key material instead of using the cluster vault key.
     pub vault_own_master_key: bool,
@@ -2169,13 +2169,13 @@ pub enum AlterOperation {
     /// as their xmin is still pinned by an existing commit.
     SetVersioned(bool),
     /// `ENABLE EVENTS ...` — install or re-enable table event subscription metadata.
-    EnableEvents(crate::catalog::SubscriptionDescriptor),
+    EnableEvents(reddb_types::catalog::SubscriptionDescriptor),
     /// `DISABLE EVENTS` — mark all table event subscriptions disabled.
     DisableEvents,
     /// `ADD SUBSCRIPTION name TO queue [REDACT (...)] [WHERE ...]` — add a named subscription.
     AddSubscription {
         name: String,
-        descriptor: crate::catalog::SubscriptionDescriptor,
+        descriptor: reddb_types::catalog::SubscriptionDescriptor,
     },
     /// `DROP SUBSCRIPTION name` — remove a named subscription by name.
     DropSubscription { name: String },
@@ -2202,7 +2202,7 @@ pub enum AlterOperation {
     /// `analytics_config` without recreating the collection. Adding an
     /// already-enabled output is a no-op (no error, no duplicate state);
     /// the next read of `<graph>.<output>` materializes on demand.
-    AddAnalytics(Vec<crate::catalog::AnalyticsViewDescriptor>),
+    AddAnalytics(Vec<reddb_types::catalog::AnalyticsViewDescriptor>),
     /// Issue #801 — `ALTER GRAPH name DROP ANALYTICS <output>`.
     /// Removes the output from `analytics_config`; the next read of
     /// `<graph>.<output>` no longer resolves. Dropping an output that is

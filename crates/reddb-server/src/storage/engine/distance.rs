@@ -22,17 +22,12 @@ pub use super::simd_distance::{
     inner_product_distance_simd, l2_norm_simd, l2_squared_simd, simd_level, SimdLevel,
 };
 
-/// Distance metric types supported by vector operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum DistanceMetric {
-    /// Euclidean (L2) distance - good for dense vectors
-    #[default]
-    L2,
-    /// Cosine distance - good for normalized embeddings
-    Cosine,
-    /// Inner product (dot product) - for maximum inner product search
-    InnerProduct,
-}
+/// Distance metric types supported by vector operations.
+///
+/// Re-homed to the neutral keystone crate (ADR 0053, RQL Phase 2 S4b) so the
+/// canonical SQL AST resolves it without a `reddb-server` edge. This shim keeps
+/// `storage::engine::distance::DistanceMetric` valid for existing call-sites.
+pub use reddb_types::distance::DistanceMetric;
 
 /// Compute L2 (Euclidean) squared distance between two vectors
 ///
