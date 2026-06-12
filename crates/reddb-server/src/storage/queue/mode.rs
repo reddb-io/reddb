@@ -1,23 +1,4 @@
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum QueueMode {
-    Fanout,
-    #[default]
-    Work,
-}
-
-impl QueueMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Fanout => "fanout",
-            Self::Work => "work",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.to_ascii_uppercase().as_str() {
-            "FANOUT" => Some(Self::Fanout),
-            "WORK" => Some(Self::Work),
-            _ => None,
-        }
-    }
-}
+// `QueueMode` re-homed to the neutral keystone crate (ADR 0053, RQL Phase 2
+// S4b) so the canonical SQL AST resolves it without a `reddb-server` edge. This
+// shim keeps `storage::queue::mode::QueueMode` valid for existing call-sites.
+pub use reddb_types::queue_mode::QueueMode;
