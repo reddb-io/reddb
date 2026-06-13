@@ -18,6 +18,7 @@
 //! If one fails, Phase 2 has lost data on recovery.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::collections::HashMap;
