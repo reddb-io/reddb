@@ -26,7 +26,7 @@ default = ["embedded"]
 embedded = ["dep:reddb"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
