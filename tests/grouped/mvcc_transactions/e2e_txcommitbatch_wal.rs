@@ -1,6 +1,7 @@
 //! Atomic TxCommitBatch WAL recovery for autocommit table mutations.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::path::{Path, PathBuf};
