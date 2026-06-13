@@ -55,3 +55,14 @@ fn fill_bytes_windows(buf: &mut [u8]) -> Result<(), String> {
 extern "system" {
     fn SystemFunction036(RandomBuffer: *mut u8, RandomBufferLength: u32) -> u8;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_buffer_is_a_noop() {
+        let mut buf = [];
+        fill_bytes(&mut buf).unwrap();
+    }
+}

@@ -192,4 +192,20 @@ mod tests {
         bad[last] ^= 1;
         assert!(decrypt_page(&key(), 9, &bad).is_err());
     }
+
+    #[test]
+    fn error_display_is_specific_to_failure_class() {
+        assert_eq!(
+            PageEnvelopeError::Truncated.to_string(),
+            "encrypted page: truncated frame"
+        );
+        assert_eq!(
+            PageEnvelopeError::KeyMismatch("bad tag".to_string()).to_string(),
+            "encrypted page: key mismatch or tampering (bad tag)"
+        );
+        assert_eq!(
+            PageEnvelopeError::RandomFailure("no entropy".to_string()).to_string(),
+            "encrypted page: nonce generation failed (no entropy)"
+        );
+    }
 }
