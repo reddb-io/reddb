@@ -7,6 +7,7 @@
 //! `audit_query_endpoint.rs`.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::path::PathBuf;
