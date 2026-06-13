@@ -1,0 +1,74 @@
+name: Crypto Coverage Gate
+
+# Hard coverage gate for the reddb-io-crypto authority crate.
+# ADR 0054 makes this crate the canonical per-page encryption envelope
+# and key parser. Unlike the older advisory reports, this job fails the
+# PR if the crate drops below 90% line coverage.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/reddb-crypto/**'
+      - '.github/workflows/crypto-coverage.yml'
+  pull_request:
+    paths:
+      - 'crates/reddb-crypto/**'
+      - '.github/workflows/crypto-coverage.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: crypto-coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  crypto-coverage:
+    name: Crypto Coverage Gate
+    if: github.actor != 'dependabot[bot]'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: llvm-tools-preview
+
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.95.0-llvm-cov-crypto
+          cache-on-failure: "true"
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage gate (reddb-io-crypto)
+        env:
+          RUSTC_WRAPPER: ""
+        run: |
+          cargo llvm-cov -p reddb-io-crypto --summary-only --fail-under-lines 90 | tee coverage-summary.txt
+
+          {
+            echo "## Crypto Coverage Gate"
+            echo ""
+            echo "Crate: \`reddb-io-crypto\` — hard minimum: **90% line coverage**"
+            echo ""
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+            echo ""
+            echo "> Run locally: \`cargo llvm-cov -p reddb-io-crypto --summary-only --fail-under-lines 90\`"
+          } >> "$GITHUB_STEP_SUMMARY"
