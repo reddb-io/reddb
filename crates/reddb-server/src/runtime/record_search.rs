@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::sql_lowering::effective_table_projections;
 use crate::storage::query::unified::{
     sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_capabilities,
@@ -148,32 +149,8 @@ pub(super) fn scan_runtime_table_source_records_limited(
     table: &str,
     limit: Option<usize>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    use crate::runtime::impl_core::capture_current_snapshot;
-    use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
-
     if is_universal_entity_source(table) {
-        // Cross-collection scan runs inside std::thread::scope — capture
-        // the snapshot so worker threads see the same MVCC view instead
-        // of defaulting to "no snapshot" (every row visible).
-        let table_row_resolver = TableRowMvccReadResolver::captured(capture_current_snapshot());
-        let records: Vec<UnifiedRecord> = db
-            .store()
-            .query_all(move |e| table_row_resolver.resolve_read_candidate(e).is_some())
-            .into_iter()
-            .filter_map(|(collection, entity)| {
-                if !db.replica_allows_entity_at_read(&collection, &entity) {
-                    return None;
-                }
-                let mut record = runtime_any_record_from_entity(entity)?;
-                set_source_collection(&mut record, &collection);
-                Some(record)
-            })
-            .collect();
-        let records = match limit {
-            Some(n) if records.len() > n => records.into_iter().take(n).collect(),
-            _ => records,
-        };
-        return Ok(records);
+        return scan_runtime_universal_source_records_limited(db, None, limit);
     }
 
     let manager = db
@@ -268,6 +245,68 @@ pub(super) fn scan_runtime_table_source_records_limited(
         }
         true
     });
+    Ok(records)
+}
+
+pub(super) fn scan_runtime_universal_source_records_limited(
+    db: &RedDB,
+    candidate_collections: Option<&[String]>,
+    limit: Option<usize>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    use crate::runtime::impl_core::capture_current_snapshot;
+    use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
+
+    // Cross-collection scans may run inside std::thread::scope — capture
+    // the snapshot so worker threads see the same MVCC view instead of
+    // defaulting to "no snapshot" (every row visible).
+    let table_row_resolver = TableRowMvccReadResolver::captured(capture_current_snapshot());
+    if let Some(collections) = candidate_collections {
+        let store = db.store();
+        let mut records = match limit {
+            Some(n) => Vec::with_capacity(n),
+            None => Vec::new(),
+        };
+        for collection in collections {
+            let Some(manager) = store.get_collection(collection) else {
+                continue;
+            };
+            manager.for_each_entity(|entity| {
+                if records.len() >= limit.unwrap_or(usize::MAX) {
+                    return false;
+                }
+                if table_row_resolver.resolve_read_candidate(entity).is_none() {
+                    return true;
+                }
+                if !db.replica_allows_entity_at_read(collection, entity) {
+                    return true;
+                }
+                if let Some(mut record) = runtime_any_record_from_entity_ref(entity) {
+                    set_source_collection(&mut record, collection);
+                    records.push(record);
+                }
+                true
+            });
+        }
+        return Ok(records);
+    }
+
+    let records: Vec<UnifiedRecord> = db
+        .store()
+        .query_all(move |e| table_row_resolver.resolve_read_candidate(e).is_some())
+        .into_iter()
+        .filter_map(|(collection, entity)| {
+            if !db.replica_allows_entity_at_read(&collection, &entity) {
+                return None;
+            }
+            let mut record = runtime_any_record_from_entity(entity)?;
+            set_source_collection(&mut record, &collection);
+            Some(record)
+        })
+        .collect();
+    let records = match limit {
+        Some(n) if records.len() > n => records.into_iter().take(n).collect(),
+        _ => records,
+    };
     Ok(records)
 }
 
@@ -1063,6 +1102,21 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
                 record,
             )
         }
+        (EntityKind::QueueMessage { position, .. }, EntityData::QueueMessage(msg)) => {
+            let mut record = UnifiedRecord::new();
+            record.set("position", Value::UnsignedInteger(*position));
+            record.set("payload", msg.payload.clone());
+            record.set("attempts", Value::UnsignedInteger(msg.attempts as u64));
+            record.set("acked", Value::Boolean(msg.acked));
+            if let Some(priority) = msg.priority {
+                record.set("priority", Value::Integer(priority as i64));
+            }
+            (
+                "queue_message",
+                runtime_record_capability_list(["document", "queue", "message"]),
+                record,
+            )
+        }
         _ => return None,
     };
 
@@ -1296,6 +1350,10 @@ pub(super) fn runtime_entity_type_and_capabilities(
         (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(_)) => (
             "timeseries",
             runtime_record_capability_list(["document", "timeseries", "metric", "temporal"]),
+        ),
+        (EntityKind::QueueMessage { .. }, EntityData::QueueMessage(_)) => (
+            "queue_message",
+            runtime_record_capability_list(["document", "queue", "message"]),
         ),
         _ => ("unknown", BTreeSet::new()),
     }

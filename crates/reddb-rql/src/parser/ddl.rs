@@ -1427,3 +1427,251 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
         _ => Err(format!("non-hex char: {:?}", c as char)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reddb_types::catalog::{AnalyticsOutput, CollectionModel, SubscriptionOperation};
+
+    fn parser(input: &str) -> Parser<'_> {
+        Parser::new(input).unwrap_or_else(|err| panic!("failed to lex {input:?}: {err:?}"))
+    }
+
+    #[test]
+    fn parse_create_table_body_parenthesized_options_and_trailing_clauses() {
+        let QueryExpr::CreateTable(table) = parser(
+            "IF NOT EXISTS events (id INT, tenant_meta TEXT) \
+             WITH (tenant_by = 'tenant_id', append_only = true, timestamps = false) \
+             PARTITION BY HASH (id) TENANT BY (tenant_meta.tenant)",
+        )
+        .parse_create_table_body()
+        .expect("create table body") else {
+            panic!("Expected CreateTableQuery");
+        };
+
+        assert_eq!(table.name, "events");
+        assert!(table.if_not_exists);
+        assert!(table.append_only);
+        assert!(!table.timestamps);
+        assert_eq!(table.tenant_by.as_deref(), Some("tenant_id"));
+        assert_eq!(
+            table
+                .partition_by
+                .as_ref()
+                .map(|spec| (spec.kind, spec.column.as_str())),
+            Some((PartitionKind::Hash, "id"))
+        );
+
+        let err = parser("bad (id INT) WITH (tenant_by = 42)")
+            .parse_create_table_body()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("WITH tenant_by expects a text literal"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_keyed_bodies_cover_vault_analytics_and_dotted_drop_names() {
+        let QueryExpr::CreateTable(vault) =
+            parser("IF NOT EXISTS tenant.secrets WITH OWN MASTER KEY")
+                .parse_create_keyed_body(CollectionModel::Vault)
+                .expect("create vault")
+        else {
+            panic!("Expected CreateTableQuery");
+        };
+        assert_eq!(vault.collection_model, CollectionModel::Vault);
+        assert_eq!(vault.name, "tenant.secrets");
+        assert!(vault.if_not_exists);
+        assert!(vault.vault_own_master_key);
+
+        let QueryExpr::CreateTable(graph) = parser(
+            "g WITH ANALYTICS (centrality (using = pagerank, max_iterations = 12, tolerance = 0.001))",
+        )
+        .parse_create_keyed_body(CollectionModel::Graph)
+        .expect("create graph")
+        else {
+            panic!("Expected CreateTableQuery");
+        };
+        assert_eq!(graph.analytics_config.len(), 1);
+        let view = &graph.analytics_config[0];
+        assert_eq!(view.output, AnalyticsOutput::Centrality);
+        assert_eq!(view.algorithm.as_deref(), Some("pagerank"));
+        assert_eq!(view.max_iterations, Some(12));
+        assert_eq!(view.tolerance, Some(0.001));
+
+        let err = parser("g WITH OTHER")
+            .parse_create_keyed_body(CollectionModel::Graph)
+            .unwrap_err();
+        assert!(err.to_string().contains("expected: ANALYTICS"), "{err}");
+
+        assert!(parser("CREATE KV cache WITH ANALYTICS (components)")
+            .parse()
+            .unwrap_err()
+            .to_string()
+            .contains("Unexpected token after query"));
+
+        let QueryExpr::DropKv(drop) = parser("IF EXISTS tenant.cache.*")
+            .parse_drop_keyed_body(CollectionModel::Kv)
+            .expect("drop kv")
+        else {
+            panic!("Expected DropKvQuery");
+        };
+        assert_eq!(drop.name, "tenant.cache.*");
+        assert!(drop.if_exists);
+        assert_eq!(drop.model, CollectionModel::Kv);
+    }
+
+    #[test]
+    fn parse_collection_signed_by_list_and_errors() {
+        let pk_a = "aa".repeat(32);
+        let pk_b = "BB".repeat(32);
+        let QueryExpr::CreateCollection(collection) =
+            parser(&format!("signed KIND graph SIGNED_BY ('{pk_a}', '{pk_b}')"))
+                .parse_create_collection_body()
+                .expect("create collection")
+        else {
+            panic!("Expected CreateCollectionQuery");
+        };
+        assert_eq!(collection.allowed_signers, vec![[0xaau8; 32], [0xBBu8; 32]]);
+
+        let err = parser("signed KIND graph SIGNED_BY (42)")
+            .parse_create_collection_body()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("string literal (ed25519 pubkey hex)"),
+            "{err}"
+        );
+
+        let err = parser("signed KIND graph SIGNED_BY ('deadbeef')")
+            .parse_create_collection_body()
+            .unwrap_err();
+        assert!(err.to_string().contains("expected 64 hex chars"), "{err}");
+    }
+
+    #[test]
+    fn parse_alter_operations_cover_subscriptions_partitions_tenancy_and_signers() {
+        let pk = "11".repeat(32);
+        let QueryExpr::AlterTable(alter) = parser(&format!(
+            "ALTER COLLECTION audit \
+             ADD SUBSCRIPTION pii TO audit_events REDACT (payload.ssn, *.secret) WHERE level = 'warn', \
+             DROP SUBSCRIPTION pii, \
+             ADD SIGNER '{pk}', \
+             REVOKE SIGNER '{pk}', \
+             ATTACH PARTITION audit_2026 FOR VALUES FROM (2026) TO (2027), \
+             DETACH PARTITION audit_2026, \
+             ENABLE EVENTS (INSERT, UPDATE) TO table_events ON ALL TENANTS, \
+             DISABLE EVENTS, \
+             ENABLE TENANCY ON (metadata.tenant), \
+             DISABLE TENANCY, \
+             SET APPEND_ONLY = true, \
+             SET VERSIONED = false, \
+             SET RETENTION 2 h, \
+             UNSET RETENTION"
+        ))
+        .parse_alter_table_query()
+        .expect("alter collection")
+        else {
+            panic!("Expected AlterTableQuery");
+        };
+
+        assert_eq!(alter.name, "audit");
+        assert_eq!(alter.operations.len(), 14);
+        match &alter.operations[0] {
+            AlterOperation::AddSubscription { name, descriptor } => {
+                assert_eq!(name, "pii");
+                assert_eq!(descriptor.target_queue, "audit_events");
+                assert_eq!(descriptor.redact_fields, vec!["payload.ssn", "*.secret"]);
+                assert_eq!(descriptor.where_filter.as_deref(), Some("LEVEL = 'warn'"));
+            }
+            other => panic!("expected AddSubscription, got {other:?}"),
+        }
+        assert!(matches!(
+            &alter.operations[1],
+            AlterOperation::DropSubscription { name } if name == "pii"
+        ));
+        assert!(matches!(
+            &alter.operations[2],
+            AlterOperation::AddSigner { pubkey } if *pubkey == [0x11; 32]
+        ));
+        assert!(matches!(
+            &alter.operations[3],
+            AlterOperation::RevokeSigner { pubkey } if *pubkey == [0x11; 32]
+        ));
+        assert!(matches!(
+            &alter.operations[4],
+            AlterOperation::AttachPartition { child, bound }
+                if child == "audit_2026" && bound == "FROM ( 2026 ) TO ( 2027 )"
+        ));
+        assert!(matches!(
+            &alter.operations[5],
+            AlterOperation::DetachPartition { child } if child == "audit_2026"
+        ));
+        match &alter.operations[6] {
+            AlterOperation::EnableEvents(descriptor) => {
+                assert_eq!(
+                    descriptor.ops_filter,
+                    vec![SubscriptionOperation::Insert, SubscriptionOperation::Update]
+                );
+                assert_eq!(descriptor.target_queue, "table_events");
+                assert!(descriptor.all_tenants);
+            }
+            other => panic!("expected EnableEvents, got {other:?}"),
+        }
+        assert!(matches!(
+            &alter.operations[7],
+            AlterOperation::DisableEvents
+        ));
+        assert!(matches!(
+            &alter.operations[8],
+            AlterOperation::EnableTenancy { column } if column == "METADATA.tenant"
+        ));
+        assert!(matches!(
+            &alter.operations[9],
+            AlterOperation::DisableTenancy
+        ));
+        assert!(matches!(
+            &alter.operations[10],
+            AlterOperation::SetAppendOnly(true)
+        ));
+        assert!(matches!(
+            &alter.operations[11],
+            AlterOperation::SetVersioned(false)
+        ));
+        assert!(matches!(
+            &alter.operations[12],
+            AlterOperation::SetRetention { duration_ms } if *duration_ms == 7_200_000
+        ));
+        assert!(matches!(
+            &alter.operations[13],
+            AlterOperation::UnsetRetention
+        ));
+    }
+
+    #[test]
+    fn parse_alter_graph_analytics_keyword_errors() {
+        let err = parser("ALTER GRAPH g ADD centrality")
+            .parse_alter_graph_query()
+            .unwrap_err();
+        assert!(err.to_string().contains("expected: ANALYTICS"), "{err}");
+
+        let err = parser("ALTER GRAPH g DROP centrality")
+            .parse_alter_graph_query()
+            .unwrap_err();
+        assert!(err.to_string().contains("expected: ANALYTICS"), "{err}");
+    }
+
+    #[test]
+    fn decode_hex_32_reports_length_and_character_errors() {
+        assert_eq!(decode_hex_32(&"0f".repeat(32)).unwrap(), [0x0f; 32]);
+        assert_eq!(
+            decode_hex_32("deadbeef").unwrap_err(),
+            "expected 64 hex chars, got 8"
+        );
+        assert!(decode_hex_32(&"gg".repeat(32))
+            .unwrap_err()
+            .contains("non-hex char"));
+    }
+}

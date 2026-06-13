@@ -194,6 +194,998 @@ fn collection_model_filter(model: &str) -> Filter {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reddb_types::catalog::CollectionModel;
+
+    fn frontend(input: &str) -> FrontendStatement {
+        parse_frontend(input)
+            .unwrap_or_else(|err| panic!("failed to parse frontend {input:?}: {err:?}"))
+    }
+
+    fn expr(input: &str) -> QueryExpr {
+        frontend(input).into_query_expr()
+    }
+
+    fn sql_command(input: &str) -> SqlCommand {
+        sql_command_result(input)
+            .unwrap_or_else(|err| panic!("failed to parse SQL command {input:?}: {err:?}"))
+    }
+
+    fn sql_command_result(input: &str) -> Result<SqlCommand, ParseError> {
+        let mut parser = Parser::new(input)?;
+        parser.parse_sql_command()
+    }
+
+    fn assert_text(value: &Value, expected: &str) {
+        match value {
+            Value::Text(text) => assert_eq!(text.as_ref(), expected),
+            other => panic!("expected text {expected:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_frontend_routes_core_sql_statements() {
+        let FrontendStatement::Sql(SqlStatement::Query(SqlQuery::Select(query))) =
+            frontend("SELECT * FROM users")
+        else {
+            panic!("SELECT should route to SqlStatement::Query::Select");
+        };
+        assert_eq!(query.table, "users");
+
+        let QueryExpr::Insert(query) = expr("INSERT INTO users (id, name) VALUES (1, 'ada')")
+        else {
+            panic!("INSERT should lower through the SQL frontend");
+        };
+        assert_eq!(query.table, "users");
+        assert_eq!(query.columns, vec!["id", "name"]);
+        assert_eq!(query.values.len(), 1);
+
+        let QueryExpr::Update(query) = expr("UPDATE users SET name = 'ada' WHERE id = 1") else {
+            panic!("UPDATE should lower through the SQL frontend");
+        };
+        assert_eq!(query.table, "users");
+        assert_eq!(query.assignments[0].0, "name");
+
+        let QueryExpr::Delete(query) = expr("DELETE FROM users WHERE id = 1") else {
+            panic!("DELETE should lower through the SQL frontend");
+        };
+        assert_eq!(query.table, "users");
+        assert!(query.filter.is_some());
+
+        let QueryExpr::CreateTable(query) = expr("CREATE TABLE users (id INT, name TEXT)") else {
+            panic!("CREATE TABLE should lower through the SQL frontend");
+        };
+        assert_eq!(query.collection_model, CollectionModel::Table);
+        assert_eq!(query.name, "users");
+        assert_eq!(query.columns[0].name, "id");
+
+        let QueryExpr::DropTable(query) = expr("DROP TABLE IF EXISTS users") else {
+            panic!("DROP TABLE should lower through the SQL frontend");
+        };
+        assert_eq!(query.name, "users");
+        assert!(query.if_exists);
+    }
+
+    #[test]
+    fn parse_frontend_routes_admin_and_catalog_sql() {
+        let QueryExpr::Table(query) = expr("SHOW COLLECTIONS") else {
+            panic!("SHOW COLLECTIONS should become a red.collections table query");
+        };
+        assert_eq!(query.table, "red.collections");
+        assert!(query.filter.is_some());
+
+        let QueryExpr::Table(query) = expr("SHOW TABLES LIMIT 5") else {
+            panic!("SHOW TABLES should become a filtered red.collections table query");
+        };
+        assert_eq!(query.table, "red.collections");
+        assert_eq!(query.limit, Some(5));
+        assert!(query.filter.is_some());
+
+        assert!(matches!(
+            expr("SHOW CONFIG durability.mode"),
+            QueryExpr::ShowConfig { prefix: Some(prefix) } if prefix == "durability.mode"
+        ));
+        assert!(matches!(
+            expr("SHOW CONFIG"),
+            QueryExpr::ShowConfig { prefix: None }
+        ));
+
+        let QueryExpr::SetConfig { key, value } = expr("SET CONFIG durability.mode = 'sync'")
+        else {
+            panic!("SET CONFIG should stay on the SQL admin surface");
+        };
+        assert_eq!(key, "durability.mode");
+        assert_text(&value, "sync");
+
+        let QueryExpr::SetSecret { key, value } = expr("SET SECRET provider.api_key = 'sk_test'")
+        else {
+            panic!("SET SECRET should stay on the SQL admin surface");
+        };
+        assert_eq!(key, "provider.api_key");
+        assert_text(&value, "sk_test");
+
+        assert!(matches!(
+            expr("DELETE SECRET provider.api_key"),
+            QueryExpr::DeleteSecret { key } if key == "provider.api_key"
+        ));
+        assert!(matches!(
+            expr("SHOW SECRETS provider"),
+            QueryExpr::ShowSecrets { prefix: Some(prefix) } if prefix == "provider"
+        ));
+        assert!(matches!(
+            expr("SET TENANT 'acme'"),
+            QueryExpr::SetTenant(Some(tenant)) if tenant == "acme"
+        ));
+        assert!(matches!(expr("RESET TENANT"), QueryExpr::SetTenant(None)));
+        assert!(matches!(expr("SHOW TENANT"), QueryExpr::ShowTenant));
+        assert!(matches!(
+            expr("BEGIN ISOLATION LEVEL SNAPSHOT"),
+            QueryExpr::TransactionControl(TxnControl::Begin)
+        ));
+        assert!(matches!(
+            expr("ROLLBACK TO SAVEPOINT sp1"),
+            QueryExpr::TransactionControl(TxnControl::RollbackToSavepoint(name)) if name == "sp1"
+        ));
+        assert!(matches!(
+            expr("VACUUM FULL users"),
+            QueryExpr::MaintenanceCommand(MaintenanceCommand::Vacuum {
+                target: Some(target),
+                full: true,
+            }) if target == "users"
+        ));
+    }
+
+    #[test]
+    fn parse_frontend_routes_extended_schema_sql() {
+        assert!(matches!(
+            expr("CREATE SCHEMA IF NOT EXISTS app"),
+            QueryExpr::CreateSchema(CreateSchemaQuery {
+                name,
+                if_not_exists: true,
+            }) if name == "app"
+        ));
+        assert!(matches!(
+            expr("DROP SCHEMA IF EXISTS app CASCADE"),
+            QueryExpr::DropSchema(DropSchemaQuery {
+                name,
+                if_exists: true,
+                cascade: true,
+            }) if name == "app"
+        ));
+        assert!(matches!(
+            expr("CREATE SEQUENCE IF NOT EXISTS seq START WITH 10 INCREMENT BY 2"),
+            QueryExpr::CreateSequence(CreateSequenceQuery {
+                name,
+                if_not_exists: true,
+                start: 10,
+                increment: 2,
+            }) if name == "seq"
+        ));
+        assert!(matches!(
+            expr("DROP SEQUENCE IF EXISTS seq"),
+            QueryExpr::DropSequence(DropSequenceQuery {
+                name,
+                if_exists: true,
+            }) if name == "seq"
+        ));
+
+        let QueryExpr::CopyFrom(copy) = expr(
+            "COPY users FROM '/tmp/u.csv' WITH (FORMAT = csv, HEADER = true, DELIMITER = ';')",
+        ) else {
+            panic!("COPY should lower through SQL frontend");
+        };
+        assert_eq!(copy.table, "users");
+        assert_eq!(copy.path, "/tmp/u.csv");
+        assert_eq!(copy.format, CopyFormat::Csv);
+        assert_eq!(copy.delimiter, Some(';'));
+        assert!(copy.has_header);
+
+        let QueryExpr::CreateView(view) = expr(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS mv WITH RETENTION 1 h \
+             AS SELECT id FROM users REFRESH EVERY 5 s",
+        ) else {
+            panic!("CREATE MATERIALIZED VIEW should lower through SQL frontend");
+        };
+        assert_eq!(view.name, "mv");
+        assert!(view.materialized);
+        assert!(view.if_not_exists);
+        assert_eq!(view.retention_duration_ms, Some(3_600_000));
+        assert_eq!(view.refresh_every_ms, Some(5_000));
+        assert!(matches!(*view.query, QueryExpr::Table(_)));
+
+        assert!(matches!(
+            expr("DROP MATERIALIZED VIEW IF EXISTS mv"),
+            QueryExpr::DropView(DropViewQuery {
+                name,
+                materialized: true,
+                if_exists: true,
+            }) if name == "mv"
+        ));
+        assert!(matches!(
+            expr("REFRESH MATERIALIZED VIEW mv"),
+            QueryExpr::RefreshMaterializedView(RefreshMaterializedViewQuery { name }) if name == "mv"
+        ));
+    }
+
+    #[test]
+    fn parse_frontend_routes_fdw_policy_auth_and_migrations() {
+        let QueryExpr::CreateServer(server) = expr(
+            "CREATE SERVER IF NOT EXISTS csvsrv FOREIGN DATA WRAPPER csv OPTIONS (path '/data')",
+        ) else {
+            panic!("CREATE SERVER should lower through SQL frontend");
+        };
+        assert_eq!(server.name, "csvsrv");
+        assert_eq!(server.wrapper, "csv");
+        assert!(server.if_not_exists);
+        assert_eq!(
+            server.options,
+            vec![("path".to_string(), "/data".to_string())]
+        );
+
+        let QueryExpr::CreateForeignTable(table) = expr(
+            "CREATE FOREIGN TABLE IF NOT EXISTS ext_users \
+             (id INT, name TEXT) SERVER csvsrv OPTIONS (file 'users.csv')",
+        ) else {
+            panic!("CREATE FOREIGN TABLE should lower through SQL frontend");
+        };
+        assert_eq!(table.name, "ext_users");
+        assert_eq!(table.server, "csvsrv");
+        assert!(table.if_not_exists);
+        assert_eq!(table.columns.len(), 2);
+        assert!(!table.columns[0].not_null);
+
+        assert!(matches!(
+            expr("DROP SERVER IF EXISTS csvsrv CASCADE"),
+            QueryExpr::DropServer(DropServerQuery {
+                name,
+                if_exists: true,
+                cascade: true,
+            }) if name == "csvsrv"
+        ));
+        assert!(matches!(
+            expr("DROP FOREIGN TABLE IF EXISTS ext_users"),
+            QueryExpr::DropForeignTable(DropForeignTableQuery {
+                name,
+                if_exists: true,
+            }) if name == "ext_users"
+        ));
+
+        let QueryExpr::CreatePolicy(policy) = expr(
+            "CREATE POLICY readonly ON NODES OF mygraph FOR SELECT TO analytics USING (public = 1)",
+        ) else {
+            panic!("CREATE POLICY should lower through SQL frontend");
+        };
+        assert_eq!(policy.name, "readonly");
+        assert_eq!(policy.table, "mygraph");
+        assert_eq!(policy.action, Some(PolicyAction::Select));
+        assert_eq!(policy.role.as_deref(), Some("analytics"));
+        assert_eq!(policy.target_kind.as_ident(), "nodes");
+
+        assert!(matches!(
+            expr("DROP POLICY IF EXISTS readonly ON mygraph"),
+            QueryExpr::DropPolicy(DropPolicyQuery {
+                name,
+                table,
+                if_exists: true,
+            }) if name == "readonly" && table == "mygraph"
+        ));
+
+        assert!(matches!(
+            expr("GRANT SELECT ON TABLE public.users TO tenant1.alice"),
+            QueryExpr::Grant(grant)
+                if grant.actions == vec!["SELECT"]
+                    && grant.objects[0].schema.as_deref() == Some("public")
+        ));
+        assert!(matches!(
+            expr("REVOKE GRANT OPTION FOR USAGE ON SCHEMA analytics FROM GROUP analysts"),
+            QueryExpr::Revoke(revoke) if revoke.grant_option_for && revoke.all == false
+        ));
+        assert!(matches!(
+            expr("ALTER USER bob ENABLE SET search_path TO 'public'"),
+            QueryExpr::AlterUser(user)
+                if user.username == "bob" && user.attributes.len() == 2
+        ));
+
+        assert!(matches!(
+            expr("CREATE POLICY 'readonly' AS '{\"Statement\":[]}'"),
+            QueryExpr::CreateIamPolicy { id, json }
+                if id == "readonly" && json == "{\"Statement\":[]}"
+        ));
+        assert!(matches!(
+            expr("DROP POLICY 'readonly'"),
+            QueryExpr::DropIamPolicy { id } if id == "readonly"
+        ));
+
+        assert!(matches!(
+            expr("CREATE MIGRATION m2 DEPENDS ON m0 BATCH 10 ROWS AS CREATE TABLE accounts (id INT)"),
+            QueryExpr::CreateMigration(migration)
+                if migration.name == "m2"
+                    && migration.depends_on == vec!["m0".to_string()]
+                    && migration.batch_size == Some(10)
+        ));
+        assert!(matches!(
+            expr("APPLY MIGRATION * FOR TENANT tenant1"),
+            QueryExpr::ApplyMigration(apply)
+                if apply.for_tenant.as_deref() == Some("tenant1")
+        ));
+        assert!(matches!(
+            expr("ROLLBACK MIGRATION m2"),
+            QueryExpr::RollbackMigration(RollbackMigrationQuery { name }) if name == "m2"
+        ));
+        assert!(matches!(
+            expr("EXPLAIN MIGRATION m2"),
+            QueryExpr::ExplainMigration(ExplainMigrationQuery { name }) if name == "m2"
+        ));
+    }
+
+    #[test]
+    fn parse_sql_statement_covers_statement_category_wrapping() {
+        enum Expected {
+            Select,
+            Insert,
+            CreateSchema,
+            SetTenant,
+        }
+
+        let cases = [
+            ("SELECT * FROM users", Expected::Select),
+            ("INSERT INTO users (id) VALUES (1)", Expected::Insert),
+            ("CREATE SCHEMA app", Expected::CreateSchema),
+            ("SET TENANT 'acme'", Expected::SetTenant),
+        ];
+
+        for (input, expected) in cases {
+            let mut parser = Parser::new(input).expect("lexer");
+            let statement = parser
+                .parse_sql_statement()
+                .unwrap_or_else(|err| panic!("failed to parse {input:?}: {err:?}"));
+            let matched = match expected {
+                Expected::Select => matches!(statement, SqlStatement::Query(SqlQuery::Select(_))),
+                Expected::Insert => {
+                    matches!(statement, SqlStatement::Mutation(SqlMutation::Insert(_)))
+                }
+                Expected::CreateSchema => matches!(
+                    statement,
+                    SqlStatement::Schema(SqlSchemaCommand::CreateSchema(_))
+                ),
+                Expected::SetTenant => {
+                    matches!(
+                        statement,
+                        SqlStatement::Admin(SqlAdminCommand::SetTenant(_))
+                    )
+                }
+            };
+            assert!(matched, "{input}");
+        }
+    }
+
+    #[test]
+    fn parse_frontend_routes_non_sql_frontends() {
+        let QueryExpr::KvCommand(KvCommand::Get {
+            model,
+            collection,
+            key,
+        }) = expr("KV GET settings.feature")
+        else {
+            panic!("KV GET should route to FrontendStatement::KvCommand");
+        };
+        assert_eq!(model, CollectionModel::Kv);
+        assert_eq!(collection, "settings");
+        assert_eq!(key, "feature");
+
+        let QueryExpr::ConfigCommand(ConfigCommand::Watch {
+            collection,
+            key,
+            prefix,
+            from_lsn,
+        }) = expr("WATCH CONFIG app PREFIX feature FROM LSN 7")
+        else {
+            panic!("WATCH CONFIG should route to FrontendStatement::ConfigCommand");
+        };
+        assert_eq!(collection, "app");
+        assert_eq!(key, "feature");
+        assert!(prefix);
+        assert_eq!(from_lsn, Some(7));
+
+        let QueryExpr::ConfigCommand(ConfigCommand::List {
+            collection,
+            prefix,
+            limit,
+            offset,
+        }) = expr("LIST CONFIG app PREFIX feature LIMIT 3 OFFSET 1")
+        else {
+            panic!("LIST CONFIG should route to FrontendStatement::ConfigCommand");
+        };
+        assert_eq!(collection, "app");
+        assert_eq!(prefix.as_deref(), Some("feature"));
+        assert_eq!(limit, Some(3));
+        assert_eq!(offset, 1);
+
+        let QueryExpr::KvCommand(KvCommand::Watch {
+            model,
+            collection,
+            key,
+            prefix,
+            from_lsn,
+        }) = expr("WATCH sessions.user.* FROM LSN 3")
+        else {
+            panic!("bare WATCH should route to FrontendStatement::KvCommand");
+        };
+        assert_eq!(model, CollectionModel::Kv);
+        assert_eq!(collection, "sessions");
+        assert_eq!(key, "user");
+        assert!(prefix);
+        assert_eq!(from_lsn, Some(3));
+
+        let QueryExpr::KvCommand(KvCommand::Watch {
+            model,
+            collection,
+            key,
+            prefix,
+            from_lsn,
+        }) = expr("WATCH VAULT secrets PREFIX api FROM LSN 7")
+        else {
+            panic!("WATCH VAULT should route to FrontendStatement::KvCommand");
+        };
+        assert_eq!(model, CollectionModel::Vault);
+        assert_eq!(collection, "secrets");
+        assert_eq!(key, "api");
+        assert!(prefix);
+        assert_eq!(from_lsn, Some(7));
+
+        let QueryExpr::KvCommand(KvCommand::List {
+            model,
+            collection,
+            prefix,
+            limit,
+            offset,
+        }) = expr("LIST VAULT secrets PREFIX api LIMIT 10 OFFSET 2")
+        else {
+            panic!("LIST VAULT should route to FrontendStatement::KvCommand");
+        };
+        assert_eq!(model, CollectionModel::Vault);
+        assert_eq!(collection, "secrets");
+        assert_eq!(prefix.as_deref(), Some("api"));
+        assert_eq!(limit, Some(10));
+        assert_eq!(offset, 2);
+
+        assert!(matches!(
+            expr("INVALIDATE CONFIG app feature_flag"),
+            QueryExpr::ConfigCommand(ConfigCommand::InvalidVolatileOperation {
+                operation,
+                collection,
+                key: Some(key),
+            }) if operation == "INVALIDATE" && collection == "app" && key == "feature_flag"
+        ));
+        assert!(matches!(
+            expr("INVALIDATE TAGS [user:42, org:7] FROM sessions"),
+            QueryExpr::KvCommand(KvCommand::InvalidateTags { collection, tags })
+                if collection == "sessions" && tags == vec!["user:42".to_string(), "org:7".to_string()]
+        ));
+
+        let QueryExpr::EventsBackfill(query) =
+            expr("EVENTS BACKFILL users WHERE status = 'active' TO audit LIMIT 10")
+        else {
+            panic!("EVENTS BACKFILL should route to FrontendStatement::EventsBackfill");
+        };
+        assert_eq!(query.collection, "users");
+        assert_eq!(query.where_filter.as_deref(), Some("status = 'active'"));
+        assert_eq!(query.target_queue, "audit");
+        assert_eq!(query.limit, Some(10));
+
+        let QueryExpr::Table(query) = expr("EVENTS STATUS users LIMIT 2") else {
+            panic!("EVENTS STATUS should route through the SQL select surface");
+        };
+        assert_eq!(query.table, "red.subscriptions");
+        assert_eq!(query.limit, Some(2));
+        assert!(query.filter.is_some());
+
+        assert!(matches!(
+            expr("EVENTS BACKFILL STATUS users"),
+            QueryExpr::EventsBackfillStatus { collection } if collection == "users"
+        ));
+        assert!(parse_frontend("LIST UNKNOWN").is_err());
+        assert!(parse_frontend("EVENTS UNKNOWN").is_err());
+    }
+
+    #[test]
+    fn parse_frontend_routes_ranking_reads() {
+        assert!(matches!(
+            expr("RANK OF 42 IN page_rank"),
+            QueryExpr::RankOf(RankOfQuery { ranking, entity_id })
+                if ranking == "page_rank" && entity_id == 42
+        ));
+        assert!(matches!(
+            expr("APPROX RANK OF 7 IN page_rank"),
+            QueryExpr::ApproxRankOf(RankOfQuery { ranking, entity_id })
+                if ranking == "page_rank" && entity_id == 7
+        ));
+        assert!(matches!(
+            expr("RANK RANGE 1 TO 3 IN page_rank"),
+            QueryExpr::RankRange(RankRangeQuery { ranking, lo, hi })
+                if ranking == "page_rank" && lo == 1 && hi == 3
+        ));
+        assert!(matches!(
+            expr("ZRANK page_rank 0"),
+            QueryExpr::RankOf(RankOfQuery { ranking, entity_id })
+                if ranking == "page_rank" && entity_id == 0
+        ));
+        assert!(matches!(
+            expr("ZRANGE page_rank 0 3 WITHSCORES"),
+            QueryExpr::RankRange(RankRangeQuery { ranking, lo, hi })
+                if ranking == "page_rank" && lo == 1 && hi == 4
+        ));
+        assert!(
+            parse_frontend("RANK RANGE 3 TO 1 IN page_rank").is_err(),
+            "rank range must reject reversed bounds"
+        );
+    }
+
+    #[test]
+    fn parse_frontend_covers_multimodel_command_routing() {
+        assert!(matches!(
+            expr("GRAPH CENTRALITY ALGORITHM pagerank LIMIT 5"),
+            QueryExpr::GraphCommand(GraphCommand::Centrality {
+                algorithm,
+                limit: Some(5),
+                ..
+            }) if algorithm == "pagerank"
+        ));
+        assert!(matches!(
+            expr("SEARCH TEXT 'login failure' COLLECTION incidents LIMIT 20 FUZZY"),
+            QueryExpr::SearchCommand(SearchCommand::Text {
+                query,
+                collection: Some(collection),
+                limit: 20,
+                fuzzy: true,
+                ..
+            }) if query == "login failure" && collection == "incidents"
+        ));
+        assert!(matches!(
+            expr("ASK 'why did login fail?' USING openai LIMIT 3"),
+            QueryExpr::Ask(query)
+                if query.question == "why did login fail?"
+                    && query.provider.as_deref() == Some("openai")
+                    && query.limit == Some(3)
+        ));
+        assert!(matches!(
+            expr("QUEUE LEN tasks"),
+            QueryExpr::QueueCommand(QueueCommand::Len { queue }) if queue == "tasks"
+        ));
+        assert!(matches!(
+            expr("TREE REBALANCE forest.org DRY RUN"),
+            QueryExpr::TreeCommand(TreeCommand::Rebalance {
+                collection,
+                tree_name,
+                dry_run: true,
+            }) if collection == "forest" && tree_name == "org"
+        ));
+        assert!(matches!(
+            expr("HLL COUNT visitors"),
+            QueryExpr::ProbabilisticCommand(ProbabilisticCommand::HllCount { names })
+                if names == vec!["visitors".to_string()]
+        ));
+    }
+
+    #[test]
+    fn sql_command_round_trips_multimodel_schema_variants() {
+        macro_rules! assert_command_round_trip {
+            ($input:expr, $pattern:pat) => {{
+                let command = sql_command($input);
+                assert!(matches!(command, $pattern), "unexpected command for {}", $input);
+
+                let statement = sql_command($input).into_statement();
+                let command = statement.into_command();
+                assert!(
+                    matches!(command, $pattern),
+                    "statement round trip changed command for {}",
+                    $input
+                );
+
+                let expr = sql_command($input).into_query_expr();
+                assert!(
+                    !matches!(expr, QueryExpr::Table(TableQuery { table, .. }) if table.is_empty()),
+                    "lowering produced an empty table placeholder for {}",
+                    $input
+                );
+            }};
+        }
+
+        assert_command_round_trip!(
+            "EXPLAIN ALTER FOR CREATE TABLE users (id INT) FORMAT JSON",
+            SqlCommand::ExplainAlter(_)
+        );
+        assert_command_round_trip!("CREATE TABLE users (id INT)", SqlCommand::CreateTable(_));
+        assert_command_round_trip!("DROP TABLE IF EXISTS users", SqlCommand::DropTable(_));
+        assert_command_round_trip!(
+            "ALTER TABLE users ADD COLUMN status TEXT",
+            SqlCommand::AlterTable(_)
+        );
+        assert_command_round_trip!(
+            "CREATE INDEX idx_email ON users (email) USING HASH",
+            SqlCommand::CreateIndex(_)
+        );
+        assert_command_round_trip!(
+            "DROP INDEX IF EXISTS idx_email ON users",
+            SqlCommand::DropIndex(_)
+        );
+        assert_command_round_trip!("CREATE GRAPH identity", SqlCommand::CreateTable(_));
+        assert_command_round_trip!("CREATE DOCUMENT docs", SqlCommand::CreateTable(_));
+        assert_command_round_trip!(
+            "CREATE VECTOR embeddings DIM 4",
+            SqlCommand::CreateVector(_)
+        );
+        assert_command_round_trip!(
+            "CREATE COLLECTION turbo KIND vector.turbo DIM 3",
+            SqlCommand::CreateCollection(_)
+        );
+        assert_command_round_trip!("CREATE KV settings", SqlCommand::CreateTable(_));
+        assert_command_round_trip!("CREATE CONFIG app", SqlCommand::CreateTable(_));
+        assert_command_round_trip!(
+            "CREATE VAULT secrets WITH OWN MASTER KEY",
+            SqlCommand::CreateTable(_)
+        );
+        assert_command_round_trip!(
+            "CREATE TIMESERIES metrics RETENTION 90 d",
+            SqlCommand::CreateTimeSeries(_)
+        );
+        assert_command_round_trip!(
+            "CREATE METRIC svc.latency TYPE gauge ROLE sli",
+            SqlCommand::CreateMetric(_)
+        );
+        assert_command_round_trip!(
+            "ALTER METRIC svc.latency SET ROLE internal",
+            SqlCommand::AlterMetric(_)
+        );
+        assert_command_round_trip!(
+            "CREATE SLO svc.availability ON svc.latency TARGET 99.9 WINDOW 5 m",
+            SqlCommand::CreateSlo(_)
+        );
+        assert_command_round_trip!(
+            "CREATE QUEUE tasks MAX_SIZE 100",
+            SqlCommand::CreateQueue(_)
+        );
+        assert_command_round_trip!(
+            "ALTER QUEUE tasks SET MODE FANOUT",
+            SqlCommand::AlterQueue(_)
+        );
+        assert_command_round_trip!(
+            "CREATE TREE org IN forest ROOT LABEL root MAX_CHILDREN 4",
+            SqlCommand::CreateTree(_)
+        );
+        assert_command_round_trip!(
+            "CREATE HLL visitors PRECISION 14",
+            SqlCommand::Probabilistic(_)
+        );
+        assert_command_round_trip!(
+            "CREATE SKETCH freqs WIDTH 512 DEPTH 3",
+            SqlCommand::Probabilistic(_)
+        );
+        assert_command_round_trip!(
+            "CREATE FILTER seen CAPACITY 1024",
+            SqlCommand::Probabilistic(_)
+        );
+        assert_command_round_trip!("COPY users FROM '/tmp/u.csv'", SqlCommand::CopyFrom(_));
+        assert_command_round_trip!(
+            "CREATE VIEW active_users AS SELECT * FROM users",
+            SqlCommand::CreateView(_)
+        );
+        assert_command_round_trip!("DROP VIEW active_users", SqlCommand::DropView(_));
+        assert_command_round_trip!(
+            "REFRESH MATERIALIZED VIEW active_users",
+            SqlCommand::RefreshMaterializedView(_)
+        );
+        assert_command_round_trip!(
+            "CREATE SERVER mycsv FOREIGN DATA WRAPPER csv OPTIONS (base_path '/data')",
+            SqlCommand::CreateServer(_)
+        );
+        assert_command_round_trip!(
+            "DROP SERVER IF EXISTS mycsv CASCADE",
+            SqlCommand::DropServer(_)
+        );
+        assert_command_round_trip!(
+            "CREATE FOREIGN TABLE ext_users (id INT, name TEXT) SERVER mycsv OPTIONS (path 'users.csv')",
+            SqlCommand::CreateForeignTable(_)
+        );
+        assert_command_round_trip!(
+            "DROP FOREIGN TABLE IF EXISTS ext_users",
+            SqlCommand::DropForeignTable(_)
+        );
+    }
+
+    #[test]
+    fn sql_command_round_trips_drop_truncate_and_maintenance_variants() {
+        macro_rules! assert_command_round_trip {
+            ($input:expr, $pattern:pat) => {{
+                let command = sql_command($input);
+                assert!(
+                    matches!(command, $pattern),
+                    "unexpected command for {}",
+                    $input
+                );
+                let statement = sql_command($input).into_statement();
+                assert!(
+                    matches!(statement.into_command(), $pattern),
+                    "statement round trip changed command for {}",
+                    $input
+                );
+            }};
+        }
+
+        assert_command_round_trip!("DROP GRAPH IF EXISTS identity", SqlCommand::DropGraph(_));
+        assert_command_round_trip!(
+            "DROP VECTOR IF EXISTS embeddings",
+            SqlCommand::DropVector(_)
+        );
+        assert_command_round_trip!("DROP DOCUMENT IF EXISTS docs", SqlCommand::DropDocument(_));
+        assert_command_round_trip!("DROP KV IF EXISTS settings", SqlCommand::DropKv(_));
+        assert_command_round_trip!("DROP CONFIG IF EXISTS app", SqlCommand::DropKv(_));
+        assert_command_round_trip!("DROP VAULT IF EXISTS secrets", SqlCommand::DropKv(_));
+        assert_command_round_trip!(
+            "DROP COLLECTION IF EXISTS docs",
+            SqlCommand::DropCollection(_)
+        );
+        assert_command_round_trip!(
+            "DROP TIMESERIES IF EXISTS metrics",
+            SqlCommand::DropTimeSeries(_)
+        );
+        assert_command_round_trip!(
+            "DROP HYPERTABLE IF EXISTS metrics",
+            SqlCommand::DropTimeSeries(_)
+        );
+        assert_command_round_trip!("DROP QUEUE IF EXISTS tasks", SqlCommand::DropQueue(_));
+        assert_command_round_trip!("DROP TREE IF EXISTS org IN forest", SqlCommand::DropTree(_));
+        assert_command_round_trip!("DROP HLL IF EXISTS visitors", SqlCommand::Probabilistic(_));
+        assert_command_round_trip!("DROP SKETCH IF EXISTS freqs", SqlCommand::Probabilistic(_));
+        assert_command_round_trip!("DROP FILTER IF EXISTS seen", SqlCommand::Probabilistic(_));
+        assert_command_round_trip!(
+            "TRUNCATE VECTOR IF EXISTS embeddings",
+            SqlCommand::Truncate(_)
+        );
+        assert_command_round_trip!(
+            "COMMIT WORK",
+            SqlCommand::TransactionControl(TxnControl::Commit)
+        );
+        assert_command_round_trip!(
+            "ROLLBACK",
+            SqlCommand::TransactionControl(TxnControl::Rollback)
+        );
+        assert_command_round_trip!(
+            "SAVEPOINT before_batch",
+            SqlCommand::TransactionControl(TxnControl::Savepoint(_))
+        );
+        assert_command_round_trip!(
+            "RELEASE SAVEPOINT before_batch",
+            SqlCommand::TransactionControl(TxnControl::ReleaseSavepoint(_))
+        );
+        assert_command_round_trip!(
+            "ANALYZE users",
+            SqlCommand::Maintenance(MaintenanceCommand::Analyze { .. })
+        );
+        assert_command_round_trip!(
+            "VACUUM",
+            SqlCommand::Maintenance(MaintenanceCommand::Vacuum { .. })
+        );
+    }
+
+    #[test]
+    fn parse_sql_command_covers_show_and_error_branches() {
+        assert!(matches!(
+            sql_command("SHOW CREATE TABLE public.users"),
+            SqlCommand::Select(TableQuery { table, .. }) if table == "red.show_create"
+        ));
+        assert!(matches!(
+            sql_command("SHOW COLLECTIONS INCLUDING INTERNAL LIMIT 2"),
+            SqlCommand::Select(TableQuery { table, limit: Some(2), .. }) if table == "red.collections"
+        ));
+        assert!(matches!(
+            sql_command("SHOW QUEUES INCLUDING INTERNAL"),
+            SqlCommand::Select(TableQuery { table, filter: None, .. }) if table == "red.queues"
+        ));
+        assert!(matches!(
+            sql_command("SHOW INDICES ON users"),
+            SqlCommand::Select(TableQuery { table, filter: Some(_), .. }) if table == "red.show_indexes"
+        ));
+        assert!(matches!(
+            sql_command("SHOW POLICIES ON users WHERE action = 'SELECT'"),
+            SqlCommand::Select(TableQuery { table, filter: Some(_), .. }) if table == "red.policies"
+        ));
+        assert!(matches!(
+            sql_command("SHOW STATS 'users' WHERE rows > 0"),
+            SqlCommand::Select(TableQuery { table, filter: Some(_), .. }) if table == "red.stats"
+        ));
+        assert!(matches!(
+            sql_command("SHOW SAMPLE users"),
+            SqlCommand::Select(TableQuery { table, limit: Some(10), .. }) if table == "users"
+        ));
+        assert!(matches!(
+            sql_command("DESC public.users"),
+            SqlCommand::Select(TableQuery { table, filter: Some(_), .. }) if table == "red.describe"
+        ));
+        assert!(
+            sql_command_result("CREATE VIEW v WITH RETENTION 1 h AS SELECT * FROM users").is_err()
+        );
+        assert!(sql_command_result("CREATE TABLE bad WITH ANALYTICS (centrality)").is_err());
+        assert!(sql_command_result("BEGIN ISOLATION LEVEL SERIALIZABLE").is_err());
+        assert!(sql_command_result("EVENTS BACKFILL STATUS users").is_err());
+    }
+
+    #[test]
+    fn parse_sql_command_covers_remaining_catalog_and_copy_shapes() {
+        for input in [
+            "SHOW VECTORS",
+            "SHOW DOCUMENTS",
+            "SHOW TIMESERIES",
+            "SHOW GRAPHS",
+            "SHOW CONFIGS",
+            "SHOW VAULTS",
+            "SHOW KV",
+            "SHOW SCHEMA public.users",
+        ] {
+            assert!(
+                matches!(sql_command(input), SqlCommand::Select(_)),
+                "{input}"
+            );
+        }
+
+        for input in [
+            "TRUNCATE TABLE users",
+            "TRUNCATE GRAPH identity",
+            "TRUNCATE DOCUMENT docs",
+            "TRUNCATE TIMESERIES metrics",
+            "TRUNCATE METRICS metrics",
+            "TRUNCATE KV settings",
+            "TRUNCATE QUEUE tasks",
+            "TRUNCATE COLLECTION docs",
+        ] {
+            assert!(
+                matches!(sql_command(input), SqlCommand::Truncate(_)),
+                "{input}"
+            );
+        }
+        assert!(sql_command_result("TRUNCATE UNKNOWN users").is_err());
+
+        let SqlCommand::CopyFrom(copy) = sql_command("COPY users FROM '/tmp/u.csv' WITH (HEADER)")
+        else {
+            panic!("expected COPY");
+        };
+        assert!(copy.has_header);
+        assert_eq!(copy.delimiter, None);
+
+        let SqlCommand::CopyFrom(copy) =
+            sql_command("COPY users FROM '/tmp/u.csv' WITH (HEADER = false)")
+        else {
+            panic!("expected COPY");
+        };
+        assert!(!copy.has_header);
+
+        let SqlCommand::CopyFrom(copy) =
+            sql_command("COPY users FROM '/tmp/u.csv' DELIMITER '|' HEADER")
+        else {
+            panic!("expected COPY");
+        };
+        assert_eq!(copy.delimiter, Some('|'));
+        assert!(copy.has_header);
+    }
+
+    #[test]
+    fn parse_sql_command_covers_remaining_ranking_and_event_errors() {
+        assert!(matches!(
+            expr("APPROXIMATE RANK OF 9 IN page_rank"),
+            QueryExpr::ApproxRankOf(RankOfQuery { ranking, entity_id })
+                if ranking == "page_rank" && entity_id == 9
+        ));
+        assert!(parse_frontend("APPROX OF 7 IN page_rank").is_err());
+        assert!(parse_frontend("RANK 1 IN page_rank").is_err());
+        assert!(parse_frontend("RANK RANGE 0 TO 3 IN page_rank").is_err());
+        assert!(parse_frontend("ZRANK page_rank -1").is_err());
+        assert!(parse_frontend("ZRANGE page_rank 3 1").is_err());
+
+        let QueryExpr::Table(query) = expr("EVENTS STATUS 'users' WHERE active = true") else {
+            panic!("EVENTS STATUS should accept a quoted collection");
+        };
+        assert_eq!(query.table, "red.subscriptions");
+        assert!(query.filter.is_some());
+        assert!(query.where_expr.is_some());
+
+        let QueryExpr::EventsBackfill(query) = expr("EVENTS BACKFILL users TO audit") else {
+            panic!("EVENTS BACKFILL should allow omitted filter and limit");
+        };
+        assert_eq!(query.collection, "users");
+        assert_eq!(query.where_filter, None);
+        assert_eq!(query.limit, None);
+
+        assert!(parse_frontend("EVENTS BACKFILL users WHERE TO audit").is_err());
+    }
+
+    #[test]
+    fn parse_sql_command_covers_analytics_non_goal_rejections() {
+        for head in ["ANALYTICS", "EVENT", "COHORT", "FUNNEL", "SLA", "ADAPTER"] {
+            let err = sql_command_result(&format!("CREATE {head} demo"))
+                .expect_err("analytics v0 non-goal should be rejected");
+            assert!(err.to_string().contains(&format!("CREATE {head}")), "{err}");
+        }
+    }
+
+    #[test]
+    fn parse_sql_command_covers_transaction_isolation_edges() {
+        for input in [
+            "BEGIN ISOLATION LEVEL READ UNCOMMITTED",
+            "BEGIN ISOLATION LEVEL READ COMMITTED",
+            "BEGIN ISOLATION LEVEL REPEATABLE READ",
+            "START TRANSACTION ISOLATION LEVEL SNAPSHOT",
+        ] {
+            assert!(
+                matches!(
+                    sql_command(input),
+                    SqlCommand::TransactionControl(TxnControl::Begin)
+                ),
+                "{input}"
+            );
+        }
+
+        assert!(sql_command_result("BEGIN ISOLATION LEVEL READ").is_err());
+        assert!(sql_command_result("BEGIN ISOLATION LEVEL REPEATABLE").is_err());
+        assert!(sql_command_result("BEGIN ISOLATION LEVEL CHAOS").is_err());
+    }
+
+    #[test]
+    fn parse_sql_command_covers_iam_and_hypertable_dispatch_edges() {
+        assert!(matches!(
+            expr("CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'"),
+            QueryExpr::CreateTimeSeries(query)
+                if query.name == "metrics" && query.hypertable.is_some()
+        ));
+        assert!(sql_command_result("CREATE OR TABLE bad (id INT)").is_err());
+        assert!(sql_command_result("DROP MATERIALIZED TABLE bad").is_err());
+
+        assert!(matches!(
+            expr("ATTACH POLICY 'readonly' TO USER tenant1.alice"),
+            QueryExpr::AttachPolicy { policy_id, .. } if policy_id == "readonly"
+        ));
+        assert!(matches!(
+            expr("DETACH POLICY 'readonly' FROM GROUP analysts"),
+            QueryExpr::DetachPolicy { policy_id, .. } if policy_id == "readonly"
+        ));
+        assert!(matches!(
+            expr("SHOW POLICIES FOR USER alice"),
+            QueryExpr::ShowPolicies { filter: Some(_) }
+        ));
+        assert!(matches!(
+            expr("SHOW EFFECTIVE PERMISSIONS FOR alice"),
+            QueryExpr::ShowEffectivePermissions { resource: None, .. }
+        ));
+        assert!(matches!(
+            expr("SIMULATE alice ACTION 'iam:PassRole' ON TABLE:public.orders"),
+            QueryExpr::SimulatePolicy { action, .. } if action == "iam:PassRole"
+        ));
+        assert!(matches!(
+            expr("LINT POLICY JSON '{\"Statement\":[]}'"),
+            QueryExpr::LintPolicy { .. }
+        ));
+        assert!(matches!(
+            expr("MIGRATE POLICY MODE TO 'policy_only' DRY RUN"),
+            QueryExpr::MigratePolicyMode {
+                target,
+                dry_run: true,
+            } if target == "policy_only"
+        ));
+        assert!(parse_frontend("MIGRATE OTHER").is_err());
+    }
+
+    #[test]
+    fn parse_frontend_rejects_trailing_tokens() {
+        let err = parse_frontend("SET TENANT 'acme' junk")
+            .expect_err("parse_frontend should reject trailing tokens");
+        assert!(
+            err.to_string().contains("Unexpected token after query"),
+            "{err}"
+        );
+    }
+}
+
 fn add_table_filter(query: &mut TableQuery, filter: Filter) {
     let combined = match query.filter.take() {
         Some(existing) => existing.and(filter),
@@ -858,6 +1850,9 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("RESET") => {
+                self.parse_sql_statement().map(FrontendStatement::Sql)
+            }
             Token::Ident(name)
                 if name.eq_ignore_ascii_case("RANK")
                     || name.eq_ignore_ascii_case("APPROX")
@@ -1253,7 +2248,7 @@ impl<'a> Parser<'a> {
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
                     "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
                     "QUEUE", "EVENTS", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
-                    "DESCRIBE", "DESC", "RANK", "ZRANK", "ZRANGE",
+                    "RESET", "DESCRIBE", "DESC", "RANK", "ZRANK", "ZRANGE",
                 ],
                 other,
                 self.position(),

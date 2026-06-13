@@ -728,3 +728,258 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parser(input: &str) -> Parser<'_> {
+        Parser::new(input).unwrap_or_else(|err| panic!("failed to lex {input:?}: {err:?}"))
+    }
+
+    #[test]
+    fn parse_grant_statement_covers_columns_default_table_and_principals() {
+        let grant = parser(
+            "GRANT SELECT, UPDATE (id, email) ON public.users TO PUBLIC, GROUP analysts, tenant.alice WITH GRANT OPTION",
+        )
+        .parse_grant_statement()
+        .expect("grant");
+
+        assert_eq!(grant.actions, vec!["SELECT", "UPDATE"]);
+        assert_eq!(
+            grant.columns.as_deref(),
+            Some(&["id".to_string(), "email".to_string()][..])
+        );
+        assert_eq!(grant.object_kind, GrantObjectKind::Table);
+        assert_eq!(grant.objects.len(), 1);
+        assert_eq!(grant.objects[0].schema.as_deref(), Some("public"));
+        assert_eq!(grant.objects[0].name, "users");
+        assert!(matches!(grant.principals[0], GrantPrincipalRef::Public));
+        assert!(matches!(
+            &grant.principals[1],
+            GrantPrincipalRef::Group(group) if group == "analysts"
+        ));
+        assert!(matches!(
+            &grant.principals[2],
+            GrantPrincipalRef::User { tenant: Some(t), name } if t == "tenant" && name == "alice"
+        ));
+        assert!(grant.with_grant_option);
+        assert!(!grant.all);
+    }
+
+    #[test]
+    fn parse_revoke_statement_covers_grant_option_for_all_and_function_objects() {
+        let revoke = parser(
+            "REVOKE GRANT OPTION FOR ALL PRIVILEGES (id) ON FUNCTION public.recalc FROM GROUP analysts",
+        )
+        .parse_revoke_statement()
+        .expect("revoke");
+
+        assert!(revoke.grant_option_for);
+        assert!(revoke.all);
+        assert_eq!(revoke.actions, vec!["ALL"]);
+        assert_eq!(revoke.columns.as_deref(), Some(&["id".to_string()][..]));
+        assert_eq!(revoke.object_kind, GrantObjectKind::Function);
+        assert_eq!(revoke.objects[0].schema.as_deref(), Some("public"));
+        assert_eq!(revoke.objects[0].name, "recalc");
+        assert!(matches!(
+            &revoke.principals[0],
+            GrantPrincipalRef::Group(group) if group == "analysts"
+        ));
+
+        let revoke = parser("REVOKE USAGE ON SCHEMA analytics FROM bob")
+            .parse_revoke_statement()
+            .expect("revoke without grant option");
+        assert!(!revoke.grant_option_for);
+        assert_eq!(revoke.object_kind, GrantObjectKind::Schema);
+        assert_eq!(revoke.objects[0].name, "analytics");
+    }
+
+    #[test]
+    fn parse_grant_and_revoke_option_errors_are_specific() {
+        let err = parser("GRANT SELECT ON TABLE users TO alice WITH OPTION")
+            .parse_grant_statement()
+            .unwrap_err();
+        assert!(err.to_string().contains("expected: GRANT"), "{err}");
+
+        let err = parser("GRANT SELECT ON TABLE users TO alice WITH GRANT")
+            .parse_grant_statement()
+            .unwrap_err();
+        assert!(err.to_string().contains("expected: OPTION"), "{err}");
+
+        let err = parser("REVOKE GRANT SELECT ON TABLE users FROM alice")
+            .parse_revoke_statement()
+            .unwrap_err();
+        assert!(err.to_string().contains("expected: OPTION"), "{err}");
+
+        let err = parser("REVOKE GRANT OPTION SELECT ON TABLE users FROM alice")
+            .parse_revoke_statement()
+            .unwrap_err();
+        assert!(err.to_string().contains("expected: FOR"), "{err}");
+    }
+
+    #[test]
+    fn parse_alter_user_statement_covers_attribute_variants_and_errors() {
+        let mut p = parser(
+            "ALTER USER tenant.bob VALID UNTIL '2030-01-01' CONNECTION LIMIT 10 ENABLE \
+             SET search_path TO 'public,analytics' ADD GROUP analysts DROP GROUP temp PASSWORD 'pw'",
+        );
+        p.expect(Token::Alter).expect("ALTER");
+        let stmt = p.parse_alter_user_statement().expect("alter user");
+
+        assert_eq!(stmt.tenant.as_deref(), Some("tenant"));
+        assert_eq!(stmt.username, "bob");
+        assert!(matches!(
+            &stmt.attributes[0],
+            AlterUserAttribute::ValidUntil(value) if value == "2030-01-01"
+        ));
+        assert!(matches!(
+            stmt.attributes[1],
+            AlterUserAttribute::ConnectionLimit(10)
+        ));
+        assert!(matches!(stmt.attributes[2], AlterUserAttribute::Enable));
+        assert!(matches!(
+            &stmt.attributes[3],
+            AlterUserAttribute::SetSearchPath(value) if value == "public,analytics"
+        ));
+        assert!(matches!(
+            &stmt.attributes[4],
+            AlterUserAttribute::AddGroup(group) if group == "analysts"
+        ));
+        assert!(matches!(
+            &stmt.attributes[5],
+            AlterUserAttribute::DropGroup(group) if group == "temp"
+        ));
+        assert!(matches!(
+            &stmt.attributes[6],
+            AlterUserAttribute::Password(password) if password == "pw"
+        ));
+
+        let mut p = parser("ALTER USER alice");
+        p.expect(Token::Alter).expect("ALTER");
+        let err = p.parse_alter_user_statement().unwrap_err();
+        assert!(err.to_string().contains("expected:"), "{err}");
+
+        let mut p = parser("ALTER USER alice ADD ROLE analysts");
+        p.expect(Token::Alter).expect("ALTER");
+        let err = p.parse_alter_user_statement().unwrap_err();
+        assert!(err.to_string().contains("expected: GROUP"), "{err}");
+    }
+
+    #[test]
+    fn parse_iam_policy_helpers_cover_policy_sources_and_principals() {
+        assert!(matches!(
+            parser("'readonly' AS '{\"Statement\":[]}'")
+                .parse_create_iam_policy_after_keywords()
+                .expect("create iam policy"),
+            QueryExpr::CreateIamPolicy { ref id, ref json }
+                if id == "readonly" && json == "{\"Statement\":[]}"
+        ));
+        assert!(matches!(
+            parser("'readonly'")
+                .parse_drop_iam_policy_after_keywords()
+                .expect("drop iam policy"),
+            QueryExpr::DropIamPolicy { ref id } if id == "readonly"
+        ));
+        assert!(matches!(
+            parser("LINT POLICY JSON '{\"Statement\":[]}'")
+                .parse_lint_policy()
+                .expect("lint json"),
+            QueryExpr::LintPolicy {
+                source: LintPolicySource::Json(ref json),
+            } if json == "{\"Statement\":[]}"
+        ));
+        assert!(matches!(
+            parser("LINT POLICY 'readonly'")
+                .parse_lint_policy()
+                .expect("lint id"),
+            QueryExpr::LintPolicy {
+                source: LintPolicySource::Id(ref id),
+            } if id == "readonly"
+        ));
+        assert!(matches!(
+            parser("MIGRATE POLICY MODE TO 'policy_only' DRY RUN")
+                .parse_migrate_policy_mode()
+                .expect("migrate policy mode"),
+            QueryExpr::MigratePolicyMode { ref target, dry_run }
+                if target == "policy_only" && dry_run
+        ));
+
+        assert!(matches!(
+            parser("ATTACH POLICY 'readonly' TO USER tenant.alice")
+                .parse_attach_policy()
+                .expect("attach policy"),
+            QueryExpr::AttachPolicy {
+                ref policy_id,
+                principal: PolicyPrincipalRef::User(ref user),
+            } if policy_id == "readonly"
+                && user.tenant.as_deref() == Some("tenant")
+                && user.username == "alice"
+        ));
+        assert!(matches!(
+            parser("DETACH POLICY 'readonly' FROM GROUP analysts")
+                .parse_detach_policy()
+                .expect("detach policy"),
+            QueryExpr::DetachPolicy {
+                ref policy_id,
+                principal: PolicyPrincipalRef::Group(ref group),
+            } if policy_id == "readonly" && group == "analysts"
+        ));
+    }
+
+    #[test]
+    fn parse_show_and_simulate_helpers_cover_resources_and_action_errors() {
+        let mut p = parser("SHOW POLICIES FOR USER tenant.alice");
+        p.advance().expect("SHOW");
+        assert!(matches!(
+            p.parse_show_iam_after_show()
+                .expect("show policies")
+                .expect("iam show"),
+            QueryExpr::ShowPolicies {
+                filter: Some(PolicyPrincipalRef::User(ref user)),
+            } if user.tenant.as_deref() == Some("tenant") && user.username == "alice"
+        ));
+
+        let mut p = parser("SHOW EFFECTIVE PERMISSIONS FOR alice ON TABLE:public.orders");
+        p.advance().expect("SHOW");
+        assert!(matches!(
+            p.parse_show_iam_after_show()
+                .expect("show effective")
+                .expect("iam show"),
+            QueryExpr::ShowEffectivePermissions {
+                ref user,
+                resource: Some(ref resource),
+            } if user.tenant.is_none()
+                && user.username == "alice"
+                && resource.kind == "table"
+                && resource.name == "public.orders"
+        ));
+
+        assert!(matches!(
+            parser("SIMULATE alice ACTION DELETE ON 'table:public.orders'")
+                .parse_simulate_policy()
+                .expect("simulate"),
+            QueryExpr::SimulatePolicy {
+                ref user,
+                ref action,
+                ref resource,
+            } if user.username == "alice"
+                && action == "delete"
+                && resource.kind == "table"
+                && resource.name == "public.orders"
+        ));
+
+        let err = parser("SIMULATE alice ACTION 42 ON table:public.orders")
+            .parse_simulate_policy()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("expected: action keyword"),
+            "{err}"
+        );
+
+        let err = parser("SIMULATE alice ACTION SELECT ON 'missing-colon'")
+            .parse_simulate_policy()
+            .unwrap_err();
+        assert!(err.to_string().contains("kind:name"), "{err}");
+    }
+}

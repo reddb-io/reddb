@@ -1,11 +1,12 @@
 //! sqllogictest-format conformance harness for the **RedDB-only query
 //! surfaces** that have no external oracle (ADR 0053, S3).
 //!
-//! Where the standard-SQL slice (`tests/conformance.rs` over `tests/corpus/`)
-//! draws its truth from the public SQLite corpus, the surfaces covered here —
-//! vector search, the native `GRAPH` command family, the four graph DSL modes
-//! (Gremlin / Cypher / SPARQL / Path), natural-language, and vector
-//! extensions — are RedDB inventions. Their expected results are
+//! Where the standard-SQL slice (`tests/rql_conformance.rs` over
+//! `crates/reddb-rql/tests/corpus/`) draws its truth from the public SQLite
+//! corpus, the surfaces covered here — vector search, the native `GRAPH`
+//! command family, the four graph DSL modes (Gremlin / Cypher / SPARQL /
+//! Path), natural-language, and vector extensions — are RedDB inventions.
+//! Their expected results are
 //! **hand-authored**: each value in a `query` block is what the surface's
 //! semantics dictate (cosine ranking, neighbourhood reachability, shortest-path
 //! hop counts), never blindly copied from engine output. Engine output is the
@@ -147,7 +148,7 @@ impl DB for EngineDb {
 }
 
 fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reddb_corpus")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/reddb-rql/tests/reddb_corpus")
 }
 
 fn slt_files(dir: &Path) -> Vec<PathBuf> {

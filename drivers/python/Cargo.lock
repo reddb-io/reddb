@@ -654,6 +654,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1728,9 +1738,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3"
-version = "0.28.3"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91fd8e38a3b50ed1167fb981cd6fd60147e091784c427b8f7183a7ee32c31c12"
+checksum = "cd274650b21d4bfc26a0a47587962c1edb425f69287324355cd040c3ea66071c"
 dependencies = [
  "libc",
  "once_cell",
@@ -1742,18 +1752,18 @@ dependencies = [
 
 [[package]]
 name = "pyo3-build-config"
-version = "0.28.3"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e368e7ddfdeb98c9bca7f8383be1648fd84ab466bf2bc015e94008db6d35611e"
+checksum = "c5e2a7d2f0d013342f295c048ad19237add5154a55b1c5a254c0ec93d4109078"
 dependencies = [
  "target-lexicon",
 ]
 
 [[package]]
 name = "pyo3-ffi"
-version = "0.28.3"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f29e10af80b1f7ccaf7f69eace800a03ecd13e883acfacc1e5d0988605f651e"
+checksum = "ca85c467da1bbc8d866eea5deff9cf29ea5f7785054a17da36e65bda9c05845b"
 dependencies = [
  "libc",
  "pyo3-build-config",
@@ -1761,9 +1771,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3-macros"
-version = "0.28.3"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df6e520eff47c45997d2fc7dd8214b25dd1310918bbb2642156ef66a67f29813"
+checksum = "9ac53762fd065daa3194dd09337a38bd793a188100fd1a9304c4ab312d901771"
 dependencies = [
  "proc-macro2",
  "pyo3-macros-backend",
@@ -1773,13 +1783,12 @@ dependencies = [
 
 [[package]]
 name = "pyo3-macros-backend"
-version = "0.28.3"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4cdc218d835738f81c2338f822078af45b4afdf8b2e33cbb5916f108b813acb"
+checksum = "4ca3a1557399783172dc5bf39cfca835157732532cba56b71d2292161e53b362"
 dependencies = [
  "heck",
  "proc-macro2",
- "pyo3-build-config",
  "quote",
  "syn",
 ]
@@ -1933,12 +1942,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-crypto"
+version = "1.0.0"
+dependencies = [
+ "aes-gcm",
+]
+
+[[package]]
 name = "reddb-io-file"
 version = "1.0.0"
 dependencies = [
  "blake3",
  "crc32fast",
  "fs2",
+ "hex",
  "lz4_flex",
  "serde",
  "serde_json",
@@ -1977,6 +1994,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-rql"
+version = "1.0.0"
+dependencies = [
+ "reddb-io-types",
+]
+
+[[package]]
 name = "reddb-io-server"
 version = "1.10.1"
 dependencies = [
@@ -1987,6 +2011,7 @@ dependencies = [
  "crc32fast",
  "crossbeam-queue",
  "ed25519-dalek",
+ "flate2",
  "fs2",
  "hex",
  "hmac 0.13.0",
@@ -2004,8 +2029,11 @@ dependencies = [
  "rayon",
  "rcgen",
  "reddb-io-client-connector",
+ "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-grpc-proto",
+ "reddb-io-rql",
+ "reddb-io-types",
  "reddb-io-wire",
  "regex",
  "roaring",
@@ -2016,6 +2044,7 @@ dependencies = [
  "sha2 0.11.0",
  "snap",
  "strsim",
+ "tar",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -2025,7 +2054,15 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ureq",
+ "webpki-roots 1.0.7",
  "x509-parser",
+ "zstd",
+]
+
+[[package]]
+name = "reddb-io-types"
+version = "1.0.0"
+dependencies = [
  "zstd",
 ]
 
@@ -2033,6 +2070,7 @@ dependencies = [
 name = "reddb-io-wire"
 version = "1.10.1"
 dependencies = [
+ "reddb-io-types",
  "serde_json",
  "tokio",
  "url",
@@ -2472,6 +2510,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
 ]
 
 [[package]]
@@ -3295,6 +3344,16 @@ dependencies = [
  "rusticata-macros",
  "thiserror",
  "time",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]
