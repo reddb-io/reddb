@@ -1,3 +1,4 @@
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::{Mutex, OnceLock};
