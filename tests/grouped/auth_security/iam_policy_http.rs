@@ -6,6 +6,7 @@
 //! the assertions exercise pure routing + handler behaviour.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};

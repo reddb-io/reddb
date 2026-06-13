@@ -16,6 +16,7 @@
 //!    no-op and existing clients keep their current behavior.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};
