@@ -71,6 +71,12 @@ redwire = ["reddb-client/redwire"]
 # the tests need.
 reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client", features = ["embedded", "redwire"] }
 reddb-file = { package = "reddb-io-file", version = "1.0", path = "crates/reddb-file" }
+# Workspace-level RQL conformance drivers execute the corpus owned by
+# `crates/reddb-rql` against the current in-server engine. Keeping these deps
+# here preserves the pure `reddb-io-rql -> reddb-io-types` crate graph.
+reddb-rql = { package = "reddb-io-rql", version = "1.0", path = "crates/reddb-rql" }
+reddb-types = { package = "reddb-io-types", version = "1.0", path = "crates/reddb-types" }
+sqllogictest = "0.29"
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"

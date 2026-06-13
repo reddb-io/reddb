@@ -1023,3 +1023,350 @@ fn secret_ref_value(store: &str, collection: &str, key: &str) -> Value {
         reddb_types::json::to_vec(&reddb_types::json::Value::Object(map)).unwrap_or_default(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{InsertEntityType, ReturningItem, UpdateTarget};
+
+    fn make_parser(input: &str) -> Parser<'_> {
+        Parser::new(input).expect("lexer")
+    }
+
+    fn insert(input: &str) -> InsertQuery {
+        let mut parser = make_parser(input);
+        let QueryExpr::Insert(query) = parser.parse_insert_query().expect("insert") else {
+            panic!("expected insert query");
+        };
+        query
+    }
+
+    fn update(input: &str) -> UpdateQuery {
+        let mut parser = make_parser(input);
+        let QueryExpr::Update(query) = parser.parse_update_query().expect("update") else {
+            panic!("expected update query");
+        };
+        query
+    }
+
+    fn delete(input: &str) -> DeleteQuery {
+        let mut parser = make_parser(input);
+        let QueryExpr::Delete(query) = parser.parse_delete_query().expect("delete") else {
+            panic!("expected delete query");
+        };
+        query
+    }
+
+    fn ask(input: &str) -> AskQuery {
+        let mut parser = make_parser(input);
+        let QueryExpr::Ask(query) = parser.parse_ask_query().expect("ask") else {
+            panic!("expected ask query");
+        };
+        query
+    }
+
+    #[test]
+    fn insert_entity_types_with_options_returning_and_suppress_events() {
+        let cases = [
+            (
+                "INSERT INTO items NODE (id) VALUES (1)",
+                InsertEntityType::Node,
+            ),
+            (
+                "INSERT INTO items EDGE (id) VALUES (1)",
+                InsertEntityType::Edge,
+            ),
+            (
+                "INSERT INTO items VECTOR (id) VALUES (1)",
+                InsertEntityType::Vector,
+            ),
+            (
+                "INSERT INTO items DOCUMENT (id) VALUES (1)",
+                InsertEntityType::Document,
+            ),
+            ("INSERT INTO items KV (id) VALUES (1)", InsertEntityType::Kv),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(insert(input).entity_type, expected, "{input}");
+        }
+
+        let query = insert(
+            "INSERT INTO docs (id, body) VALUES (1, 'red'), (2, ?) \
+             WITH TTL 2 h WITH EXPIRES AT 999 \
+             WITH METADATA (source = 'test', score = 3) \
+             WITH AUTO EMBED (body, title) USING openai MODEL 'text-embedding-3-small' \
+             RETURNING * SUPPRESS EVENTS",
+        );
+        assert_eq!(query.table, "docs");
+        assert_eq!(query.entity_type, InsertEntityType::Row);
+        assert_eq!(query.columns, vec!["id", "body"]);
+        assert_eq!(query.values.len(), 2);
+        assert_eq!(query.value_exprs.len(), 2);
+        assert_eq!(query.ttl_ms, Some(7_200_000));
+        assert_eq!(query.expires_at_ms, Some(999));
+        assert_eq!(query.with_metadata.len(), 2);
+        assert_eq!(
+            query.returning.as_deref(),
+            Some([ReturningItem::All].as_slice())
+        );
+        let auto_embed = query.auto_embed.expect("auto embed");
+        assert_eq!(auto_embed.fields, vec!["body", "title"]);
+        assert_eq!(auto_embed.provider, "openai");
+        assert_eq!(auto_embed.model.as_deref(), Some("text-embedding-3-small"));
+        assert!(query.suppress_events);
+    }
+
+    #[test]
+    fn insert_rejects_metric_and_bad_with_clause() {
+        let mut parser = make_parser("INSERT INTO METRIC cpu.usage (value) VALUES (1)");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("metric insert should fail");
+        assert!(err.to_string().contains("INSERT INTO METRIC"));
+
+        let mut parser = make_parser("INSERT INTO docs (id) VALUES (1) WITH TTL 1 fortnight");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("bad ttl unit should fail");
+        assert!(err.to_string().contains("unsupported TTL unit"));
+
+        let mut parser = make_parser("INSERT INTO docs (id) VALUES (1) WITH UNKNOWN");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("bad WITH should fail");
+        assert!(err.to_string().contains("expected"));
+    }
+
+    #[test]
+    fn update_targets_compound_assignments_order_limit_returning() {
+        let cases = [
+            ("UPDATE docs KV SET count = 1", UpdateTarget::Kv),
+            ("UPDATE docs ROWS SET count = 1", UpdateTarget::Rows),
+            (
+                "UPDATE docs DOCUMENTS SET count = 1",
+                UpdateTarget::Documents,
+            ),
+            ("UPDATE docs NODES SET count = 1", UpdateTarget::Nodes),
+            ("UPDATE docs EDGES SET count = 1", UpdateTarget::Edges),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(update(input).target, expected, "{input}");
+        }
+
+        let query = update(
+            "UPDATE docs DOCUMENTS SET count += 2, title = UPPER(title) \
+             WHERE id = 1 WITH TTL 30 s WITH METADATA (source = 'update') \
+             ORDER BY updated_at DESC LIMIT 5 RETURNING weight, title SUPPRESS EVENTS",
+        );
+        assert_eq!(query.table, "docs");
+        assert_eq!(query.target, UpdateTarget::Documents);
+        assert_eq!(query.assignment_exprs.len(), 2);
+        assert_eq!(query.compound_assignment_ops, vec![Some(BinOp::Add), None]);
+        assert_eq!(query.assignments.len(), 0);
+        assert!(query.filter.is_some());
+        assert!(query.where_expr.is_some());
+        assert_eq!(query.ttl_ms, Some(30_000));
+        assert_eq!(query.with_metadata.len(), 1);
+        assert_eq!(query.limit, Some(5));
+        assert_eq!(query.order_by.len(), 2);
+        assert!(matches!(
+            &query.order_by[1].field,
+            FieldRef::TableColumn { column, .. } if column == "rid"
+        ));
+        assert_eq!(
+            query.returning.as_deref(),
+            Some(
+                [
+                    ReturningItem::Column("weight".to_string()),
+                    ReturningItem::Column("title".to_string())
+                ]
+                .as_slice()
+            )
+        );
+        assert!(query.suppress_events);
+    }
+
+    #[test]
+    fn update_rejects_invalid_assignment_and_order_by_forms() {
+        let mut parser = make_parser("UPDATE docs SET count ^= 1");
+        let err = parser
+            .parse_update_query()
+            .expect_err("unknown compound assignment should fail");
+        assert!(err.to_string().contains("expected"));
+
+        let mut parser = make_parser("UPDATE docs SET count = 1 ORDER BY updated_at");
+        let err = parser
+            .parse_update_query()
+            .expect_err("ORDER BY without LIMIT should fail");
+        assert!(err.to_string().contains("requires LIMIT"));
+
+        let mut parser = make_parser("UPDATE docs SET count = 1 ORDER BY updated_at + 1 LIMIT 1");
+        let err = parser
+            .parse_update_query()
+            .expect_err("ORDER BY expression should fail");
+        assert!(err.to_string().contains("top-level fields"));
+    }
+
+    #[test]
+    fn delete_returning_and_suppress_events() {
+        let query = delete("DELETE FROM docs WHERE id = 1 RETURNING id, title SUPPRESS EVENTS");
+        assert_eq!(query.table, "docs");
+        assert!(query.filter.is_some());
+        assert!(query.where_expr.is_some());
+        assert_eq!(
+            query.returning.as_deref(),
+            Some(
+                [
+                    ReturningItem::Column("id".to_string()),
+                    ReturningItem::Column("title".to_string())
+                ]
+                .as_slice()
+            )
+        );
+        assert!(query.suppress_events);
+
+        let query = delete("DELETE FROM docs RETURNING *");
+        assert_eq!(
+            query.returning.as_deref(),
+            Some([ReturningItem::All].as_slice())
+        );
+    }
+
+    #[test]
+    fn returning_rejects_expression_forms() {
+        for input in [
+            "DELETE FROM docs RETURNING 1",
+            "DELETE FROM docs RETURNING UPPER(title)",
+            "DELETE FROM docs RETURNING title || body",
+        ] {
+            let mut parser = make_parser(input);
+            let err = parser
+                .parse_delete_query()
+                .expect_err("RETURNING expression should fail");
+            assert!(err.to_string().contains("RETURNING expressions"));
+        }
+    }
+
+    #[test]
+    fn ask_parses_all_optional_clauses_and_cache_modes() {
+        let query = ask(
+            "ASK 'what changed?' USING 'openai' MODEL 'gpt' DEPTH 3 LIMIT 4 \
+             MIN_SCORE 0.7 COLLECTION docs TEMPERATURE 0.2 SEED 42 STRICT OFF \
+             STREAM CACHE TTL '10m'",
+        );
+        assert_eq!(query.question, "what changed?");
+        assert_eq!(query.provider.as_deref(), Some("openai"));
+        assert_eq!(query.model.as_deref(), Some("gpt"));
+        assert_eq!(query.depth, Some(3));
+        assert_eq!(query.limit, Some(4));
+        assert_eq!(query.min_score, Some(0.7));
+        assert_eq!(query.collection.as_deref(), Some("docs"));
+        assert_eq!(query.temperature, Some(0.2));
+        assert_eq!(query.seed, Some(42));
+        assert!(!query.strict);
+        assert!(query.stream);
+        assert_eq!(query.cache, AskCacheClause::CacheTtl("10m".to_string()));
+
+        let query = ask("ASK ? NOCACHE");
+        assert_eq!(query.question, "");
+        assert_eq!(query.question_param, Some(0));
+        assert_eq!(query.cache, AskCacheClause::NoCache);
+    }
+
+    #[test]
+    fn explain_ask_and_ask_error_paths() {
+        let mut parser = make_parser("EXPLAIN ASK $2 STRICT ON");
+        let QueryExpr::Ask(query) = parser.parse_explain_ask_query().expect("explain ask") else {
+            panic!("expected ask query");
+        };
+        assert!(query.explain);
+        assert_eq!(query.question_param, Some(1));
+        assert!(query.strict);
+
+        let mut parser = make_parser("EXPLAIN SELECT 1");
+        let err = parser
+            .parse_explain_ask_query()
+            .expect_err("missing ASK should fail");
+        assert!(err.to_string().contains("expected"));
+
+        let mut parser = make_parser("ASK 'q' STRICT MAYBE");
+        let err = parser
+            .parse_ask_query()
+            .expect_err("bad strict should fail");
+        assert!(err.to_string().contains("Expected ON or OFF"));
+
+        let mut parser = make_parser("ASK 'q' CACHE TTL '10m' NOCACHE");
+        let err = parser
+            .parse_ask_query()
+            .expect_err("duplicate cache should fail");
+        assert!(err.to_string().contains("cache clause"));
+
+        let mut parser = make_parser("ASK 'q' CACHE FOREVER '10m'");
+        let err = parser
+            .parse_ask_query()
+            .expect_err("bad cache ttl keyword should fail");
+        assert!(err.to_string().contains("Expected TTL"));
+    }
+
+    #[test]
+    fn literal_value_special_constructors_arrays_and_objects() {
+        let mut parser = make_parser("PASSWORD('pw')");
+        assert!(matches!(
+            parser.parse_literal_value().expect("password"),
+            Value::Password(secret) if secret == "@@plain@@pw"
+        ));
+
+        let mut parser = make_parser("SECRET('pw')");
+        assert!(matches!(
+            parser.parse_literal_value().expect("secret"),
+            Value::Secret(bytes) if bytes == b"@@plain@@pw"
+        ));
+
+        let mut parser = make_parser("SECRET_REF(vault, red.vault.api_key)");
+        let value = parser.parse_literal_value().expect("secret ref");
+        assert!(matches!(value, Value::Json(_)));
+
+        let mut parser = make_parser("[1, 2.5]");
+        assert!(matches!(
+            parser.parse_literal_value().expect("vector"),
+            Value::Vector(values) if values == vec![1.0, 2.5]
+        ));
+
+        let mut parser = make_parser("['a', 2]");
+        assert!(matches!(
+            parser.parse_literal_value().expect("json array"),
+            Value::Json(_)
+        ));
+
+        let mut parser = make_parser("{level = 'info', count: 2}");
+        assert!(matches!(
+            parser.parse_literal_value().expect("json object"),
+            Value::Json(_)
+        ));
+    }
+
+    #[test]
+    fn literal_value_rejects_invalid_secret_ref_and_scalar_start() {
+        let mut parser = make_parser("SECRET_REF(config, red.vault.api_key)");
+        let err = parser
+            .parse_literal_value()
+            .expect_err("non-vault secret ref should fail");
+        assert!(err.to_string().contains("expected"));
+
+        let mut parser = make_parser("ORDER");
+        let err = parser
+            .parse_literal_value()
+            .expect_err("non literal should fail");
+        assert!(err.to_string().contains("expected"));
+    }
+
+    #[test]
+    fn json_depth_check_rejects_deep_literals() {
+        let mut deep = reddb_types::utils::json::JsonValue::Array(vec![]);
+        for _ in 0..JSON_LITERAL_MAX_DEPTH {
+            deep = reddb_types::utils::json::JsonValue::Array(vec![deep]);
+        }
+        let err = json_literal_depth_check(&deep).expect_err("depth should fail");
+        assert!(err.contains("JSON_LITERAL_MAX_DEPTH"));
+    }
+}

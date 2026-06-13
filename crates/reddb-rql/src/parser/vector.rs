@@ -328,3 +328,185 @@ impl<'a> Parser<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_query(input: &str) -> Result<QueryExpr, ParseError> {
+        crate::parser::parse(input).map(|query| query.query)
+    }
+
+    #[test]
+    fn vector_query_uses_defaults_for_bare_identifier_source() {
+        let query = parse_query("VECTOR SEARCH embeddings SIMILAR TO nearest_neighbor").unwrap();
+
+        let QueryExpr::Vector(vector) = query else {
+            panic!("expected vector query");
+        };
+        assert_eq!(vector.collection, "embeddings");
+        assert_eq!(vector.k, 10);
+        assert!(vector.filter.is_none());
+        assert_eq!(vector.metric, None);
+        assert_eq!(vector.threshold, None);
+        assert!(!vector.include_vectors);
+        assert!(!vector.include_metadata);
+        assert!(matches!(
+            vector.query_vector,
+            VectorSource::Text(text) if text == "nearest_neighbor"
+        ));
+    }
+
+    #[test]
+    fn vector_query_parses_reference_sources_and_k_alias() {
+        let query =
+            parse_query("VECTOR SEARCH embeddings SIMILAR TO docs(42) INCLUDE METADATA K = 7")
+                .unwrap();
+        let QueryExpr::Vector(vector) = query else {
+            panic!("expected vector query");
+        };
+        assert_eq!(vector.k, 7);
+        assert!(vector.include_metadata);
+        assert!(matches!(
+            vector.query_vector,
+            VectorSource::Reference {
+                collection,
+                vector_id,
+            } if collection == "docs" && vector_id == 42
+        ));
+
+        let query =
+            parse_query("VECTOR SEARCH embeddings SIMILAR TO (archive, 99) LIMIT 4").unwrap();
+        let QueryExpr::Vector(vector) = query else {
+            panic!("expected vector query");
+        };
+        assert_eq!(vector.k, 4);
+        assert!(matches!(
+            vector.query_vector,
+            VectorSource::Reference {
+                collection,
+                vector_id,
+            } if collection == "archive" && vector_id == 99
+        ));
+    }
+
+    #[test]
+    fn vector_query_parses_subquery_source() {
+        let query =
+            parse_query("VECTOR SEARCH docs SIMILAR TO (SELECT id FROM seeds) LIMIT 2").unwrap();
+
+        let QueryExpr::Vector(vector) = query else {
+            panic!("expected vector query");
+        };
+        assert_eq!(vector.collection, "docs");
+        assert_eq!(vector.k, 2);
+        match vector.query_vector {
+            VectorSource::Subquery(expr) => match *expr {
+                QueryExpr::Table(table) => assert_eq!(table.table, "seeds"),
+                other => panic!("expected table subquery, got {other:?}"),
+            },
+            other => panic!("expected subquery source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vector_query_parses_filter_sets_metric_threshold_and_includes() {
+        let query = parse_query(
+            "VECTOR SEARCH docs SIMILAR TO [0.1, 0.2] \
+             WHERE (source IN ('nmap', 'nessus') OR severity NOT IN (1, 2)) \
+             AND archived = false METRIC DOT THRESHOLD 0.25 INCLUDE VECTORS LIMIT 3",
+        )
+        .unwrap();
+
+        let QueryExpr::Vector(vector) = query else {
+            panic!("expected vector query");
+        };
+        assert_eq!(vector.k, 3);
+        assert_eq!(vector.metric, Some(DistanceMetric::InnerProduct));
+        assert_eq!(vector.threshold, Some(0.25));
+        assert!(vector.include_vectors);
+        assert!(
+            matches!(vector.query_vector, VectorSource::Literal(values) if values == vec![0.1, 0.2])
+        );
+
+        let Some(MetadataFilter::And(and_parts)) = vector.filter else {
+            panic!("expected AND filter");
+        };
+        assert_eq!(and_parts.len(), 2);
+        match &and_parts[0] {
+            MetadataFilter::Or(or_parts) => {
+                assert_eq!(or_parts.len(), 2);
+                assert!(matches!(
+                    &or_parts[0],
+                    MetadataFilter::In(field, values)
+                        if field == "source"
+                            && values == &vec![
+                                MetadataValue::String("nmap".to_string()),
+                                MetadataValue::String("nessus".to_string())
+                            ]
+                ));
+                assert!(matches!(
+                    &or_parts[1],
+                    MetadataFilter::NotIn(field, values)
+                        if field == "severity"
+                            && values == &vec![MetadataValue::Integer(1), MetadataValue::Integer(2)]
+                ));
+            }
+            other => panic!("expected OR filter, got {other:?}"),
+        }
+        assert!(matches!(
+            &and_parts[1],
+            MetadataFilter::Eq(field, MetadataValue::Bool(false)) if field == "archived"
+        ));
+    }
+
+    #[test]
+    fn metadata_filter_parses_comparisons_and_contains() {
+        let query = parse_query(
+            "VECTOR SEARCH docs SIMILAR TO [0.3] \
+             WHERE score < 0.7 OR rank >= 10 AND title CONTAINS 'redis'",
+        )
+        .unwrap();
+
+        let QueryExpr::Vector(vector) = query else {
+            panic!("expected vector query");
+        };
+        let Some(MetadataFilter::Or(or_parts)) = vector.filter else {
+            panic!("expected OR filter");
+        };
+        assert_eq!(or_parts.len(), 2);
+        assert!(matches!(
+            &or_parts[0],
+            MetadataFilter::Lt(field, MetadataValue::Float(value))
+                if field == "score" && (*value - 0.7).abs() < f64::EPSILON
+        ));
+        match &or_parts[1] {
+            MetadataFilter::And(and_parts) => {
+                assert_eq!(and_parts.len(), 2);
+                assert!(matches!(
+                    &and_parts[0],
+                    MetadataFilter::Gte(field, MetadataValue::Integer(10)) if field == "rank"
+                ));
+                assert!(matches!(
+                    &and_parts[1],
+                    MetadataFilter::Contains(field, value)
+                        if field == "title" && value == "redis"
+                ));
+            }
+            other => panic!("expected AND filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vector_parser_reports_malformed_queries() {
+        for sql in [
+            "VECTOR SEARCH docs SIMILAR TO []",
+            "VECTOR SEARCH docs SIMILAR TO [0.1] INCLUDE SCORES",
+            "VECTOR SEARCH docs SIMILAR TO [0.1] METRIC MANHATTAN",
+            "VECTOR SEARCH docs SIMILAR TO [0.1] WHERE source",
+            "VECTOR SEARCH docs SIMILAR TO (docs)",
+        ] {
+            assert!(parse_query(sql).is_err(), "{sql} should not parse");
+        }
+    }
+}

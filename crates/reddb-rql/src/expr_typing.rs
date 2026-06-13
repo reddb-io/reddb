@@ -577,3 +577,348 @@ fn binop_result_type(op: BinOp, lhs: DataType, rhs: DataType) -> Result<DataType
 fn _ctx_explicit() -> CastContext {
     CastContext::Explicit
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Span;
+    use crate::lexer::Position;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    fn span() -> Span {
+        Span {
+            start: Position::default(),
+            end: Position::default(),
+        }
+    }
+
+    fn lit(value: Value) -> Expr {
+        Expr::Literal {
+            value,
+            span: span(),
+        }
+    }
+
+    fn col(table: &str, column: &str) -> Expr {
+        Expr::Column {
+            field: FieldRef::column(table, column),
+            span: span(),
+        }
+    }
+
+    fn bin(op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::BinaryOp {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            span: span(),
+        }
+    }
+
+    fn unary(op: UnaryOp, operand: Expr) -> Expr {
+        Expr::UnaryOp {
+            op,
+            operand: Box::new(operand),
+            span: span(),
+        }
+    }
+
+    fn scope(table: &str, column: &str) -> Option<DataType> {
+        match (table, column) {
+            ("", "age") => Some(DataType::Integer),
+            ("", "active") => Some(DataType::Boolean),
+            ("users", "name") => Some(DataType::Text),
+            ("n", "score") => Some(DataType::Float),
+            _ => None,
+        }
+    }
+
+    fn no_scope(_: &str, _: &str) -> Option<DataType> {
+        None
+    }
+
+    #[test]
+    fn literal_values_map_to_declared_types() {
+        let values = vec![
+            (Value::Null, DataType::Nullable),
+            (Value::Boolean(true), DataType::Boolean),
+            (Value::Integer(1), DataType::Integer),
+            (Value::UnsignedInteger(1), DataType::UnsignedInteger),
+            (Value::Float(1.0), DataType::Float),
+            (Value::BigInt(1), DataType::BigInt),
+            (Value::Decimal(100), DataType::Decimal),
+            (Value::Text(Arc::from("x")), DataType::Text),
+            (Value::Blob(vec![1, 2]), DataType::Blob),
+            (Value::Timestamp(1), DataType::Timestamp),
+            (Value::TimestampMs(1), DataType::TimestampMs),
+            (Value::Duration(1), DataType::Duration),
+            (Value::Date(1), DataType::Date),
+            (Value::Time(1), DataType::Time),
+            (
+                Value::IpAddr(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                DataType::IpAddr,
+            ),
+            (Value::Ipv4(0x7f00_0001), DataType::Ipv4),
+            (Value::Ipv6([0; 16]), DataType::Ipv6),
+            (Value::Subnet(0, 24), DataType::Subnet),
+            (Value::Cidr(0, 24), DataType::Cidr),
+            (Value::MacAddr([1, 2, 3, 4, 5, 6]), DataType::MacAddr),
+            (Value::Port(5432), DataType::Port),
+            (Value::Latitude(1), DataType::Latitude),
+            (Value::Longitude(1), DataType::Longitude),
+            (Value::GeoPoint(1, 2), DataType::GeoPoint),
+            (Value::Country2(*b"BR"), DataType::Country2),
+            (Value::Country3(*b"BRA"), DataType::Country3),
+            (Value::Lang2(*b"pt"), DataType::Lang2),
+            (Value::Lang5(*b"pt-BR"), DataType::Lang5),
+            (Value::Currency(*b"BRL"), DataType::Currency),
+            (Value::AssetCode("BTC".to_string()), DataType::AssetCode),
+            (
+                Value::Money {
+                    asset_code: "BRL".to_string(),
+                    minor_units: 123,
+                    scale: 2,
+                },
+                DataType::Money,
+            ),
+            (Value::Color([1, 2, 3]), DataType::Color),
+            (Value::ColorAlpha([1, 2, 3, 4]), DataType::ColorAlpha),
+            (Value::Email("a@example.com".to_string()), DataType::Email),
+            (Value::Url("https://example.com".to_string()), DataType::Url),
+            (Value::Phone(5511999999999), DataType::Phone),
+            (Value::Semver(1_002_003), DataType::Semver),
+            (Value::Uuid([1; 16]), DataType::Uuid),
+            (Value::Vector(vec![1.0, 2.0]), DataType::Vector),
+            (Value::Array(vec![Value::Integer(1)]), DataType::Array),
+            (Value::Json(br#"{"x":1}"#.to_vec()), DataType::Json),
+            (Value::EnumValue(1), DataType::Enum),
+            (Value::NodeRef("n1".to_string()), DataType::NodeRef),
+            (Value::EdgeRef("e1".to_string()), DataType::EdgeRef),
+            (Value::VectorRef("vecs".to_string(), 1), DataType::VectorRef),
+            (Value::RowRef("rows".to_string(), 1), DataType::RowRef),
+            (
+                Value::KeyRef("kv".to_string(), "k".to_string()),
+                DataType::KeyRef,
+            ),
+            (Value::DocRef("docs".to_string(), 1), DataType::DocRef),
+            (Value::TableRef("users".to_string()), DataType::TableRef),
+            (Value::PageRef(7), DataType::PageRef),
+            (Value::Secret(vec![1, 2, 3]), DataType::Secret),
+            (Value::Password("argon2".to_string()), DataType::Password),
+        ];
+
+        for (value, expected) in values {
+            let typed = type_expr(&lit(value), &no_scope).unwrap();
+            assert_eq!(typed.ty, expected);
+            assert!(matches!(typed.kind, TypedExprKind::Literal(_)));
+        }
+    }
+
+    #[test]
+    fn column_lookup_preserves_field_ref_and_reports_unknowns() {
+        let typed = type_expr(&col("users", "name"), &scope).unwrap();
+        assert_eq!(typed.ty, DataType::Text);
+        assert!(matches!(
+            typed.kind,
+            TypedExprKind::Column(FieldRef::TableColumn { table, column })
+                if table == "users" && column == "name"
+        ));
+
+        let err = type_expr(&col("", "missing"), &scope).unwrap_err();
+        assert!(matches!(
+            err,
+            TypeError::UnknownColumn { ref table, ref column }
+                if table.is_empty() && column == "missing"
+        ));
+        assert_eq!(err.to_string(), "unknown column `missing`");
+    }
+
+    #[test]
+    fn arithmetic_logical_and_unary_ops_return_expected_types() {
+        let add = bin(BinOp::Add, lit(Value::Integer(1)), lit(Value::Float(2.0)));
+        assert_eq!(type_expr(&add, &scope).unwrap().ty, DataType::Float);
+
+        let and = bin(BinOp::And, col("", "active"), lit(Value::Boolean(false)));
+        assert_eq!(type_expr(&and, &scope).unwrap().ty, DataType::Boolean);
+
+        let neg = unary(UnaryOp::Neg, col("", "age"));
+        assert_eq!(type_expr(&neg, &scope).unwrap().ty, DataType::Integer);
+
+        let not = unary(UnaryOp::Not, col("", "active"));
+        assert_eq!(type_expr(&not, &scope).unwrap().ty, DataType::Boolean);
+    }
+
+    #[test]
+    fn operator_mismatches_are_reported() {
+        let bad_and = bin(
+            BinOp::And,
+            lit(Value::Boolean(true)),
+            lit(Value::Integer(1)),
+        );
+        assert!(matches!(
+            type_expr(&bad_and, &scope).unwrap_err(),
+            TypeError::OperatorMismatch {
+                op: BinOp::And,
+                lhs: DataType::Boolean,
+                rhs: DataType::Integer,
+            }
+        ));
+
+        let bad_neg = unary(UnaryOp::Neg, lit(Value::Text(Arc::from("x"))));
+        assert!(matches!(
+            type_expr(&bad_neg, &scope).unwrap_err(),
+            TypeError::UnaryMismatch {
+                op: UnaryOp::Neg,
+                operand: DataType::Text,
+            }
+        ));
+    }
+
+    #[test]
+    fn casts_functions_and_parameters_have_stable_types() {
+        let cast = Expr::Cast {
+            inner: Box::new(lit(Value::Integer(1))),
+            target: DataType::Text,
+            span: span(),
+        };
+        assert_eq!(type_expr(&cast, &scope).unwrap().ty, DataType::Text);
+
+        let concat = Expr::FunctionCall {
+            name: "concat".to_string(),
+            args: vec![lit(Value::Text(Arc::from("a"))), lit(Value::Integer(1))],
+            span: span(),
+        };
+        assert_eq!(type_expr(&concat, &scope).unwrap().ty, DataType::Text);
+
+        let money_minor = Expr::FunctionCall {
+            name: "money_minor".to_string(),
+            args: vec![lit(Value::Money {
+                asset_code: "BRL".to_string(),
+                minor_units: 10,
+                scale: 2,
+            })],
+            span: span(),
+        };
+        assert_eq!(
+            type_expr(&money_minor, &scope).unwrap().ty,
+            DataType::BigInt
+        );
+
+        let coalesce = Expr::FunctionCall {
+            name: "coalesce".to_string(),
+            args: vec![
+                lit(Value::Null),
+                lit(Value::Integer(1)),
+                lit(Value::Float(2.0)),
+            ],
+            span: span(),
+        };
+        assert_eq!(type_expr(&coalesce, &scope).unwrap().ty, DataType::Integer);
+
+        let unknown = Expr::FunctionCall {
+            name: "not_a_function".to_string(),
+            args: Vec::new(),
+            span: span(),
+        };
+        assert_eq!(type_expr(&unknown, &scope).unwrap().ty, DataType::Nullable);
+
+        let parameter = Expr::Parameter {
+            index: 1,
+            span: span(),
+        };
+        assert_eq!(
+            type_expr(&parameter, &scope).unwrap().ty,
+            DataType::Nullable
+        );
+    }
+
+    #[test]
+    fn invalid_casts_case_branches_and_lists_are_errors() {
+        let bad_cast = Expr::Cast {
+            inner: Box::new(lit(Value::Blob(vec![1]))),
+            target: DataType::Money,
+            span: span(),
+        };
+        assert!(matches!(
+            type_expr(&bad_cast, &scope).unwrap_err(),
+            TypeError::InvalidCast {
+                src: DataType::Blob,
+                target: DataType::Money,
+            }
+        ));
+
+        let case = Expr::Case {
+            branches: vec![(
+                lit(Value::Boolean(true)),
+                lit(Value::Text(Arc::from("text"))),
+            )],
+            else_: Some(Box::new(lit(Value::Integer(1)))),
+            span: span(),
+        };
+        assert!(matches!(
+            type_expr(&case, &scope).unwrap_err(),
+            TypeError::CaseBranchMismatch {
+                first: DataType::Text,
+                other: DataType::Integer,
+            }
+        ));
+
+        let in_list = Expr::InList {
+            target: Box::new(lit(Value::Integer(1))),
+            values: vec![lit(Value::Text(Arc::from("x")))],
+            negated: false,
+            span: span(),
+        };
+        assert!(matches!(
+            type_expr(&in_list, &scope).unwrap_err(),
+            TypeError::InListMismatch {
+                target: DataType::Integer,
+                element: DataType::Text,
+            }
+        ));
+    }
+
+    #[test]
+    fn predicates_return_boolean_when_bounds_and_values_are_compatible() {
+        let is_null = Expr::IsNull {
+            operand: Box::new(col("", "age")),
+            negated: true,
+            span: span(),
+        };
+        assert_eq!(type_expr(&is_null, &scope).unwrap().ty, DataType::Boolean);
+
+        let in_list = Expr::InList {
+            target: Box::new(col("", "age")),
+            values: vec![lit(Value::Integer(1)), lit(Value::Integer(2))],
+            negated: false,
+            span: span(),
+        };
+        assert_eq!(type_expr(&in_list, &scope).unwrap().ty, DataType::Boolean);
+
+        let between = Expr::Between {
+            target: Box::new(col("", "age")),
+            low: Box::new(lit(Value::Integer(1))),
+            high: Box::new(lit(Value::Integer(9))),
+            negated: false,
+            span: span(),
+        };
+        assert_eq!(type_expr(&between, &scope).unwrap().ty, DataType::Boolean);
+
+        let bad_between = Expr::Between {
+            target: Box::new(col("", "age")),
+            low: Box::new(lit(Value::Text(Arc::from("low")))),
+            high: Box::new(lit(Value::Integer(9))),
+            negated: false,
+            span: span(),
+        };
+        assert!(matches!(
+            type_expr(&bad_between, &scope).unwrap_err(),
+            TypeError::OperatorMismatch {
+                op: BinOp::Ge,
+                lhs: DataType::Integer,
+                rhs: DataType::Text,
+            }
+        ));
+    }
+}

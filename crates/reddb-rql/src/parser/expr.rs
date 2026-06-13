@@ -1671,6 +1671,231 @@ mod tests {
     }
 
     #[test]
+    fn unary_plus_is_noop() {
+        let e = parse("+42");
+        assert!(matches!(
+            e,
+            Expr::Literal {
+                value: Value::Integer(42),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parenthesised_select_becomes_subquery_expr() {
+        let e = parse("(SELECT 1)");
+        assert!(matches!(e, Expr::Subquery { .. }));
+    }
+
+    #[test]
+    fn bare_zero_arg_current_functions_parse_as_calls() {
+        for (input, expected) in [
+            ("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP"),
+            ("CURRENT_DATE", "CURRENT_DATE"),
+            ("CURRENT_TIME", "CURRENT_TIME"),
+        ] {
+            let e = parse(input);
+            let Expr::FunctionCall { name, args, .. } = e else {
+                panic!("expected FunctionCall for {input}");
+            };
+            assert_eq!(name, expected);
+            assert!(args.is_empty());
+        }
+    }
+
+    #[test]
+    fn keyword_function_names_parse_as_calls() {
+        for (input, expected_len) in [
+            ("COUNT(*)", 1),
+            ("SUM(amount)", 1),
+            ("LEFT(name, 2)", 2),
+            ("RIGHT(name, 2)", 2),
+            ("CONTAINS(body, 'red')", 2),
+            ("KV(cfg, path)", 2),
+        ] {
+            let e = parse(input);
+            let Expr::FunctionCall { args, .. } = e else {
+                panic!("expected FunctionCall for {input}");
+            };
+            assert_eq!(args.len(), expected_len, "{input}");
+        }
+    }
+
+    #[test]
+    fn count_distinct_lowers_to_count_distinct_function() {
+        let e = parse("COUNT(DISTINCT user_id)");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected FunctionCall");
+        };
+        assert_eq!(name, "COUNT_DISTINCT");
+        assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn dollar_secret_and_config_refs_become_function_calls() {
+        for (input, expected_name, expected_key) in [
+            ("$secret.api_key", "__SECRET_REF", "red.vault/api_key"),
+            ("$red.secret.api_key", "__SECRET_REF", "red.vault/api_key"),
+            ("$config.ai.provider", "CONFIG", "red.config/ai.provider"),
+            (
+                "$red.config.ai.provider",
+                "CONFIG",
+                "red.config/ai.provider",
+            ),
+        ] {
+            let e = parse(input);
+            let Expr::FunctionCall { name, args, .. } = e else {
+                panic!("expected FunctionCall for {input}");
+            };
+            assert_eq!(name, expected_name);
+            assert!(matches!(
+                &args[..],
+                [Expr::Literal { value: Value::Text(key), .. }] if key.as_ref() == expected_key
+            ));
+        }
+    }
+
+    #[test]
+    fn dollar_ref_rejects_unknown_namespace() {
+        let mut parser = Parser::new("$tenant.id").expect("lexer");
+        let err = parser
+            .parse_expr()
+            .expect_err("unknown namespace should fail");
+        assert!(err.to_string().contains("unknown $ reference"));
+    }
+
+    #[test]
+    fn config_and_kv_bare_path_args_lowercase_to_text() {
+        let e = parse("CONFIG(Red.AI.Default.Provider, 'openai')");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected FunctionCall");
+        };
+        assert_eq!(name, "CONFIG");
+        assert_eq!(args.len(), 2);
+        assert!(matches!(
+            &args[0],
+            Expr::Literal { value: Value::Text(path), .. }
+                if path.as_ref() == "red.ai.default.provider"
+        ));
+        assert!(matches!(
+            &args[1],
+            Expr::Literal { value: Value::Text(provider), .. } if provider.as_ref() == "openai"
+        ));
+
+        let e = parse("KV(cfg, default.role, LOWER(name))");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected FunctionCall");
+        };
+        assert_eq!(name, "KV");
+        assert!(matches!(
+            &args[0],
+            Expr::Literal { value: Value::Text(path), .. } if path.as_ref() == "cfg"
+        ));
+        assert!(matches!(
+            &args[1],
+            Expr::Literal { value: Value::Text(path), .. } if path.as_ref() == "default.role"
+        ));
+        assert!(matches!(&args[2], Expr::FunctionCall { name, .. } if name == "LOWER"));
+    }
+
+    #[test]
+    fn cast_rejects_unknown_type_name() {
+        let mut parser = Parser::new("CAST(age AS BOGUS_TYPE)").expect("lexer");
+        let err = parser
+            .parse_expr()
+            .expect_err("unknown cast target should fail");
+        assert!(err.to_string().contains("unknown type name"));
+    }
+
+    #[test]
+    fn trim_position_and_substring_sql_forms_lower_to_function_args() {
+        let e = parse("TRIM(LEADING 'x' FROM name)");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected trim function");
+        };
+        assert_eq!(name, "LTRIM");
+        assert_eq!(args.len(), 2);
+
+        let e = parse("TRIM(TRAILING FROM name)");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected trim function");
+        };
+        assert_eq!(name, "RTRIM");
+        assert_eq!(args.len(), 1);
+
+        let e = parse("POSITION('x' IN name)");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected position function");
+        };
+        assert_eq!(name, "POSITION");
+        assert_eq!(args.len(), 2);
+
+        let e = parse("POSITION('x', name)");
+        let Expr::FunctionCall { args, .. } = e else {
+            panic!("expected position function");
+        };
+        assert_eq!(args.len(), 2);
+
+        let e = parse("SUBSTRING(name FROM 2 FOR 3)");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected substring function");
+        };
+        assert_eq!(name, "SUBSTRING");
+        assert_eq!(args.len(), 3);
+
+        let e = parse("SUBSTRING(name FOR 3)");
+        let Expr::FunctionCall { args, .. } = e else {
+            panic!("expected substring function");
+        };
+        assert_eq!(args.len(), 3);
+        assert!(matches!(
+            args[1],
+            Expr::Literal {
+                value: Value::Integer(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn postfix_in_accepts_subquery_and_empty_list() {
+        let e = parse("id IN (SELECT user_id FROM users)");
+        let Expr::InList { values, .. } = e else {
+            panic!("expected InList");
+        };
+        assert!(matches!(&values[..], [Expr::Subquery { .. }]));
+
+        let e = parse("id IN ()");
+        let Expr::InList { values, .. } = e else {
+            panic!("expected InList");
+        };
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn postfix_not_requires_between_or_in() {
+        let mut parser = Parser::new("status NOT NULL").expect("lexer");
+        let err = parser.parse_expr().expect_err("postfix NOT should fail");
+        assert!(err.to_string().contains("BETWEEN or IN"));
+    }
+
+    #[test]
+    fn case_reports_missing_then_end_and_empty_branch() {
+        for input in [
+            "CASE END",
+            "CASE WHEN a = 1 'one' END",
+            "CASE WHEN a = 1 THEN 'one'",
+        ] {
+            let mut parser = Parser::new(input).expect("lexer");
+            assert!(
+                parser.parse_expr().is_err(),
+                "expected CASE parse failure for {input}"
+            );
+        }
+    }
+
+    #[test]
     fn span_tracks_token_range() {
         // A literal's span must cover the exact tokens consumed.
         let mut parser = Parser::new("123 + 456").expect("lexer");
@@ -1828,5 +2053,55 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert_eq!(window.partition_by.len(), 1);
         assert!(window.order_by.is_empty());
+    }
+
+    #[test]
+    fn window_order_nulls_first_and_last() {
+        let e = parse("SUM(x) OVER (ORDER BY score ASC NULLS FIRST, ts DESC NULLS LAST)");
+        let Expr::WindowFunctionCall { window, .. } = e else {
+            panic!("expected WindowFunctionCall");
+        };
+        assert_eq!(window.order_by.len(), 2);
+        assert!(window.order_by[0].ascending);
+        assert!(window.order_by[0].nulls_first);
+        assert!(!window.order_by[1].ascending);
+        assert!(!window.order_by[1].nulls_first);
+    }
+
+    #[test]
+    fn window_single_bound_frames() {
+        let e = parse("SUM(x) OVER (ORDER BY ts ROWS 3 PRECEDING)");
+        let Expr::WindowFunctionCall { window, .. } = e else {
+            panic!("expected WindowFunctionCall");
+        };
+        let frame = window.frame.expect("frame");
+        assert!(matches!(
+            frame.start,
+            crate::ast::WindowFrameBound::Preceding(_)
+        ));
+        assert!(frame.end.is_none());
+
+        let e = parse("SUM(x) OVER (ORDER BY ts RANGE 1 FOLLOWING)");
+        let Expr::WindowFunctionCall { window, .. } = e else {
+            panic!("expected WindowFunctionCall");
+        };
+        let frame = window.frame.expect("frame");
+        assert!(matches!(
+            frame.start,
+            crate::ast::WindowFrameBound::Following(_)
+        ));
+        assert!(frame.end.is_none());
+    }
+
+    #[test]
+    fn window_reports_nulls_and_frame_bound_errors() {
+        for input in [
+            "SUM(x) OVER (ORDER BY score NULLS MIDDLE)",
+            "SUM(x) OVER (ORDER BY score ROWS UNBOUNDED)",
+            "SUM(x) OVER (ORDER BY score ROWS 3)",
+        ] {
+            let err = try_parse(input).expect_err("window syntax should fail");
+            assert!(!err.to_string().is_empty(), "{input}");
+        }
     }
 }

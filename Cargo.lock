@@ -2437,11 +2437,14 @@ dependencies = [
  "reddb-io-client",
  "reddb-io-file",
  "reddb-io-grpc-proto",
+ "reddb-io-rql",
  "reddb-io-server",
+ "reddb-io-types",
  "reddb-io-wire",
  "rustls",
  "serde_json",
  "snap",
+ "sqllogictest",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -2526,10 +2529,8 @@ name = "reddb-io-rql"
 version = "1.0.0"
 dependencies = [
  "proptest",
- "reddb-io-server",
  "reddb-io-types",
  "serde_json",
- "sqllogictest",
 ]
 
 [[package]]

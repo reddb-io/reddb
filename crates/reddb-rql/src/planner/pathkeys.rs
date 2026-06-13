@@ -232,3 +232,98 @@ pub fn plan_sort(input_order: &PathKeys, required_order: &PathKeys) -> SortStrat
     }
     SortStrategy::Incremental { prefix_len: prefix }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(name: &str) -> FieldRef {
+        FieldRef::column("", name)
+    }
+
+    #[test]
+    fn constructors_apply_sql_default_null_placement() {
+        let asc = PathKey::asc(col("created_at"));
+        assert_eq!(asc.direction, PathKeyDirection::Ascending);
+        assert_eq!(asc.nulls, PathKeyNulls::Last);
+
+        let desc = PathKey::desc(col("score"));
+        assert_eq!(desc.direction, PathKeyDirection::Descending);
+        assert_eq!(desc.nulls, PathKeyNulls::First);
+    }
+
+    #[test]
+    fn prefix_matching_ignores_null_placement_but_not_direction_or_column() {
+        let input = PathKeys {
+            keys: vec![
+                PathKey {
+                    field: col("tenant_id"),
+                    direction: PathKeyDirection::Ascending,
+                    nulls: PathKeyNulls::First,
+                },
+                PathKey::desc(col("created_at")),
+            ],
+        };
+        let required = PathKeys {
+            keys: vec![
+                PathKey::asc(col("tenant_id")),
+                PathKey::desc(col("created_at")),
+                PathKey::asc(col("id")),
+            ],
+        };
+
+        assert_eq!(input.prefix_match(&required), 2);
+
+        let wrong_direction = PathKeys::desc(col("tenant_id"));
+        assert_eq!(input.prefix_match(&wrong_direction), 0);
+
+        let wrong_column = PathKeys::asc(col("account_id"));
+        assert_eq!(input.prefix_match(&wrong_column), 0);
+    }
+
+    #[test]
+    fn satisfies_requires_all_required_keys_in_order() {
+        let input = PathKeys::asc(col("a"))
+            .appended(PathKey::asc(col("b")))
+            .appended(PathKey::desc(col("c")));
+
+        assert!(input.satisfies(&PathKeys::asc(col("a"))));
+        assert!(input.satisfies(&PathKeys::asc(col("a")).appended(PathKey::asc(col("b")))));
+        assert!(!PathKeys::asc(col("a")).satisfies(&input));
+        assert!(!input.satisfies(&PathKeys::asc(col("b"))));
+    }
+
+    #[test]
+    fn appended_truncated_and_empty_report_stable_lengths() {
+        let unordered = PathKeys::unordered();
+        assert!(unordered.is_unordered());
+        assert!(unordered.is_empty());
+        assert_eq!(unordered.len(), 0);
+
+        let keys = unordered
+            .appended(PathKey::asc(col("a")))
+            .appended(PathKey::desc(col("b")));
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys.truncated(1), PathKeys::asc(col("a")));
+        assert_eq!(keys.truncated(99), keys);
+    }
+
+    #[test]
+    fn plan_sort_distinguishes_none_incremental_and_full() {
+        let input = PathKeys::asc(col("tenant_id")).appended(PathKey::desc(col("created_at")));
+        let exact = input.clone();
+        let extension = exact.clone().appended(PathKey::asc(col("id")));
+        let unrelated = PathKeys::asc(col("status"));
+
+        assert_eq!(
+            plan_sort(&input, &PathKeys::unordered()),
+            SortStrategy::None
+        );
+        assert_eq!(plan_sort(&input, &exact), SortStrategy::None);
+        assert_eq!(
+            plan_sort(&input, &extension),
+            SortStrategy::Incremental { prefix_len: 2 }
+        );
+        assert_eq!(plan_sort(&input, &unrelated), SortStrategy::Full);
+    }
+}

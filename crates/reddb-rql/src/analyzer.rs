@@ -81,3 +81,112 @@ pub fn resolve_sql_type_name(sql_type: &SqlTypeName) -> Result<DataType, Analysi
     DataType::from_sql_type_name(sql_type)
         .ok_or_else(|| AnalysisError::UnsupportedType(sql_type.base_name()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{CreateColumnDef, CreateTableQuery};
+    use reddb_types::catalog::CollectionModel;
+
+    fn column(name: &str, declared: &str) -> CreateColumnDef {
+        CreateColumnDef {
+            name: name.to_string(),
+            data_type: declared.to_string(),
+            sql_type: SqlTypeName::parse_declared(declared),
+            not_null: false,
+            default: None,
+            compress: None,
+            unique: false,
+            primary_key: false,
+            enum_variants: Vec::new(),
+            array_element: None,
+            decimal_precision: None,
+        }
+    }
+
+    fn create_table(columns: Vec<CreateColumnDef>) -> CreateTableQuery {
+        CreateTableQuery {
+            collection_model: CollectionModel::Table,
+            name: "orders".to_string(),
+            columns,
+            if_not_exists: true,
+            default_ttl_ms: Some(60_000),
+            metrics_rollup_policies: Vec::new(),
+            context_index_fields: vec!["description".to_string()],
+            context_index_enabled: true,
+            timestamps: true,
+            partition_by: None,
+            tenant_by: None,
+            append_only: false,
+            subscriptions: Vec::new(),
+            analytics_config: Vec::new(),
+            vault_own_master_key: false,
+        }
+    }
+
+    #[test]
+    fn analyze_create_table_resolves_columns_and_preserves_options() {
+        let mut id = column("id", "INTEGER");
+        id.primary_key = true;
+        id.not_null = true;
+
+        let mut description = column("description", "VARCHAR");
+        description.default = Some("'new'".to_string());
+        description.unique = true;
+
+        let query = create_table(vec![id, description]);
+        let analyzed = analyze_create_table(&query).unwrap();
+
+        assert_eq!(analyzed.name, "orders");
+        assert!(analyzed.if_not_exists);
+        assert_eq!(analyzed.default_ttl_ms, Some(60_000));
+        assert_eq!(analyzed.context_index_fields, ["description"]);
+        assert!(analyzed.timestamps);
+        assert_eq!(analyzed.columns.len(), 2);
+        assert_eq!(analyzed.columns[0].name, "id");
+        assert_eq!(analyzed.columns[0].storage_type, DataType::Integer);
+        assert!(analyzed.columns[0].not_null);
+        assert!(analyzed.columns[0].primary_key);
+        assert_eq!(analyzed.columns[1].declared_type.base_name(), "VARCHAR");
+        assert_eq!(analyzed.columns[1].storage_type, DataType::Text);
+        assert_eq!(analyzed.columns[1].default.as_deref(), Some("'new'"));
+        assert!(analyzed.columns[1].unique);
+    }
+
+    #[test]
+    fn duplicate_columns_are_case_insensitive() {
+        let query = create_table(vec![column("Id", "INT"), column("id", "INT")]);
+        let err = analyze_create_table(&query).unwrap_err();
+
+        assert!(matches!(err, AnalysisError::DuplicateColumn(ref name) if name == "id"));
+        assert_eq!(err.to_string(), "duplicate column name: id");
+    }
+
+    #[test]
+    fn unsupported_type_is_reported_with_normalized_name() {
+        let query = create_table(vec![column("mystery", "not_a_real_type")]);
+        let err = analyze_create_table(&query).unwrap_err();
+
+        assert!(
+            matches!(err, AnalysisError::UnsupportedType(ref name) if name == "NOT_A_REAL_TYPE")
+        );
+        assert_eq!(err.to_string(), "unsupported SQL type: NOT_A_REAL_TYPE");
+    }
+
+    #[test]
+    fn resolve_declared_data_type_accepts_sql_aliases() {
+        assert_eq!(
+            resolve_declared_data_type("varchar").unwrap(),
+            DataType::Text
+        );
+        assert_eq!(
+            resolve_declared_data_type("numeric(10)").unwrap(),
+            DataType::Decimal
+        );
+        assert_eq!(
+            resolve_declared_data_type("timestamptz").unwrap(),
+            DataType::TimestampMs
+        );
+        assert!(resolve_declared_data_type("definitely_not_sql").is_err());
+    }
+}

@@ -995,4 +995,178 @@ mod tests {
         let expr = q.to_query_expr();
         assert!(matches!(expr, QueryExpr::Graph(_)));
     }
+
+    #[test]
+    fn test_parse_optional_order_offset_and_filter_functions() {
+        let q = SparqlParser::parse(
+            r#"
+            PREFIX ex: <http://example.org/>
+            SELECT DISTINCT ?host ?name WHERE {
+                # comments are whitespace
+                ?host a ex:Host .
+                OPTIONAL {
+                    ?host :hasName "web"^^<http://www.w3.org/2001/XMLSchema#string> .
+                }
+                FILTER (REGEX(?name, "web", "i"))
+                FILTER (BOUND(?name))
+                FILTER (!BOUND(?missing))
+                FILTER (isIRI(?host))
+                FILTER (isURI(?host))
+                FILTER (isLiteral(?name))
+                FILTER (CONTAINS(?name, "w"))
+                FILTER (STRSTARTS(?name, "w"))
+                FILTER (STRENDS(?name, "b"))
+            }
+            FILTER (?score >= 0.5)
+            ORDER BY DESC(?score) ASC(?host) ?name
+            LIMIT 5
+            OFFSET 2
+            "#,
+        )
+        .unwrap();
+
+        assert!(q.distinct);
+        assert_eq!(
+            q.prefixes.get("ex").map(String::as_str),
+            Some("http://example.org/")
+        );
+        assert_eq!(q.where_patterns.len(), 1);
+        assert_eq!(q.optionals.len(), 1);
+        assert_eq!(q.filters.len(), 10);
+        assert_eq!(
+            q.order_by,
+            vec![
+                ("score".to_string(), false),
+                ("host".to_string(), true),
+                ("name".to_string(), true),
+            ]
+        );
+        assert_eq!(q.limit, Some(5));
+        assert_eq!(q.offset, Some(2));
+
+        assert!(matches!(
+            &q.optionals[0][0].object,
+            SparqlTerm::TypedLiteral(value, datatype)
+                if value == "web"
+                    && datatype == "http://www.w3.org/2001/XMLSchema#string"
+        ));
+    }
+
+    #[test]
+    fn test_to_query_expr_normalizes_edges_literals_and_star_projection() {
+        let q = SparqlParser::parse(
+            "SELECT * WHERE { ?host :hasService ?svc . ?host <http://example.org/connectsTo> ?peer . ?host :hasName 'web' . } LIMIT 3",
+        )
+        .unwrap();
+        let QueryExpr::Graph(graph) = q.to_query_expr() else {
+            panic!("SPARQL should lower to GraphQuery");
+        };
+
+        assert_eq!(graph.limit, Some(3));
+        assert_eq!(graph.pattern.edges.len(), 2);
+        assert!(graph
+            .pattern
+            .edges
+            .iter()
+            .any(|edge| edge.edge_label.as_deref() == Some("has_service")));
+        assert!(graph
+            .pattern
+            .edges
+            .iter()
+            .any(|edge| edge.edge_label.as_deref() == Some("connects_to")));
+        assert_eq!(graph.return_.len(), graph.pattern.nodes.len());
+        assert!(graph.filter.is_some());
+    }
+
+    #[test]
+    fn test_convert_sparql_filter_variants() {
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::Compare(
+                "age".to_string(),
+                CompareOp::Ge,
+                SparqlTerm::Number(18.5),
+            )),
+            Some(Filter::Compare {
+                op: CompareOp::Ge,
+                value: Value::Float(18.5),
+                ..
+            })
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::Compare(
+                "active".to_string(),
+                CompareOp::Eq,
+                SparqlTerm::Boolean(true),
+            )),
+            Some(Filter::Compare {
+                value: Value::Boolean(true),
+                ..
+            })
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::Compare(
+                "name".to_string(),
+                CompareOp::Eq,
+                SparqlTerm::Literal("alice".to_string()),
+            )),
+            Some(Filter::Compare {
+                value: Value::Text(text),
+                ..
+            }) if text.as_ref() == "alice"
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::Bound("name".to_string())),
+            Some(Filter::IsNotNull(_))
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::NotBound("name".to_string())),
+            Some(Filter::IsNull(_))
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::Contains("name".to_string(), "lic".to_string())),
+            Some(Filter::Like { pattern, .. }) if pattern == "%lic%"
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::StrStarts("name".to_string(), "a".to_string())),
+            Some(Filter::StartsWith { prefix, .. }) if prefix == "a"
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::StrEnds("name".to_string(), "e".to_string())),
+            Some(Filter::EndsWith { suffix, .. }) if suffix == "e"
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::And(
+                Box::new(SparqlFilter::Bound("a".to_string())),
+                Box::new(SparqlFilter::Bound("b".to_string())),
+            )),
+            Some(Filter::And(_, _))
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::Or(
+                Box::new(SparqlFilter::Bound("a".to_string())),
+                Box::new(SparqlFilter::Bound("b".to_string())),
+            )),
+            Some(Filter::Or(_, _))
+        ));
+        assert!(matches!(
+            convert_sparql_filter(&SparqlFilter::Not(Box::new(SparqlFilter::Bound(
+                "a".to_string(),
+            )))),
+            Some(Filter::Not(_))
+        ));
+        assert!(convert_sparql_filter(&SparqlFilter::Regex(
+            "name".to_string(),
+            "a.*".to_string(),
+            None,
+        ))
+        .is_none());
+        assert!(convert_sparql_filter(&SparqlFilter::IsIri("s".to_string())).is_none());
+        assert!(convert_sparql_filter(&SparqlFilter::IsLiteral("s".to_string())).is_none());
+        assert!(convert_sparql_filter(&SparqlFilter::Compare(
+            "iri".to_string(),
+            CompareOp::Eq,
+            SparqlTerm::Iri("http://example.org/id".to_string()),
+        ))
+        .is_none());
+    }
 }
