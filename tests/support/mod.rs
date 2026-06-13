@@ -953,7 +953,7 @@ pub fn apply_end_to_end_mutations(rt: &RedDBRuntime) {
 
     exec(
         &query,
-        "CREATE QUEUE workflow WITH DLQ workflow_failed MAX_ATTEMPTS 3",
+        "CREATE QUEUE workflow WITH DLQ workflow_failed MAX_ATTEMPTS 3 LOCK_DEADLINE_MS 1",
     );
     exec(&query, "QUEUE GROUP CREATE workflow workers");
     exec(&query, "QUEUE PUSH workflow 'task-a'");
@@ -974,6 +974,7 @@ pub fn apply_end_to_end_mutations(rt: &RedDBRuntime) {
         "workflow read should bind the first consumer"
     );
 
+    std::thread::sleep(Duration::from_millis(5));
     let claimed = exec(
         &query,
         "QUEUE CLAIM workflow GROUP workers CONSUMER worker2 MIN_IDLE 0",

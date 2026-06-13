@@ -44,7 +44,7 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
     // second NACK promotes immediately.
     exec(
         &rt,
-        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 2",
+        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 4",
     );
     exec(&rt, "QUEUE GROUP CREATE tasks workers");
     exec(&rt, "QUEUE PUSH tasks 'job-dlq'");
