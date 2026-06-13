@@ -27,8 +27,20 @@ mod e2e_metric_descriptor_catalog;
 #[path = "grouped/timeseries_metrics/e2e_metrics_collection_contract.rs"]
 mod e2e_metrics_collection_contract;
 
+#[path = "grouped/timeseries_metrics/e2e_metrics_prometheus_aggregation.rs"]
+mod e2e_metrics_prometheus_aggregation;
+
+#[path = "grouped/timeseries_metrics/e2e_metrics_prometheus_counter_functions.rs"]
+mod e2e_metrics_prometheus_counter_functions;
+
+#[path = "grouped/timeseries_metrics/e2e_metrics_prometheus_histogram.rs"]
+mod e2e_metrics_prometheus_histogram;
+
 #[path = "grouped/timeseries_metrics/e2e_metrics_prometheus_query.rs"]
 mod e2e_metrics_prometheus_query;
+
+#[path = "grouped/timeseries_metrics/e2e_metrics_prometheus_query_range.rs"]
+mod e2e_metrics_prometheus_query_range;
 
 #[path = "grouped/timeseries_metrics/e2e_slo_descriptor_catalog.rs"]
 mod e2e_slo_descriptor_catalog;
