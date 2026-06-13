@@ -27,7 +27,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::super::ast::{CteDefinition, QueryExpr, QueryWithCte};
+use super::super::ast::{
+    CteDefinition, Expr, Filter, Projection, QueryExpr, QueryWithCte, SelectItem, TableSource,
+};
 use super::super::unified::{ExecutionError, UnifiedRecord, UnifiedResult};
 use crate::storage::schema::Value;
 
@@ -607,7 +609,6 @@ pub fn inline_ctes(query: QueryWithCte) -> Result<QueryExpr, ExecutionError> {
 /// the CTE body so dispatchers that key off `QueryExpr::Table` (like
 /// the JOIN executor) see the right shape.
 fn rewrite(expr: &mut QueryExpr, ctes: &HashMap<String, QueryExpr>) {
-    use super::super::ast::TableSource;
     match expr {
         QueryExpr::Table(tq) => {
             let lookup_name = match &tq.source {
@@ -650,15 +651,185 @@ fn rewrite(expr: &mut QueryExpr, ctes: &HashMap<String, QueryExpr>) {
                 }
             }
 
-            if let Some(TableSource::Subquery(body)) = tq.source.as_mut() {
-                rewrite(body, ctes);
+            match tq.source.as_mut() {
+                Some(TableSource::Subquery(body)) => rewrite(body, ctes),
+                Some(TableSource::InlineGraphFunction { nodes, edges, .. }) => {
+                    rewrite(nodes, ctes);
+                    rewrite(edges, ctes);
+                }
+                _ => {}
             }
+            rewrite_table_query_parts(tq, ctes);
         }
         QueryExpr::Join(jq) => {
             rewrite(&mut jq.left, ctes);
             rewrite(&mut jq.right, ctes);
+            if let Some(filter) = jq.filter.as_mut() {
+                rewrite_filter(filter, ctes);
+            }
+            for item in &mut jq.order_by {
+                if let Some(expr) = item.expr.as_mut() {
+                    rewrite_expr(expr, ctes);
+                }
+            }
+            for item in &mut jq.return_items {
+                rewrite_select_item(item, ctes);
+            }
+            for projection in &mut jq.return_ {
+                rewrite_projection(projection, ctes);
+            }
+        }
+        QueryExpr::Graph(gq) => {
+            if let Some(filter) = gq.filter.as_mut() {
+                rewrite_filter(filter, ctes);
+            }
+            for projection in &mut gq.return_ {
+                rewrite_projection(projection, ctes);
+            }
         }
         _ => {}
+    }
+}
+
+fn rewrite_table_query_parts(
+    tq: &mut super::super::ast::TableQuery,
+    ctes: &HashMap<String, QueryExpr>,
+) {
+    for item in &mut tq.select_items {
+        rewrite_select_item(item, ctes);
+    }
+    for projection in &mut tq.columns {
+        rewrite_projection(projection, ctes);
+    }
+    if let Some(expr) = tq.where_expr.as_mut() {
+        rewrite_expr(expr, ctes);
+    }
+    if let Some(filter) = tq.filter.as_mut() {
+        rewrite_filter(filter, ctes);
+    }
+    for expr in &mut tq.group_by_exprs {
+        rewrite_expr(expr, ctes);
+    }
+    if let Some(expr) = tq.having_expr.as_mut() {
+        rewrite_expr(expr, ctes);
+    }
+    if let Some(filter) = tq.having.as_mut() {
+        rewrite_filter(filter, ctes);
+    }
+    for item in &mut tq.order_by {
+        if let Some(expr) = item.expr.as_mut() {
+            rewrite_expr(expr, ctes);
+        }
+    }
+}
+
+fn rewrite_select_item(item: &mut SelectItem, ctes: &HashMap<String, QueryExpr>) {
+    if let SelectItem::Expr { expr, .. } = item {
+        rewrite_expr(expr, ctes);
+    }
+}
+
+fn rewrite_projection(projection: &mut Projection, ctes: &HashMap<String, QueryExpr>) {
+    match projection {
+        Projection::Function(_, args) => {
+            for arg in args {
+                rewrite_projection(arg, ctes);
+            }
+        }
+        Projection::Expression(filter, _) => rewrite_filter(filter, ctes),
+        Projection::Window { args, window, .. } => {
+            for arg in args {
+                rewrite_projection(arg, ctes);
+            }
+            for expr in &mut window.partition_by {
+                rewrite_expr(expr, ctes);
+            }
+            for item in &mut window.order_by {
+                rewrite_expr(&mut item.expr, ctes);
+            }
+        }
+        Projection::All
+        | Projection::Column(_)
+        | Projection::Alias(_, _)
+        | Projection::Field(_, _) => {}
+    }
+}
+
+fn rewrite_filter(filter: &mut Filter, ctes: &HashMap<String, QueryExpr>) {
+    match filter {
+        Filter::CompareExpr { lhs, rhs, .. } => {
+            rewrite_expr(lhs, ctes);
+            rewrite_expr(rhs, ctes);
+        }
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            rewrite_filter(left, ctes);
+            rewrite_filter(right, ctes);
+        }
+        Filter::Not(inner) => rewrite_filter(inner, ctes),
+        Filter::Compare { .. }
+        | Filter::CompareFields { .. }
+        | Filter::IsNull(_)
+        | Filter::IsNotNull(_)
+        | Filter::In { .. }
+        | Filter::Between { .. }
+        | Filter::Like { .. }
+        | Filter::StartsWith { .. }
+        | Filter::EndsWith { .. }
+        | Filter::Contains { .. } => {}
+    }
+}
+
+fn rewrite_expr(expr: &mut Expr, ctes: &HashMap<String, QueryExpr>) {
+    match expr {
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            rewrite_expr(lhs, ctes);
+            rewrite_expr(rhs, ctes);
+        }
+        Expr::UnaryOp { operand, .. } => rewrite_expr(operand, ctes),
+        Expr::Cast { inner, .. } => rewrite_expr(inner, ctes),
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                rewrite_expr(arg, ctes);
+            }
+        }
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            for (condition, value) in branches {
+                rewrite_expr(condition, ctes);
+                rewrite_expr(value, ctes);
+            }
+            if let Some(value) = else_ {
+                rewrite_expr(value, ctes);
+            }
+        }
+        Expr::IsNull { operand, .. } => rewrite_expr(operand, ctes),
+        Expr::InList { target, values, .. } => {
+            rewrite_expr(target, ctes);
+            for value in values {
+                rewrite_expr(value, ctes);
+            }
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            rewrite_expr(target, ctes);
+            rewrite_expr(low, ctes);
+            rewrite_expr(high, ctes);
+        }
+        Expr::Subquery { query, .. } => rewrite(&mut query.query, ctes),
+        Expr::WindowFunctionCall { args, window, .. } => {
+            for arg in args {
+                rewrite_expr(arg, ctes);
+            }
+            for expr in &mut window.partition_by {
+                rewrite_expr(expr, ctes);
+            }
+            for item in &mut window.order_by {
+                rewrite_expr(&mut item.expr, ctes);
+            }
+        }
+        Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => {}
     }
 }
 

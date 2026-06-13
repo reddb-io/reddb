@@ -87,7 +87,8 @@ impl<'a> Parser<'a> {
         // Label filter is a free-form string; resolution against the
         // graph's `LabelRegistry` happens at execution time, not here.
         let node_label = if self.consume(&Token::Colon)? {
-            Some(self.expect_ident_or_keyword()?.to_lowercase())
+            let label = self.expect_ident_or_keyword()?;
+            Some(self.parse_node_label(&label)?)
         } else {
             None
         };
@@ -130,7 +131,8 @@ impl<'a> Parser<'a> {
         };
 
         let edge_label = if self.consume(&Token::Colon)? {
-            Some(self.expect_ident_or_keyword()?.to_lowercase())
+            let label = self.expect_ident_or_keyword()?;
+            Some(self.parse_edge_label(&label)?)
         } else {
             None
         };

@@ -116,7 +116,9 @@ use reddb::json::{from_slice as json_from_slice, json, Value as JsonValue};
 use reddb::replication::cdc::{change_record_from_entity, ChangeOperation, ChangeRecord};
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
-use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+use reddb::storage::{
+    EntityData, EntityId, EntityKind, RowData, StorageDeployPreset, UnifiedEntity,
+};
 use reddb::{CatalogUseCases, HealthState, RedDBOptions, RedDBRuntime};
 
 const ACCOUNTS_TTL_MS: u64 = 86_400_000;
@@ -194,7 +196,10 @@ impl PersistentDbPath {
 
     pub fn open_runtime(&self) -> RedDBRuntime {
         let path = self.path_string();
-        RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        let options = RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .unwrap_or_else(|err| panic!("serverless storage profile should be valid: {err}"));
+        RedDBRuntime::with_options(options)
             .unwrap_or_else(|err| panic!("failed to open persistent runtime at {path}: {err:?}"))
     }
 

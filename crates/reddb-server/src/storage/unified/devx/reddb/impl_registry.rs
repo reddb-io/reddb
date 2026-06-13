@@ -417,12 +417,13 @@ impl RedDB {
 
     /// List recorded snapshots from the current physical metadata view.
     pub fn snapshots(&self) -> Vec<crate::physical::SnapshotDescriptor> {
-        self.physical_metadata()
-            .map(|metadata| metadata.snapshots)
-            .or_else(|| {
-                self.native_physical_state()
-                    .map(|state| self.snapshots_from_native_state(&state))
-            })
+        if let Some(metadata) = self.physical_metadata() {
+            if !metadata.snapshots.is_empty() {
+                return metadata.snapshots;
+            }
+        }
+        self.native_physical_state()
+            .map(|state| self.snapshots_from_native_state(&state))
             .unwrap_or_default()
     }
 

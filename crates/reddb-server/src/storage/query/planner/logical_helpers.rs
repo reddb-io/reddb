@@ -488,6 +488,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::Grant(_)
         | QueryExpr::Revoke(_)
         | QueryExpr::AlterUser(_)
+        | QueryExpr::CreateUser(_)
         | QueryExpr::CreateIamPolicy { .. }
         | QueryExpr::DropIamPolicy { .. }
         | QueryExpr::AttachPolicy { .. }
@@ -865,6 +866,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Grant(_) => "grant",
         QueryExpr::Revoke(_) => "revoke",
         QueryExpr::AlterUser(_) => "alter_user",
+        QueryExpr::CreateUser(_) => "create_user",
         QueryExpr::CreateIamPolicy { .. } => "create_iam_policy",
         QueryExpr::DropIamPolicy { .. } => "drop_iam_policy",
         QueryExpr::AttachPolicy { .. } => "attach_policy",

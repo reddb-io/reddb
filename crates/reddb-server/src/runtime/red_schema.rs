@@ -656,10 +656,14 @@ pub(super) fn references_system_schema(query: &str) -> bool {
 
 pub(super) fn is_system_schema_write(query: &str) -> bool {
     let trimmed = query.trim_start();
-    let first = trimmed
-        .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
-        .next()
-        .unwrap_or("");
+    let mut tokens = trimmed.split(|c: char| c.is_whitespace() || c == '(' || c == ';');
+    let first = tokens.next().unwrap_or("");
+    let second = tokens.next().unwrap_or("");
+    if first.eq_ignore_ascii_case("DELETE")
+        && matches_ignore_ascii_case(second, &["SECRET", "CONFIG", "VAULT"])
+    {
+        return false;
+    }
     matches_ignore_ascii_case(first, &["INSERT", "UPDATE", "DELETE", "TRUNCATE"])
         && references_system_schema(query)
 }

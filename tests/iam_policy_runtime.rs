@@ -113,6 +113,52 @@ fn attach_policy(store: &AuthStore, user: reddb::auth::UserId, policy: &str) {
         .unwrap();
 }
 
+#[test]
+fn sql_create_attach_and_show_iam_policy_applies_at_runtime() {
+    let (_dir, rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE orders (id INT)").unwrap();
+    rt.execute_query("INSERT INTO orders (id) VALUES (1)")
+        .unwrap();
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT * FROM orders")
+    });
+    assert!(
+        denied.is_err(),
+        "PolicyOnly user should not read without an attached policy"
+    );
+
+    let policy = r#"{"id":"sql-read-orders","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["table:orders"]}]}"#;
+    store.set_enforcement_mode(reddb::auth::enforcement_mode::PolicyEnforcementMode::LegacyRbac);
+    as_user("admin", Role::Admin, || {
+        rt.execute_query(&format!("CREATE POLICY 'sql-read-orders' AS '{}'", policy))
+            .unwrap();
+        rt.execute_query("ATTACH POLICY 'sql-read-orders' TO USER alice")
+            .unwrap();
+    });
+    store.set_enforcement_mode(reddb::auth::enforcement_mode::PolicyEnforcementMode::PolicyOnly);
+
+    let show = as_user("admin", Role::Admin, || {
+        rt.execute_query("SHOW POLICIES FOR USER alice").unwrap()
+    });
+    assert!(
+        show.result.records.iter().any(|record| {
+            matches!(
+                record.get("id"),
+                Some(reddb::storage::schema::Value::Text(id)) if id.as_ref() == "sql-read-orders"
+            )
+        }),
+        "SHOW POLICIES should expose the SQL-created policy: {:?}",
+        show.result.records
+    );
+
+    let allowed = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT * FROM orders")
+    })
+    .expect("attached SQL-created policy should allow SELECT");
+    assert_eq!(allowed.result.records.len(), 1);
+}
+
 fn seed_document(rt: &RedDBRuntime) {
     rt.execute_query(
         r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"public":"ok","secret":"no","nested":{"public":"yes","secret":"hidden"}}')"#,

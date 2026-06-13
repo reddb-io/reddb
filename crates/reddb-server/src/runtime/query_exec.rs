@@ -466,6 +466,12 @@ pub(super) fn execute_runtime_canonical_expr_node(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match expr {
         QueryExpr::Table(table) => {
+            if matches!(
+                table.source,
+                Some(crate::storage::query::ast::TableSource::Subquery(_))
+            ) {
+                return execute_runtime_canonical_table_query_indexed(db, table, None);
+            }
             let table_name = table.table.as_str();
             let table_alias = table.alias.as_deref().unwrap_or(table_name);
             let context = RuntimeTableExecutionContext {

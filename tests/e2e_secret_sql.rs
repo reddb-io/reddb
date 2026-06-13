@@ -5,13 +5,20 @@ use std::sync::Arc;
 use reddb::auth::vault::Vault;
 use reddb::auth::{AuthConfig, AuthStore};
 use reddb::storage::schema::Value;
+use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-use support::PersistentDbPath;
+use support::TempDbFile;
 
-fn open_runtime_with_vault(name: &str) -> (PersistentDbPath, RedDBRuntime, Arc<AuthStore>) {
-    let path = PersistentDbPath::new(name);
-    let rt = path.open_runtime();
+fn pager_backed_options(path: &std::path::Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should expose pager")
+}
+
+fn open_runtime_with_vault(name: &str) -> (TempDbFile, RedDBRuntime, Arc<AuthStore>) {
+    let path = support::temp_db_file(name);
+    let rt = RedDBRuntime::with_options(pager_backed_options(path.path())).expect("runtime opens");
     let db = rt.db();
     let store = db.store();
     let pager = Arc::clone(
@@ -142,7 +149,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
     let dump_path = dump_guard.path();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(source_path))
+        let rt = RedDBRuntime::with_options(pager_backed_options(source_path))
             .expect("source runtime should open");
         let _auth = attach_vault(&rt, "cli-pass");
         rt.execute_query("SET CONFIG red.config.demo.enabled = true")
@@ -152,7 +159,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         rt.checkpoint().expect("source checkpoint should succeed");
     }
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(source_path))
+        let rt = RedDBRuntime::with_options(pager_backed_options(source_path))
             .expect("source runtime should reopen");
         let auth = attach_vault(&rt, "cli-pass");
         assert_eq!(
@@ -201,7 +208,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         String::from_utf8_lossy(&restore.stderr)
     );
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dest_path))
+    let rt = RedDBRuntime::with_options(pager_backed_options(dest_path))
         .expect("dest runtime should open");
     let auth = attach_vault(&rt, "cli-pass");
     assert_eq!(
@@ -269,6 +276,49 @@ fn dollar_red_secret_reference_uses_full_red_secret_path() {
 }
 
 #[test]
+fn red_secrets_plural_alias_normalizes_to_red_secret() {
+    let (_path, rt, auth) = open_runtime_with_vault("secret_sql_red_secrets_plural");
+
+    rt.execute_query("CREATE TABLE tokens (id INT, token TEXT)")
+        .expect("create table");
+    rt.execute_query("INSERT INTO tokens (id, token) VALUES (1, 'plural-match'), (2, 'other')")
+        .expect("insert rows");
+    rt.execute_query("SET SECRET red.secrets.tokens.active = 'plural-match'")
+        .expect("set plural red secret");
+
+    assert_eq!(
+        auth.vault_kv_get("red.secret.tokens.active").as_deref(),
+        Some("plural-match")
+    );
+    assert!(
+        auth.vault_kv_get("red.secrets.tokens.active").is_none(),
+        "plural alias should not create a second physical namespace"
+    );
+
+    let shown = rt
+        .execute_query("SHOW SECRETS red.secrets.tokens")
+        .expect("show plural red secrets");
+    assert_eq!(shown.result.records.len(), 1);
+    assert_eq!(
+        shown.result.records[0].get("key"),
+        Some(&Value::Text("red.secret.tokens.active".into()))
+    );
+
+    let filtered = rt
+        .execute_query("SELECT id FROM tokens WHERE token = $red.secrets.tokens.active")
+        .expect("filter by plural red secret");
+    assert_eq!(filtered.result.records.len(), 1);
+    assert_eq!(
+        filtered.result.records[0].get("id"),
+        Some(&Value::Integer(1))
+    );
+
+    rt.execute_query("DELETE SECRET red.secrets.tokens.active")
+        .expect("delete plural red secret");
+    assert!(auth.vault_kv_get("red.secret.tokens.active").is_none());
+}
+
+#[test]
 fn dollar_config_reference_resolves_plaintext_config() {
     let (_path, rt, _auth) = open_runtime_with_vault("secret_sql_dollar_config_ref");
 
@@ -321,4 +371,9 @@ fn config_and_secret_reserved_prefixes_do_not_cross() {
         .execute_query("SET CONFIG red.secret.foo = 'x'")
         .expect_err("SET CONFIG must reject red.secret");
     assert!(err.to_string().contains("red.secret.* is reserved"));
+
+    let err = rt
+        .execute_query("SET CONFIG red.secrets.foo = 'x'")
+        .expect_err("SET CONFIG must reject red.secrets");
+    assert!(err.to_string().contains("red.secrets.*"));
 }

@@ -375,8 +375,10 @@ impl<'a> Parser<'a> {
             let path_lc = path.to_ascii_lowercase();
             let (name, key) = if let Some(rest) = path_lc.strip_prefix("secret.") {
                 ("__SECRET_REF", format!("red.vault/{rest}"))
-            } else if path_lc.starts_with("red.secret.") {
-                let rest = path_lc.trim_start_matches("red.secret.");
+            } else if let Some(rest) = path_lc
+                .strip_prefix("red.secret.")
+                .or_else(|| path_lc.strip_prefix("red.secrets."))
+            {
                 ("__SECRET_REF", format!("red.vault/{rest}"))
             } else if let Some(rest) = path_lc.strip_prefix("config.") {
                 ("CONFIG", format!("red.config/{rest}"))
@@ -386,7 +388,7 @@ impl<'a> Parser<'a> {
             } else {
                 return Err(ParseError::new(
                     format!(
-                        "unknown $ reference `${path}`; expected $secret.*, $red.secret.*, $config.*, or $red.config.*"
+                        "unknown $ reference `${path}`; expected $secret.*, $red.secret.*, $red.secrets.*, $config.*, or $red.config.*"
                     ),
                     self.position(),
                 ));
@@ -1737,6 +1739,7 @@ mod tests {
         for (input, expected_name, expected_key) in [
             ("$secret.api_key", "__SECRET_REF", "red.vault/api_key"),
             ("$red.secret.api_key", "__SECRET_REF", "red.vault/api_key"),
+            ("$red.secrets.api_key", "__SECRET_REF", "red.vault/api_key"),
             ("$config.ai.provider", "CONFIG", "red.config/ai.provider"),
             (
                 "$red.config.ai.provider",

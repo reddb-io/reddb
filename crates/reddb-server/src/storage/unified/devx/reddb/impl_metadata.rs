@@ -1104,7 +1104,7 @@ impl RedDB {
         &self,
         native_state: &NativePhysicalState,
     ) -> Vec<crate::physical::SnapshotDescriptor> {
-        native_state
+        let snapshots: Vec<_> = native_state
             .recovery
             .as_ref()
             .map(|recovery| {
@@ -1120,7 +1120,36 @@ impl RedDB {
                     })
                     .collect()
             })
+            .unwrap_or_default();
+        if !snapshots.is_empty() {
+            return snapshots;
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
+            .as_millis();
+        let (collection_count, total_entities) = native_state
+            .catalog
+            .as_ref()
+            .map(|catalog| {
+                (
+                    catalog.collection_count as usize,
+                    catalog.total_entities as usize,
+                )
+            })
+            .unwrap_or_else(|| {
+                let catalog = self.catalog_snapshot();
+                (catalog.total_collections, catalog.total_entities)
+            });
+
+        vec![crate::physical::SnapshotDescriptor {
+            snapshot_id: native_state.header.sequence,
+            created_at_unix_ms: now,
+            superblock_sequence: native_state.header.sequence,
+            collection_count,
+            total_entities,
+        }]
     }
 
     fn index_kind_from_str(value: &str) -> Option<crate::index::IndexKind> {
