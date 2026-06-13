@@ -720,6 +720,21 @@ impl NaturalQuery {
 mod tests {
     use super::*;
 
+    fn graph(expr: QueryExpr) -> GraphQuery {
+        match expr {
+            QueryExpr::Graph(graph) => graph,
+            other => panic!("expected graph query, got {other:?}"),
+        }
+    }
+
+    fn entity(entity_type: EntityType, alias: &str) -> ExtractedEntity {
+        ExtractedEntity {
+            entity_type,
+            value: None,
+            alias: alias.to_string(),
+        }
+    }
+
     #[test]
     fn test_parse_find_hosts() {
         let q = NaturalParser::parse("find all hosts with ssh open").unwrap();
@@ -803,5 +818,312 @@ mod tests {
     fn test_detect_relationship() {
         let q = NaturalParser::parse("credentials that can access host 10.0.0.1").unwrap();
         assert_eq!(q.relationship, Some(RelationshipType::AuthAccess));
+    }
+
+    #[test]
+    fn test_parse_rejects_empty_after_normalization() {
+        let err = NaturalParser::parse(" ?! ").unwrap_err();
+        assert_eq!(err.message, "Empty query");
+    }
+
+    #[test]
+    fn test_parse_intent_variants() {
+        let cases = [
+            ("search hosts", QueryIntent::Find),
+            ("display users", QueryIntent::Show),
+            ("count users", QueryIntent::Count),
+            ("how are hosts", QueryIntent::Find),
+            ("route between hosts", QueryIntent::Path),
+            ("does user admin access host 10.0.0.1", QueryIntent::Check),
+            ("which services are public", QueryIntent::Find),
+            ("unexpected words", QueryIntent::Find),
+        ];
+
+        for (input, expected) in cases {
+            let q = NaturalParser::parse(input).unwrap();
+            assert_eq!(q.intent, expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn test_parse_entities_from_values_and_identifiers() {
+        let user = NaturalParser::parse("show user the admin").unwrap();
+        assert!(user
+            .entities
+            .iter()
+            .any(|e| e.entity_type == EntityType::User && e.value == Some("admin".to_string())));
+
+        let host = NaturalParser::parse("find 192.168.1.10").unwrap();
+        assert!(host.entities.iter().any(|e| {
+            e.entity_type == EntityType::Host && e.value == Some("192.168.1.10".to_string())
+        }));
+
+        let cve = NaturalParser::parse("show cve:2024-1234").unwrap();
+        assert!(cve.entities.iter().any(|e| {
+            e.entity_type == EntityType::Vulnerability
+                && e.value == Some("CVE-2024-1234".to_string())
+        }));
+    }
+
+    #[test]
+    fn test_parse_filter_variants() {
+        let high = NaturalParser::parse("find high vulnerabilities").unwrap();
+        assert!(high
+            .filters
+            .iter()
+            .any(|f| f.property == "severity" && f.op == CompareOp::Ge && f.value == "7.0"));
+
+        let medium = NaturalParser::parse("find medium vulnerabilities").unwrap();
+        assert!(medium
+            .filters
+            .iter()
+            .any(|f| f.property == "severity" && f.op == CompareOp::Ge && f.value == "4.0"));
+
+        let public_rdp = NaturalParser::parse("find public rdp services").unwrap();
+        assert!(public_rdp
+            .filters
+            .iter()
+            .any(|f| f.property == "service" && f.value == "rdp"));
+        assert!(public_rdp
+            .filters
+            .iter()
+            .any(|f| f.property == "status" && f.value == "open"));
+
+        let zero_port = NaturalParser::parse("find hosts with port 0").unwrap();
+        assert!(!zero_port.filters.iter().any(|f| f.property == "port"));
+    }
+
+    #[test]
+    fn test_parse_limit_variants() {
+        let cases = [
+            ("top 3 hosts", Some(3)),
+            ("first 4 hosts", Some(4)),
+            ("limit 5 hosts", Some(5)),
+            ("show 6 hosts", Some(6)),
+            ("show hosts", None),
+            ("top hosts", None),
+        ];
+
+        for (input, expected) in cases {
+            let q = NaturalParser::parse(input).unwrap();
+            assert_eq!(q.limit, expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn test_parse_explicit_relationship_phrases() {
+        let cases = [
+            (
+                "find hosts running on technology linux",
+                RelationshipType::RunsOn,
+            ),
+            (
+                "find services using certificate tls",
+                RelationshipType::Uses,
+            ),
+            (
+                "show host 10.0.0.1 exposes port 443",
+                RelationshipType::Exposes,
+            ),
+            (
+                "find hosts affected by cve-2024-1234",
+                RelationshipType::Affects,
+            ),
+            (
+                "check users authenticate to host 10.0.0.1",
+                RelationshipType::AuthAccess,
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let q = NaturalParser::parse(input).unwrap();
+            assert_eq!(q.relationship, Some(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn test_parse_inferred_relationships_from_entity_pairs() {
+        let cases = [
+            ("find hosts services", RelationshipType::HasService),
+            ("find hosts port 443", RelationshipType::HasPort),
+            ("find hosts vulnerabilities", RelationshipType::HasVuln),
+            ("find users credentials", RelationshipType::HasCredential),
+            (
+                "find credentials for 10.0.0.1",
+                RelationshipType::AuthAccess,
+            ),
+            ("find cves for 10.0.0.1", RelationshipType::Affects),
+        ];
+
+        for (input, expected) in cases {
+            let q = NaturalParser::parse(input).unwrap();
+            assert_eq!(q.relationship, Some(expected), "{input}");
+        }
+
+        let unrelated = NaturalParser::parse("find domains certificates").unwrap();
+        assert_eq!(unrelated.relationship, None);
+    }
+
+    #[test]
+    fn test_unknown_text_falls_back_to_find_without_entities() {
+        let q = NaturalParser::parse("unmapped gibberish").unwrap();
+        assert_eq!(q.intent, QueryIntent::Find);
+        assert_eq!(q.primary_entity, None);
+        assert_eq!(q.secondary_entity, None);
+        assert!(q.entities.is_empty());
+        assert!(q.filters.is_empty());
+        assert_eq!(q.relationship, None);
+
+        let graph = graph(q.to_query_expr());
+        assert!(graph.pattern.nodes.is_empty());
+        assert!(graph.pattern.edges.is_empty());
+        assert_eq!(graph.limit, None);
+    }
+
+    #[test]
+    fn test_to_query_expr_builds_count_projection_limit_and_nested_filters() {
+        let q = NaturalParser::parse("count top 2 hosts with ssh open").unwrap();
+        let graph = graph(q.to_query_expr());
+
+        assert_eq!(graph.limit, Some(2));
+        assert!(matches!(graph.filter, Some(Filter::And(_, _))));
+        match graph.return_.as_slice() {
+            [Projection::Field(FieldRef::NodeId { alias }, Some(name))] => {
+                assert_eq!(alias, "e0");
+                assert_eq!(name, "count");
+            }
+            other => panic!("unexpected projection: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_to_query_expr_maps_all_relationship_edge_labels() {
+        let cases = [
+            (RelationshipType::HasService, "has_service"),
+            (RelationshipType::HasPort, "has_endpoint"),
+            (RelationshipType::HasVuln, "affected_by"),
+            (RelationshipType::HasCredential, "auth_access"),
+            (RelationshipType::HasUser, "has_user"),
+            (RelationshipType::ConnectsTo, "connects_to"),
+            (RelationshipType::Affects, "affected_by"),
+            (RelationshipType::AuthAccess, "auth_access"),
+            (RelationshipType::Uses, "uses_tech"),
+            (RelationshipType::RunsOn, "contains"),
+            (RelationshipType::Exposes, "has_endpoint"),
+        ];
+
+        for (relationship, expected_label) in cases {
+            let debug_name = format!("{relationship:?}");
+            let q = NaturalQuery {
+                intent: QueryIntent::Find,
+                primary_entity: Some(EntityType::Host),
+                secondary_entity: Some(EntityType::Service),
+                entities: vec![
+                    entity(EntityType::Host, "source"),
+                    entity(EntityType::Service, "target"),
+                ],
+                filters: Vec::new(),
+                relationship: Some(relationship),
+                limit: None,
+            };
+            let graph = graph(q.to_query_expr());
+
+            assert_eq!(graph.pattern.edges.len(), 1, "{debug_name}");
+            let edge = &graph.pattern.edges[0];
+            assert_eq!(edge.from, "source", "{debug_name}");
+            assert_eq!(edge.to, "target", "{debug_name}");
+            assert_eq!(
+                edge.edge_label.as_deref(),
+                Some(expected_label),
+                "{debug_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_to_query_expr_skips_edge_without_two_nodes() {
+        let q = NaturalQuery {
+            intent: QueryIntent::Find,
+            primary_entity: Some(EntityType::Host),
+            secondary_entity: None,
+            entities: vec![entity(EntityType::Host, "source")],
+            filters: Vec::new(),
+            relationship: Some(RelationshipType::ConnectsTo),
+            limit: None,
+        };
+
+        let graph = graph(q.to_query_expr());
+        assert_eq!(graph.pattern.nodes.len(), 1);
+        assert!(graph.pattern.edges.is_empty());
+    }
+
+    #[test]
+    fn test_to_query_expr_maps_entity_labels_and_id_properties() {
+        let cases = [
+            (EntityType::Host, Some("host")),
+            (EntityType::Service, Some("service")),
+            (EntityType::Port, None),
+            (EntityType::User, Some("user")),
+            (EntityType::Credential, Some("credential")),
+            (EntityType::Vulnerability, Some("vulnerability")),
+            (EntityType::Technology, Some("technology")),
+            (EntityType::Domain, Some("domain")),
+            (EntityType::Certificate, Some("certificate")),
+            (EntityType::Network, None),
+        ];
+        let entities: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (entity_type, _))| ExtractedEntity {
+                entity_type: entity_type.clone(),
+                value: Some(format!("value{i}")),
+                alias: format!("e{i}"),
+            })
+            .collect();
+        let q = NaturalQuery {
+            intent: QueryIntent::Find,
+            primary_entity: Some(EntityType::Host),
+            secondary_entity: None,
+            entities,
+            filters: Vec::new(),
+            relationship: None,
+            limit: None,
+        };
+        let graph = graph(q.to_query_expr());
+
+        for (node, (_, expected_label)) in graph.pattern.nodes.iter().zip(cases.iter()) {
+            assert_eq!(node.node_label.as_deref(), *expected_label);
+            assert_eq!(node.properties.len(), 1);
+            assert_eq!(node.properties[0].name, "id");
+        }
+    }
+
+    #[test]
+    fn test_to_query_expr_creates_default_node_from_primary_entity() {
+        let cases = [
+            (EntityType::Host, Some("host")),
+            (EntityType::Service, Some("service")),
+            (EntityType::User, Some("user")),
+            (EntityType::Credential, Some("credential")),
+            (EntityType::Vulnerability, Some("vulnerability")),
+            (EntityType::Network, None),
+        ];
+
+        for (entity_type, expected_label) in cases {
+            let q = NaturalQuery {
+                intent: QueryIntent::Find,
+                primary_entity: Some(entity_type),
+                secondary_entity: None,
+                entities: Vec::new(),
+                filters: Vec::new(),
+                relationship: None,
+                limit: None,
+            };
+            let graph = graph(q.to_query_expr());
+
+            assert_eq!(graph.pattern.nodes.len(), 1);
+            assert_eq!(graph.pattern.nodes[0].alias, "n0");
+            assert_eq!(graph.pattern.nodes[0].node_label.as_deref(), expected_label);
+        }
     }
 }

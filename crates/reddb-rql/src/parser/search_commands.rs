@@ -582,3 +582,258 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_query(input: &str) -> QueryExpr {
+        crate::parser::parse(input).unwrap().query
+    }
+
+    fn assert_parse_err(input: &str) {
+        assert!(crate::parser::parse(input).is_err(), "{input}");
+    }
+
+    #[test]
+    fn parses_search_similar_text_vector_and_limit_parameters() {
+        let query = parse_query(
+            "SEARCH SIMILAR TEXT 'semantic query' COLLECTION docs LIMIT 7 MIN_SCORE 0.42 USING openai",
+        );
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            vector,
+            text,
+            provider,
+            collection,
+            limit,
+            min_score,
+            vector_param,
+            limit_param,
+            min_score_param,
+            text_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::Similar");
+        };
+        assert!(vector.is_empty());
+        assert_eq!(text, Some("semantic query".to_string()));
+        assert_eq!(provider, Some("openai".to_string()));
+        assert_eq!(collection, "docs");
+        assert_eq!(limit, 7);
+        assert!((min_score - 0.42).abs() < 0.01);
+        assert_eq!(vector_param, None);
+        assert_eq!(limit_param, None);
+        assert_eq!(min_score_param, None);
+        assert_eq!(text_param, None);
+
+        let query = parse_query("SEARCH SIMILAR TEXT $1 COLLECTION docs LIMIT $2 MIN_SCORE $3");
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            vector,
+            text,
+            limit,
+            min_score,
+            vector_param,
+            limit_param,
+            min_score_param,
+            text_param,
+            ..
+        }) = query
+        else {
+            panic!("Expected parameterized SearchCommand::Similar");
+        };
+        assert!(vector.is_empty());
+        assert_eq!(text, None);
+        assert_eq!(limit, 0);
+        assert!((min_score).abs() < 0.01);
+        assert_eq!(vector_param, None);
+        assert_eq!(limit_param, Some(1));
+        assert_eq!(min_score_param, Some(2));
+        assert_eq!(text_param, Some(0));
+
+        let query = parse_query("SEARCH SIMILAR $1 COLLECTION embeddings");
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            vector,
+            vector_param,
+            limit,
+            min_score,
+            ..
+        }) = query
+        else {
+            panic!("Expected vector parameter SearchCommand::Similar");
+        };
+        assert!(vector.is_empty());
+        assert_eq!(vector_param, Some(0));
+        assert_eq!(limit, 10);
+        assert!((min_score).abs() < 0.01);
+    }
+
+    #[test]
+    fn parses_search_text_in_collection_with_question_limit() {
+        let query = parse_query("SEARCH TEXT 'needle' IN docs LIMIT ? FUZZY");
+        let QueryExpr::SearchCommand(SearchCommand::Text {
+            query,
+            collection,
+            limit,
+            fuzzy,
+            limit_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::Text");
+        };
+        assert_eq!(query, "needle");
+        assert_eq!(collection, Some("docs".to_string()));
+        assert_eq!(limit, 0);
+        assert!(fuzzy);
+        assert_eq!(limit_param, Some(0));
+    }
+
+    #[test]
+    fn parses_search_hybrid_vector_keyword_k_equals_and_keyword_collection() {
+        let query = parse_query("SEARCH HYBRID VECTOR [1, 2] TEXT 'needle' IN TEXT K = $1");
+        let QueryExpr::SearchCommand(SearchCommand::Hybrid {
+            vector,
+            query,
+            collection,
+            limit,
+            limit_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::Hybrid");
+        };
+        assert_eq!(vector, Some(vec![1.0, 2.0]));
+        assert_eq!(query, Some("needle".to_string()));
+        assert_eq!(collection, "text");
+        assert_eq!(limit, 0);
+        assert_eq!(limit_param, Some(0));
+    }
+
+    #[test]
+    fn parses_multimodal_and_index_parameterized_limits() {
+        let query = parse_query("SEARCH MULTIMODAL 'image query' COLLECTION assets LIMIT $1");
+        let QueryExpr::SearchCommand(SearchCommand::Multimodal {
+            query,
+            collection,
+            limit,
+            limit_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::Multimodal");
+        };
+        assert_eq!(query, "image query");
+        assert_eq!(collection, Some("assets".to_string()));
+        assert_eq!(limit, 0);
+        assert_eq!(limit_param, Some(0));
+
+        let query = parse_query(
+            "SEARCH INDEX email VALUE 'a@example.test' COLLECTION users LIMIT $1 EXACT",
+        );
+        let QueryExpr::SearchCommand(SearchCommand::Index {
+            index,
+            value,
+            collection,
+            limit,
+            exact,
+            limit_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::Index");
+        };
+        assert_eq!(index, "email");
+        assert_eq!(value, "a@example.test");
+        assert_eq!(collection, Some("users".to_string()));
+        assert_eq!(limit, 0);
+        assert!(exact);
+        assert_eq!(limit_param, Some(0));
+    }
+
+    #[test]
+    fn parses_search_context_depth_before_parameterized_limit() {
+        let query =
+            parse_query("SEARCH CONTEXT 'who' FIELD subject COLLECTION docs DEPTH 3 LIMIT $1");
+        let QueryExpr::SearchCommand(SearchCommand::Context {
+            query,
+            field,
+            collection,
+            limit,
+            depth,
+            limit_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::Context");
+        };
+        assert_eq!(query, "who");
+        assert_eq!(field, Some("subject".to_string()));
+        assert_eq!(collection, Some("docs".to_string()));
+        assert_eq!(limit, 0);
+        assert_eq!(depth, 3);
+        assert_eq!(limit_param, Some(0));
+    }
+
+    #[test]
+    fn parses_search_spatial_bbox_and_nearest_parameters() {
+        let query =
+            parse_query("SEARCH SPATIAL BBOX -10 -20 10 20 COLLECTION sites COLUMN geog LIMIT $1");
+        let QueryExpr::SearchCommand(SearchCommand::SpatialBbox {
+            min_lat,
+            min_lon,
+            max_lat,
+            max_lon,
+            collection,
+            column,
+            limit,
+            limit_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::SpatialBbox");
+        };
+        assert!((min_lat + 10.0).abs() < 0.001);
+        assert!((min_lon + 20.0).abs() < 0.001);
+        assert!((max_lat - 10.0).abs() < 0.001);
+        assert!((max_lon - 20.0).abs() < 0.001);
+        assert_eq!(collection, "sites");
+        assert_eq!(column, "geog");
+        assert_eq!(limit, 0);
+        assert_eq!(limit_param, Some(0));
+
+        let query =
+            parse_query("SEARCH SPATIAL NEAREST 48.85 2.35 K ?2 COLLECTION sites COLUMN geog");
+        let QueryExpr::SearchCommand(SearchCommand::SpatialNearest {
+            lat,
+            lon,
+            k,
+            collection,
+            column,
+            k_param,
+        }) = query
+        else {
+            panic!("Expected SearchCommand::SpatialNearest");
+        };
+        assert!((lat - 48.85).abs() < 0.001);
+        assert!((lon - 2.35).abs() < 0.001);
+        assert_eq!(k, 0);
+        assert_eq!(collection, "sites");
+        assert_eq!(column, "geog");
+        assert_eq!(k_param, Some(1));
+    }
+
+    #[test]
+    fn rejects_invalid_search_command_forms() {
+        for input in [
+            "SEARCH AUDIO 'needle'",
+            "SEARCH HYBRID TEXT 'needle'",
+            "SEARCH SPATIAL WITHIN 0 0 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL RADIUS 91 0 1 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL RADIUS 45 181 1 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL RADIUS 45 90 0 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL BBOX -91 0 1 1 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL BBOX 0 -181 1 1 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL BBOX 0 0 91 1 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL BBOX 0 0 1 181 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL NEAREST 91 0 K 1 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL NEAREST 0 181 K 1 COLLECTION sites COLUMN geog",
+            "SEARCH SPATIAL NEAREST 0 0 K 0 COLLECTION sites COLUMN geog",
+        ] {
+            assert_parse_err(input);
+        }
+    }
+}

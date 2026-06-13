@@ -115,3 +115,105 @@ impl<'a> Parser<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parser(input: &str) -> Parser<'_> {
+        Parser::new(input).unwrap_or_else(|err| panic!("failed to lex {input:?}: {err:?}"))
+    }
+
+    fn parse_create_index(input: &str) -> CreateIndexQuery {
+        let mut parser = parser(input);
+        parser.expect(Token::Create).expect("CREATE");
+        let QueryExpr::CreateIndex(query) = parser
+            .parse_create_index_query()
+            .unwrap_or_else(|err| panic!("failed to parse {input:?}: {err:?}"))
+        else {
+            panic!("Expected CreateIndexQuery");
+        };
+        assert!(
+            matches!(parser.peek(), Token::Eof),
+            "CREATE INDEX parse did not consume all input: {input:?}"
+        );
+        query
+    }
+
+    fn parse_drop_index(input: &str) -> DropIndexQuery {
+        let mut parser = parser(input);
+        parser.expect(Token::Drop).expect("DROP");
+        let QueryExpr::DropIndex(query) = parser
+            .parse_drop_index_query()
+            .unwrap_or_else(|err| panic!("failed to parse {input:?}: {err:?}"))
+        else {
+            panic!("Expected DropIndexQuery");
+        };
+        assert!(
+            matches!(parser.peek(), Token::Eof),
+            "DROP INDEX parse did not consume all input: {input:?}"
+        );
+        query
+    }
+
+    #[test]
+    fn parse_create_index_defaults_and_options() {
+        let query = parse_create_index("CREATE INDEX IF NOT EXISTS idx ON users (email, type)");
+        assert_eq!(query.name, "idx");
+        assert_eq!(query.table, "users");
+        assert_eq!(query.columns, vec!["email", "type"]);
+        assert_eq!(query.method, IndexMethod::BTree);
+        assert!(query.if_not_exists);
+        assert!(!query.unique);
+
+        let query = parse_create_index("CREATE UNIQUE INDEX idx_orders ON orders (id) USING HASH");
+        assert!(query.unique);
+        assert_eq!(query.method, IndexMethod::Hash);
+    }
+
+    #[test]
+    fn parse_index_method_accepts_all_ident_variants() {
+        for (method, expected) in [
+            ("BTREE", IndexMethod::BTree),
+            ("BITMAP", IndexMethod::Bitmap),
+            ("RTREE", IndexMethod::RTree),
+            ("hash", IndexMethod::Hash),
+        ] {
+            let query = parse_create_index(&format!(
+                "CREATE INDEX idx_{method} ON users (email) USING {method}"
+            ));
+            assert_eq!(query.method, expected);
+        }
+    }
+
+    #[test]
+    fn parse_drop_index_body_covers_if_exists() {
+        let query = parse_drop_index("DROP INDEX IF EXISTS idx_email ON users");
+        assert_eq!(query.name, "idx_email");
+        assert_eq!(query.table, "users");
+        assert!(query.if_exists);
+
+        let query = parse_drop_index("DROP INDEX idx_email ON users");
+        assert!(!query.if_exists);
+    }
+
+    #[test]
+    fn parse_index_method_reports_unknown_ident_and_non_ident_errors() {
+        let mut p = parser("CREATE INDEX idx ON users (email) USING GIN");
+        p.expect(Token::Create).expect("CREATE");
+        let err = p.parse_create_index_query().unwrap_err();
+        assert!(
+            err.to_string().contains("unknown index method 'GIN'"),
+            "{err}"
+        );
+
+        let mut p = parser("CREATE INDEX idx ON users (email) USING 42");
+        p.expect(Token::Create).expect("CREATE");
+        let err = p.parse_create_index_query().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected: HASH, BTREE, BITMAP, RTREE"),
+            "{err}"
+        );
+    }
+}

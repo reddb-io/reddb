@@ -21,14 +21,7 @@ path = "src/lib.rs"
 [dependencies]
 reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
 
-# The conformance harness runs the corpus end-to-end against the *current
-# in-server engine* (ADR 0053: executors stay in reddb-server during the
-# extraction). It reaches the engine only from the integration-test target, so
-# `reddb-server` and the `sqllogictest` harness are dev-only — the published
-# crate graph keeps `reddb-io-rql -> reddb-io-types` as its sole edge.
 [dev-dependencies]
-reddb-server = { package = "reddb-io-server", version = "1.10", path = "../reddb-server" }
-sqllogictest = "0.29"
 # Parser property round-trip tests (issue #87) moved in with the parser family
 # (#1103); the AST→SQL renderer moved with them, so the round-trip stays a
 # single in-crate type instance (no `reddb-server` round-trip).

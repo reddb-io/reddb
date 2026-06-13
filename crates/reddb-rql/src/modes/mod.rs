@@ -169,4 +169,65 @@ mod tests {
             QueryMode::Natural
         );
     }
+
+    #[test]
+    fn parse_multi_routes_supported_modes_to_query_exprs() {
+        assert!(matches!(
+            parse_multi("SELECT * FROM hosts").expect("sql"),
+            QueryExpr::Table(_)
+        ));
+        assert!(matches!(
+            parse_multi("g.V().hasLabel('Host').limit(2)").expect("gremlin"),
+            QueryExpr::Graph(_)
+        ));
+        assert!(matches!(
+            parse_multi("SELECT ?s WHERE { ?s :name 'alice' }").expect("sparql"),
+            QueryExpr::Graph(_)
+        ));
+        assert!(matches!(
+            parse_multi("find all hosts with ssh").expect("natural"),
+            QueryExpr::Graph(_)
+        ));
+    }
+
+    #[test]
+    fn parse_multi_surfaces_parse_and_unknown_errors() {
+        let err = parse_multi("SELECT * FROM").expect_err("bad SQL should fail");
+        assert!(matches!(err, MultiParseError::Parse(_)));
+        assert!(err.to_string().starts_with("Parse error:"));
+
+        let err = parse_multi("").expect_err("empty should be unknown");
+        assert!(matches!(err, MultiParseError::UnknownMode(ref q) if q.is_empty()));
+        assert_eq!(err.to_string(), "Unknown query mode for: ");
+    }
+
+    #[test]
+    fn multi_parse_error_display_covers_all_variants() {
+        let cases = [
+            (
+                MultiParseError::Parse("bad".to_string()),
+                "Parse error: bad",
+            ),
+            (
+                MultiParseError::Gremlin("bad".to_string()),
+                "Gremlin error: bad",
+            ),
+            (
+                MultiParseError::Sparql("bad".to_string()),
+                "SPARQL error: bad",
+            ),
+            (
+                MultiParseError::Natural("bad".to_string()),
+                "Natural language error: bad",
+            ),
+            (
+                MultiParseError::UnknownMode("???".to_string()),
+                "Unknown query mode for: ???",
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
 }
