@@ -126,3 +126,106 @@ fn env_flag(name: &str) -> bool {
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+fn reset_physical_metadata_policy_for_test() {
+    META_JSON_SIDECAR_POLICY.store(0, Ordering::Relaxed);
+    SEQN_JOURNAL_POLICY.store(0, Ordering::Relaxed);
+    FOLD_PAGER_META_POLICY.store(0, Ordering::Relaxed);
+    FOLD_DWB_INTO_WAL_POLICY.store(0, Ordering::Relaxed);
+    SEQN_JOURNAL_RETENTION.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static POLICY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env(name: &str, value: &str) {
+        unsafe {
+            std::env::set_var(name, value);
+        }
+    }
+
+    fn remove_env(name: &str) {
+        unsafe {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn env_flags_and_explicit_overrides_drive_sidecar_policies() {
+        let _guard = POLICY_TEST_LOCK.lock().unwrap();
+        reset_physical_metadata_policy_for_test();
+
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            set_env("REDDB_META_JSON_SIDECAR", value);
+            assert!(meta_json_sidecar_enabled(), "{value}");
+        }
+        set_env("REDDB_META_JSON_SIDECAR", "false");
+        assert!(!meta_json_sidecar_enabled());
+
+        set_meta_json_sidecar_enabled(true);
+        set_env("REDDB_META_JSON_SIDECAR", "false");
+        assert!(meta_json_sidecar_enabled());
+        set_meta_json_sidecar_enabled(false);
+        set_env("REDDB_META_JSON_SIDECAR", "1");
+        assert!(!meta_json_sidecar_enabled());
+        remove_env("REDDB_META_JSON_SIDECAR");
+    }
+
+    #[test]
+    fn journal_and_fold_policy_overrides_are_independent() {
+        let _guard = POLICY_TEST_LOCK.lock().unwrap();
+        reset_physical_metadata_policy_for_test();
+
+        set_env("REDDB_SEQN_JOURNAL", "1");
+        assert!(seqn_journal_enabled());
+        set_seqn_journal_enabled(false);
+        assert!(!seqn_journal_enabled());
+        set_seqn_journal_enabled(true);
+        assert!(seqn_journal_enabled());
+        remove_env("REDDB_SEQN_JOURNAL");
+
+        set_env("REDDB_FOLD_PAGER_META", "yes");
+        assert!(fold_pager_meta_enabled());
+        set_fold_pager_meta_enabled(false);
+        assert!(!fold_pager_meta_enabled());
+        set_fold_pager_meta_enabled(true);
+        assert!(fold_pager_meta_enabled());
+        remove_env("REDDB_FOLD_PAGER_META");
+
+        set_env("REDDB_FOLD_DWB_INTO_WAL", "on");
+        assert!(fold_dwb_into_wal_enabled());
+        set_fold_dwb_into_wal_enabled(false);
+        assert!(!fold_dwb_into_wal_enabled());
+        set_fold_dwb_into_wal_enabled(true);
+        assert!(fold_dwb_into_wal_enabled());
+        remove_env("REDDB_FOLD_DWB_INTO_WAL");
+    }
+
+    #[test]
+    fn seqn_journal_retention_prefers_override_then_env_then_default() {
+        let _guard = POLICY_TEST_LOCK.lock().unwrap();
+        reset_physical_metadata_policy_for_test();
+        remove_env("REDDB_SEQN_JOURNAL_RETENTION");
+
+        assert_eq!(seqn_journal_retention(), OPT_IN_METADATA_JOURNAL_RETENTION);
+
+        set_env("REDDB_SEQN_JOURNAL_RETENTION", "12");
+        assert_eq!(seqn_journal_retention(), 12);
+        set_env("REDDB_SEQN_JOURNAL_RETENTION", "0");
+        assert_eq!(seqn_journal_retention(), OPT_IN_METADATA_JOURNAL_RETENTION);
+        set_env("REDDB_SEQN_JOURNAL_RETENTION", "bad");
+        assert_eq!(seqn_journal_retention(), OPT_IN_METADATA_JOURNAL_RETENTION);
+
+        set_seqn_journal_retention(99);
+        assert_eq!(seqn_journal_retention(), 99);
+        set_seqn_journal_retention(0);
+        assert_eq!(seqn_journal_retention(), OPT_IN_METADATA_JOURNAL_RETENTION);
+
+        remove_env("REDDB_SEQN_JOURNAL_RETENTION");
+    }
+}

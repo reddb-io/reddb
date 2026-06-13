@@ -1,10 +1,9 @@
 name: Types Coverage
 
-# Report-only llvm-cov signal for the reddb-io-types keystone crate
-# (ADR 0052, PRD #1060). Aspirational target is ~95%+, but this workflow
-# NEVER blocks merge — it only surfaces the number in the job summary and,
-# on PRs, as an advisory comment. A hard merge gate is explicitly out of
-# scope per the PRD's Human Decisions.
+# Hard coverage gate for the reddb-io-types keystone crate.
+#
+# The type system is an authority crate. This workflow fails the PR if
+# isolated line coverage drops below 90%.
 
 on:
   push:
@@ -28,7 +27,7 @@ env:
 
 jobs:
   types-coverage:
-    name: Types Coverage Report
+    name: Types Coverage Gate
     if: github.actor != 'dependabot[bot]'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
@@ -57,33 +56,24 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
 
-      - name: Run coverage (reddb-io-types)
+      - name: Run coverage gate (reddb-io-types)
         run: |
-          # Collect profdata once, then render it twice (text table + JSON
-          # totals) without re-running the tests. reddb-io-types depends on no
-          # other workspace crate, so this is a fast, self-contained measure.
-          cargo llvm-cov --no-report -p reddb-io-types
-          cargo llvm-cov report --summary-only | tee coverage-summary.txt
-          cargo llvm-cov report --json --summary-only > coverage-summary.json
+          set -o pipefail
+          cargo llvm-cov -p reddb-io-types --summary-only --fail-under-lines 90 | tee coverage-summary.txt
 
       - name: Build report
         id: report
         run: |
-          # Pull the headline line-coverage percentage straight from the JSON
-          # totals — robust against column-layout changes in the text table.
-          total_line=$(python3 -c "import json; print(f\"{json.load(open('coverage-summary.json'))['data'][0]['totals']['lines']['percent']:.2f}%\")" 2>/dev/null || echo "n/a")
-
           {
-            echo "## Types Coverage Report"
+            echo "## Types Coverage Gate"
             echo ""
-            echo "Crate: \`reddb-io-types\` — line coverage: **${total_line}** (target ~95%, advisory)"
+            echo "Crate: \`reddb-io-types\` — hard minimum: **90% line coverage**"
             echo ""
             echo '```'
             cat coverage-summary.txt
             echo '```'
             echo ""
-            echo "> ℹ️ Report-only — this never blocks merge (ADR 0052 / PRD #1060)."
-            echo "> Run locally: \`cargo llvm-cov -p reddb-io-types --summary-only\`"
+            echo "> Run locally: \`cargo llvm-cov -p reddb-io-types --summary-only --fail-under-lines 90\`"
           } > coverage-report.md
 
           # Mirror to the job summary so the signal is visible without a PR.

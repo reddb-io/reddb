@@ -488,4 +488,104 @@ mod tests {
         assert!(!manifest.collection_path_for_test("orphan").exists());
         assert!(manifest.quarantine_path_for_test("orphan.rcol").exists());
     }
+
+    #[test]
+    fn create_and_drop_collection_are_idempotent_and_escape_names() {
+        let path = temp_db_path("create_drop");
+        let manifest = OperationalManifest::for_db_path(&path);
+
+        manifest.create_collection("tenant/a b").unwrap();
+        let first_generation = manifest.read_generation_for_test().unwrap();
+        manifest.create_collection("tenant/a b").unwrap();
+        assert_eq!(
+            manifest.read_generation_for_test().unwrap(),
+            first_generation
+        );
+        assert!(manifest.collection_path_for_test("tenant/a b").exists());
+        assert!(manifest
+            .collection_path_for_test("tenant/a b")
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("%2F"));
+
+        manifest.begin_drop_collection("missing").unwrap();
+        assert_eq!(
+            manifest.read_generation_for_test().unwrap(),
+            first_generation
+        );
+        manifest.begin_drop_collection("tenant/a b").unwrap();
+        manifest.finish_drop_collection("missing").unwrap();
+        manifest.finish_drop_collection("tenant/a b").unwrap();
+        assert!(!manifest.collection_path_for_test("tenant/a b").exists());
+        assert!(manifest.read_generation_for_test().unwrap() > first_generation);
+    }
+
+    #[test]
+    fn next_manifest_helper_writes_next_file_without_publishing() {
+        let path = temp_db_path("next");
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.recover_or_bootstrap(&[]).unwrap();
+        manifest.write_next_manifest_for_test("future").unwrap();
+
+        assert!(manifest.root.join(NEXT_MANIFEST_FILE).exists());
+        assert!(manifest
+            .load_current()
+            .unwrap()
+            .unwrap()
+            .collections
+            .is_empty());
+    }
+
+    #[test]
+    fn manifest_parser_rejects_malformed_shapes() {
+        assert!(manifest_from_bytes(b"[]").is_err());
+        assert!(manifest_from_bytes(br#"{"format_version":1}"#).is_err());
+        assert!(CollectionState::parse("bad").is_err());
+
+        let mut object = Map::new();
+        object.insert("format_version".to_string(), Value::from(2));
+        object.insert("generation".to_string(), Value::from(0));
+        object.insert("collections".to_string(), Value::Object(Map::new()));
+        assert!(manifest_from_object(&object).is_err());
+
+        object.insert("format_version".to_string(), Value::from(FORMAT_VERSION));
+        object.remove("generation");
+        assert!(manifest_from_object(&object).is_err());
+
+        object.insert("generation".to_string(), Value::from(0));
+        object.remove("collections");
+        assert!(manifest_from_object(&object).is_err());
+
+        let mut collections = Map::new();
+        collections.insert("users".to_string(), Value::String("bad".to_string()));
+        object.insert("collections".to_string(), Value::Object(collections));
+        assert!(manifest_from_object(&object).is_err());
+
+        let mut entry = Map::new();
+        entry.insert("path".to_string(), Value::String("users.rcol".to_string()));
+        let mut collections = Map::new();
+        collections.insert("users".to_string(), Value::Object(entry));
+        object.insert("collections".to_string(), Value::Object(collections));
+        assert!(manifest_from_object(&object).is_err());
+
+        let mut entry = Map::new();
+        entry.insert("state".to_string(), Value::String("active".to_string()));
+        let mut collections = Map::new();
+        collections.insert("users".to_string(), Value::Object(entry));
+        object.insert("collections".to_string(), Value::Object(collections));
+        assert!(manifest_from_object(&object).is_err());
+    }
+
+    #[test]
+    fn unique_quarantine_path_adds_suffix_when_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("orphan.rcol"), b"one").unwrap();
+        fs::write(dir.path().join("orphan.rcol.1"), b"two").unwrap();
+
+        assert_eq!(
+            unique_quarantine_path(dir.path(), "orphan.rcol"),
+            dir.path().join("orphan.rcol.2")
+        );
+    }
 }

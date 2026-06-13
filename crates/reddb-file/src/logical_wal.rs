@@ -463,4 +463,126 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn missing_paths_read_as_empty_wal() {
+        let path = temp_path("missing");
+        assert!(read_and_repair_logical_wal_entries(&path)
+            .unwrap()
+            .is_empty());
+        assert!(read_logical_wal_entries_from(&path, 0).unwrap().is_empty());
+        assert_eq!(
+            build_logical_wal_seek_index(&path).unwrap(),
+            (Vec::new(), 0, 0)
+        );
+    }
+
+    #[test]
+    fn read_from_seek_index_and_rewrite_round_trip_many_entries() {
+        let path = temp_path("index");
+        let mut bytes = Vec::new();
+        let mut offset_64 = 0u64;
+        for lsn in 1..=70u64 {
+            if lsn == 65 {
+                offset_64 = bytes.len() as u64;
+            }
+            bytes.extend_from_slice(
+                &encode_logical_wal_v3(2, lsn, 1_000 + lsn, format!("p{lsn}").as_bytes()).unwrap(),
+            );
+        }
+        std::fs::write(&path, bytes).unwrap();
+
+        let (index, write_offset, ordinal) = build_logical_wal_seek_index(&path).unwrap();
+        assert_eq!(ordinal, 70);
+        assert_eq!(write_offset, std::fs::metadata(&path).unwrap().len());
+        assert_eq!(index, vec![(1, 0), (65, offset_64)]);
+
+        let tail = read_logical_wal_entries_from(&path, offset_64).unwrap();
+        assert_eq!(tail.first().unwrap().lsn, 65);
+        assert_eq!(tail.len(), 6);
+
+        let rewritten = temp_path("rewrite");
+        let max_lsn = rewrite_logical_wal_entries(&path, &rewritten, &tail).unwrap();
+        assert_eq!(max_lsn, 70);
+        assert!(!rewritten.exists());
+        assert_eq!(read_and_repair_logical_wal_entries(&path).unwrap(), tail);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn v1_legacy_frame_decodes_with_zero_term_and_timestamp() {
+        let path = temp_path("v1");
+        let mut frame = Vec::new();
+        frame.extend_from_slice(LOGICAL_WAL_SPOOL_MAGIC);
+        frame.push(LOGICAL_WAL_SPOOL_VERSION_V1);
+        frame.extend_from_slice(&42u64.to_le_bytes());
+        frame.extend_from_slice(&3u64.to_le_bytes());
+        frame.extend_from_slice(b"old");
+        std::fs::write(&path, frame).unwrap();
+
+        let entries = read_and_repair_logical_wal_entries(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].term, 0);
+        assert_eq!(entries[0].timestamp_ms, 0);
+        assert_eq!(entries[0].lsn, 42);
+        assert_eq!(entries[0].data, b"old");
+        assert_eq!(entries[0].version, LOGICAL_WAL_SPOOL_VERSION_V1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn corruption_modes_truncate_to_last_good_record() {
+        let valid = encode_logical_wal_v3(1, 1, 1, b"ok").unwrap();
+
+        for (name, tail) in [
+            ("bad-magic", b"NOPE".to_vec()),
+            (
+                "unknown-version",
+                [LOGICAL_WAL_SPOOL_MAGIC.as_slice(), &[99]].concat(),
+            ),
+            ("torn-version", LOGICAL_WAL_SPOOL_MAGIC.to_vec()),
+        ] {
+            let path = temp_path(name);
+            let mut bytes = valid.clone();
+            bytes.extend_from_slice(&tail);
+            std::fs::write(&path, bytes).unwrap();
+            let entries = read_and_repair_logical_wal_entries(&path).unwrap();
+            assert_eq!(entries.len(), 1, "{name}");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), valid.len() as u64);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn checksum_and_implausible_payload_are_repaired_away() {
+        let valid = encode_logical_wal_v3(1, 1, 1, b"ok").unwrap();
+
+        let path = temp_path("bad-crc");
+        let mut bad_crc = valid.clone();
+        let mut corrupt = encode_logical_wal_v3(1, 2, 2, b"bad").unwrap();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xff;
+        bad_crc.extend_from_slice(&corrupt);
+        std::fs::write(&path, bad_crc).unwrap();
+        let entries = read_and_repair_logical_wal_entries(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), valid.len() as u64);
+        let _ = std::fs::remove_file(&path);
+
+        let path = temp_path("implausible");
+        let mut implausible = valid.clone();
+        implausible.extend_from_slice(LOGICAL_WAL_SPOOL_MAGIC);
+        implausible.push(LOGICAL_WAL_SPOOL_VERSION_V3);
+        implausible.extend_from_slice(&1u64.to_le_bytes());
+        implausible.extend_from_slice(&2u64.to_le_bytes());
+        implausible.extend_from_slice(&3u64.to_le_bytes());
+        implausible.extend_from_slice(&(MAX_PLAUSIBLE_PAYLOAD as u32 + 1).to_le_bytes());
+        std::fs::write(&path, implausible).unwrap();
+        let entries = read_and_repair_logical_wal_entries(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), valid.len() as u64);
+        let _ = std::fs::remove_file(path);
+    }
 }

@@ -45,3 +45,55 @@ pub fn local_backend_atomic_upload(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_backend_download_reports_missing_or_copies_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.bin");
+        let dest = dir.path().join("dest.bin");
+
+        assert!(!local_backend_download(missing.to_str().unwrap(), &dest).unwrap());
+        assert!(!dest.exists());
+
+        let source = dir.path().join("source.bin");
+        fs::write(&source, b"payload").unwrap();
+        assert!(local_backend_download(source.to_str().unwrap(), &dest).unwrap());
+        assert_eq!(fs::read(&dest).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn local_backend_atomic_upload_creates_parent_and_replaces_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local.bin");
+        let remote = dir.path().join("nested").join("remote.bin");
+        fs::write(&local, b"new").unwrap();
+
+        local_backend_atomic_upload(&local, remote.to_str().unwrap(), 123, 456).unwrap();
+
+        assert_eq!(fs::read(&remote).unwrap(), b"new");
+        let temp = crate::layout::local_upload_temp_path(&remote, 123, 456);
+        assert!(!temp.exists());
+
+        fs::write(&local, b"replacement").unwrap();
+        local_backend_atomic_upload(&local, remote.to_str().unwrap(), 123, 457).unwrap();
+        assert_eq!(fs::read(&remote).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn local_backend_atomic_upload_cleans_temp_when_copy_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_local = dir.path().join("missing.bin");
+        let remote = dir.path().join("remote.bin");
+
+        assert!(
+            local_backend_atomic_upload(&missing_local, remote.to_str().unwrap(), 1, 2).is_err()
+        );
+        let temp = crate::layout::local_upload_temp_path(&remote, 1, 2);
+        assert!(!temp.exists());
+        assert!(!remote.exists());
+    }
+}
