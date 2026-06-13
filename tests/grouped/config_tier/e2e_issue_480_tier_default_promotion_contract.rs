@@ -26,6 +26,7 @@
 //! Each test maps to one acceptance bullet on the issue.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::{

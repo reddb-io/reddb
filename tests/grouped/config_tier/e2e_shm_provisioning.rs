@@ -4,6 +4,7 @@
 //! dead. Mmap wiring + tier auto-enable are deferred — see ADR-0018.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::{
