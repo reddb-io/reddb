@@ -10,6 +10,7 @@
 //!     no node carries a hint and the JSON `hint` field is omitted entirely
 //!     (AC5 — clients may ignore it).
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::topology_collections as topo;

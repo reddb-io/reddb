@@ -14,6 +14,7 @@
 //! over the WHOLE graph store. This test therefore places the whole structure
 //! in one graph collection.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;

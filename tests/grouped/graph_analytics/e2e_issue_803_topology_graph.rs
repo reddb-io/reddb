@@ -12,6 +12,7 @@
 //!   - a topology mutation advances `graph_version` + `computed_at` and a no-op
 //!     refresh does not, surfacing `cache_status` hit vs cold (AC5/AC6).
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::topology_collections as topo;
