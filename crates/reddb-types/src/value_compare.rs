@@ -85,4 +85,77 @@ mod tests {
             assert_ne!(total_compare_values(a, b), Ordering::Equal);
         }
     }
+
+    #[test]
+    fn same_type_partial_comparisons_cover_registered_orderings() {
+        let pairs = [
+            (Value::Null, Value::Null, Ordering::Equal),
+            (Value::Integer(1), Value::Integer(2), Ordering::Less),
+            (
+                Value::UnsignedInteger(3),
+                Value::UnsignedInteger(2),
+                Ordering::Greater,
+            ),
+            (Value::Float(1.0), Value::Float(1.0), Ordering::Equal),
+            (Value::text("a"), Value::text("b"), Ordering::Less),
+            (Value::Boolean(false), Value::Boolean(true), Ordering::Less),
+            (Value::Timestamp(10), Value::Timestamp(9), Ordering::Greater),
+            (Value::Duration(4), Value::Duration(4), Ordering::Equal),
+            (
+                Value::Blob(vec![1]),
+                Value::Blob(vec![1, 2]),
+                Ordering::Less,
+            ),
+            (Value::Uuid([1; 16]), Value::Uuid([2; 16]), Ordering::Less),
+        ];
+
+        for (left, right, expected) in pairs {
+            assert_eq!(partial_compare_values(&left, &right), Some(expected));
+            assert_eq!(total_compare_values(&left, &right), expected);
+        }
+    }
+
+    #[test]
+    fn numeric_cross_type_comparisons_use_numeric_value() {
+        let pairs = [
+            (Value::Integer(2), Value::Float(2.5), Ordering::Less),
+            (Value::Float(3.5), Value::Integer(3), Ordering::Greater),
+            (
+                Value::UnsignedInteger(4),
+                Value::Float(4.0),
+                Ordering::Equal,
+            ),
+            (Value::Float(5.0), Value::UnsignedInteger(6), Ordering::Less),
+            (
+                Value::Integer(-1),
+                Value::UnsignedInteger(1),
+                Ordering::Less,
+            ),
+            (
+                Value::UnsignedInteger(9),
+                Value::Integer(8),
+                Ordering::Greater,
+            ),
+        ];
+
+        for (left, right, expected) in pairs {
+            assert_eq!(partial_compare_values(&left, &right), Some(expected));
+        }
+    }
+
+    #[test]
+    fn nan_partial_compare_falls_back_to_total_tag_order() {
+        assert_eq!(
+            partial_compare_values(&Value::Float(f64::NAN), &Value::Float(1.0)),
+            None
+        );
+        assert_eq!(
+            total_compare_values(&Value::Float(f64::NAN), &Value::Float(1.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            partial_compare_values(&Value::Json(vec![]), &Value::Json(vec![])),
+            None
+        );
+    }
 }

@@ -592,4 +592,110 @@ mod tests {
         let output = value.to_json_string();
         assert!(output.contains("hello"));
     }
+
+    #[test]
+    fn constructors_accessors_mutators_and_display_cover_all_shapes() {
+        let mut value = JsonValue::object(vec![
+            ("name".to_string(), JsonValue::from("reddb")),
+            ("active".to_string(), JsonValue::from(true)),
+            ("count".to_string(), JsonValue::from(3usize)),
+            ("ratio".to_string(), JsonValue::from(1.5f64)),
+            (
+                "items".to_string(),
+                JsonValue::array(vec![JsonValue::Null, JsonValue::from(2i64)]),
+            ),
+        ]);
+
+        assert_eq!(value.get("name").and_then(JsonValue::as_str), Some("reddb"));
+        assert_eq!(value.get("active").and_then(JsonValue::as_bool), Some(true));
+        assert_eq!(value.get("count").and_then(JsonValue::as_f64), Some(3.0));
+        assert_eq!(
+            value
+                .get("items")
+                .and_then(JsonValue::as_array)
+                .map(<[_]>::len),
+            Some(2)
+        );
+        assert_eq!(value.as_object().map(<[_]>::len), Some(5));
+        assert!(JsonValue::Null.as_str().is_none());
+        assert!(JsonValue::Null.as_bool().is_none());
+        assert!(JsonValue::Null.as_array().is_none());
+        assert!(JsonValue::Null.as_object().is_none());
+
+        value
+            .get_mut("count")
+            .map(|slot| *slot = JsonValue::from(4usize))
+            .unwrap();
+        assert_eq!(value.get("count").and_then(JsonValue::as_f64), Some(4.0));
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .push(("extra".to_string(), JsonValue::from("ok".to_string())));
+        let mut array = JsonValue::array(vec![JsonValue::from(1usize)]);
+        array.as_array_mut().unwrap().push(JsonValue::from(2usize));
+        assert_eq!(array.as_array().unwrap().len(), 2);
+
+        #[allow(deprecated)]
+        let encoded =
+            JsonValue::String("quote\" slash\\ tab\t ctrl\x01".to_string()).to_json_string();
+        assert!(encoded.contains("\\\""));
+        assert!(encoded.contains("\\\\"));
+        assert!(encoded.contains("\\t"));
+        assert!(encoded.contains("\\u0001"));
+        assert_eq!(format!("{}", JsonValue::Bool(false)), "false");
+    }
+
+    #[test]
+    fn parser_accepts_scalars_escapes_empty_containers_and_trailing_space() {
+        assert_eq!(parse_json(" null \n").unwrap(), JsonValue::Null);
+        assert_eq!(parse_json("true").unwrap(), JsonValue::Bool(true));
+        assert_eq!(parse_json("false").unwrap(), JsonValue::Bool(false));
+        assert_eq!(parse_json("-12.5e+2").unwrap(), JsonValue::Number(-1250.0));
+        assert_eq!(parse_json("[]").unwrap(), JsonValue::Array(Vec::new()));
+        assert_eq!(parse_json("{}").unwrap(), JsonValue::Object(Vec::new()));
+
+        let escaped = parse_json(r#""\"\\\/\b\f\n\r\t\u00e9\uD83D\uDCA9""#).unwrap();
+        let text = escaped.as_str().unwrap();
+        assert!(text.contains('"'));
+        assert!(text.contains('\\'));
+        assert!(text.contains('/'));
+        assert!(text.contains('\x08'));
+        assert!(text.contains('\x0c'));
+        assert!(text.contains('\n'));
+        assert!(text.contains('\r'));
+        assert!(text.contains('\t'));
+        assert!(text.chars().any(|ch| ch as u32 == 0x00E9));
+        assert_eq!(text.chars().last(), char::from_u32(0x1F4A9));
+    }
+
+    #[test]
+    fn parser_rejects_invalid_tokens_numbers_strings_and_separators() {
+        let cases = [
+            "",
+            "truth",
+            "nul",
+            "-",
+            "01",
+            "1.",
+            "1e",
+            r#""unterminated"#,
+            r#""\x""#,
+            r#""\u12""#,
+            r#""\u12zz""#,
+            r#""\uD800""#,
+            r#""\uD800\u0000""#,
+            r#""\uDC00""#,
+            "[1 2]",
+            "[1,]",
+            r#"{"a" 1}"#,
+            r#"{"a":1 "b":2}"#,
+            "{} trailing",
+            "?",
+        ];
+
+        for case in cases {
+            assert!(parse_json(case).is_err(), "{case:?}");
+        }
+    }
 }

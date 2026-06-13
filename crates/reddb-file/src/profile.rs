@@ -45,3 +45,40 @@ impl FileArtifactKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_profiles_render_canonical_labels() {
+        let profiles = [
+            (FileProfile::Embedded, "embedded"),
+            (FileProfile::Serverless, "serverless"),
+            (FileProfile::PrimaryReplica, "primary-replica"),
+            (FileProfile::Cluster, "cluster"),
+        ];
+
+        for (profile, label) in profiles {
+            assert_eq!(profile.as_str(), label);
+        }
+    }
+
+    #[test]
+    fn artifact_kinds_render_canonical_labels() {
+        let kinds = [
+            (FileArtifactKind::SingleRdb, "single-rdb"),
+            (FileArtifactKind::Manifest, "manifest"),
+            (FileArtifactKind::Wal, "wal"),
+            (FileArtifactKind::Snapshot, "snapshot"),
+            (FileArtifactKind::BootIndex, "boot-index"),
+            (FileArtifactKind::Pack, "pack"),
+            (FileArtifactKind::BaseBackup, "base-backup"),
+            (FileArtifactKind::Timeline, "timeline"),
+        ];
+
+        for (kind, label) in kinds {
+            assert_eq!(kind.as_str(), label);
+        }
+    }
+}

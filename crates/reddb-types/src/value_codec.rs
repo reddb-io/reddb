@@ -957,6 +957,7 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     /// Pinned on-disk byte layout for the canonical [`Value`]
     /// variants. **If this test breaks, callers with persisted data
@@ -1064,6 +1065,207 @@ mod tests {
         write_varint(&mut buf, 5);
         buf.extend_from_slice(b"ab");
         assert!(matches!(decode(&buf), Err(ValueError::TruncatedData)));
+    }
+
+    #[test]
+    fn type_for_tag_handles_null_registered_and_unknown_tags() {
+        assert_eq!(type_for_tag(0), Some(DataType::Nullable));
+        assert_eq!(
+            type_for_tag(DataType::Money.to_byte()),
+            Some(DataType::Money)
+        );
+        assert_eq!(type_for_tag(0xFF), None);
+    }
+
+    #[test]
+    fn round_trip_every_value_variant_directly_through_registry() {
+        let values = vec![
+            Value::Null,
+            Value::Integer(-1),
+            Value::UnsignedInteger(2),
+            Value::Float(3.5),
+            Value::text("hello"),
+            Value::Blob(vec![1, 2, 3]),
+            Value::Boolean(true),
+            Value::Timestamp(4),
+            Value::Duration(5),
+            Value::IpAddr(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+            Value::IpAddr(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            Value::MacAddr([1, 2, 3, 4, 5, 6]),
+            Value::Vector(vec![1.0, 2.0]),
+            Value::Json(br#"{"ok":true}"#.to_vec()),
+            Value::Uuid([7; 16]),
+            Value::NodeRef("node".to_string()),
+            Value::EdgeRef("edge".to_string()),
+            Value::VectorRef("vectors".to_string(), 8),
+            Value::RowRef("rows".to_string(), 9),
+            Value::Color([0xAA, 0xBB, 0xCC]),
+            Value::Email("a@example.com".to_string()),
+            Value::Url("https://example.com".to_string()),
+            Value::Phone(5511999),
+            Value::Semver(1_002_003),
+            Value::Cidr(10 << 24, 8),
+            Value::Date(20_000),
+            Value::Time(43_200_000),
+            Value::Decimal(123_456),
+            Value::EnumValue(3),
+            Value::Array(vec![Value::Integer(1), Value::text("two")]),
+            Value::TimestampMs(123_456),
+            Value::Ipv4(0x7f000001),
+            Value::Ipv6([1; 16]),
+            Value::Subnet(10 << 24, 0xff000000),
+            Value::Port(5432),
+            Value::Latitude(-23_550_520),
+            Value::Longitude(-46_633_308),
+            Value::GeoPoint(-23_550_520, -46_633_308),
+            Value::Country2(*b"BR"),
+            Value::Country3(*b"BRA"),
+            Value::Lang2(*b"pt"),
+            Value::Lang5(*b"pt-BR"),
+            Value::Currency(*b"USD"),
+            Value::AssetCode("BTC".to_string()),
+            Value::Money {
+                asset_code: "USD".to_string(),
+                minor_units: 1234,
+                scale: 2,
+            },
+            Value::ColorAlpha([1, 2, 3, 4]),
+            Value::BigInt(-10),
+            Value::KeyRef("kv".to_string(), "key".to_string()),
+            Value::DocRef("docs".to_string(), 42),
+            Value::TableRef("users".to_string()),
+            Value::PageRef(99),
+            Value::Secret(vec![9, 8, 7]),
+            Value::Password("$argon2id$v=19$hash".to_string()),
+        ];
+
+        for original in values {
+            let mut bytes = Vec::new();
+            encode(&original, &mut bytes);
+            let (decoded, consumed) = decode(&bytes).expect("decode");
+            assert_eq!(consumed, bytes.len());
+            assert_eq!(decoded, original, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn compressed_text_and_blob_decode_to_plain_values() {
+        let text = Value::text("reddb ".repeat(700));
+        let mut bytes = Vec::new();
+        encode(&text, &mut bytes);
+        assert_eq!(bytes[0], DataType::TextZstd.to_byte());
+        let (decoded, consumed) = decode(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(decoded, text);
+
+        let blob = Value::Blob(vec![0xAB; TOAST_THRESHOLD + 512]);
+        let mut bytes = Vec::new();
+        encode(&blob, &mut bytes);
+        assert_eq!(bytes[0], DataType::BlobZstd.to_byte());
+        let (decoded, consumed) = decode(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(decoded, blob);
+    }
+
+    #[test]
+    fn decode_rejects_short_payload_for_registered_tags() {
+        let truncated_tags = [
+            DataType::Integer,
+            DataType::UnsignedInteger,
+            DataType::Float,
+            DataType::Text,
+            DataType::Blob,
+            DataType::Boolean,
+            DataType::Timestamp,
+            DataType::Duration,
+            DataType::IpAddr,
+            DataType::MacAddr,
+            DataType::Vector,
+            DataType::Json,
+            DataType::Uuid,
+            DataType::NodeRef,
+            DataType::EdgeRef,
+            DataType::VectorRef,
+            DataType::RowRef,
+            DataType::Color,
+            DataType::Email,
+            DataType::Url,
+            DataType::Phone,
+            DataType::Semver,
+            DataType::Cidr,
+            DataType::Date,
+            DataType::Time,
+            DataType::Decimal,
+            DataType::Enum,
+            DataType::Array,
+            DataType::TimestampMs,
+            DataType::Ipv4,
+            DataType::Ipv6,
+            DataType::Subnet,
+            DataType::Port,
+            DataType::Latitude,
+            DataType::Longitude,
+            DataType::GeoPoint,
+            DataType::Country2,
+            DataType::Country3,
+            DataType::Lang2,
+            DataType::Lang5,
+            DataType::Currency,
+            DataType::AssetCode,
+            DataType::Money,
+            DataType::ColorAlpha,
+            DataType::BigInt,
+            DataType::KeyRef,
+            DataType::DocRef,
+            DataType::TableRef,
+            DataType::PageRef,
+            DataType::Secret,
+            DataType::Password,
+            DataType::TextZstd,
+            DataType::BlobZstd,
+        ];
+
+        for data_type in truncated_tags {
+            let err = decode(&[data_type.to_byte()]).expect_err("short payload must error");
+            assert_eq!(err, ValueError::TruncatedData, "{data_type:?}");
+        }
+
+        assert_eq!(
+            decode(&[DataType::Nullable.to_byte()]).unwrap().0,
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn decode_rejects_invalid_embedded_tags_and_utf8_payloads() {
+        assert_eq!(
+            decode(&[DataType::IpAddr.to_byte(), 5]).expect_err("bad ip version"),
+            ValueError::InvalidIpVersion(5)
+        );
+
+        let invalid_text = [DataType::Text.to_byte(), 1, 0xff];
+        assert_eq!(
+            decode(&invalid_text).expect_err("invalid utf8"),
+            ValueError::InvalidUtf8
+        );
+
+        let invalid_email = [DataType::Email.to_byte(), 1, 0xff];
+        assert_eq!(
+            decode(&invalid_email).expect_err("invalid utf8"),
+            ValueError::InvalidUtf8
+        );
+
+        let invalid_url = [DataType::Url.to_byte(), 1, 0xff];
+        assert_eq!(
+            decode(&invalid_url).expect_err("invalid utf8"),
+            ValueError::InvalidUtf8
+        );
+
+        let invalid_asset = [DataType::AssetCode.to_byte(), 1, 0xff];
+        assert_eq!(
+            decode(&invalid_asset).expect_err("invalid utf8"),
+            ValueError::InvalidUtf8
+        );
     }
 
     /// Round-trip: encode then decode must recover the original

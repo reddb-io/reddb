@@ -1,0 +1,75 @@
+name: File Coverage Gate
+
+# Hard coverage gate for the reddb-io-file authority crate.
+#
+# File owns persistent artifact contracts. This workflow fails the PR if the
+# isolated crate drops below 90% line coverage.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/reddb-file/**'
+      - '.github/workflows/file-coverage.yml'
+  pull_request:
+    paths:
+      - 'crates/reddb-file/**'
+      - '.github/workflows/file-coverage.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: file-coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  file-coverage:
+    name: File Coverage Gate
+    if: github.actor != 'dependabot[bot]'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: llvm-tools-preview
+
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.91.0-llvm-cov
+          cache-on-failure: "true"
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage gate (reddb-io-file)
+        run: |
+          set -o pipefail
+          cargo llvm-cov -p reddb-io-file --summary-only --ignore-filename-regex 'tests\.rs$' --fail-under-lines 90 | tee coverage-summary.txt
+
+      - name: Publish summary
+        run: |
+          {
+            echo "## File Coverage Gate"
+            echo ""
+            echo "Crate: \`reddb-io-file\` — hard minimum: **90% line coverage**"
+            echo ""
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+            echo ""
+            echo "> Run locally: \`cargo llvm-cov -p reddb-io-file --summary-only --ignore-filename-regex 'tests\\.rs$' --fail-under-lines 90\`"
+          } >> "$GITHUB_STEP_SUMMARY"

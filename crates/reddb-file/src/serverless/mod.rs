@@ -1287,6 +1287,190 @@ mod tests {
     }
 
     #[test]
+    fn file_plan_derives_cache_generation_and_hot_boot_paths() {
+        let plan = ServerlessFilePlan::for_data_path("/tmp/reddb/main.rdb", 41);
+        assert_eq!(plan.root, PathBuf::from("/tmp/reddb/main.serverless"));
+        assert_eq!(plan.namespace, "main");
+
+        let next = plan
+            .for_generation(42)
+            .with_cache_policy(ServerlessCachePolicy {
+                keep_boot_index_local: true,
+                keep_hot_snapshot_local: true,
+                max_hot_bytes: 4096,
+            });
+        assert_eq!(next.root, plan.root);
+        assert_eq!(next.namespace, plan.namespace);
+        assert_eq!(next.generation, 42);
+
+        let cache = next.local_cache();
+        assert_eq!(
+            cache.root,
+            PathBuf::from("/tmp/reddb/main.serverless/main/cache")
+        );
+        assert_eq!(cache.generation, 42);
+
+        let hot = ServerlessBootPlan::hot(&next);
+        assert_eq!(
+            hot.required_first,
+            vec![
+                next.boot_index_path(),
+                next.hot_snapshot_path(),
+                next.wal_tail_path(),
+            ]
+        );
+        assert_eq!(
+            hot.lazy_after_open,
+            vec![
+                next.manifest_path(),
+                next.collection_data_path(),
+                next.secondary_index_path(),
+            ]
+        );
+    }
+
+    #[test]
+    fn publish_generation_pointer_rejects_manifest_identity_mismatch() {
+        let root = temp_root("serverless-pointer-identity");
+        let plan = ServerlessFilePlan::new(&root, "db", 10);
+
+        let wrong_namespace = ServerlessManifest::new("other", 10);
+        let err = plan
+            .publish_generation_pointer(&wrong_namespace)
+            .expect_err("namespace mismatch rejected before publish");
+        assert!(err.to_string().contains("namespace"), "{err}");
+
+        let wrong_generation = ServerlessManifest::new("db", 11);
+        let err = plan
+            .publish_generation_pointer(&wrong_generation)
+            .expect_err("generation mismatch rejected before publish");
+        assert!(err.to_string().contains("generation"), "{err}");
+
+        assert!(!plan.current_pointer_path().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verified_current_pointer_rejects_pointer_shape_and_manifest_identity() {
+        let root = temp_root("serverless-current-pointer-shape");
+        let plan = ServerlessFilePlan::new(&root, "db", 10);
+        let manifest = ServerlessManifest::new("db", 10);
+        let manifest_bytes = manifest.encode();
+
+        let namespace_mismatch = ServerlessGenerationPointer {
+            namespace: "other".to_string(),
+            generation: 10,
+            manifest_relative_path: PathBuf::from("g00000000000000000010/manifest.redpack"),
+            manifest_bytes: manifest_bytes.len() as u64,
+            manifest_checksum: crc32(&manifest_bytes),
+            manifest_content_hash: ServerlessContentHash::from_bytes(&manifest_bytes),
+        };
+        namespace_mismatch
+            .write_to_path(plan.current_pointer_path())
+            .expect("write namespace mismatch pointer");
+        let err = plan
+            .read_current_pointer_verified()
+            .expect_err("pointer namespace mismatch rejected");
+        assert!(err.to_string().contains("namespace"), "{err}");
+
+        let path_mismatch = ServerlessGenerationPointer {
+            namespace: "db".to_string(),
+            generation: 10,
+            manifest_relative_path: PathBuf::from("g00000000000000000010/boot-index.redpack"),
+            manifest_bytes: manifest_bytes.len() as u64,
+            manifest_checksum: crc32(&manifest_bytes),
+            manifest_content_hash: ServerlessContentHash::from_bytes(&manifest_bytes),
+        };
+        path_mismatch
+            .write_to_path(plan.current_pointer_path())
+            .expect("write path mismatch pointer");
+        let err = plan
+            .read_current_pointer_verified()
+            .expect_err("pointer manifest path mismatch rejected");
+        assert!(err.to_string().contains("manifest path"), "{err}");
+
+        let wrong_manifest_namespace = ServerlessManifest::new("other", 10);
+        wrong_manifest_namespace
+            .write_to_path(plan.manifest_path())
+            .expect("write namespace mismatched manifest");
+        let pointer = ServerlessGenerationPointer::from_manifest(&plan, &wrong_manifest_namespace);
+        pointer
+            .write_to_path(plan.current_pointer_path())
+            .expect("write pointer");
+        let err = plan
+            .read_current_pointer_verified()
+            .expect_err("manifest namespace mismatch rejected");
+        assert!(err.to_string().contains("manifest namespace"), "{err}");
+
+        let wrong_generation_manifest = ServerlessManifest::new("db", 11);
+        let wrong_generation_bytes = wrong_generation_manifest.encode();
+        std::fs::write(plan.manifest_path(), &wrong_generation_bytes).expect("write manifest");
+        let generation_mismatch = ServerlessGenerationPointer {
+            namespace: "db".to_string(),
+            generation: 10,
+            manifest_relative_path: PathBuf::from("g00000000000000000010/manifest.redpack"),
+            manifest_bytes: wrong_generation_bytes.len() as u64,
+            manifest_checksum: crc32(&wrong_generation_bytes),
+            manifest_content_hash: ServerlessContentHash::from_bytes(&wrong_generation_bytes),
+        };
+        generation_mismatch
+            .write_to_path(plan.current_pointer_path())
+            .expect("write generation mismatch pointer");
+        let err = plan
+            .read_current_pointer_verified()
+            .expect_err("manifest generation mismatch rejected");
+        assert!(err.to_string().contains("manifest generation"), "{err}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validate_complete_generation_rejects_pack_and_manifest_metadata_mismatch() {
+        let root = temp_root("serverless-validate-metadata");
+        let plan = ServerlessFilePlan::new(&root, "db", 16);
+        let mut extent_index = ServerlessExtentIndex::new(16);
+        extent_index.push(
+            ServerlessExtentRef::new(
+                "events",
+                b"a".to_vec(),
+                b"z".to_vec(),
+                "collection-data.redpack",
+                0,
+                b"collection-bytes",
+                true,
+            )
+            .expect("extent"),
+        );
+        plan.publish_core_generation(&extent_index, b"collection-bytes", b"secondary-bytes")
+            .expect("publish complete generation");
+        let manifest =
+            ServerlessManifest::read_from_path(plan.manifest_path()).expect("read manifest");
+
+        let mut wrong_bytes = manifest.clone();
+        wrong_bytes.entries[0].bytes += 1;
+        let err = plan
+            .validate_complete_generation(&wrong_bytes)
+            .expect_err("pack byte length mismatch rejected");
+        assert!(err.to_string().contains("expected"), "{err}");
+
+        let mut wrong_hash = manifest.clone();
+        wrong_hash.entries[0].content_hash = ServerlessContentHash([1; CONTENT_HASH_LEN]);
+        let err = plan
+            .validate_complete_generation(&wrong_hash)
+            .expect_err("pack content hash mismatch rejected");
+        assert!(err.to_string().contains("content hash mismatch"), "{err}");
+
+        let mut manifest_mismatch = manifest.clone();
+        manifest_mismatch.namespace = "other".to_string();
+        let err = plan
+            .validate_complete_generation(&manifest_mismatch)
+            .expect_err("manifest-on-disk mismatch rejected");
+        assert!(err.to_string().contains("manifest on disk"), "{err}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn writer_lease_json_round_trips_and_preserves_fencing_token() {
         let lease = ServerlessWriterLease {
             database_key: "main".to_string(),

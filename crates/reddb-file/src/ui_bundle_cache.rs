@@ -212,4 +212,64 @@ mod tests {
             Path::new("/tmp/reddb/ui/.purge/1.2.3-abc")
         );
     }
+
+    #[test]
+    fn ui_bundle_manifest_rejects_invalid_json_and_missing_fields() {
+        assert!(decode_ui_bundle_manifest_json(b"not json").is_err());
+        assert!(decode_ui_bundle_manifest_json(b"[]").is_err());
+        assert!(decode_ui_bundle_manifest_json(br#"{"version":"1"}"#).is_err());
+        assert!(decode_ui_bundle_manifest_json(
+            br#"{"version":"1","sha256":"abc","tgz_size_bytes":"big","cached_at_unix_ms":1}"#
+        )
+        .is_err());
+        assert!(decode_ui_bundle_manifest_json(
+            br#"{"version":"1","sha256":"abc","tgz_size_bytes":1,"cached_at_unix_ms":"now"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ui_bundle_manifest_write_and_promote_staging_are_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = ui_bundle_cache_root(dir.path());
+        let version_dir = ui_bundle_version_dir(&cache_root, "1.2.3");
+        fs::create_dir_all(&version_dir).unwrap();
+
+        write_ui_bundle_manifest(&version_dir, br#"{"ok":true}"#).unwrap();
+        assert_eq!(
+            fs::read(ui_bundle_manifest_path(&version_dir)).unwrap(),
+            br#"{"ok":true}"#
+        );
+        assert!(!ui_bundle_manifest_temp_path(&version_dir).exists());
+
+        let staging = ui_bundle_staging_dir(&cache_root, "1.2.3", "new");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("bundle.js"), b"new").unwrap();
+        fs::write(version_dir.join("bundle.js"), b"old").unwrap();
+        promote_ui_bundle_staging(&cache_root, "1.2.3", "new", &staging, &version_dir).unwrap();
+        assert_eq!(fs::read(version_dir.join("bundle.js")).unwrap(), b"new");
+        assert!(!ui_bundle_purge_dir(&cache_root, "1.2.3", "new").exists());
+    }
+
+    #[test]
+    fn promote_ui_bundle_staging_rolls_back_existing_version_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = ui_bundle_cache_root(dir.path());
+        let version_dir = ui_bundle_version_dir(&cache_root, "1.2.3");
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("bundle.js"), b"old").unwrap();
+
+        let missing_staging = ui_bundle_staging_dir(&cache_root, "1.2.3", "missing");
+        assert!(promote_ui_bundle_staging(
+            &cache_root,
+            "1.2.3",
+            "missing",
+            &missing_staging,
+            &version_dir
+        )
+        .is_err());
+
+        assert_eq!(fs::read(version_dir.join("bundle.js")).unwrap(), b"old");
+        assert!(!missing_staging.exists());
+    }
 }

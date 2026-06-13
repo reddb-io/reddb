@@ -1674,6 +1674,8 @@ impl IntoIterator for Row {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -2388,5 +2390,683 @@ mod tests {
         let (recovered, size) = Row::from_bytes(&bytes).unwrap();
         assert_eq!(row, recovered);
         assert_eq!(size, bytes.len());
+    }
+
+    #[test]
+    fn sql_type_name_parses_modifiers_and_helpers() {
+        let decimal = SqlTypeName::parse_declared("decimal(10, 2)");
+        assert_eq!(decimal.base_name(), "DECIMAL");
+        assert_eq!(decimal.decimal_precision(), Some(10));
+        assert_eq!(decimal.to_string(), "DECIMAL(10,2)");
+
+        let enum_type = SqlTypeName::parse_declared("enum('red','blue')");
+        assert_eq!(
+            enum_type.enum_variants(),
+            Some(vec!["red".to_string(), "blue".to_string()])
+        );
+
+        let bad_enum = SqlTypeName::new("enum").with_modifiers(vec![TypeModifier::Number(1)]);
+        assert_eq!(bad_enum.enum_variants(), None);
+        assert_eq!(SqlTypeName::new("text").enum_variants(), None);
+
+        let array = SqlTypeName::parse_declared("array(varchar(12))");
+        assert_eq!(array.array_element_type(), Some("VARCHAR(12)".to_string()));
+        let array_ident =
+            SqlTypeName::new("array").with_modifiers(vec![TypeModifier::Ident("int".to_string())]);
+        assert_eq!(array_ident.array_element_type(), Some("INT".to_string()));
+        assert_eq!(SqlTypeName::new("text").array_element_type(), None);
+        assert_eq!(SqlTypeName::new("text").decimal_precision(), None);
+
+        assert_eq!(
+            SqlTypeName::parse_declared("enum('a,b', array(int))").to_string(),
+            "ENUM('a,b',ARRAY(INT))"
+        );
+        assert_eq!(SqlTypeName::parse_declared("").to_string(), "");
+    }
+
+    #[test]
+    fn datatype_category_preference_display_and_storage_traits_cover_all_variants() {
+        let cases = [
+            (
+                DataType::Unknown,
+                TypeCategory::Unknown,
+                "UNKNOWN",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::Integer,
+                TypeCategory::Numeric,
+                "INTEGER",
+                Some(8),
+                true,
+                true,
+            ),
+            (
+                DataType::UnsignedInteger,
+                TypeCategory::Numeric,
+                "UNSIGNED INTEGER",
+                Some(8),
+                true,
+                true,
+            ),
+            (
+                DataType::Float,
+                TypeCategory::Numeric,
+                "FLOAT",
+                Some(8),
+                true,
+                true,
+            ),
+            (
+                DataType::Text,
+                TypeCategory::String,
+                "TEXT",
+                None,
+                true,
+                true,
+            ),
+            (
+                DataType::Blob,
+                TypeCategory::String,
+                "BLOB",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::Boolean,
+                TypeCategory::Boolean,
+                "BOOLEAN",
+                Some(1),
+                false,
+                false,
+            ),
+            (
+                DataType::Timestamp,
+                TypeCategory::DateTime,
+                "TIMESTAMP",
+                Some(8),
+                true,
+                true,
+            ),
+            (
+                DataType::Duration,
+                TypeCategory::TimeSpan,
+                "DURATION",
+                Some(8),
+                false,
+                true,
+            ),
+            (
+                DataType::IpAddr,
+                TypeCategory::Network,
+                "IPADDR",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::MacAddr,
+                TypeCategory::Network,
+                "MACADDR",
+                Some(6),
+                false,
+                false,
+            ),
+            (
+                DataType::Vector,
+                TypeCategory::Vector,
+                "VECTOR",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::Nullable,
+                TypeCategory::Unknown,
+                "NULLABLE",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::Json,
+                TypeCategory::Json,
+                "JSON",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::Uuid,
+                TypeCategory::Uuid,
+                "UUID",
+                Some(16),
+                true,
+                false,
+            ),
+            (
+                DataType::NodeRef,
+                TypeCategory::Reference,
+                "NODEREF",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::EdgeRef,
+                TypeCategory::Reference,
+                "EDGEREF",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::VectorRef,
+                TypeCategory::Reference,
+                "VECTORREF",
+                Some(8),
+                true,
+                false,
+            ),
+            (
+                DataType::RowRef,
+                TypeCategory::Reference,
+                "ROWREF",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::Color,
+                TypeCategory::Domain,
+                "COLOR",
+                Some(3),
+                false,
+                false,
+            ),
+            (
+                DataType::Email,
+                TypeCategory::Domain,
+                "EMAIL",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::Url,
+                TypeCategory::Domain,
+                "URL",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::Phone,
+                TypeCategory::Domain,
+                "PHONE",
+                Some(8),
+                true,
+                false,
+            ),
+            (
+                DataType::Semver,
+                TypeCategory::Domain,
+                "SEMVER",
+                Some(4),
+                true,
+                true,
+            ),
+            (
+                DataType::Cidr,
+                TypeCategory::Network,
+                "CIDR",
+                Some(5),
+                false,
+                false,
+            ),
+            (
+                DataType::Date,
+                TypeCategory::DateTime,
+                "DATE",
+                Some(4),
+                true,
+                true,
+            ),
+            (
+                DataType::Time,
+                TypeCategory::DateTime,
+                "TIME",
+                Some(4),
+                true,
+                true,
+            ),
+            (
+                DataType::Decimal,
+                TypeCategory::Numeric,
+                "DECIMAL",
+                Some(8),
+                true,
+                true,
+            ),
+            (
+                DataType::Enum,
+                TypeCategory::Domain,
+                "ENUM",
+                Some(1),
+                true,
+                false,
+            ),
+            (
+                DataType::Array,
+                TypeCategory::Array,
+                "ARRAY",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::TimestampMs,
+                TypeCategory::DateTime,
+                "TIMESTAMP_MS",
+                Some(8),
+                true,
+                true,
+            ),
+            (
+                DataType::Ipv4,
+                TypeCategory::Network,
+                "IPV4",
+                Some(4),
+                true,
+                false,
+            ),
+            (
+                DataType::Ipv6,
+                TypeCategory::Network,
+                "IPV6",
+                Some(16),
+                true,
+                false,
+            ),
+            (
+                DataType::Subnet,
+                TypeCategory::Network,
+                "SUBNET",
+                Some(8),
+                false,
+                false,
+            ),
+            (
+                DataType::Port,
+                TypeCategory::Numeric,
+                "PORT",
+                Some(2),
+                true,
+                true,
+            ),
+            (
+                DataType::Latitude,
+                TypeCategory::Numeric,
+                "LATITUDE",
+                Some(4),
+                true,
+                true,
+            ),
+            (
+                DataType::Longitude,
+                TypeCategory::Numeric,
+                "LONGITUDE",
+                Some(4),
+                true,
+                true,
+            ),
+            (
+                DataType::GeoPoint,
+                TypeCategory::Geo,
+                "GEOPOINT",
+                Some(8),
+                true,
+                false,
+            ),
+            (
+                DataType::Country2,
+                TypeCategory::Domain,
+                "COUNTRY2",
+                Some(2),
+                true,
+                false,
+            ),
+            (
+                DataType::Country3,
+                TypeCategory::Domain,
+                "COUNTRY3",
+                Some(3),
+                true,
+                false,
+            ),
+            (
+                DataType::Lang2,
+                TypeCategory::Domain,
+                "LANG2",
+                Some(2),
+                true,
+                false,
+            ),
+            (
+                DataType::Lang5,
+                TypeCategory::Domain,
+                "LANG5",
+                Some(5),
+                true,
+                false,
+            ),
+            (
+                DataType::Currency,
+                TypeCategory::Domain,
+                "CURRENCY",
+                Some(3),
+                true,
+                false,
+            ),
+            (
+                DataType::ColorAlpha,
+                TypeCategory::Domain,
+                "COLOR_ALPHA",
+                Some(4),
+                false,
+                false,
+            ),
+            (
+                DataType::BigInt,
+                TypeCategory::Numeric,
+                "BIGINT",
+                Some(8),
+                true,
+                true,
+            ),
+            (
+                DataType::KeyRef,
+                TypeCategory::Reference,
+                "KEY_REF",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::DocRef,
+                TypeCategory::Reference,
+                "DOC_REF",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::TableRef,
+                TypeCategory::Reference,
+                "TABLE_REF",
+                None,
+                true,
+                false,
+            ),
+            (
+                DataType::PageRef,
+                TypeCategory::Reference,
+                "PAGE_REF",
+                Some(4),
+                true,
+                false,
+            ),
+            (
+                DataType::Secret,
+                TypeCategory::Opaque,
+                "SECRET",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::Password,
+                TypeCategory::Opaque,
+                "PASSWORD",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::TextZstd,
+                TypeCategory::String,
+                "TEXT",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::BlobZstd,
+                TypeCategory::String,
+                "BLOB",
+                None,
+                false,
+                false,
+            ),
+            (
+                DataType::AssetCode,
+                TypeCategory::Domain,
+                "ASSET_CODE",
+                None,
+                true,
+                true,
+            ),
+            (
+                DataType::Money,
+                TypeCategory::Domain,
+                "MONEY",
+                None,
+                false,
+                false,
+            ),
+        ];
+
+        for (data_type, category, display, fixed, indexable, orderable) in cases {
+            assert_eq!(data_type.category(), category, "{data_type:?}");
+            assert_eq!(data_type.to_string(), display);
+            assert_eq!(data_type.fixed_size(), fixed, "{data_type:?}");
+            assert_eq!(data_type.is_indexable(), indexable, "{data_type:?}");
+            assert_eq!(data_type.is_orderable(), orderable, "{data_type:?}");
+        }
+
+        for preferred in [
+            DataType::Float,
+            DataType::Text,
+            DataType::TimestampMs,
+            DataType::IpAddr,
+            DataType::Boolean,
+            DataType::Uuid,
+        ] {
+            assert!(preferred.is_preferred(), "{preferred:?}");
+        }
+        assert!(!DataType::Integer.is_preferred());
+    }
+
+    #[test]
+    fn sql_aliases_cover_domain_reference_and_unknown_paths() {
+        let aliases = [
+            ("BOOL", DataType::Boolean),
+            ("SMALLINT", DataType::Integer),
+            ("BIGSERIAL", DataType::BigInt),
+            ("UNSIGNED INTEGER", DataType::UnsignedInteger),
+            ("DOUBLE", DataType::Float),
+            ("VARCHAR(20)", DataType::Text),
+            ("BYTEA", DataType::Blob),
+            ("TIMESTAMP_MS", DataType::TimestampMs),
+            ("INTERVAL", DataType::Duration),
+            ("NUMERIC(10,2)", DataType::Decimal),
+            ("JSONB", DataType::Json),
+            ("INET", DataType::IpAddr),
+            ("COLOR_ALPHA", DataType::ColorAlpha),
+            ("GEO_POINT", DataType::GeoPoint),
+            ("ASSET_CODE", DataType::AssetCode),
+            ("KEYREF", DataType::KeyRef),
+            ("DOCREF", DataType::DocRef),
+            ("TABLEREF", DataType::TableRef),
+            ("PAGEREF", DataType::PageRef),
+            ("PASSWORD", DataType::Password),
+            ("VECTOR", DataType::Vector),
+        ];
+
+        for (alias, expected) in aliases {
+            assert_eq!(DataType::from_sql_name(alias), Some(expected), "{alias}");
+        }
+        assert_eq!(DataType::from_sql_name("definitely_not_a_type"), None);
+        assert_eq!(DataType::from_byte(0), None);
+        assert_eq!(DataType::from_byte(55), None);
+    }
+
+    #[test]
+    fn value_accessors_hash_and_display_cover_remaining_variants() {
+        let values = vec![
+            Value::Null,
+            Value::Integer(-1),
+            Value::UnsignedInteger(2),
+            Value::Float(3.5),
+            Value::text("hello"),
+            Value::Blob(vec![1, 2, 3]),
+            Value::Boolean(true),
+            Value::Timestamp(4),
+            Value::Duration(5),
+            Value::IpAddr(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+            Value::IpAddr(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            Value::MacAddr([1, 2, 3, 4, 5, 6]),
+            Value::Vector(vec![1.0, 2.0]),
+            Value::Json(br#"{"ok":true}"#.to_vec()),
+            Value::Uuid([7; 16]),
+            Value::NodeRef("node".to_string()),
+            Value::EdgeRef("edge".to_string()),
+            Value::VectorRef("vectors".to_string(), 8),
+            Value::RowRef("rows".to_string(), 9),
+            Value::Color([0xAA, 0xBB, 0xCC]),
+            Value::Email("a@example.com".to_string()),
+            Value::Url("https://example.com".to_string()),
+            Value::Phone(5511999),
+            Value::Semver(1_002_003),
+            Value::Cidr(10 << 24, 8),
+            Value::Date(20_000),
+            Value::Time(43_200_000),
+            Value::Decimal(123_456),
+            Value::EnumValue(3),
+            Value::Array(vec![Value::Integer(1), Value::text("two")]),
+            Value::TimestampMs(123_456),
+            Value::Ipv4(0x7f000001),
+            Value::Ipv6([1; 16]),
+            Value::Subnet(10 << 24, 0xff00ff00),
+            Value::Port(5432),
+            Value::Latitude(-23_550_520),
+            Value::Longitude(-46_633_308),
+            Value::GeoPoint(-23_550_520, -46_633_308),
+            Value::Country2(*b"BR"),
+            Value::Country3(*b"BRA"),
+            Value::Lang2(*b"pt"),
+            Value::Lang5(*b"pt-BR"),
+            Value::Currency(*b"USD"),
+            Value::AssetCode("BTC".to_string()),
+            Value::Money {
+                asset_code: "USD".to_string(),
+                minor_units: -1234,
+                scale: 2,
+            },
+            Value::ColorAlpha([1, 2, 3, 4]),
+            Value::BigInt(-10),
+            Value::KeyRef("kv".to_string(), "key".to_string()),
+            Value::DocRef("docs".to_string(), 42),
+            Value::TableRef("users".to_string()),
+            Value::PageRef(99),
+            Value::Secret(vec![9, 8, 7]),
+            Value::Password("$argon2id$v=19$hash".to_string()),
+        ];
+
+        for value in &values {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            let _ = hasher.finish();
+            assert_eq!(value.data_type(), value.data_type());
+            assert!(!value.display_string().is_empty());
+            assert!(!value.plain_text().is_empty());
+        }
+
+        assert!(Value::Null.is_null());
+        assert_eq!(Value::Integer(-1).as_integer(), Some(-1));
+        assert_eq!(
+            Value::UnsignedInteger(i64::MAX as u64).as_integer(),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            Value::UnsignedInteger(i64::MAX as u64 + 1).as_integer(),
+            None
+        );
+        assert_eq!(Value::Timestamp(1).as_integer(), Some(1));
+        assert_eq!(Value::Duration(2).as_integer(), Some(2));
+        assert_eq!(Value::Float(1.5).as_float(), Some(1.5));
+        assert_eq!(Value::Integer(2).as_float(), Some(2.0));
+        assert_eq!(Value::UnsignedInteger(3).as_float(), Some(3.0));
+        assert_eq!(Value::text("x").as_text(), Some("x"));
+        assert_eq!(Value::Boolean(true).as_boolean(), Some(true));
+        assert_eq!(
+            Value::IpAddr(IpAddr::V4(Ipv4Addr::LOCALHOST)).as_ip_addr(),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(Value::Vector(vec![1.0]).as_vector(), Some(&[1.0][..]));
+        assert_eq!(Value::Null.as_integer(), None);
+        assert_eq!(Value::Null.as_float(), None);
+        assert_eq!(Value::Null.as_text(), None);
+        assert_eq!(Value::Null.as_boolean(), None);
+        assert_eq!(Value::Null.as_ip_addr(), None);
+        assert_eq!(Value::Null.as_vector(), None);
+    }
+
+    #[test]
+    fn row_accessors_iteration_and_error_paths() {
+        let empty = Row::new(Vec::new());
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.get(0), None);
+
+        let row = Row::from(vec![Value::Integer(1), Value::text("two")]);
+        assert_eq!(row.len(), 2);
+        assert_eq!(row.get(1), Some(&Value::text("two")));
+        assert_eq!(row.values().len(), 2);
+        assert_eq!(row.iter().count(), 2);
+        assert_eq!(row.clone().into_values().len(), 2);
+        assert_eq!(row.into_iter().count(), 2);
+
+        assert_eq!(Row::from_bytes(&[]).unwrap_err(), ValueError::EmptyData);
+        assert_eq!(
+            Row::from_bytes(&[0x80]).unwrap_err(),
+            ValueError::TruncatedData
+        );
+    }
+
+    #[test]
+    fn value_error_display_covers_every_variant() {
+        let errors = [
+            (ValueError::EmptyData, "empty data"),
+            (ValueError::InvalidType(99), "invalid type byte: 99"),
+            (ValueError::TruncatedData, "truncated data"),
+            (ValueError::InvalidUtf8, "invalid UTF-8"),
+            (ValueError::InvalidIpVersion(5), "invalid IP version: 5"),
+            (ValueError::VarintOverflow, "varint overflow"),
+            (
+                ValueError::TypeMismatch {
+                    expected: DataType::Text,
+                    found: DataType::Integer,
+                },
+                "type mismatch: expected TEXT, found INTEGER",
+            ),
+        ];
+
+        for (error, message) in errors {
+            assert_eq!(error.to_string(), message);
+        }
     }
 }
