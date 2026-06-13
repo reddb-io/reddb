@@ -624,3 +624,208 @@ impl Default for CteQueryBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eq_filter(column: &str, value: Value) -> Filter {
+        Filter::compare(FieldRef::column("", column), CompareOp::Eq, value)
+    }
+
+    fn join_condition() -> JoinCondition {
+        JoinCondition::new(
+            FieldRef::column("left", "id"),
+            FieldRef::column("right", "id"),
+        )
+    }
+
+    #[test]
+    fn table_builder_covers_selection_filters_order_limit_and_offset() {
+        let query = TableQueryBuilder::new("hosts")
+            .alias("h")
+            .select("ip")
+            .filter(eq_filter("os", Value::text("linux")))
+            .filter(eq_filter("active", Value::Boolean(true)))
+            .order_by(OrderByClause::desc(FieldRef::column("h", "last_seen")))
+            .limit(10)
+            .offset(5)
+            .build();
+
+        let QueryExpr::Table(table) = query else {
+            panic!("expected table query");
+        };
+        assert_eq!(table.table, "hosts");
+        assert_eq!(table.alias.as_deref(), Some("h"));
+        assert_eq!(table.select_items.len(), 1);
+        assert_eq!(table.columns.len(), 1);
+        assert!(matches!(table.filter, Some(Filter::And(_, _))));
+        assert!(matches!(
+            table.where_expr,
+            Some(Expr::BinaryOp { op: BinOp::And, .. })
+        ));
+        assert_eq!(table.order_by.len(), 1);
+        assert_eq!(table.limit, Some(10));
+        assert_eq!(table.offset, Some(5));
+
+        let QueryExpr::Table(table) = TableQueryBuilder::new("hosts").select_all().build() else {
+            panic!("expected table query");
+        };
+        assert_eq!(table.select_items, vec![SelectItem::Wildcard]);
+        assert!(table.columns.is_empty());
+    }
+
+    #[test]
+    fn graph_builder_combines_filters_alias_limit_and_returns() {
+        let query = GraphQueryBuilder::new()
+            .node(NodePattern::new("h").of_label("Host"))
+            .edge(EdgePattern::new("h", "s").of_label("HAS_SERVICE"))
+            .filter(eq_filter("critical", Value::Boolean(true)))
+            .filter(eq_filter("active", Value::Boolean(true)))
+            .alias("g")
+            .limit(3)
+            .return_field(FieldRef::node_prop("h", "ip"))
+            .build();
+
+        let QueryExpr::Graph(graph) = query else {
+            panic!("expected graph query");
+        };
+        assert_eq!(graph.alias.as_deref(), Some("g"));
+        assert_eq!(graph.pattern.nodes.len(), 1);
+        assert_eq!(graph.pattern.edges.len(), 1);
+        assert!(matches!(graph.filter, Some(Filter::And(_, _))));
+        assert_eq!(graph.limit, Some(3));
+        assert_eq!(graph.return_.len(), 1);
+    }
+
+    #[test]
+    fn join_builder_aliases_supported_right_sources_and_builds_options() {
+        let condition = join_condition();
+        let cases = vec![
+            TableQueryBuilder::new("hosts").join_table("services", condition.clone()),
+            TableQueryBuilder::new("hosts").join_graph(GraphPattern::new(), condition.clone()),
+            TableQueryBuilder::new("hosts").join_path(
+                PathQuery::new(NodeSelector::by_id("a"), NodeSelector::by_id("b")),
+                condition.clone(),
+            ),
+            TableQueryBuilder::new("hosts").join_vector(
+                VectorQuery::new("embeddings", VectorSource::text("ssh")),
+                condition.clone(),
+            ),
+            TableQueryBuilder::new("hosts").join_hybrid(
+                HybridQuery::new(
+                    QueryExpr::Table(TableQuery::new("hosts")),
+                    VectorQuery::new("embeddings", VectorSource::text("ssh")),
+                ),
+                condition.clone(),
+            ),
+        ];
+
+        for builder in cases {
+            let query = builder
+                .right_alias("rhs")
+                .join_type(JoinType::FullOuter)
+                .filter(eq_filter("ok", Value::Boolean(true)))
+                .order_by(OrderByClause::asc(FieldRef::column("", "id")))
+                .limit(4)
+                .offset(2)
+                .return_field(FieldRef::column("hosts", "id"))
+                .select("name")
+                .build();
+
+            let QueryExpr::Join(join) = query else {
+                panic!("expected join query");
+            };
+            assert_eq!(join.join_type, JoinType::FullOuter);
+            assert!(join.filter.is_some());
+            assert_eq!(join.order_by.len(), 1);
+            assert_eq!(join.limit, Some(4));
+            assert_eq!(join.offset, Some(2));
+            assert_eq!(join.return_.len(), 2);
+            assert_eq!(join.return_items.len(), 2);
+            match *join.right {
+                QueryExpr::Table(table) => assert_eq!(table.alias.as_deref(), Some("rhs")),
+                QueryExpr::Graph(graph) => assert_eq!(graph.alias.as_deref(), Some("rhs")),
+                QueryExpr::Path(path) => assert_eq!(path.alias.as_deref(), Some("rhs")),
+                QueryExpr::Vector(vector) => assert_eq!(vector.alias.as_deref(), Some("rhs")),
+                QueryExpr::Hybrid(hybrid) => assert_eq!(hybrid.alias.as_deref(), Some("rhs")),
+                other => panic!("unexpected right source: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn join_builder_right_alias_ignores_non_source_variants() {
+        let builder = JoinQueryBuilder {
+            left: QueryExpr::Table(TableQuery::new("left")),
+            right: QueryExpr::SetTenant(Some("acme".to_string())),
+            on: join_condition(),
+            join_type: JoinType::Inner,
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_items: Vec::new(),
+            return_: Vec::new(),
+        };
+        let query = builder.right_alias("ignored").build();
+        let QueryExpr::Join(join) = query else {
+            panic!("expected join query");
+        };
+        assert!(matches!(*join.right, QueryExpr::SetTenant(Some(ref tenant)) if tenant == "acme"));
+    }
+
+    #[test]
+    fn path_builder_sets_alias_via_filter_and_length() {
+        let query = PathQueryBuilder::new(NodeSelector::by_id("a"), NodeSelector::by_id("b"))
+            .via_label("CONNECTS_TO")
+            .max_length(7)
+            .filter(eq_filter("kind", Value::text("vpn")))
+            .alias("p")
+            .build();
+
+        let QueryExpr::Path(path) = query else {
+            panic!("expected path query");
+        };
+        assert_eq!(path.alias.as_deref(), Some("p"));
+        assert_eq!(path.via, vec!["CONNECTS_TO"]);
+        assert_eq!(path.max_length, 7);
+        assert!(path.filter.is_some());
+    }
+
+    #[test]
+    fn cte_helpers_track_recursive_state_and_lookup() {
+        let base = QueryExpr::Table(TableQuery::new("hosts"));
+        let cte = CteDefinition::new("active", base.clone())
+            .with_columns(vec!["id".to_string(), "ip".to_string()]);
+        assert_eq!(cte.name, "active");
+        assert_eq!(cte.columns, vec!["id", "ip"]);
+        assert!(!cte.recursive);
+
+        let recursive = CteDefinition::recursive("walk", base.clone());
+        assert!(recursive.recursive);
+
+        let clause = WithClause::new().add(cte).add(recursive);
+        assert!(!clause.is_empty());
+        assert!(clause.has_recursive);
+        assert!(clause.get("active").is_some());
+        assert!(clause.get("missing").is_none());
+
+        let simple = QueryWithCte::simple(base.clone());
+        assert!(simple.with_clause.is_none());
+        assert!(matches!(simple.query, QueryExpr::Table(_)));
+
+        let with_ctes = QueryWithCte::with_ctes(clause.clone(), base.clone());
+        assert!(with_ctes.with_clause.is_some());
+
+        let built = CteQueryBuilder::new()
+            .cte("one", base.clone())
+            .recursive_cte("two", base.clone())
+            .cte_with_columns("three", vec!["id".to_string()], base.clone())
+            .build(base);
+        let clause = built.with_clause.expect("with clause");
+        assert_eq!(clause.ctes.len(), 3);
+        assert!(clause.has_recursive);
+        assert_eq!(clause.get("three").expect("cte").columns, vec!["id"]);
+    }
+}

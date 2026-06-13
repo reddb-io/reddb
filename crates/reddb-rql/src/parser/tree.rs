@@ -309,3 +309,148 @@ fn tree_json_value_to_storage_value(value: &JsonValue) -> Result<Value, ParseErr
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_query(input: &str) -> Result<QueryExpr, ParseError> {
+        crate::parser::parse(input).map(|query| query.query)
+    }
+
+    fn entry_value<'a>(entries: &'a [(String, Value)], key: &str) -> &'a Value {
+        entries
+            .iter()
+            .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
+            .unwrap_or_else(|| panic!("missing entry {key}"))
+    }
+
+    #[test]
+    fn create_tree_accepts_root_options_and_maxchildren_alias() {
+        let query = parse_query(
+            "CREATE TREE IF NOT EXISTS org IN forest ROOT LABEL 'Company' TYPE root \
+             METADATA {active: true, rank: 3, nested: {tier: 'gold'}} MAXCHILDREN 2",
+        )
+        .unwrap();
+
+        let QueryExpr::CreateTree(tree) = query else {
+            panic!("expected create tree");
+        };
+        assert_eq!(tree.collection, "forest");
+        assert_eq!(tree.name, "org");
+        assert!(tree.if_not_exists);
+        assert_eq!(tree.default_max_children, 2);
+        assert_eq!(tree.root.label, "Company");
+        assert_eq!(tree.root.node_type.as_deref(), Some("root"));
+        assert_eq!(tree.root.max_children, None);
+        assert_eq!(
+            entry_value(&tree.root.metadata, "active"),
+            &Value::Boolean(true)
+        );
+        assert_eq!(entry_value(&tree.root.metadata, "rank"), &Value::Integer(3));
+        assert!(matches!(
+            entry_value(&tree.root.metadata, "nested"),
+            Value::Json(_)
+        ));
+    }
+
+    #[test]
+    fn tree_insert_defaults_to_last_and_accepts_string_entity_ids() {
+        let query = parse_query(
+            "TREE INSERT INTO forest.org PARENT 'e42' LABEL child \
+             PROPERTIES {name: 'Platform'} MAX_CHILDREN 4",
+        )
+        .unwrap();
+
+        let QueryExpr::TreeCommand(TreeCommand::Insert {
+            collection,
+            tree_name,
+            parent_id,
+            node,
+            position,
+        }) = query
+        else {
+            panic!("expected tree insert");
+        };
+        assert_eq!(collection, "forest");
+        assert_eq!(tree_name, "org");
+        assert_eq!(parent_id, 42);
+        assert_eq!(node.label, "child");
+        assert_eq!(node.max_children, Some(4));
+        assert!(matches!(
+            entry_value(&node.properties, "name"),
+            Value::Text(value) if value.as_ref() == "Platform"
+        ));
+        assert_eq!(position, TreePosition::Last);
+    }
+
+    #[test]
+    fn tree_commands_cover_move_delete_validate_rebalance_and_drop() {
+        let query = parse_query("TREE MOVE forest.org NODE 'e9' TO PARENT 1 POSITION 3").unwrap();
+        let QueryExpr::TreeCommand(TreeCommand::Move {
+            collection,
+            tree_name,
+            node_id,
+            parent_id,
+            position,
+        }) = query
+        else {
+            panic!("expected tree move");
+        };
+        assert_eq!(collection, "forest");
+        assert_eq!(tree_name, "org");
+        assert_eq!(node_id, 9);
+        assert_eq!(parent_id, 1);
+        assert_eq!(position, TreePosition::Index(3));
+
+        let query = parse_query("TREE DELETE forest.org NODE 5").unwrap();
+        assert!(matches!(
+            query,
+            QueryExpr::TreeCommand(TreeCommand::Delete {
+                collection,
+                tree_name,
+                node_id,
+            }) if collection == "forest" && tree_name == "org" && node_id == 5
+        ));
+
+        let query = parse_query("TREE VALIDATE forest.org").unwrap();
+        assert!(matches!(
+            query,
+            QueryExpr::TreeCommand(TreeCommand::Validate {
+                collection,
+                tree_name,
+            }) if collection == "forest" && tree_name == "org"
+        ));
+
+        let query = parse_query("TREE REBALANCE forest.org").unwrap();
+        assert!(matches!(
+            query,
+            QueryExpr::TreeCommand(TreeCommand::Rebalance {
+                collection,
+                tree_name,
+                dry_run,
+            }) if collection == "forest" && tree_name == "org" && !dry_run
+        ));
+
+        let query = parse_query("DROP TREE IF EXISTS org IN forest").unwrap();
+        assert!(matches!(
+            query,
+            QueryExpr::DropTree(drop) if drop.name == "org"
+                && drop.collection == "forest"
+                && drop.if_exists
+        ));
+    }
+
+    #[test]
+    fn tree_parser_rejects_malformed_commands() {
+        for sql in [
+            "CREATE TREE org IN forest ROOT LABEL root",
+            "TREE INSERT INTO forest.org PARENT 0 LABEL child",
+            "TREE INSERT INTO forest.org PARENT 1 LABEL child POSITION 0",
+            "TREE INSERT INTO forest.org PARENT 1 LABEL child PROPERTIES 'not-object'",
+            "TREE UNKNOWN forest.org",
+        ] {
+            assert!(parse_query(sql).is_err(), "{sql} should not parse");
+        }
+    }
+}

@@ -691,7 +691,7 @@ fn is_always_false(filter: &AstFilter) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{TableQuery, WindowSpec};
+    use crate::ast::{JoinCondition, TableQuery, WindowSpec};
 
     fn make_field(name: &str) -> FieldRef {
         FieldRef::TableColumn {
@@ -892,6 +892,74 @@ mod tests {
             }) if column == "age"
         ));
         assert!(ctx.stats.filters_simplified >= 1);
+    }
+
+    #[test]
+    fn query_rewriter_recurses_into_join_children_and_tracks_pushdown() {
+        let mut left = TableQuery::new("users");
+        left.columns = vec![
+            Projection::Column("z".to_string()),
+            Projection::Column("a".to_string()),
+        ];
+        left.filter = Some(AstFilter::And(
+            Box::new(AstFilter::Compare {
+                field: make_field("1"),
+                op: CompareOp::Eq,
+                value: Value::Integer(1),
+            }),
+            Box::new(AstFilter::Compare {
+                field: make_field("age"),
+                op: CompareOp::Ge,
+                value: Value::Integer(18),
+            }),
+        ));
+
+        let join = JoinQuery::new(
+            QueryExpr::Table(left),
+            QueryExpr::Table(TableQuery::new("orders")),
+            JoinCondition::new(make_field("id"), make_field("user_id")),
+        );
+
+        let mut ctx = RewriteContext::default();
+        let rewritten =
+            QueryRewriter::default().rewrite_with_context(QueryExpr::Join(join), &mut ctx);
+        let QueryExpr::Join(join) = rewritten else {
+            panic!("expected join query");
+        };
+        let QueryExpr::Table(left) = join.left.as_ref() else {
+            panic!("expected table on left side");
+        };
+
+        assert_eq!(
+            left.columns.iter().map(projection_name).collect::<Vec<_>>(),
+            vec!["a", "z"]
+        );
+        assert!(matches!(
+            &left.filter,
+            Some(AstFilter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Ge,
+                value: Value::Integer(18),
+            }) if column == "age"
+        ));
+        assert!(ctx.stats.predicates_pushed >= 1);
+    }
+
+    #[test]
+    fn query_rewriter_eliminates_always_true_table_filters() {
+        let mut table = TableQuery::new("users");
+        table.filter = Some(AstFilter::Compare {
+            field: make_field("1"),
+            op: CompareOp::Eq,
+            value: Value::Integer(1),
+        });
+
+        let rewritten = QueryRewriter::default().rewrite(QueryExpr::Table(table));
+        let QueryExpr::Table(table) = rewritten else {
+            panic!("expected table query");
+        };
+
+        assert!(table.filter.is_none());
     }
 
     struct CountingRule;

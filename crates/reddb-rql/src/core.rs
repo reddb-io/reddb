@@ -3206,6 +3206,264 @@ pub enum ConfigCommand {
     },
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Expr, Span};
+
+    fn table_expr(name: &str) -> QueryExpr {
+        QueryExpr::Table(TableQuery::new(name))
+    }
+
+    #[test]
+    fn policy_target_kind_identifiers_cover_all_variants() {
+        assert_eq!(PolicyTargetKind::Table.as_ident(), "table");
+        assert_eq!(PolicyTargetKind::Nodes.as_ident(), "nodes");
+        assert_eq!(PolicyTargetKind::Edges.as_ident(), "edges");
+        assert_eq!(PolicyTargetKind::Vectors.as_ident(), "vectors");
+        assert_eq!(PolicyTargetKind::Messages.as_ident(), "messages");
+        assert_eq!(PolicyTargetKind::Points.as_ident(), "points");
+        assert_eq!(PolicyTargetKind::Documents.as_ident(), "documents");
+    }
+
+    #[test]
+    fn index_method_display_names_are_sql_keywords() {
+        assert_eq!(IndexMethod::BTree.to_string(), "BTREE");
+        assert_eq!(IndexMethod::Hash.to_string(), "HASH");
+        assert_eq!(IndexMethod::Bitmap.to_string(), "BITMAP");
+        assert_eq!(IndexMethod::RTree.to_string(), "RTREE");
+    }
+
+    #[test]
+    fn table_query_defaults_and_subquery_source() {
+        let query = TableQuery::new("hosts");
+        assert_eq!(query.table, "hosts");
+        assert!(query.source.is_none());
+        assert!(query.alias.is_none());
+        assert!(query.select_items.is_empty());
+        assert!(!query.distinct);
+
+        let subquery = table_expr("inner");
+        let wrapped = TableQuery::from_subquery(subquery, Some("h".to_string()));
+        assert_eq!(wrapped.table, "__subq_h");
+        assert_eq!(wrapped.alias.as_deref(), Some("h"));
+        assert!(matches!(wrapped.source, Some(TableSource::Subquery(_))));
+
+        let anonymous = TableQuery::from_subquery(table_expr("inner"), None);
+        assert_eq!(anonymous.table, "__subq_anon");
+        assert!(anonymous.alias.is_none());
+    }
+
+    #[test]
+    fn graph_pattern_query_and_components_builders_set_fields() {
+        let node = NodePattern::new("h").of_label("Host").with_property(
+            "os",
+            CompareOp::Eq,
+            Value::text("linux"),
+        );
+        assert_eq!(node.alias, "h");
+        assert_eq!(node.node_label.as_deref(), Some("Host"));
+        assert_eq!(node.properties.len(), 1);
+
+        let edge = EdgePattern::new("h", "s")
+            .alias("r")
+            .of_label("HAS_SERVICE")
+            .direction(EdgeDirection::Incoming)
+            .hops(2, 4);
+        assert_eq!(edge.alias.as_deref(), Some("r"));
+        assert_eq!(edge.edge_label.as_deref(), Some("HAS_SERVICE"));
+        assert_eq!(edge.direction, EdgeDirection::Incoming);
+        assert_eq!((edge.min_hops, edge.max_hops), (2, 4));
+
+        let pattern = GraphPattern::new().node(node).edge(edge);
+        assert_eq!(pattern.nodes.len(), 1);
+        assert_eq!(pattern.edges.len(), 1);
+
+        let graph = GraphQuery::new(pattern).alias("g");
+        assert_eq!(graph.alias.as_deref(), Some("g"));
+        assert!(graph.filter.is_none());
+        assert!(graph.return_.is_empty());
+    }
+
+    #[test]
+    fn join_condition_and_join_query_defaults() {
+        let left = FieldRef::column("hosts", "id");
+        let right = FieldRef::node_id("h");
+        let condition = JoinCondition::new(left.clone(), right.clone());
+        assert_eq!(condition.left_field, left);
+        assert_eq!(condition.right_field, right);
+
+        let join = JoinQuery::new(
+            table_expr("hosts"),
+            table_expr("services"),
+            condition.clone(),
+        )
+        .join_type(JoinType::LeftOuter);
+        assert!(matches!(*join.left, QueryExpr::Table(_)));
+        assert!(matches!(*join.right, QueryExpr::Table(_)));
+        assert_eq!(join.join_type, JoinType::LeftOuter);
+        assert_eq!(join.on.left_field, condition.left_field);
+        assert!(join.return_items.is_empty());
+    }
+
+    #[test]
+    fn field_ref_projection_filter_and_order_builders() {
+        let column = FieldRef::column("hosts", "ip");
+        let node_prop = FieldRef::node_prop("h", "os");
+        let edge_prop = FieldRef::edge_prop("r", "weight");
+        assert!(matches!(column, FieldRef::TableColumn { .. }));
+        assert!(matches!(node_prop, FieldRef::NodeProperty { .. }));
+        assert!(matches!(edge_prop, FieldRef::EdgeProperty { .. }));
+
+        assert!(matches!(
+            Projection::from_field(column.clone()),
+            Projection::Field(_, None)
+        ));
+        assert!(matches!(
+            Projection::column("ip"),
+            Projection::Column(ref name) if name == "ip"
+        ));
+        assert!(matches!(
+            Projection::with_alias("ip", "addr"),
+            Projection::Alias(ref column, ref alias) if column == "ip" && alias == "addr"
+        ));
+
+        let eq = Filter::compare(column.clone(), CompareOp::Eq, Value::text("127.0.0.1"));
+        let gt = Filter::compare(node_prop, CompareOp::Gt, Value::Integer(7));
+        let combined = eq.clone().and(gt.clone()).or(eq.clone().not());
+        assert!(matches!(combined, Filter::Or(_, _)));
+        assert!(matches!(gt.optimize(), Filter::Compare { .. }));
+
+        assert_eq!(CompareOp::Eq.to_string(), "=");
+        assert_eq!(CompareOp::Ne.to_string(), "<>");
+        assert_eq!(CompareOp::Lt.to_string(), "<");
+        assert_eq!(CompareOp::Le.to_string(), "<=");
+        assert_eq!(CompareOp::Gt.to_string(), ">");
+        assert_eq!(CompareOp::Ge.to_string(), ">=");
+
+        let asc = OrderByClause::asc(column.clone());
+        assert!(asc.ascending);
+        assert!(!asc.nulls_first);
+        assert!(asc.expr.is_none());
+
+        let desc = OrderByClause::desc(column).with_expr(Expr::lit(Value::Integer(1)));
+        assert!(!desc.ascending);
+        assert!(desc.nulls_first);
+        assert!(desc.expr.is_some());
+    }
+
+    #[test]
+    fn path_and_node_selector_builders_set_expected_defaults() {
+        let from = NodeSelector::by_id("a");
+        let to = NodeSelector::by_row("hosts", 42);
+        let path = PathQuery::new(from, to).alias("p").via_label("CONNECTS_TO");
+        assert_eq!(path.alias.as_deref(), Some("p"));
+        assert_eq!(path.via, vec!["CONNECTS_TO"]);
+        assert_eq!(path.max_length, 10);
+        assert!(path.filter.is_none());
+
+        assert!(matches!(NodeSelector::by_id("n1"), NodeSelector::ById(id) if id == "n1"));
+        assert!(matches!(
+            NodeSelector::by_label("Host"),
+            NodeSelector::ByType { node_label, filter: None } if node_label == "Host"
+        ));
+        assert!(matches!(
+            NodeSelector::by_row("hosts", 7),
+            NodeSelector::ByRow { table, row_id } if table == "hosts" && row_id == 7
+        ));
+    }
+
+    #[test]
+    fn vector_and_hybrid_builders_set_options() {
+        let literal = VectorSource::literal(vec![0.1, 0.2]);
+        assert!(matches!(literal, VectorSource::Literal(ref values) if values == &[0.1, 0.2]));
+        assert!(matches!(VectorSource::text("ssh"), VectorSource::Text(ref text) if text == "ssh"));
+        assert!(matches!(
+            VectorSource::reference("embeddings", 9),
+            VectorSource::Reference { collection, vector_id }
+                if collection == "embeddings" && vector_id == 9
+        ));
+
+        let vector = VectorQuery::new("embeddings", VectorSource::text("ssh"))
+            .limit(3)
+            .with_filter(MetadataFilter::eq("source", "nmap"))
+            .with_vectors()
+            .min_similarity(0.8)
+            .alias("sim");
+        assert_eq!(vector.collection, "embeddings");
+        assert_eq!(vector.k, 3);
+        assert!(vector.filter.is_some());
+        assert!(vector.include_vectors);
+        assert!(vector.include_metadata);
+        assert_eq!(vector.threshold, Some(0.8));
+        assert_eq!(vector.alias.as_deref(), Some("sim"));
+
+        let hybrid = HybridQuery::new(table_expr("hosts"), vector)
+            .with_fusion(FusionStrategy::RRF { k: 60 })
+            .limit(5)
+            .alias("hy");
+        assert!(matches!(*hybrid.structured, QueryExpr::Table(_)));
+        assert_eq!(hybrid.limit, Some(5));
+        assert_eq!(hybrid.alias.as_deref(), Some("hy"));
+        assert!(matches!(hybrid.fusion, FusionStrategy::RRF { k: 60 }));
+    }
+
+    #[test]
+    fn window_spec_structs_are_constructible() {
+        let order = WindowOrderItem {
+            expr: Expr::lit(Value::Integer(1)),
+            ascending: false,
+            nulls_first: true,
+        };
+        let frame = WindowFrame {
+            unit: WindowFrameUnit::Rows,
+            start: WindowFrameBound::UnboundedPreceding,
+            end: Some(WindowFrameBound::CurrentRow),
+        };
+        let spec = WindowSpec {
+            partition_by: vec![Expr::lit(Value::text("tenant"))],
+            order_by: vec![order],
+            frame: Some(frame),
+        };
+        assert_eq!(spec.partition_by.len(), 1);
+        assert_eq!(spec.order_by.len(), 1);
+        assert!(matches!(
+            spec.frame,
+            Some(WindowFrame {
+                unit: WindowFrameUnit::Rows,
+                ..
+            })
+        ));
+
+        let default = WindowSpec::default();
+        assert!(default.partition_by.is_empty());
+        assert!(default.order_by.is_empty());
+        assert!(default.frame.is_none());
+
+        let _ = Span::synthetic();
+    }
+
+    #[test]
+    fn config_value_type_aliases_and_display_names() {
+        for (input, expected, as_str) in [
+            ("bool", ConfigValueType::Bool, "bool"),
+            ("boolean", ConfigValueType::Bool, "bool"),
+            ("int", ConfigValueType::Int, "int"),
+            ("integer", ConfigValueType::Int, "int"),
+            ("str", ConfigValueType::String, "string"),
+            ("text", ConfigValueType::String, "string"),
+            ("url", ConfigValueType::Url, "url"),
+            ("json_object", ConfigValueType::Object, "object"),
+            ("list", ConfigValueType::Array, "array"),
+        ] {
+            let parsed = ConfigValueType::parse(input).expect("known type");
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), as_str);
+        }
+        assert_eq!(ConfigValueType::parse("bogus"), None);
+    }
+}
+
 // ============================================================================
 // Builders (Fluent API)
 // ============================================================================
