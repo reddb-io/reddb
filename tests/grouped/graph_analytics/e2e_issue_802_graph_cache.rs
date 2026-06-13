@@ -14,6 +14,7 @@
 //! Known v0 limitation (shared with #795/#796): `louvain(g)` runs over the
 //! WHOLE graph store, so each test isolates its structure in one runtime.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;

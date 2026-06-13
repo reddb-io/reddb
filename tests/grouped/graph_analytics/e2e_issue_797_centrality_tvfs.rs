@@ -11,6 +11,7 @@
 //! `<collection>` argument is NOT resolved — the TVF runs over the WHOLE graph
 //! store. This test therefore places the whole structure in one collection.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;
