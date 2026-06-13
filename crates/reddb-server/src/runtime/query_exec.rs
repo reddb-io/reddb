@@ -164,6 +164,12 @@ fn execute_runtime_table_query_materialized(
         && effective_having.is_none()
         && query.expand.is_none()
         && query.offset.is_none()
+        && !effective_projections.iter().any(|p| {
+            matches!(
+                p,
+                Projection::Function(_, _) | Projection::Expression(_, _) | Projection::Window { .. }
+            ) || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
+        })
         && !is_universal_query_source(&query.table)
     {
         if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {

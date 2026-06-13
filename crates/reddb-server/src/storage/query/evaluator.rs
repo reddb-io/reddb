@@ -693,6 +693,9 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
                 args: vec![other.data_type()],
             }),
         },
+        "TRIM" => trim_function(name, args, true, true),
+        "LTRIM" => trim_function(name, args, true, false),
+        "RTRIM" => trim_function(name, args, false, true),
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => match &args[0] {
             Value::Text(s) => Ok(Value::Integer(s.chars().count() as i64)),
             other => Err(EvalError::UnknownFunction {
@@ -802,6 +805,31 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
         other => Err(EvalError::UnknownFunction {
             name: other.to_string(),
             args: args.iter().map(|v| v.data_type()).collect(),
+        }),
+    }
+}
+
+fn trim_function(name: &str, args: &[Value], left: bool, right: bool) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::UnknownFunction {
+            name: name.to_string(),
+            args: args.iter().map(|v| v.data_type()).collect(),
+        });
+    }
+
+    match &args[0] {
+        Value::Text(s) => {
+            let trimmed = match (left, right) {
+                (true, true) => s.trim(),
+                (true, false) => s.trim_start(),
+                (false, true) => s.trim_end(),
+                (false, false) => s,
+            };
+            Ok(Value::Text(Arc::from(trimmed)))
+        }
+        other => Err(EvalError::UnknownFunction {
+            name: name.to_string(),
+            args: vec![other.data_type()],
         }),
     }
 }

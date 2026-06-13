@@ -45,7 +45,7 @@ fn resolve_table_row_by_logical_id(
     TableRowMvccReadResolver::current_statement().resolve_logical_id(&store, table, logical_id)
 }
 
-fn projections_require_runtime_eval(projections: &[Projection]) -> bool {
+fn projections_require_runtime_projection(projections: &[Projection]) -> bool {
     projections.iter().any(|projection| {
         matches!(
             projection,
@@ -66,7 +66,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);
     let effective_having = effective_table_having_filter(query);
-    let requires_runtime_projection = projections_require_runtime_eval(&effective_projections);
+    let requires_runtime_projection =
+        projections_require_runtime_projection(&effective_projections);
     let uses_document_projection =
         runtime_projections_use_document_path(&effective_projections, query);
 
@@ -198,19 +199,22 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── ULTRA-FAST PATH: entity_id lookup bypasses planner entirely ──
-    if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-        let entity = resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id));
-        if let Some(entity) = entity {
-            return Ok(
-                super::super::record_search::runtime_table_record_lean_in_collection(
-                    entity,
-                    &query.table,
-                )
-                .into_iter()
-                .collect(),
-            );
+    if !requires_runtime_projection {
+        if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
+            let entity =
+                resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id));
+            if let Some(entity) = entity {
+                return Ok(
+                    super::super::record_search::runtime_table_record_lean_in_collection(
+                        entity,
+                        &query.table,
+                    )
+                    .into_iter()
+                    .collect(),
+                );
+            }
+            return Ok(Vec::new());
         }
-        return Ok(Vec::new());
     }
 
     let requires_mvcc_index_fallback =
@@ -236,12 +240,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             extract_cross_index_predicates(filter, &query.table, idx_store)
         })
         .is_some();
-    if let (false, Some(idx_store), Some(ref filter), false, false, false) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false, false) = (
         requires_mvcc_index_fallback,
+        requires_runtime_projection,
         index_store,
         &effective_filter,
         has_cross_index_candidate,
-        requires_runtime_projection,
         uses_document_projection,
     ) {
         let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
@@ -400,11 +404,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Equivalent to PG's bitmap heap scan where two bitmap indexes are AND-ed
     // at word level before touching heap pages. Here we use HashSet instead of
     // actual bitmaps but the reduction in entity fetches is the same.
-    if let (false, Some(idx_store), Some(ref filter), false, false) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false) = (
         requires_mvcc_index_fallback,
+        requires_runtime_projection,
         index_store,
         &effective_filter,
-        requires_runtime_projection,
         uses_document_projection,
     ) {
         if let Some((eq_col, eq_bytes, range_filter)) =
@@ -505,11 +509,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // - Optionally narrow further via sorted range scan filtered by the intersection set
     // - Fetch only the surviving rows; re-apply full compiled filter for residual predicates
     // Only fires when ≥2 indexed equality columns exist in the filter.
-    if let (false, Some(idx_store), Some(ref filter), false, false) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false) = (
         requires_mvcc_index_fallback,
+        requires_runtime_projection,
         index_store,
         &effective_filter,
-        requires_runtime_projection,
         uses_document_projection,
     ) {
         let mut eq_candidates: Vec<(String, Vec<u8>, crate::storage::schema::Value)> = Vec::new();
@@ -639,11 +643,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── INDEX-ASSISTED PATH: use hash index for O(1) equality lookups ──
-    if let (false, Some(idx_store), Some(ref filter), false, false) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false) = (
         requires_mvcc_index_fallback,
+        requires_runtime_projection,
         index_store,
         &effective_filter,
-        requires_runtime_projection,
         uses_document_projection,
     ) {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
@@ -1241,26 +1245,30 @@ pub(crate) fn execute_runtime_canonical_table_node(
     match node.operator.as_str() {
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
             // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
-            if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-                let entity = resolve_table_row_by_logical_id(
-                    db,
-                    &context.query.table,
-                    EntityId::new(entity_id),
-                );
-                if let Some(entity) = entity {
-                    if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
-                        return Ok(Vec::new());
-                    }
-                    return Ok(
-                        super::super::record_search::runtime_table_record_lean_in_collection(
-                            entity,
-                            &context.query.table,
-                        )
-                        .into_iter()
-                        .collect(),
+            if !projections_require_runtime_projection(&effective_projections)
+                && !uses_document_projection
+            {
+                if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
+                    let entity = resolve_table_row_by_logical_id(
+                        db,
+                        &context.query.table,
+                        EntityId::new(entity_id),
                     );
+                    if let Some(entity) = entity {
+                        if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
+                            return Ok(Vec::new());
+                        }
+                        return Ok(
+                            super::super::record_search::runtime_table_record_lean_in_collection(
+                                entity,
+                                &context.query.table,
+                            )
+                            .into_iter()
+                            .collect(),
+                        );
+                    }
+                    return Ok(Vec::new());
                 }
-                return Ok(Vec::new());
             }
 
             // ── FAST PATH 2: Filtered scan with entity-level pre-filter ──
@@ -1407,23 +1415,27 @@ pub(crate) fn execute_runtime_canonical_table_node(
         }
         "filter" | "entity_filter" => {
             // ── FAST PATH: Direct entity_id lookup (O(1)) ──
-            if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-                let entity = resolve_table_row_by_logical_id(
-                    db,
-                    &context.query.table,
-                    EntityId::new(entity_id),
-                );
-                if let Some(entity) = entity {
-                    return Ok(
-                        super::super::record_search::runtime_table_record_lean_in_collection(
-                            entity,
-                            &context.query.table,
-                        )
-                        .into_iter()
-                        .collect(),
+            if !projections_require_runtime_projection(&effective_projections)
+                && !uses_document_projection
+            {
+                if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
+                    let entity = resolve_table_row_by_logical_id(
+                        db,
+                        &context.query.table,
+                        EntityId::new(entity_id),
                     );
+                    if let Some(entity) = entity {
+                        return Ok(
+                            super::super::record_search::runtime_table_record_lean_in_collection(
+                                entity,
+                                &context.query.table,
+                            )
+                            .into_iter()
+                            .collect(),
+                        );
+                    }
+                    return Ok(Vec::new());
                 }
-                return Ok(Vec::new());
             }
 
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
