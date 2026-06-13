@@ -701,3 +701,241 @@ impl<'a> Parser<'a> {
         Ok(mult)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reddb_types::types::Value;
+
+    fn parser(input: &str) -> Parser<'_> {
+        Parser::new(input).unwrap_or_else(|err| panic!("failed to lex {input:?}: {err:?}"))
+    }
+
+    #[test]
+    fn kv_key_helper_handles_multisegment_and_vault_aliases() {
+        let mut p = parser("settings.feature.flag");
+        let (collection, key) = p.parse_kv_key(CollectionModel::Kv).unwrap();
+        assert_eq!(collection, "settings");
+        assert_eq!(key, "feature.flag");
+
+        let mut p = parser("red.vault.prod.api_key");
+        let (collection, key) = p.parse_kv_key(CollectionModel::Vault).unwrap();
+        assert_eq!(collection, "red.vault");
+        assert_eq!(key, "prod.api_key");
+
+        let mut p = parser("red.secret.prod.api_key");
+        let (collection, key) = p.parse_kv_key(CollectionModel::Vault).unwrap();
+        assert_eq!(collection, "red.vault");
+        assert_eq!(key, "prod.api_key");
+
+        let mut p = parser("secret.prod.api_key");
+        let (collection, key) = p.parse_kv_key(CollectionModel::Vault).unwrap();
+        assert_eq!(collection, "red.vault");
+        assert_eq!(key, "prod.api_key");
+
+        let mut p = parser("settings.feature:flag");
+        let err = p
+            .parse_kv_key(CollectionModel::Kv)
+            .expect_err("unquoted colon in nested key should fail");
+        assert!(err.to_string().contains("settings.'feature:flag'"));
+    }
+
+    #[test]
+    fn keyed_list_watch_tags_and_duration_helpers_cover_edges() {
+        let mut p = parser("items PREFIX tenant LIMIT -2 OFFSET -3");
+        let QueryExpr::KvCommand(KvCommand::List {
+            model,
+            collection,
+            prefix,
+            limit,
+            offset,
+        }) = p.parse_keyed_list(CollectionModel::Kv).unwrap()
+        else {
+            panic!("expected kv list");
+        };
+        assert_eq!(model, CollectionModel::Kv);
+        assert_eq!(collection, "items");
+        assert_eq!(prefix.as_deref(), Some("tenant"));
+        assert_eq!(limit, Some(0));
+        assert_eq!(offset, 0);
+
+        let mut p = parser("secrets.env PREFIX api FROM LSN 12");
+        let QueryExpr::KvCommand(KvCommand::Watch {
+            model,
+            collection,
+            key,
+            prefix,
+            from_lsn,
+        }) = p.parse_kv_watch(CollectionModel::Vault).unwrap()
+        else {
+            panic!("expected vault watch");
+        };
+        assert_eq!(model, CollectionModel::Vault);
+        assert_eq!(collection, "secrets.env");
+        assert_eq!(key, "api");
+        assert!(prefix);
+        assert_eq!(from_lsn, Some(12));
+
+        let mut p = parser("[org:7, region.us-east-1, 1.5]");
+        assert_eq!(
+            p.parse_kv_tag_list().unwrap(),
+            vec![
+                "org:7".to_string(),
+                "region.us-east-1".to_string(),
+                "1.5".to_string()
+            ]
+        );
+
+        for (unit, expected) in [
+            ("ms", 1.0),
+            ("secs", 1_000.0),
+            ("mins", 60_000.0),
+            ("hrs", 3_600_000.0),
+            ("days", 86_400_000.0),
+            ("fortnight", 1_000.0),
+            ("", 1_000.0),
+        ] {
+            let mut p = parser(unit);
+            assert_eq!(p.parse_kv_duration_unit().unwrap(), expected, "{unit}");
+        }
+    }
+
+    #[test]
+    fn kv_command_error_paths_are_structured() {
+        for sql in [
+            "KV PUT a = 1 IF EXISTS",
+            "KV PUT a = 1 IF NOT",
+            "INVALIDATE [tag] FROM c",
+            "INVALIDATE TAGS [tag] c",
+            "KV CAS key SET 1",
+            "KV CAS key EXPECT NULL VALUE 1",
+            "KV WATCH key FROM 7",
+        ] {
+            assert!(parser(sql).parse_frontend_statement().is_err(), "{sql}");
+        }
+        assert!(crate::sql::parse_frontend("VAULT UNSEAL secret.key FROM 7").is_err());
+    }
+
+    #[test]
+    fn kv_cas_and_vault_lifecycle_cover_remaining_shapes() {
+        let QueryExpr::KvCommand(KvCommand::Cas {
+            model,
+            collection,
+            key,
+            expected,
+            new_value,
+            ttl_ms,
+        }) = parser("KV CAS settings.feature EXPECT NULL SET 'on' EXPIRE 2 min")
+            .parse_frontend_statement()
+            .unwrap()
+            .into_query_expr()
+        else {
+            panic!("expected kv cas");
+        };
+        assert_eq!(model, CollectionModel::Kv);
+        assert_eq!(collection, "settings");
+        assert_eq!(key, "feature");
+        assert_eq!(expected, None);
+        assert_eq!(new_value, Value::text("on"));
+        assert_eq!(ttl_ms, Some(120_000));
+
+        assert!(matches!(
+            parser("DELETE VAULT secrets.api_key")
+                .parse_frontend_statement()
+                .unwrap()
+                .into_query_expr(),
+            QueryExpr::KvCommand(KvCommand::Delete {
+                model: CollectionModel::Vault,
+                collection,
+                key,
+            }) if collection == "secrets" && key == "api_key"
+        ));
+        assert!(matches!(
+            parser("VAULT PURGE secrets.api_key")
+                .parse_frontend_statement()
+                .unwrap()
+                .into_query_expr(),
+            QueryExpr::KvCommand(KvCommand::Purge { collection, key })
+                if collection == "secrets" && key == "api_key"
+        ));
+        assert!(matches!(
+            parser("VAULT ROTATE secrets.api_key = 'v2' TAGS [scope:prod]")
+                .parse_frontend_statement()
+                .unwrap()
+                .into_query_expr(),
+            QueryExpr::KvCommand(KvCommand::Rotate {
+                collection,
+                key,
+                tags,
+                ..
+            }) if collection == "secrets"
+                && key == "api_key"
+                && tags == vec!["scope:prod".to_string()]
+        ));
+    }
+
+    #[test]
+    fn vault_body_and_kv_error_variants_cover_remaining_dispatch() {
+        assert!(parser("NOPE GET key").parse_vault_command().is_err());
+
+        for sql in [
+            "KV UNSEAL secret.key",
+            "KV ROTATE secret.key = 'v2'",
+            "KV HISTORY secret.key",
+            "KV PURGE secret.key",
+        ] {
+            assert!(parser(sql).parse_frontend_statement().is_err(), "{sql}");
+        }
+
+        assert!(matches!(
+            parser("VAULT UNSEAL secret.api_key VERSION 2")
+                .parse_frontend_statement()
+                .unwrap()
+                .into_query_expr(),
+            QueryExpr::KvCommand(KvCommand::Unseal {
+                collection,
+                key,
+                version: Some(2),
+            }) if collection == "red.vault" && key == "api_key"
+        ));
+        assert!(matches!(
+            parser("VAULT HISTORY secret.api_key")
+                .parse_frontend_statement()
+                .unwrap()
+                .into_query_expr(),
+            QueryExpr::KvCommand(KvCommand::History { collection, key })
+                if collection == "red.vault" && key == "api_key"
+        ));
+        assert!(matches!(
+            parser("PURGE VAULT secret.api_key")
+                .parse_frontend_statement()
+                .unwrap()
+                .into_query_expr(),
+            QueryExpr::KvCommand(KvCommand::Purge { collection, key })
+                if collection == "red.vault" && key == "api_key"
+        ));
+
+        let mut p = parser("settings:feature");
+        assert!(p.parse_kv_key(CollectionModel::Kv).is_err());
+
+        assert!(matches!(
+            parser("WATCH user.*")
+                .parse_frontend_statement()
+                .unwrap()
+                .into_query_expr(),
+            QueryExpr::KvCommand(KvCommand::Watch {
+                model: CollectionModel::Kv,
+                collection,
+                key,
+                prefix: true,
+                from_lsn: None,
+            }) if collection == KV_DEFAULT_COLLECTION && key == "user"
+        ));
+
+        let mut p = parser("[, scope:prod]");
+        assert_eq!(
+            p.parse_kv_tag_list().unwrap(),
+            vec!["scope:prod".to_string()]
+        );
+    }
+}

@@ -691,6 +691,7 @@ fn is_always_false(filter: &AstFilter) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{JoinCondition, TableQuery, WindowSpec};
 
     fn make_field(name: &str) -> FieldRef {
         FieldRef::TableColumn {
@@ -744,5 +745,250 @@ mod tests {
             }
             _ => panic!("Expected Compare filter"),
         }
+    }
+
+    #[test]
+    fn projection_name_uses_visible_output_name_for_all_projection_shapes() {
+        assert_eq!(projection_name(&Projection::All), "*");
+        assert_eq!(
+            projection_name(&Projection::Column("raw".to_string())),
+            "raw"
+        );
+        assert_eq!(
+            projection_name(&Projection::Alias("raw".to_string(), "alias".to_string())),
+            "alias"
+        );
+        assert_eq!(
+            projection_name(&Projection::Function(
+                "LOWER:display".to_string(),
+                Vec::new()
+            )),
+            "display"
+        );
+        assert_eq!(
+            projection_name(&Projection::Expression(
+                Box::new(AstFilter::Compare {
+                    field: make_field("x"),
+                    op: CompareOp::Eq,
+                    value: Value::Integer(1),
+                }),
+                Some("expr_alias".to_string()),
+            )),
+            "expr_alias"
+        );
+        assert_eq!(
+            projection_name(&Projection::Field(
+                FieldRef::node_prop("n", "name"),
+                Some("node_name".to_string()),
+            )),
+            "node_name"
+        );
+        assert_eq!(
+            projection_name(&Projection::Window {
+                name: "ROW_NUMBER".to_string(),
+                args: Vec::new(),
+                window: Box::new(WindowSpec::default()),
+                alias: Some("rn".to_string()),
+            }),
+            "rn"
+        );
+    }
+
+    #[test]
+    fn normalize_rule_sorts_table_columns_by_output_name() {
+        let mut table = TableQuery::new("users");
+        table.columns = vec![
+            Projection::Column("z".to_string()),
+            Projection::Function("LOWER:a_alias".to_string(), Vec::new()),
+            Projection::Alias("name".to_string(), "m".to_string()),
+        ];
+
+        let mut ctx = RewriteContext::default();
+        let normalized = NormalizeRule.apply(QueryExpr::Table(table), &mut ctx);
+        let QueryExpr::Table(table) = normalized else {
+            panic!("expected table query");
+        };
+
+        assert_eq!(ctx.stats.expressions_normalized, 1);
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .map(projection_name)
+                .collect::<Vec<_>>(),
+            vec!["a_alias", "m", "z"]
+        );
+    }
+
+    #[test]
+    fn simplify_filter_covers_or_true_false_and_not_paths() {
+        let mut ctx = RewriteContext::default();
+        let truth = AstFilter::Compare {
+            field: make_field("1"),
+            op: CompareOp::Eq,
+            value: Value::Integer(1),
+        };
+        let falsehood = AstFilter::Compare {
+            field: make_field("1"),
+            op: CompareOp::Eq,
+            value: Value::Integer(0),
+        };
+        let predicate = AstFilter::Compare {
+            field: make_field("x"),
+            op: CompareOp::Eq,
+            value: Value::Integer(5),
+        };
+
+        assert_eq!(
+            simplify_filter(
+                AstFilter::Or(Box::new(falsehood.clone()), Box::new(predicate.clone())),
+                &mut ctx,
+            ),
+            predicate
+        );
+        assert!(is_always_true(&simplify_filter(
+            AstFilter::Or(Box::new(truth), Box::new(falsehood.clone())),
+            &mut ctx,
+        )));
+        assert!(is_always_false(&simplify_filter(
+            AstFilter::And(
+                Box::new(falsehood),
+                Box::new(AstFilter::IsNotNull(make_field("x")))
+            ),
+            &mut ctx,
+        )));
+        assert!(ctx.stats.filters_simplified >= 3);
+    }
+
+    #[test]
+    fn query_rewriter_runs_rules_until_fixed_point_and_exposes_context() {
+        let mut table = TableQuery::new("users");
+        table.filter = Some(AstFilter::And(
+            Box::new(AstFilter::Compare {
+                field: make_field("1"),
+                op: CompareOp::Eq,
+                value: Value::Integer(1),
+            }),
+            Box::new(AstFilter::Compare {
+                field: make_field("age"),
+                op: CompareOp::Ge,
+                value: Value::Integer(18),
+            }),
+        ));
+
+        let mut ctx = RewriteContext::default();
+        let rewritten =
+            QueryRewriter::default().rewrite_with_context(QueryExpr::Table(table), &mut ctx);
+        let QueryExpr::Table(table) = rewritten else {
+            panic!("expected table query");
+        };
+
+        assert!(matches!(
+            table.filter,
+            Some(AstFilter::Compare {
+                field: FieldRef::TableColumn { column, .. },
+                op: CompareOp::Ge,
+                value: Value::Integer(18),
+            }) if column == "age"
+        ));
+        assert!(ctx.stats.filters_simplified >= 1);
+    }
+
+    #[test]
+    fn query_rewriter_recurses_into_join_children_and_tracks_pushdown() {
+        let mut left = TableQuery::new("users");
+        left.columns = vec![
+            Projection::Column("z".to_string()),
+            Projection::Column("a".to_string()),
+        ];
+        left.filter = Some(AstFilter::And(
+            Box::new(AstFilter::Compare {
+                field: make_field("1"),
+                op: CompareOp::Eq,
+                value: Value::Integer(1),
+            }),
+            Box::new(AstFilter::Compare {
+                field: make_field("age"),
+                op: CompareOp::Ge,
+                value: Value::Integer(18),
+            }),
+        ));
+
+        let join = JoinQuery::new(
+            QueryExpr::Table(left),
+            QueryExpr::Table(TableQuery::new("orders")),
+            JoinCondition::new(make_field("id"), make_field("user_id")),
+        );
+
+        let mut ctx = RewriteContext::default();
+        let rewritten =
+            QueryRewriter::default().rewrite_with_context(QueryExpr::Join(join), &mut ctx);
+        let QueryExpr::Join(join) = rewritten else {
+            panic!("expected join query");
+        };
+        let QueryExpr::Table(left) = join.left.as_ref() else {
+            panic!("expected table on left side");
+        };
+
+        assert_eq!(
+            left.columns.iter().map(projection_name).collect::<Vec<_>>(),
+            vec!["a", "z"]
+        );
+        assert!(matches!(
+            &left.filter,
+            Some(AstFilter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Ge,
+                value: Value::Integer(18),
+            }) if column == "age"
+        ));
+        assert!(ctx.stats.predicates_pushed >= 1);
+    }
+
+    #[test]
+    fn query_rewriter_eliminates_always_true_table_filters() {
+        let mut table = TableQuery::new("users");
+        table.filter = Some(AstFilter::Compare {
+            field: make_field("1"),
+            op: CompareOp::Eq,
+            value: Value::Integer(1),
+        });
+
+        let rewritten = QueryRewriter::default().rewrite(QueryExpr::Table(table));
+        let QueryExpr::Table(table) = rewritten else {
+            panic!("expected table query");
+        };
+
+        assert!(table.filter.is_none());
+    }
+
+    struct CountingRule;
+
+    impl RewriteRule for CountingRule {
+        fn name(&self) -> &str {
+            "CountingRule"
+        }
+
+        fn apply(&self, query: QueryExpr, ctx: &mut RewriteContext) -> QueryExpr {
+            ctx.warnings.push(self.name().to_string());
+            query
+        }
+
+        fn is_applicable(&self, query: &QueryExpr) -> bool {
+            matches!(query, QueryExpr::Table(_))
+        }
+    }
+
+    #[test]
+    fn custom_rules_can_be_added_after_defaults() {
+        let mut rewriter = QueryRewriter::new();
+        rewriter.add_rule(Box::new(CountingRule));
+
+        let mut ctx = RewriteContext::default();
+        let rewritten =
+            rewriter.rewrite_with_context(QueryExpr::Table(TableQuery::new("users")), &mut ctx);
+
+        assert!(matches!(rewritten, QueryExpr::Table(_)));
+        assert!(ctx.warnings.iter().any(|warning| warning == "CountingRule"));
     }
 }

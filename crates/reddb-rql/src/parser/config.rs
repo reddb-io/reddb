@@ -327,3 +327,101 @@ impl<'a> Parser<'a> {
         Ok(Some(value_type))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reddb_types::types::Value;
+
+    fn expr(input: &str) -> Result<QueryExpr, ParseError> {
+        let mut parser = Parser::new(input)?;
+        parser.parse_config_command()
+    }
+
+    #[test]
+    fn config_command_covers_dotted_collections_and_schema_type_forms() {
+        let QueryExpr::ConfigCommand(ConfigCommand::Put {
+            collection,
+            key,
+            value,
+            value_type,
+            tags,
+        }) = expr("PUT CONFIG App.Prod Feature = 'on' SCHEMA string TAGS [scope:prod]").unwrap()
+        else {
+            panic!("expected config put");
+        };
+        assert_eq!(collection, "app.prod");
+        assert_eq!(key, "feature");
+        assert_eq!(value, Value::text("on"));
+        assert_eq!(value_type, Some(ConfigValueType::String));
+        assert_eq!(tags, vec!["scope:prod".to_string()]);
+
+        let QueryExpr::ConfigCommand(ConfigCommand::Rotate {
+            collection,
+            key,
+            value_type,
+            ..
+        }) = expr("ROTATE CONFIG app feature = true WITH TYPE bool").unwrap()
+        else {
+            panic!("expected config rotate");
+        };
+        assert_eq!(collection, "app");
+        assert_eq!(key, "feature");
+        assert_eq!(value_type, Some(ConfigValueType::Bool));
+    }
+
+    #[test]
+    fn config_list_watch_and_invalid_operations_cover_optional_branches() {
+        assert!(matches!(
+            expr("LIST CONFIG App.Prod LIMIT -1 OFFSET -2").unwrap(),
+            QueryExpr::ConfigCommand(ConfigCommand::List {
+                collection,
+                prefix: None,
+                limit: Some(0),
+                offset: 0,
+            }) if collection == "app.prod"
+        ));
+        assert!(matches!(
+            expr("WATCH CONFIG App.Prod feature FROM LSN 9").unwrap(),
+            QueryExpr::ConfigCommand(ConfigCommand::Watch {
+                collection,
+                key,
+                prefix: false,
+                from_lsn: Some(9),
+            }) if collection == "app.prod" && key == "feature"
+        ));
+        assert!(matches!(
+            expr("ADD CONFIG app").unwrap(),
+            QueryExpr::ConfigCommand(ConfigCommand::InvalidVolatileOperation {
+                operation,
+                collection,
+                key: None,
+            }) if operation == "ADD" && collection == "app"
+        ));
+        assert!(matches!(
+            expr("DECR CONFIG app counter").unwrap(),
+            QueryExpr::ConfigCommand(ConfigCommand::InvalidVolatileOperation {
+                operation,
+                collection,
+                key: Some(key),
+            }) if operation == "DECR" && collection == "app" && key == "counter"
+        ));
+    }
+
+    #[test]
+    fn config_errors_are_reported_before_construction() {
+        for sql in [
+            "UPSERT CONFIG app key = 'v'",
+            "PUT app key = 'v'",
+            "PUT CONFIG app = 'v'",
+            "GET CONFIG app",
+            "WATCH CONFIG app",
+            "WATCH CONFIG app feature FROM 9",
+            "PUT CONFIG app feature = 'v' WITH",
+            "PUT CONFIG app feature = 'v' WITH TYPE nope",
+        ] {
+            assert!(expr(sql).is_err(), "{sql}");
+        }
+        assert!(crate::sql::parse_frontend("LIST CONFIG app key").is_err());
+    }
+}

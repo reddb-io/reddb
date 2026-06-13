@@ -1055,4 +1055,160 @@ mod tests {
         let expr = t.to_query_expr();
         assert!(matches!(expr, QueryExpr::Graph(_)));
     }
+
+    #[test]
+    fn test_parse_edge_vertex_terminal_and_path_steps() {
+        let t = GremlinParser::parse(
+            "g.E('edge-1').outV().inV().bothV().otherV().toList().toSet().next().fold()",
+        )
+        .unwrap();
+        assert!(matches!(&t.steps[0], GremlinStep::E(Some(id)) if id == "edge-1"));
+        assert!(matches!(t.steps[1], GremlinStep::OutV));
+        assert!(matches!(t.steps[2], GremlinStep::InV));
+        assert!(matches!(t.steps[3], GremlinStep::BothV));
+        assert!(matches!(t.steps[4], GremlinStep::OtherV));
+        assert!(matches!(t.steps[5], GremlinStep::ToList));
+        assert!(matches!(t.steps[6], GremlinStep::ToSet));
+        assert!(matches!(t.steps[7], GremlinStep::Next));
+        assert!(matches!(t.steps[8], GremlinStep::Fold));
+
+        let t = GremlinParser::parse(
+            "g.V().outE('created').inE('owned').bothE('related').path().simplePath().cyclicPath()",
+        )
+        .unwrap();
+        assert!(matches!(&t.steps[1], GremlinStep::OutE(Some(label)) if label == "created"));
+        assert!(matches!(&t.steps[2], GremlinStep::InE(Some(label)) if label == "owned"));
+        assert!(matches!(&t.steps[3], GremlinStep::BothE(Some(label)) if label == "related"));
+        assert!(matches!(t.steps[4], GremlinStep::Path));
+        assert!(matches!(t.steps[5], GremlinStep::SimplePath));
+        assert!(matches!(t.steps[6], GremlinStep::CyclicPath));
+    }
+
+    #[test]
+    fn test_parse_filter_values_and_map_steps() {
+        let t = GremlinParser::parse(
+            "g.V().has('active', true).has('score', 1.5).has('count', 2).has('name').hasNot('deleted').hasId('node-1').dedup().skip(1).range(2, 5)",
+        )
+        .unwrap();
+        assert!(matches!(
+            &t.steps[1],
+            GremlinStep::Has(key, Some(GremlinValue::Boolean(true))) if key == "active"
+        ));
+        assert!(matches!(
+            &t.steps[2],
+            GremlinStep::Has(key, Some(GremlinValue::Float(value)))
+                if key == "score" && *value == 1.5
+        ));
+        assert!(matches!(
+            &t.steps[3],
+            GremlinStep::Has(key, Some(GremlinValue::Integer(value)))
+                if key == "count" && *value == 2
+        ));
+        assert!(matches!(&t.steps[4], GremlinStep::Has(key, None) if key == "name"));
+        assert!(matches!(&t.steps[5], GremlinStep::HasNot(key) if key == "deleted"));
+        assert!(matches!(&t.steps[6], GremlinStep::HasId(id) if id == "node-1"));
+        assert!(matches!(t.steps[7], GremlinStep::Dedup));
+        assert!(matches!(t.steps[8], GremlinStep::Skip(1)));
+        assert!(matches!(t.steps[9], GremlinStep::Range(2, 5)));
+
+        let t = GremlinParser::parse(
+            "g.V().valueMap('name', 'age').id().label().properties('ip').sum().min().max().mean().select('a', 'b').project('x', 'y')",
+        )
+        .unwrap();
+        assert!(
+            matches!(&t.steps[1], GremlinStep::ValueMap(keys) if keys == &vec!["name".to_string(), "age".to_string()])
+        );
+        assert!(matches!(t.steps[2], GremlinStep::Id));
+        assert!(matches!(t.steps[3], GremlinStep::Label));
+        assert!(
+            matches!(&t.steps[4], GremlinStep::Properties(keys) if keys == &vec!["ip".to_string()])
+        );
+        assert!(matches!(t.steps[5], GremlinStep::Sum));
+        assert!(matches!(t.steps[6], GremlinStep::Min));
+        assert!(matches!(t.steps[7], GremlinStep::Max));
+        assert!(matches!(t.steps[8], GremlinStep::Mean));
+        assert!(matches!(&t.steps[9], GremlinStep::Select(labels) if labels.len() == 2));
+        assert!(matches!(&t.steps[10], GremlinStep::Project(keys) if keys.len() == 2));
+    }
+
+    #[test]
+    fn test_parse_branch_side_effect_and_error_paths() {
+        let t = GremlinParser::parse(
+            "g.V().repeat(__.out('knows')).until(has('name', 'bob')).emit().as('a').aggregate('seen').store('stash').group().groupCount()",
+        )
+        .unwrap();
+        assert!(matches!(&t.steps[1], GremlinStep::Repeat(inner) if inner.steps.len() == 1));
+        assert!(matches!(&t.steps[2], GremlinStep::Until(inner) if inner.steps.len() == 1));
+        assert!(matches!(t.steps[3], GremlinStep::Emit));
+        assert!(matches!(&t.steps[4], GremlinStep::As(label) if label == "a"));
+        assert!(matches!(&t.steps[5], GremlinStep::Aggregate(label) if label == "seen"));
+        assert!(matches!(&t.steps[6], GremlinStep::Store(label) if label == "stash"));
+        assert!(matches!(t.steps[7], GremlinStep::Group));
+        assert!(matches!(t.steps[8], GremlinStep::GroupCount));
+
+        let err = GremlinParser::parse("x.V()").expect_err("invalid traversal source");
+        assert!(err.to_string().contains("Expected 'g.' or '__'"));
+        let err = GremlinParser::parse("g.V().unknown()").expect_err("unknown step");
+        assert!(err.to_string().contains("Unknown step"));
+    }
+
+    #[test]
+    fn test_to_query_expr_covers_filters_aliases_edges_and_projections() {
+        let traversal = GremlinTraversal {
+            source: TraversalSource::Graph,
+            steps: vec![
+                GremlinStep::V(Some("host:1".to_string())),
+                GremlinStep::HasLabel("vuln".to_string()),
+                GremlinStep::Has(
+                    "name".to_string(),
+                    Some(GremlinValue::String("alice".to_string())),
+                ),
+                GremlinStep::Has("seen".to_string(), Some(GremlinValue::Boolean(true))),
+                GremlinStep::Has("count".to_string(), Some(GremlinValue::Integer(2))),
+                GremlinStep::Has("score".to_string(), Some(GremlinValue::Float(9.5))),
+                GremlinStep::Has(
+                    "predicate".to_string(),
+                    Some(GremlinValue::Predicate(GremlinPredicate::Eq(Box::new(
+                        GremlinValue::String("ignored".to_string()),
+                    )))),
+                ),
+                GremlinStep::Out(Some("connects".to_string())),
+                GremlinStep::In(Some("hasService".to_string())),
+                GremlinStep::Both(Some("relatedTo".to_string())),
+                GremlinStep::Values(vec!["name".to_string(), "status".to_string()]),
+                GremlinStep::Count,
+                GremlinStep::As("renamed".to_string()),
+            ],
+        };
+
+        let QueryExpr::Graph(graph) = traversal.to_query_expr() else {
+            panic!("Gremlin should lower to GraphQuery");
+        };
+        assert_eq!(
+            graph.pattern.nodes[0].node_label.as_deref(),
+            Some("vulnerability")
+        );
+        assert_eq!(graph.pattern.edges.len(), 3);
+        assert!(graph
+            .pattern
+            .edges
+            .iter()
+            .any(|edge| edge.edge_label.as_deref() == Some("connects_to")
+                && edge.direction == EdgeDirection::Outgoing));
+        assert!(graph
+            .pattern
+            .edges
+            .iter()
+            .any(|edge| edge.edge_label.as_deref() == Some("has_service")
+                && edge.direction == EdgeDirection::Incoming));
+        assert!(graph
+            .pattern
+            .edges
+            .iter()
+            .any(|edge| edge.edge_label.as_deref() == Some("related_to")
+                && edge.direction == EdgeDirection::Both));
+        assert!(graph.filter.is_some());
+        assert_eq!(graph.return_.len(), 3);
+        assert_eq!(graph.pattern.nodes.last().unwrap().alias, "renamed");
+    }
 }

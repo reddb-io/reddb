@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: llvm-tools-preview
 
@@ -51,36 +51,131 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-rust-1.91.0-llvm-cov
+          shared-key: ubuntu-rust-1.95.0-llvm-cov
           cache-on-failure: "true"
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
 
       - name: Run coverage (reddb-io-rql)
+        env:
+          RUSTC_WRAPPER: ""
         run: |
           # Measure the language front-end through its embedded library unit
           # tests only (`--lib`): that exercises the lexer/parser/AST/analyzer/
-          # typer/optimizer code without pulling in the heavy `reddb-server`
-          # dev-dependency that the conformance harness reaches for. The crate's
-          # sole non-dev workspace edge is `reddb-io-types`, which we exclude
-          # below so the totals reflect reddb-io-rql alone. Collect profdata
-          # once, then render it twice (text table + JSON totals) without
-          # re-running the tests.
-          cargo llvm-cov --no-report -p reddb-io-rql --lib
-          cargo llvm-cov report --summary-only \
+          # typer/optimizer code. The server-backed sqllogictest harness lives
+          # in the umbrella crate, so the measured crate graph stays
+          # `reddb-io-rql -> reddb-io-types`. Exclude `reddb-io-types` below so
+          # the totals reflect reddb-io-rql alone. Generate the summary JSON in
+          # the same cargo-llvm-cov invocation that runs tests so CI cannot lose
+          # profile data between a separate collection and report phase.
+          cargo llvm-cov -p reddb-io-rql --lib --json --summary-only \
             --ignore-filename-regex 'crates/reddb-types/' \
-            | tee coverage-summary.txt
-          cargo llvm-cov report --json --summary-only \
-            --ignore-filename-regex 'crates/reddb-types/' \
-            > coverage-summary.json
+            --output-path coverage-summary.json
 
       - name: Build report
         id: report
         run: |
-          # Pull the headline line-coverage percentage straight from the JSON
-          # totals — robust against column-layout changes in the text table.
-          total_line=$(python3 -c "import json; print(f\"{json.load(open('coverage-summary.json'))['data'][0]['totals']['lines']['percent']:.2f}%\")" 2>/dev/null || echo "n/a")
+          # Pull the headline and table straight from the JSON totals. This is
+          # robust against column-layout changes in cargo-llvm-cov text output.
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("coverage-summary.json").read_text())["data"][0]
+
+          def pct(metric):
+              count = metric["count"]
+              if count == 0:
+                  return "-"
+              return f"{metric['percent']:.2f}%"
+
+          def missed(metric):
+              return metric["count"] - metric["covered"]
+
+          def display_name(filename):
+              marker = "/crates/reddb-rql/src/"
+              if marker in filename:
+                  return filename.split(marker, 1)[1]
+              return Path(filename).name
+
+          rows = []
+          for item in data["files"]:
+              summary = item["summary"]
+              rows.append(
+                  (
+                      display_name(item["filename"]),
+                      summary["regions"]["count"],
+                      missed(summary["regions"]),
+                      pct(summary["regions"]),
+                      summary["functions"]["count"],
+                      missed(summary["functions"]),
+                      pct(summary["functions"]),
+                      summary["lines"]["count"],
+                      missed(summary["lines"]),
+                      pct(summary["lines"]),
+                      summary["branches"]["count"],
+                      summary["branches"].get("notcovered", missed(summary["branches"])),
+                      pct(summary["branches"]),
+                  )
+              )
+
+          totals = data["totals"]
+          rows.append(
+              (
+                  "TOTAL",
+                  totals["regions"]["count"],
+                  missed(totals["regions"]),
+                  pct(totals["regions"]),
+                  totals["functions"]["count"],
+                  missed(totals["functions"]),
+                  pct(totals["functions"]),
+                  totals["lines"]["count"],
+                  missed(totals["lines"]),
+                  pct(totals["lines"]),
+                  totals["branches"]["count"],
+                  totals["branches"].get("notcovered", missed(totals["branches"])),
+                  pct(totals["branches"]),
+              )
+          )
+
+          header = (
+              "Filename",
+              "Regions",
+              "Missed Regions",
+              "Cover",
+              "Functions",
+              "Missed Functions",
+              "Executed",
+              "Lines",
+              "Missed Lines",
+              "Cover",
+              "Branches",
+              "Missed Branches",
+              "Cover",
+          )
+          widths = [len(name) for name in header]
+          for row in rows:
+              for idx, value in enumerate(row):
+                  widths[idx] = max(widths[idx], len(str(value)))
+
+          def format_row(row):
+              cells = []
+              for idx, value in enumerate(row):
+                  value = str(value)
+                  if idx == 0:
+                      cells.append(value.ljust(widths[idx]))
+                  else:
+                      cells.append(value.rjust(widths[idx]))
+              return "  ".join(cells)
+
+          lines = [format_row(header), "-" * len(format_row(header))]
+          lines.extend(format_row(row) for row in rows)
+          Path("coverage-summary.txt").write_text("\n".join(lines) + "\n")
+          Path("coverage-line-percent.txt").write_text(pct(totals["lines"]) + "\n")
+          PY
+
+          total_line=$(cat coverage-line-percent.txt)
 
           {
             echo "## RQL Coverage Report"
@@ -92,7 +187,7 @@ jobs:
             echo '```'
             echo ""
             echo "> ℹ️ Report-only — this never blocks merge (ADR 0053 / PRD #1098)."
-            echo "> Run locally: \`cargo llvm-cov -p reddb-io-rql --lib --summary-only\`"
+            echo "> Run locally: \`cargo llvm-cov -p reddb-io-rql --lib --summary-only --ignore-filename-regex 'crates/reddb-types/'\`"
           } > coverage-report.md
 
           # Mirror to the job summary so the signal is visible without a PR.
@@ -109,10 +204,12 @@ jobs:
       - name: Post or update PR comment
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
+        env:
+          RQL_COVERAGE_BODY: ${{ steps.report.outputs.body }}
         with:
           script: |
             const marker = '<!-- rql-coverage-comment -->';
-            const body = `${{ steps.report.outputs.body }}`;
+            const body = process.env.RQL_COVERAGE_BODY;
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
