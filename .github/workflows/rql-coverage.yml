@@ -1,10 +1,8 @@
 name: RQL Coverage
 
-# Report-only llvm-cov signal for the reddb-io-rql language front-end crate
-# (ADR 0053, PRD #1098). Aspirational target is ~95%+, but this workflow
-# NEVER blocks merge — it only surfaces the number in the job summary and,
-# on PRs, as an advisory comment. A hard merge gate is explicitly out of
-# scope (mirrors the reddb-io-types posture, PRD #1060).
+# Hard llvm-cov gate for the reddb-io-rql language front-end crate
+# (ADR 0053, PRD #1098). The aspirational target remains ~95%+, but
+# this workflow now blocks merge below 90% line coverage.
 
 on:
   push:
@@ -71,6 +69,7 @@ jobs:
           # profile data between a separate collection and report phase.
           cargo llvm-cov -p reddb-io-rql --lib --json --summary-only \
             --ignore-filename-regex 'crates/reddb-types/' \
+            --fail-under-lines 90 \
             --output-path coverage-summary.json
 
       - name: Build report
@@ -180,14 +179,13 @@ jobs:
           {
             echo "## RQL Coverage Report"
             echo ""
-            echo "Crate: \`reddb-io-rql\` — line coverage: **${total_line}** (target ~95%, advisory)"
+            echo "Crate: \`reddb-io-rql\` — line coverage: **${total_line}** (hard minimum 90%, target ~95%)"
             echo ""
             echo '```'
             cat coverage-summary.txt
             echo '```'
             echo ""
-            echo "> ℹ️ Report-only — this never blocks merge (ADR 0053 / PRD #1098)."
-            echo "> Run locally: \`cargo llvm-cov -p reddb-io-rql --lib --summary-only --ignore-filename-regex 'crates/reddb-types/'\`"
+            echo "> Run locally: \`cargo llvm-cov -p reddb-io-rql --lib --summary-only --ignore-filename-regex 'crates/reddb-types/' --fail-under-lines 90\`"
           } > coverage-report.md
 
           # Mirror to the job summary so the signal is visible without a PR.
