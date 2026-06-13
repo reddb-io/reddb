@@ -1,17 +1,21 @@
-//! Chaos test: missing middle WAL segment (PLAN.md Phase 11.3 / 8 slice).
+//! Chaos test: WAL segment payload corruption (PLAN.md Phase 2.4 / 8 slice).
 //!
-//! Archives three segments, then deletes segment 2's payload + sidecar.
-//! Restore enumerates segments 1 and 3 (segment 2 is gone from the
-//! bucket); segment 3's `prev_hash` points to segment 2's sha256, not
-//! segment 1's, so the chain check fires.
+//! Archives three WAL segments with valid sha256 sidecars, then
+//! tampers segment 2's recorded sha256 to a value that doesn't match
+//! the on-disk payload. Restore must fail closed before applying any
+//! record from the corrupted segment.
 
 use reddb::storage::backend::LocalBackend;
-use reddb::storage::wal::{archive_change_records, publish_snapshot_manifest, PointInTimeRecovery};
+use reddb::storage::wal::{
+    archive_change_records, load_wal_segment_manifest, publish_snapshot_manifest,
+    publish_wal_segment_manifest, PointInTimeRecovery,
+};
 use reddb::storage::RedDB;
-use reddb_file::{wal_segment_manifest_key, SnapshotManifest};
+use reddb_file::SnapshotManifest;
 use std::sync::Arc;
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 fn temp_dir(prefix: &str) -> support::TempDataDir {
@@ -23,8 +27,8 @@ fn record(lsn: u64, payload: &[u8]) -> reddb::replication::cdc::ChangeRecord {
 }
 
 #[test]
-fn restore_fails_closed_on_missing_middle_segment() {
-    let work = temp_dir("missing");
+fn restore_fails_closed_on_segment_sha256_mismatch() {
+    let work = temp_dir("sha-corrupt");
     let snapshot_dir = work.join("snapshots");
     let wal_dir = work.join("wal");
     let restore_path = work.join("restore").join("data.rdb");
@@ -65,13 +69,13 @@ fn restore_fails_closed_on_missing_middle_segment() {
         metas.push(m);
     }
 
-    // Delete segment 2's payload AND sidecar — gone from the bucket
-    // entirely. The LocalBackend stores keys as filesystem paths, so
-    // `metas[1].key` is the on-disk path.
-    let seg2_path = std::path::Path::new(&metas[1].key);
-    let seg2_sidecar = wal_segment_manifest_key(&metas[1].key);
-    let _ = std::fs::remove_file(seg2_path);
-    let _ = std::fs::remove_file(&seg2_sidecar);
+    // Tamper segment 2's recorded sha256 — payload bytes are intact,
+    // but the sidecar lies about their digest.
+    let mut sidecar2 = load_wal_segment_manifest(&LocalBackend, &metas[1].key)
+        .unwrap()
+        .expect("segment 2 sidecar");
+    sidecar2.sha256 = Some("ff".repeat(32));
+    publish_wal_segment_manifest(&LocalBackend, &sidecar2).unwrap();
 
     let recovery = PointInTimeRecovery::new(
         Arc::new(LocalBackend),
@@ -80,10 +84,10 @@ fn restore_fails_closed_on_missing_middle_segment() {
     );
     let err = recovery
         .restore_to(0, &restore_path)
-        .expect_err("missing middle segment must fail closed");
+        .expect_err("sha256 mismatch must fail closed");
     let msg = err.to_string().to_lowercase();
     assert!(
-        msg.contains("chain"),
-        "error must mention chain; got: {msg}"
+        msg.contains("integrity") || msg.contains("sha256"),
+        "error must mention integrity/sha256; got: {msg}"
     );
 }

@@ -10,6 +10,7 @@
 //! refresh from the winner still works.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::replication::lease::{LeaseError, LeaseStore};

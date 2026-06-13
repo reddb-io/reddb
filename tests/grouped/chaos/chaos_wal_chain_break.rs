@@ -15,6 +15,7 @@ use reddb_file::SnapshotManifest;
 use std::sync::Arc;
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 fn temp_dir(prefix: &str) -> support::TempDataDir {
