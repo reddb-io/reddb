@@ -715,6 +715,99 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         }
     }
 
+    // ── GLOBAL ATTRIBUTE PATH: `SELECT * WHERE passport = '...'` ──
+    //
+    // SELECT without FROM parses as the universal source (`table = "any"`).
+    // Before falling back to the canonical universal scan, narrow the
+    // collection set using declared collection contracts / column schemas when
+    // the WHERE clause references plain attributes. Collections with unknown
+    // shape stay in the candidate set so dynamic graph/document collections
+    // can still match.
+    if effective_filter.is_some()
+        && is_universal_query_source(&query.table)
+        && effective_group_by.is_empty()
+        && effective_having.is_none()
+        && query.expand.is_none()
+        && !effective_projections.iter().any(|p| {
+            matches!(
+                p,
+                Projection::Function(_, _) | Projection::Expression(_, _) | Projection::Window { .. }
+            ) || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
+        })
+    {
+        let filter = effective_filter.as_ref().ok_or_else(|| {
+            RedDBError::Internal(
+                "global attribute scan selected without a WHERE clause".into(),
+            )
+        })?;
+        if let Some(candidate_collections) =
+            universal_candidate_collections_for_filter(db, query, filter)
+        {
+            let table_name = query.table.as_str();
+            let table_alias = query.alias.as_deref().unwrap_or(table_name);
+            let mut records = scan_runtime_universal_source_records_limited(
+                db,
+                Some(candidate_collections.as_slice()),
+                None,
+            )?;
+            let compiled = crate::runtime::scalar_evaluator::compile_filter(
+                filter,
+                &crate::runtime::scalar_evaluator::PermissiveScope,
+            );
+            records.retain(|record| {
+                crate::runtime::scalar_evaluator::evaluate_compiled_filter(
+                    Some(db),
+                    &compiled,
+                    record,
+                    Some(table_name),
+                    Some(table_alias),
+                )
+            });
+
+            if !query.order_by.is_empty() {
+                crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
+                super::super::join_filter::sort_records_by_order_by_with_db(
+                    Some(db),
+                    &mut records,
+                    &query.order_by,
+                    Some(table_name),
+                    Some(table_alias),
+                );
+            }
+
+            if let Some(offset) = query.offset {
+                let offset = offset as usize;
+                if offset < records.len() {
+                    records = records.into_iter().skip(offset).collect();
+                } else {
+                    records.clear();
+                }
+            }
+            if let Some(limit) = query.limit {
+                records.truncate(limit as usize);
+            }
+
+            if !matches!(effective_projections.as_slice(), [Projection::All]) {
+                records = records
+                    .iter()
+                    .map(|record| {
+                        project_runtime_record_with_db(
+                            Some(db),
+                            record,
+                            &effective_projections,
+                            Some(table_name),
+                            Some(table_alias),
+                            false,
+                            false,
+                        )
+                    })
+                    .collect();
+            }
+
+            return Ok(records);
+        }
+    }
+
     // ── FAST PATH: Simple filtered scan — bypass planner for basic WHERE queries ──
     // Evaluates the filter directly on raw entity data to avoid materializing
     // UnifiedRecord for every entity in the collection.
@@ -1668,9 +1761,250 @@ fn runtime_field_ref_uses_document_path(field: &FieldRef, query: &TableQuery) ->
     }
 }
 
+fn universal_candidate_collections_for_filter(
+    db: &RedDB,
+    query: &TableQuery,
+    filter: &Filter,
+) -> Option<Vec<String>> {
+    let mut fields = Vec::new();
+    if !collect_universal_filter_field_roots(filter, query, &mut fields) || fields.is_empty() {
+        return None;
+    }
+    fields.sort();
+    fields.dedup();
+
+    Some(
+        db.store()
+            .list_collections()
+            .into_iter()
+            .filter(|collection| universal_collection_may_have_fields(db, collection, &fields))
+            .collect(),
+    )
+}
+
+fn collect_universal_filter_field_roots(
+    filter: &Filter,
+    query: &TableQuery,
+    out: &mut Vec<String>,
+) -> bool {
+    match filter {
+        Filter::Compare { field, .. }
+        | Filter::IsNull(field)
+        | Filter::IsNotNull(field)
+        | Filter::In { field, .. }
+        | Filter::Between { field, .. }
+        | Filter::Like { field, .. }
+        | Filter::StartsWith { field, .. }
+        | Filter::EndsWith { field, .. }
+        | Filter::Contains { field, .. } => push_universal_filter_field_root(field, query, out),
+        Filter::CompareFields { left, right, .. } => {
+            push_universal_filter_field_root(left, query, out)
+                && push_universal_filter_field_root(right, query, out)
+        }
+        Filter::And(left, right) => {
+            collect_universal_filter_field_roots(left, query, out)
+                && collect_universal_filter_field_roots(right, query, out)
+        }
+        // OR/NOT and expression filters can be soundly executed by the
+        // existing universal plan. Keep them there until we have a candidate
+        // algebra that can prove union/complement collection sets.
+        Filter::Or(_, _) | Filter::Not(_) | Filter::CompareExpr { .. } => false,
+    }
+}
+
+fn push_universal_filter_field_root(
+    field: &FieldRef,
+    query: &TableQuery,
+    out: &mut Vec<String>,
+) -> bool {
+    let FieldRef::TableColumn { table, column } = field else {
+        return false;
+    };
+    if !table.is_empty()
+        && !is_universal_query_source(table)
+        && query.alias.as_deref() != Some(table.as_str())
+    {
+        return false;
+    }
+    let root = column
+        .split_once('.')
+        .map_or(column.as_str(), |(root, _)| root);
+    if is_universal_runtime_field(root) {
+        return false;
+    }
+    out.push(root.to_string());
+    true
+}
+
+fn is_universal_runtime_field(field: &str) -> bool {
+    matches!(
+        field,
+        "rid"
+            | "row_id"
+            | "entity_id"
+            | "red_entity_id"
+            | "collection"
+            | "red_collection"
+            | "kind"
+            | "red_kind"
+            | "tenant"
+            | "created_at"
+            | "updated_at"
+            | "red_entity_type"
+            | "red_capabilities"
+            | "red_sequence_id"
+    )
+}
+
+fn universal_collection_may_have_fields(db: &RedDB, collection: &str, fields: &[String]) -> bool {
+    let contract = db.collection_contract(collection);
+    if let Some(contract) = contract.as_ref() {
+        let declared_match = fields.iter().all(|field| {
+            contract
+                .declared_columns
+                .iter()
+                .any(|column| column.name.eq_ignore_ascii_case(field))
+        });
+        if declared_match && !contract.declared_columns.is_empty() {
+            return true;
+        }
+        if matches!(contract.schema_mode, crate::catalog::SchemaMode::Strict)
+            && !contract.declared_columns.is_empty()
+        {
+            return false;
+        }
+    }
+
+    let Some(manager) = db.store().get_collection(collection) else {
+        return false;
+    };
+    if let Some(schema) = manager.column_schema() {
+        if !schema.is_empty() {
+            return fields.iter().all(|field| {
+                schema
+                    .iter()
+                    .any(|column| column.eq_ignore_ascii_case(field))
+            });
+        }
+    }
+
+    if let Some(contract) = contract.as_ref() {
+        if !universal_contract_may_have_dynamic_fields(contract) {
+            return universal_contract_has_static_fields(contract, fields);
+        }
+        if universal_contract_has_static_fields(contract, fields) {
+            return true;
+        }
+        return universal_collection_has_observed_fields(&manager, fields);
+    }
+
+    universal_collection_has_observed_fields(&manager, fields)
+}
+
+fn universal_contract_has_static_fields(
+    contract: &crate::physical::CollectionContract,
+    fields: &[String],
+) -> bool {
+    match contract.declared_model {
+        crate::catalog::CollectionModel::Graph => fields_match_any(
+            fields,
+            &["label", "node_type", "from_rid", "to_rid", "weight"],
+        ),
+        crate::catalog::CollectionModel::Vector => {
+            fields_match_any(fields, &["dimension", "content"])
+        }
+        crate::catalog::CollectionModel::TimeSeries | crate::catalog::CollectionModel::Metrics => {
+            fields_match_any(
+                fields,
+                &[
+                    "metric",
+                    "timestamp_ns",
+                    "timestamp",
+                    "time",
+                    "value",
+                    "tags",
+                ],
+            )
+        }
+        crate::catalog::CollectionModel::Queue => fields_match_any(
+            fields,
+            &["position", "payload", "attempts", "acked", "priority"],
+        ),
+        crate::catalog::CollectionModel::Kv
+        | crate::catalog::CollectionModel::Config
+        | crate::catalog::CollectionModel::Vault => fields_match_any(fields, &["key", "value"]),
+        _ => false,
+    }
+}
+
+fn universal_contract_may_have_dynamic_fields(
+    contract: &crate::physical::CollectionContract,
+) -> bool {
+    matches!(
+        contract.declared_model,
+        crate::catalog::CollectionModel::Document
+            | crate::catalog::CollectionModel::Graph
+            | crate::catalog::CollectionModel::Hll
+            | crate::catalog::CollectionModel::Sketch
+            | crate::catalog::CollectionModel::Filter
+            | crate::catalog::CollectionModel::Mixed
+    ) || matches!(
+        contract.declared_model,
+        crate::catalog::CollectionModel::Table
+    ) && !matches!(contract.schema_mode, crate::catalog::SchemaMode::Strict)
+}
+
+fn universal_collection_has_observed_fields(
+    manager: &crate::storage::unified::manager::SegmentManager,
+    fields: &[String],
+) -> bool {
+    if fields.is_empty() {
+        return false;
+    }
+    let mut seen = vec![false; fields.len()];
+    manager.for_each_entity(|entity| {
+        for (idx, field) in fields.iter().enumerate() {
+            if !seen[idx] && universal_entity_has_observed_field(entity, field) {
+                seen[idx] = true;
+            }
+        }
+        !seen.iter().all(|value| *value)
+    });
+    seen.into_iter().all(|value| value)
+}
+
+fn universal_entity_has_observed_field(
+    entity: &crate::storage::unified::UnifiedEntity,
+    field: &str,
+) -> bool {
+    match &entity.data {
+        crate::storage::unified::EntityData::Row(row) => row
+            .iter_fields()
+            .any(|(name, _)| name.eq_ignore_ascii_case(field)),
+        crate::storage::unified::EntityData::Node(node) => node
+            .properties
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(field)),
+        crate::storage::unified::EntityData::Edge(edge) => edge
+            .properties
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(field)),
+        _ => false,
+    }
+}
+
+fn fields_match_any(fields: &[String], candidates: &[&str]) -> bool {
+    fields.iter().all(|field| {
+        candidates
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(field))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    use crate::storage::query::ast::{CompareOp, FieldRef, Filter, QueryExpr};
     use crate::storage::schema::Value;
     use crate::storage::unified::EntityId;
     use crate::{RedDBOptions, RedDBRuntime};
@@ -1752,5 +2086,83 @@ mod tests {
         assert_eq!(indexed, scanned);
         assert!(indexed.is_empty());
         clear_current_connection_id();
+    }
+
+    #[test]
+    fn global_attribute_candidates_use_declared_columns_but_keep_dynamic_collections() {
+        let rt = rt();
+        exec(&rt, "CREATE TABLE travelers (passport TEXT, name TEXT)");
+        exec(&rt, "CREATE TABLE pets (tag TEXT, name TEXT)");
+        exec(&rt, "CREATE VECTOR embeddings DIM 2 METRIC cosine");
+        exec(&rt, "CREATE TIMESERIES metrics RETENTION 7 d");
+        exec(&rt, "CREATE QUEUE jobs");
+        exec(
+            &rt,
+            "INSERT INTO social NODE (label, node_type, passport) \
+             VALUES ('person', 'Person', 'ABC123123')",
+        );
+        exec(
+            &rt,
+            "INSERT INTO places NODE (label, node_type, name) \
+             VALUES ('city', 'Place', 'Paris')",
+        );
+
+        let query =
+            match crate::storage::query::parser::parse("SELECT * WHERE passport = 'ABC123123'")
+                .expect("parse")
+                .query
+            {
+                QueryExpr::Table(query) => query,
+                other => panic!("expected table query, got {other:?}"),
+            };
+        let filter = Filter::Compare {
+            field: FieldRef::column("", "passport"),
+            op: CompareOp::Eq,
+            value: Value::text("ABC123123"),
+        };
+        let candidates =
+            super::universal_candidate_collections_for_filter(&rt.db(), &query, &filter)
+                .expect("plain attribute filter should produce candidates");
+
+        assert!(candidates.iter().any(|name| name == "travelers"));
+        assert!(candidates.iter().any(|name| name == "social"));
+        assert!(!candidates.iter().any(|name| name == "pets"));
+        assert!(!candidates.iter().any(|name| name == "places"));
+
+        let content_fields = vec!["content".to_string()];
+        assert!(super::universal_collection_may_have_fields(
+            &rt.db(),
+            "embeddings",
+            &content_fields
+        ));
+        assert!(!super::universal_collection_may_have_fields(
+            &rt.db(),
+            "metrics",
+            &content_fields
+        ));
+
+        let tags_fields = vec!["tags".to_string()];
+        assert!(super::universal_collection_may_have_fields(
+            &rt.db(),
+            "metrics",
+            &tags_fields
+        ));
+        assert!(!super::universal_collection_may_have_fields(
+            &rt.db(),
+            "embeddings",
+            &tags_fields
+        ));
+
+        let payload_fields = vec!["payload".to_string()];
+        assert!(super::universal_collection_may_have_fields(
+            &rt.db(),
+            "jobs",
+            &payload_fields
+        ));
+        assert!(!super::universal_collection_may_have_fields(
+            &rt.db(),
+            "travelers",
+            &payload_fields
+        ));
     }
 }
