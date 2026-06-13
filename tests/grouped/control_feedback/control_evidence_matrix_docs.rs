@@ -1,4 +1,4 @@
-const MATRIX: &str = include_str!("../docs/compliance/control-evidence-matrix.md");
+const MATRIX: &str = include_str!("../../../docs/compliance/control-evidence-matrix.md");
 
 #[test]
 fn control_evidence_matrix_separates_current_foundations_from_required_capabilities() {
