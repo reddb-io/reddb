@@ -21,6 +21,7 @@
 // array positional paths could plausibly be requested by clients holding
 // an array-shaped body.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};

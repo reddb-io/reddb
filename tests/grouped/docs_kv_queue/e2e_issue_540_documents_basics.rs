@@ -5,6 +5,7 @@
 // list, so a future regression is traceable back to the specific public
 // promise it broke.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};

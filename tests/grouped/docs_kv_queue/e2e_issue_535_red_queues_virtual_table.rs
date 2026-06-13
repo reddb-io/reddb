@@ -14,6 +14,7 @@
 //!    `oldest_pending_age` becomes non-NULL — derived from
 //!    `red_queue_meta`, not the catalog descriptor's hot fields.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::{Mutex, OnceLock};
