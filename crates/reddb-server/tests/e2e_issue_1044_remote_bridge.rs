@@ -33,8 +33,8 @@ use reddb_server::wire::WireTlsConfig;
 use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_wire::redwire::{
     build_auth_response_anonymous_payload, build_auth_response_frame, build_client_hello_frame,
-    build_query_frame, decode_frame, encode_frame, Frame, MessageKind, MAX_KNOWN_MINOR_VERSION,
-    REDWIRE_MAGIC,
+    build_query_frame, drain_next_frame, frame_to_bytes, Frame, MessageKind,
+    MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
 };
 use tokio::net::TcpListener;
 use tokio::time::timeout;
@@ -102,7 +102,7 @@ fn ws_request(
 }
 
 async fn send_frame(ws: &mut WsStream, frame: &Frame) {
-    ws.send(Message::Binary(Bytes::from(encode_frame(frame))))
+    ws.send(Message::Binary(Bytes::from(frame_to_bytes(frame))))
         .await
         .expect("send frame");
 }
@@ -111,11 +111,8 @@ async fn send_frame(ws: &mut WsStream, frame: &Frame) {
 /// frame stream, returning the next decoded frame.
 async fn next_frame(ws: &mut WsStream, buf: &mut Vec<u8>) -> Frame {
     loop {
-        if buf.len() >= reddb_wire::redwire::FRAME_HEADER_SIZE {
-            if let Ok((frame, consumed)) = decode_frame(buf) {
-                buf.drain(..consumed);
-                return frame;
-            }
+        if let Some(frame) = drain_next_frame(buf).expect("decode frame") {
+            return frame;
         }
         let msg = timeout(TIMEOUT, ws.next())
             .await
