@@ -13,6 +13,7 @@
 //! a named collection is a follow-up. This test therefore places both subgraphs
 //! in one graph collection and expects them to be discovered as two components.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;

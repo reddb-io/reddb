@@ -19,6 +19,7 @@
 //! acceptance note.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::{set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime};
