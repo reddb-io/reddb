@@ -228,3 +228,116 @@ pub fn parse_decimal_modifier(sql_type: &SqlTypeName) -> Result<(u8, u8), Parame
     }
     Ok((precision, scale))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_varchar_rejects_or_truncates_by_mode() {
+        let value = Value::text("abcdef");
+        let err = validate_varchar(&value, 3, VarcharMode::Reject).unwrap_err();
+        assert_eq!(err.to_string(), "string of length 6 exceeds VARCHAR(3)");
+
+        let truncated = validate_varchar(&value, 3, VarcharMode::Truncate).unwrap();
+        assert_eq!(truncated, Value::text("abc"));
+
+        let non_text = validate_varchar(&Value::Integer(123), 3, VarcharMode::Reject).unwrap();
+        assert_eq!(non_text, Value::text("123"));
+    }
+
+    #[test]
+    fn validate_decimal_checks_precision_scale_and_syntax() {
+        assert_eq!(
+            validate_decimal(&Value::Decimal(12_3400), 6, 4).unwrap(),
+            Value::Decimal(12_3400)
+        );
+
+        assert!(matches!(
+            validate_decimal(&Value::Decimal(12_3400), 5, 4),
+            Err(ParametricError::DecimalPrecisionOverflow { .. })
+        ));
+        assert!(matches!(
+            validate_decimal(&Value::Decimal(12_3400), 6, 2),
+            Err(ParametricError::DecimalScaleOverflow { .. })
+        ));
+        assert!(matches!(
+            validate_decimal(&Value::text("not decimal"), 10, 2),
+            Err(ParametricError::NotADecimal(_))
+        ));
+    }
+
+    #[test]
+    fn varchar_modifier_parses_defaults_and_errors() {
+        assert_eq!(
+            parse_varchar_modifier(&SqlTypeName::new("varchar")).unwrap(),
+            u32::MAX
+        );
+        assert_eq!(
+            parse_varchar_modifier(
+                &SqlTypeName::new("varchar").with_modifiers(vec![TypeModifier::Number(42)])
+            )
+            .unwrap(),
+            42
+        );
+        assert!(matches!(
+            parse_varchar_modifier(
+                &SqlTypeName::new("varchar")
+                    .with_modifiers(vec![TypeModifier::Number(1), TypeModifier::Number(2)])
+            ),
+            Err(ParametricError::BadModifier(_))
+        ));
+        assert!(matches!(
+            parse_varchar_modifier(
+                &SqlTypeName::new("varchar")
+                    .with_modifiers(vec![TypeModifier::Ident("x".to_string())])
+            ),
+            Err(ParametricError::BadModifier(_))
+        ));
+    }
+
+    #[test]
+    fn decimal_modifier_parses_defaults_and_errors() {
+        assert_eq!(
+            parse_decimal_modifier(&SqlTypeName::new("decimal")).unwrap(),
+            (38, 0)
+        );
+        assert_eq!(
+            parse_decimal_modifier(
+                &SqlTypeName::new("decimal").with_modifiers(vec![TypeModifier::Number(10)])
+            )
+            .unwrap(),
+            (10, 0)
+        );
+        assert_eq!(
+            parse_decimal_modifier(
+                &SqlTypeName::new("decimal")
+                    .with_modifiers(vec![TypeModifier::Number(10), TypeModifier::Number(2)])
+            )
+            .unwrap(),
+            (10, 2)
+        );
+
+        for modifiers in [
+            vec![
+                TypeModifier::Number(1),
+                TypeModifier::Number(2),
+                TypeModifier::Number(3),
+            ],
+            vec![TypeModifier::Ident("p".to_string())],
+            vec![TypeModifier::Number(300)],
+            vec![
+                TypeModifier::Number(10),
+                TypeModifier::Ident("s".to_string()),
+            ],
+            vec![TypeModifier::Number(10), TypeModifier::Number(300)],
+            vec![TypeModifier::Number(2), TypeModifier::Number(3)],
+        ] {
+            let ty = SqlTypeName::new("decimal").with_modifiers(modifiers);
+            assert!(matches!(
+                parse_decimal_modifier(&ty),
+                Err(ParametricError::BadModifier(_))
+            ));
+        }
+    }
+}

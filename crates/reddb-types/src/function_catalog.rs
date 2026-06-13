@@ -986,3 +986,48 @@ pub fn lookup(name: &str) -> Vec<&'static FunctionEntry> {
 pub fn resolve(name: &str, arg_types: &[DataType]) -> Option<&'static FunctionEntry> {
     crate::coercion_spine::resolve_function(name, arg_types).map(|(entry, _)| entry)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_is_case_insensitive_and_returns_overloads() {
+        let count = lookup("count");
+        assert!(count.len() >= 3);
+        assert!(count.iter().all(|entry| entry.name == "COUNT"));
+        assert!(lookup("missing_function").is_empty());
+    }
+
+    #[test]
+    fn catalog_pins_key_function_kinds_and_variadic_flags() {
+        let now = lookup("NOW").into_iter().next().expect("NOW");
+        assert_eq!(now.kind, FunctionKind::Volatile);
+        assert!(now.arg_types.is_empty());
+        assert_eq!(now.return_type, DataType::TimestampMs);
+
+        let coalesce = lookup("COALESCE").into_iter().next().expect("COALESCE");
+        assert_eq!(coalesce.kind, FunctionKind::Scalar);
+        assert!(coalesce.variadic);
+        assert_eq!(coalesce.return_type, DataType::Text);
+
+        let sum = lookup("SUM")
+            .into_iter()
+            .find(|entry| entry.arg_types == [DataType::BigInt])
+            .expect("SUM(bigint)");
+        assert_eq!(sum.kind, FunctionKind::Aggregate);
+        assert_eq!(sum.return_type, DataType::BigInt);
+    }
+
+    #[test]
+    fn resolve_delegates_to_coercion_spine() {
+        let abs_int = resolve("ABS", &[DataType::Integer]).expect("ABS(int)");
+        assert_eq!(abs_int.return_type, DataType::Integer);
+
+        let abs_float = resolve("ABS", &[DataType::Float]).expect("ABS(float)");
+        assert_eq!(abs_float.return_type, DataType::Float);
+
+        assert!(resolve("ABS", &[DataType::Text]).is_none());
+        assert!(resolve("DOES_NOT_EXIST", &[DataType::Integer]).is_none());
+    }
+}

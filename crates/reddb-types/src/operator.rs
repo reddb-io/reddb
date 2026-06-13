@@ -55,3 +55,31 @@ impl BinOp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn precedence_groups_match_parser_contract() {
+        assert_eq!(BinOp::Or.precedence(), 10);
+        assert_eq!(BinOp::And.precedence(), 20);
+        for op in [
+            BinOp::Eq,
+            BinOp::Ne,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+        ] {
+            assert_eq!(op.precedence(), 30, "{op:?}");
+        }
+        assert_eq!(BinOp::Concat.precedence(), 40);
+        for op in [BinOp::Add, BinOp::Sub] {
+            assert_eq!(op.precedence(), 50, "{op:?}");
+        }
+        for op in [BinOp::Mul, BinOp::Div, BinOp::Mod] {
+            assert_eq!(op.precedence(), 60, "{op:?}");
+        }
+    }
+}

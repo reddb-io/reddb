@@ -246,3 +246,53 @@ pub fn resolve(
 
     best.map(|(_, entry)| entry)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_returns_all_overloads_for_symbol() {
+        let plus = lookup("+");
+        assert!(plus.len() >= 6);
+        assert!(plus.iter().all(|entry| entry.name == "+"));
+        assert!(lookup("??").is_empty());
+    }
+
+    #[test]
+    fn resolve_picks_exact_infix_and_prefix_overloads() {
+        let add = resolve("+", OperatorKind::Infix, DataType::Integer, DataType::Float)
+            .expect("int + float overload");
+        assert_eq!(add.return_type, DataType::Float);
+        assert_eq!(add.kind, OperatorKind::Infix);
+
+        let not = resolve(
+            "NOT",
+            OperatorKind::Prefix,
+            DataType::Nullable,
+            DataType::Boolean,
+        )
+        .expect("NOT boolean overload");
+        assert_eq!(not.lhs_type, DataType::Nullable);
+        assert_eq!(not.return_type, DataType::Boolean);
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_and_mismatched_overloads() {
+        assert!(resolve(
+            "??",
+            OperatorKind::Infix,
+            DataType::Integer,
+            DataType::Integer
+        )
+        .is_none());
+        assert!(resolve(
+            "+",
+            OperatorKind::Postfix,
+            DataType::Integer,
+            DataType::Integer
+        )
+        .is_none());
+        assert!(resolve("+", OperatorKind::Infix, DataType::Boolean, DataType::Text).is_none());
+    }
+}

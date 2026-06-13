@@ -373,3 +373,122 @@ impl MetadataFilter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn metadata_values_compare_and_match_by_type() {
+        assert!(MetadataValue::from("red database").contains_str("data"));
+        assert!(MetadataValue::from("red database").starts_with("red"));
+        assert!(MetadataValue::from("red database").ends_with("base"));
+        assert!(!MetadataValue::from(42_i64).contains_str("42"));
+
+        assert!(MetadataValue::from(10_i64).matches_eq(&MetadataValue::from(10_i64)));
+        assert!(!MetadataValue::from(10_i64).matches_eq(&MetadataValue::from(11_i64)));
+        assert_eq!(
+            MetadataValue::from(10_i64).compare(&MetadataValue::from(11_i64)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            MetadataValue::from(true).compare(&MetadataValue::from("true")),
+            None
+        );
+    }
+
+    #[test]
+    fn metadata_values_convert_to_canonical_keys() {
+        assert!(metadata_value_to_canonical_key(&MetadataValue::from("alpha")).is_some());
+        assert!(metadata_value_to_canonical_key(&MetadataValue::from(7_i64)).is_some());
+        assert!(metadata_value_to_canonical_key(&MetadataValue::from(1.5_f64)).is_some());
+        assert!(metadata_value_to_canonical_key(&MetadataValue::from(true)).is_some());
+    }
+
+    #[test]
+    fn metadata_entry_inserts_gets_keys_and_removes_nulls() {
+        let mut entry = MetadataEntry::new();
+        assert!(entry.is_empty());
+
+        entry.insert("title", MetadataValue::from("Graph Guide"));
+        entry.insert("pages", MetadataValue::from(100_i64));
+        entry.insert("score", MetadataValue::from(0.75_f64));
+        entry.insert("published", MetadataValue::from(true));
+
+        assert_eq!(entry.get("title"), Some(MetadataValue::from("Graph Guide")));
+        assert_eq!(entry.get("pages"), Some(MetadataValue::from(100_i64)));
+        assert_eq!(entry.get("score"), Some(MetadataValue::from(0.75_f64)));
+        assert_eq!(entry.get("published"), Some(MetadataValue::from(true)));
+        assert!(entry.contains_key("title"));
+        assert!(!entry.is_empty());
+
+        let mut keys = entry.keys();
+        keys.sort();
+        assert_eq!(keys, vec!["pages", "published", "score", "title"]);
+
+        entry.insert("title", MetadataValue::Null);
+        assert_eq!(entry.get("title"), None);
+        assert!(!entry.contains_key("title"));
+    }
+
+    #[test]
+    fn metadata_filters_cover_comparison_membership_and_strings() {
+        let mut entry = MetadataEntry::new();
+        entry.insert("title", MetadataValue::from("Graph Guide"));
+        entry.insert("pages", MetadataValue::from(100_i64));
+
+        assert!(MetadataFilter::eq("title", "Graph Guide").matches(&entry));
+        assert!(!MetadataFilter::eq("title", "Other").matches(&entry));
+        assert!(MetadataFilter::ne("title", "Other").matches(&entry));
+        assert!(MetadataFilter::ne("missing", "anything").matches(&entry));
+
+        assert!(MetadataFilter::gt("pages", 99_i64).matches(&entry));
+        assert!(MetadataFilter::gte("pages", 100_i64).matches(&entry));
+        assert!(MetadataFilter::lt("pages", 101_i64).matches(&entry));
+        assert!(MetadataFilter::lte("pages", 100_i64).matches(&entry));
+        assert!(!MetadataFilter::gt("missing", 1_i64).matches(&entry));
+
+        assert!(MetadataFilter::In(
+            "pages".to_string(),
+            vec![MetadataValue::from(1_i64), MetadataValue::from(100_i64)]
+        )
+        .matches(&entry));
+        assert!(MetadataFilter::NotIn(
+            "pages".to_string(),
+            vec![MetadataValue::from(1_i64), MetadataValue::from(2_i64)]
+        )
+        .matches(&entry));
+        assert!(
+            MetadataFilter::NotIn("missing".to_string(), vec![MetadataValue::from(1_i64)])
+                .matches(&entry)
+        );
+
+        assert!(MetadataFilter::Contains("title".to_string(), "Guide".to_string()).matches(&entry));
+        assert!(
+            MetadataFilter::StartsWith("title".to_string(), "Graph".to_string()).matches(&entry)
+        );
+        assert!(MetadataFilter::EndsWith("title".to_string(), "Guide".to_string()).matches(&entry));
+    }
+
+    #[test]
+    fn metadata_filters_cover_existence_and_boolean_composition() {
+        let mut entry = MetadataEntry::new();
+        entry.insert("title", MetadataValue::from("Graph Guide"));
+        entry.insert("pages", MetadataValue::from(100_i64));
+
+        assert!(MetadataFilter::Exists("title".to_string()).matches(&entry));
+        assert!(MetadataFilter::NotExists("missing".to_string()).matches(&entry));
+        assert!(MetadataFilter::and(vec![
+            MetadataFilter::eq("title", "Graph Guide"),
+            MetadataFilter::gte("pages", 100_i64),
+        ])
+        .matches(&entry));
+        assert!(MetadataFilter::or(vec![
+            MetadataFilter::eq("title", "Other"),
+            MetadataFilter::eq("pages", 100_i64),
+        ])
+        .matches(&entry));
+        assert!(MetadataFilter::not(MetadataFilter::eq("title", "Other")).matches(&entry));
+    }
+}
