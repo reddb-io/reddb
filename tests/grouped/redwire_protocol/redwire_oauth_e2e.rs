@@ -19,6 +19,7 @@
 //!   - Tampered signature — JWT signed with a different key → AuthFail.
 //!   - Unknown kid       — JWT carries a kid the validator never seeded → AuthFail.
 
+#[path = "../../common/mod.rs"]
 mod common;
 
 use std::sync::Arc;
