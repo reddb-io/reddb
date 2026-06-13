@@ -1,5 +1,6 @@
 //! Issue #828 — replica WAL tail-follow stream with await-data semantics.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

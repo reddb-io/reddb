@@ -22,6 +22,7 @@
 //! recover-to-LSN mechanism exactly as the live wiring will.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::path::PathBuf;

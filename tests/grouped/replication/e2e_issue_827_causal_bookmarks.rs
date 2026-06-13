@@ -1,6 +1,7 @@
 //! Issue #827 — causal bookmarks and contiguous replica apply waits.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::time::Duration;

@@ -6,6 +6,7 @@
 //! (observable via `/metrics` and a rejected DML write); acking the
 //! replica forward releases it.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

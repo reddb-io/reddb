@@ -6,6 +6,7 @@
 //! that delete to arrive.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::path::Path;
