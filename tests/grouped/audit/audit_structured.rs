@@ -6,6 +6,7 @@
 //! per-site exceptions.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::time::Duration;
