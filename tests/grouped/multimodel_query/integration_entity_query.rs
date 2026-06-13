@@ -5,6 +5,7 @@
 //! text search, and cross-model entity scenarios.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::{

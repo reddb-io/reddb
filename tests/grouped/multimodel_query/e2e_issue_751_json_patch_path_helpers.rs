@@ -15,6 +15,7 @@
 //      failures produce structured UI-safe errors.
 //   5. Tests cover document and KV happy paths plus validation failures.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};
