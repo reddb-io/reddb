@@ -1,5 +1,6 @@
 //! Issue #817 — primary /metrics exports per-replica replication progress.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

@@ -1,5 +1,6 @@
 //! Issue #830 — slot-pinned replica bootstrap.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;
