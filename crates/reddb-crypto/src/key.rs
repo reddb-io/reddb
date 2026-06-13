@@ -141,4 +141,24 @@ mod tests {
         let key = parse_key(&out).unwrap();
         assert_eq!(key, [0xABu8; 32]);
     }
+
+    #[test]
+    fn decode_base64_accepts_symbols_whitespace_and_padding() {
+        assert_eq!(decode_base64(" +/+/==\n").unwrap(), vec![251, 255, 191]);
+    }
+
+    #[test]
+    fn decode_base64_rejects_invalid_chars_by_position() {
+        for input in [
+            "!AAA", "A!AA", "AA!A", "AAA!", "!A", "A!", "!AA", "A!A", "AA!",
+        ] {
+            assert!(decode_base64(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn decode_base64_rejects_single_char_remainder() {
+        let err = decode_base64("A").unwrap_err();
+        assert!(err.contains("invalid base64 length remainder 1"));
+    }
 }
