@@ -9,6 +9,7 @@ use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 fn unique_ident(prefix: &str) -> String {
