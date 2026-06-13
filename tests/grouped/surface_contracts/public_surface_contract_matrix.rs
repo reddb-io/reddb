@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-const MATRIX: &str = include_str!("../docs/conformance/public-surface-contract-matrix.md");
+const MATRIX: &str = include_str!("../../../docs/conformance/public-surface-contract-matrix.md");
 
 #[derive(Debug)]
 struct PromiseRow<'a> {

@@ -8,6 +8,7 @@
 //! env vars so the test never duplicates path knowledge.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{ErrorKind, Read};
