@@ -29,6 +29,7 @@
 //! decoupled scans keep it fast.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
