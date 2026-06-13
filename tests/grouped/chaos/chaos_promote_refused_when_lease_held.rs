@@ -9,6 +9,7 @@
 //! generic 409.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::replication::lease::{LeaseError, LeaseStore};
