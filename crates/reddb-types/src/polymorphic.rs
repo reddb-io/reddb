@@ -251,3 +251,158 @@ fn bind(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substitution_apply_returns_bound_or_concrete_types() {
+        let sub = Substitution {
+            any_element: Some(DataType::Integer),
+            any_array: Some(DataType::Array),
+            any_nonarray: Some(DataType::Text),
+            any_compatible: Some(DataType::Float),
+        };
+        assert_eq!(
+            sub.apply(ArgSlot::Concrete(DataType::Boolean)),
+            Some(DataType::Boolean)
+        );
+        assert_eq!(
+            sub.apply(ArgSlot::Poly(PseudoType::AnyElement)),
+            Some(DataType::Integer)
+        );
+        assert_eq!(
+            sub.apply(ArgSlot::Poly(PseudoType::AnyArray)),
+            Some(DataType::Array)
+        );
+        assert_eq!(
+            sub.apply(ArgSlot::Poly(PseudoType::AnyNonArray)),
+            Some(DataType::Text)
+        );
+        assert_eq!(
+            sub.apply(ArgSlot::Poly(PseudoType::AnyCompatible)),
+            Some(DataType::Float)
+        );
+        assert_eq!(
+            Substitution::default().apply(ArgSlot::Poly(PseudoType::AnyElement)),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_accepts_concrete_and_poly_slots() {
+        let sub = resolve(
+            &[
+                ArgSlot::Concrete(DataType::Float),
+                ArgSlot::Poly(PseudoType::AnyElement),
+                ArgSlot::Poly(PseudoType::AnyArray),
+                ArgSlot::Poly(PseudoType::AnyNonArray),
+            ],
+            &[
+                DataType::Integer,
+                DataType::Text,
+                DataType::Array,
+                DataType::Boolean,
+            ],
+        )
+        .unwrap();
+        assert_eq!(sub.any_element, Some(DataType::Text));
+        assert_eq!(sub.any_array, Some(DataType::Array));
+        assert_eq!(sub.any_nonarray, Some(DataType::Boolean));
+    }
+
+    #[test]
+    fn resolve_reports_arity_and_kind_errors() {
+        assert!(matches!(
+            resolve(&[ArgSlot::Poly(PseudoType::AnyElement)], &[]),
+            Err(ResolveError::ArityMismatch {
+                expected: 1,
+                got: 0
+            })
+        ));
+        assert!(matches!(
+            resolve(&[ArgSlot::Poly(PseudoType::AnyArray)], &[DataType::Text]),
+            Err(ResolveError::ArrayGotScalar)
+        ));
+        assert!(matches!(
+            resolve(
+                &[ArgSlot::Poly(PseudoType::AnyNonArray)],
+                &[DataType::Array]
+            ),
+            Err(ResolveError::NonArrayGotArray)
+        ));
+        assert!(matches!(
+            resolve(&[ArgSlot::Concrete(DataType::Boolean)], &[DataType::Text]),
+            Err(ResolveError::Conflict { .. })
+        ));
+    }
+
+    #[test]
+    fn repeated_pseudo_slots_must_be_consistent() {
+        let ok = resolve(
+            &[
+                ArgSlot::Poly(PseudoType::AnyElement),
+                ArgSlot::Poly(PseudoType::AnyElement),
+            ],
+            &[DataType::Integer, DataType::Integer],
+        )
+        .unwrap();
+        assert_eq!(ok.any_element, Some(DataType::Integer));
+
+        let err = resolve(
+            &[
+                ArgSlot::Poly(PseudoType::AnyElement),
+                ArgSlot::Poly(PseudoType::AnyElement),
+            ],
+            &[DataType::Integer, DataType::Text],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ResolveError::Conflict {
+                pseudo: PseudoType::AnyElement,
+                first: DataType::Integer,
+                other: DataType::Text,
+            }
+        ));
+        assert!(err.to_string().contains("AnyElement"));
+    }
+
+    #[test]
+    fn anycompatible_uses_cast_catalog_to_resolve_binding() {
+        let int_then_float = resolve(
+            &[
+                ArgSlot::Poly(PseudoType::AnyCompatible),
+                ArgSlot::Poly(PseudoType::AnyCompatible),
+            ],
+            &[DataType::Integer, DataType::Float],
+        )
+        .unwrap();
+        assert_eq!(int_then_float.any_compatible, Some(DataType::Integer));
+
+        let float_then_int = resolve(
+            &[
+                ArgSlot::Poly(PseudoType::AnyCompatible),
+                ArgSlot::Poly(PseudoType::AnyCompatible),
+            ],
+            &[DataType::Float, DataType::Integer],
+        )
+        .unwrap();
+        assert_eq!(float_then_int.any_compatible, Some(DataType::Float));
+
+        assert!(matches!(
+            resolve(
+                &[
+                    ArgSlot::Poly(PseudoType::AnyCompatible),
+                    ArgSlot::Poly(PseudoType::AnyCompatible),
+                ],
+                &[DataType::Boolean, DataType::Json],
+            ),
+            Err(ResolveError::Conflict {
+                pseudo: PseudoType::AnyCompatible,
+                ..
+            })
+        ));
+    }
+}
