@@ -27,8 +27,10 @@ surfaces but are never promoted to "truth".
 
 Quality posture: full parser pyramid (proptest AST→print→re-parse round-trip,
 cargo-fuzz no-panic, corpus goldens including error-message-with-position
-snapshots, differential accept/reject vs `sqlparser-rs`), with **~95%+
-aspirational `cargo llvm-cov` coverage reported in CI — no hard merge gate**.
+snapshots, differential accept/reject vs `sqlparser-rs`). The aspirational
+coverage target remains **~95%+**, and CI now enforces a **90% line-coverage
+floor** for the pure `reddb-io-rql` library scope (`--lib`, excluding
+`reddb-io-types` from totals).
 
 Sequencing: three phases (types re-home → conformance-suite-before-move → rql
 extraction → pyramid), each a PRD drained by `/afk`, queued after the current
