@@ -11,6 +11,7 @@
 //!      still be in the kernel page cache, but `sync_all` forces it).
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::replication::primary::LogicalWalSpool;

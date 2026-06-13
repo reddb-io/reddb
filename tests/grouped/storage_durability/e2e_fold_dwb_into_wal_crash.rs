@@ -10,6 +10,7 @@
 //! `e2e_seqn_journal_policy::recovery_handles_present_absent_and_corrupt_binary`.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::{set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime, StorageDeployPreset};
