@@ -4,6 +4,7 @@
 //! shapes. Lets us isolate "is the JWKS helper itself broken?"
 //! from the bigger end-to-end OAuth handshake test.
 
+#[path = "../../common/mod.rs"]
 mod common;
 
 use common::{jwks_server, jwt_mint};
