@@ -1109,7 +1109,10 @@ fn all_literal_values(values: &[Expr]) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{OrderByClause, WindowOrderItem, WindowSpec};
+    use crate::ast::{
+        GraphPattern, GraphQuery, JoinCondition, JoinQuery, NodeSelector, OrderByClause, PathQuery,
+        QueryExpr, VectorQuery, VectorSource, WindowOrderItem, WindowSpec,
+    };
 
     fn field(name: &str) -> FieldRef {
         FieldRef::column("", name)
@@ -1472,6 +1475,68 @@ mod tests {
     }
 
     #[test]
+    fn non_table_effective_helpers_preserve_existing_query_fields() {
+        let mut join = JoinQuery::new(
+            QueryExpr::Table(TableQuery::new("users")),
+            QueryExpr::Graph(GraphQuery::new(GraphPattern::new())),
+            JoinCondition::new(field("id"), FieldRef::node_id("n")),
+        );
+        join.filter = Some(Filter::IsNotNull(field("id")));
+        join.return_items = vec![SelectItem::Expr {
+            expr: col("name"),
+            alias: Some("display_name".to_string()),
+        }];
+        join.return_ = vec![Projection::Column("legacy_name".to_string())];
+
+        assert_eq!(
+            effective_join_filter(&join),
+            Some(Filter::IsNotNull(field("id")))
+        );
+        assert!(matches!(
+            effective_join_projections(&join).as_slice(),
+            [Projection::Field(FieldRef::TableColumn { column, .. }, Some(alias))]
+                if column == "name" && alias == "display_name"
+        ));
+
+        join.return_items.clear();
+        assert_eq!(
+            effective_join_projections(&join),
+            vec![Projection::Column("legacy_name".to_string())]
+        );
+
+        let graph_filter = Filter::StartsWith {
+            field: FieldRef::node_prop("n", "path"),
+            prefix: "infra/".to_string(),
+        };
+        let graph_return = vec![Projection::Field(FieldRef::node_prop("n", "name"), None)];
+        let mut graph = GraphQuery::new(GraphPattern::new());
+        graph.filter = Some(graph_filter.clone());
+        graph.return_ = graph_return.clone();
+        assert_eq!(effective_graph_filter(&graph), Some(graph_filter));
+        assert_eq!(effective_graph_projections(&graph), graph_return);
+
+        let path_filter = Filter::Contains {
+            field: FieldRef::edge_prop("e", "label"),
+            substring: "depends".to_string(),
+        };
+        let path_return = vec![Projection::Column("path".to_string())];
+        let mut path = PathQuery::new(NodeSelector::by_id("start"), NodeSelector::by_id("end"));
+        path.filter = Some(path_filter.clone());
+        path.return_ = path_return.clone();
+        assert_eq!(effective_path_filter(&path), Some(path_filter));
+        assert_eq!(effective_path_projections(&path), path_return);
+
+        let mut vector = VectorQuery::new("embeddings", VectorSource::literal(vec![0.1, 0.2]));
+        assert!(effective_vector_filter(&vector).is_none());
+        vector.filter = Some(MetadataFilter::eq("source", "nmap"));
+        assert!(matches!(
+            effective_vector_filter(&vector),
+            Some(MetadataFilter::Eq(key, reddb_types::vector_metadata::MetadataValue::String(value)))
+                if key == "source" && value == "nmap"
+        ));
+    }
+
+    #[test]
     fn insert_update_delete_helpers_fold_canonical_expressions() {
         let insert = InsertQuery {
             table: "users".to_string(),
@@ -1586,5 +1651,256 @@ mod tests {
             span: Span::synthetic(),
         })
         .is_err());
+    }
+
+    #[test]
+    fn render_label_and_literal_helpers_cover_private_round_trip_paths() {
+        assert_eq!(
+            render_expr_label(&lit(Value::text("O'Reilly"))),
+            "'O''Reilly'"
+        );
+        assert_eq!(render_expr_label(&parameter(4)), "$4");
+        assert_eq!(
+            render_expr_label(&bin(
+                BinOp::Mul,
+                bin(BinOp::Add, col("a"), col("b")),
+                col("c")
+            )),
+            "(a + b) * c"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::UnaryOp {
+                op: UnaryOp::Not,
+                operand: Box::new(col("active")),
+                span: Span::synthetic(),
+            }),
+            "NOT active"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::Cast {
+                inner: Box::new(col("age")),
+                target: reddb_types::types::DataType::Text,
+                span: Span::synthetic(),
+            }),
+            "CAST(age AS TEXT)"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::FunctionCall {
+                name: "lower".to_string(),
+                args: vec![col("name")],
+                span: Span::synthetic(),
+            }),
+            "lower(name)"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::Case {
+                branches: vec![(col("active"), lit(Value::text("yes")))],
+                else_: Some(Box::new(lit(Value::text("no")))),
+                span: Span::synthetic(),
+            }),
+            "CASE WHEN active THEN 'yes' ELSE 'no' END"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::IsNull {
+                operand: Box::new(col("deleted_at")),
+                negated: true,
+                span: Span::synthetic(),
+            }),
+            "deleted_at IS NOT NULL"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::InList {
+                target: Box::new(col("status")),
+                values: vec![lit(Value::text("closed"))],
+                negated: true,
+                span: Span::synthetic(),
+            }),
+            "status NOT IN ('closed')"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::Between {
+                target: Box::new(col("age")),
+                low: Box::new(lit(Value::Integer(18))),
+                high: Box::new(lit(Value::Integer(65))),
+                negated: false,
+                span: Span::synthetic(),
+            }),
+            "age BETWEEN 18 AND 65"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::Subquery {
+                query: crate::ast::ExprSubquery {
+                    query: Box::new(QueryExpr::Table(TableQuery::new("users"))),
+                },
+                span: Span::synthetic(),
+            }),
+            "subquery"
+        );
+        assert_eq!(
+            render_expr_label(&Expr::WindowFunctionCall {
+                name: "sum".to_string(),
+                args: vec![col("amount")],
+                window: WindowSpec::default(),
+                span: Span::synthetic(),
+            }),
+            "sum(amount) OVER (...)"
+        );
+
+        assert_eq!(render_field_label(&FieldRef::node_id("n")), "n.id");
+        assert_eq!(
+            render_field_label(&FieldRef::edge_prop("e", "weight")),
+            "e.weight"
+        );
+        assert_eq!(render_binop_label(BinOp::Concat), "||");
+        assert_eq!(render_sql_literal_label(&Value::Float(3.0)), "3");
+        assert_eq!(
+            render_projection_literal(&Value::Array(vec![Value::Integer(1), Value::text("x"),])),
+            "@RL:[1,\"x\"]"
+        );
+        assert_eq!(
+            render_projection_literal(&Value::Vector(vec![1.0, 2.5])),
+            "@RL:V[1,2.5]"
+        );
+        assert_eq!(
+            render_projection_literal(&Value::Json(br#"{"a":1}"#.to_vec())),
+            "@RL:\"<json 7 bytes>\""
+        );
+        assert!(matches!(
+            projection_from_literal(&Value::Boolean(true)),
+            Some(Projection::Expression(_, None))
+        ));
+        assert_eq!(
+            split_projection_function_alias("LOWER:name").1.as_deref(),
+            Some("name")
+        );
+        assert_eq!(split_projection_function_alias(":bad").1, None);
+    }
+
+    #[test]
+    fn lowering_fallbacks_cover_alias_legacy_and_non_specialized_paths() {
+        for (op, name) in [
+            (BinOp::Sub, "SUB"),
+            (BinOp::Div, "DIV"),
+            (BinOp::Mod, "MOD"),
+            (BinOp::Concat, "CONCAT"),
+        ] {
+            assert!(matches!(
+                expr_to_projection(&bin(op, col("lhs"), col("rhs"))),
+                Some(Projection::Function(function, args))
+                    if function == name && args.len() == 2
+            ));
+        }
+
+        assert!(matches!(
+            select_item_to_projection(&SelectItem::Expr {
+                expr: lit(Value::Integer(1)),
+                alias: Some("one".to_string()),
+            }),
+            Some(Projection::Alias(column, alias)) if column == "LIT:1" && alias == "one"
+        ));
+        assert!(matches!(
+            select_item_to_projection(&SelectItem::Expr {
+                expr: Expr::UnaryOp {
+                    op: UnaryOp::Not,
+                    operand: Box::new(col("active")),
+                    span: Span::synthetic(),
+                },
+                alias: Some("inactive".to_string()),
+            }),
+            Some(Projection::Expression(_, Some(alias))) if alias == "inactive"
+        ));
+
+        let legacy_insert = InsertQuery {
+            table: "users".to_string(),
+            entity_type: crate::ast::InsertEntityType::Row,
+            columns: vec!["id".to_string()],
+            value_exprs: Vec::new(),
+            values: vec![vec![Value::Integer(1)]],
+            returning: None,
+            ttl_ms: None,
+            expires_at_ms: None,
+            with_metadata: Vec::new(),
+            auto_embed: None,
+            suppress_events: false,
+        };
+        assert_eq!(
+            effective_insert_rows(&legacy_insert).unwrap(),
+            vec![vec![Value::Integer(1)]]
+        );
+
+        assert!(matches!(
+            expr_to_filter(&Expr::IsNull {
+                operand: Box::new(lit(Value::Null)),
+                negated: false,
+                span: Span::synthetic(),
+            }),
+            Filter::CompareExpr { .. }
+        ));
+        assert!(matches!(
+            expr_to_filter(&Expr::InList {
+                target: Box::new(col("status")),
+                values: vec![col("other_status")],
+                negated: false,
+                span: Span::synthetic(),
+            }),
+            Filter::CompareExpr { .. }
+        ));
+        assert!(matches!(
+            expr_to_filter(&Expr::Between {
+                target: Box::new(col("age")),
+                low: Box::new(lit(Value::Integer(18))),
+                high: Box::new(lit(Value::Integer(65))),
+                negated: true,
+                span: Span::synthetic(),
+            }),
+            Filter::CompareExpr { .. }
+        ));
+        assert!(matches!(
+            expr_to_filter(&Expr::FunctionCall {
+                name: "UNKNOWN".to_string(),
+                args: vec![col("name"), lit(Value::text("a"))],
+                span: Span::synthetic(),
+            }),
+            Filter::CompareExpr { .. }
+        ));
+        assert!(matches!(
+            expr_to_filter(&Expr::FunctionCall {
+                name: "LIKE".to_string(),
+                args: vec![lit(Value::text("not_field")), lit(Value::text("a"))],
+                span: Span::synthetic(),
+            }),
+            Filter::CompareExpr { .. }
+        ));
+
+        assert_eq!(
+            fold_expr_to_value(Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                operand: Box::new(lit(Value::Float(1.5))),
+                span: Span::synthetic(),
+            })
+            .unwrap(),
+            Value::Float(-1.5)
+        );
+        assert!(fold_expr_to_value(Expr::UnaryOp {
+            op: UnaryOp::Not,
+            operand: Box::new(lit(Value::Integer(1))),
+            span: Span::synthetic(),
+        })
+        .is_err());
+        assert!(fold_expr_to_value(Expr::FunctionCall {
+            name: "LOWER".to_string(),
+            args: vec![lit(Value::text("Ada"))],
+            span: Span::synthetic(),
+        })
+        .is_err());
+
+        assert_eq!(render_projection_literal(&Value::Null), "");
+        assert_eq!(render_projection_literal(&Value::UnsignedInteger(7)), "7");
+        assert_eq!(render_projection_literal(&Value::Boolean(false)), "false");
+        assert_eq!(
+            render_projection_literal(&Value::Blob(vec![1, 2, 3])),
+            "@RL:\"<blob 3 bytes>\""
+        );
+        assert_eq!(serialize_value_json(&Value::Null), "null");
     }
 }

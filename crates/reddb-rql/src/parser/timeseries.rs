@@ -532,3 +532,136 @@ impl<'a> Parser<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reddb_types::catalog::CollectionModel;
+
+    fn parse_query(input: &str) -> Result<QueryExpr, ParseError> {
+        crate::parser::parse(input).map(|query| query.query)
+    }
+
+    #[test]
+    fn create_timeseries_accepts_clause_order_defaults_and_columnar() {
+        let query = parse_query(
+            "CREATE TIMESERIES IF NOT EXISTS readings COLUMNAR DOWNSAMPLE 1h:raw \
+             RETENTION 2 h CHUNKSIZE 64",
+        )
+        .unwrap();
+
+        let QueryExpr::CreateTimeSeries(timeseries) = query else {
+            panic!("expected create timeseries");
+        };
+        assert_eq!(timeseries.name, "readings");
+        assert!(timeseries.if_not_exists);
+        assert!(timeseries.columnar);
+        assert_eq!(timeseries.retention_ms, Some(2 * 3_600_000));
+        assert_eq!(timeseries.chunk_size, Some(64));
+        assert_eq!(timeseries.downsample_policies, vec!["1h:raw:avg"]);
+        assert_eq!(timeseries.session_key, None);
+        assert_eq!(timeseries.session_gap_ms, None);
+        assert!(timeseries.hypertable.is_none());
+    }
+
+    #[test]
+    fn create_metrics_sets_collection_defaults_and_optional_clauses() {
+        let query = parse_query(
+            "CREATE METRICS IF NOT EXISTS telemetry RETENTION 30 m \
+             DOWNSAMPLE 5m:raw:max TENANT BY (ctx.tenant)",
+        )
+        .unwrap();
+
+        let QueryExpr::CreateTable(metrics) = query else {
+            panic!("expected metrics collection");
+        };
+        assert_eq!(metrics.collection_model, CollectionModel::Metrics);
+        assert_eq!(metrics.name, "telemetry");
+        assert!(metrics.if_not_exists);
+        assert_eq!(metrics.default_ttl_ms, Some(30 * 60_000));
+        assert_eq!(metrics.metrics_rollup_policies, vec!["5m:raw:max"]);
+        assert_eq!(metrics.tenant_by.as_deref(), Some("ctx.tenant"));
+        assert!(metrics.append_only);
+        assert!(metrics.columns.is_empty());
+    }
+
+    #[test]
+    fn create_metric_alter_metric_and_slo_parse_descriptor_forms() {
+        let query = parse_query(
+            "CREATE METRIC Svc.Latency.P99 TYPE gauge ROLE sli SOURCE rollups \
+             QUERY 'SELECT p99 FROM rollups' WINDOW 5 min TIME_FIELD observed_at",
+        )
+        .unwrap();
+        let QueryExpr::CreateMetric(metric) = query else {
+            panic!("expected create metric");
+        };
+        assert_eq!(metric.path, "svc.latency.p99");
+        assert_eq!(metric.kind, "gauge");
+        assert_eq!(metric.role, "sli");
+        assert_eq!(metric.source.as_deref(), Some("rollups"));
+        assert_eq!(metric.query.as_deref(), Some("SELECT p99 FROM rollups"));
+        assert_eq!(metric.window_ms, Some(5 * 60_000));
+        assert_eq!(metric.time_field.as_deref(), Some("observed_at"));
+
+        let query = parse_query("ALTER METRIC Svc.Latency.P99 SET PATH svc.latency.p95").unwrap();
+        let QueryExpr::AlterMetric(alter) = query else {
+            panic!("expected alter metric");
+        };
+        assert_eq!(alter.path, "svc.latency.p99");
+        assert_eq!(alter.set_role, None);
+        assert_eq!(alter.attempted_kind, None);
+        assert_eq!(alter.attempted_path.as_deref(), Some("svc.latency.p95"));
+
+        let query =
+            parse_query("CREATE SLO Api.Availability ON Svc.Latency.P99 TARGET 0.999 WINDOW 28 d")
+                .unwrap();
+        let QueryExpr::CreateSlo(slo) = query else {
+            panic!("expected create slo");
+        };
+        assert_eq!(slo.path, "api.availability");
+        assert_eq!(slo.metric_path, "svc.latency.p99");
+        assert!((slo.target - 0.999).abs() < f64::EPSILON);
+        assert_eq!(slo.window_ms, 28 * 86_400_000);
+    }
+
+    #[test]
+    fn create_hypertable_and_drop_timeseries_parse_variants() {
+        let query = parse_query(
+            "CREATE HYPERTABLE IF NOT EXISTS events TIME_COLUMN ts COLUMNAR \
+             CHUNK_INTERVAL '30m' TTL '10s' RETENTION 1 h",
+        )
+        .unwrap();
+        let QueryExpr::CreateTimeSeries(timeseries) = query else {
+            panic!("expected hypertable as timeseries");
+        };
+        let hypertable = timeseries.hypertable.expect("hypertable ddl");
+        assert_eq!(timeseries.name, "events");
+        assert!(timeseries.if_not_exists);
+        assert!(timeseries.columnar);
+        assert_eq!(timeseries.retention_ms, Some(3_600_000));
+        assert_eq!(hypertable.time_column, "ts");
+        assert_eq!(hypertable.chunk_interval_ns, 30 * 60 * 1_000_000_000);
+        assert_eq!(hypertable.default_ttl_ns, Some(10 * 1_000_000_000));
+
+        let query = parse_query("DROP TIMESERIES IF EXISTS tenant.metrics.*").unwrap();
+        assert!(matches!(
+            query,
+            QueryExpr::DropTimeSeries(drop) if drop.name == "tenant.metrics.*" && drop.if_exists
+        ));
+    }
+
+    #[test]
+    fn timeseries_metric_and_slo_errors_are_reported() {
+        for sql in [
+            "CREATE TIMESERIES events WITH RETENTION 1 d",
+            "CREATE METRICS telemetry TENANT (ctx.tenant)",
+            "CREATE METRIC svc.latency TYPE gauge",
+            "CREATE METRIC svc.latency TYPE gauge ROLE sli QUERY 42",
+            "ALTER METRIC svc.latency ROLE sli",
+            "CREATE SLO api.availability ON svc.latency WINDOW 1 h",
+            "CREATE HYPERTABLE events TIME_COLUMN ts CHUNK_INTERVAL 'not-duration'",
+        ] {
+            assert!(parse_query(sql).is_err(), "{sql} should not parse");
+        }
+    }
+}

@@ -522,8 +522,10 @@ fn swap_condition(condition: crate::ast::JoinCondition) -> crate::ast::JoinCondi
 mod tests {
     use super::*;
     use crate::ast::{
-        DistanceMetric, FieldRef, FusionStrategy, JoinCondition, Projection, TableQuery,
+        CompareOp, DistanceMetric, FieldRef, Filter, FusionStrategy, JoinCondition, Projection,
+        TableQuery,
     };
+    use reddb_types::Value;
 
     fn make_table_query(name: &str) -> QueryExpr {
         QueryExpr::Table(TableQuery {
@@ -635,11 +637,128 @@ mod tests {
         let (optimized, passes) = optimizer.optimize(join);
 
         // Should have applied JoinReordering
+        assert!(passes.iter().any(|pass| pass == "JoinReordering"));
         if let QueryExpr::Join(jq) = optimized {
             // Small table should now be on left (build side)
-            if let QueryExpr::Table(left) = *jq.left {
+            if let QueryExpr::Table(left) = jq.left.as_ref() {
                 assert_eq!(left.table, "small");
             }
+            assert!(matches!(
+                &jq.on.left_field,
+                FieldRef::TableColumn { table, column } if table == "small" && column == "id"
+            ));
         }
+    }
+
+    #[test]
+    fn optimize_with_hints_can_disable_join_reordering() {
+        let optimizer = QueryOptimizer::new();
+
+        let large = make_table_query("large");
+        let mut small_table = TableQuery::new("small");
+        small_table.limit = Some(1);
+        let small = QueryExpr::Table(small_table);
+
+        let join = QueryExpr::Join(JoinQuery {
+            left: Box::new(large),
+            right: Box::new(small),
+            join_type: JoinType::Inner,
+            on: JoinCondition {
+                left_field: FieldRef::TableColumn {
+                    table: "large".to_string(),
+                    column: "id".to_string(),
+                },
+                right_field: FieldRef::TableColumn {
+                    table: "small".to_string(),
+                    column: "id".to_string(),
+                },
+            },
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_items: Vec::new(),
+            return_: Vec::new(),
+        });
+        let hints = OptimizationHints {
+            disabled_passes: vec!["JoinReordering".to_string()],
+            ..OptimizationHints::default()
+        };
+
+        let optimized = optimizer.optimize_with_hints(join, &hints);
+        let QueryExpr::Join(join) = optimized else {
+            panic!("expected join query");
+        };
+        let QueryExpr::Table(left) = join.left.as_ref() else {
+            panic!("expected table on left side");
+        };
+
+        assert_eq!(left.table, "large");
+        assert!(matches!(
+            &join.on.left_field,
+            FieldRef::TableColumn { table, column } if table == "large" && column == "id"
+        ));
+    }
+
+    #[test]
+    fn optimizer_sets_index_hint_on_table_filters() {
+        let optimizer = QueryOptimizer::new();
+        let mut table = TableQuery::new("hosts");
+        table.filter = Some(Filter::Compare {
+            field: FieldRef::column("", "host_id"),
+            op: CompareOp::Eq,
+            value: Value::Integer(7),
+        });
+
+        let (optimized, passes) = optimizer.optimize(QueryExpr::Table(table));
+        let QueryExpr::Table(table) = optimized else {
+            panic!("expected table query");
+        };
+        let hint = table
+            .expand
+            .and_then(|expand| expand.index_hint)
+            .expect("expected optimizer index hint");
+
+        assert!(passes.iter().any(|pass| pass == "IndexSelection"));
+        assert_eq!(hint.method, IndexHintMethod::Hash);
+        assert_eq!(hint.column, "host_id");
+    }
+
+    #[test]
+    fn index_selection_analyzes_supported_filter_shapes() {
+        let range = IndexSelectionPass::analyze_filter(&Filter::Between {
+            field: FieldRef::node_prop("n", "score"),
+            low: Value::Integer(1),
+            high: Value::Integer(9),
+        })
+        .expect("expected range hint");
+        assert_eq!(range.method, IndexHintMethod::BTree);
+        assert_eq!(range.column, "score");
+
+        let bitmap = IndexSelectionPass::analyze_filter(&Filter::In {
+            field: FieldRef::edge_prop("e", "kind"),
+            values: vec![Value::text("http"), Value::text("ssh")],
+        })
+        .expect("expected bitmap hint");
+        assert_eq!(bitmap.method, IndexHintMethod::Bitmap);
+        assert_eq!(bitmap.column, "kind");
+
+        assert!(IndexSelectionPass::analyze_filter(&Filter::In {
+            field: FieldRef::column("", "status"),
+            values: (0..11).map(Value::Integer).collect(),
+        })
+        .is_none());
+
+        let fallback_right = IndexSelectionPass::analyze_filter(&Filter::And(
+            Box::new(Filter::IsNull(FieldRef::column("", "deleted_at"))),
+            Box::new(Filter::Compare {
+                field: FieldRef::node_id("n"),
+                op: CompareOp::Eq,
+                value: Value::Integer(1),
+            }),
+        ))
+        .expect("expected right-side AND hint");
+        assert_eq!(fallback_right.method, IndexHintMethod::Hash);
+        assert_eq!(fallback_right.column, "n.id");
     }
 }
