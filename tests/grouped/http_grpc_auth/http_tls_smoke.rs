@@ -8,6 +8,7 @@
 //!   * Authorization: Bearer survives the TLS wrap and reaches handlers.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};
