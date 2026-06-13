@@ -6,6 +6,7 @@
 //! and the audit log (`operator/queue_dlq_promoted`) reflect the
 //! promotion.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::time::Duration;
