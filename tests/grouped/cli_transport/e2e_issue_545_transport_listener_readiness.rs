@@ -20,6 +20,7 @@
 //! mirroring the discipline used by the #540 / #541 / #542 / #543 /
 //! #544 regression commits.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};
