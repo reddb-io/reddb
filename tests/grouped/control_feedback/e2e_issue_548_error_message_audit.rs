@@ -28,6 +28,7 @@
 //!   `parser/table.rs`. Must point at `SELECT *` / bare columns / queue
 //!   verbs.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::runtime::RedDBRuntime;

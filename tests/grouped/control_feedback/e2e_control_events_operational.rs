@@ -8,6 +8,7 @@ use reddb::storage::EntityData;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 fn control_event_rows(rt: &RedDBRuntime) -> Vec<HashMap<String, Value>> {

@@ -30,7 +30,7 @@ use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 
-const MATRIX: &str = include_str!("../docs/conformance/public-surface-contract-matrix.md");
+const MATRIX: &str = include_str!("../../../docs/conformance/public-surface-contract-matrix.md");
 
 // ---------- shared helpers ----------
 
