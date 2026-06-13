@@ -122,6 +122,8 @@ test("nightly DR drill workflow uses the current-shell runner and public make ta
 
   assert.match(makefile, /\ndrill-nightly:\n\t@\.\/scripts\/drill-nightly\.sh/);
   assert.match(script, /CMD="cargo test --locked --test 'drill_\*' --no-fail-fast"/);
+  assert.match(script, /mktemp -t drill-nightly\.XXXXXX\.log/);
+  assert.doesNotMatch(script, /mktemp -t reddb-drill-nightly/);
   assert.match(script, /eval "\$CMD" >"\$LOG" 2>&1/);
   assert.doesNotMatch(script, /bash -lc "\$CMD"/);
   assert.match(script, /issue #116/);

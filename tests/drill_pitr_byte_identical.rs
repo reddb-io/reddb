@@ -17,10 +17,9 @@
 
 use reddb::api::REDDB_FORMAT_VERSION;
 use reddb::storage::backend::LocalBackend;
-use reddb::storage::wal::{
-    archive_snapshot, publish_snapshot_manifest, PointInTimeRecovery, SnapshotManifest,
-};
+use reddb::storage::wal::{archive_snapshot, publish_snapshot_manifest, PointInTimeRecovery};
 use reddb::storage::RedDB;
+use reddb_file::SnapshotManifest;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

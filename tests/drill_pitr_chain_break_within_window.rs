@@ -22,9 +22,10 @@ use reddb::replication::cdc::ChangeRecord;
 use reddb::storage::backend::LocalBackend;
 use reddb::storage::wal::{
     archive_change_records, archive_snapshot, load_wal_segment_manifest, publish_snapshot_manifest,
-    publish_wal_segment_manifest, PointInTimeRecovery, SnapshotManifest,
+    publish_wal_segment_manifest, PointInTimeRecovery,
 };
 use reddb::storage::RedDB;
+use reddb_file::SnapshotManifest;
 use std::sync::Arc;
 
 #[allow(dead_code)]

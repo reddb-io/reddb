@@ -19,9 +19,10 @@ use reddb::replication::cdc::ChangeRecord;
 use reddb::storage::backend::LocalBackend;
 use reddb::storage::wal::{
     archive_change_records, archive_snapshot, publish_snapshot_manifest,
-    publish_unified_manifest_for_prefix, PointInTimeRecovery, SnapshotManifest,
+    publish_unified_manifest_for_prefix, PointInTimeRecovery,
 };
 use reddb::storage::RedDB;
+use reddb_file::SnapshotManifest;
 use std::sync::Arc;
 
 #[allow(dead_code)]
