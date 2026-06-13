@@ -5,6 +5,7 @@
 // dedicated regression suite traceable to #541 so future breakage is
 // localised. One test per acceptance bullet in the AGENT-BRIEF.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};

@@ -10,6 +10,7 @@
 // HTTP surface is `GET /collections/<name>/scan?offset=&limit=` for cursor
 // pagination, with the same `/query` SQL endpoint for the filtered form.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};
