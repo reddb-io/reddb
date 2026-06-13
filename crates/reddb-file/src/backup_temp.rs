@@ -156,4 +156,42 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn temp_json_constructors_use_distinct_prefixes_and_cleanup_on_drop() {
+        let object = BackupTempJsonFile::json_object();
+        let object_read = BackupTempJsonFile::json_object_read();
+        let archived = BackupTempJsonFile::archived_change_records(10, 20);
+        let archived_read = BackupTempJsonFile::archived_change_records_read();
+
+        assert!(object
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(BACKUP_JSON_OBJECT_TEMP_PREFIX));
+        assert!(object_read
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(BACKUP_JSON_OBJECT_READ_TEMP_PREFIX));
+        assert!(archived
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("-10-20-"));
+        assert!(archived_read
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX));
+
+        object.write_bytes(b"drop").unwrap();
+        let path = object.path().to_path_buf();
+        drop(object);
+        assert!(!path.exists());
+    }
 }

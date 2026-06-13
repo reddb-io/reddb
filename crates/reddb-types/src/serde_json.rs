@@ -206,6 +206,9 @@ fn escape_string(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json;
+    use std::borrow::Cow;
+    use std::collections::HashMap;
 
     fn encode(s: &str) -> String {
         Value::String(s.to_string()).to_string_compact()
@@ -280,6 +283,150 @@ mod tests {
         // Round trip through the in-house parser must reproduce the original bytes.
         let parsed: String = from_str(&encoded).expect("audit payload must parse");
         assert_eq!(parsed, payload);
+    }
+
+    #[test]
+    fn value_accessors_indexing_and_pretty_printing_cover_all_shapes() {
+        let mut object = Map::new();
+        object.insert("null".to_string(), Value::Null);
+        object.insert("bool".to_string(), Value::Bool(true));
+        object.insert("number".to_string(), Value::Number(42.5));
+        object.insert("string".to_string(), Value::String("reddb".to_string()));
+        object.insert(
+            "array".to_string(),
+            Value::Array(vec![Value::Number(1.0), Value::String("two".to_string())]),
+        );
+        let value = Value::Object(object);
+
+        assert_eq!(value.get("string").and_then(Value::as_str), Some("reddb"));
+        assert_eq!(value.get("number").and_then(Value::as_f64), Some(42.5));
+        assert_eq!(value.get("number").and_then(Value::as_i64), Some(42));
+        assert_eq!(value.get("number").and_then(Value::as_u64), Some(42));
+        assert_eq!(value.get("bool").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            value.get("array").and_then(Value::as_array).map(<[_]>::len),
+            Some(2)
+        );
+        assert_eq!(value.as_object().map(Map::len), Some(5));
+        assert!(Value::Number(-1.0).as_u64().is_none());
+        assert!(Value::Null.as_str().is_none());
+
+        assert_eq!(value["missing"], Value::Null);
+        assert_eq!(value["string"], Value::String("reddb".to_string()));
+        let pretty = value.to_string_pretty();
+        assert!(pretty.contains('\n'));
+        assert!(pretty.contains("\"array\": ["));
+        assert_eq!(Value::Array(Vec::new()).to_string_pretty(), "[]");
+        assert_eq!(Value::Object(Map::new()).to_string_pretty(), "{}");
+
+        let mut created_from_index = Value::Null;
+        created_from_index["created"] = Value::Bool(true);
+        assert_eq!(created_from_index["created"], Value::Bool(true));
+    }
+
+    #[test]
+    fn json_encode_decode_traits_cover_scalars_collections_and_errors() {
+        assert_eq!(to_value(&true), Value::Bool(true));
+        assert_eq!(to_value(&-7i64), Value::Number(-7.0));
+        assert_eq!(to_value(&-3i32), Value::Number(-3.0));
+        assert_eq!(to_value(&7u8), Value::Number(7.0));
+        assert_eq!(to_value(&8u16), Value::Number(8.0));
+        assert_eq!(to_value(&9u32), Value::Number(9.0));
+        assert_eq!(to_value(&10u64), Value::Number(10.0));
+        assert_eq!(to_value(&11usize), Value::Number(11.0));
+        assert_eq!(to_value(&1.5f64), Value::Number(1.5));
+        assert_eq!(to_value(&2.5f32), Value::Number(2.5));
+        assert_eq!(to_value(&"borrowed"), Value::String("borrowed".to_string()));
+        assert_eq!(
+            to_value(&"owned".to_string()),
+            Value::String("owned".to_string())
+        );
+        let cow: Cow<'_, str> = Cow::Borrowed("cow");
+        assert_eq!(to_value(&cow), Value::String("cow".to_string()));
+        assert_eq!(
+            to_value(&vec![1u8, 2, 3]),
+            Value::Array(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0)
+            ])
+        );
+        assert_eq!(
+            to_value(&[4u8, 5, 6]),
+            Value::Array(vec![
+                Value::Number(4.0),
+                Value::Number(5.0),
+                Value::Number(6.0)
+            ])
+        );
+        assert_eq!(to_value(&Some(12u16)), Value::Number(12.0));
+        assert_eq!(to_value(&Option::<u16>::None), Value::Null);
+
+        let mut hash = HashMap::new();
+        hash.insert("a".to_string(), 1u8);
+        let Value::Object(map) = to_value(&hash) else {
+            panic!("hash map should encode to object");
+        };
+        assert_eq!(map.get("a"), Some(&Value::Number(1.0)));
+
+        assert_eq!(
+            from_value::<String>(Value::String("x".to_string())).unwrap(),
+            "x"
+        );
+        assert!(from_value::<String>(Value::Bool(true)).is_err());
+        assert_eq!(from_value::<bool>(Value::Bool(false)).unwrap(), false);
+        assert!(from_value::<bool>(Value::String("no".to_string())).is_err());
+        assert_eq!(from_value::<u8>(Value::Number(255.0)).unwrap(), 255);
+        assert_eq!(from_value::<u16>(Value::Number(256.0)).unwrap(), 256);
+        assert_eq!(from_value::<u32>(Value::Number(257.0)).unwrap(), 257);
+        assert_eq!(from_value::<u64>(Value::Number(258.0)).unwrap(), 258);
+        assert_eq!(from_value::<usize>(Value::Number(259.0)).unwrap(), 259);
+        assert_eq!(from_value::<i64>(Value::Number(-260.0)).unwrap(), -260);
+        assert_eq!(from_value::<i32>(Value::Number(-261.0)).unwrap(), -261);
+        assert_eq!(from_value::<f32>(Value::Number(1.25)).unwrap(), 1.25);
+        assert!(from_value::<u8>(Value::String("no".to_string())).is_err());
+        assert!(from_value::<Vec<u8>>(Value::Bool(false)).is_err());
+        assert_eq!(
+            from_value::<Vec<u8>>(Value::Array(vec![Value::Number(1.0), Value::Number(2.0)]))
+                .unwrap(),
+            vec![1, 2]
+        );
+
+        let mut object = Map::new();
+        object.insert("x".to_string(), Value::Number(7.0));
+        let decoded: HashMap<String, u8> = from_value(Value::Object(object)).unwrap();
+        assert_eq!(decoded.get("x"), Some(&7));
+        assert!(from_value::<HashMap<String, u8>>(Value::Null).is_err());
+
+        assert_eq!(from_value::<Option<u8>>(Value::Null).unwrap(), None);
+        assert_eq!(
+            from_value::<Option<u8>>(Value::Number(9.0)).unwrap(),
+            Some(9)
+        );
+        assert_eq!(
+            from_value::<[u8; 3]>(Value::Array(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0),
+            ]))
+            .unwrap(),
+            [1, 2, 3]
+        );
+        assert!(from_value::<[u8; 3]>(Value::Array(vec![Value::Number(1.0)])).is_err());
+        assert!(from_value::<[u8; 3]>(Value::Null).is_err());
+    }
+
+    #[test]
+    fn string_and_byte_entry_points_round_trip_and_reject_bad_inputs() {
+        let bytes = to_vec(&vec![1u8, 2, 3]).unwrap();
+        assert_eq!(from_slice::<Vec<u8>>(&bytes).unwrap(), vec![1, 2, 3]);
+        assert!(from_slice::<Value>(&[0xff]).is_err());
+
+        let compact = to_string(&json!({ "b": true, "n": 2 })).unwrap();
+        assert_eq!(from_str::<Value>(&compact).unwrap()["b"], Value::Bool(true));
+
+        let pretty = to_string_pretty(&json!([1, 2])).unwrap();
+        assert!(pretty.contains('\n'));
     }
 }
 

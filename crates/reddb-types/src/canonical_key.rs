@@ -414,6 +414,7 @@ fn ipaddr_to_bytes(value: IpAddr) -> [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn canonical_keys_are_ordered_inside_their_family() {
@@ -432,5 +433,235 @@ mod tests {
         let text = value_to_canonical_key(&Value::text("alice".to_string())).unwrap();
         let email = value_to_canonical_key(&Value::Email("alice@example.com".to_string())).unwrap();
         assert_ne!(text.family(), email.family());
+    }
+
+    #[test]
+    fn value_to_canonical_key_covers_supported_families() {
+        let samples = [
+            (Value::Null, CanonicalKeyFamily::Null),
+            (Value::Boolean(true), CanonicalKeyFamily::Boolean),
+            (Value::Integer(-7), CanonicalKeyFamily::Integer),
+            (Value::BigInt(-9), CanonicalKeyFamily::BigInt),
+            (
+                Value::UnsignedInteger(7),
+                CanonicalKeyFamily::UnsignedInteger,
+            ),
+            (Value::Float(1.5), CanonicalKeyFamily::Float),
+            (Value::text("text"), CanonicalKeyFamily::Text),
+            (Value::Blob(vec![1, 2]), CanonicalKeyFamily::Blob),
+            (Value::Timestamp(10), CanonicalKeyFamily::Timestamp),
+            (Value::Duration(11), CanonicalKeyFamily::Duration),
+            (
+                Value::IpAddr(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+                CanonicalKeyFamily::IpAddr,
+            ),
+            (
+                Value::IpAddr(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+                CanonicalKeyFamily::IpAddr,
+            ),
+            (
+                Value::MacAddr([1, 2, 3, 4, 5, 6]),
+                CanonicalKeyFamily::MacAddr,
+            ),
+            (
+                Value::Json(br#"{"a":1}"#.to_vec()),
+                CanonicalKeyFamily::Json,
+            ),
+            (Value::Uuid([7; 16]), CanonicalKeyFamily::Uuid),
+            (
+                Value::NodeRef("n1".to_string()),
+                CanonicalKeyFamily::NodeRef,
+            ),
+            (
+                Value::EdgeRef("e1".to_string()),
+                CanonicalKeyFamily::EdgeRef,
+            ),
+            (
+                Value::VectorRef("vecs".to_string(), 9),
+                CanonicalKeyFamily::VectorRef,
+            ),
+            (
+                Value::RowRef("rows".to_string(), 10),
+                CanonicalKeyFamily::RowRef,
+            ),
+            (Value::Color([0xAA, 0xBB, 0xCC]), CanonicalKeyFamily::Color),
+            (
+                Value::Email("a@example.com".to_string()),
+                CanonicalKeyFamily::Email,
+            ),
+            (
+                Value::Url("https://example.com".to_string()),
+                CanonicalKeyFamily::Url,
+            ),
+            (Value::Phone(5511999), CanonicalKeyFamily::Phone),
+            (Value::Semver(1_002_003), CanonicalKeyFamily::Semver),
+            (Value::Cidr(10 << 24, 8), CanonicalKeyFamily::Cidr),
+            (Value::Date(20_000), CanonicalKeyFamily::Date),
+            (Value::Time(43_200_000), CanonicalKeyFamily::Time),
+            (Value::Decimal(123_456), CanonicalKeyFamily::Decimal),
+            (Value::EnumValue(3), CanonicalKeyFamily::EnumValue),
+            (Value::TimestampMs(123_456), CanonicalKeyFamily::TimestampMs),
+            (Value::Ipv4(0x7f000001), CanonicalKeyFamily::Ipv4),
+            (Value::Ipv6([1; 16]), CanonicalKeyFamily::Ipv6),
+            (
+                Value::Subnet(10 << 24, 0xff000000),
+                CanonicalKeyFamily::Subnet,
+            ),
+            (Value::Port(5432), CanonicalKeyFamily::Port),
+            (Value::Latitude(-23_550_520), CanonicalKeyFamily::Latitude),
+            (Value::Longitude(-46_633_308), CanonicalKeyFamily::Longitude),
+            (
+                Value::GeoPoint(-23_550_520, -46_633_308),
+                CanonicalKeyFamily::GeoPoint,
+            ),
+            (Value::Country2(*b"BR"), CanonicalKeyFamily::Country2),
+            (Value::Country3(*b"BRA"), CanonicalKeyFamily::Country3),
+            (Value::Lang2(*b"pt"), CanonicalKeyFamily::Lang2),
+            (Value::Lang5(*b"pt-BR"), CanonicalKeyFamily::Lang5),
+            (Value::Currency(*b"USD"), CanonicalKeyFamily::Currency),
+            (
+                Value::AssetCode("BTC".to_string()),
+                CanonicalKeyFamily::Text,
+            ),
+            (
+                Value::ColorAlpha([0xAA, 0xBB, 0xCC, 0xDD]),
+                CanonicalKeyFamily::ColorAlpha,
+            ),
+            (
+                Value::KeyRef("kv".to_string(), "key".to_string()),
+                CanonicalKeyFamily::KeyRef,
+            ),
+            (
+                Value::DocRef("docs".to_string(), 42),
+                CanonicalKeyFamily::DocRef,
+            ),
+            (
+                Value::TableRef("users".to_string()),
+                CanonicalKeyFamily::TableRef,
+            ),
+            (Value::PageRef(12), CanonicalKeyFamily::PageRef),
+            (
+                Value::Password("$argon2id$v=19$hash".to_string()),
+                CanonicalKeyFamily::Password,
+            ),
+        ];
+
+        for (value, family) in samples {
+            let key = value_to_canonical_key(&value).expect("indexable value");
+            assert_eq!(key.family(), family, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_keys_round_trip_to_values_by_shape() {
+        let keys = vec![
+            CanonicalKey::Null,
+            CanonicalKey::Boolean(false),
+            CanonicalKey::Signed(CanonicalKeyFamily::Integer, -1),
+            CanonicalKey::Signed(CanonicalKeyFamily::BigInt, -2),
+            CanonicalKey::Signed(CanonicalKeyFamily::Timestamp, 3),
+            CanonicalKey::Signed(CanonicalKeyFamily::Duration, 4),
+            CanonicalKey::Signed(CanonicalKeyFamily::Date, 5),
+            CanonicalKey::Signed(CanonicalKeyFamily::Decimal, 6),
+            CanonicalKey::Signed(CanonicalKeyFamily::TimestampMs, 7),
+            CanonicalKey::Signed(CanonicalKeyFamily::Latitude, 8),
+            CanonicalKey::Signed(CanonicalKeyFamily::Longitude, 9),
+            CanonicalKey::Unsigned(CanonicalKeyFamily::UnsignedInteger, 10),
+            CanonicalKey::Unsigned(CanonicalKeyFamily::Phone, 11),
+            CanonicalKey::Unsigned(CanonicalKeyFamily::Semver, 12),
+            CanonicalKey::Unsigned(CanonicalKeyFamily::Time, 13),
+            CanonicalKey::Unsigned(CanonicalKeyFamily::EnumValue, 14),
+            CanonicalKey::Unsigned(CanonicalKeyFamily::Port, 15),
+            CanonicalKey::Unsigned(CanonicalKeyFamily::PageRef, 16),
+            CanonicalKey::Float(1.25f64.to_bits()),
+            CanonicalKey::Text(CanonicalKeyFamily::Text, Arc::from("text")),
+            CanonicalKey::Text(CanonicalKeyFamily::NodeRef, Arc::from("node")),
+            CanonicalKey::Text(CanonicalKeyFamily::EdgeRef, Arc::from("edge")),
+            CanonicalKey::Text(CanonicalKeyFamily::Email, Arc::from("a@example.com")),
+            CanonicalKey::Text(CanonicalKeyFamily::Url, Arc::from("https://e.test")),
+            CanonicalKey::Text(CanonicalKeyFamily::TableRef, Arc::from("users")),
+            CanonicalKey::Text(CanonicalKeyFamily::Password, Arc::from("hash")),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Blob, vec![1, 2]),
+            CanonicalKey::Bytes(CanonicalKeyFamily::MacAddr, vec![1, 2, 3, 4, 5, 6]),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Json, br#"{"ok":true}"#.to_vec()),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Uuid, vec![7; 16]),
+            CanonicalKey::Bytes(CanonicalKeyFamily::IpAddr, vec![0; 16]),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Ipv4, vec![127, 0, 0, 1]),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Ipv6, vec![8; 16]),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Color, vec![0xAA, 0xBB, 0xCC]),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Country2, b"BR".to_vec()),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Country3, b"BRA".to_vec()),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Lang2, b"pt".to_vec()),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Lang5, b"pt-BR".to_vec()),
+            CanonicalKey::Bytes(CanonicalKeyFamily::Currency, b"USD".to_vec()),
+            CanonicalKey::Bytes(CanonicalKeyFamily::ColorAlpha, vec![1, 2, 3, 4]),
+            CanonicalKey::PairTextU64(CanonicalKeyFamily::VectorRef, "v".to_string(), 1),
+            CanonicalKey::PairTextU64(CanonicalKeyFamily::RowRef, "r".to_string(), 2),
+            CanonicalKey::PairTextU64(CanonicalKeyFamily::DocRef, "d".to_string(), 3),
+            CanonicalKey::PairTextText(
+                CanonicalKeyFamily::KeyRef,
+                "kv".to_string(),
+                "key".to_string(),
+            ),
+            CanonicalKey::PairU32U8(CanonicalKeyFamily::Cidr, 10 << 24, 8),
+            CanonicalKey::PairU32U32(CanonicalKeyFamily::Subnet, 10 << 24, 0xff000000),
+            CanonicalKey::PairI32I32(CanonicalKeyFamily::GeoPoint, -1, 2),
+        ];
+
+        for key in keys {
+            let value = key.clone().into_value();
+            let recovered = value_to_canonical_key(&value).expect("round-tripped key is indexable");
+            assert_eq!(recovered.family(), key.family(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn non_indexable_values_do_not_produce_canonical_keys() {
+        let values = [
+            Value::Float(f64::INFINITY),
+            Value::Vector(vec![1.0, 2.0]),
+            Value::Array(vec![Value::Integer(1)]),
+            Value::Money {
+                asset_code: "USD".to_string(),
+                minor_units: 100,
+                scale: 2,
+            },
+            Value::Secret(vec![1, 2, 3]),
+        ];
+
+        for value in values {
+            assert!(value_to_canonical_key(&value).is_none(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn pair_key_ordering_uses_secondary_components() {
+        assert!(
+            CanonicalKey::PairTextU64(CanonicalKeyFamily::RowRef, "a".to_string(), 1)
+                < CanonicalKey::PairTextU64(CanonicalKeyFamily::RowRef, "a".to_string(), 2)
+        );
+        assert!(
+            CanonicalKey::PairTextText(
+                CanonicalKeyFamily::KeyRef,
+                "a".to_string(),
+                "a".to_string()
+            ) < CanonicalKey::PairTextText(
+                CanonicalKeyFamily::KeyRef,
+                "a".to_string(),
+                "b".to_string()
+            )
+        );
+        assert!(
+            CanonicalKey::PairU32U8(CanonicalKeyFamily::Cidr, 1, 24)
+                < CanonicalKey::PairU32U8(CanonicalKeyFamily::Cidr, 2, 8)
+        );
+        assert!(
+            CanonicalKey::PairU32U32(CanonicalKeyFamily::Subnet, 1, 1)
+                < CanonicalKey::PairU32U32(CanonicalKeyFamily::Subnet, 1, 2)
+        );
+        assert!(
+            CanonicalKey::PairI32I32(CanonicalKeyFamily::GeoPoint, -1, 0)
+                < CanonicalKey::PairI32I32(CanonicalKeyFamily::GeoPoint, 0, -1)
+        );
     }
 }
