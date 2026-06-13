@@ -8,6 +8,7 @@
 //! * oversize batches reject with 413 before any storage write.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};

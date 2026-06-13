@@ -3,6 +3,7 @@
 //! exit status, and JSON envelopes stay wired through main().
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::net::TcpListener;
