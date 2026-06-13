@@ -12,6 +12,7 @@
 //!      (`snapshot_sha256: None`) still restore — backward compat.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::backend::LocalBackend;
