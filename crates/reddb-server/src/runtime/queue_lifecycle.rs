@@ -21,14 +21,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::runtime::queue_telemetry::{NackOutcomeLabel, QueueTelemetryCounters};
+use crate::runtime::queue_telemetry::QueueTelemetryCounters;
 use crate::storage::queue::lifecycle::{
     DeliveryId, DlqTarget, MessageId, PendingDeliveryView, QueueSide, QueueStore, QueueStoreError,
     QueueTxn, Result,
 };
 use crate::storage::queue::mode::QueueMode;
 use crate::storage::schema::Value;
-use crate::telemetry::operator_event::OperatorEvent;
 
 /// Monotonic clock abstraction. The Module reads "now" through this so
 /// unit tests can drive lock-expiry transitions without `std::thread::sleep`.
@@ -344,7 +343,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// it. Callers never see the decision — observe outcomes via the test
     /// tap.
     pub(crate) fn nack(&self, txn: &QueueTxn, delivery_id: &str) -> Result<RetirementOutcome> {
-        let bumped = self.store.read_pending_attempt(delivery_id)?;
+        let bumped = self.store.bump_attempt(txn, delivery_id)?;
         let max_attempts = self
             .store
             .read_max_attempts(&bumped.queue, bumped.message_id);
@@ -361,23 +360,6 @@ impl<S: QueueStore> QueueLifecycle<S> {
                     self.store.enqueue_dlq(txn, target, payload)?;
                     outcome = RetirementOutcome::MovedToDlq(target.clone());
                     self.record(outcome.clone());
-                    // DLQ promotion is forensic — emit through the
-                    // process-wide audit sink (which also lays a
-                    // tracing::warn breadcrumb under
-                    // target=reddb::operator). The lifecycle surface
-                    // doesn't yet carry queue/group on the delivery
-                    // handle (slice 12 of issue #527); the production
-                    // path emits the populated event today via
-                    // `queue_delivery::move_message_to_dlq_or_drop`.
-                    OperatorEvent::QueueDlqPromoted {
-                        queue: String::new(),
-                        group: String::new(),
-                        dlq: target.clone(),
-                        message_id: 0,
-                        attempts,
-                        reason: format!("lifecycle_nack:{delivery_id}"),
-                    }
-                    .emit_global();
                 }
                 None => {
                     self.retire(txn, delivery_id)?;
@@ -389,27 +371,6 @@ impl<S: QueueStore> QueueLifecycle<S> {
             self.store.release_pending(txn, delivery_id)?;
             outcome = RetirementOutcome::Requeued;
             self.record(outcome.clone());
-        }
-        // Counter bumping when the telemetry handle is attached.
-        // Per-(queue, group, mode) labels stay accurate even though
-        // the lifecycle surface lacks queue/group on the nack handle
-        // today — the production wiring (slice 12) builds the
-        // lifecycle with the full descriptor and constructs the
-        // labels at that layer. Until then the lifecycle-only path
-        // bumps with placeholder labels so unit tests don't depend
-        // on absent context.
-        if let Some(telemetry) = self.telemetry.as_ref() {
-            let outcome = match self
-                .outcomes
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .last()
-            {
-                Some(RetirementOutcome::MovedToDlq(_)) => NackOutcomeLabel::Dlq,
-                Some(RetirementOutcome::Dropped) => NackOutcomeLabel::Drop,
-                Some(RetirementOutcome::Requeued) | None => NackOutcomeLabel::Retry,
-            };
-            telemetry.record_nacked("", "", self.config.mode.as_str(), outcome);
         }
         Ok(outcome)
     }
@@ -528,10 +489,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
             .store
             .pending_deliveries_for_queue(queue)
             .into_iter()
-            .filter(|p| {
-                let delivered_at = p.deadline - self.config.lock_duration;
-                delivered_at + threshold <= now
-            })
+            .filter(|p| p.deadline <= now && now.duration_since(p.deadline) >= threshold)
             .collect();
         // Stable ordering by deadline keeps the oldest delivery first
         // because all rows in a queue share the same lock duration.

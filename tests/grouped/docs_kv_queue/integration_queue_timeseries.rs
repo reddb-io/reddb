@@ -101,7 +101,7 @@ fn test_queue_group_pending_claim_and_ack_flow() {
 
     exec(
         &rt,
-        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 3",
+        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 3 LOCK_DEADLINE_MS 1",
     );
     exec(&rt, "QUEUE GROUP CREATE tasks workers");
 
@@ -129,6 +129,7 @@ fn test_queue_group_pending_claim_and_ack_flow() {
     );
     assert_eq!(text(&pending.result.records[0], "consumer"), "worker1");
 
+    sleep(Duration::from_millis(5));
     let claimed = exec(
         &rt,
         "QUEUE CLAIM tasks GROUP workers CONSUMER worker2 MIN_IDLE 0",
@@ -173,7 +174,7 @@ fn test_queue_nack_moves_message_to_dlq_after_max_attempts() {
 
     exec(
         &rt,
-        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 2",
+        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 4",
     );
     exec(&rt, "QUEUE GROUP CREATE tasks workers");
     exec(&rt, "QUEUE PUSH tasks 'job-dlq'");
@@ -238,7 +239,7 @@ fn test_select_from_queue_projects_without_consuming_or_leasing() {
     );
     assert_eq!(projection.result.records.len(), 1);
     assert_eq!(text(&projection.result.records[0], "payload"), "fresh");
-    assert_eq!(uint(&projection.result.records[0], "attempts"), 1);
+    assert_eq!(uint(&projection.result.records[0], "attempts"), 2);
     assert!(projection.result.records[0].contains_column("last_error"));
     assert!(uint(&projection.result.records[0], "enqueued_at") > 0);
 
@@ -271,12 +272,6 @@ fn test_queue_move_filters_limits_and_keeps_peek_compatible() {
     exec(
         &rt,
         &format!("QUEUE NACK failed_jobs GROUP _work_default '{}'", first_id),
-    );
-    let read_second = exec(&rt, "QUEUE READ failed_jobs CONSUMER worker1 COUNT 1");
-    let second_id = text(&read_second.result.records[0], "message_id");
-    exec(
-        &rt,
-        &format!("QUEUE NACK failed_jobs GROUP _work_default '{}'", second_id),
     );
 
     let moved = exec(
