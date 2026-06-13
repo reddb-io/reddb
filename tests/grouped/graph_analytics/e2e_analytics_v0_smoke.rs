@@ -29,6 +29,7 @@
 //! (`READ METRIC`) is explicitly unsupported in v0. Querying the catalog must
 //! never require metric-output execution.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;

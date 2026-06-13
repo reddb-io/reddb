@@ -25,6 +25,7 @@
 //! `SELECT … FROM red.analytics.metrics` working — this suite only
 //! pins what is **out** of scope.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::RedDBRuntime;

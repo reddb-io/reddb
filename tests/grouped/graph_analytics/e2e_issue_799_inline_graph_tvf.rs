@@ -7,6 +7,7 @@
 //! `components`, `louvain`, and `degree_centrality` — plus the wrong-shape
 //! error path and the source-collection-scoped result cache.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;

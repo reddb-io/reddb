@@ -11,6 +11,7 @@
 //! 3. `GRAPH PROPERTIES` does not overwrite a user-set `node_type` with
 //!    the runtime's internal node label.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};

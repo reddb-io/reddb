@@ -22,6 +22,7 @@
 //! behind a file named after the issue so future regressions surface
 //! at the right test boundary.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};

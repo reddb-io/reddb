@@ -12,6 +12,7 @@
 //! Refs #757 — child of PRD #735.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

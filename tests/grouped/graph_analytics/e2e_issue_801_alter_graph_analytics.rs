@@ -15,6 +15,7 @@
 //! not scoped — the algorithms run over the whole graph store, so each test
 //! uses a single graph collection.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::catalog::AnalyticsOutput;
