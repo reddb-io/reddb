@@ -666,6 +666,24 @@ fn test_parse_select_without_from_defaults_to_any() {
 }
 
 #[test]
+fn test_parse_select_without_from_with_where_defaults_to_any() {
+    let query = parse("SELECT * WHERE passport = 'ABC123123'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "any");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                ..
+            }) if column == "passport"
+        ));
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
 fn test_parse_select_without_from_with_trailing_identifier_errors() {
     let err = parse("SELECT * docs").unwrap_err();
     assert!(matches!(err.to_string(), s if s.contains("Unexpected token after query")));
