@@ -50,3 +50,19 @@ impl From<bool> for Value {
         Value::Boolean(b)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primitive_conversions_construct_expected_value_variants() {
+        assert_eq!(Value::from("red"), Value::text("red"));
+        assert_eq!(Value::from("db".to_string()), Value::text("db"));
+        assert_eq!(Value::from(7_i32), Value::Integer(7));
+        assert_eq!(Value::from(9_i64), Value::Integer(9));
+        assert_eq!(Value::from(1.5_f32), Value::Float(1.5));
+        assert_eq!(Value::from(2.25_f64), Value::Float(2.25));
+        assert_eq!(Value::from(true), Value::Boolean(true));
+    }
+}
