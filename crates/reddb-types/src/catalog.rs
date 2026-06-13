@@ -140,3 +140,65 @@ pub struct AnalyticsViewDescriptor {
     /// `tolerance = <f64>` — convergence tolerance for iterative centralities.
     pub tolerance: Option<f64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_operations_round_trip_canonical_names() {
+        for (op, name) in [
+            (SubscriptionOperation::Insert, "INSERT"),
+            (SubscriptionOperation::Update, "UPDATE"),
+            (SubscriptionOperation::Delete, "DELETE"),
+        ] {
+            assert_eq!(op.as_str(), name);
+            assert_eq!(
+                SubscriptionOperation::from_str(&name.to_ascii_lowercase()),
+                Some(op)
+            );
+        }
+        assert_eq!(SubscriptionOperation::from_str("UPSERT"), None);
+    }
+
+    #[test]
+    fn analytics_outputs_round_trip_lowercase_names() {
+        for (output, name) in [
+            (AnalyticsOutput::Communities, "communities"),
+            (AnalyticsOutput::Components, "components"),
+            (AnalyticsOutput::Centrality, "centrality"),
+        ] {
+            assert_eq!(output.as_str(), name);
+            assert_eq!(
+                AnalyticsOutput::from_str(&name.to_ascii_uppercase()),
+                Some(output)
+            );
+        }
+        assert_eq!(AnalyticsOutput::from_str("pagerank"), None);
+    }
+
+    #[test]
+    fn descriptors_are_plain_data_carriers() {
+        let subscription = SubscriptionDescriptor {
+            name: "audit".to_string(),
+            source: "orders".to_string(),
+            target_queue: "events".to_string(),
+            ops_filter: vec![SubscriptionOperation::Insert, SubscriptionOperation::Delete],
+            where_filter: Some("amount > 0".to_string()),
+            redact_fields: vec!["secret".to_string()],
+            enabled: true,
+            all_tenants: false,
+        };
+        assert_eq!(subscription.ops_filter[1].as_str(), "DELETE");
+
+        let view = AnalyticsViewDescriptor {
+            output: AnalyticsOutput::Centrality,
+            algorithm: Some("pagerank".to_string()),
+            resolution: Some(1.0),
+            max_iterations: Some(20),
+            tolerance: Some(0.001),
+        };
+        assert_eq!(view.output.as_str(), "centrality");
+        assert_eq!(view.algorithm.as_deref(), Some("pagerank"));
+    }
+}

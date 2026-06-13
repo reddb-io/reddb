@@ -27,3 +27,21 @@ impl QueueMode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_modes_parse_aliases_and_render_canonical_names() {
+        assert_eq!(QueueMode::default(), QueueMode::Work);
+        assert_eq!(QueueMode::Fanout.as_str(), "fanout");
+        assert_eq!(QueueMode::Work.as_str(), "work");
+
+        assert_eq!(QueueMode::parse("fanout"), Some(QueueMode::Fanout));
+        for alias in ["work", "STANDARD", "fifo"] {
+            assert_eq!(QueueMode::parse(alias), Some(QueueMode::Work), "{alias}");
+        }
+        assert_eq!(QueueMode::parse("broadcast"), None);
+    }
+}
