@@ -5,6 +5,7 @@
 //! new observability columns on `red.retention`.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::ExecuteQueryInput;
