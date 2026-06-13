@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-const MATRIX: &str = include_str!("../docs/security/iam_policy_coverage_matrix.md");
+const MATRIX: &str = include_str!("../../../docs/security/iam_policy_coverage_matrix.md");
 
 #[derive(Debug)]
 struct MatrixRow<'a> {

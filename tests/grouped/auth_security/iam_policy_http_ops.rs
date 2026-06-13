@@ -19,6 +19,7 @@
 //!   no-op and dashboards keep their current behavior.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::io::{Read, Write};
