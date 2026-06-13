@@ -3,8 +3,8 @@
 //! This guards against public docs accidentally broadening the ADR 0014
 //! table-row guarantee to every RedDB model.
 
-const TRANSACTIONS_DOC: &str = include_str!("../docs/query/transactions.md");
-const LIMITATIONS_DOC: &str = include_str!("../docs/reference/limitations.md");
+const TRANSACTIONS_DOC: &str = include_str!("../../../docs/query/transactions.md");
+const LIMITATIONS_DOC: &str = include_str!("../../../docs/reference/limitations.md");
 
 fn assert_contains(haystack: &str, needle: &str) {
     assert!(
