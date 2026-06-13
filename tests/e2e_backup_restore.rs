@@ -15,9 +15,8 @@
 mod support;
 
 use reddb::storage::backend::LocalBackend;
-use reddb::storage::wal::{
-    archive_snapshot, publish_snapshot_manifest, PointInTimeRecovery, SnapshotManifest,
-};
+use reddb::storage::wal::{archive_snapshot, publish_snapshot_manifest, PointInTimeRecovery};
+use reddb_file::SnapshotManifest;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;

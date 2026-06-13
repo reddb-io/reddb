@@ -20,7 +20,9 @@ fi
 
 CMD="cargo test --locked --test 'drill_*' --no-fail-fast"
 START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-LOG="$(mktemp -t reddb-drill-nightly.XXXXXX.log)"
+# Keep the runner log out of the `reddb-*` temp namespace: the drills
+# intentionally clean that namespace while checking for leaked DB files.
+LOG="$(mktemp -t drill-nightly.XXXXXX.log)"
 
 # Run the drill in the current shell so that PATH (sccache, mold, rustup
 # shims) and RUSTC_WRAPPER stay consistent with the runner environment.

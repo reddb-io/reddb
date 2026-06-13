@@ -6,11 +6,9 @@
 //! segment 1's, so the chain check fires.
 
 use reddb::storage::backend::LocalBackend;
-use reddb::storage::wal::{
-    archive_change_records, publish_snapshot_manifest, wal_segment_manifest_key,
-    PointInTimeRecovery, SnapshotManifest,
-};
+use reddb::storage::wal::{archive_change_records, publish_snapshot_manifest, PointInTimeRecovery};
 use reddb::storage::RedDB;
+use reddb_file::{wal_segment_manifest_key, SnapshotManifest};
 use std::sync::Arc;
 
 #[allow(dead_code)]
