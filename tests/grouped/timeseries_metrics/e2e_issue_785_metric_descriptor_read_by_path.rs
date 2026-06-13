@@ -17,6 +17,7 @@
 //! All reads go through `SELECT FROM red.analytics.metrics` — i.e. normal
 //! query/catalog semantics, not a separate `SHOW`-style command.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;

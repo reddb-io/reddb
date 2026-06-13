@@ -10,6 +10,7 @@
 //! the checkpoint/flush durability boundary — not a parallel durability
 //! mechanism.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use support::{checkpoint_and_reopen, PersistentDbPath};
