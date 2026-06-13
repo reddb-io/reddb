@@ -33,6 +33,9 @@ mod e2e_issue_555_documents_sql_aggregates;
 #[path = "grouped/docs_kv_queue/e2e_kv_namespaced_keys.rs"]
 mod e2e_kv_namespaced_keys;
 
+#[path = "grouped/docs_kv_queue/e2e_queue_lifecycle_telemetry.rs"]
+mod e2e_queue_lifecycle_telemetry;
+
 #[path = "grouped/docs_kv_queue/e2e_red_queue_pending.rs"]
 mod e2e_red_queue_pending;
 
