@@ -3,6 +3,7 @@
 //! application use case surface instead of private frame modules.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::ExecuteQueryInput;
