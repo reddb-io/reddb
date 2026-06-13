@@ -1,4 +1,4 @@
-#[path = "support/mock_ai_provider.rs"]
+#[path = "../../support/mock_ai_provider.rs"]
 mod mock_ai_provider;
 
 use mock_ai_provider::{MockAiErrorKind, MockAiProvider, MockAiProviderConfig};
