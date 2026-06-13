@@ -73,9 +73,9 @@ pub enum QueryExpr {
     CreateSlo(CreateSloQuery),
     /// DROP TIMESERIES name
     DropTimeSeries(DropTimeSeriesQuery),
-    /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
+    /// CREATE QUEUE name [WORK|STANDARD|FIFO|FANOUT] [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
     CreateQueue(CreateQueueQuery),
-    /// ALTER QUEUE name SET MODE [FANOUT|WORK]
+    /// ALTER QUEUE name SET MODE [FANOUT|WORK|STANDARD|FIFO]
     AlterQueue(AlterQueueQuery),
     /// DROP QUEUE name
     DropQueue(DropQueueQuery),
@@ -95,8 +95,11 @@ pub enum QueryExpr {
     TreeCommand(TreeCommand),
     /// SET CONFIG key = value
     SetConfig { key: String, value: Value },
-    /// SHOW CONFIG [prefix]
-    ShowConfig { prefix: Option<String> },
+    /// SHOW CONFIG [prefix] [AS JSON|FORMAT JSON]
+    ShowConfig {
+        prefix: Option<String>,
+        as_json: bool,
+    },
     /// SET SECRET key = value
     SetSecret { key: String, value: Value },
     /// DELETE SECRET key
@@ -220,6 +223,8 @@ pub enum QueryExpr {
     /// `ALTER USER name [VALID UNTIL 'ts'] [CONNECTION LIMIT n]
     ///   [ENABLE | DISABLE] [SET search_path = ...]`
     AlterUser(AlterUserStmt),
+    /// `CREATE USER [tenant.]name [WITH] PASSWORD 'plaintext' [ROLE read|write|admin]`
+    CreateUser(CreateUserStmt),
     // ----- IAM policy DDL (Agent #28 / IAM kernel integration) -----
     /// `CREATE POLICY '<id>' AS '<json>'` — installs an IAM policy
     /// document in the AuthStore. Distinct from the RLS-flavoured
@@ -424,6 +429,15 @@ pub struct AlterUserStmt {
     pub tenant: Option<String>,
     pub username: String,
     pub attributes: Vec<AlterUserAttribute>,
+}
+
+/// `CREATE USER` statement AST.
+#[derive(Debug, Clone)]
+pub struct CreateUserStmt {
+    pub tenant: Option<String>,
+    pub username: String,
+    pub password: String,
+    pub role: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2817,7 +2831,7 @@ pub struct CreateQueueQuery {
 }
 
 /// ALTER QUEUE name SET <clause>
-///   MODE [FANOUT|WORK]
+///   MODE [FANOUT|WORK|STANDARD|FIFO]
 ///   MAX_ATTEMPTS n
 ///   LOCK_DEADLINE_MS n
 ///   IN_FLIGHT_CAP_PER_GROUP n
@@ -3080,6 +3094,7 @@ pub enum KvCommand {
         prefix: Option<String>,
         limit: Option<usize>,
         offset: usize,
+        as_json: bool,
     },
     Purge {
         collection: String,

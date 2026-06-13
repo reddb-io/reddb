@@ -183,10 +183,27 @@ fn statement_kind(query: &str) -> &'static str {
     } else {
         trimmed
     };
-    let first = trimmed
-        .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
-        .next()
-        .unwrap_or("");
+    let mut tokens = trimmed.split(|c: char| c.is_whitespace() || c == '(' || c == ';');
+    let first = tokens.next().unwrap_or("");
+    let second = tokens.next().unwrap_or("");
+    if first.eq_ignore_ascii_case("KV") {
+        if second.eq_ignore_ascii_case("GET")
+            || second.eq_ignore_ascii_case("LIST")
+            || second.eq_ignore_ascii_case("WATCH")
+        {
+            return "read";
+        }
+        return "write";
+    }
+    if first.eq_ignore_ascii_case("VAULT") {
+        if second.eq_ignore_ascii_case("LIST")
+            || second.eq_ignore_ascii_case("WATCH")
+            || second.eq_ignore_ascii_case("HISTORY")
+        {
+            return "read";
+        }
+        return "write";
+    }
     // ASCII-uppercase compare without allocating: SQL keywords are ASCII.
     let mut buf = [0u8; 16];
     let bytes = first.as_bytes();
@@ -196,12 +213,16 @@ fn statement_kind(query: &str) -> &'static str {
     }
     match &buf[..n] {
         b"SELECT" | b"WITH" | b"SHOW" | b"EXPLAIN" | b"DESCRIBE" | b"DESC" | b"RANK"
-        | b"APPROX" | b"APPROXIMATE" | b"ZRANK" | b"ZRANGE" => "read",
+        | b"APPROX" | b"APPROXIMATE" | b"ZRANK" | b"ZRANGE" | b"LIST" | b"WATCH" | b"GET"
+        | b"HISTORY" => "read",
         b"INSERT" | b"UPDATE" | b"DELETE" | b"UPSERT" | b"MERGE" | b"COPY" | b"TRUNCATE" => "write",
         b"CREATE" | b"ALTER" | b"DROP" | b"REINDEX" | b"VACUUM" | b"ANALYZE" => "ddl",
         b"GRANT" | b"REVOKE" => "admin",
         b"BEGIN" | b"START" | b"COMMIT" | b"ROLLBACK" | b"SAVEPOINT" | b"RELEASE" | b"END"
         | b"SET" | b"RESET" | b"PREPARE" | b"EXECUTE" | b"DEALLOCATE" | b"USE" => "control",
+        b"PUT" | b"INCR" | b"DECR" | b"ADD" | b"ROTATE" | b"PURGE" | b"UNSEAL" | b"INVALIDATE" => {
+            "write"
+        }
         _ => "unknown",
     }
 }
@@ -1240,8 +1261,25 @@ mod tests {
 
         let cases = [
             ("SELECT 1", Privilege::Read, LockIntent::Shared),
+            ("LIST KV settings", Privilege::Read, LockIntent::Shared),
+            (
+                "KV GET settings.feature",
+                Privilege::Read,
+                LockIntent::Shared,
+            ),
+            ("VAULT LIST secrets", Privilege::Read, LockIntent::Shared),
             (
                 "INSERT INTO t (id) VALUES (1)",
+                Privilege::Write,
+                LockIntent::Exclusive,
+            ),
+            (
+                "KV PUT settings.feature = 'on'",
+                Privilege::Write,
+                LockIntent::Exclusive,
+            ),
+            (
+                "VAULT PUT secrets.api = 'x'",
                 Privilege::Write,
                 LockIntent::Exclusive,
             ),

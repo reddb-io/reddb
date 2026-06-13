@@ -32,13 +32,51 @@
 //! principal.
 
 use crate::ast::{
-    AlterUserAttribute, AlterUserStmt, GrantObject, GrantObjectKind, GrantPrincipalRef, GrantStmt,
-    LintPolicySource, PolicyPrincipalRef, PolicyResourceRef, PolicyUserRef, QueryExpr, RevokeStmt,
+    AlterUserAttribute, AlterUserStmt, CreateUserStmt, GrantObject, GrantObjectKind,
+    GrantPrincipalRef, GrantStmt, LintPolicySource, PolicyPrincipalRef, PolicyResourceRef,
+    PolicyUserRef, QueryExpr, RevokeStmt,
 };
 use crate::lexer::Token;
 use crate::parser::{ParseError, Parser};
 
 impl<'a> Parser<'a> {
+    /// Parse `CREATE USER name [WITH] PASSWORD 'plaintext' [ROLE role]`.
+    /// `role` defaults to `read`, the least-privileged RedDB role.
+    pub fn parse_create_user_statement(&mut self) -> Result<CreateUserStmt, ParseError> {
+        if !self.consume_ident_ci("USER")? {
+            return Err(ParseError::expected(
+                vec!["USER"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let (tenant, username) = self.parse_user_name()?;
+
+        let mut password = None;
+        let mut role = "read".to_string();
+
+        let _ = self.consume(&Token::With)? || self.consume_ident_ci("WITH")?;
+        loop {
+            if self.consume_ident_ci("PASSWORD")? {
+                password = Some(self.parse_string()?);
+            } else if self.consume_ident_ci("ROLE")? {
+                role = self.expect_ident()?.to_ascii_lowercase();
+            } else {
+                break;
+            }
+        }
+
+        let password = password
+            .ok_or_else(|| ParseError::expected(vec!["PASSWORD"], self.peek(), self.position()))?;
+
+        Ok(CreateUserStmt {
+            tenant,
+            username,
+            password,
+            role,
+        })
+    }
+
     /// Parse a `GRANT` statement. Caller must have already verified the
     /// current token is the `GRANT` ident (it is not a lexer keyword —
     /// the lexer maps it to `Token::Ident("GRANT")`).
@@ -864,6 +902,29 @@ mod tests {
         p.expect(Token::Alter).expect("ALTER");
         let err = p.parse_alter_user_statement().unwrap_err();
         assert!(err.to_string().contains("expected: GROUP"), "{err}");
+    }
+
+    #[test]
+    fn parse_create_user_statement_covers_role_and_password_errors() {
+        let mut p = parser("CREATE USER tenant.alice WITH PASSWORD 'pw' ROLE admin");
+        p.expect(Token::Create).expect("CREATE");
+        let stmt = p.parse_create_user_statement().expect("create user");
+        assert_eq!(stmt.tenant.as_deref(), Some("tenant"));
+        assert_eq!(stmt.username, "alice");
+        assert_eq!(stmt.password, "pw");
+        assert_eq!(stmt.role, "admin");
+
+        let mut p = parser("CREATE USER bob PASSWORD 'pw'");
+        p.expect(Token::Create).expect("CREATE");
+        let stmt = p.parse_create_user_statement().expect("create user");
+        assert_eq!(stmt.tenant, None);
+        assert_eq!(stmt.username, "bob");
+        assert_eq!(stmt.role, "read");
+
+        let mut p = parser("CREATE USER alice ROLE write");
+        p.expect(Token::Create).expect("CREATE");
+        let err = p.parse_create_user_statement().unwrap_err();
+        assert!(err.to_string().contains("expected: PASSWORD"), "{err}");
     }
 
     #[test]

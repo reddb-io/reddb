@@ -230,7 +230,9 @@ pub(crate) fn extract_zone_predicates(
     }
 }
 
-/// Extract simple column names from SELECT projections for projection pushdown.
+/// Extract source column names from SELECT projections for projection pushdown.
+/// Dotted JSON/document paths need their root column materialized so the
+/// projection phase can resolve the remaining path.
 /// Returns empty Vec for SELECT * or when projections contain expressions/functions.
 pub(crate) fn extract_select_column_names(projections: &[Projection]) -> Vec<String> {
     if projections.is_empty() || projections.iter().any(|p| matches!(p, Projection::All)) {
@@ -240,12 +242,26 @@ pub(crate) fn extract_select_column_names(projections: &[Projection]) -> Vec<Str
         .iter()
         .filter_map(|p| match p {
             Projection::Column(c) | Projection::Alias(c, _) if !c.starts_with("LIT:") => {
-                Some(c.clone())
+                Some(projection_source_column(c))
             }
-            Projection::Field(FieldRef::TableColumn { column: c, .. }, _) => Some(c.clone()),
+            Projection::Field(FieldRef::TableColumn { table, column }, _)
+                if !table.is_empty() && column.contains('.') =>
+            {
+                Some(table.clone())
+            }
+            Projection::Field(FieldRef::TableColumn { column, .. }, _) => {
+                Some(projection_source_column(column))
+            }
             _ => None,
         })
         .collect()
+}
+
+fn projection_source_column(column: &str) -> String {
+    column
+        .split_once('.')
+        .map(|(head, _)| head.to_string())
+        .unwrap_or_else(|| column.to_string())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

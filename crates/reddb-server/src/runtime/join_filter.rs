@@ -1507,7 +1507,7 @@ pub(super) fn resolve_runtime_document_path(record: &UnifiedRecord, path: &str) 
     resolve_runtime_document_path_from_value(flattened_value, flattened_tail)
 }
 
-pub(super) fn resolve_runtime_document_path_from_value(
+pub(crate) fn resolve_runtime_document_path_from_value(
     value: &Value,
     path: &[String],
 ) -> Option<Value> {
@@ -1579,7 +1579,7 @@ pub(super) fn runtime_json_value_to_runtime_value(value: &JsonValue) -> Option<V
     }
 }
 
-pub(super) fn parse_runtime_document_path(path: &str) -> Vec<String> {
+pub(crate) fn parse_runtime_document_path(path: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut chars = path.chars().peekable();
@@ -2076,6 +2076,7 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::Grant(_) => "grant",
         QueryExpr::Revoke(_) => "revoke",
         QueryExpr::AlterUser(_) => "alter_user",
+        QueryExpr::CreateUser(_) => "create_user",
         QueryExpr::CreateIamPolicy { .. } => "create_iam_policy",
         QueryExpr::DropIamPolicy { .. } => "drop_iam_policy",
         QueryExpr::AttachPolicy { .. } => "attach_policy",
@@ -2902,7 +2903,9 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
             }
             source.get(col.as_str()).cloned()
         }
-        Projection::Alias(col, _) => source.get(col.as_str()).cloned(),
+        Projection::Alias(col, _) => {
+            eval_projection_value(&Projection::Column(col.clone()), source)
+        }
         Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
         Projection::Function(name, inner_args) => {
             crate::storage::query::sql_lowering::projection_to_expr(proj)

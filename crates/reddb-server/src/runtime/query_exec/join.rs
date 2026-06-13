@@ -326,6 +326,7 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::Grant(_)
         | QueryExpr::Revoke(_)
         | QueryExpr::AlterUser(_)
+        | QueryExpr::CreateUser(_)
         | QueryExpr::CreateIamPolicy { .. }
         | QueryExpr::DropIamPolicy { .. }
         | QueryExpr::AttachPolicy { .. }

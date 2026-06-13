@@ -29,7 +29,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen)?;
         let mut columns = Vec::new();
         loop {
-            columns.push(self.expect_ident_or_keyword()?);
+            columns.push(self.parse_index_column_path()?);
             if !self.consume(&Token::Comma)? {
                 break;
             }
@@ -114,6 +114,15 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+
+    fn parse_index_column_path(&mut self) -> Result<String, ParseError> {
+        let mut column = self.expect_ident_or_keyword()?;
+        while self.consume(&Token::Dot)? {
+            column.push('.');
+            column.push_str(&self.expect_ident_or_keyword()?);
+        }
+        Ok(column)
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +178,15 @@ mod tests {
         let query = parse_create_index("CREATE UNIQUE INDEX idx_orders ON orders (id) USING HASH");
         assert!(query.unique);
         assert_eq!(query.method, IndexMethod::Hash);
+    }
+
+    #[test]
+    fn parse_create_index_on_document_path() {
+        let query = parse_create_index("CREATE INDEX idx_docs_tier ON docs (body.service.tier)");
+        assert_eq!(query.name, "idx_docs_tier");
+        assert_eq!(query.table, "docs");
+        assert_eq!(query.columns, vec!["body.service.tier"]);
+        assert_eq!(query.method, IndexMethod::BTree);
     }
 
     #[test]

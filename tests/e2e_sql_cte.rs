@@ -4,6 +4,7 @@
 //! rows as the equivalent un-CTE'd query, and that `WITH RECURSIVE`
 //! errors out with a clear message rather than silently misparsing.
 
+use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn seed_users(rt: &RedDBRuntime) {
@@ -23,6 +24,33 @@ fn seed_users(rt: &RedDBRuntime) {
         ))
         .unwrap();
     }
+}
+
+fn seed_orders(rt: &RedDBRuntime) {
+    rt.execute_query("CREATE TABLE orders (id INT, user_id INT, total INT)")
+        .unwrap();
+    rt.execute_query(
+        "INSERT INTO orders (id, user_id, total) VALUES \
+         (1, 1, 50), (2, 3, 200), (3, 4, 150), (4, 5, 20)",
+    )
+    .unwrap();
+}
+
+fn selected_ids(rt: &RedDBRuntime, sql: &str) -> Vec<i64> {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    result
+        .result
+        .records
+        .iter()
+        .map(
+            |record| match record.get("id").or_else(|| record.get("c0")) {
+                Some(Value::Integer(id)) => *id,
+                other => panic!("expected integer id, got {other:?} in record {record:?}"),
+            },
+        )
+        .collect()
 }
 
 #[test]
@@ -149,5 +177,115 @@ fn with_recursive_returns_clear_not_implemented_error() {
         msg.to_lowercase().contains("not yet supported")
             || msg.to_lowercase().contains("not supported"),
         "error should be a clear not-yet-supported message: got `{msg}`"
+    );
+}
+
+#[test]
+fn from_subquery_applies_outer_filter_and_ordering() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_users(&rt);
+
+    let ids = selected_ids(
+        &rt,
+        "SELECT id FROM \
+            (SELECT id, age FROM users WHERE status = 'active') AS active_users \
+         WHERE age < 35 \
+         ORDER BY id",
+    );
+
+    assert_eq!(ids, vec![1, 4]);
+}
+
+#[test]
+fn where_in_subquery_materializes_first_column_values() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_users(&rt);
+    seed_orders(&rt);
+
+    let ids = selected_ids(
+        &rt,
+        "SELECT id FROM users \
+         WHERE id IN (SELECT user_id FROM orders WHERE total > 100) \
+         ORDER BY id",
+    );
+
+    assert_eq!(ids, vec![3, 4]);
+}
+
+#[test]
+fn cte_from_subquery_and_where_subquery_compose_in_one_statement() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_users(&rt);
+    seed_orders(&rt);
+
+    let ids = selected_ids(
+        &rt,
+        "WITH \
+            active_users AS (SELECT id, age FROM users WHERE status = 'active'), \
+            high_value_buyers AS (SELECT user_id FROM orders WHERE total > 100) \
+         SELECT id FROM \
+            (SELECT id, age FROM active_users WHERE age >= 20) AS visible_users \
+         WHERE id IN (SELECT user_id FROM high_value_buyers) \
+         ORDER BY id",
+    );
+
+    assert_eq!(ids, vec![3, 4]);
+}
+
+#[test]
+fn scalar_subquery_can_drive_where_comparison() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_users(&rt);
+
+    let ids = selected_ids(
+        &rt,
+        "SELECT id FROM users \
+         WHERE age > (SELECT age FROM users WHERE name = 'alice') \
+         ORDER BY id",
+    );
+
+    assert_eq!(ids, vec![3, 5]);
+}
+
+#[test]
+fn scalar_subquery_in_select_list_can_reference_named_cte() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_users(&rt);
+    seed_orders(&rt);
+
+    let result = rt
+        .execute_query(
+            "WITH high_value_buyers AS (SELECT user_id FROM orders WHERE total > 100) \
+             SELECT id, \
+                    (SELECT user_id FROM high_value_buyers WHERE user_id = 3) AS matched_user \
+             FROM users \
+             WHERE id = 3",
+        )
+        .unwrap();
+
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("matched_user"),
+        Some(&Value::Integer(3)),
+        "record={:?}",
+        result.result.records[0]
+    );
+}
+
+#[test]
+fn correlated_where_subquery_returns_clear_error() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_users(&rt);
+
+    let err = rt
+        .execute_query(
+            "SELECT id FROM users u \
+             WHERE age > (SELECT age FROM users WHERE id = u.id)",
+        )
+        .expect_err("correlated subquery should not silently execute");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("correlated subqueries are not supported"),
+        "expected correlated-subquery error, got `{msg}`"
     );
 }

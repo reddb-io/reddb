@@ -678,13 +678,23 @@ impl GrowingSegment {
             for &id in ids {
                 let raw = id.raw();
                 if raw < self.base_entity_id {
+                    if let Some(entity) = self.entities.remove(&id) {
+                        self.unindex_entity(&entity);
+                        self.metadata.remove_all(id);
+                        self.deleted.insert(id);
+                        deleted_ids.push(id);
+                    }
                     continue;
                 }
                 let idx = (raw - self.base_entity_id) as usize;
-                if idx < self.flat_entities.len()
-                    && self.flat_entities[idx].id == id
-                    && !self.deleted.contains(&id)
-                {
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
+                    if !self.deleted.contains(&id) {
+                        self.metadata.remove_all(id);
+                        self.deleted.insert(id);
+                        deleted_ids.push(id);
+                    }
+                } else if let Some(entity) = self.entities.remove(&id) {
+                    self.unindex_entity(&entity);
                     self.metadata.remove_all(id);
                     self.deleted.insert(id);
                     deleted_ids.push(id);
@@ -1452,6 +1462,12 @@ impl UnifiedSegment for GrowingSegment {
                     self.deleted.insert(id);
                     return Ok(true);
                 }
+            }
+            if let Some(entity) = self.entities.remove(&id) {
+                self.unindex_entity(&entity);
+                self.metadata.remove_all(id);
+                self.deleted.insert(id);
+                return Ok(true);
             }
             return Ok(false);
         }

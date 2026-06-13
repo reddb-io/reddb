@@ -96,6 +96,50 @@ fn selected_text(rt: &RedDBRuntime, sql: &str) -> String {
     }
 }
 
+fn text_values(rt: &RedDBRuntime, sql: &str, column: &str) -> Vec<String> {
+    rt.execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get(column) {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("expected text column {column}, got {other:?} in {record:?}"),
+        })
+        .collect()
+}
+
+fn uint_value(rt: &RedDBRuntime, sql: &str, column: &str) -> u64 {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    let record = result
+        .result
+        .records
+        .first()
+        .unwrap_or_else(|| panic!("{sql}: expected one row"));
+    match record.get(column) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) if *value >= 0 => *value as u64,
+        other => panic!("expected unsigned integer column {column}, got {other:?} in {record:?}"),
+    }
+}
+
+fn bool_value(rt: &RedDBRuntime, sql: &str, column: &str) -> bool {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    let record = result
+        .result
+        .records
+        .first()
+        .unwrap_or_else(|| panic!("{sql}: expected one row"));
+    match record.get(column) {
+        Some(Value::Boolean(value)) => *value,
+        other => panic!("expected boolean column {column}, got {other:?} in {record:?}"),
+    }
+}
+
 fn seed_target_scan_fixture(rt: &RedDBRuntime) {
     exec(rt, "CREATE TABLE items (id INT, score INT, touched INT)");
     for id in 0..5 {
@@ -137,6 +181,207 @@ fn assert_update_and_delete_target_same_rows(predicate: &str, expected_ids: &[i6
         (0..5)
             .filter(|id| !expected_ids.contains(id))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn table_command_matrix_executes_ddl_dml_index_alter_truncate_and_drop() {
+    let rt = runtime();
+
+    exec(
+        &rt,
+        "CREATE TABLE table_matrix (id INT, status TEXT, score INT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO table_matrix (id, status, score) VALUES \
+         (1, 'new', 10), (2, 'new', 20), (3, 'stale', 30)",
+    );
+    assert_eq!(
+        selected_ids(
+            &rt,
+            "SELECT id FROM table_matrix WHERE status = 'new' ORDER BY id"
+        ),
+        vec![1, 2]
+    );
+
+    exec(
+        &rt,
+        "CREATE INDEX idx_table_matrix_status ON table_matrix (status) USING HASH",
+    );
+    assert_eq!(
+        uint_value(
+            &rt,
+            "SHOW INDEXES ON table_matrix WHERE name = 'idx_table_matrix_status'",
+            "entries_indexed",
+        ),
+        3
+    );
+    let explain_ops = text_values(
+        &rt,
+        "EXPLAIN SELECT id FROM table_matrix WHERE status = 'new'",
+        "op",
+    );
+    assert!(
+        explain_ops.iter().any(|op| op == "index_seek"),
+        "expected table status predicate to use index_seek, got {explain_ops:?}"
+    );
+
+    exec(
+        &rt,
+        "UPDATE table_matrix SET status = 'done', score = 25 WHERE id = 2",
+    );
+    assert_eq!(
+        selected_ids(
+            &rt,
+            "SELECT id FROM table_matrix WHERE status = 'done' ORDER BY id"
+        ),
+        vec![2]
+    );
+
+    exec(&rt, "DELETE FROM table_matrix WHERE status = 'stale'");
+    assert_eq!(
+        selected_ids(&rt, "SELECT id FROM table_matrix ORDER BY id"),
+        vec![1, 2]
+    );
+
+    exec(&rt, "ALTER TABLE table_matrix ADD COLUMN urgency INT");
+    let columns = || {
+        text_values(
+            &rt,
+            "SELECT name FROM red.columns WHERE collection = 'table_matrix' ORDER BY name",
+            "name",
+        )
+    };
+    assert!(columns().contains(&"urgency".to_string()));
+
+    exec(
+        &rt,
+        "ALTER TABLE table_matrix RENAME COLUMN urgency TO rank",
+    );
+    let renamed = columns();
+    assert!(renamed.contains(&"rank".to_string()));
+    assert!(!renamed.contains(&"urgency".to_string()));
+
+    exec(&rt, "ALTER TABLE table_matrix DROP COLUMN rank");
+    assert!(!columns().contains(&"rank".to_string()));
+
+    exec(&rt, "DROP INDEX idx_table_matrix_status ON table_matrix");
+    let indexes_after_drop = text_values(&rt, "SHOW INDEXES ON table_matrix", "name");
+    assert!(
+        !indexes_after_drop.contains(&"idx_table_matrix_status".to_string()),
+        "DROP INDEX should remove the named index, got {indexes_after_drop:?}"
+    );
+
+    exec(&rt, "TRUNCATE TABLE table_matrix");
+    let ids_after_truncate = selected_ids(&rt, "SELECT id FROM table_matrix ORDER BY id");
+    assert_eq!(ids_after_truncate, Vec::<i64>::new());
+
+    exec(&rt, "DROP TABLE table_matrix");
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT name FROM red.collections WHERE name = 'table_matrix'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn graph_command_matrix_executes_core_runtime_surface() {
+    let rt = runtime();
+
+    exec(&rt, "CREATE GRAPH graph_matrix");
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT name FROM red.graphs WHERE name = 'graph_matrix'"
+        ),
+        1
+    );
+    exec(
+        &rt,
+        "INSERT INTO graph_matrix NODE (label, node_type, name) VALUES ('alpha', 'Service', 'Alpha')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO graph_matrix NODE (label, node_type, name) VALUES ('beta', 'Service', 'Beta')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO graph_matrix NODE (label, node_type, name) VALUES ('gamma', 'Database', 'Gamma')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO graph_matrix EDGE (label, from_rid, to_rid, weight) VALUES ('CONNECTS', 'alpha', 'beta', 1.0)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO graph_matrix EDGE (label, from_rid, to_rid, weight) VALUES ('CONNECTS', 'beta', 'gamma', 1.0)",
+    );
+
+    let matched = text_values(
+        &rt,
+        "MATCH (a)-[r:CONNECTS]->(b) \
+         WHERE a.label = 'alpha' \
+         RETURN a.name, b.name, r.label",
+        "b.name",
+    );
+    assert_eq!(matched, vec!["Beta".to_string()]);
+
+    assert_eq!(
+        text_values(&rt, "GRAPH PROPERTIES 'alpha'", "label"),
+        vec!["alpha".to_string()]
+    );
+
+    let neighborhood = text_values(
+        &rt,
+        "GRAPH NEIGHBORHOOD 'alpha' DEPTH 2 EDGES IN ('CONNECTS')",
+        "label",
+    );
+    assert!(
+        neighborhood.contains(&"gamma".to_string()),
+        "neighborhood should reach gamma through beta, got {neighborhood:?}"
+    );
+
+    let traversal = text_values(
+        &rt,
+        "GRAPH TRAVERSE FROM 'alpha' STRATEGY bfs DIRECTION outgoing MAX_DEPTH 2 EDGES IN ('CONNECTS')",
+        "label",
+    );
+    assert!(
+        traversal.contains(&"gamma".to_string()),
+        "traversal should reach gamma through beta, got {traversal:?}"
+    );
+
+    assert!(bool_value(
+        &rt,
+        "GRAPH SHORTEST_PATH FROM 'alpha' TO 'gamma' ALGORITHM dijkstra",
+        "path_found",
+    ));
+
+    assert_eq!(
+        row_count(&rt, "GRAPH CENTRALITY ALGORITHM degree LIMIT 3"),
+        3
+    );
+    assert!(row_count(&rt, "GRAPH COMMUNITY ALGORITHM label_propagation LIMIT 5") >= 1);
+    assert!(row_count(&rt, "GRAPH COMPONENTS MODE connected LIMIT 5") >= 1);
+    assert!(row_count(&rt, "GRAPH CLUSTERING") >= 1);
+    assert!(row_count(&rt, "GRAPH TOPOLOGICAL_SORT") >= 1);
+
+    exec(
+        &rt,
+        "INSERT INTO graph_matrix EDGE (label, from_rid, to_rid, weight) VALUES ('CONNECTS', 'gamma', 'alpha', 1.0)",
+    );
+    assert!(row_count(&rt, "GRAPH CYCLES MAX_LENGTH 4") >= 1);
+
+    exec(&rt, "DROP GRAPH graph_matrix");
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT name FROM red.graphs WHERE name = 'graph_matrix'"
+        ),
+        0
     );
 }
 
@@ -187,6 +432,38 @@ fn read_statement_context_observes_tenant_config_auth_and_policy_state() {
         "expected write privilege denial, got {err:?}"
     );
     clear_current_auth_identity();
+}
+
+#[test]
+fn show_config_as_json_reconstructs_config_subtree() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+    );
+    exec(
+        &rt,
+        "SET CONFIG runtime.result_cache.capacity_entries = 128",
+    );
+    exec(&rt, "SET CONFIG runtime.result_cache.enabled = true");
+    exec(&rt, "SET CONFIG runtime.result_cache.backend = 'shadow'");
+
+    let result = rt
+        .execute_query("SHOW CONFIG runtime.result_cache AS JSON")
+        .expect("SHOW CONFIG AS JSON");
+    assert_eq!(result.result.columns, vec!["key", "value"]);
+    let record = result.result.records.first().expect("config json row");
+    assert!(matches!(
+        record.get("key"),
+        Some(Value::Text(key)) if key.as_ref() == "runtime.result_cache"
+    ));
+    let Some(Value::Json(bytes)) = record.get("value") else {
+        panic!("expected JSON value, got {record:?}");
+    };
+    let json: reddb::json::Value = reddb::json::from_slice(bytes).expect("valid config json");
+    assert_eq!(json["backend"].as_str(), Some("shadow"));
+    assert_eq!(json["capacity_entries"].as_u64(), Some(128));
+    assert_eq!(json["enabled"].as_bool(), Some(true));
 }
 
 #[test]

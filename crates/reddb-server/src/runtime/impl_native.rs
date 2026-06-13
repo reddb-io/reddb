@@ -11,12 +11,48 @@ impl RedDBRuntime {
 
     pub fn create_snapshot(&self) -> RedDBResult<SnapshotDescriptor> {
         self.checkpoint()?;
-        self.inner
-            .db
-            .snapshots()
-            .last()
-            .cloned()
-            .ok_or_else(|| RedDBError::Internal("snapshot metadata was not recorded".to_string()))
+        if let Some(snapshot) = self.inner.db.snapshots().last().cloned() {
+            return Ok(snapshot);
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let (sequence, collection_count, total_entities) =
+            if let Some(state) = self.inner.db.native_physical_state() {
+                let (collection_count, total_entities) = state
+                    .catalog
+                    .as_ref()
+                    .map(|catalog| {
+                        (
+                            catalog.collection_count as usize,
+                            catalog.total_entities as usize,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        let catalog = self.inner.db.catalog_snapshot();
+                        (catalog.total_collections, catalog.total_entities)
+                    });
+                (state.header.sequence, collection_count, total_entities)
+            } else {
+                let catalog = self.inner.db.catalog_snapshot();
+                let sequence = self
+                    .inner
+                    .db
+                    .physical_metadata()
+                    .map(|metadata| metadata.superblock.sequence)
+                    .unwrap_or(1);
+                (sequence, catalog.total_collections, catalog.total_entities)
+            };
+
+        Ok(SnapshotDescriptor {
+            snapshot_id: sequence,
+            created_at_unix_ms: now,
+            superblock_sequence: sequence,
+            collection_count,
+            total_entities,
+        })
     }
 
     pub fn exports(&self) -> RedDBResult<Vec<ExportDescriptor>> {
