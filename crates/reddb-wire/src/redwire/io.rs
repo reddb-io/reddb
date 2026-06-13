@@ -72,6 +72,35 @@ where
     Ok(())
 }
 
+/// Encode one frame for transports that move already-chunked binary payloads,
+/// such as RedWire-over-WebSocket.
+pub fn frame_to_bytes(frame: &Frame) -> Vec<u8> {
+    encode_frame(frame)
+}
+
+/// Drain the next complete RedWire frame from an accumulated byte buffer.
+///
+/// This gives chunked transports the same canonical frame parsing as
+/// [`read_frame_async`] without making callers know the header size or codec
+/// choreography.
+pub fn drain_next_frame(buffer: &mut Vec<u8>) -> Result<Option<Frame>, FrameError> {
+    if buffer.len() < FRAME_HEADER_SIZE {
+        return Ok(None);
+    }
+
+    let mut header = [0u8; FRAME_HEADER_SIZE];
+    header.copy_from_slice(&buffer[..FRAME_HEADER_SIZE]);
+    let length = frame_len_from_header(&header)?;
+    if buffer.len() < length {
+        return Ok(None);
+    }
+
+    let payload = &buffer[FRAME_HEADER_SIZE..length];
+    let frame = decode_frame_parts(&header, payload)?;
+    buffer.drain(..length);
+    Ok(Some(frame))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +115,28 @@ mod tests {
         let decoded = read_frame_async(&mut right).await.unwrap();
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn chunked_frame_io_drains_complete_frames_and_keeps_leftover() {
+        let first = Frame::new(MessageKind::Ping, 1, b"one".to_vec());
+        let second = Frame::new(MessageKind::Pong, 2, b"two".to_vec());
+        let mut bytes = frame_to_bytes(&first);
+        bytes.extend_from_slice(&frame_to_bytes(&second));
+        bytes.extend_from_slice(b"partial");
+
+        assert_eq!(drain_next_frame(&mut bytes).unwrap(), Some(first));
+        assert_eq!(drain_next_frame(&mut bytes).unwrap(), Some(second));
+        assert_eq!(drain_next_frame(&mut bytes).unwrap(), None);
+        assert_eq!(bytes, b"partial");
+    }
+
+    #[test]
+    fn chunked_frame_io_waits_for_complete_payload() {
+        let frame = Frame::new(MessageKind::Ping, 1, b"hello".to_vec());
+        let mut bytes = frame_to_bytes(&frame);
+        bytes.pop();
+
+        assert_eq!(drain_next_frame(&mut bytes).unwrap(), None);
     }
 }

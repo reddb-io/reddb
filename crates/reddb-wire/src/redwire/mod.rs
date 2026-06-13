@@ -61,7 +61,9 @@ pub use handshake::{
     expect_auth_response_payload, AuthFail, AuthOk, AuthResponseKindError, Hello, HelloAck,
     SUPPORTED_METHODS,
 };
-pub use io::{read_frame_async, write_frame_async, RedWireIoError};
+pub use io::{
+    drain_next_frame, frame_to_bytes, read_frame_async, write_frame_async, RedWireIoError,
+};
 pub use operations::{
     decode_bulk_ok_count_payload, decode_bulk_ok_payload, decode_delete_ok_affected,
     decode_delete_payload, decode_error_payload, decode_get_payload, decode_get_result_payload,
