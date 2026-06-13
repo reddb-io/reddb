@@ -1015,6 +1015,20 @@ fn test_parse_match_with_edge() {
 }
 
 #[test]
+fn test_parse_match_canonicalizes_edge_label_aliases() {
+    let query = parse("MATCH (a)-[:CONNECTS]->(b) RETURN a, b").unwrap();
+    if let QueryExpr::Graph(gq) = query {
+        assert_eq!(gq.pattern.edges.len(), 1);
+        assert_eq!(
+            gq.pattern.edges[0].edge_label.as_deref(),
+            Some("connects_to")
+        );
+    } else {
+        panic!("Expected GraphQuery");
+    }
+}
+
+#[test]
 fn test_parse_match_variable_length() {
     let query = parse("MATCH (a)-[*1..5]->(b) RETURN a, b").unwrap();
     if let QueryExpr::Graph(gq) = query {
@@ -4559,10 +4573,34 @@ fn test_parse_queue_mode_ddl() {
         QueryExpr::CreateQueue(q) if q.name == "work_tasks" && q.mode == QueueMode::Work
     ));
 
+    let query = parse("CREATE QUEUE standard_tasks STANDARD").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateQueue(q) if q.name == "standard_tasks" && q.mode == QueueMode::Work
+    ));
+
+    let query = parse("CREATE QUEUE fifo_tasks FIFO").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateQueue(q) if q.name == "fifo_tasks" && q.mode == QueueMode::Work
+    ));
+
     let query = parse("ALTER QUEUE fanout_tasks SET MODE FANOUT").unwrap();
     assert!(matches!(
         query,
         QueryExpr::AlterQueue(q) if q.name == "fanout_tasks" && q.mode == Some(QueueMode::Fanout)
+    ));
+
+    let query = parse("ALTER QUEUE standard_tasks SET MODE STANDARD").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterQueue(q) if q.name == "standard_tasks" && q.mode == Some(QueueMode::Work)
+    ));
+
+    let query = parse("ALTER QUEUE fifo_tasks SET MODE FIFO").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterQueue(q) if q.name == "fifo_tasks" && q.mode == Some(QueueMode::Work)
     ));
 }
 
@@ -5166,6 +5204,15 @@ fn test_parse_hll_commands() {
 #[test]
 fn test_parse_auth_grant_revoke_and_alter_user_forms() {
     use crate::ast::{AlterUserAttribute, GrantObjectKind, GrantPrincipalRef};
+
+    let query = parse("CREATE USER tenant1.alice WITH PASSWORD 'pw' ROLE write").unwrap();
+    let QueryExpr::CreateUser(stmt) = query else {
+        panic!("Expected CreateUser");
+    };
+    assert_eq!(stmt.tenant.as_deref(), Some("tenant1"));
+    assert_eq!(stmt.username, "alice");
+    assert_eq!(stmt.password, "pw");
+    assert_eq!(stmt.role, "write");
 
     let query =
         parse("GRANT ALL PRIVILEGES ON DATABASE maindb TO PUBLIC WITH GRANT OPTION").unwrap();
@@ -7151,6 +7198,38 @@ fn test_parse_vault_lifecycle_commands() {
 #[test]
 fn test_parse_vault_list_and_watch() {
     assert!(matches!(
+        parse("KV LIST settings PREFIX 'feature.' LIMIT 10 OFFSET 2").unwrap(),
+        QueryExpr::KvCommand(KvCommand::List {
+            model: reddb_types::catalog::CollectionModel::Kv,
+            collection,
+            prefix: Some(prefix),
+            limit: Some(10),
+            offset: 2,
+            as_json: false,
+        }) if collection == "settings" && prefix == "feature."
+    ));
+    assert!(matches!(
+        parse("LIST KV settings PREFIX feature LIMIT 10 OFFSET 2").unwrap(),
+        QueryExpr::KvCommand(KvCommand::List {
+            model: reddb_types::catalog::CollectionModel::Kv,
+            collection,
+            prefix: Some(prefix),
+            limit: Some(10),
+            offset: 2,
+            as_json: false,
+        }) if collection == "settings" && prefix == "feature"
+    ));
+    assert!(matches!(
+        parse("KV LIST settings PREFIX feature AS JSON").unwrap(),
+        QueryExpr::KvCommand(KvCommand::List {
+            model: reddb_types::catalog::CollectionModel::Kv,
+            collection,
+            prefix: Some(prefix),
+            as_json: true,
+            ..
+        }) if collection == "settings" && prefix == "feature"
+    ));
+    assert!(matches!(
         parse("LIST VAULT secrets PREFIX api LIMIT 10 OFFSET 2").unwrap(),
         QueryExpr::KvCommand(KvCommand::List {
             model: reddb_types::catalog::CollectionModel::Vault,
@@ -7158,6 +7237,18 @@ fn test_parse_vault_list_and_watch() {
             prefix: Some(prefix),
             limit: Some(10),
             offset: 2,
+            as_json: false,
+        }) if collection == "secrets" && prefix == "api"
+    ));
+    assert!(matches!(
+        parse("VAULT LIST secrets PREFIX api LIMIT 10 OFFSET 2").unwrap(),
+        QueryExpr::KvCommand(KvCommand::List {
+            model: reddb_types::catalog::CollectionModel::Vault,
+            collection,
+            prefix: Some(prefix),
+            limit: Some(10),
+            offset: 2,
+            as_json: false,
         }) if collection == "secrets" && prefix == "api"
     ));
     assert!(matches!(

@@ -244,6 +244,7 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::Grant(_)
             | QueryExpr::Revoke(_)
             | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateUser(_)
             | QueryExpr::CreateIamPolicy { .. }
             | QueryExpr::DropIamPolicy { .. }
             | QueryExpr::AttachPolicy { .. }
@@ -377,6 +378,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Grant(_)
             | QueryExpr::Revoke(_)
             | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateUser(_)
             | QueryExpr::CreateIamPolicy { .. }
             | QueryExpr::DropIamPolicy { .. }
             | QueryExpr::AttachPolicy { .. }
@@ -469,6 +471,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Grant(_)
             | QueryExpr::Revoke(_)
             | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateUser(_)
             | QueryExpr::CreateIamPolicy { .. }
             | QueryExpr::DropIamPolicy { .. }
             | QueryExpr::AttachPolicy { .. }

@@ -76,6 +76,74 @@ fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
     }
 }
 
+fn insert_config_json_path(
+    root: &mut crate::serde_json::Value,
+    path: &str,
+    value: crate::serde_json::Value,
+) {
+    let segments: Vec<&str> = path
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    insert_config_json_segments(root, &segments, value);
+}
+
+fn insert_config_json_segments(
+    root: &mut crate::serde_json::Value,
+    segments: &[&str],
+    value: crate::serde_json::Value,
+) {
+    if segments.is_empty() {
+        *root = value;
+        return;
+    }
+
+    if !matches!(root, crate::serde_json::Value::Object(_)) {
+        *root = crate::serde_json::Value::Object(crate::serde_json::Map::new());
+    }
+
+    let crate::serde_json::Value::Object(map) = root else {
+        return;
+    };
+    if segments.len() == 1 {
+        map.insert(segments[0].to_string(), value);
+        return;
+    }
+    let entry = map
+        .entry(segments[0].to_string())
+        .or_insert_with(|| crate::serde_json::Value::Object(crate::serde_json::Map::new()));
+    insert_config_json_segments(entry, &segments[1..], value);
+}
+
+fn show_config_json_result(
+    query: &str,
+    mode: crate::storage::query::modes::QueryMode,
+    prefix: &Option<String>,
+    value: crate::serde_json::Value,
+) -> RuntimeQueryResult {
+    let mut result = UnifiedResult::with_columns(vec!["key".into(), "value".into()]);
+    let mut record = UnifiedRecord::new();
+    record.set(
+        "key",
+        prefix
+            .as_ref()
+            .map(|key| Value::text(key.clone()))
+            .unwrap_or(Value::Null),
+    );
+    record.set("value", Value::Json(value.to_string_compact().into_bytes()));
+    result.push(record);
+    RuntimeQueryResult {
+        query: query.to_string(),
+        mode,
+        statement: "show_config_json",
+        engine: "runtime-config",
+        result,
+        affected_rows: 0,
+        statement_type: "select",
+        bookmark: None,
+    }
+}
+
 #[derive(Clone)]
 struct QueryControlEventSpec {
     kind: crate::runtime::control_events::EventKind,
@@ -774,6 +842,14 @@ fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
                 fields: Vec::new(),
             });
         }
+        QueryExpr::CreateUser(stmt) => {
+            specs.push(QueryControlEventSpec {
+                kind: EventKind::UserCreate,
+                action: "create_user",
+                resource: Some(format!("user:{}", stmt.username)),
+                fields: Vec::new(),
+            });
+        }
         _ => {}
     }
     specs
@@ -1420,6 +1496,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::Grant(_)
         | QueryExpr::Revoke(_)
         | QueryExpr::AlterUser(_)
+        | QueryExpr::CreateUser(_)
         | QueryExpr::CreateIamPolicy { .. }
         | QueryExpr::DropIamPolicy { .. }
         | QueryExpr::AttachPolicy { .. }
@@ -4727,9 +4804,10 @@ impl RedDBRuntime {
             QueryExpr::TreeCommand(ref cmd) => self.execute_tree_command(query, cmd),
             // SET CONFIG key = value
             QueryExpr::SetConfig { ref key, ref value } => {
-                if key.starts_with("red.secret.") {
+                if key.starts_with("red.secret.") || key.starts_with("red.secrets.") {
                     return Err(RedDBError::Query(
-                        "red.secret.* is reserved for vault secrets; use SET SECRET".to_string(),
+                        "red.secret.* / red.secrets.* are reserved for vault secrets; use SET SECRET"
+                            .to_string(),
                     ));
                 }
                 match self.check_managed_config_write_for_set_config(key) {
@@ -4856,11 +4934,22 @@ impl RedDBRuntime {
                     bookmark: None,
                 })
             }
-            // SHOW CONFIG [prefix]
-            QueryExpr::ShowConfig { ref prefix } => {
+            // SHOW CONFIG [prefix] [AS JSON|FORMAT JSON]
+            QueryExpr::ShowConfig {
+                ref prefix,
+                as_json,
+            } => {
                 let store = self.inner.db.store();
                 let all_collections = store.list_collections();
                 if !all_collections.contains(&"red_config".to_string()) {
+                    if as_json {
+                        return Ok(show_config_json_result(
+                            query,
+                            mode,
+                            prefix,
+                            crate::serde_json::Value::Object(crate::serde_json::Map::new()),
+                        ));
+                    }
                     let result = UnifiedResult::with_columns(vec!["key".into(), "value".into()]);
                     return Ok(RuntimeQueryResult {
                         query: query.to_string(),
@@ -4901,6 +4990,25 @@ impl RedDBRuntime {
                             }
                         }
                     }
+                }
+                if as_json {
+                    let mut tree = crate::serde_json::Value::Object(crate::serde_json::Map::new());
+                    for (key, (_, _, val)) in latest {
+                        let relative = match prefix {
+                            Some(pfx) if key == *pfx => "",
+                            Some(pfx) => key
+                                .strip_prefix(pfx.as_str())
+                                .and_then(|tail| tail.strip_prefix('.'))
+                                .unwrap_or(key.as_str()),
+                            None => key.as_str(),
+                        };
+                        insert_config_json_path(
+                            &mut tree,
+                            relative,
+                            crate::presentation::entity_json::storage_value_to_json(&val),
+                        );
+                    }
+                    return Ok(show_config_json_result(query, mode, prefix, tree));
                 }
                 let mut result = UnifiedResult::with_columns(vec!["key".into(), "value".into()]);
                 for (_, key_val, val) in latest.into_values() {
@@ -5901,6 +6009,7 @@ impl RedDBRuntime {
             QueryExpr::Grant(ref g) => self.execute_grant_statement(query, g),
             QueryExpr::Revoke(ref r) => self.execute_revoke_statement(query, r),
             QueryExpr::AlterUser(ref a) => self.execute_alter_user_statement(query, a),
+            QueryExpr::CreateUser(ref u) => self.execute_create_user_statement(query, u),
             QueryExpr::CreateIamPolicy { ref id, ref json } => {
                 self.execute_create_iam_policy(query, id, json)
             }
@@ -6242,12 +6351,14 @@ impl RedDBRuntime {
                     | KvCommand::Cas {
                         collection, model, ..
                     }
+                    | KvCommand::List {
+                        collection, model, ..
+                    }
                     | KvCommand::Delete {
                         collection, model, ..
                     } => (collection.as_str(), *model),
                     KvCommand::Rotate { collection, .. }
                     | KvCommand::History { collection, .. }
-                    | KvCommand::List { collection, .. }
                     | KvCommand::Purge { collection, .. } => {
                         (collection.as_str(), CollectionModel::Vault)
                     }
@@ -9376,9 +9487,12 @@ impl RedDBRuntime {
             // table — for now we emit a single Select on the database
             // (admins bypass; non-admins need a Database/Schema grant).
             QueryExpr::Join(_) => (Action::Select, Resource::Database),
-            // GRANT / REVOKE / ALTER USER are authority statements;
+            // GRANT / REVOKE / USER DDL are authority statements;
             // require Admin (the helper methods enforce).
-            QueryExpr::Grant(_) | QueryExpr::Revoke(_) | QueryExpr::AlterUser(_) => {
+            QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateUser(_) => {
                 return if role == crate::auth::Role::Admin {
                     Ok(())
                 } else {
@@ -10670,6 +10784,51 @@ impl RedDBRuntime {
             query.to_string(),
             &format!("REVOKE removed {} grant(s)", total_removed),
             "revoke",
+        ))
+    }
+
+    /// Translate the parsed [`CreateUserStmt`] into an AuthStore user.
+    fn execute_create_user_statement(
+        &self,
+        query: &str,
+        stmt: &crate::storage::query::ast::CreateUserStmt,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+
+        let (_gname, grole) = current_auth_identity().ok_or_else(|| {
+            RedDBError::Query("CREATE USER requires an authenticated principal".to_string())
+        })?;
+        if grole != crate::auth::Role::Admin {
+            return Err(RedDBError::Query(
+                "CREATE USER requires Admin role".to_string(),
+            ));
+        }
+
+        let role = crate::auth::Role::from_str(&stmt.role)
+            .ok_or_else(|| RedDBError::Query(format!("invalid role `{}`", stmt.role)))?;
+        let user = auth_store
+            .create_user_in_tenant(stmt.tenant.as_deref(), &stmt.username, &stmt.password, role)
+            .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+        self.invalidate_result_cache();
+        let target = crate::auth::UserId::from_parts(user.tenant_id.as_deref(), &user.username);
+        tracing::info!(
+            target: "audit",
+            principal = %target,
+            role = %role,
+            action = "create_user",
+            "CREATE USER applied"
+        );
+
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("CREATE USER {} applied", target),
+            "create_user",
         ))
     }
 

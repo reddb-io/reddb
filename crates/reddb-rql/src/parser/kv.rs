@@ -129,6 +129,10 @@ impl<'a> Parser<'a> {
                 let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Purge { collection, key }))
             }
+            Token::List => {
+                self.advance()?;
+                self.parse_keyed_list(model)
+            }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LIST") => {
                 self.advance()?;
                 self.parse_keyed_list(model)
@@ -181,6 +185,7 @@ impl<'a> Parser<'a> {
                     vec![
                         "PUT",
                         "GET",
+                        "LIST",
                         "WATCH",
                         "DELETE",
                         "INCR",
@@ -204,6 +209,11 @@ impl<'a> Parser<'a> {
             ));
         }
         self.parse_keyed_list(CollectionModel::Vault)
+    }
+
+    pub(crate) fn parse_kv_list_after_list(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect(Token::Kv)?;
+        self.parse_keyed_list(CollectionModel::Kv)
     }
 
     pub(crate) fn parse_vault_watch_after_watch(&mut self) -> Result<QueryExpr, ParseError> {
@@ -433,7 +443,7 @@ impl<'a> Parser<'a> {
             }
             if lower_segments.len() >= 3
                 && lower_segments[0] == "red"
-                && lower_segments[1] == "secret"
+                && (lower_segments[1] == "secret" || lower_segments[1] == "secrets")
             {
                 return Ok(("red.vault".to_string(), lower_segments[2..].join(".")));
             }
@@ -468,13 +478,23 @@ impl<'a> Parser<'a> {
         let mut prefix = None;
         let mut limit = None;
         let mut offset = 0usize;
+        let mut as_json = false;
         loop {
             if self.consume_ident_ci("PREFIX")? {
-                prefix = Some(self.expect_ident_or_keyword()?.to_string());
+                prefix = Some(self.parse_kv_key_part()?);
             } else if self.consume(&Token::Limit)? || self.consume_ident_ci("LIMIT")? {
                 limit = Some(self.parse_float()?.round().max(0.0) as usize);
             } else if self.consume(&Token::Offset)? || self.consume_ident_ci("OFFSET")? {
                 offset = self.parse_float()?.round().max(0.0) as usize;
+            } else if self.consume(&Token::As)? || self.consume(&Token::Format)? {
+                if !self.consume(&Token::Json)? {
+                    return Err(ParseError::expected(
+                        vec!["JSON"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                as_json = true;
             } else {
                 break;
             }
@@ -485,6 +505,7 @@ impl<'a> Parser<'a> {
             prefix,
             limit,
             offset,
+            as_json,
         }))
     }
 
@@ -728,6 +749,11 @@ mod tests {
         assert_eq!(collection, "red.vault");
         assert_eq!(key, "prod.api_key");
 
+        let mut p = parser("red.secrets.prod.api_key");
+        let (collection, key) = p.parse_kv_key(CollectionModel::Vault).unwrap();
+        assert_eq!(collection, "red.vault");
+        assert_eq!(key, "prod.api_key");
+
         let mut p = parser("secret.prod.api_key");
         let (collection, key) = p.parse_kv_key(CollectionModel::Vault).unwrap();
         assert_eq!(collection, "red.vault");
@@ -749,6 +775,7 @@ mod tests {
             prefix,
             limit,
             offset,
+            as_json,
         }) = p.parse_keyed_list(CollectionModel::Kv).unwrap()
         else {
             panic!("expected kv list");
@@ -758,6 +785,15 @@ mod tests {
         assert_eq!(prefix.as_deref(), Some("tenant"));
         assert_eq!(limit, Some(0));
         assert_eq!(offset, 0);
+        assert!(!as_json);
+
+        let mut p = parser("items PREFIX tenant FORMAT JSON");
+        let QueryExpr::KvCommand(KvCommand::List { as_json, .. }) =
+            p.parse_keyed_list(CollectionModel::Kv).unwrap()
+        else {
+            panic!("expected kv list");
+        };
+        assert!(as_json);
 
         let mut p = parser("secrets.env PREFIX api FROM LSN 12");
         let QueryExpr::KvCommand(KvCommand::Watch {

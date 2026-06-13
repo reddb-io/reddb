@@ -1281,11 +1281,7 @@ impl RedDBRuntime {
                                 &query.with_metadata,
                             );
                             let (columns, values) = pairwise_columns_values(&document_values);
-                            let body_str = find_column_value_string(&columns, &values, "body")?;
-                            let body: crate::json::Value = crate::json::from_str(&body_str)
-                                .map_err(|e| {
-                                    RedDBError::Query(format!("invalid JSON body: {e}"))
-                                })?;
+                            let body = find_document_body_json(&columns, &values)?;
                             let input = CreateDocumentInput {
                                 collection: query.table.clone(),
                                 body,
@@ -3527,6 +3523,28 @@ fn find_column_value_string(
         Value::Float(n) => Ok(n.to_string()),
         other => Err(RedDBError::Query(format!(
             "column '{name}' expected text, got {other:?}"
+        ))),
+    }
+}
+
+fn find_document_body_json(
+    columns: &[String],
+    values: &[Value],
+) -> RedDBResult<crate::json::Value> {
+    let val = find_column_value(columns, values, "body")?;
+    match val {
+        Value::Json(bytes) | Value::Blob(bytes) => crate::json::from_slice(&bytes)
+            .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Text(text) => crate::json::from_str(text.as_ref())
+            .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Integer(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::UnsignedInteger(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Float(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        other => Err(RedDBError::Query(format!(
+            "column 'body' expected JSON body, got {other:?}"
         ))),
     }
 }

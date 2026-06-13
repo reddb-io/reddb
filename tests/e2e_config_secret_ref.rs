@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::storage::schema::Value;
+use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 #[allow(dead_code)]
@@ -19,8 +20,10 @@ fn unique_ident(prefix: &str) -> String {
 }
 
 fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
-    let rt =
-        RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("runtime should open");
+    let options = RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should expose pager");
+    let rt = RedDBRuntime::with_options(options).expect("runtime should open");
     let pager = Arc::clone(
         rt.db()
             .store()

@@ -235,6 +235,7 @@ impl UnifiedExecutor {
             | QueryExpr::Grant(_)
             | QueryExpr::Revoke(_)
             | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateUser(_)
             | QueryExpr::CreateIamPolicy { .. }
             | QueryExpr::DropIamPolicy { .. }
             | QueryExpr::AttachPolicy { .. }
@@ -477,6 +478,7 @@ impl UnifiedExecutor {
             | QueryExpr::Grant(_)
             | QueryExpr::Revoke(_)
             | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateUser(_)
             | QueryExpr::CreateIamPolicy { .. }
             | QueryExpr::DropIamPolicy { .. }
             | QueryExpr::AttachPolicy { .. }

@@ -3,16 +3,17 @@ use crate::ast::{
     AskQuery, BinOp, CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateCollectionQuery,
     CreateForeignTableQuery, CreateIndexQuery, CreateMetricQuery, CreateMigrationQuery,
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
-    CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateVectorQuery,
-    CreateViewQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery,
-    DropGraphQuery, DropIndexQuery, DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
-    DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery,
-    DropVectorQuery, DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery,
-    Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery,
-    InsertQuery, JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction,
-    ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
-    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
-    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
+    CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateUserStmt,
+    CreateVectorQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery,
+    DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery, DropPolicyQuery,
+    DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery, DropTableQuery,
+    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, DropViewQuery, EventsBackfillQuery,
+    ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt,
+    GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery, KvCommand, MaintenanceCommand,
+    PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery,
+    RankOfQuery, RankRangeQuery, RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery,
+    SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery,
+    VectorQuery,
 };
 use crate::lexer::Token;
 use crate::parser::{ParseError, Parser, SafeTokenDisplay};
@@ -92,6 +93,7 @@ pub enum SqlCommand {
     },
     ShowConfig {
         prefix: Option<String>,
+        as_json: bool,
     },
     SetSecret {
         key: String,
@@ -127,6 +129,8 @@ pub enum SqlCommand {
     Revoke(RevokeStmt),
     /// `ALTER USER name <attrs>`
     AlterUser(AlterUserStmt),
+    /// `CREATE USER name PASSWORD '...' [ROLE read|write|admin]`
+    CreateUser(CreateUserStmt),
     /// IAM policy DDL (CREATE POLICY '...' AS '...', DROP POLICY '...',
     /// ATTACH/DETACH POLICY, SHOW POLICIES, SIMULATE, SHOW EFFECTIVE
     /// PERMISSIONS). Stored as a pre-built QueryExpr so the dispatcher
@@ -285,11 +289,25 @@ mod tests {
 
         assert!(matches!(
             expr("SHOW CONFIG durability.mode"),
-            QueryExpr::ShowConfig { prefix: Some(prefix) } if prefix == "durability.mode"
+            QueryExpr::ShowConfig { prefix: Some(prefix), as_json: false } if prefix == "durability.mode"
         ));
         assert!(matches!(
             expr("SHOW CONFIG"),
-            QueryExpr::ShowConfig { prefix: None }
+            QueryExpr::ShowConfig {
+                prefix: None,
+                as_json: false
+            }
+        ));
+        assert!(matches!(
+            expr("SHOW CONFIG runtime.result_cache AS JSON"),
+            QueryExpr::ShowConfig { prefix: Some(prefix), as_json: true } if prefix == "runtime.result_cache"
+        ));
+        assert!(matches!(
+            expr("SHOW CONFIG FORMAT JSON"),
+            QueryExpr::ShowConfig {
+                prefix: None,
+                as_json: true
+            }
         ));
 
         let QueryExpr::SetConfig { key, value } = expr("SET CONFIG durability.mode = 'sync'")
@@ -305,14 +323,26 @@ mod tests {
         };
         assert_eq!(key, "provider.api_key");
         assert_text(&value, "sk_test");
+        assert!(matches!(
+            expr("SET SECRET red.secrets.provider.api_key = 'sk_test'"),
+            QueryExpr::SetSecret { key, .. } if key == "red.secret.provider.api_key"
+        ));
 
         assert!(matches!(
             expr("DELETE SECRET provider.api_key"),
             QueryExpr::DeleteSecret { key } if key == "provider.api_key"
         ));
         assert!(matches!(
+            expr("DELETE SECRET red.secrets.provider.api_key"),
+            QueryExpr::DeleteSecret { key } if key == "red.secret.provider.api_key"
+        ));
+        assert!(matches!(
             expr("SHOW SECRETS provider"),
             QueryExpr::ShowSecrets { prefix: Some(prefix) } if prefix == "provider"
+        ));
+        assert!(matches!(
+            expr("SHOW SECRETS red.secrets.provider"),
+            QueryExpr::ShowSecrets { prefix: Some(prefix) } if prefix == "red.secret.provider"
         ));
         assert!(matches!(
             expr("SET TENANT 'acme'"),
@@ -487,6 +517,14 @@ mod tests {
             QueryExpr::AlterUser(user)
                 if user.username == "bob" && user.attributes.len() == 2
         ));
+        assert!(matches!(
+            expr("CREATE USER tenant1.alice WITH PASSWORD 'pw' ROLE write"),
+            QueryExpr::CreateUser(user)
+                if user.tenant.as_deref() == Some("tenant1")
+                    && user.username == "alice"
+                    && user.password == "pw"
+                    && user.role == "write"
+        ));
 
         assert!(matches!(
             expr("CREATE POLICY 'readonly' AS '{\"Statement\":[]}'"),
@@ -603,6 +641,57 @@ mod tests {
         assert_eq!(limit, Some(3));
         assert_eq!(offset, 1);
 
+        let QueryExpr::KvCommand(KvCommand::List {
+            model,
+            collection,
+            prefix,
+            limit,
+            offset,
+            as_json,
+        }) = expr("KV LIST settings PREFIX 'feature.' LIMIT 10 OFFSET 2")
+        else {
+            panic!("KV LIST should route to FrontendStatement::KvCommand");
+        };
+        assert_eq!(model, CollectionModel::Kv);
+        assert_eq!(collection, "settings");
+        assert_eq!(prefix.as_deref(), Some("feature."));
+        assert_eq!(limit, Some(10));
+        assert_eq!(offset, 2);
+        assert!(!as_json);
+
+        let QueryExpr::KvCommand(KvCommand::List {
+            model,
+            collection,
+            prefix,
+            limit,
+            offset,
+            as_json,
+        }) = expr("LIST KV settings PREFIX feature LIMIT 10 OFFSET 2")
+        else {
+            panic!("LIST KV should route to FrontendStatement::KvCommand");
+        };
+        assert_eq!(model, CollectionModel::Kv);
+        assert_eq!(collection, "settings");
+        assert_eq!(prefix.as_deref(), Some("feature"));
+        assert_eq!(limit, Some(10));
+        assert_eq!(offset, 2);
+        assert!(!as_json);
+
+        let QueryExpr::KvCommand(KvCommand::List {
+            model,
+            collection,
+            prefix,
+            as_json,
+            ..
+        }) = expr("KV LIST settings PREFIX feature AS JSON")
+        else {
+            panic!("KV LIST AS JSON should route to FrontendStatement::KvCommand");
+        };
+        assert_eq!(model, CollectionModel::Kv);
+        assert_eq!(collection, "settings");
+        assert_eq!(prefix.as_deref(), Some("feature"));
+        assert!(as_json);
+
         let QueryExpr::KvCommand(KvCommand::Watch {
             model,
             collection,
@@ -641,6 +730,7 @@ mod tests {
             prefix,
             limit,
             offset,
+            as_json,
         }) = expr("LIST VAULT secrets PREFIX api LIMIT 10 OFFSET 2")
         else {
             panic!("LIST VAULT should route to FrontendStatement::KvCommand");
@@ -650,6 +740,7 @@ mod tests {
         assert_eq!(prefix.as_deref(), Some("api"));
         assert_eq!(limit, Some(10));
         assert_eq!(offset, 2);
+        assert!(!as_json);
 
         assert!(matches!(
             expr("INVALIDATE CONFIG app feature_flag"),
@@ -1269,11 +1360,24 @@ pub enum SqlSchemaCommand {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum SqlAdminCommand {
-    SetConfig { key: String, value: Value },
-    ShowConfig { prefix: Option<String> },
-    SetSecret { key: String, value: Value },
-    DeleteSecret { key: String },
-    ShowSecrets { prefix: Option<String> },
+    SetConfig {
+        key: String,
+        value: Value,
+    },
+    ShowConfig {
+        prefix: Option<String>,
+        as_json: bool,
+    },
+    SetSecret {
+        key: String,
+        value: Value,
+    },
+    DeleteSecret {
+        key: String,
+    },
+    ShowSecrets {
+        prefix: Option<String>,
+    },
     SetTenant(Option<String>),
     ShowTenant,
     TransactionControl(TxnControl),
@@ -1281,6 +1385,7 @@ pub enum SqlAdminCommand {
     Grant(GrantStmt),
     Revoke(RevokeStmt),
     AlterUser(AlterUserStmt),
+    CreateUser(CreateUserStmt),
     IamPolicy(QueryExpr),
 }
 
@@ -1364,8 +1469,8 @@ impl SqlStatement {
             SqlStatement::Admin(SqlAdminCommand::SetConfig { key, value }) => {
                 SqlCommand::SetConfig { key, value }
             }
-            SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix }) => {
-                SqlCommand::ShowConfig { prefix }
+            SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix, as_json }) => {
+                SqlCommand::ShowConfig { prefix, as_json }
             }
             SqlStatement::Admin(SqlAdminCommand::SetSecret { key, value }) => {
                 SqlCommand::SetSecret { key, value }
@@ -1407,6 +1512,7 @@ impl SqlStatement {
             SqlStatement::Admin(SqlAdminCommand::Grant(s)) => SqlCommand::Grant(s),
             SqlStatement::Admin(SqlAdminCommand::Revoke(s)) => SqlCommand::Revoke(s),
             SqlStatement::Admin(SqlAdminCommand::AlterUser(s)) => SqlCommand::AlterUser(s),
+            SqlStatement::Admin(SqlAdminCommand::CreateUser(s)) => SqlCommand::CreateUser(s),
             SqlStatement::Admin(SqlAdminCommand::IamPolicy(e)) => SqlCommand::IamPolicy(e),
             SqlStatement::Schema(SqlSchemaCommand::CreateMigration(q)) => {
                 SqlCommand::CreateMigration(q)
@@ -1506,7 +1612,7 @@ impl SqlCommand {
             SqlCommand::DropTree(query) => QueryExpr::DropTree(query),
             SqlCommand::Probabilistic(command) => QueryExpr::ProbabilisticCommand(command),
             SqlCommand::SetConfig { key, value } => QueryExpr::SetConfig { key, value },
-            SqlCommand::ShowConfig { prefix } => QueryExpr::ShowConfig { prefix },
+            SqlCommand::ShowConfig { prefix, as_json } => QueryExpr::ShowConfig { prefix, as_json },
             SqlCommand::SetSecret { key, value } => QueryExpr::SetSecret { key, value },
             SqlCommand::DeleteSecret { key } => QueryExpr::DeleteSecret { key },
             SqlCommand::ShowSecrets { prefix } => QueryExpr::ShowSecrets { prefix },
@@ -1531,6 +1637,7 @@ impl SqlCommand {
             SqlCommand::Grant(s) => QueryExpr::Grant(s),
             SqlCommand::Revoke(s) => QueryExpr::Revoke(s),
             SqlCommand::AlterUser(s) => QueryExpr::AlterUser(s),
+            SqlCommand::CreateUser(s) => QueryExpr::CreateUser(s),
             SqlCommand::IamPolicy(e) => e,
             SqlCommand::CreateMigration(q) => QueryExpr::CreateMigration(q),
             SqlCommand::ApplyMigration(q) => QueryExpr::ApplyMigration(q),
@@ -1618,8 +1725,8 @@ impl SqlCommand {
             SqlCommand::SetConfig { key, value } => {
                 SqlStatement::Admin(SqlAdminCommand::SetConfig { key, value })
             }
-            SqlCommand::ShowConfig { prefix } => {
-                SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix })
+            SqlCommand::ShowConfig { prefix, as_json } => {
+                SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix, as_json })
             }
             SqlCommand::SetSecret { key, value } => {
                 SqlStatement::Admin(SqlAdminCommand::SetSecret { key, value })
@@ -1661,6 +1768,7 @@ impl SqlCommand {
             SqlCommand::Grant(s) => SqlStatement::Admin(SqlAdminCommand::Grant(s)),
             SqlCommand::Revoke(s) => SqlStatement::Admin(SqlAdminCommand::Revoke(s)),
             SqlCommand::AlterUser(s) => SqlStatement::Admin(SqlAdminCommand::AlterUser(s)),
+            SqlCommand::CreateUser(s) => SqlStatement::Admin(SqlAdminCommand::CreateUser(s)),
             SqlCommand::IamPolicy(e) => SqlStatement::Admin(SqlAdminCommand::IamPolicy(e)),
             SqlCommand::CreateMigration(q) => {
                 SqlStatement::Schema(SqlSchemaCommand::CreateMigration(q))
@@ -1935,6 +2043,14 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if matches!(self.peek(), Token::Kv) {
+                    match self.parse_kv_list_after_list()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: LIST KV produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else if matches!(
                     self.peek(),
                     Token::Ident(name) if name.eq_ignore_ascii_case("VAULT")
@@ -1950,7 +2066,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     Err(ParseError::expected(
-                        vec!["CONFIG", "VAULT"],
+                        vec!["CONFIG", "KV", "VAULT"],
                         self.peek(),
                         self.position(),
                     ))
@@ -1973,6 +2089,14 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if matches!(self.peek(), Token::Kv) {
+                    match self.parse_kv_list_after_list()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: LIST KV produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else if matches!(
                     self.peek(),
                     Token::Ident(name) if name.eq_ignore_ascii_case("VAULT")
@@ -1988,7 +2112,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     Err(ParseError::expected(
-                        vec!["CONFIG", "VAULT"],
+                        vec!["CONFIG", "KV", "VAULT"],
                         self.peek(),
                         self.position(),
                     ))
@@ -2393,6 +2517,16 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn normalize_secret_admin_path(path: String) -> String {
+        if let Some(rest) = path.strip_prefix("red.secrets.") {
+            format!("red.secret.{rest}")
+        } else if path == "red.secrets" {
+            "red.secret".to_string()
+        } else {
+            path
+        }
+    }
+
     /// Parse any SQL/RQL-style command through a single frontend module.
     /// Parse a `CREATE ...` statement. Split out of
     /// [`parse_sql_command`] so its very large per-arm locals
@@ -2506,7 +2640,10 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        if self.check(&Token::Index) || self.check(&Token::Unique) {
+        if matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("USER")) {
+            let stmt = self.parse_create_user_statement()?;
+            Ok(SqlCommand::CreateUser(stmt))
+        } else if self.check(&Token::Index) || self.check(&Token::Unique) {
             match self.parse_create_index_query()? {
                 QueryExpr::CreateIndex(query) => Ok(SqlCommand::CreateIndex(query)),
                 other => Err(ParseError::new(
@@ -2890,6 +3027,7 @@ impl<'a> Parser<'a> {
                     "FILTER",
                     "SCHEMA",
                     "SEQUENCE",
+                    "USER",
                     "MIGRATION",
                 ],
                 self.peek(),
@@ -2935,7 +3073,8 @@ impl<'a> Parser<'a> {
                 {
                     self.advance()?; // DELETE
                     self.advance()?; // SECRET
-                    let key = self.parse_dotted_admin_path(true)?;
+                    let key =
+                        Self::normalize_secret_admin_path(self.parse_dotted_admin_path(true)?);
                     Ok(SqlCommand::DeleteSecret { key })
                 } else {
                     match self.parse_delete_query()? {
@@ -3442,7 +3581,8 @@ impl<'a> Parser<'a> {
                         value,
                     })
                 } else if self.consume_ident_ci("SECRET")? {
-                    let key = self.parse_dotted_admin_path(true)?;
+                    let key =
+                        Self::normalize_secret_admin_path(self.parse_dotted_admin_path(true)?);
                     self.expect(Token::Eq)?;
                     let value = self.parse_literal_value()?;
                     Ok(SqlCommand::SetSecret { key, value })
@@ -3540,7 +3680,10 @@ impl<'a> Parser<'a> {
                     // Accept dotted prefixes the same way SET CONFIG does
                     // (`SHOW CONFIG durability.mode`), and empty prefix
                     // (`SHOW CONFIG`) for a catalog-wide listing.
-                    let prefix = if !self.check(&Token::Eof) {
+                    let prefix = if !(self.check(&Token::Eof)
+                        || self.check(&Token::As)
+                        || self.check(&Token::Format))
+                    {
                         let first = self.expect_ident()?;
                         let mut full = first;
                         while self.consume(&Token::Dot)? {
@@ -3553,7 +3696,19 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    Ok(SqlCommand::ShowConfig { prefix })
+                    let as_json = if self.consume(&Token::As)? || self.consume(&Token::Format)? {
+                        if !self.consume(&Token::Json)? {
+                            return Err(ParseError::expected(
+                                vec!["JSON"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        true
+                    } else {
+                        false
+                    };
+                    Ok(SqlCommand::ShowConfig { prefix, as_json })
                 } else if self.consume_ident_ci("COLLECTIONS")? {
                     let mut query = TableQuery::new("red.collections");
                     let include_internal = if self.consume_ident_ci("INCLUDING")? {
@@ -3749,7 +3904,9 @@ impl<'a> Parser<'a> {
                     Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
-                        Some(self.parse_dotted_admin_path(true)?)
+                        Some(Self::normalize_secret_admin_path(
+                            self.parse_dotted_admin_path(true)?,
+                        ))
                     } else {
                         None
                     };

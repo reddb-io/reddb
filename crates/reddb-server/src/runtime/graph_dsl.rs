@@ -21,8 +21,8 @@ pub(super) fn materialize_graph_with_projection(
         .and_then(|projection| normalize_token_filter_list(projection.node_labels.clone()));
     let node_type_filters = projection
         .and_then(|projection| normalize_token_filter_list(projection.node_types.clone()));
-    let edge_label_filters = projection
-        .and_then(|projection| normalize_token_filter_list(projection.edge_labels.clone()));
+    let edge_label_filters =
+        projection.and_then(|projection| normalize_edge_filters(projection.edge_labels.clone()));
     let mut allowed_nodes = HashSet::new();
 
     for (_, entity) in &entities {
@@ -400,7 +400,7 @@ pub(super) fn normalize_edge_filters(edge_labels: Option<Vec<String>>) -> Option
         .map(|labels| {
             labels
                 .into_iter()
-                .map(|label| normalize_graph_token(&label))
+                .map(|label| normalize_graph_token(&graph_edge_label(&label)))
                 .filter(|label| !label.is_empty())
                 .collect()
         })
@@ -417,8 +417,8 @@ pub(super) fn merge_edge_filters(
         merged.extend(filters);
     }
 
-    if let Some(filters) = projection
-        .and_then(|projection| normalize_token_filter_list(projection.edge_labels.clone()))
+    if let Some(filters) =
+        projection.and_then(|projection| normalize_edge_filters(projection.edge_labels.clone()))
     {
         merged.extend(filters);
     }

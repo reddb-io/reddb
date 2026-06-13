@@ -10,11 +10,21 @@
 
 use reddb::auth::privileges::{Action, GrantPrincipal, Resource};
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
+use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::storage::query::{GrantObjectKind, GrantPrincipalRef, Parser, QueryExpr};
+use reddb::{RedDBOptions, RedDBRuntime};
+use std::sync::Arc;
 
 fn parse(sql: &str) -> QueryExpr {
     let mut p = Parser::new(sql).expect("parser construct");
     p.parse().expect("parse")
+}
+
+fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
+    set_current_auth_identity(name.to_string(), role);
+    let out = f();
+    clear_current_auth_identity();
+    out
 }
 
 #[test]
@@ -92,6 +102,25 @@ fn revoke_grant_option_for_parses() {
         other => panic!("expected Revoke, got {:?}", other),
     };
     assert!(r.grant_option_for);
+}
+
+#[test]
+fn create_user_rql_creates_tenant_scoped_user() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    let store = Arc::new(AuthStore::new(AuthConfig::default()));
+    store.create_user("admin", "p", Role::Admin).unwrap();
+    rt.set_auth_store(Arc::clone(&store));
+
+    let result = as_user("admin", Role::Admin, || {
+        rt.execute_query("CREATE USER acme.alice WITH PASSWORD 'secret' ROLE write")
+    })
+    .expect("create user through RQL");
+
+    assert_eq!(result.statement, "create_user");
+    let alice = store.get_user(Some("acme"), "alice").expect("alice exists");
+    assert_eq!(alice.tenant_id.as_deref(), Some("acme"));
+    assert_eq!(alice.role, Role::Write);
+    assert!(alice.enabled);
 }
 
 #[test]

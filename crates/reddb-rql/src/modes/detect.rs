@@ -108,6 +108,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("rotate vault ")
         || lower.starts_with("history vault ")
         || lower.starts_with("list vault ")
+        || lower.starts_with("list kv ")
         || lower.starts_with("watch vault ")
         || lower.starts_with("delete vault ")
         || lower.starts_with("purge vault ")
@@ -326,6 +327,10 @@ mod tests {
         assert_eq!(detect_mode("SHOW SECRET red.secret"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SECRETS"), QueryMode::Sql);
         assert_eq!(detect_mode("VAULT PUT secrets.api = 'x'"), QueryMode::Sql);
+        assert_eq!(
+            detect_mode("LIST KV settings PREFIX feature LIMIT 10"),
+            QueryMode::Sql
+        );
         assert_eq!(detect_mode("SHOW SAMPLE users"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW TABLES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW QUEUES"), QueryMode::Sql);

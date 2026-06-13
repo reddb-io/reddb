@@ -129,6 +129,61 @@ fn runtime_queries_document_fields_json_paths_arrays_and_groups() {
 }
 
 #[test]
+fn runtime_indexes_nested_document_path_filters() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT events");
+    exec(
+        &rt,
+        r#"INSERT INTO events DOCUMENT (body) VALUES
+        ('{"level":"error","service":{"name":"checkout","tier":"edge"},"latency_ms":42}'),
+        ('{"level":"info","service":{"name":"checkout","tier":"edge"},"latency_ms":7}'),
+        ('{"level":"error","service":{"name":"billing","tier":"core"},"latency_ms":99}')"#,
+    );
+    exec(
+        &rt,
+        "CREATE INDEX idx_events_service_tier ON events (body.service.tier)",
+    );
+
+    let indexes = exec(&rt, "SHOW INDEXES ON events");
+    let index = indexes
+        .result
+        .records
+        .iter()
+        .find(|record| text(record, "name") == "idx_events_service_tier")
+        .expect("idx_events_service_tier should be listed");
+    assert_eq!(int(index, "entries_indexed"), 3);
+
+    let explain = exec(
+        &rt,
+        "EXPLAIN SELECT body.level AS severity FROM events WHERE body.service.tier = 'edge'",
+    );
+    let plan_ops = explain
+        .result
+        .records
+        .iter()
+        .filter_map(|record| match record.get("op") {
+            Some(Value::Text(value)) => Some(value.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(
+        plan_ops.contains("index_seek"),
+        "nested document path filter should plan through an index; ops={plan_ops}"
+    );
+
+    let filtered = exec(
+        &rt,
+        "SELECT body.level AS severity FROM events \
+         WHERE body.service.tier = 'edge' \
+         ORDER BY body.latency_ms",
+    );
+    assert_eq!(filtered.result.records.len(), 2);
+    assert_eq!(text(&filtered.result.records[0], "severity"), "info");
+    assert_eq!(text(&filtered.result.records[1], "severity"), "error");
+}
+
+#[test]
 fn http_query_document_fields_json_paths_arrays_and_groups() {
     let addr = spawn_http_server();
     post_query(&addr, "CREATE DOCUMENT events");

@@ -600,6 +600,47 @@ impl<'a> KvAtomicOps<'a> {
         Ok(None)
     }
 
+    fn latest_kv_entries(
+        &self,
+        collection: &str,
+        prefix: Option<&str>,
+    ) -> RedDBResult<Vec<(String, crate::storage::UnifiedEntity)>> {
+        self.ensure_declared_model(crate::catalog::CollectionModel::Kv, collection)?;
+        let store = self.runtime.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(Vec::new());
+        };
+        let mut entries: std::collections::BTreeMap<String, crate::storage::UnifiedEntity> =
+            std::collections::BTreeMap::new();
+        for entity in manager.query_all(|_| true) {
+            let key = match &entity.data {
+                crate::storage::EntityData::Row(row) => row
+                    .named
+                    .as_ref()
+                    .and_then(|named| named.get("key"))
+                    .and_then(|value| match value {
+                        crate::storage::schema::Value::Text(key) => Some(key.to_string()),
+                        _ => None,
+                    }),
+                _ => None,
+            };
+            let Some(key) = key else {
+                continue;
+            };
+            if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
+                continue;
+            }
+            let should_replace = match entries.get(&key) {
+                Some(existing) => entity.id.raw() >= existing.id.raw(),
+                None => true,
+            };
+            if should_replace {
+                entries.insert(key, entity);
+            }
+        }
+        Ok(entries.into_iter().collect())
+    }
+
     fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
         self.vault_versions(collection, key)
             .map(super::keyed_spine::latest_version)
@@ -1459,74 +1500,151 @@ impl RedDBRuntime {
                 prefix,
                 limit,
                 offset,
+                as_json,
             } => {
-                if *model != crate::catalog::CollectionModel::Vault {
-                    return Err(RedDBError::InvalidOperation(
-                        "LIST is not supported through normal KV command execution".to_string(),
-                    ));
-                }
-                let mut entries = ops.latest_vault_entries(collection, prefix.as_deref())?;
-                entries.sort_by(|left, right| left.key.cmp(&right.key));
-                let mut result = UnifiedResult::with_columns(vec![
-                    "collection".into(),
-                    "key".into(),
-                    "version".into(),
-                    "fingerprint".into(),
-                    "tags".into(),
-                    "created_at".into(),
-                    "updated_at".into(),
-                    "status".into(),
-                    "tombstone".into(),
-                    "op".into(),
-                ]);
-                let mut visible = Vec::new();
-                for entry in entries {
-                    match self.check_vault_capability("vault:read_metadata", collection, &entry.key)
-                    {
-                        Ok(()) => {
-                            self.emit_vault_control_event(
-                                crate::runtime::control_events::EventKind::VaultMetadataRead,
-                                crate::runtime::control_events::Outcome::Allowed,
-                                "vault:read_metadata",
-                                collection,
-                                &entry.key,
-                                "ok",
-                                Some(&entry),
-                                Vec::new(),
-                            )?;
-                            visible.push(entry);
-                        }
-                        Err(reason) => {
-                            self.emit_vault_control_event(
-                                crate::runtime::control_events::EventKind::VaultMetadataRead,
-                                crate::runtime::control_events::Outcome::Denied,
-                                "vault:read_metadata",
-                                collection,
-                                &entry.key,
-                                &reason,
-                                Some(&entry),
-                                Vec::new(),
-                            )?;
+                if *model == crate::catalog::CollectionModel::Vault {
+                    if *as_json {
+                        return Err(RedDBError::Query(
+                            "LIST VAULT AS JSON is not supported; vault list only exposes metadata"
+                                .to_string(),
+                        ));
+                    }
+                    let mut entries = ops.latest_vault_entries(collection, prefix.as_deref())?;
+                    entries.sort_by(|left, right| left.key.cmp(&right.key));
+                    let mut result = UnifiedResult::with_columns(vec![
+                        "collection".into(),
+                        "key".into(),
+                        "version".into(),
+                        "fingerprint".into(),
+                        "tags".into(),
+                        "created_at".into(),
+                        "updated_at".into(),
+                        "status".into(),
+                        "tombstone".into(),
+                        "op".into(),
+                    ]);
+                    let mut visible = Vec::new();
+                    for entry in entries {
+                        match self.check_vault_capability(
+                            "vault:read_metadata",
+                            collection,
+                            &entry.key,
+                        ) {
+                            Ok(()) => {
+                                self.emit_vault_control_event(
+                                    crate::runtime::control_events::EventKind::VaultMetadataRead,
+                                    crate::runtime::control_events::Outcome::Allowed,
+                                    "vault:read_metadata",
+                                    collection,
+                                    &entry.key,
+                                    "ok",
+                                    Some(&entry),
+                                    Vec::new(),
+                                )?;
+                                visible.push(entry);
+                            }
+                            Err(reason) => {
+                                self.emit_vault_control_event(
+                                    crate::runtime::control_events::EventKind::VaultMetadataRead,
+                                    crate::runtime::control_events::Outcome::Denied,
+                                    "vault:read_metadata",
+                                    collection,
+                                    &entry.key,
+                                    &reason,
+                                    Some(&entry),
+                                    Vec::new(),
+                                )?;
+                            }
                         }
                     }
+                    for entry in visible
+                        .into_iter()
+                        .skip(*offset)
+                        .take(limit.unwrap_or(usize::MAX))
+                    {
+                        push_vault_metadata_record(&mut result, collection, &entry.key, &entry);
+                    }
+                    return Ok(RuntimeQueryResult {
+                        query: raw_query.to_string(),
+                        mode: crate::storage::query::modes::QueryMode::Sql,
+                        statement: "vault_list",
+                        engine: "vault",
+                        result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                        bookmark: None,
+                    });
+                } else {
+                    let mut result = UnifiedResult::with_columns(vec![
+                        "rid".into(),
+                        "collection".into(),
+                        "kind".into(),
+                        "tenant".into(),
+                        "created_at".into(),
+                        "updated_at".into(),
+                        "key".into(),
+                        "value".into(),
+                        "tags".into(),
+                    ]);
+                    let entries = ops.latest_kv_entries(collection, prefix.as_deref())?;
+                    if *as_json {
+                        let mut tree = crate::json::Value::Object(crate::json::Map::new());
+                        for (key, entity) in entries
+                            .into_iter()
+                            .skip(*offset)
+                            .take(limit.unwrap_or(usize::MAX))
+                        {
+                            let Some(value) = kv_value_from_entity(&entity) else {
+                                continue;
+                            };
+                            let relative = match prefix {
+                                Some(pfx) if key == *pfx => "",
+                                Some(pfx) => key
+                                    .strip_prefix(pfx.as_str())
+                                    .map(|tail| tail.strip_prefix('.').unwrap_or(tail))
+                                    .unwrap_or(key.as_str()),
+                                None => key.as_str(),
+                            };
+                            insert_kv_json_path(
+                                &mut tree,
+                                relative,
+                                crate::presentation::entity_json::storage_value_to_json(&value),
+                            );
+                        }
+                        return Ok(kv_list_json_result(raw_query, collection, prefix, tree));
+                    }
+                    for (key, entity) in entries
+                        .into_iter()
+                        .skip(*offset)
+                        .take(limit.unwrap_or(usize::MAX))
+                    {
+                        let mut record = UnifiedRecord::new();
+                        record.set("rid", Value::UnsignedInteger(entity.id.raw()));
+                        record.set("collection", Value::text(collection.clone()));
+                        record.set("kind", Value::text("kv"));
+                        record.set("tenant", Value::Null);
+                        record.set("created_at", Value::UnsignedInteger(entity.created_at));
+                        record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+                        record.set("key", Value::text(key.clone()));
+                        record.set(
+                            "value",
+                            kv_value_from_entity(&entity)
+                                .unwrap_or(crate::storage::schema::Value::Null),
+                        );
+                        record.set("tags", kv_tags_value(&ops.tags_for_key(collection, &key)));
+                        result.push(record);
+                    }
+                    return Ok(RuntimeQueryResult {
+                        query: raw_query.to_string(),
+                        mode: crate::storage::query::modes::QueryMode::Sql,
+                        statement: "kv_list",
+                        engine: "kv",
+                        result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                        bookmark: None,
+                    });
                 }
-                for entry in visible
-                    .into_iter()
-                    .skip(*offset)
-                    .take(limit.unwrap_or(usize::MAX))
-                {
-                    push_vault_metadata_record(&mut result, collection, &entry.key, &entry);
-                }
-                Ok(RuntimeQueryResult {
-                    query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
-                    statement: "vault_list",
-                    engine: "vault",
-                    result,
-                    affected_rows: 0,
-                    statement_type: "select",
-                    bookmark: None,
-                })
             }
 
             KvCommand::History { collection, key } => {
@@ -2506,6 +2624,72 @@ fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value>
         }
     }
     None
+}
+
+fn insert_kv_json_path(root: &mut crate::json::Value, path: &str, value: crate::json::Value) {
+    let segments: Vec<&str> = path
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    insert_kv_json_segments(root, &segments, value);
+}
+
+fn insert_kv_json_segments(
+    root: &mut crate::json::Value,
+    segments: &[&str],
+    value: crate::json::Value,
+) {
+    if segments.is_empty() {
+        *root = value;
+        return;
+    }
+
+    if !matches!(root, crate::json::Value::Object(_)) {
+        *root = crate::json::Value::Object(crate::json::Map::new());
+    }
+
+    let crate::json::Value::Object(map) = root else {
+        return;
+    };
+    if segments.len() == 1 {
+        map.insert(segments[0].to_string(), value);
+        return;
+    }
+    let entry = map
+        .entry(segments[0].to_string())
+        .or_insert_with(|| crate::json::Value::Object(crate::json::Map::new()));
+    insert_kv_json_segments(entry, &segments[1..], value);
+}
+
+fn kv_list_json_result(
+    raw_query: &str,
+    collection: &str,
+    prefix: &Option<String>,
+    value: crate::json::Value,
+) -> RuntimeQueryResult {
+    let mut result =
+        UnifiedResult::with_columns(vec!["collection".into(), "prefix".into(), "value".into()]);
+    let mut record = UnifiedRecord::new();
+    record.set("collection", Value::text(collection.to_string()));
+    record.set(
+        "prefix",
+        prefix
+            .as_ref()
+            .map(|prefix| Value::text(prefix.clone()))
+            .unwrap_or(Value::Null),
+    );
+    record.set("value", Value::Json(value.to_string_compact().into_bytes()));
+    result.push(record);
+    RuntimeQueryResult {
+        query: raw_query.to_string(),
+        mode: crate::storage::query::modes::QueryMode::Sql,
+        statement: "kv_list_json",
+        engine: "kv",
+        result,
+        affected_rows: 0,
+        statement_type: "select",
+        bookmark: None,
+    }
 }
 
 fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {

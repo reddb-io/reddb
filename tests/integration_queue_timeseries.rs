@@ -940,6 +940,8 @@ fn test_queue_mode_visible_in_red_collections() {
 
     exec(&rt, "CREATE QUEUE notifications FANOUT");
     exec(&rt, "CREATE QUEUE tasks WORK");
+    exec(&rt, "CREATE QUEUE standard_tasks STANDARD");
+    exec(&rt, "CREATE QUEUE fifo_tasks FIFO");
 
     let result = exec(
         &rt,
@@ -959,6 +961,14 @@ fn test_queue_mode_visible_in_red_collections() {
         Some("fanout")
     );
     assert_eq!(queue_modes.get("tasks").map(String::as_str), Some("work"));
+    assert_eq!(
+        queue_modes.get("standard_tasks").map(String::as_str),
+        Some("work")
+    );
+    assert_eq!(
+        queue_modes.get("fifo_tasks").map(String::as_str),
+        Some("work")
+    );
 }
 
 #[test]

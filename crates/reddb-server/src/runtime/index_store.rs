@@ -7,6 +7,7 @@
 //! the IndexStore finds the right index and returns matching entity IDs.
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
@@ -1166,6 +1167,11 @@ impl IndexStore {
         entities: &[(EntityId, Vec<(String, Value)>)],
     ) -> Result<usize, String> {
         let col = columns.first().map(|s| s.as_str()).unwrap_or("");
+        if columns.len() > 1 && columns.iter().any(|column| column.contains('.')) {
+            return Err(
+                "document path indexes currently support a single indexed column".to_string(),
+            );
+        }
 
         match method {
             IndexMethodKind::Hash => {
@@ -1181,14 +1187,12 @@ impl IndexStore {
                 // Index existing entities
                 let mut count = 0;
                 for (entity_id, fields) in entities {
-                    for (field_name, value) in fields {
-                        if field_name == col {
-                            let key = value_to_bytes(value);
-                            self.hash
-                                .insert(collection, name, key, *entity_id)
-                                .map_err(|err| err.to_string())?;
-                            count += 1;
-                        }
+                    if let Some(value) = index_field_value(fields, col) {
+                        let key = value_to_bytes(value.as_ref());
+                        self.hash
+                            .insert(collection, name, key, *entity_id)
+                            .map_err(|err| err.to_string())?;
+                        count += 1;
                     }
                 }
                 Ok(count)
@@ -1198,14 +1202,12 @@ impl IndexStore {
 
                 let mut count = 0;
                 for (entity_id, fields) in entities {
-                    for (field_name, value) in fields {
-                        if field_name == col {
-                            let key = value_to_bytes(value);
-                            self.bitmap
-                                .insert(collection, col, *entity_id, &key)
-                                .map_err(|err| err.to_string())?;
-                            count += 1;
-                        }
+                    if let Some(value) = index_field_value(fields, col) {
+                        let key = value_to_bytes(value.as_ref());
+                        self.bitmap
+                            .insert(collection, col, *entity_id, &key)
+                            .map_err(|err| err.to_string())?;
+                        count += 1;
                     }
                 }
                 Ok(count)
@@ -1226,7 +1228,14 @@ impl IndexStore {
                     return Ok(count);
                 }
                 // Build sorted in-memory index for range scans (single col)
-                let count = self.sorted.build_index(collection, col, entities);
+                let derived_entities;
+                let sorted_entities = if col.contains('.') {
+                    derived_entities = derive_index_entities_for_column(entities, col);
+                    derived_entities.as_slice()
+                } else {
+                    entities
+                };
+                let count = self.sorted.build_index(collection, col, sorted_entities);
                 // Also build hash index for equality lookups on same column
                 self.hash
                     .create_index(&HashIndexConfig {
@@ -1237,13 +1246,11 @@ impl IndexStore {
                     })
                     .map_err(|err| err.to_string())?;
                 for (entity_id, fields) in entities {
-                    for (field_name, value) in fields {
-                        if field_name == col {
-                            let key = value_to_bytes(value);
-                            self.hash
-                                .insert(collection, &format!("{name}_hash"), key, *entity_id)
-                                .map_err(|err| err.to_string())?;
-                        }
+                    if let Some(value) = index_field_value(fields, col) {
+                        let key = value_to_bytes(value.as_ref());
+                        self.hash
+                            .insert(collection, &format!("{name}_hash"), key, *entity_id)
+                            .map_err(|err| err.to_string())?;
                     }
                 }
                 Ok(count)
@@ -1439,11 +1446,8 @@ impl IndexStore {
             let btree_hash_name =
                 matches!(idx.method, IndexMethodKind::BTree).then(|| format!("{}_hash", idx.name));
             for (entity_id, fields) in rows {
-                for (field_name, value) in fields {
-                    if field_name != col {
-                        continue;
-                    }
-                    let key = value_to_bytes(value);
+                if let Some(value) = index_field_value(fields, col) {
+                    let key = value_to_bytes(value.as_ref());
                     match idx.method {
                         IndexMethodKind::Hash => {
                             self.hash
@@ -1461,7 +1465,8 @@ impl IndexStore {
                                     "sorted index for collection '{collection}' column '{col}' was not found"
                                 ));
                             }
-                            self.sorted.insert_one(collection, col, value, *entity_id);
+                            self.sorted
+                                .insert_one(collection, col, value.as_ref(), *entity_id);
                             let hash_name = btree_hash_name.as_deref().unwrap_or("");
                             self.hash
                                 .insert(collection, hash_name, key, *entity_id)
@@ -1469,9 +1474,6 @@ impl IndexStore {
                         }
                         IndexMethodKind::Spatial => {}
                     }
-                    // Column names are unique per row — early-exit
-                    // the inner field scan.
-                    break;
                 }
             }
         }
@@ -1503,33 +1505,32 @@ impl IndexStore {
             }
 
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
-            for (field_name, value) in fields {
-                if field_name == col {
-                    let key = value_to_bytes(value);
-                    match idx.method {
-                        IndexMethodKind::Hash => {
-                            self.hash
-                                .insert(collection, &idx.name, key, entity_id)
-                                .map_err(|err| err.to_string())?;
-                        }
-                        IndexMethodKind::Bitmap => {
-                            self.bitmap
-                                .insert(collection, col, entity_id, &key)
-                                .map_err(|err| err.to_string())?;
-                        }
-                        IndexMethodKind::BTree => {
-                            if !self.sorted.has_index(collection, col) {
-                                return Err(format!(
-                                    "sorted index for collection '{collection}' column '{col}' was not found"
-                                ));
-                            }
-                            self.sorted.insert_one(collection, col, value, entity_id);
-                            self.hash
-                                .insert(collection, &format!("{}_hash", idx.name), key, entity_id)
-                                .map_err(|err| err.to_string())?;
-                        }
-                        IndexMethodKind::Spatial => {}
+            if let Some(value) = index_field_value(fields, col) {
+                let key = value_to_bytes(value.as_ref());
+                match idx.method {
+                    IndexMethodKind::Hash => {
+                        self.hash
+                            .insert(collection, &idx.name, key, entity_id)
+                            .map_err(|err| err.to_string())?;
                     }
+                    IndexMethodKind::Bitmap => {
+                        self.bitmap
+                            .insert(collection, col, entity_id, &key)
+                            .map_err(|err| err.to_string())?;
+                    }
+                    IndexMethodKind::BTree => {
+                        if !self.sorted.has_index(collection, col) {
+                            return Err(format!(
+                                "sorted index for collection '{collection}' column '{col}' was not found"
+                            ));
+                        }
+                        self.sorted
+                            .insert_one(collection, col, value.as_ref(), entity_id);
+                        self.hash
+                            .insert(collection, &format!("{}_hash", idx.name), key, entity_id)
+                            .map_err(|err| err.to_string())?;
+                    }
+                    IndexMethodKind::Spatial => {}
                 }
             }
         }
@@ -1567,28 +1568,27 @@ impl IndexStore {
             }
 
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
-            for (field_name, value) in fields {
-                if field_name == col {
-                    let key = value_to_bytes(value);
-                    match idx.method {
-                        IndexMethodKind::Hash => {
-                            // Missing index on delete is non-fatal.
-                            let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
-                        }
-                        IndexMethodKind::Bitmap => {
-                            let _ = self.bitmap.remove(collection, col, entity_id);
-                        }
-                        IndexMethodKind::BTree => {
-                            self.sorted.delete_one(collection, col, value, entity_id);
-                            let _ = self.hash.remove(
-                                collection,
-                                &format!("{}_hash", idx.name),
-                                &key,
-                                entity_id,
-                            );
-                        }
-                        IndexMethodKind::Spatial => {}
+            if let Some(value) = index_field_value(fields, col) {
+                let key = value_to_bytes(value.as_ref());
+                match idx.method {
+                    IndexMethodKind::Hash => {
+                        // Missing index on delete is non-fatal.
+                        let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
                     }
+                    IndexMethodKind::Bitmap => {
+                        let _ = self.bitmap.remove(collection, col, entity_id);
+                    }
+                    IndexMethodKind::BTree => {
+                        self.sorted
+                            .delete_one(collection, col, value.as_ref(), entity_id);
+                        let _ = self.hash.remove(
+                            collection,
+                            &format!("{}_hash", idx.name),
+                            &key,
+                            entity_id,
+                        );
+                    }
+                    IndexMethodKind::Spatial => {}
                 }
             }
         }
@@ -1753,6 +1753,36 @@ impl SecondaryIndexBackend for IndexStore {
             IncMethodKind::Spatial => {}
         }
     }
+}
+
+fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<Cow<'a, Value>> {
+    if let Some((_, value)) = fields.iter().find(|(field, _)| field == column) {
+        return Some(Cow::Borrowed(value));
+    }
+    if !column.contains('.') {
+        return None;
+    }
+
+    let segments = super::join_filter::parse_runtime_document_path(column);
+    let (root, tail) = segments.split_first()?;
+    if tail.is_empty() {
+        return None;
+    }
+    let (_, root_value) = fields.iter().find(|(field, _)| field == root)?;
+    super::join_filter::resolve_runtime_document_path_from_value(root_value, tail).map(Cow::Owned)
+}
+
+fn derive_index_entities_for_column(
+    entities: &[(EntityId, Vec<(String, Value)>)],
+    column: &str,
+) -> Vec<(EntityId, Vec<(String, Value)>)> {
+    entities
+        .iter()
+        .filter_map(|(entity_id, fields)| {
+            index_field_value(fields, column)
+                .map(|value| (*entity_id, vec![(column.to_string(), value.into_owned())]))
+        })
+        .collect()
 }
 
 /// Convert a Value to bytes for index key
