@@ -9,9 +9,11 @@ use crate::runtime::impl_core::{
     clear_current_auth_identity, clear_current_tenant, current_auth_identity, current_tenant,
     set_current_auth_identity, set_current_tenant,
 };
+use crate::runtime::queue_telemetry::NackOutcomeLabel;
 use crate::storage::queue::QueueMode;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
+use crate::telemetry::operator_event::OperatorEvent;
 
 use super::*;
 
@@ -40,7 +42,8 @@ pub(super) fn runtime_lifecycle(
     let txn = primary_for_lifecycle.new_txn();
     let cfg = primary_for_lifecycle.lifecycle_config(queue);
     (
-        QueueLifecycle::new(primary_for_lifecycle, cfg),
+        QueueLifecycle::new(primary_for_lifecycle, cfg)
+            .with_telemetry(Arc::clone(&runtime.inner.queue_telemetry)),
         primary_for_lookup,
         txn,
     )
@@ -1435,6 +1438,8 @@ impl RedDBRuntime {
                 // override wins, then queue default, then zero
                 // (immediate requeue — pre-#723 behavior).
                 let effective_delay_ms = delay_ms.or(config.retry_delay_ms).unwrap_or(0);
+                let pending_attempt = ps.read_pending_attempt(&did).map_err(map_qse)?;
+                let nack_attempts = pending_attempt.attempts.saturating_add(1);
                 let outcome = lifecycle.nack(&txn, &did).map_err(map_qse)?;
                 // Apply delay only when the message was actually
                 // requeued — DLQ promotion / drop terminate the
@@ -1464,6 +1469,28 @@ impl RedDBRuntime {
                     config.retry_delay_ms,
                     &outcome,
                 );
+                let outcome_label = match &outcome {
+                    RetirementOutcome::Requeued => NackOutcomeLabel::Retry,
+                    RetirementOutcome::MovedToDlq(_) => NackOutcomeLabel::Dlq,
+                    RetirementOutcome::Dropped => NackOutcomeLabel::Drop,
+                };
+                self.queue_telemetry().record_nacked(
+                    queue,
+                    group_ref,
+                    config.mode.as_str(),
+                    outcome_label,
+                );
+                if let RetirementOutcome::MovedToDlq(dlq) = &outcome {
+                    OperatorEvent::QueueDlqPromoted {
+                        queue: queue.to_string(),
+                        group: group_ref.to_string(),
+                        dlq: dlq.clone(),
+                        message_id: pending_attempt.message_id,
+                        attempts: nack_attempts,
+                        reason: format!("lifecycle_nack:{did}"),
+                    }
+                    .emit_global();
+                }
                 let message = match outcome {
                     RetirementOutcome::Requeued => {
                         if effective_delay_ms > 0 {
