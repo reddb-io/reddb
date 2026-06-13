@@ -133,6 +133,10 @@ mod tests {
         else {
             panic!("Expected CreateIndexQuery");
         };
+        assert!(
+            matches!(parser.peek(), Token::Eof),
+            "CREATE INDEX parse did not consume all input: {input:?}"
+        );
         query
     }
 
@@ -145,6 +149,10 @@ mod tests {
         else {
             panic!("Expected DropIndexQuery");
         };
+        assert!(
+            matches!(parser.peek(), Token::Eof),
+            "DROP INDEX parse did not consume all input: {input:?}"
+        );
         query
     }
 
