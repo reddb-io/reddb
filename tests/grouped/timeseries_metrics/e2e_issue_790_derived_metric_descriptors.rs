@@ -18,6 +18,7 @@
 //! * The descriptor itself is reachable through `red.analytics.metrics`
 //!   even when the output read is unsupported.
 
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;
