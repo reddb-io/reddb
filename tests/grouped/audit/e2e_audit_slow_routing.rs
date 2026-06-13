@@ -16,6 +16,7 @@ use reddb::{
 };
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 // Tier toggles + global audit sink are process-globals — serialise the
