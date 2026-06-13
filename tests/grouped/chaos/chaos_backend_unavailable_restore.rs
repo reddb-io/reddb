@@ -8,6 +8,7 @@
 //! a freshly-rotated bucket or misconfigured `RED_BACKEND` would hit.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::backend::{BackendError, LocalBackend};

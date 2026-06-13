@@ -11,6 +11,7 @@ use reddb::replication::logical::{
 use reddb::storage::RedDB;
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 fn temp_path(prefix: &str) -> support::TempDbFile {
