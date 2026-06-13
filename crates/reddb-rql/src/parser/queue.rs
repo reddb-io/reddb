@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
     /// Parse ALTER QUEUE body (after ALTER QUEUE consumed)
     ///
     /// Syntax: `ALTER QUEUE <name> SET <clause>` where `<clause>` is one of
-    ///   `MODE <WORK|FANOUT>`
+    ///   `MODE <WORK|STANDARD|FIFO|FANOUT>`
     ///   `MAX_ATTEMPTS <int>`
     ///   `LOCK_DEADLINE_MS <int>`
     ///   `IN_FLIGHT_CAP_PER_GROUP <int>`
@@ -568,7 +568,7 @@ impl<'a> Parser<'a> {
         match self.consume_queue_mode()? {
             Some(mode) => Ok(mode),
             None => Err(ParseError::expected(
-                vec!["FANOUT", "WORK"],
+                vec!["FANOUT", "WORK", "STANDARD", "FIFO"],
                 self.peek(),
                 self.position(),
             )),

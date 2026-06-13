@@ -46,11 +46,14 @@ fn resolve_table_row_by_logical_id(
 }
 
 fn projections_require_runtime_projection(projections: &[Projection]) -> bool {
-    projections.iter().any(|p| {
+    projections.iter().any(|projection| {
         matches!(
-            p,
+            projection,
             Projection::Function(_, _) | Projection::Expression(_, _) | Projection::Window { .. }
-        ) || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
+        ) || matches!(
+            projection,
+            Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:")
+        )
     })
 }
 
@@ -65,6 +68,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let effective_having = effective_table_having_filter(query);
     let requires_runtime_projection =
         projections_require_runtime_projection(&effective_projections);
+    let uses_document_projection =
+        runtime_projections_use_document_path(&effective_projections, query);
 
     // Hypertable chunk pruning (PRD #850, Phase 0): when this table is a
     // hypertable and the WHERE clause constrains the time column, consult
@@ -160,7 +165,28 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     records.truncate(limit as usize);
                 }
 
-                return Ok(records);
+                crate::runtime::window_phase::apply(
+                    Some(db),
+                    &mut records,
+                    &effective_projections,
+                    None,
+                    outer_alias,
+                )?;
+
+                return Ok(records
+                    .iter()
+                    .map(|record| {
+                        project_runtime_record_with_db(
+                            Some(db),
+                            record,
+                            &effective_projections,
+                            None,
+                            outer_alias,
+                            false,
+                            false,
+                        )
+                    })
+                    .collect());
             }
             other => {
                 return Err(RedDBError::Query(format!(
@@ -214,12 +240,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             extract_cross_index_predicates(filter, &query.table, idx_store)
         })
         .is_some();
-    if let (false, false, Some(idx_store), Some(ref filter), false) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false, false) = (
         requires_mvcc_index_fallback,
         requires_runtime_projection,
         index_store,
         &effective_filter,
         has_cross_index_candidate,
+        uses_document_projection,
     ) {
         let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
         let sorted_res = try_sorted_index_lookup(
@@ -377,11 +404,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Equivalent to PG's bitmap heap scan where two bitmap indexes are AND-ed
     // at word level before touching heap pages. Here we use HashSet instead of
     // actual bitmaps but the reduction in entity fetches is the same.
-    if let (false, false, Some(idx_store), Some(ref filter)) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false) = (
         requires_mvcc_index_fallback,
         requires_runtime_projection,
         index_store,
         &effective_filter,
+        uses_document_projection,
     ) {
         if let Some((eq_col, eq_bytes, range_filter)) =
             extract_cross_index_predicates(filter, &query.table, idx_store)
@@ -481,11 +509,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // - Optionally narrow further via sorted range scan filtered by the intersection set
     // - Fetch only the surviving rows; re-apply full compiled filter for residual predicates
     // Only fires when ≥2 indexed equality columns exist in the filter.
-    if let (false, false, Some(idx_store), Some(ref filter)) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false) = (
         requires_mvcc_index_fallback,
         requires_runtime_projection,
         index_store,
         &effective_filter,
+        uses_document_projection,
     ) {
         let mut eq_candidates: Vec<(String, Vec<u8>, crate::storage::schema::Value)> = Vec::new();
         extract_all_eq_candidates(filter, &mut eq_candidates);
@@ -614,11 +643,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── INDEX-ASSISTED PATH: use hash index for O(1) equality lookups ──
-    if let (false, false, Some(idx_store), Some(ref filter)) = (
+    if let (false, false, Some(idx_store), Some(ref filter), false) = (
         requires_mvcc_index_fallback,
         requires_runtime_projection,
         index_store,
         &effective_filter,
+        uses_document_projection,
     ) {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
             if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
@@ -844,6 +874,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         && effective_having.is_none()
         && query.expand.is_none()
         && !requires_runtime_projection
+        && !uses_document_projection
         && !is_universal_query_source(&query.table)
     {
         let manager = db
@@ -1136,17 +1167,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Skipped when the projection list contains scalar function calls
     // (e.g. VERIFY_PASSWORD(...), UPPER(...)), since the fast path
     // returns raw records without running project_runtime_record.
-    let has_scalar_function = effective_projections.iter().any(|p| {
-        matches!(
-            p,
-            Projection::Function(_, _) | Projection::Expression(_, _) | Projection::Window { .. }
-        ) || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
-    });
     if effective_filter.is_none()
         && effective_group_by.is_empty()
         && effective_having.is_none()
         && query.expand.is_none()
-        && !has_scalar_function
+        && !requires_runtime_projection
+        && !uses_document_projection
     {
         // LIMIT + OFFSET pushdown: pre-scan cap is `offset + limit` so
         // the scan loop stops once we have enough to skip + keep. ORDER
@@ -1214,10 +1240,14 @@ pub(crate) fn execute_runtime_canonical_table_node(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let effective_filter = effective_table_filter(context.query);
     let effective_projections = effective_table_projections(context.query);
+    let uses_document_projection =
+        runtime_projections_use_document_path(&effective_projections, context.query);
     match node.operator.as_str() {
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
             // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
-            if !projections_require_runtime_projection(&effective_projections) {
+            if !projections_require_runtime_projection(&effective_projections)
+                && !uses_document_projection
+            {
                 if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                     let entity = resolve_table_row_by_logical_id(
                         db,
@@ -1249,12 +1279,11 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 && !effective_filter.as_ref().is_some_and(|filter| {
                     runtime_filter_uses_document_path(filter, context.query)
                 })
-                && !effective_table_projections(context.query)
-                    .iter()
-                    .any(|p| {
+                && !effective_projections.iter().any(|p| {
                         matches!(p, Projection::Function(_, _) | Projection::Expression(_, _))
                             || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
                     })
+                && !uses_document_projection
                 && !is_universal_query_source(context.query.table.as_str())
             {
                 let manager = db
@@ -1271,7 +1300,6 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 let table_alias = context.table_alias;
                 let limit = context.query.limit.unwrap_or(10000) as usize;
 
-                let effective_projections = effective_table_projections(context.query);
                 let select_cols = extract_select_column_names(&effective_projections);
                 let schema_arc = manager.column_schema();
                 let compiled = match schema_arc.as_ref() {
@@ -1387,7 +1415,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
         }
         "filter" | "entity_filter" => {
             // ── FAST PATH: Direct entity_id lookup (O(1)) ──
-            if !projections_require_runtime_projection(&effective_projections) {
+            if !projections_require_runtime_projection(&effective_projections)
+                && !uses_document_projection
+            {
                 if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                     let entity = resolve_table_row_by_logical_id(
                         db,
@@ -1671,6 +1701,26 @@ fn collect_expr_document_path_roots(
         // Opaque shapes can't be proven to traverse a known root —
         // contribute an unresolvable marker so the gate stays strict.
         Expr::Subquery { .. } | Expr::WindowFunctionCall { .. } => out.push(None),
+    }
+}
+
+fn runtime_projections_use_document_path(projections: &[Projection], query: &TableQuery) -> bool {
+    projections
+        .iter()
+        .any(|projection| runtime_projection_uses_document_path(projection, query))
+}
+
+fn runtime_projection_uses_document_path(projection: &Projection, query: &TableQuery) -> bool {
+    match projection {
+        Projection::Column(name) | Projection::Alias(name, _) => {
+            name.split_once('.').is_some_and(|(head, tail)| {
+                tail.contains('.')
+                    || (head != query.table.as_str() && query.alias.as_deref() != Some(head))
+            })
+        }
+        Projection::Field(field, _) => runtime_field_ref_uses_document_path(field, query),
+        Projection::Expression(filter, _) => runtime_filter_uses_document_path(filter, query),
+        Projection::Function(_, _) | Projection::All | Projection::Window { .. } => false,
     }
 }
 

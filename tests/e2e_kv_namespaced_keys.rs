@@ -103,6 +103,63 @@ fn namespaced_kv_keys_survive_reopen() {
 }
 
 #[test]
+fn kv_list_returns_keys_with_prefix_limit_and_offset() {
+    let rt = runtime();
+
+    exec(&rt, "KV PUT settings.feature.gamma = 'G'");
+    exec(&rt, "KV PUT settings.feature.alpha = 'A'");
+    exec(&rt, "KV PUT settings.other.delta = 'D'");
+    exec(&rt, "KV PUT settings.feature.beta = 'B'");
+
+    let listed = exec(&rt, "KV LIST settings PREFIX 'feature.' LIMIT 2 OFFSET 1");
+    assert_eq!(
+        listed.result.columns,
+        vec![
+            "rid".to_string(),
+            "collection".to_string(),
+            "kind".to_string(),
+            "tenant".to_string(),
+            "created_at".to_string(),
+            "updated_at".to_string(),
+            "key".to_string(),
+            "value".to_string(),
+            "tags".to_string(),
+        ]
+    );
+    assert_eq!(listed.result.records.len(), 2);
+    assert_eq!(text(&listed.result.records[0], "collection"), "settings");
+    assert_eq!(text(&listed.result.records[0], "kind"), "kv");
+    assert_eq!(text(&listed.result.records[0], "key"), "feature.beta");
+    assert_eq!(text(&listed.result.records[0], "value"), "B");
+    assert_eq!(text(&listed.result.records[1], "key"), "feature.gamma");
+    assert_eq!(text(&listed.result.records[1], "value"), "G");
+
+    let top_level = exec(&rt, "LIST KV settings PREFIX 'feature.' LIMIT 1");
+    assert_eq!(top_level.result.records.len(), 1);
+    assert_eq!(text(&top_level.result.records[0], "key"), "feature.alpha");
+
+    let tree = exec(&rt, "KV LIST settings PREFIX 'feature.' AS JSON");
+    assert_eq!(
+        tree.result.columns,
+        vec![
+            "collection".to_string(),
+            "prefix".to_string(),
+            "value".to_string(),
+        ]
+    );
+    let row = only_record(&tree);
+    assert_eq!(text(row, "collection"), "settings");
+    assert_eq!(text(row, "prefix"), "feature.");
+    let Some(Value::Json(bytes)) = row.get("value") else {
+        panic!("expected JSON value, got {row:?}");
+    };
+    let json: reddb::json::Value = reddb::json::from_slice(bytes).expect("valid kv tree json");
+    assert_eq!(json["alpha"].as_str(), Some("A"));
+    assert_eq!(json["beta"].as_str(), Some("B"));
+    assert_eq!(json["gamma"].as_str(), Some("G"));
+}
+
+#[test]
 fn http_kv_endpoints_accept_url_encoded_namespaced_keys() {
     let server = RedDBServer::new(runtime());
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");

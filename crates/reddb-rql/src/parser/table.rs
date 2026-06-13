@@ -341,6 +341,7 @@ impl<'a> Parser<'a> {
         // table-valued function calls such as `components(g)` (issue #795);
         // plain tables leave this `None` and rely on the legacy `table` slot.
         let mut table_source: Option<crate::ast::TableSource> = None;
+        let mut from_subquery: Option<QueryExpr> = None;
         let table = if has_from {
             if self.consume(&Token::Queue)? {
                 let queue = self.expect_ident()?;
@@ -360,6 +361,17 @@ impl<'a> Parser<'a> {
                     filter,
                     limit,
                 }));
+            } else if self.check(&Token::LParen) {
+                self.advance()?; // consume '('
+                if !self.check(&Token::Select) {
+                    return Err(ParseError::new(
+                        "subquery in FROM must start with SELECT".to_string(),
+                        self.position(),
+                    ));
+                }
+                from_subquery = Some(self.parse_select_query()?);
+                self.expect(Token::RParen)?;
+                "__subq_pending".to_string()
             } else if self.consume(&Token::Star)? {
                 "*".to_string()
             } else if self.consume(&Token::All)? {
@@ -451,27 +463,35 @@ impl<'a> Parser<'a> {
                 None
             };
 
-        let mut query = TableQuery {
-            table,
-            source: table_source,
-            alias,
-            select_items,
-            columns,
-            where_expr: None,
-            filter: None,
-            group_by_exprs: Vec::new(),
-            group_by: Vec::new(),
-            having_expr: None,
-            having: None,
-            order_by: Vec::new(),
-            limit: None,
-            limit_param: None,
-            offset: None,
-            offset_param: None,
-            expand: None,
-            as_of: None,
-            sessionize: None,
-            distinct,
+        let mut query = if let Some(inner) = from_subquery {
+            let mut query = TableQuery::from_subquery(inner, alias);
+            query.select_items = select_items;
+            query.columns = columns;
+            query.distinct = distinct;
+            query
+        } else {
+            TableQuery {
+                table,
+                source: table_source,
+                alias,
+                select_items,
+                columns,
+                where_expr: None,
+                filter: None,
+                group_by_exprs: Vec::new(),
+                group_by: Vec::new(),
+                having_expr: None,
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                limit_param: None,
+                offset: None,
+                offset_param: None,
+                expand: None,
+                as_of: None,
+                sessionize: None,
+                distinct,
+            }
         };
 
         if self.is_join_keyword() {
@@ -1546,7 +1566,19 @@ mod tests {
         assert!(matches!(table.source, Some(TableSource::Subquery(_))));
         assert_eq!(table.select_items.len(), 1);
 
+        let parsed = crate::parser::parse("SELECT id FROM (SELECT id FROM users) AS u")
+            .unwrap()
+            .query;
+        let QueryExpr::Table(table) = parsed else {
+            panic!("expected table query");
+        };
+        assert_eq!(table.table, "__subq_u");
+        assert_eq!(table.alias.as_deref(), Some("u"));
+        assert!(matches!(table.source, Some(TableSource::Subquery(_))));
+        assert_eq!(table.select_items.len(), 1);
+
         assert!(crate::parser::parse("FROM (MATCH (n) RETURN n) AS g").is_err());
+        assert!(crate::parser::parse("SELECT * FROM (MATCH (n) RETURN n) AS g").is_err());
     }
 
     // ── Table-valued function arguments (issues #795 / #796) ──

@@ -22,7 +22,7 @@ impl QueueMode {
     pub fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_uppercase().as_str() {
             "FANOUT" => Some(Self::Fanout),
-            "WORK" => Some(Self::Work),
+            "WORK" | "STANDARD" | "FIFO" => Some(Self::Work),
             _ => None,
         }
     }

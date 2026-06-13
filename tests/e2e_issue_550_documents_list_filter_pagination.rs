@@ -131,6 +131,40 @@ fn sql_select_with_where_limit_offset_returns_expected_slice() {
     assert_eq!(number_field(&page.result.records[1], "seq"), 4.0);
 }
 
+// Acceptance: document top-level body attributes can be indexed through
+// the SQL DDL surface and remain queryable via the same attribute filter.
+#[test]
+fn sql_create_index_on_document_attribute_registers_and_filters() {
+    let rt = runtime();
+    seed_documents(&rt, "issue550_sql_indexed", 10);
+
+    rt.execute_query("CREATE INDEX idx_issue550_event_type ON issue550_sql_indexed (event_type)")
+        .expect("CREATE INDEX on document attribute should succeed");
+
+    let indices = rt
+        .execute_query(
+            "SELECT name, collection, columns FROM red.indices \
+             WHERE collection = 'issue550_sql_indexed'",
+        )
+        .expect("red.indices should expose document attribute index");
+    assert_eq!(indices.result.records.len(), 1);
+    assert_eq!(
+        text_field(&indices.result.records[0], "name"),
+        "idx_issue550_event_type"
+    );
+
+    let page = rt
+        .execute_query(
+            "SELECT event_type, seq FROM issue550_sql_indexed \
+             WHERE event_type = 'logout' ORDER BY seq LIMIT 2 OFFSET 1",
+        )
+        .expect("indexed document attribute filter should succeed");
+    assert_eq!(page.result.records.len(), 2);
+    assert_eq!(text_field(&page.result.records[0], "event_type"), "logout");
+    assert_eq!(number_field(&page.result.records[0], "seq"), 3.0);
+    assert_eq!(number_field(&page.result.records[1], "seq"), 5.0);
+}
+
 // Acceptance: empty filter (WHERE matches nothing) returns an empty page.
 #[test]
 fn sql_select_with_filter_that_matches_nothing_returns_empty_page() {
