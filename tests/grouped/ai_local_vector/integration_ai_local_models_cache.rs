@@ -5,6 +5,7 @@
 //! tests never reach out to HuggingFace.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::fs;
