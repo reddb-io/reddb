@@ -9,6 +9,9 @@ mod e2e_config_matrix;
 #[path = "grouped/config_tier/e2e_config_secret_ref.rs"]
 mod e2e_config_secret_ref;
 
+#[path = "grouped/config_tier/e2e_config_vault_observation.rs"]
+mod e2e_config_vault_observation;
+
 #[path = "grouped/config_tier/e2e_issue_480_tier_default_promotion_contract.rs"]
 mod e2e_issue_480_tier_default_promotion_contract;
 
