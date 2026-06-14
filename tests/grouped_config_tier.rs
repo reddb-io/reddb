@@ -18,5 +18,8 @@ mod e2e_issue_480_tier_default_promotion_contract;
 #[path = "grouped/config_tier/e2e_shm_provisioning.rs"]
 mod e2e_shm_provisioning;
 
+#[path = "grouped/config_tier/e2e_system_config_vault.rs"]
+mod e2e_system_config_vault;
+
 #[path = "grouped/config_tier/e2e_tier_wiring.rs"]
 mod e2e_tier_wiring;

@@ -1,4 +1,5 @@
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;
@@ -6,7 +7,7 @@ use std::sync::Arc;
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::storage::schema::Value;
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 fn runtime(name: &str) -> (support::TempDbFile, RedDBRuntime) {
     let path = support::temp_db_file(name);
@@ -19,7 +20,11 @@ fn runtime_with_vault(
     name: &str,
     passphrase: &str,
 ) -> (support::TempDbFile, RedDBRuntime, Arc<AuthStore>) {
-    let (path, rt) = runtime(name);
+    let path = support::temp_db_file(name);
+    let options = RedDBOptions::persistent(path.path())
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should expose pager");
+    let rt = RedDBRuntime::with_options(options).expect("runtime should open");
     let pager = Arc::clone(
         rt.db()
             .store()
