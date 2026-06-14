@@ -1767,8 +1767,24 @@ enum UiBackend {
     Direct { ws_url: String },
 }
 
+fn ui_handoff_wait_duration() -> Duration {
+    env_string("RED_UI_HANDOFF_WAIT_MS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(60))
+}
+
+async fn wait_for_ui_handoff(server: &reddb::server::ui_auth::HandoffServer) {
+    let _ = tokio::time::timeout(ui_handoff_wait_duration(), async {
+        while !server.is_consumed() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+}
+
 /// `red ui <uri> [--server] [--desktop] [--ui-dir DIR] [--port N]
-/// [--tls-ca PEM] [--no-browser]` — the spine of the red-ui integration
+/// [--tls-ca PEM] [--token TOKEN] [--no-browser]` — the spine of the red-ui integration
 /// (issues #1042 / #1044 / #1046, PRD #1041, ADR 0051).
 ///
 /// By default it prefers the installed desktop app: when the `redui://`
@@ -1786,6 +1802,9 @@ enum UiBackend {
 /// the bridge down cleanly on Ctrl-C.
 fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     let json_mode = wants_json(flags);
+    let token = flag_string(flags, "token")
+        .or_else(|| env_string("RED_UI_TOKEN"))
+        .filter(|value| !value.is_empty());
 
     let uri = match remaining.first() {
         Some(value) => value.clone(),
@@ -1828,6 +1847,55 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                 std::process::exit(1);
             });
         let env = reddb::server::ui_deeplink::OsDeepLinkEnv;
+        if let Some(token) = token.clone() {
+            if reddb::server::ui_deeplink::DeepLinkEnv::handler_registered(&env) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                let handoff = rt.block_on(async {
+                    let server = reddb::server::ui_auth::spawn_handoff_server(token)
+                        .await
+                        .map_err(|err| format!("start UI credential handoff: {err}"))?;
+                    let handoff_url = server.handoff_url();
+                    let deep_link = reddb::server::ui_deeplink::build_deep_link_with_handoff(
+                        &canonical,
+                        &handoff_url,
+                    );
+                    if let Err(err) =
+                        reddb::server::ui_deeplink::DeepLinkEnv::open_url(&env, &deep_link)
+                    {
+                        server.shutdown().await;
+                        return Err(err);
+                    }
+                    wait_for_ui_handoff(&server).await;
+                    server.shutdown().await;
+                    Ok::<_, String>(deep_link)
+                });
+                let deep_link = handoff.unwrap_or_else(|err| {
+                    let msg = format!("deep-link dispatch: {err}");
+                    if json_mode {
+                        json_error("ui", &msg);
+                    }
+                    eprintln!("error: {msg}");
+                    std::process::exit(1);
+                });
+                if json_mode {
+                    json_ok(
+                        "ui",
+                        &format!(
+                            "{{\"dispatch\":\"desktop\",\"auth\":\"handoff\",\"deep_link\":\"{}\",\"target\":\"{}\"}}",
+                            json_escape(&deep_link),
+                            json_escape(&canonical),
+                        ),
+                    );
+                } else {
+                    println!("red ui: handing off to the desktop app");
+                    println!("  {deep_link}");
+                }
+                return;
+            }
+        }
         match reddb::server::ui_deeplink::dispatch(mode, &canonical, &env) {
             Ok(reddb::server::ui_deeplink::DispatchOutcome::HandedOff { deep_link }) => {
                 if json_mode {
@@ -1942,6 +2010,15 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
             (uri.clone(), UiBackend::Remote(target))
         }
         reddb::server::ui_bridge::UiTarget::Direct { ws_url } => {
+            if token.is_some() {
+                let msg = "red ui --token cannot be injected for red+ws:// direct targets; \
+                           use red:// or reds:// so the loopback bridge can hold the token";
+                if json_mode {
+                    json_error("ui", msg);
+                }
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
             // ADR 0047: browser-reachable WS target — no loopback relay.
             // Serve the UI bundle locally and let the browser connect
             // directly to ws_url (already a wss:// or ws:// URL).
@@ -1977,7 +2054,13 @@ fn run_ui_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         .unwrap_or(0);
     let no_browser = flag_bool(flags, "no-browser") || env_truthy("RED_UI_NO_BROWSER");
 
-    let config = reddb::server::ui_bridge::UiBridgeConfig { ui_dir, port };
+    let auth_mode = reddb::server::ui_auth::UiAuthMode::resolve(token.is_some(), false);
+    let config = reddb::server::ui_bridge::UiBridgeConfig {
+        ui_dir,
+        port,
+        injected_token: token,
+        auth_mode,
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -3092,6 +3175,9 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("tls-ca").with_description(
                     "PEM CA bundle to trust for a reds:// target (on top of system roots)",
                 ),
+                cli::types::FlagSchema::new("token")
+                    .with_short('t')
+                    .with_description("Bearer token for UI auth handoff (env: RED_UI_TOKEN)"),
                 cli::types::FlagSchema::boolean("no-browser").with_description(
                     "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",
                 ),

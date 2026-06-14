@@ -1,4 +1,5 @@
 .{
+    .fingerprint = 0xa43b8ea87b2f740b,
     .name = .reddb,
     .version = "0.1.0",
     .minimum_zig_version = "0.13.0",
