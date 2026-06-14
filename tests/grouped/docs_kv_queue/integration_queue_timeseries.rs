@@ -259,7 +259,7 @@ fn test_select_from_queue_projects_without_consuming_or_leasing() {
 
 #[test]
 fn test_queue_move_filters_limits_and_keeps_peek_compatible() {
-    let rt = rt();
+    let rt = support::persistent_test_runtime("queue-move-audit");
 
     exec(&rt, "CREATE QUEUE failed_jobs");
     exec(&rt, "CREATE QUEUE jobs");

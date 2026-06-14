@@ -17,8 +17,8 @@ use reddb::RedDBRuntime;
 
 use support::prometheus::get;
 
-fn rt() -> RedDBRuntime {
-    RedDBRuntime::in_memory().expect("in-memory runtime")
+fn rt(tag: &str) -> support::PersistentRuntime {
+    support::persistent_test_runtime(tag)
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
@@ -42,8 +42,8 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
     // The operator event sink is process-global and first-runtime-wins.
     // Queue DLQ promotion must still persist to the runtime that performed
     // the NACK, not whichever runtime first installed the global sink.
-    let _global_sink_owner = rt();
-    let rt = rt();
+    let _global_sink_owner = rt("queue-lifecycle-global-sink");
+    let rt = rt("queue-lifecycle-audit");
 
     // Build a queue with a DLQ target + a low max_attempts so the
     // second NACK promotes immediately.
@@ -112,7 +112,7 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
     // -------------------------------------------------------------
     // Prometheus assertion — scrape via the public /metrics endpoint
     // -------------------------------------------------------------
-    let (status, body) = get(rt, "/metrics");
+    let (status, body) = get(rt.clone_runtime(), "/metrics");
     assert_eq!(status, 200, "metrics endpoint should return 200");
 
     // deliver fired twice (one per READ).

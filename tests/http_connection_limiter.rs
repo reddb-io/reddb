@@ -123,7 +123,7 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
     let resp_lower = resp.to_ascii_lowercase();
     let is_limiter_reject = resp.starts_with("HTTP/1.1 503")
         && resp_lower.contains("retry-after: 5")
-        && resp.contains("server at capacity");
+        && resp_lower.contains("server at capacity");
     assert!(
         !is_limiter_reject,
         "fresh connection should not be rejected by the limiter, got: {resp:?}"
