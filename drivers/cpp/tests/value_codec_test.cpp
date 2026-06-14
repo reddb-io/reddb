@@ -13,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using reddb::Value;
@@ -195,8 +196,9 @@ TEST(ValueCodec, EncodesQueryWithParamsPayload) {
 }
 
 TEST(ValueCodec, AcceptedCppSnippetParamShapeCompiles) {
-    auto encoded = encode_query_with_params("SELECT $1", {Value::int64(42)});
-    EXPECT_EQ(encoded[0], 8);
+    constexpr std::string_view sql = "SELECT $1";
+    auto encoded = encode_query_with_params(sql, {Value::int64(42)});
+    EXPECT_EQ(encoded[0], sql.size());
 }
 
 TEST(ValueCodec, HttpParamsUseJsonEnvelopesForTaggedValues) {

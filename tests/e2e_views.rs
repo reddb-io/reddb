@@ -22,8 +22,25 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
 }
 
+fn run_with_large_stack(name: &str, f: fn()) {
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn view e2e test")
+        .join()
+        .expect("view e2e test panicked");
+}
+
 #[test]
 fn view_body_filters_rows_via_select_from_view() {
+    run_with_large_stack(
+        "view-body-filters-rows-via-select-from-view",
+        view_body_filters_rows_via_select_from_view_impl,
+    );
+}
+
+fn view_body_filters_rows_via_select_from_view_impl() {
     let rt = open_runtime();
     exec(
         &rt,
@@ -71,6 +88,13 @@ fn view_body_filters_rows_via_select_from_view() {
 
 #[test]
 fn materialized_view_refresh_executes_body() {
+    run_with_large_stack(
+        "materialized-view-refresh-executes-body",
+        materialized_view_refresh_executes_body_impl,
+    );
+}
+
+fn materialized_view_refresh_executes_body_impl() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE orders (id INT, total INT, status TEXT)");
     exec(
@@ -102,6 +126,13 @@ fn materialized_view_refresh_executes_body() {
 
 #[test]
 fn view_chain_resolves_recursively() {
+    run_with_large_stack(
+        "view-chain-resolves-recursively",
+        view_chain_resolves_recursively_impl,
+    );
+}
+
+fn view_chain_resolves_recursively_impl() {
     let rt = open_runtime();
     exec(
         &rt,
