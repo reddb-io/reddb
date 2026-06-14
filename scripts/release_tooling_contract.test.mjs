@@ -146,3 +146,23 @@ test("wire coverage gate installs protoc and preserves llvm-cov failures", () =>
   assert.match(workflow, /set -o pipefail[\s\S]*cargo llvm-cov -p reddb-io-wire/);
   assert.match(workflow, /cargo llvm-cov -p reddb-io-wire[\s\S]*\| tee coverage-summary\.txt/);
 });
+
+test("parser fuzz nightly installs protoc before fuzz builds", () => {
+  const workflow = read(".github/workflows/parser-fuzz-nightly.yml");
+
+  assert.match(workflow, /uses: \.\/\.github\/actions\/install-protoc[\s\S]*version: '28\.3'/);
+  assert.match(
+    workflow,
+    /uses: dtolnay\/rust-toolchain@nightly[\s\S]*uses: \.\/\.github\/actions\/install-protoc[\s\S]*name: Run \$\{\{ matrix\.target \}\}/,
+  );
+});
+
+test("per-PR parser fuzz job has enough timeout for three fixed fuzz windows", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const job = workflow.match(/\n  fuzz-parsers:[\s\S]*?(?=\n  package:)/)?.[0] ?? "";
+
+  assert.match(job, /timeout-minutes: 40/);
+  assert.match(job, /cargo \+nightly fuzz run sql_parser -- -max_total_time=300/);
+  assert.match(job, /cargo \+nightly fuzz run migration_parser -- -max_total_time=300/);
+  assert.match(job, /cargo \+nightly fuzz run conn_string_parser -- -max_total_time=300/);
+});

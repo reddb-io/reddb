@@ -33,6 +33,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
 
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: parser-fuzz-nightly
