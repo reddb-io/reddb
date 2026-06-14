@@ -10,6 +10,7 @@
 //! Expect: all 2N rows considered; bench reports about half are missing.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::{CreateRowInput, CreateRowsBatchInput, RuntimeEntityPort};
@@ -218,7 +219,7 @@ fn post_create_index_update_keeps_index_in_sync() {
 /// to corrupt post-CREATE-INDEX entity lookups.
 #[test]
 fn post_create_index_inserts_at_scale_keeps_index_fresh() {
-    let p = support::temp_data_dir("scale-repro");
+    let p = support::temp_db_file("scale-repro");
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&p)).unwrap();
     rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
         .unwrap();
