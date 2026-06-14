@@ -1,3 +1,4 @@
+#[path = "../../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;
@@ -174,6 +175,8 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         .arg("dump")
         .arg("--path")
         .arg(&source_path)
+        .arg("--storage-preset")
+        .arg("serverless")
         .arg("--output")
         .arg(&dump_path)
         .output()
@@ -198,6 +201,8 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         .arg("restore")
         .arg("--path")
         .arg(&dest_path)
+        .arg("--storage-preset")
+        .arg("serverless")
         .arg("--input")
         .arg(&dump_path)
         .output()
