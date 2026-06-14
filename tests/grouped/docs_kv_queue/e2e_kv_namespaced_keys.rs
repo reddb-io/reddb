@@ -162,7 +162,8 @@ fn kv_list_returns_keys_with_prefix_limit_and_offset() {
 
 #[test]
 fn http_kv_endpoints_accept_url_encoded_namespaced_keys() {
-    let server = RedDBServer::new(runtime());
+    let (_db, rt) = support::persistent_runtime("kv-namespaced-http");
+    let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     server.serve_in_background_on(listener);

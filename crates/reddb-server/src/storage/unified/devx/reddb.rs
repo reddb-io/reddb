@@ -182,17 +182,28 @@ pub(super) fn is_ephemeral_data_path(path: &Path) -> bool {
 }
 
 fn ephemeral_data_artifacts(data_path: &Path) -> Vec<PathBuf> {
+    let logical_wal_path = reddb_file::layout::logical_wal_path(data_path);
+    let result_cache_l2_path = reddb_file::layout::result_cache_l2_path(data_path);
+    let legacy_logical_slots_path = reddb_file::layout::legacy_logical_slots_path(data_path);
+    let mut operational_manifest_root = data_path.as_os_str().to_os_string();
+    operational_manifest_root.push(".ops");
     let mut paths = vec![
         data_path.to_path_buf(),
+        PathBuf::from(operational_manifest_root),
         reddb_file::layout::unified_wal_path(data_path),
-        reddb_file::layout::logical_wal_path(data_path),
+        logical_wal_path.clone(),
+        reddb_file::layout::logical_wal_temp_path(&logical_wal_path),
         reddb_file::layout::temp_path(data_path),
-        reddb_file::layout::result_cache_l2_path(data_path),
+        reddb_file::layout::atomic_temp_path(data_path),
+        result_cache_l2_path.clone(),
         reddb_file::layout::pager_legacy_wal_path(data_path),
         reddb_file::layout::engine_wal_path(data_path),
         reddb_file::layout::pager_header_path(data_path),
         reddb_file::layout::pager_meta_path(data_path),
         reddb_file::layout::pager_dwb_path(data_path),
+        legacy_logical_slots_path.clone(),
+        reddb_file::layout::legacy_logical_slots_temp_path(&legacy_logical_slots_path),
+        reddb_file::layout::legacy_audit_log_path(data_path),
         reddb_file::layout::shm_path(data_path),
         reddb_file::layout::physical_metadata_json_path(data_path),
         reddb_file::layout::physical_metadata_binary_path(data_path),
@@ -205,6 +216,12 @@ fn ephemeral_data_artifacts(data_path: &Path) -> Vec<PathBuf> {
         reddb_file::layout::serverless_root(data_path),
     ];
     paths.extend(reddb_file::layout::pager_shadow_sidecar_paths(data_path));
+    paths.extend(reddb_file::layout::pager_shadow_sidecar_paths(
+        &result_cache_l2_path,
+    ));
+    if let Some(parent) = data_path.parent() {
+        paths.push(reddb_file::layout::legacy_slow_query_log_path(parent));
+    }
     paths.push(reddb_file::layout::support_dir_for(data_path));
     paths
 }

@@ -9,13 +9,15 @@
 //! to fire follow-up requests against a parked permit, so no real load race
 //! is needed.
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
 use reddb::server::RedDBServer;
-use reddb::{RedDBOptions, RedDBRuntime};
 
 /// Send one buffered `POST /query` carrying `Authorization: Bearer <token>`
 /// and return the full raw response text. The body is a trivial `SELECT 1`
@@ -39,9 +41,8 @@ fn post_query(addr: &str, token: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
-fn boot(cap: usize, slow_ms: u64) -> (String, RedDBServer) {
-    let opts = RedDBOptions::in_memory();
-    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+fn boot(cap: usize, slow_ms: u64) -> (support::TempDbFile, String, RedDBServer) {
+    let (db, runtime) = support::persistent_runtime("principal-inflight-http");
     let server = RedDBServer::new(runtime).with_principal_inflight_cap(cap);
     server.set_test_slow_inject_ms(slow_ms);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -49,13 +50,13 @@ fn boot(cap: usize, slow_ms: u64) -> (String, RedDBServer) {
     let bg = server.clone();
     bg.serve_in_background_on(listener);
     thread::sleep(Duration::from_millis(80));
-    (addr, server)
+    (db, addr, server)
 }
 
 #[test]
 fn over_cap_principal_gets_structured_429_others_unaffected_then_recovers() {
     // cap=1 per principal; each request parks ~700ms in flight.
-    let (addr, server) = boot(1, 700);
+    let (_db, addr, server) = boot(1, 700);
 
     // Fire request A for principal `alice` in the background; it acquires
     // the single per-principal slot and holds it while the slow-inject
@@ -126,7 +127,7 @@ fn disabled_cap_admits_unlimited_concurrency_per_principal() {
     // cap=0 disables the per-principal gate entirely; many concurrent
     // requests for one principal all get through (bounded only by the
     // global cap, which is the default and far above this handful).
-    let (addr, _server) = boot(0, 300);
+    let (_db, addr, _server) = boot(0, 300);
 
     let mut handles = Vec::new();
     for _ in 0..6 {

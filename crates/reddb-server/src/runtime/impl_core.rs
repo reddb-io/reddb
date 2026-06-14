@@ -2477,17 +2477,19 @@ impl RedDBRuntime {
                     // lands under the file-owned support-directory logs tier;
                     // lower tiers fall back to `red-slow.log` in the
                     // data directory.
-                    let fallback_dir = if embedded_single_file {
-                        std::env::temp_dir()
-                            .join("reddb-embedded-runtime")
-                            .join(format!("slow-{}", std::process::id()))
-                    } else {
-                        options
-                            .data_path
-                            .as_ref()
-                            .and_then(|p| p.parent().map(std::path::PathBuf::from))
-                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
-                    };
+                    let fallback_dir = options
+                        .data_path
+                        .as_ref()
+                        .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                        .unwrap_or_else(|| {
+                            if embedded_single_file {
+                                std::env::temp_dir()
+                                    .join("reddb-embedded-runtime")
+                                    .join(format!("slow-{}", std::process::id()))
+                            } else {
+                                std::env::temp_dir().join("reddb")
+                            }
+                        });
                     let threshold_ms = std::env::var("RED_SLOW_QUERY_THRESHOLD_MS")
                         .ok()
                         .and_then(|s| s.parse::<u64>().ok())

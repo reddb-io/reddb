@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use reddb::server::tls::{build_server_config, HttpTlsConfig};
 use reddb::server::RedDBServer;
-use reddb::{RedDBOptions, RedDBRuntime};
 use rustls::pki_types::{CertificateDer, ServerName};
 
 fn write_self_signed(dir: &std::path::Path) -> (PathBuf, PathBuf, Vec<u8>) {
@@ -151,8 +150,7 @@ fn tls_rejection_when_clear_text_saturates_then_recovers() {
 
     // Boot a single RedDBServer with one shared limiter, then bind two
     // listeners on it: clear-text and TLS.
-    let opts = RedDBOptions::in_memory();
-    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+    let (_db, runtime) = support::persistent_runtime("http-tls-limiter-cross");
     let server = RedDBServer::new(runtime).with_http_limiter_cap(cap);
 
     let clear_listener = TcpListener::bind("127.0.0.1:0").expect("bind clear");
@@ -229,8 +227,7 @@ fn tls_handler_deadline_emits_503_then_recovers() {
     let slack = Duration::from_millis(2_000);
 
     let (_dir, tls_cfg, cert_der) = build_tls_config("deadline");
-    let opts = RedDBOptions::in_memory();
-    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+    let (_db, runtime) = support::persistent_runtime("http-tls-limiter-deadline");
     let server = RedDBServer::new(runtime).with_handler_timeout(handler_timeout);
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind tls");
@@ -298,8 +295,7 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     let cap = 2;
     let (_dir, tls_cfg, cert_der) = build_tls_config("mixed");
 
-    let opts = RedDBOptions::in_memory();
-    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+    let (_db, runtime) = support::persistent_runtime("http-tls-limiter-mixed");
     let server = RedDBServer::new(runtime).with_http_limiter_cap(cap);
 
     let clear_listener = TcpListener::bind("127.0.0.1:0").expect("bind clear");

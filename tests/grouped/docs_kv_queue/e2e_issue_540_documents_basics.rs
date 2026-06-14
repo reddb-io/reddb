@@ -46,13 +46,13 @@ fn rid_field(row: &UnifiedRecord) -> u64 {
     }
 }
 
-fn spawn_http_server() -> (RedDBRuntime, String) {
-    let rt = runtime();
+fn spawn_http_server() -> (support::TempDbFile, RedDBRuntime, String) {
+    let (db, rt) = support::persistent_runtime("documents-basics-http");
     let server = RedDBServer::new(rt.clone());
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr").to_string();
     server.serve_in_background_on(listener);
-    (rt, addr)
+    (db, rt, addr)
 }
 
 fn http_request(addr: &str, method: &str, path: &str, body: Option<JsonValue>) -> (u16, JsonValue) {
@@ -148,7 +148,7 @@ fn sql_insert_stores_json_document_and_get_by_id_returns_it() {
 // Acceptance: HTTP POST stores a JSON document and HTTP GET by id returns it.
 #[test]
 fn http_post_stores_document_and_http_get_by_id_returns_it() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     let (status, _) = http_request(
         &addr,
         "POST",

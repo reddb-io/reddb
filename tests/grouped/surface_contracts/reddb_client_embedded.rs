@@ -2,9 +2,16 @@
 
 use reddb_client::{ErrorCode, JsonValue, Reddb};
 
+fn temp_file_uri(tag: &str) -> (super::support::TempDbFile, String) {
+    let db = super::support::temp_db_file(tag);
+    let uri = format!("file://{}", db.path().display());
+    (db, uri)
+}
+
 #[tokio::test]
-async fn connect_memory_then_version() {
-    let _db = Reddb::connect("memory://").await.expect("connect");
+async fn connect_file_then_version() {
+    let (_db_path, uri) = temp_file_uri("client-connect-version");
+    let _db = Reddb::connect(&uri).await.expect("connect");
 }
 
 #[tokio::test]
@@ -21,7 +28,8 @@ async fn connect_with_empty_uri_returns_invalid() {
 
 #[tokio::test]
 async fn insert_then_query_round_trip() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+    let (_db_path, uri) = temp_file_uri("client-insert-query");
+    let db = Reddb::connect(&uri).await.expect("connect");
     let payload = JsonValue::object([
         ("name", JsonValue::string("Alice")),
         ("age", JsonValue::number(30)),
@@ -43,7 +51,8 @@ async fn insert_then_query_round_trip() {
 
 #[tokio::test]
 async fn bulk_insert_returns_total_affected() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+    let (_db_path, uri) = temp_file_uri("client-bulk-insert");
+    let db = Reddb::connect(&uri).await.expect("connect");
     let payloads = vec![
         JsonValue::object([("name", JsonValue::string("a"))]),
         JsonValue::object([("name", JsonValue::string("b"))]),
@@ -56,7 +65,8 @@ async fn bulk_insert_returns_total_affected() {
 
 #[tokio::test]
 async fn bad_sql_returns_query_error() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+    let (_db_path, uri) = temp_file_uri("client-bad-sql");
+    let db = Reddb::connect(&uri).await.expect("connect");
     let err = db.query("NOT A VALID STATEMENT $$$").await.unwrap_err();
     assert_eq!(err.code, ErrorCode::QueryError);
 }

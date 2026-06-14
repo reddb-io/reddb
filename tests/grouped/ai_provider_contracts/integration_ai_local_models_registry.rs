@@ -13,6 +13,9 @@
 //!
 //! No artifacts are pulled — this slice is metadata-only.
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -26,6 +29,12 @@ fn spawn_http_server(rt: RedDBRuntime) -> String {
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
     addr.to_string()
+}
+
+fn spawn_persistent_http_server(tag: &str) -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime(tag);
+    let addr = spawn_http_server(rt);
+    (db, addr)
 }
 
 fn send(addr: &str, method: &str, path: &str, body: &str) -> (u16, String) {
@@ -72,7 +81,7 @@ const MINIMAL_VALID: &str = r#"{
 
 #[test]
 fn register_persists_a_valid_local_embedding_model() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-register");
 
     let (status, body) = send(&addr, "POST", "/ai/models", MINIMAL_VALID);
     assert_eq!(status, 201, "register failed: {body}");
@@ -103,7 +112,7 @@ fn register_persists_a_valid_local_embedding_model() {
 
 #[test]
 fn register_rejects_duplicate_model_name() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-duplicate");
     let (status, _) = send(&addr, "POST", "/ai/models", MINIMAL_VALID);
     assert_eq!(status, 201);
 
@@ -115,7 +124,7 @@ fn register_rejects_duplicate_model_name() {
 
 #[test]
 fn register_rejects_empty_source_name_revision_task() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-invalid-fields");
 
     for (case, payload, must_contain) in [
         (
@@ -180,7 +189,7 @@ fn register_rejects_empty_source_name_revision_task() {
 
 #[test]
 fn register_rejects_prompt_or_generation_task() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-unsupported-task");
 
     for task in ["prompt", "generation", "chat", "completion"] {
         let payload = format!(
@@ -199,7 +208,7 @@ fn register_rejects_prompt_or_generation_task() {
 
 #[test]
 fn register_rejects_unknown_task() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-unknown-task");
     let payload = r#"{"name":"m1","source":"x/y","task":"vision","revision":"abc","dimensions":4}"#;
     let (status, body) = send(&addr, "POST", "/ai/models", payload);
     assert_eq!(status, 400, "{body}");
@@ -208,7 +217,7 @@ fn register_rejects_unknown_task() {
 
 #[test]
 fn trust_policy_defaults_to_disabled_and_rejects_unacknowledged_remote_code() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-trust-policy");
 
     let (status, _) = send(&addr, "POST", "/ai/models", MINIMAL_VALID);
     assert_eq!(status, 201);
@@ -260,7 +269,7 @@ fn trust_policy_defaults_to_disabled_and_rejects_unacknowledged_remote_code() {
 
 #[test]
 fn update_rejects_missing_or_invalid_fields() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-update-invalid");
     let (status, _) = send(&addr, "POST", "/ai/models", MINIMAL_VALID);
     assert_eq!(status, 201);
 
@@ -316,7 +325,7 @@ fn update_rejects_missing_or_invalid_fields() {
 
 #[test]
 fn inspect_unknown_model_returns_404() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-registry-inspect-404");
     let (status, body) = send(&addr, "GET", "/ai/models/does-not-exist", "");
     assert_eq!(status, 404, "{body}");
 }
@@ -326,7 +335,7 @@ fn registered_model_survives_runtime_handoff() {
     // Persistence within the same runtime handle is the strongest
     // guarantee we can prove with the in-memory runtime, which still
     // exercises the durable red_config storage layer.
-    let rt = RedDBRuntime::in_memory().expect("rt");
+    let (_db, rt) = support::persistent_runtime("ai-registry-handoff");
     let addr = spawn_http_server(rt);
     let (status, _) = send(&addr, "POST", "/ai/models", MINIMAL_VALID);
     assert_eq!(status, 201);

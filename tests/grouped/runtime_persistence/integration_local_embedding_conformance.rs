@@ -14,6 +14,9 @@
 //! download — proving the contract "normal test commands do not
 //! require live HuggingFace network access" for the `local` provider.
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -176,7 +179,7 @@ fn local_provider_conformance_all_surfaces_offline() {
     // pure KV write, so registering the same name on each runtime
     // gives the local backend the same registry view it would see
     // in a single-process deployment.
-    let http_rt = rt();
+    let (_http_db, http_rt) = support::persistent_runtime("local-embedding-http");
     register_installed_local_model(&http_rt, "mini-en", 2);
     let addr = spawn_http_server(http_rt);
     let (status, body) = post_json(
@@ -299,7 +302,8 @@ fn local_provider_http_requires_explicit_model_name() {
         calls: Arc::new(Mutex::new(0)),
     }));
 
-    let addr = spawn_http_server(rt());
+    let (_db, http_rt) = support::persistent_runtime("local-embedding-http-missing-model");
+    let addr = spawn_http_server(http_rt);
     let (status, body) = post_json(
         &addr,
         "/ai/embeddings",

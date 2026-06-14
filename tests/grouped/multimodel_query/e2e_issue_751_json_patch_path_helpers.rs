@@ -30,13 +30,13 @@ fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")
 }
 
-fn spawn_http_server() -> (RedDBRuntime, String) {
-    let rt = runtime();
+fn spawn_http_server() -> (support::TempDbFile, RedDBRuntime, String) {
+    let (db, rt) = support::persistent_runtime("json-patch-http");
     let server = RedDBServer::new(rt.clone());
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr").to_string();
     server.serve_in_background_on(listener);
-    (rt, addr)
+    (db, rt, addr)
 }
 
 fn http_request(addr: &str, method: &str, path: &str, body: Option<JsonValue>) -> (u16, JsonValue) {
@@ -115,7 +115,7 @@ fn fetch_document_body(addr: &str, collection: &str, id: u64) -> JsonValue {
 // of validated operations so Red UI can render a preview confidently.
 #[test]
 fn document_patch_dry_run_validates_without_mutation() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE DOCUMENT issue751_docs_dry");
     let id = insert_document(&addr, "issue751_docs_dry", json!({ "event_type": "login" }));
     let before = fetch_document_body(&addr, "issue751_docs_dry", id);
@@ -148,7 +148,7 @@ fn document_patch_dry_run_validates_without_mutation() {
 // `code` Red UI can branch on.
 #[test]
 fn document_patch_invalid_path_returns_structured_error_with_pointer() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE DOCUMENT issue751_docs_err");
     let id = insert_document(&addr, "issue751_docs_err", json!({ "event_type": "login" }));
 
@@ -177,7 +177,7 @@ fn document_patch_invalid_path_returns_structured_error_with_pointer() {
 // target leaf and leaves siblings untouched.
 #[test]
 fn document_patch_set_then_unset_nested_path() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE DOCUMENT issue751_docs_nested");
     let id = insert_document(
         &addr,
@@ -226,7 +226,7 @@ fn document_patch_set_then_unset_nested_path() {
 // rewriting the whole blob. Original siblings survive.
 #[test]
 fn kv_patch_set_nested_path_preserves_siblings() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE KV issue751_kv");
     // Seed a JSON object: the HTTP PUT path stores object payloads as JSON.
     let (status, _) = http_request(
@@ -268,7 +268,7 @@ fn kv_patch_set_nested_path_preserves_siblings() {
 // Acceptance 3 — KV nested unset removes a leaf without touching siblings.
 #[test]
 fn kv_patch_unset_nested_path_removes_leaf() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE KV issue751_kv_unset");
     let (status, _) = http_request(
         &addr,
@@ -296,7 +296,7 @@ fn kv_patch_unset_nested_path_removes_leaf() {
 // replacing the whole value.
 #[test]
 fn kv_patch_rejects_non_json_value_with_structured_error() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE KV issue751_kv_scalar");
     let (status, _) = http_request(
         &addr,
@@ -324,7 +324,7 @@ fn kv_patch_rejects_non_json_value_with_structured_error() {
 // distinct empty-state.
 #[test]
 fn kv_patch_missing_key_returns_structured_not_found() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE KV issue751_kv_missing");
 
     let (status, body) = http_request(
@@ -342,7 +342,7 @@ fn kv_patch_missing_key_returns_structured_not_found() {
 // Acceptance 1 — KV dry_run validates without mutation.
 #[test]
 fn kv_patch_dry_run_validates_without_mutation() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     ddl(&addr, "CREATE KV issue751_kv_dry");
     let (status, _) = http_request(
         &addr,

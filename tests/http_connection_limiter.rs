@@ -3,13 +3,15 @@
 //! `HTTP/1.1 503 Service Unavailable` + `Retry-After`, then recover
 //! once existing connections drain.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
 use reddb::server::RedDBServer;
-use reddb::{RedDBOptions, RedDBRuntime};
 
 fn send_request(addr: &str, path: &str) -> String {
     let mut tcp = TcpStream::connect(addr).expect("connect");
@@ -27,9 +29,8 @@ fn spawn_slow_request(addr: String) -> thread::JoinHandle<String> {
     thread::spawn(move || send_request(&addr, "/health/live"))
 }
 
-fn boot(cap: usize) -> (String, RedDBServer) {
-    let opts = RedDBOptions::in_memory();
-    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+fn boot(cap: usize) -> (support::TempDbFile, String, RedDBServer) {
+    let (db, runtime) = support::persistent_runtime("http-connection-limiter");
     let server = RedDBServer::new(runtime).with_http_limiter_cap(cap);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap().to_string();
@@ -39,13 +40,13 @@ fn boot(cap: usize) -> (String, RedDBServer) {
     });
     // Small wait so the accept thread is parked on `incoming()`.
     thread::sleep(Duration::from_millis(80));
-    (addr, server)
+    (db, addr, server)
 }
 
 #[test]
 fn rejects_with_503_when_cap_saturated_then_recovers() {
     let cap = 2;
-    let (addr, server) = boot(cap);
+    let (_db, addr, server) = boot(cap);
 
     // The async HTTP edge limits in-flight requests, not idle TCP
     // connections. Saturate the cap with real requests held inside the

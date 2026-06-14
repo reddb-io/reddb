@@ -50,14 +50,15 @@ fn occupy_random_port() -> (TcpListener, String) {
     (occupier, addr)
 }
 
-fn spawn_http_server(readiness: TransportReadiness) -> String {
+fn spawn_http_server(readiness: TransportReadiness) -> (support::TempDbFile, String) {
     let mut options = ServerOptions::default();
     options.transport_readiness = readiness;
-    let server = RedDBServer::with_options(runtime(), options);
+    let (db, rt) = support::persistent_runtime("transport-readiness-http");
+    let server = RedDBServer::with_options(rt, options);
     let listener = TcpListener::bind("127.0.0.1:0").expect("http listener bind");
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
-    addr.to_string()
+    (db, addr.to_string())
 }
 
 fn http_get(addr: &str, path: &str) -> (u16, JsonValue) {
@@ -191,7 +192,7 @@ fn health_endpoint_enumerates_active_and_failed_listeners() {
             reason: "wire listener bind 127.0.0.1:6378: address in use".to_string(),
         }],
     };
-    let addr = spawn_http_server(readiness);
+    let (_db, addr) = spawn_http_server(readiness);
 
     let (status, body) = http_get(&addr, "/health");
     // `/health` may answer 200 (ready) or 503 (still warming up) at

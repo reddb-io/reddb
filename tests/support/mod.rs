@@ -102,6 +102,45 @@ pub fn temp_db_file(tag: &str) -> TempDbFile {
     TempDbFile { _dir: dir, path }
 }
 
+/// Return an auto-cleaning persistent runtime and the guard that owns its
+/// parent temp directory.
+pub fn persistent_runtime(tag: &str) -> (TempDbFile, RedDBRuntime) {
+    let path = temp_db_file(tag);
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
+        .unwrap_or_else(|err| panic!("failed to open persistent runtime for '{tag}': {err:?}"));
+    (path, runtime)
+}
+
+/// Persistent test runtime that keeps the temp-db guard alive for as long as
+/// the runtime is in scope.
+pub struct PersistentRuntime {
+    _db: TempDbFile,
+    runtime: RedDBRuntime,
+}
+
+impl PersistentRuntime {
+    pub fn runtime(&self) -> &RedDBRuntime {
+        &self.runtime
+    }
+
+    pub fn clone_runtime(&self) -> RedDBRuntime {
+        self.runtime.clone()
+    }
+}
+
+impl Deref for PersistentRuntime {
+    type Target = RedDBRuntime;
+
+    fn deref(&self) -> &RedDBRuntime {
+        &self.runtime
+    }
+}
+
+pub fn persistent_test_runtime(tag: &str) -> PersistentRuntime {
+    let (_db, runtime) = persistent_runtime(tag);
+    PersistentRuntime { _db, runtime }
+}
+
 pub mod mock_ai_provider;
 pub mod prometheus;
 

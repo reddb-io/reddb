@@ -36,13 +36,13 @@ fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")
 }
 
-fn spawn_http_server() -> (RedDBRuntime, String) {
-    let rt = runtime();
+fn spawn_http_server() -> (support::TempDbFile, RedDBRuntime, String) {
+    let (db, rt) = support::persistent_runtime("documents-patch-http");
     let server = RedDBServer::new(rt.clone());
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr").to_string();
     server.serve_in_background_on(listener);
-    (rt, addr)
+    (db, rt, addr)
 }
 
 fn http_request(addr: &str, method: &str, path: &str, body: Option<JsonValue>) -> (u16, JsonValue) {
@@ -121,7 +121,7 @@ fn fetch_document(addr: &str, collection: &str, id: u64) -> JsonValue {
 // after PATCH `/body/meta/ip` the body contains `meta: { ip: "..." }`.
 #[test]
 fn http_patch_set_on_nested_body_path_creates_intermediate_object() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     create_document_collection(&addr, "issue552_set_intermediates");
     let id = insert_document(
         &addr,
@@ -159,7 +159,7 @@ fn http_patch_set_on_nested_body_path_creates_intermediate_object() {
 // no-op success — the response is 200 and the document body is unchanged.
 #[test]
 fn http_patch_unset_on_missing_path_is_noop_success() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     create_document_collection(&addr, "issue552_unset_missing");
     let id = insert_document(
         &addr,
@@ -196,7 +196,7 @@ fn http_patch_unset_on_missing_path_is_noop_success() {
 // (replace the array or the full document body).
 #[test]
 fn http_patch_array_positional_path_rejected_with_clear_error() {
-    let (_rt, addr) = spawn_http_server();
+    let (_db, _rt, addr) = spawn_http_server();
     create_document_collection(&addr, "issue552_array_position");
     let id = insert_document(
         &addr,

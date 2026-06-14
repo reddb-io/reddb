@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "support/mod.rs"]
+mod support;
+
 #[path = "grouped/surface_contracts/compile_fail.rs"]
 mod compile_fail;
 

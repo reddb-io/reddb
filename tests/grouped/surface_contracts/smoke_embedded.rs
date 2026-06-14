@@ -8,10 +8,12 @@ use reddb::application::{
 };
 use reddb::json::Value as JsonValue;
 use reddb::storage::schema::Value;
-use reddb::{ArtifactState, EntityUseCases, NativeUseCases, QueryUseCases, RedDBRuntime};
+use reddb::{ArtifactState, EntityUseCases, NativeUseCases, QueryUseCases};
 
-fn rt() -> RedDBRuntime {
-    RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
+use super::support::PersistentRuntime;
+
+fn rt() -> PersistentRuntime {
+    super::support::persistent_test_runtime("surface-smoke-embedded")
 }
 
 // ---------------------------------------------------------------------------
@@ -21,7 +23,7 @@ fn rt() -> RedDBRuntime {
 #[test]
 fn smoke_health_report() {
     let rt = rt();
-    let native = NativeUseCases::new(&rt);
+    let native = NativeUseCases::new(rt.runtime());
     let report = native.health();
     assert!(
         report.is_healthy() || matches!(report.state, reddb::HealthState::Degraded),
@@ -33,7 +35,7 @@ fn smoke_health_report() {
 #[test]
 fn smoke_catalog_snapshot() {
     let rt = rt();
-    let native = NativeUseCases::new(&rt);
+    let native = NativeUseCases::new(rt.runtime());
     let _report = native.health();
 }
 
@@ -44,7 +46,7 @@ fn smoke_catalog_snapshot() {
 #[test]
 fn smoke_row_crud() {
     let rt = rt();
-    let uc = EntityUseCases::new(&rt);
+    let uc = EntityUseCases::new(rt.runtime());
 
     let out = uc.create_row(CreateRowInput {
         collection: "users".into(),
@@ -67,8 +69,8 @@ fn smoke_row_crud() {
 #[test]
 fn smoke_vector_insert_and_search() {
     let rt = rt();
-    let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let entity = EntityUseCases::new(rt.runtime());
+    let query = QueryUseCases::new(rt.runtime());
 
     for v in [
         vec![1.0f32, 0.0, 0.0],
@@ -109,7 +111,7 @@ fn smoke_vector_insert_and_search() {
 #[test]
 fn smoke_graph_crud() {
     let rt = rt();
-    let uc = EntityUseCases::new(&rt);
+    let uc = EntityUseCases::new(rt.runtime());
 
     let node_a = uc
         .create_node(CreateNodeInput {
@@ -156,8 +158,8 @@ fn smoke_graph_crud() {
 #[test]
 fn smoke_query_select() {
     let rt = rt();
-    let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let entity = EntityUseCases::new(rt.runtime());
+    let query = QueryUseCases::new(rt.runtime());
 
     entity
         .create_row(CreateRowInput {
@@ -181,7 +183,7 @@ fn smoke_query_select() {
 #[test]
 fn smoke_query_explain_universal() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = QueryUseCases::new(rt.runtime());
 
     let explain = query.explain(ExplainQueryInput {
         query: "SELECT * FROM any".into(),
@@ -240,7 +242,7 @@ fn smoke_artifact_state_machine() {
 #[test]
 fn smoke_kv_crud() {
     let rt = rt();
-    let uc = EntityUseCases::new(&rt);
+    let uc = EntityUseCases::new(rt.runtime());
 
     // Set a key
     let out = uc.create_kv(CreateKvInput {
@@ -283,7 +285,7 @@ fn smoke_kv_crud() {
 #[test]
 fn smoke_document_crud() {
     let rt = rt();
-    let uc = EntityUseCases::new(&rt);
+    let uc = EntityUseCases::new(rt.runtime());
 
     let mut body = reddb::json::Map::new();
     body.insert("name".into(), JsonValue::String("Alice".into()));
@@ -304,7 +306,7 @@ fn smoke_document_crud() {
     );
 
     // Query via table (documents are enriched rows)
-    let result = QueryUseCases::new(&rt).execute(ExecuteQueryInput {
+    let result = QueryUseCases::new(rt.runtime()).execute(ExecuteQueryInput {
         query: "SELECT * FROM profiles".into(),
     });
     assert!(
@@ -321,8 +323,8 @@ fn smoke_document_crud() {
 #[test]
 fn smoke_vector_hnsw_search() {
     let rt = rt();
-    let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let entity = EntityUseCases::new(rt.runtime());
+    let query = QueryUseCases::new(rt.runtime());
 
     // Insert enough vectors to trigger HNSW (>=100 for index build)
     for i in 0..120 {

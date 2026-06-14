@@ -25,6 +25,9 @@
 //! 4. Regression tests for parity + limit behavior — the above five
 //!    tests collectively satisfy this bullet.
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -57,13 +60,13 @@ fn text(record: &UnifiedRecord, column: &str) -> String {
 // `tests/http_query_grimms_graph.rs`).
 // ---------------------------------------------------------------------------
 
-fn spawn_http_server() -> String {
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+fn spawn_http_server() -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime("graph-parity-http");
     let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
-    addr.to_string()
+    (db, addr.to_string())
 }
 
 fn post_query(addr: &str, query: &str) -> JsonValue {
@@ -117,7 +120,7 @@ fn match_query_returns_same_envelope_via_sql_dsl_and_http() {
     // Then run the same representative MATCH query against both and assert
     // the public envelope matches (columns, row count, and per-row values).
     let rt = runtime();
-    let http = spawn_http_server();
+    let (_db, http) = spawn_http_server();
 
     let seeds = [
         "INSERT INTO social NODE (label, name) VALUES ('alice', 'Alice')",

@@ -10,10 +10,12 @@ use reddb::application::SearchContextInput;
 use reddb::runtime::mvcc::{
     clear_current_connection_id, set_current_connection_id, set_current_tenant,
 };
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::RedDBRuntime;
 
-fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
+use super::support::PersistentRuntime;
+
+fn open_runtime() -> PersistentRuntime {
+    super::support::persistent_test_runtime("ask-tenant-scoped")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {

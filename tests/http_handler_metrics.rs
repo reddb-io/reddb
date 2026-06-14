@@ -9,17 +9,18 @@
 //! the issue brief are present with the expected label sets and
 //! monotonic counter relationships.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
 use reddb::server::RedDBServer;
-use reddb::{RedDBOptions, RedDBRuntime};
 
-fn boot(cap: usize, handler_timeout: Duration) -> (String, RedDBServer) {
-    let opts = RedDBOptions::in_memory();
-    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+fn boot(cap: usize, handler_timeout: Duration) -> (support::TempDbFile, String, RedDBServer) {
+    let (db, runtime) = support::persistent_runtime("http-handler-metrics");
     let server = RedDBServer::new(runtime)
         .with_http_limiter_cap(cap)
         .with_handler_timeout(handler_timeout);
@@ -30,7 +31,7 @@ fn boot(cap: usize, handler_timeout: Duration) -> (String, RedDBServer) {
         let _ = server_clone.serve_on(listener);
     });
     thread::sleep(Duration::from_millis(80));
-    (addr, server)
+    (db, addr, server)
 }
 
 fn send_request(addr: &str, path: &str) -> String {
@@ -79,7 +80,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
     // never sends a request and still leave room for the scrape.
     let cap = 2;
     let handler_timeout = Duration::from_millis(3_000);
-    let (addr, server) = boot(cap, handler_timeout);
+    let (_db, addr, server) = boot(cap, handler_timeout);
 
     // (1) Happy-path request — records one sample in the http
     // duration histogram. Use a separate connection from later steps.
