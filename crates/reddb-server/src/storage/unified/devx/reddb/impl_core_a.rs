@@ -393,10 +393,10 @@ impl RedDB {
         }
 
         let path_buf = options.resolved_path(reddb_file::default_database_path());
-        let mut store_config = store_config_from_options(options);
-        if embedded_single_file_selected(options) {
-            store_config = store_config.with_embedded_wal_path(path_buf.clone());
-        }
+        let store_config = store_config_from_options(options);
+        let embedded_store_config = store_config
+            .clone()
+            .with_embedded_wal_path(path_buf.clone());
         let embedded_open = if embedded_single_file_selected(options) {
             if path_buf.exists() {
                 match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
@@ -405,9 +405,9 @@ impl RedDB {
                             match crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)? {
                                 Some(snapshot) => UnifiedStore::load_from_bytes_with_config(
                                     &snapshot,
-                                    store_config.clone(),
+                                    embedded_store_config.clone(),
                                 )?,
-                                None => UnifiedStore::with_config(store_config.clone()),
+                                None => UnifiedStore::with_config(embedded_store_config.clone()),
                             };
                         for payload in
                             crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&artifact)?
@@ -450,7 +450,7 @@ impl RedDB {
                     format!("create embedded rdb artifact {}: {err}", path_buf.display())
                 })?;
                 Some((
-                    UnifiedStore::with_config(store_config.clone()),
+                    UnifiedStore::with_config(embedded_store_config),
                     Some(path_buf.clone()),
                     false,
                 ))
