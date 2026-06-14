@@ -25,11 +25,6 @@ use reddb::{
     LayoutOverrides, LogDestination, RedDBOptions, RedDBRuntime, StorageLayout,
     DEFAULT_METADATA_JOURNAL_RETENTION, OPT_IN_METADATA_JOURNAL_RETENTION,
 };
-use std::sync::Mutex;
-
-/// All tests in this binary mutate process-global tier toggles. Serialise
-/// them so a parallel runner doesn't observe a half-applied tier state.
-static TIER_GUARD: Mutex<()> = Mutex::new(());
 
 fn reset_env() {
     std::env::remove_var("REDDB_META_JSON_SIDECAR");
@@ -49,7 +44,7 @@ fn open_at_layout(prefix: &str, layout: StorageLayout) -> (RedDBRuntime, support
 
 #[test]
 fn minimal_tier_defaults_all_toggles_off() {
-    let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let (_rt, _path) = open_at_layout("minimal", StorageLayout::Minimal);
 
@@ -69,7 +64,7 @@ fn minimal_tier_defaults_all_toggles_off() {
 
 #[test]
 fn standard_tier_provisions_shm_only() {
-    let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let (_rt, _path) = open_at_layout("standard", StorageLayout::Standard);
 
@@ -90,7 +85,7 @@ fn standard_tier_provisions_shm_only() {
 
 #[test]
 fn performance_tier_routes_logs_to_file() {
-    let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let (_rt, _path) = open_at_layout("performance", StorageLayout::Performance);
 
@@ -111,7 +106,7 @@ fn performance_tier_routes_logs_to_file() {
 
 #[test]
 fn max_tier_enables_all_toggles() {
-    let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let (_rt, _path) = open_at_layout("max", StorageLayout::Max);
 
@@ -134,7 +129,7 @@ fn max_tier_enables_all_toggles() {
 #[test]
 fn layout_overrides_win_over_tier_default() {
     use reddb::LogRoutingOverrides;
-    let _g = TIER_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let guard = support::temp_db_file("overrides");
     let override_dest = LogDestination::Syslog;

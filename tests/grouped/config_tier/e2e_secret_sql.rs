@@ -19,7 +19,10 @@ fn pager_backed_options(path: &std::path::Path) -> RedDBOptions {
 
 fn open_runtime_with_vault(name: &str) -> (TempDbFile, RedDBRuntime, Arc<AuthStore>) {
     let path = support::temp_db_file(name);
-    let rt = RedDBRuntime::with_options(pager_backed_options(path.path())).expect("runtime opens");
+    let rt = crate::config_tier_shared::open_runtime_with_options(
+        pager_backed_options(path.path()),
+        "runtime opens",
+    );
     let db = rt.db();
     let store = db.store();
     let pager = Arc::clone(
@@ -150,8 +153,10 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
     let dump_path = dump_guard.path();
 
     {
-        let rt = RedDBRuntime::with_options(pager_backed_options(source_path))
-            .expect("source runtime should open");
+        let rt = crate::config_tier_shared::open_runtime_with_options(
+            pager_backed_options(source_path),
+            "source runtime should open",
+        );
         let _auth = attach_vault(&rt, "cli-pass");
         rt.execute_query("SET CONFIG red.config.demo.enabled = true")
             .expect("SET CONFIG should succeed");
@@ -160,8 +165,10 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         rt.checkpoint().expect("source checkpoint should succeed");
     }
     {
-        let rt = RedDBRuntime::with_options(pager_backed_options(source_path))
-            .expect("source runtime should reopen");
+        let rt = crate::config_tier_shared::open_runtime_with_options(
+            pager_backed_options(source_path),
+            "source runtime should reopen",
+        );
         let auth = attach_vault(&rt, "cli-pass");
         assert_eq!(
             auth.vault_kv_get("mycompany.payments.key").as_deref(),
@@ -213,8 +220,10 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         String::from_utf8_lossy(&restore.stderr)
     );
 
-    let rt = RedDBRuntime::with_options(pager_backed_options(dest_path))
-        .expect("dest runtime should open");
+    let rt = crate::config_tier_shared::open_runtime_with_options(
+        pager_backed_options(dest_path),
+        "dest runtime should open",
+    );
     let auth = attach_vault(&rt, "cli-pass");
     assert_eq!(
         auth.vault_kv_get("mycompany.payments.key").as_deref(),
@@ -354,7 +363,8 @@ fn dollar_config_reference_resolves_plaintext_config() {
 
 #[test]
 fn set_secret_requires_vault() {
-    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    let rt =
+        crate::config_tier_shared::open_runtime_with_options(RedDBOptions::in_memory(), "runtime");
     let err = rt
         .execute_query("SET SECRET mycompany.stripe.key = 'sk_live'")
         .expect_err("SET SECRET without vault should fail");

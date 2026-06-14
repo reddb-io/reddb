@@ -11,7 +11,10 @@ mod support;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
+    crate::config_tier_shared::open_runtime_with_options(
+        RedDBOptions::in_memory(),
+        "runtime should open in-memory",
+    )
 }
 
 fn show_value(rt: &RedDBRuntime, key: &str) -> Option<String> {
@@ -74,7 +77,10 @@ fn storage_deploy_profile_selection_is_visible_in_config() {
             reddb::storage::StorageDeployPreset::PrimaryReplicaProductionHa.selection(),
         )
         .expect("profile selection should validate");
-    let rt = RedDBRuntime::with_options(options).expect("runtime should open in-memory");
+    let rt = crate::config_tier_shared::open_runtime_with_options(
+        options,
+        "runtime should open in-memory",
+    );
 
     assert!(show_value(&rt, "storage.deploy.profile")
         .unwrap()
@@ -107,14 +113,19 @@ fn storage_deploy_profile_selection_reseeds_default_profile_on_reopen() {
                 reddb::storage::StorageDeployPreset::PrimaryReplicaProductionHa.selection(),
             )
             .expect("profile selection should validate");
-        let rt = RedDBRuntime::with_options(options).expect("first runtime should open");
+        let rt = crate::config_tier_shared::open_runtime_with_options(
+            options,
+            "first runtime should open",
+        );
         assert!(show_value(&rt, "storage.deploy.profile")
             .unwrap()
             .contains("primary-replica"));
     }
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("second runtime should open");
+    let rt = crate::config_tier_shared::open_runtime_with_options(
+        RedDBOptions::persistent(&path),
+        "second runtime should open",
+    );
     assert!(show_value(&rt, "storage.deploy.profile")
         .unwrap()
         .contains("embedded"));

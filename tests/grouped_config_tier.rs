@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "grouped/config_tier/shared.rs"]
+mod config_tier_shared;
+
 #[path = "grouped/config_tier/e2e_config_crud.rs"]
 mod e2e_config_crud;
 
