@@ -15,6 +15,9 @@ mod e2e_meta_json_sidecar_policy;
 #[path = "grouped/runtime_persistence/e2e_query_audit.rs"]
 mod e2e_query_audit;
 
+#[path = "grouped/runtime_persistence/e2e_seqn_journal_policy.rs"]
+mod e2e_seqn_journal_policy;
+
 #[path = "grouped/runtime_persistence/e2e_vault_sealed_storage.rs"]
 mod e2e_vault_sealed_storage;
 

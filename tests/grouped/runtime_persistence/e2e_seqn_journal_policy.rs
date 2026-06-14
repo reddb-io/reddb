@@ -6,11 +6,13 @@
 //! viable source without panicking).
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::{
     seqn_journal_enabled, seqn_journal_retention, set_seqn_journal_enabled,
     set_seqn_journal_retention, PhysicalMetadataFile, RedDBOptions, RedDBRuntime,
+    StorageDeployPreset,
 };
 use std::path::Path;
 use std::sync::Mutex;
@@ -29,9 +31,14 @@ fn reset_policy() {
     std::env::remove_var("REDDB_SEQN_JOURNAL_RETENTION");
 }
 
+fn sidecar_options(path: &Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+        .expect("production HA profile should write physical metadata sidecars")
+}
+
 fn run_a_few_saves(path: &Path, table: &str, n: usize) {
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
-        .expect("persistent runtime opens");
+    let rt = RedDBRuntime::with_options(sidecar_options(path)).expect("persistent runtime opens");
     rt.execute_query(&format!("CREATE TABLE {table} (name TEXT)"))
         .expect("ddl");
     for i in 0..n {
