@@ -333,7 +333,6 @@ jobs:
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
-      TMPDIR: ${{ runner.temp }}/reddb-test-suite-tmp
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.91.0
@@ -350,7 +349,9 @@ jobs:
             . -> target
             . -> target/persistent-tests
       - name: Prepare isolated temp dir
-        run: mkdir -p "$TMPDIR"
+        run: |
+          mkdir -p "$RUNNER_TEMP/reddb-test-suite-tmp"
+          echo "TMPDIR=$RUNNER_TEMP/reddb-test-suite-tmp" >> "$GITHUB_ENV"
       - name: Build red_client (cross-binary smoke prereq)
         run: cargo build --locked --bin red_client -p reddb-io-client --no-default-features
       - name: red_client size budget
