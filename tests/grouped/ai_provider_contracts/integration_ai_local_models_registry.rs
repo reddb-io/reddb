@@ -79,7 +79,7 @@ fn register_persists_a_valid_local_embedding_model() {
     assert!(body.contains("\"provider\":\"local\""), "{body}");
     assert!(body.contains("\"task\":\"embedding\""), "{body}");
     assert!(body.contains("\"engine\":\"candle\""), "{body}");
-    assert!(body.contains("\"pull_policy\":\"on_demand\""), "{body}");
+    assert!(body.contains("\"pull_policy\":\"if_missing\""), "{body}");
     assert!(body.contains("\"trust_policy\":\"disabled\""), "{body}");
     assert!(body.contains("\"status\":\"registered\""), "{body}");
     assert!(body.contains("\"dimensions\":384"), "{body}");

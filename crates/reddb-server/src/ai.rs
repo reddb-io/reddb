@@ -2463,6 +2463,8 @@ fn grpc_embeddings_local(
     runtime: &crate::runtime::RedDBRuntime,
     payload: &JsonValue,
 ) -> crate::RedDBResult<JsonValue> {
+    crate::runtime::ai::local_embedding::ensure_local_embedding_available()?;
+
     let model_name = payload
         .get("model")
         .and_then(|v| v.as_str())
