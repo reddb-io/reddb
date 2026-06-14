@@ -713,7 +713,7 @@ fn fb_bundle_covers_every_matrix_feedback_id() {
     }
     assert!(
         missing.is_empty(),
-        "tests/feedback_regression.rs is missing regression entries for: {missing:?}"
+        "tests/grouped/control_feedback/feedback_regression.rs is missing regression entries for: {missing:?}"
     );
 }
 
@@ -722,7 +722,7 @@ fn fb_bundle_covers_every_matrix_feedback_id() {
 #[test]
 fn fb_bundle_is_cross_referenced_from_the_matrix() {
     assert!(
-        MATRIX.contains("tests/feedback_regression.rs"),
-        "public-surface-contract-matrix.md must cross-reference tests/feedback_regression.rs"
+        MATRIX.contains("tests/grouped/control_feedback/feedback_regression.rs"),
+        "public-surface-contract-matrix.md must cross-reference tests/grouped/control_feedback/feedback_regression.rs"
     );
 }

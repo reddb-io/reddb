@@ -2433,16 +2433,15 @@ impl RedDBRuntime {
                     // support-directory logs tier;
                     // lower tiers / ephemeral runs report `Stderr`
                     // and we keep the legacy file-next-to-data sink.
-                    let data_path = if embedded_single_file {
-                        std::env::temp_dir()
-                            .join("reddb-embedded-runtime")
-                            .join(format!("audit-{}", std::process::id()))
-                    } else {
-                        options
-                            .data_path
-                            .clone()
-                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
-                    };
+                    let data_path = options.data_path.clone().unwrap_or_else(|| {
+                        if embedded_single_file {
+                            std::env::temp_dir()
+                                .join("reddb-embedded-runtime")
+                                .join(format!("audit-{}", std::process::id()))
+                        } else {
+                            std::env::temp_dir().join("reddb")
+                        }
+                    });
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
                     Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
                         &audit_dest,

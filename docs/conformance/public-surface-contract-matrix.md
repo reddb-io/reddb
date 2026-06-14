@@ -156,11 +156,11 @@ minimum acceptable proof is:
 
 ## Focused Regression Packs
 
-- `tests/e2e_feedback_regression_pack.rs` covers the #451 feedback regressions
+- `tests/grouped/control_feedback/e2e_feedback_regression_pack.rs` covers the #451 feedback regressions
   for PSC-003, PSC-005, PSC-006, PSC-011, and PSC-013: probabilistic SQL-read
   forms, `COUNT(*) AS count`, quoted KV colon keys, timeseries JSON tags, and
   `GRAPH PROPERTIES` `node_type` preservation.
-- `tests/feedback_regression.rs` is the #549 feedback-scenario regression
+- `tests/grouped/control_feedback/feedback_regression.rs` is the #549 feedback-scenario regression
   bundle: one named test per `FB-OLD-NN` and `FB-NEW-NN` row in the
   Feedback Scenario Coverage table above. Each test header documents the
   source feedback file and the PSC contract row it maps to. Runtime-
