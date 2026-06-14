@@ -18,6 +18,9 @@ mod e2e_red_schema;
 #[path = "grouped/schema_query_core/e2e_repro_stale_index_post_insert.rs"]
 mod e2e_repro_stale_index_post_insert;
 
+#[path = "grouped/schema_query_core/e2e_reserved_system_fields.rs"]
+mod e2e_reserved_system_fields;
+
 #[path = "grouped/schema_query_core/e2e_rid_row_envelope.rs"]
 mod e2e_rid_row_envelope;
 
