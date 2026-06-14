@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "grouped/ai_search/support.rs"]
+mod support;
+
 #[path = "grouped/ai_search/e2e_ask_search_conformance.rs"]
 mod e2e_ask_search_conformance;
 

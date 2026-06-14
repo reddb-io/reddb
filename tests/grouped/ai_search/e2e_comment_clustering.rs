@@ -6,9 +6,10 @@ use reddb::RedDBRuntime;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+
+use super::support::env_lock;
 
 const COMMENTS_PER_TOPIC: usize = 20;
 const TOPIC_COUNT: usize = 10;
@@ -72,11 +73,6 @@ struct ClusterAssignment {
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 struct EnvGuard {

@@ -12,6 +12,8 @@ use reddb::storage::ml::ModelVersion;
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
 
+use super::support::env_lock;
+
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
 }
@@ -168,6 +170,8 @@ fn semantic_cache_roundtrip_via_sql() {
 
 #[test]
 fn embed_returns_null_without_provider_config() {
+    let _env = env_lock().lock().expect("env lock");
+
     // EMBED needs `red_config` entries for a provider. With none set
     // the scalar degrades to Null rather than panicking or crossing
     // the network. Negative-path guard — proves the wiring reaches
