@@ -735,6 +735,7 @@ fn graph_match_blocks_denied_node_property_projection() {
             "version":1,
             "statements":[
                 {"effect":"allow","actions":["select"],"resources":["table:graph"]},
+                {"effect":"allow","actions":["graph:traverse"],"resources":["graph:*"]},
                 {"effect":"deny","actions":["select"],"resources":["column:graph.secret"]}
             ]
         }"#,

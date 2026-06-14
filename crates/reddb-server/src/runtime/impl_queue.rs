@@ -1489,7 +1489,7 @@ impl RedDBRuntime {
                         attempts: nack_attempts,
                         reason: format!("lifecycle_nack:{did}"),
                     }
-                    .emit_global();
+                    .emit(self.audit_log());
                 }
                 let message = match outcome {
                     RetirementOutcome::Requeued => {

@@ -14,6 +14,9 @@
 //! Those quoted-number and stringified-array shapes are exactly the
 //! "placeholder strings" user-story 26 calls out as broken.
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -123,13 +126,13 @@ fn sql_select_tags_returns_json_typed_values() {
     assert_representative_payload(&tags);
 }
 
-fn spawn_http_server() -> String {
-    let rt = runtime();
+fn spawn_http_server() -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime("timeseries-tags-http");
     let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
-    addr.to_string()
+    (db, addr.to_string())
 }
 
 fn post_query(addr: &str, query: &str) -> SerdeValue {
@@ -171,7 +174,7 @@ fn post_query(addr: &str, query: &str) -> SerdeValue {
 
 #[test]
 fn http_query_tags_match_sql_shape() {
-    let addr = spawn_http_server();
+    let (_db, addr) = spawn_http_server();
 
     for sql in SETUP_SQL {
         let _ = post_query(&addr, sql);

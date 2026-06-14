@@ -32,22 +32,20 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use super::support::env_lock;
+
 use reddb::application::SearchContextInput;
 use reddb::storage::schema::Value;
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::RedDBRuntime;
 
-/// Process-wide lock around the AI env vars. The ASK provider lookup
-/// reads `REDDB_OPENAI_API_BASE` / `REDDB_OPENAI_API_KEY` from the
-/// process environment, so any test that mutates them has to serialise
-/// against every other test that does.
-static ASK_ENV_LOCK: Mutex<()> = Mutex::new(());
+use super::support::PersistentRuntime;
 
-fn open_rt() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
+fn open_rt() -> PersistentRuntime {
+    super::support::persistent_test_runtime("ask-search-conformance")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -257,7 +255,7 @@ fn value_to_i64(value: &Value) -> Option<i64> {
 
 #[test]
 fn ask_with_mock_provider_cites_grounded_sources() {
-    let _env = ASK_ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock().lock().expect("env lock");
 
     let stub = MockOpenAiStub::start("the incident is mocked [^1]");
     let _api_base = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
@@ -370,7 +368,7 @@ fn ask_with_mock_provider_cites_grounded_sources() {
 
 #[test]
 fn ask_without_grounding_yields_clear_limitation() {
-    let _env = ASK_ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock().lock().expect("env lock");
 
     // Provider stub wired in, but the pipeline must short-circuit BEFORE
     // any LLM round-trip when no usable tokens / candidates can be

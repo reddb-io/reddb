@@ -76,10 +76,10 @@ test-full:
 	./scripts/cargo-fast.sh test --locked
 
 test-persistent:
-	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test integration_persistent_multimodel -- --ignored
+	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test grouped_runtime_persistence integration_persistent_multimodel -- --ignored
 
 test-persistent-grimms:
-	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test integration_persistent_grimms_scale -- --ignored --nocapture
+	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test grouped_runtime_persistence integration_persistent_grimms_scale -- --ignored --nocapture
 
 drill-nightly:
 	@./scripts/drill-nightly.sh

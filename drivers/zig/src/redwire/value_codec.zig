@@ -2,12 +2,14 @@ const std = @import("std");
 
 const frame = @import("frame.zig");
 
+const ByteList = std.array_list.Managed(u8);
+
 pub const MAX_PARAM_COUNT: usize = 65_536;
 pub const MAX_VALUE_PAYLOAD_LEN: usize = @intCast(frame.MAX_FRAME_SIZE);
 
 pub const ValueTag = enum(u8) {
-    @"null" = 0x00,
-    @"bool" = 0x01,
+    null = 0x00,
+    bool = 0x01,
     int = 0x02,
     float = 0x03,
     text = 0x04,
@@ -19,8 +21,8 @@ pub const ValueTag = enum(u8) {
 };
 
 pub const Value = union(enum) {
-    @"null": void,
-    @"bool": bool,
+    null: void,
+    bool: bool,
     int: i64,
     float: f64,
     text: []const u8,
@@ -36,7 +38,7 @@ pub const Value = union(enum) {
 };
 
 pub fn encodeValue(allocator: std.mem.Allocator, value: Value) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ByteList.init(allocator);
     errdefer out.deinit();
     try appendValue(&out, value);
     return out.toOwnedSlice();
@@ -53,7 +55,7 @@ pub fn encodeQueryWithParams(
     if (sql.len > MAX_VALUE_PAYLOAD_LEN) return error.ValuePayloadTooLarge;
     if (params.len > MAX_PARAM_COUNT) return error.TooManyParams;
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ByteList.init(allocator);
     errdefer out.deinit();
     try appendU32(&out, @intCast(sql.len));
     try out.appendSlice(sql);
@@ -65,7 +67,7 @@ pub fn encodeQueryWithParams(
 }
 
 pub fn toHttpParamsJson(allocator: std.mem.Allocator, params: []const Value) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ByteList.init(allocator);
     errdefer out.deinit();
     try out.append('[');
     for (params, 0..) |param, i| {
@@ -81,7 +83,7 @@ pub fn toHttpQueryBody(
     sql: []const u8,
     params: []const Value,
 ) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ByteList.init(allocator);
     errdefer out.deinit();
     try out.appendSlice("{\"query\":");
     try appendJsonString(&out, sql);
@@ -98,11 +100,11 @@ pub fn toHttpQueryBody(
     return out.toOwnedSlice();
 }
 
-fn appendValue(out: *std.ArrayList(u8), value: Value) !void {
+fn appendValue(out: *ByteList, value: Value) !void {
     switch (value) {
-        .@"null" => try out.append(@intFromEnum(ValueTag.@"null")),
-        .@"bool" => |v| {
-            try out.append(@intFromEnum(ValueTag.@"bool"));
+        .null => try out.append(@intFromEnum(ValueTag.null)),
+        .bool => |v| {
+            try out.append(@intFromEnum(ValueTag.bool));
             try out.append(if (v) 1 else 0);
         },
         .int => |v| {
@@ -138,19 +140,19 @@ fn appendValue(out: *std.ArrayList(u8), value: Value) !void {
     }
 }
 
-fn appendLenPrefixed(out: *std.ArrayList(u8), tag: ValueTag, bytes: []const u8) !void {
+fn appendLenPrefixed(out: *ByteList, tag: ValueTag, bytes: []const u8) !void {
     if (bytes.len > MAX_VALUE_PAYLOAD_LEN) return error.ValuePayloadTooLarge;
     try out.append(@intFromEnum(tag));
     try appendU32(out, @intCast(bytes.len));
     try out.appendSlice(bytes);
 }
 
-fn appendHttpParamJson(out: *std.ArrayList(u8), value: Value) !void {
+fn appendHttpParamJson(out: *ByteList, value: Value) !void {
     switch (value) {
-        .@"null" => try out.appendSlice("null"),
-        .@"bool" => |v| try out.appendSlice(if (v) "true" else "false"),
-        .int => |v| try out.writer().print("{d}", .{v}),
-        .float => |v| try out.writer().print("{d}", .{v}),
+        .null => try out.appendSlice("null"),
+        .bool => |v| try out.appendSlice(if (v) "true" else "false"),
+        .int => |v| try out.print("{d}", .{v}),
+        .float => |v| try out.print("{d}", .{v}),
         .text => |v| try appendJsonString(out, v),
         .bytes => |v| {
             const encoded_len = std.base64.standard.Encoder.calcSize(v.len);
@@ -165,12 +167,12 @@ fn appendHttpParamJson(out: *std.ArrayList(u8), value: Value) !void {
             try out.append('[');
             for (v, 0..) |f, i| {
                 if (i > 0) try out.append(',');
-                try out.writer().print("{d}", .{f});
+                try out.print("{d}", .{f});
             }
             try out.append(']');
         },
         .json => |v| try out.appendSlice(v),
-        .timestamp => |v| try out.writer().print("{{\"$ts\":{d}}}", .{v}),
+        .timestamp => |v| try out.print("{{\"$ts\":{d}}}", .{v}),
         .uuid => |v| {
             try out.appendSlice("{\"$uuid\":");
             var buf: [36]u8 = undefined;
@@ -181,7 +183,7 @@ fn appendHttpParamJson(out: *std.ArrayList(u8), value: Value) !void {
     }
 }
 
-fn appendJsonString(out: *std.ArrayList(u8), s: []const u8) !void {
+fn appendJsonString(out: *ByteList, s: []const u8) !void {
     try out.append('"');
     for (s) |c| {
         switch (c) {
@@ -204,19 +206,19 @@ fn appendJsonString(out: *std.ArrayList(u8), s: []const u8) !void {
     try out.append('"');
 }
 
-fn appendU32(out: *std.ArrayList(u8), value: u32) !void {
+fn appendU32(out: *ByteList, value: u32) !void {
     var buf: [4]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], value, .little);
     try out.appendSlice(&buf);
 }
 
-fn appendU64(out: *std.ArrayList(u8), value: u64) !void {
+fn appendU64(out: *ByteList, value: u64) !void {
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u64, buf[0..8], value, .little);
     try out.appendSlice(&buf);
 }
 
-fn appendI64(out: *std.ArrayList(u8), value: i64) !void {
+fn appendI64(out: *ByteList, value: i64) !void {
     try appendU64(out, @bitCast(value));
 }
 

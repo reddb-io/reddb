@@ -4,17 +4,18 @@
 //! `Connection: close`, release its limiter permit on thread exit,
 //! and let subsequent requests succeed.
 
+#[allow(dead_code)]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use reddb::server::RedDBServer;
-use reddb::{RedDBOptions, RedDBRuntime};
 
-fn boot(handler_timeout: Duration) -> (String, RedDBServer) {
-    let opts = RedDBOptions::in_memory();
-    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+fn boot(handler_timeout: Duration) -> (support::TempDbFile, String, RedDBServer) {
+    let (db, runtime) = support::persistent_runtime("http-handler-deadline");
     let server = RedDBServer::new(runtime).with_handler_timeout(handler_timeout);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap().to_string();
@@ -23,7 +24,7 @@ fn boot(handler_timeout: Duration) -> (String, RedDBServer) {
         let _ = server_clone.serve_on(listener);
     });
     thread::sleep(Duration::from_millis(80));
-    (addr, server)
+    (db, addr, server)
 }
 
 fn send_health(addr: &str, read_timeout: Duration) -> (String, Instant) {
@@ -45,7 +46,7 @@ fn handler_deadline_emits_503_then_recovers() {
     let inject_ms: u64 = 500;
     let slack = Duration::from_millis(1_500);
 
-    let (addr, server) = boot(handler_timeout);
+    let (_db, addr, server) = boot(handler_timeout);
 
     // Arm a slow downstream that exceeds the deadline.
     server.set_test_slow_inject_ms(inject_ms);
@@ -59,15 +60,16 @@ fn handler_deadline_emits_503_then_recovers() {
         resp.starts_with("HTTP/1.1 503"),
         "expected 503 status line, got: {resp:?}"
     );
+    let resp_lower = resp.to_ascii_lowercase();
     assert!(
-        resp.contains("Connection: close"),
+        resp_lower.contains("connection: close"),
         "expected Connection: close, got: {resp:?}"
     );
     // The deadline-503 has no Retry-After (that signature belongs to
     // the limiter's static reject). This keeps the two failure modes
     // distinguishable in logs and tests.
     assert!(
-        !resp.contains("Retry-After:"),
+        !resp_lower.contains("retry-after:"),
         "deadline-503 should not carry Retry-After, got: {resp:?}"
     );
 
@@ -107,7 +109,7 @@ fn handler_deadline_emits_503_then_recovers() {
 fn fast_request_unaffected_by_deadline() {
     // With a generous deadline and no injection, /health round-trips
     // normally — the boundary checks must not interfere.
-    let (addr, _server) = boot(Duration::from_secs(30));
+    let (_db, addr, _server) = boot(Duration::from_secs(30));
     let (resp, _) = send_health(&addr, Duration::from_secs(5));
     assert!(
         resp.starts_with("HTTP/1.1 2"),

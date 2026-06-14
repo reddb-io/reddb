@@ -2,7 +2,7 @@ use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
 
 fn rt() -> RedDBRuntime {
-    RedDBRuntime::in_memory().expect("in-memory runtime")
+    crate::config_tier_shared::open_in_memory("in-memory runtime")
 }
 
 fn field<'a>(row: &'a reddb::storage::query::unified::UnifiedRecord, name: &str) -> &'a Value {

@@ -16,6 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use reddb::auth::oauth::{
     DecodedJwt, Jwk, JwtClaims, JwtHeader, JwtVerifier, OAuthConfig, OAuthIdentityMode,
     OAuthValidator,
@@ -24,8 +27,7 @@ use reddb::auth::store::AuthStore;
 use reddb::auth::{AuthConfig, Role};
 use reddb::grpc::proto::red_db_client::RedDbClient;
 use reddb::grpc::proto::Empty;
-use reddb::runtime::RedDBRuntime;
-use reddb::{GrpcServerOptions, RedDBGrpcServer, RedDBOptions};
+use reddb::{GrpcServerOptions, RedDBGrpcServer};
 
 use tonic::metadata::MetadataValue;
 
@@ -127,8 +129,8 @@ fn make_server(
     bind: String,
     auth_cfg: AuthConfig,
     validator: Option<Arc<OAuthValidator>>,
-) -> RedDBGrpcServer {
-    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime");
+) -> (support::TempDbFile, RedDBGrpcServer) {
+    let (db, runtime) = support::persistent_runtime("grpc-oauth");
     let auth_store = Arc::new(AuthStore::new(auth_cfg));
     let mut server = RedDBGrpcServer::with_options(
         runtime,
@@ -141,7 +143,7 @@ fn make_server(
     if let Some(v) = validator {
         server = server.with_oauth_validator(v);
     }
-    server
+    (db, server)
 }
 
 /// Send a Health RPC with `Authorization: Bearer <token>` — Health is
@@ -316,7 +318,7 @@ async fn grpc_e2e_jwt_accepted_by_interceptor() {
     auth_cfg.oauth.audience = "reddb".to_string();
 
     let validator = validator_for("https://id.example.com", "reddb");
-    let server = make_server(addr.clone(), auth_cfg, Some(validator));
+    let (_db, server) = make_server(addr.clone(), auth_cfg, Some(validator));
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
     });
@@ -350,7 +352,7 @@ async fn grpc_e2e_expired_jwt_denied() {
     auth_cfg.oauth.audience = "reddb".to_string();
 
     let validator = validator_for("https://id.example.com", "reddb");
-    let server = make_server(addr.clone(), auth_cfg, Some(validator));
+    let (_db, server) = make_server(addr.clone(), auth_cfg, Some(validator));
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
     });
@@ -387,7 +389,7 @@ async fn grpc_e2e_wrong_issuer_denied() {
     auth_cfg.oauth.audience = "reddb".to_string();
 
     let validator = validator_for("https://id.example.com", "reddb");
-    let server = make_server(addr.clone(), auth_cfg, Some(validator));
+    let (_db, server) = make_server(addr.clone(), auth_cfg, Some(validator));
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
     });
@@ -425,7 +427,7 @@ async fn grpc_e2e_non_jwt_falls_back_to_authstore() {
     auth_cfg.oauth.audience = "reddb".to_string();
 
     let validator = validator_for("https://id.example.com", "reddb");
-    let server = make_server(addr.clone(), auth_cfg, Some(validator));
+    let (_db, server) = make_server(addr.clone(), auth_cfg, Some(validator));
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
     });

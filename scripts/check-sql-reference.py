@@ -9,8 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs/reference/sql-1-0-x.md"
-LEXER = ROOT / "crates/reddb-server/src/storage/query/lexer.rs"
-SQL = ROOT / "crates/reddb-server/src/storage/query/sql.rs"
+LEXER = ROOT / "crates/reddb-rql/src/lexer.rs"
+SQL = ROOT / "crates/reddb-rql/src/sql.rs"
 
 
 def rust_strings(text: str) -> list[str]:

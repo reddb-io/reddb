@@ -6,9 +6,10 @@ use reddb::RedDBRuntime;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+
+use super::support::{env_lock, PersistentRuntime};
 
 const COMMENTS_PER_TOPIC: usize = 20;
 const TOPIC_COUNT: usize = 10;
@@ -70,13 +71,8 @@ struct ClusterAssignment {
     content: String,
 }
 
-fn rt() -> RedDBRuntime {
-    RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn rt() -> PersistentRuntime {
+    super::support::persistent_test_runtime("ai-comment-clustering")
 }
 
 struct EnvGuard {
@@ -450,9 +446,9 @@ fn e2e_comments_embedding_cluster_label_and_writeback() {
     ]);
 
     let rt = rt();
-    seed_comments(&rt);
-    let http_base = spawn_reddb_http(rt.clone());
-    let query = QueryUseCases::new(&rt);
+    seed_comments(rt.runtime());
+    let http_base = spawn_reddb_http(rt.clone_runtime());
+    let query = QueryUseCases::new(rt.runtime());
 
     let embedding_payload: JsonValue = from_str(
         r#"{

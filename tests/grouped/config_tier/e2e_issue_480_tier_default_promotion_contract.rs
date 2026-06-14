@@ -34,11 +34,6 @@ use reddb::{
     seqn_journal_enabled, shm_provisioning_enabled, tier_wiring, LogDestination, RedDBOptions,
     RedDBRuntime, StorageLayout,
 };
-use std::sync::Mutex;
-
-/// Tests in this binary poke process-global tier toggles. Serialise so a
-/// parallel runner never observes a half-applied tier state.
-static PROMOTION_GUARD: Mutex<()> = Mutex::new(());
 
 fn reset_env() {
     std::env::remove_var("REDDB_META_JSON_SIDECAR");
@@ -122,7 +117,7 @@ fn adr_0018_documents_phase_grouping_a_b_c() {
 
 #[test]
 fn phase_a_performance_routes_logs_into_red_subdir() {
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let _rt = open_at_layout("phaseA_perf", StorageLayout::Performance);
 
@@ -143,7 +138,7 @@ fn phase_a_performance_routes_logs_into_red_subdir() {
 
 #[test]
 fn phase_a_max_routes_logs_into_red_subdir() {
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let _rt = open_at_layout("phaseA_max", StorageLayout::Max);
 
@@ -157,7 +152,7 @@ fn phase_a_max_routes_logs_into_red_subdir() {
 
 #[test]
 fn phase_a_minimal_and_standard_keep_stderr() {
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let _rt = open_at_layout("phaseA_min", StorageLayout::Minimal);
     let (audit_min, slow_min) = tier_wiring::current_log_destinations();
@@ -185,7 +180,7 @@ fn phase_a_minimal_and_standard_keep_stderr() {
 
 #[test]
 fn phase_b_shm_promoted_to_standard() {
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let _rt = open_at_layout("phaseB_shm_std", StorageLayout::Standard);
     assert!(
@@ -196,7 +191,7 @@ fn phase_b_shm_promoted_to_standard() {
 
 #[test]
 fn phase_b_fold_pager_meta_remains_max_only() {
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
 
     reset_env();
     let _rt_std = open_at_layout("phaseB_fpm_std", StorageLayout::Standard);
@@ -222,7 +217,7 @@ fn phase_b_fold_pager_meta_remains_max_only() {
 
 #[test]
 fn phase_b_fold_dwb_into_wal_remains_max_only() {
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
 
     reset_env();
     let _rt_std = open_at_layout("phaseB_fdw_std", StorageLayout::Standard);
@@ -241,7 +236,7 @@ fn phase_b_fold_dwb_into_wal_remains_max_only() {
 
 #[test]
 fn meta_json_and_seqn_journal_remain_max_only() {
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
     let _rt_std = open_at_layout("aux_std", StorageLayout::Standard);
     assert!(!meta_json_sidecar_enabled());
@@ -295,7 +290,7 @@ fn phase_c_embed_catalog_in_datafile_not_yet_introduced() {
 #[test]
 fn promoted_phase_a_log_routing_override_remains_available() {
     use reddb::{LayoutOverrides, LogRoutingOverrides};
-    let _g = PROMOTION_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_env();
 
     let override_dest = LogDestination::Syslog;

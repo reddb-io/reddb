@@ -21,6 +21,16 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
 
 #[test]
 fn materialized_view_survives_restart() {
+    std::thread::Builder::new()
+        .name("materialized-view-survives-restart".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(materialized_view_survives_restart_impl)
+        .expect("spawn materialized view persistence test")
+        .join()
+        .expect("materialized view persistence test panicked");
+}
+
+fn materialized_view_survives_restart_impl() {
     let path = persistent_path("mv_persist_survives");
 
     // ── First boot: create table, insert rows, define materialized view.

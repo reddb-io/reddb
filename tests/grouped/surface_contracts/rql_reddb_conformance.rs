@@ -37,7 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use reddb_rql::{render_cell, CellType};
-use reddb_server::{RedDBError, RedDBRuntime};
+use reddb_server::RedDBError;
 use reddb_types::Value;
 use sqllogictest::{DBOutput, DefaultColumnType, Runner, DB};
 
@@ -59,15 +59,17 @@ const KEEP: &[&str] = &[
     "negative_cycle_detected",
 ];
 
-/// One sqllogictest connection to the RedDB engine — a fresh in-memory runtime.
+use super::support::PersistentRuntime;
+
+/// One sqllogictest connection to the RedDB engine — a fresh persistent runtime.
 struct EngineDb {
-    runtime: RedDBRuntime,
+    runtime: PersistentRuntime,
 }
 
 impl EngineDb {
     fn connect() -> Result<Self, RedDBError> {
         Ok(Self {
-            runtime: RedDBRuntime::in_memory()?,
+            runtime: super::support::persistent_test_runtime("surface-rql-reddb-conformance"),
         })
     }
 }

@@ -46,12 +46,13 @@ fn bool_value(row: &UnifiedRecord, column: &str) -> bool {
     }
 }
 
-fn spawn_http_server() -> String {
-    let server = RedDBServer::new(runtime());
+fn spawn_http_server() -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime("probabilistic-http");
+    let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
-    addr.to_string()
+    (db, addr.to_string())
 }
 
 fn post_query(addr: &str, query: &str) -> JsonValue {
@@ -180,7 +181,7 @@ fn probabilistic_state_survives_reopen_for_commands_and_sql_read_forms() {
 
 #[test]
 fn http_query_covers_probabilistic_commands_and_sql_read_forms() {
-    let addr = spawn_http_server();
+    let (_db, addr) = spawn_http_server();
 
     post_query(&addr, "CREATE HLL visitors");
     post_query(&addr, "HLL ADD visitors 'alice' 'bob' 'alice'");

@@ -19,12 +19,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use reddb::auth::store::AuthStore;
 use reddb::auth::AuthConfig;
 use reddb::grpc::proto::red_db_client::RedDbClient;
 use reddb::grpc::proto::BatchInsertChunk;
 use reddb::runtime::RedDBRuntime;
-use reddb::{GrpcServerOptions, RedDBGrpcServer, RedDBOptions};
+use reddb::{GrpcServerOptions, RedDBGrpcServer};
 
 use tonic::transport::Endpoint;
 use tonic::Code;
@@ -54,8 +57,16 @@ async fn wait_for_port(port: u16, max_ms: u64) {
 /// inspect storage state directly. The runtime is shared (Arc-backed
 /// inside) so the clone passed to the server and the one we keep see
 /// the same writes.
-fn build_runtime_and_server(table_ddl: &str) -> (RedDBRuntime, RedDBGrpcServer, String, u16) {
-    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+fn build_runtime_and_server(
+    table_ddl: &str,
+) -> (
+    support::TempDbFile,
+    RedDBRuntime,
+    RedDBGrpcServer,
+    String,
+    u16,
+) {
+    let (db, runtime) = support::persistent_runtime("grpc-batch-insert");
     runtime.execute_query(table_ddl).expect("create table");
     let port = pick_port();
     let bind = format!("127.0.0.1:{port}");
@@ -68,7 +79,7 @@ fn build_runtime_and_server(table_ddl: &str) -> (RedDBRuntime, RedDBGrpcServer, 
         },
         auth_store,
     );
-    (runtime, server, bind, port)
+    (db, runtime, server, bind, port)
 }
 
 async fn connect_client(port: u16) -> RedDbClient<tonic::transport::Channel> {
@@ -98,7 +109,7 @@ fn unique_suffix() -> String {
 async fn grpc_batch_insert_happy_path_returns_count_and_preserves_order() {
     let table = format!("events_586_ok_{}", unique_suffix());
     let ddl = format!("CREATE TABLE {table} (id INTEGER, name TEXT)");
-    let (runtime, server, _bind, port) = build_runtime_and_server(&ddl);
+    let (_db, runtime, server, _bind, port) = build_runtime_and_server(&ddl);
 
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
@@ -152,7 +163,7 @@ async fn grpc_batch_insert_idempotency_key_replays_cached_result() {
     let table = format!("events_586_idem_{}", unique_suffix());
     let key = format!("grpc-586-idem-{}", unique_suffix());
     let ddl = format!("CREATE TABLE {table} (id INTEGER, name TEXT)");
-    let (runtime, server, _bind, port) = build_runtime_and_server(&ddl);
+    let (_db, runtime, server, _bind, port) = build_runtime_and_server(&ddl);
 
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
@@ -222,7 +233,7 @@ async fn grpc_batch_insert_cache_shared_with_other_transports() {
     let table = format!("events_586_shared_{}", unique_suffix());
     let key = format!("grpc-586-shared-{}", unique_suffix());
     let ddl = format!("CREATE TABLE {table} (id INTEGER, name TEXT)");
-    let (_runtime, server, _bind, port) = build_runtime_and_server(&ddl);
+    let (_db, _runtime, server, _bind, port) = build_runtime_and_server(&ddl);
 
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
@@ -257,7 +268,7 @@ async fn grpc_batch_insert_cache_shared_with_other_transports() {
 async fn grpc_batch_insert_row_failure_rolls_back_with_row_index_metadata() {
     let table = format!("events_586_rollback_{}", unique_suffix());
     let ddl = format!("CREATE TABLE {table} (id INTEGER, name TEXT)");
-    let (runtime, server, _bind, port) = build_runtime_and_server(&ddl);
+    let (_db, runtime, server, _bind, port) = build_runtime_and_server(&ddl);
 
     let h = tokio::spawn(async move {
         let _ = server.serve().await;
@@ -316,7 +327,7 @@ async fn grpc_batch_insert_schema_validation_pinpoints_failing_row() {
     let table = format!("events_586_schema_{}", unique_suffix());
     let event_name = format!("click_586_{}", unique_suffix());
     let ddl = format!("CREATE TABLE {table} (event_name TEXT, payload TEXT)");
-    let (runtime, server, _bind, port) = build_runtime_and_server(&ddl);
+    let (_db, runtime, server, _bind, port) = build_runtime_and_server(&ddl);
 
     let schema = r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false}"#;
     reg::register(runtime.db().store().as_ref(), &event_name, schema).expect("register schema");
@@ -377,7 +388,7 @@ async fn grpc_batch_insert_schema_validation_pinpoints_failing_row() {
 async fn grpc_batch_insert_oversize_returns_resource_exhausted_before_storage() {
     let table = format!("events_586_oversize_{}", unique_suffix());
     let ddl = format!("CREATE TABLE {table} (id INTEGER, name TEXT)");
-    let (runtime, server, _bind, port) = build_runtime_and_server(&ddl);
+    let (_db, runtime, server, _bind, port) = build_runtime_and_server(&ddl);
 
     let h = tokio::spawn(async move {
         let _ = server.serve().await;

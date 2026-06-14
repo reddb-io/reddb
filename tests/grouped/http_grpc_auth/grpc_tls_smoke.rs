@@ -16,12 +16,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use reddb::auth::store::AuthStore;
 use reddb::auth::AuthConfig;
 use reddb::grpc::proto::red_db_client::RedDbClient;
 use reddb::grpc::proto::Empty;
-use reddb::runtime::RedDBRuntime;
-use reddb::{GrpcServerOptions, GrpcTlsOptions, RedDBGrpcServer, RedDBOptions};
+use reddb::{GrpcServerOptions, GrpcTlsOptions, RedDBGrpcServer};
 
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 
@@ -40,10 +42,16 @@ fn fresh_cert() -> (String, String) {
     reddb::wire::tls::generate_self_signed_cert("localhost").expect("self-signed cert")
 }
 
-fn make_server(bind_addr: String, tls: Option<GrpcTlsOptions>) -> RedDBGrpcServer {
-    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime");
+fn make_server(
+    bind_addr: String,
+    tls: Option<GrpcTlsOptions>,
+) -> (support::TempDbFile, RedDBGrpcServer) {
+    let (db, runtime) = support::persistent_runtime("grpc-tls");
     let auth_store = Arc::new(AuthStore::new(AuthConfig::default()));
-    RedDBGrpcServer::with_options(runtime, GrpcServerOptions { bind_addr, tls }, auth_store)
+    (
+        db,
+        RedDBGrpcServer::with_options(runtime, GrpcServerOptions { bind_addr, tls }, auth_store),
+    )
 }
 
 async fn wait_for_port(port: u16, max_ms: u64) {
@@ -72,7 +80,7 @@ async fn grpc_tls_handshake_and_health_call() {
         client_ca_pem: None,
     };
 
-    let server = make_server(format!("127.0.0.1:{port}"), Some(tls));
+    let (_db, server) = make_server(format!("127.0.0.1:{port}"), Some(tls));
     let server_handle = tokio::spawn(async move {
         let _ = server.serve().await;
     });
@@ -116,7 +124,7 @@ async fn grpc_tls_rejects_plaintext_client() {
         client_ca_pem: None,
     };
 
-    let server = make_server(format!("127.0.0.1:{port}"), Some(tls));
+    let (_db, server) = make_server(format!("127.0.0.1:{port}"), Some(tls));
     let server_handle = tokio::spawn(async move {
         let _ = server.serve().await;
     });

@@ -113,7 +113,7 @@ fn rustls_client_get(
 
 #[test]
 fn https_handshake_and_health_probe() {
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+    let (_db, rt) = support::persistent_runtime("http-tls-health");
     let (_dir, addr, server_cert_der) = spawn_https_server(rt, vec![]);
 
     // /health/live is the universal "process is running" probe — never
@@ -130,7 +130,7 @@ fn https_handshake_and_health_probe() {
 
 #[test]
 fn https_admin_token_over_tls() {
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+    let (_db, rt) = support::persistent_runtime("http-tls-admin");
     let (_dir, addr, server_cert_der) = spawn_https_server(rt, vec![]);
 
     // Inject an admin token; expect non-bearer hits to 401, correct
@@ -158,7 +158,7 @@ fn https_admin_token_over_tls() {
 
 #[test]
 fn https_alpn_advertises_http11() {
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+    let (_db, rt) = support::persistent_runtime("http-tls-alpn");
     let (_dir, addr, server_cert_der) = spawn_https_server(rt, vec![]);
 
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -196,7 +196,7 @@ fn https_alpn_advertises_http11() {
 fn https_refuses_with_unknown_root() {
     // Client trusts a different cert: handshake must fail. Confirms we
     // are NOT serving plaintext on the TLS port.
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+    let (_db, rt) = support::persistent_runtime("http-tls-unknown-root");
     let (_dir, addr, _server_cert_der) = spawn_https_server(rt, vec![]);
 
     let _ = rustls::crypto::ring::default_provider().install_default();

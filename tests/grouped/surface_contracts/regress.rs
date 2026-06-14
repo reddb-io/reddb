@@ -16,7 +16,7 @@ fn regression_sql_snapshots_match() {
 
     let mut failures = Vec::new();
     for case in &cases {
-        let runtime = RedDBRuntime::in_memory().expect("in-memory runtime");
+        let runtime = super::support::persistent_test_runtime("surface-regress");
         let failure = run_case(case, |sql| execute_statement(&runtime, sql)).expect("run case");
         if let Some(failure) = failure {
             failures.push(format!("case `{}` diff:\n{}", failure.name, failure.diff));

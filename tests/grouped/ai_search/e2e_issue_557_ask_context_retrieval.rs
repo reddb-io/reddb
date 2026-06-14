@@ -44,10 +44,12 @@
 
 use reddb::application::SearchContextInput;
 use reddb::storage::schema::Value;
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::RedDBRuntime;
 
-fn open_rt() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
+use super::support::PersistentRuntime;
+
+fn open_rt() -> PersistentRuntime {
+    super::support::persistent_test_runtime("issue-557-ask-context")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {

@@ -36,6 +36,7 @@ pub const REDDB_FORMAT_VERSION: u32 = 2;
 pub const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 0;
 pub const DEFAULT_GROUP_COMMIT_MAX_STATEMENTS: usize = 128;
 pub const DEFAULT_GROUP_COMMIT_MAX_WAL_BYTES: u64 = 1024 * 1024;
+pub(crate) const EPHEMERAL_RUNTIME_METADATA_KEY: &str = "__reddb_ephemeral_runtime";
 
 pub type RedDBResult<T> = Result<T, RedDBError>;
 
@@ -377,6 +378,11 @@ impl RedDBOptions {
             unique
         ));
         let _ = std::fs::remove_file(&path);
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            EPHEMERAL_RUNTIME_METADATA_KEY.to_string(),
+            "true".to_string(),
+        );
         Self {
             mode: StorageMode::Persistent,
             data_path: Some(path),
@@ -386,6 +392,7 @@ impl RedDBOptions {
             export_retention: DEFAULT_EXPORT_RETENTION,
             read_only: false,
             force_create: true,
+            metadata,
             ..Default::default()
         }
     }

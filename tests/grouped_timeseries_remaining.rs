@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "grouped/timeseries_remaining/shared.rs"]
+mod timeseries_remaining_shared;
+
 #[path = "grouped/timeseries_remaining/e2e_continuous_aggregate.rs"]
 mod e2e_continuous_aggregate;
 

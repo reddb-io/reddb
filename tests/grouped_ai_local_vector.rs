@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "grouped/ai_local_vector/support.rs"]
+mod support;
+
 #[path = "grouped/ai_local_vector/integration_ai_live_comment_clustering.rs"]
 mod integration_ai_live_comment_clustering;
 

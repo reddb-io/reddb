@@ -1,5 +1,6 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::{Py, PyAny};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -338,9 +339,9 @@ impl WireConnection {
         &self,
         collection: &str,
         columns: Vec<String>,
-        rows: Vec<Vec<PyObject>>,
+        rows: Vec<Vec<Py<PyAny>>>,
     ) -> PyResult<u64> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let ncols = columns.len();
             let nrows = rows.len();
             let mut buf =
@@ -358,18 +359,19 @@ impl WireConnection {
 
             for row in &rows {
                 for val in row {
-                    if val.is_none(py) {
+                    let val = val.bind(py);
+                    if val.is_none() {
                         buf.push(0); // NULL
-                    } else if let Ok(v) = val.extract::<bool>(py) {
+                    } else if let Ok(v) = val.extract::<bool>() {
                         buf.push(4);
                         buf.push(v as u8);
-                    } else if let Ok(v) = val.extract::<i64>(py) {
+                    } else if let Ok(v) = val.extract::<i64>() {
                         buf.push(1);
                         buf.extend_from_slice(&v.to_le_bytes());
-                    } else if let Ok(v) = val.extract::<f64>(py) {
+                    } else if let Ok(v) = val.extract::<f64>() {
                         buf.push(2);
                         buf.extend_from_slice(&v.to_le_bytes());
-                    } else if let Ok(v) = val.extract::<String>(py) {
+                    } else if let Ok(v) = val.extract::<String>() {
                         buf.push(3);
                         buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
                         buf.extend_from_slice(v.as_bytes());
@@ -404,7 +406,7 @@ impl WireConnection {
     }
 }
 
-fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     use pyo3::types::{PyDict, PyList};
 
     if data.len() < 2 {

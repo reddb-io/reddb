@@ -25,8 +25,25 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
 }
 
+fn run_with_large_stack(name: &str, f: fn()) {
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn materialized view atomic refresh test")
+        .join()
+        .expect("materialized view atomic refresh test panicked");
+}
+
 #[test]
 fn refresh_writes_through_backing_collection_and_scrapes_live_count() {
+    run_with_large_stack(
+        "refresh-writes-through-backing-collection-and-scrapes-live-count",
+        refresh_writes_through_backing_collection_and_scrapes_live_count_impl,
+    );
+}
+
+fn refresh_writes_through_backing_collection_and_scrapes_live_count_impl() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("rt");
     exec(&rt, "CREATE TABLE orders (id INT, total INT, status TEXT)");
     exec(
@@ -88,6 +105,13 @@ fn refresh_writes_through_backing_collection_and_scrapes_live_count() {
 
 #[test]
 fn concurrent_reader_sees_old_or_new_never_partial() {
+    run_with_large_stack(
+        "concurrent-reader-sees-old-or-new-never-partial",
+        concurrent_reader_sees_old_or_new_never_partial_impl,
+    );
+}
+
+fn concurrent_reader_sees_old_or_new_never_partial_impl() {
     // Pre-populate enough source rows that REFRESH is large enough to
     // span at least a few reader iterations. The contract under test
     // is "no intermediate state" — assertion is row count ∈ {N, M},
@@ -177,6 +201,13 @@ fn concurrent_reader_sees_old_or_new_never_partial() {
 
 #[test]
 fn refresh_survives_clean_restart() {
+    run_with_large_stack(
+        "refresh-survives-clean-restart",
+        refresh_survives_clean_restart_impl,
+    );
+}
+
+fn refresh_survives_clean_restart_impl() {
     let path = persistent_path("mv_atomic_refresh_clean");
 
     // First boot: source → MV → REFRESH → 2 rows visible through MV.
@@ -221,6 +252,13 @@ fn refresh_survives_clean_restart() {
 
 #[test]
 fn refresh_failure_leaves_prior_backing_intact() {
+    run_with_large_stack(
+        "refresh-failure-leaves-prior-backing-intact",
+        refresh_failure_leaves_prior_backing_intact_impl,
+    );
+}
+
+fn refresh_failure_leaves_prior_backing_intact_impl() {
     // Models "crash mid-refresh" by way of an error that aborts the
     // refresh handler before it runs through the atomic swap. The
     // contract is the same: prior backing contents must remain
@@ -257,6 +295,13 @@ fn refresh_failure_leaves_prior_backing_intact() {
 
 #[test]
 fn refresh_completes_within_reasonable_time_smoke() {
+    run_with_large_stack(
+        "refresh-completes-within-reasonable-time-smoke",
+        refresh_completes_within_reasonable_time_smoke_impl,
+    );
+}
+
+fn refresh_completes_within_reasonable_time_smoke_impl() {
     // Lightweight perf-regression guard: the atomic-refresh path is
     // O(rows) in the body's row count and a single REFRESH on a few
     // hundred rows should finish well under a second on a dev laptop.

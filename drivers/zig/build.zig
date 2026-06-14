@@ -17,8 +17,8 @@ pub fn build(b: *std.Build) void {
     const enable_zstd = b.option(
         bool,
         "zstd",
-        "Link libzstd for compressed redwire frames (default: auto-detect)",
-    ) orelse detectZstd(b);
+        "Link libzstd for compressed redwire frames (default: false)",
+    ) orelse false;
 
     const reddb_mod = b.addModule("reddb", .{
         .root_source_file = b.path("src/reddb.zig"),
@@ -36,16 +36,19 @@ pub fn build(b: *std.Build) void {
 
     // Static library artifact — gives downstream consumers something
     // to link against without re-compiling the driver from source.
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "reddb",
-        .root_source_file = b.path("src/reddb.zig"),
-        .target = target,
-        .optimize = optimize,
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/reddb.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     lib.root_module.addOptions("build_options", build_options);
     if (enable_zstd) {
-        lib.linkSystemLibrary("zstd");
-        lib.linkLibC();
+        lib.root_module.linkSystemLibrary("zstd", .{});
+        lib.root_module.link_libc = true;
     }
     b.installArtifact(lib);
 
@@ -67,9 +70,11 @@ pub fn build(b: *std.Build) void {
 
     for (test_files) |path| {
         const t = b.addTest(.{
-            .root_source_file = b.path(path),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(path),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         // The reddb module already carries `build_options`; tests
         // that need the flag re-export it through `reddb.build_options`.
@@ -81,8 +86,8 @@ pub fn build(b: *std.Build) void {
             t.root_module.addImport("reddb", reddb_mod);
         }
         if (enable_zstd) {
-            t.linkSystemLibrary("zstd");
-            t.linkLibC();
+            t.root_module.linkSystemLibrary("zstd", .{});
+            t.root_module.link_libc = true;
         }
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
@@ -93,30 +98,17 @@ pub fn build(b: *std.Build) void {
         "Run RedWire parameter fixture conformance tests",
     );
     const param_fixtures = b.addTest(.{
-        .root_source_file = b.path("tests/value_codec_test.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/value_codec_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     param_fixtures.root_module.addImport("reddb", reddb_mod);
     if (enable_zstd) {
-        param_fixtures.linkSystemLibrary("zstd");
-        param_fixtures.linkLibC();
+        param_fixtures.root_module.linkSystemLibrary("zstd", .{});
+        param_fixtures.root_module.link_libc = true;
     }
     const run_param_fixtures = b.addRunArtifact(param_fixtures);
     param_fixtures_step.dependOn(&run_param_fixtures.step);
-}
-
-fn detectZstd(b: *std.Build) bool {
-    // Cheap probe: ask pkg-config and trust its exit code. When
-    // pkg-config itself is missing we fall back to "no zstd" so the
-    // build succeeds on minimal CI images.
-    _ = b;
-    var child = std.process.Child.init(&.{ "pkg-config", "--exists", "libzstd" }, std.heap.page_allocator);
-    child.stderr_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    const term = child.spawnAndWait() catch return false;
-    return switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
 }

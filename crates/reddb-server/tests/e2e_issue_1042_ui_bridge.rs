@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use reddb_server::server::header_escape_guard::HeaderEscapeGuard;
 use reddb_server::server::ui_bridge::{spawn_ui_bridge, UiBridgeConfig};
 use reddb_server::server::RedDBServer;
 use reddb_server::{RedDBOptions, RedDBRuntime};
@@ -33,7 +34,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -61,7 +61,7 @@ fn ws_request(
     let mut req = url.into_client_request().expect("client request");
     req.headers_mut().insert(
         "Origin",
-        HeaderValue::from_str(origin).expect("origin value"),
+        HeaderEscapeGuard::header_value(origin).expect("origin value"),
     );
     req
 }

@@ -31,13 +31,19 @@ fn readFixtureManifest(allocator: std.mem.Allocator) ![]u8 {
         "../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
     };
 
+    const io = std.Options.debug_io;
     for (candidates) |path| {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
+        const buffer = try allocator.alloc(u8, 1024 * 1024);
+        errdefer allocator.free(buffer);
+        const bytes = std.Io.Dir.cwd().readFile(io, path, buffer) catch |err| switch (err) {
+            error.FileNotFound => {
+                allocator.free(buffer);
+                continue;
+            },
             else => return err,
         };
-        defer file.close();
-        return try file.readToEndAlloc(allocator, 1024 * 1024);
+        if (bytes.len == buffer.len) return buffer;
+        return try allocator.realloc(buffer, bytes.len);
     }
     return error.FixtureManifestNotFound;
 }

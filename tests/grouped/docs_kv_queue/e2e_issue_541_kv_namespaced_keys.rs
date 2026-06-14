@@ -70,7 +70,8 @@ fn quoted_namespaced_key_round_trips_through_sql_set_and_get() {
 // `/v1/kv/<collection>/<key>` surfaces — both are publicly documented.
 #[test]
 fn url_encoded_namespaced_key_round_trips_through_http_kv_endpoints() {
-    let server = RedDBServer::new(runtime());
+    let (_db, rt) = support::persistent_runtime("kv-namespaced-http");
+    let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     server.serve_in_background_on(listener);

@@ -5,8 +5,9 @@ use reddb::RedDBRuntime;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Mutex, OnceLock};
 use std::thread;
+
+use super::support::env_lock;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
@@ -25,11 +26,6 @@ fn text(record: &UnifiedRecord, column: &str) -> String {
         Some(Value::Text(value)) => value.to_string(),
         other => panic!("expected text value for {column}, got {other:?}"),
     }
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 struct EnvGuard {

@@ -12,10 +12,6 @@ use reddb::{
     shm_provisioning_enabled, ShmProvisionState, SHM_FILE_SIZE, SHM_HEADER_SIZE, SHM_MAGIC,
     SHM_VERSION,
 };
-use std::sync::Mutex;
-
-// Tests poke a process-global toggle; serialise them.
-static POLICY_GUARD: Mutex<()> = Mutex::new(());
 
 fn reset_policy() {
     set_shm_provisioning_enabled(false);
@@ -24,7 +20,7 @@ fn reset_policy() {
 
 #[test]
 fn provisioning_disabled_by_default() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     reset_policy();
     assert!(!shm_provisioning_enabled());
     set_shm_provisioning_enabled(true);
@@ -34,7 +30,7 @@ fn provisioning_disabled_by_default() {
 
 #[test]
 fn provision_creates_shm_with_canonical_header() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     let data = support::temp_db_file("shm-create");
 
     let handle = provision_shm(&data).expect("shm provisions cleanly");
@@ -66,7 +62,7 @@ fn provision_creates_shm_with_canonical_header() {
 
 #[test]
 fn reopen_by_same_process_attaches_without_bumping_generation() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     let data = support::temp_db_file("shm-reattach");
 
     let first = provision_shm(&data).expect("first open");
@@ -88,7 +84,7 @@ fn reopen_by_same_process_attaches_without_bumping_generation() {
 
 #[test]
 fn multiple_readers_can_attach_concurrently() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     let data = support::temp_db_file("shm-readers");
 
     let mut owner = provision_shm(&data).expect("owner open");
@@ -114,7 +110,7 @@ fn multiple_readers_can_attach_concurrently() {
 
 #[test]
 fn crash_of_prior_owner_is_detected_and_state_cleaned() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     let data = support::temp_db_file("shm-crash");
 
     // Bootstrap a valid shm with a fabricated dead-pid owner.
@@ -169,7 +165,7 @@ fn crash_of_prior_owner_is_detected_and_state_cleaned() {
 
 #[test]
 fn corrupt_header_is_healed_in_place() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
+    let _g = crate::config_tier_shared::tier_state_lock();
     let data = support::temp_db_file("shm-corrupt");
 
     // Plant a file that exists but has no valid magic.

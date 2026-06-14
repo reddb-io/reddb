@@ -32,6 +32,63 @@ use crate::RedDB;
 
 use super::TableQuery;
 
+struct QueryTempDir {
+    path: std::path::PathBuf,
+}
+
+impl QueryTempDir {
+    fn new(prefix: &str) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let unique = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "{prefix}{}-{now_nanos}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for QueryTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod query_temp_dir_tests {
+    use super::QueryTempDir;
+
+    #[test]
+    fn query_temp_dir_new_creates_directory() {
+        let dir = QueryTempDir::new("reddb-agg-test-").expect("temp dir should be created");
+
+        assert!(dir.path().is_dir());
+    }
+
+    #[test]
+    fn query_temp_dir_drop_removes_directory() {
+        let path = {
+            let dir = QueryTempDir::new("reddb-agg-test-").expect("temp dir should be created");
+            let path = dir.path().to_path_buf();
+            assert!(path.is_dir());
+            path
+        };
+
+        assert!(!path.exists());
+    }
+}
+
 /// Return `true` when any projection in the query is a known aggregate
 /// function. Used by the executor to decide whether to dispatch to
 /// [`execute_aggregate_query`].
@@ -257,20 +314,12 @@ pub(crate) fn execute_aggregate_query(
         std::collections::HashMap::new();
 
     // SpilledHashAgg receives flushed batches and performs the final merge.
-    let spill_dir = {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let d = std::env::temp_dir().join(format!("reddb-agg-{pid}-{seq}"));
-        std::fs::create_dir_all(&d)
-            .map_err(|e| RedDBError::Query(format!("agg spill dir: {e}")))?;
-        d
-    };
+    let spill_dir = QueryTempDir::new("reddb-agg-")
+        .map_err(|e| RedDBError::Query(format!("agg spill dir: {e}")))?;
     let mut spill_agg = crate::storage::query::executors::agg_spill::SpilledHashAgg::<
         AggregateGroupKey,
         AggregateGroup,
-    >::new(spill_dir, WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
+    >::new(spill_dir.path(), WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
 
     let table_row_resolver = TableRowMvccReadResolver::current_statement();

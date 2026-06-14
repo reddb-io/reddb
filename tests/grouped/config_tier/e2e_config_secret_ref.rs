@@ -24,7 +24,7 @@ fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<
     let options = RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
         .expect("serverless storage profile should expose pager");
-    let rt = RedDBRuntime::with_options(options).expect("runtime should open");
+    let rt = crate::config_tier_shared::open_runtime_with_options(options, "runtime should open");
     let pager = Arc::clone(
         rt.db()
             .store()

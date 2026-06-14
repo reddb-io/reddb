@@ -16,6 +16,16 @@ fn rows(rt: &RedDBRuntime, sql: &str) -> usize {
     rt.execute_query(sql).unwrap().result.records.len()
 }
 
+fn run_with_large_stack(name: &str, f: fn()) {
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn within-clause e2e test")
+        .join()
+        .expect("within-clause e2e test panicked");
+}
+
 #[test]
 fn within_tenant_filters_select() {
     let rt = open_runtime();
@@ -196,6 +206,10 @@ fn within_filters_join_between_two_tenant_tables() {
 
 #[test]
 fn within_works_through_view() {
+    run_with_large_stack("within-works-through-view", within_works_through_view_impl);
+}
+
+fn within_works_through_view_impl() {
     let rt = open_runtime();
     exec(
         &rt,

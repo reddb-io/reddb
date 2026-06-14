@@ -136,6 +136,9 @@ pub mod ui_bridge;
 // HTTPS download, SHA-256 verification, tgz extraction, and local cache
 // management for the pinned red-ui release asset.
 pub mod ui_bundle_resolver;
+// `red ui --token` credential handoff (issue #1048, ADR 0051): one-time
+// loopback nonce channel and served-UI auth-mode wiring.
+pub mod ui_auth;
 // `red server --ui` static bundle surface (issue #1047, ADR 0051): serve
 // the resolved red-ui bundle as inert static assets on the server's HTTP
 // edge so a remote browser can load it and connect back over RedWire-over-WS.
