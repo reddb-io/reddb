@@ -6,7 +6,10 @@ use reddb::application::ExecuteQueryInput;
 use reddb::auth::{AuthConfig, AuthStore};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
-use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+use reddb::{
+    storage::{DeployProfile, StoragePackaging, StorageProfileSelection},
+    QueryUseCases, RedDBOptions, RedDBRuntime,
+};
 
 #[allow(dead_code)]
 mod support;
@@ -29,8 +32,16 @@ fn unique_ident(prefix: &str) -> String {
 }
 
 fn rt_with_vault(path: &Path) -> RedDBRuntime {
-    let rt =
-        RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("runtime should open");
+    let options = RedDBOptions::persistent(path)
+        .with_storage_profile(StorageProfileSelection {
+            deploy_profile: DeployProfile::Embedded,
+            packaging: StoragePackaging::OperationalDirectory,
+            replica_count: 0,
+            managed_backup: false,
+            wal_retention: false,
+        })
+        .expect("operational storage profile should validate");
+    let rt = RedDBRuntime::with_options(options).expect("runtime should open");
     let pager = Arc::clone(
         rt.db()
             .store()
