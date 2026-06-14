@@ -39,6 +39,10 @@ fn message_id_of(result: &reddb::runtime::RuntimeQueryResult) -> String {
 
 #[test]
 fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
+    // The operator event sink is process-global and first-runtime-wins.
+    // Queue DLQ promotion must still persist to the runtime that performed
+    // the NACK, not whichever runtime first installed the global sink.
+    let _global_sink_owner = rt();
     let rt = rt();
 
     // Build a queue with a DLQ target + a low max_attempts so the
