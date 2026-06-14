@@ -70,9 +70,11 @@ pub fn build(b: *std.Build) void {
 
     for (test_files) |path| {
         const t = b.addTest(.{
-            .root_source_file = b.path(path),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(path),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         // The reddb module already carries `build_options`; tests
         // that need the flag re-export it through `reddb.build_options`.
@@ -96,9 +98,11 @@ pub fn build(b: *std.Build) void {
         "Run RedWire parameter fixture conformance tests",
     );
     const param_fixtures = b.addTest(.{
-        .root_source_file = b.path("tests/value_codec_test.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/value_codec_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     param_fixtures.root_module.addImport("reddb", reddb_mod);
     if (enable_zstd) {
