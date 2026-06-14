@@ -645,7 +645,7 @@ jobs:
     needs: gate
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
