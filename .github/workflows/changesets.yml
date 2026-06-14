@@ -26,10 +26,6 @@ jobs:
           # Full history so `changesets/action` can rewrite tags / detect
           # changes against main.
           fetch-depth: 0
-          # Use a PAT so the version-bump commit pushed by this workflow
-          # can re-trigger downstream tag-driven workflows (release.yml).
-          # Falls back to GITHUB_TOKEN if no PAT is configured.
-          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -69,4 +65,7 @@ jobs:
           # that as part of the `publish-github` job once binaries are built.
           createGithubReleases: false
         env:
+          # Use a PAT so the version-bump commit pushed by this workflow
+          # can re-trigger downstream tag-driven workflows (release.yml).
+          # Falls back to GITHUB_TOKEN if no PAT is configured.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
