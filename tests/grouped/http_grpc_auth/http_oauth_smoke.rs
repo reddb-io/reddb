@@ -11,6 +11,9 @@
 //!   * Unknown-kid JWT → 401.
 //!   * Opaque AuthStore session token still works (fallback path).
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -69,8 +72,10 @@ fn make_jwt(header: &str, payload: &str) -> String {
     format!("{h}.{p}.{s}")
 }
 
-fn build_runtime_with_oauth(oauth: Option<Arc<OAuthValidator>>) -> (RedDBRuntime, Arc<AuthStore>) {
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+fn build_runtime_with_oauth(
+    oauth: Option<Arc<OAuthValidator>>,
+) -> (support::TempDbFile, RedDBRuntime, Arc<AuthStore>) {
+    let (db, rt) = support::persistent_runtime("http-oauth");
     let cfg = AuthConfig {
         enabled: true,
         session_ttl_secs: 60,
@@ -88,7 +93,7 @@ fn build_runtime_with_oauth(oauth: Option<Arc<OAuthValidator>>) -> (RedDBRuntime
     if let Some(v) = oauth {
         rt.set_oauth_validator(Some(v));
     }
-    (rt, auth_store)
+    (db, rt, auth_store)
 }
 
 fn build_oauth_validator() -> Arc<OAuthValidator> {
@@ -150,7 +155,7 @@ fn http_get(addr: &str, path: &str, bearer: Option<&str>) -> (u16, String) {
 #[test]
 fn valid_jwt_is_accepted_via_oauth_validator() {
     let validator = build_oauth_validator();
-    let (rt, auth_store) = build_runtime_with_oauth(Some(validator));
+    let (_db, rt, auth_store) = build_runtime_with_oauth(Some(validator));
     let addr = spawn_http(rt, auth_store);
 
     let now = now_secs();
@@ -171,7 +176,7 @@ fn valid_jwt_is_accepted_via_oauth_validator() {
 #[test]
 fn expired_jwt_rejected_with_401() {
     let validator = build_oauth_validator();
-    let (rt, auth_store) = build_runtime_with_oauth(Some(validator));
+    let (_db, rt, auth_store) = build_runtime_with_oauth(Some(validator));
     let addr = spawn_http(rt, auth_store);
 
     let now = now_secs();
@@ -190,7 +195,7 @@ fn expired_jwt_rejected_with_401() {
 #[test]
 fn wrong_issuer_jwt_rejected() {
     let validator = build_oauth_validator();
-    let (rt, auth_store) = build_runtime_with_oauth(Some(validator));
+    let (_db, rt, auth_store) = build_runtime_with_oauth(Some(validator));
     let addr = spawn_http(rt, auth_store);
 
     let now = now_secs();
@@ -208,7 +213,7 @@ fn wrong_issuer_jwt_rejected() {
 #[test]
 fn wrong_audience_jwt_rejected() {
     let validator = build_oauth_validator();
-    let (rt, auth_store) = build_runtime_with_oauth(Some(validator));
+    let (_db, rt, auth_store) = build_runtime_with_oauth(Some(validator));
     let addr = spawn_http(rt, auth_store);
 
     let now = now_secs();
@@ -226,7 +231,7 @@ fn wrong_audience_jwt_rejected() {
 #[test]
 fn unknown_kid_jwt_rejected() {
     let validator = build_oauth_validator();
-    let (rt, auth_store) = build_runtime_with_oauth(Some(validator));
+    let (_db, rt, auth_store) = build_runtime_with_oauth(Some(validator));
     let addr = spawn_http(rt, auth_store);
 
     let now = now_secs();
@@ -244,7 +249,7 @@ fn unknown_kid_jwt_rejected() {
 #[test]
 fn opaque_api_key_still_works_with_oauth_configured() {
     let validator = build_oauth_validator();
-    let (rt, auth_store) = build_runtime_with_oauth(Some(validator));
+    let (_db, rt, auth_store) = build_runtime_with_oauth(Some(validator));
     let addr = spawn_http(rt.clone(), auth_store.clone());
 
     let api_key = auth_store
@@ -264,7 +269,7 @@ fn opaque_api_key_still_works_with_oauth_configured() {
 fn jwt_shaped_token_falls_back_to_authstore_when_no_oauth_configured() {
     // No OAuthValidator wired. JWT-shaped token must be tried against
     // AuthStore (where it doesn't exist) → 401.
-    let (rt, auth_store) = build_runtime_with_oauth(None);
+    let (_db, rt, auth_store) = build_runtime_with_oauth(None);
     let addr = spawn_http(rt, auth_store);
 
     let header = r#"{"alg":"RS256","kid":"k1","typ":"JWT"}"#;

@@ -209,7 +209,7 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "ui",
       summary: "Open a graphical UI against a local .rdb or a remote red:///reds:// instance over a RedWire-over-WS bridge",
-      usage: "red ui file://./data.rdb | red ui red://host:port [--ui-dir DIR] [--port N] [--tls-ca PEM] [--no-browser]",
+      usage: "red ui file://./data.rdb | red ui red://host:port [--token TOKEN] [--ui-dir DIR] [--port N] [--tls-ca PEM] [--no-browser]",
       flags: ui_flags(),
     },
   ]

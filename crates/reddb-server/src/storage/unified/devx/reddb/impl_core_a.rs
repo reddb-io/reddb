@@ -145,6 +145,15 @@ fn promote_ready_replica_rebootstrap(
     Ok(true)
 }
 
+fn should_cleanup_ephemeral_data_path(options: &RedDBOptions, path: &Path) -> bool {
+    options
+        .metadata
+        .get(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY)
+        .map(|value| value == "true")
+        .unwrap_or(false)
+        && super::is_ephemeral_data_path(path)
+}
+
 impl RedDB {
     fn remote_head_key(options: &RedDBOptions) -> String {
         options.default_backup_head_key()
@@ -511,6 +520,11 @@ impl RedDB {
                 options.replication.quorum.clone(),
             ))
         });
+        let ephemeral_cleanup = path
+            .as_ref()
+            .filter(|path| should_cleanup_ephemeral_data_path(options, path))
+            .cloned()
+            .map(super::EphemeralDataPathCleanup::new);
 
         Self {
             store: Arc::new(store),
@@ -534,6 +548,7 @@ impl RedDB {
             continuous_aggregates: std::sync::OnceLock::new(),
             turbo_collections: std::sync::OnceLock::new(),
             turbo_rebuild_workers: parking_lot::Mutex::new(Vec::new()),
+            _ephemeral_cleanup: ephemeral_cleanup,
         }
         .with_initialized_metadata()
         .map_err(|err| format!("initialize RedDB metadata: {err}").into())
@@ -1248,5 +1263,29 @@ impl RedDB {
             && report.state != HealthState::Unhealthy;
 
         (query_allowed, write_allowed, repair_allowed)
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_options_arm_ephemeral_cleanup_for_their_generated_path() {
+        let options = RedDBOptions::in_memory();
+        let path = options.data_path.as_ref().expect("in-memory data path");
+
+        assert!(should_cleanup_ephemeral_data_path(&options, path));
+    }
+
+    #[test]
+    fn persistent_options_do_not_arm_cleanup_for_matching_temp_path() {
+        let path = std::env::temp_dir().join(format!(
+            "reddb-ephemeral-{}-persistent-user.rdb",
+            std::process::id()
+        ));
+        let options = RedDBOptions::persistent(&path);
+
+        assert!(!should_cleanup_ephemeral_data_path(&options, &path));
     }
 }

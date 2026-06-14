@@ -80,10 +80,19 @@ pub fn run(args: BootstrapArgs) -> Result<BootstrapOutcome, String> {
         return Err("password is required (use --password-stdin or REDDB_PASSWORD_FILE)".into());
     }
 
-    // Open the runtime in persistent mode at the requested path. The
-    // engine creates the file on first open, so this works for both
-    // green-field bootstraps and re-runs against an existing DB.
-    let opts = RedDBOptions::persistent(&args.path);
+    // Vault bootstrap needs the paged storage path because AuthStore seals
+    // credentials through the pager. The default embedded single-file profile
+    // intentionally hides that pager, so bootstrap opts into the operational
+    // local layout while keeping the caller-provided database path.
+    let opts = RedDBOptions::persistent(&args.path)
+        .with_storage_profile(crate::storage::StorageProfileSelection {
+            deploy_profile: crate::storage::DeployProfile::Embedded,
+            packaging: crate::storage::StoragePackaging::OperationalDirectory,
+            replica_count: 0,
+            managed_backup: false,
+            wal_retention: false,
+        })
+        .map_err(|err| format!("storage profile: {err}"))?;
     let runtime = RedDBRuntime::with_options(opts).map_err(|err| format!("open db: {err}"))?;
 
     let pager = runtime

@@ -12,8 +12,10 @@ use reddb::storage::ml::ModelVersion;
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
 
-fn rt() -> RedDBRuntime {
-    RedDBRuntime::in_memory().expect("in-memory runtime")
+use super::support::{env_lock, PersistentRuntime};
+
+fn rt() -> PersistentRuntime {
+    super::support::persistent_test_runtime("ml-classify")
 }
 
 /// Train a tiny 2-feature, 2-class logistic regression that separates
@@ -67,7 +69,7 @@ fn train_and_register(rt: &RedDBRuntime, model_name: &str) {
 fn ml_classify_returns_predicted_class_from_sql() {
     let rt = rt();
     train_and_register(&rt, "xor_toy");
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
 
     // Class 0: first feature bigger. The scalar takes an   literal.
     let r = q
@@ -98,7 +100,7 @@ fn ml_classify_returns_predicted_class_from_sql() {
 fn ml_predict_proba_returns_normalised_probabilities() {
     let rt = rt();
     train_and_register(&rt, "xor_toy2");
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
 
     let r = q
         .execute(ExecuteQueryInput {
@@ -130,7 +132,7 @@ fn ml_predict_proba_returns_normalised_probabilities() {
 #[test]
 fn ml_classify_unknown_model_returns_null() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
     let r = q
         .execute(ExecuteQueryInput {
             query: "SELECT ML_CLASSIFY('does_not_exist', [1.0, 2.0]) AS cls".into(),
@@ -143,7 +145,7 @@ fn ml_classify_unknown_model_returns_null() {
 #[test]
 fn semantic_cache_roundtrip_via_sql() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
 
     // PUT then GET — same embedding should hit.
     q.execute(ExecuteQueryInput {
@@ -168,12 +170,14 @@ fn semantic_cache_roundtrip_via_sql() {
 
 #[test]
 fn embed_returns_null_without_provider_config() {
+    let _env = env_lock().lock().expect("env lock");
+
     // EMBED needs `red_config` entries for a provider. With none set
     // the scalar degrades to Null rather than panicking or crossing
     // the network. Negative-path guard — proves the wiring reaches
     // the runtime and fails closed.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
     let r = q
         .execute(ExecuteQueryInput {
             query: "SELECT EMBED('hello world', 'openai') AS emb".into(),
@@ -217,7 +221,7 @@ fn model_register_then_classify_roundtrip() {
     model.fit(&examples);
     let weights_json = model.to_json();
 
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
     let sql = format!(
         "SELECT MODEL_REGISTER('sql_reg_model', 'logreg', '{}') AS v",
         weights_json.replace('\'', "''")
@@ -248,7 +252,7 @@ fn model_register_then_classify_roundtrip() {
 fn model_drop_archives_versions() {
     let rt = rt();
     train_and_register(&rt, "drop_me");
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
     q.execute(ExecuteQueryInput {
         query: "SELECT MODEL_DROP('drop_me') AS ok".into(),
     })
@@ -267,7 +271,7 @@ fn model_drop_archives_versions() {
 #[test]
 fn semantic_cache_miss_returns_null() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = QueryUseCases::new(rt.runtime());
     let r = q
         .execute(ExecuteQueryInput {
             query: "SELECT SEMANTIC_CACHE_GET('qa', [0.99, 0.0, 0.0, 0.0]) AS cached".into(),

@@ -9,17 +9,20 @@ use reddb::api::DurabilityMode;
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::schema::Value;
 use reddb::storage::wal::{WalReader, WalRecord};
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 fn db_open(db: &support::TempDbFile) -> RedDBRuntime {
     RedDBRuntime::with_options(
-        RedDBOptions::persistent(db.path()).with_durability_mode(DurabilityMode::WalDurableGrouped),
+        RedDBOptions::persistent(db.path())
+            .with_durability_mode(DurabilityMode::WalDurableGrouped)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+            .expect("primary-replica operational profile"),
     )
     .expect("persistent runtime")
 }
 
 fn db_wal_path(db: &support::TempDbFile) -> PathBuf {
-    db.path().with_extension("rdb-uwal")
+    reddb_file::unified_wal_path(db.path())
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {

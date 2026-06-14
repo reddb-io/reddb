@@ -3,6 +3,7 @@ mod support;
 
 use std::sync::Arc;
 
+use reddb::auth::enforcement_mode::PolicyEnforcementMode;
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::replication::cdc::ChangeOperation;
 use reddb::runtime::mvcc::{
@@ -110,6 +111,7 @@ fn attach_alice_policy(store: &AuthStore, id: &str, statements: &str) {
 fn explicit_targets_are_authorized_as_ordinary_updates() {
     let rt = runtime();
     let auth = Arc::new(AuthStore::new(AuthConfig::default()));
+    auth.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
     auth.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&auth));
     attach_alice_policy(

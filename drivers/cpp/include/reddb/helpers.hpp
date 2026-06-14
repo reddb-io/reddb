@@ -135,7 +135,8 @@ std::shared_ptr<IQuerier> make_querier(Conn* conn);
 class DocumentClient {
 public:
     struct ListOptions {
-        int limit = 0;
+        ListOptions() : limit(0) {}
+        int limit;
         std::string order_by;
         std::string filter;
     };
@@ -144,7 +145,7 @@ public:
 
     InsertResult insert(const std::string& collection, const JsonObject& document);
     JsonObject   get(const std::string& collection, const std::string& rid);
-    ListResult   list(const std::string& collection, const ListOptions& opts = {});
+    ListResult   list(const std::string& collection, const ListOptions& opts = ListOptions{});
     JsonObject   patch(const std::string& collection, const std::string& rid,
                        const JsonObject& patch);
     DeleteResult del(const std::string& collection, const std::string& rid);
@@ -157,13 +158,15 @@ private:
 class KvClient {
 public:
     struct SetOptions {
+        SetOptions() : expire_ms(0) {}
         std::string collection;
         std::vector<std::string> tags;
-        int64_t expire_ms = 0;
+        int64_t expire_ms;
     };
     struct ListOpts {
+        ListOpts() : limit(0) {}
         std::string collection;
-        int limit = 0;
+        int limit;
         std::string prefix;
     };
 
@@ -171,13 +174,13 @@ public:
         : q_(std::move(q)), collection_(std::move(collection)) {}
 
     void         put(const std::string& key, const JsonValue& value,
-                     const SetOptions& opts = {});
+                     const SetOptions& opts = SetOptions{});
     void         set(const std::string& key, const JsonValue& value,
-                     const SetOptions& opts = {}) { put(key, value, opts); }
+                     const SetOptions& opts = SetOptions{}) { put(key, value, opts); }
     JsonValue    get(const std::string& key, const std::string& collection = "");
     ExistsResult exists(const std::string& key, const std::string& collection = "");
     DeleteResult del(const std::string& key, const std::string& collection = "");
-    ListResult   list(const ListOpts& opts = {});
+    ListResult   list(const ListOpts& opts = ListOpts{});
 
     const std::string& collection() const noexcept { return collection_; }
 
@@ -193,7 +196,7 @@ public:
     explicit QueueClient(std::shared_ptr<IQuerier> q) : q_(std::move(q)) {}
 
     QueuePushResult push(const std::string& queue, const JsonValue& value,
-                         const PushOptions& opts = {});
+                         const PushOptions& opts = PushOptions{});
     std::vector<JsonValue> pop(const std::string& queue,
                                std::optional<int> count = std::nullopt);
     std::vector<JsonValue> peek(const std::string& queue,
@@ -214,7 +217,7 @@ public:
     std::vector<JsonValue> read_wait(const std::string& queue,
                                      const std::string& consumer,
                                      int64_t wait_ms,
-                                     const ReadWaitOptions& opts = {});
+                                     const ReadWaitOptions& opts = ReadWaitOptions{});
 
 private:
     std::vector<JsonValue> fetch(const char* verb, const std::string& queue,

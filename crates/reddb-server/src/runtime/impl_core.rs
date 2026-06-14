@@ -2433,16 +2433,15 @@ impl RedDBRuntime {
                     // support-directory logs tier;
                     // lower tiers / ephemeral runs report `Stderr`
                     // and we keep the legacy file-next-to-data sink.
-                    let data_path = if embedded_single_file {
-                        std::env::temp_dir()
-                            .join("reddb-embedded-runtime")
-                            .join(format!("audit-{}", std::process::id()))
-                    } else {
-                        options
-                            .data_path
-                            .clone()
-                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
-                    };
+                    let data_path = options.data_path.clone().unwrap_or_else(|| {
+                        if embedded_single_file {
+                            std::env::temp_dir()
+                                .join("reddb-embedded-runtime")
+                                .join(format!("audit-{}", std::process::id()))
+                        } else {
+                            std::env::temp_dir().join("reddb")
+                        }
+                    });
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
                     Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
                         &audit_dest,
@@ -2478,17 +2477,19 @@ impl RedDBRuntime {
                     // lands under the file-owned support-directory logs tier;
                     // lower tiers fall back to `red-slow.log` in the
                     // data directory.
-                    let fallback_dir = if embedded_single_file {
-                        std::env::temp_dir()
-                            .join("reddb-embedded-runtime")
-                            .join(format!("slow-{}", std::process::id()))
-                    } else {
-                        options
-                            .data_path
-                            .as_ref()
-                            .and_then(|p| p.parent().map(std::path::PathBuf::from))
-                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
-                    };
+                    let fallback_dir = options
+                        .data_path
+                        .as_ref()
+                        .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                        .unwrap_or_else(|| {
+                            if embedded_single_file {
+                                std::env::temp_dir()
+                                    .join("reddb-embedded-runtime")
+                                    .join(format!("slow-{}", std::process::id()))
+                            } else {
+                                std::env::temp_dir().join("reddb")
+                            }
+                        });
                     let threshold_ms = std::env::var("RED_SLOW_QUERY_THRESHOLD_MS")
                         .ok()
                         .and_then(|s| s.parse::<u64>().ok())
@@ -7877,6 +7878,16 @@ impl RedDBRuntime {
                 retention_duration_ms: descriptor.retention_duration_ms,
             };
             self.inner.materialized_views.write().register(def);
+            if let Err(err) = self.ensure_materialized_view_backing(&view_name) {
+                crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
+                    collection: crate::runtime::continuous_materialized_view::CATALOG_COLLECTION
+                        .to_string(),
+                    detail: format!(
+                        "failed to rehydrate backing collection for materialized view {view_name}: {err}"
+                    ),
+                }
+                .emit_global();
+            }
         }
         // A rehydrated view shape may differ from any plans the cache
         // bootstrapped before this method ran — flush to be safe.

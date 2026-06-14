@@ -20,12 +20,15 @@ struct StdioSession {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
+    _db: super::support::TempDbFile,
 }
 
 impl StdioSession {
     fn spawn() -> Self {
+        let db = super::support::temp_db_file("rpc-stdio");
         let mut child = Command::new(red_binary())
-            .args(["rpc", "--stdio"])
+            .args(["rpc", "--stdio", "--path"])
+            .arg(db.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -37,6 +40,7 @@ impl StdioSession {
             child,
             stdin,
             stdout,
+            _db: db,
         }
     }
 

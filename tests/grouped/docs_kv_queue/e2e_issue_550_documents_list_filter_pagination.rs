@@ -43,13 +43,13 @@ fn number_field(row: &UnifiedRecord, field: &str) -> f64 {
     }
 }
 
-fn spawn_http_server() -> (RedDBRuntime, String) {
-    let rt = runtime();
+fn spawn_http_server() -> (support::TempDbFile, RedDBRuntime, String) {
+    let (db, rt) = support::persistent_runtime("documents-list-http");
     let server = RedDBServer::new(rt.clone());
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr").to_string();
     server.serve_in_background_on(listener);
-    (rt, addr)
+    (db, rt, addr)
 }
 
 fn http_request(addr: &str, method: &str, path: &str, body: Option<JsonValue>) -> (u16, JsonValue) {
@@ -207,7 +207,7 @@ fn sql_select_beyond_end_offset_returns_empty_page() {
 // Acceptance: HTTP list endpoint supports pagination (offset + limit).
 #[test]
 fn http_scan_offset_and_limit_paginates_documents() {
-    let (rt, addr) = spawn_http_server();
+    let (_db, rt, addr) = spawn_http_server();
     seed_documents(&rt, "issue550_http_scan", 5);
 
     // First page: limit=2, offset=0.
@@ -260,7 +260,7 @@ fn http_scan_offset_and_limit_paginates_documents() {
 // Acceptance: HTTP list endpoint with beyond-end offset returns an empty page.
 #[test]
 fn http_scan_beyond_end_offset_returns_empty_page() {
-    let (rt, addr) = spawn_http_server();
+    let (_db, rt, addr) = spawn_http_server();
     seed_documents(&rt, "issue550_http_beyond", 3);
 
     let (status, page) = http_request(
@@ -282,7 +282,7 @@ fn http_scan_beyond_end_offset_returns_empty_page() {
 // of `SELECT ... WHERE ... LIMIT N OFFSET M` on a document collection.
 #[test]
 fn http_query_with_where_limit_offset_filters_and_paginates() {
-    let (rt, addr) = spawn_http_server();
+    let (_db, rt, addr) = spawn_http_server();
     seed_documents(&rt, "issue550_http_filter", 8);
 
     // seq=0,2,4,6 are "login" (4 docs). LIMIT 2 OFFSET 1 ORDER BY seq →

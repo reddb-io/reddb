@@ -7,7 +7,7 @@
 //! without downloading anything.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::runtime::ai::local_embedding::{
@@ -18,10 +18,7 @@ use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBError, RedDBResult, RedDBRuntime};
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use super::support::{backend_lock, env_lock};
 
 struct EnvGuard {
     saved: Vec<(&'static str, Option<String>)>,
@@ -121,11 +118,6 @@ impl LocalEmbeddingBackend for FixedBackend {
 
 /// Process-global backend slot serialisation. Mirrors the unit-test
 /// strategy in `handlers_ai.rs::tests`.
-fn backend_lock() -> &'static Mutex<()> {
-    static L: OnceLock<Mutex<()>> = OnceLock::new();
-    L.get_or_init(|| Mutex::new(()))
-}
-
 #[test]
 fn text_vector_search_routes_through_local_provider_when_default_provider_is_local() {
     let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());

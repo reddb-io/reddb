@@ -1,18 +1,20 @@
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use reddb::server::RedDBServer;
-use reddb::RedDBRuntime;
 use serde_json::{json, Value};
 
-fn spawn_http_server() -> String {
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+fn spawn_http_server() -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime("grimms-graph-http");
     let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
-    addr.to_string()
+    (db, addr.to_string())
 }
 
 fn post_query(addr: &str, query: &str) -> Value {
@@ -86,7 +88,7 @@ fn only_record(response: &Value) -> &Value {
 
 #[test]
 fn http_query_grimms_graph_showcase_queries_match_embedded_contract() {
-    let addr = spawn_http_server();
+    let (_db, addr) = spawn_http_server();
 
     post_query(
         &addr,
@@ -131,7 +133,7 @@ fn http_query_grimms_graph_showcase_queries_match_embedded_contract() {
 
 #[test]
 fn http_query_mini_grimms_multimodel_showcase_smoke() {
-    let addr = spawn_http_server();
+    let (_db, addr) = spawn_http_server();
 
     post_query(
         &addr,

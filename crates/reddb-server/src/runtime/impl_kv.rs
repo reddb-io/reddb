@@ -1564,7 +1564,7 @@ impl RedDBRuntime {
                     {
                         push_vault_metadata_record(&mut result, collection, &entry.key, &entry);
                     }
-                    return Ok(RuntimeQueryResult {
+                    Ok(RuntimeQueryResult {
                         query: raw_query.to_string(),
                         mode: crate::storage::query::modes::QueryMode::Sql,
                         statement: "vault_list",
@@ -1573,7 +1573,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
-                    });
+                    })
                 } else {
                     let mut result = UnifiedResult::with_columns(vec![
                         "rid".into(),
@@ -1611,39 +1611,40 @@ impl RedDBRuntime {
                                 crate::presentation::entity_json::storage_value_to_json(&value),
                             );
                         }
-                        return Ok(kv_list_json_result(raw_query, collection, prefix, tree));
+                        Ok(kv_list_json_result(raw_query, collection, prefix, tree))
+                    } else {
+                        for (key, entity) in entries
+                            .into_iter()
+                            .skip(*offset)
+                            .take(limit.unwrap_or(usize::MAX))
+                        {
+                            let mut record = UnifiedRecord::new();
+                            record.set("rid", Value::UnsignedInteger(entity.id.raw()));
+                            record.set("collection", Value::text(collection.clone()));
+                            record.set("kind", Value::text("kv"));
+                            record.set("tenant", Value::Null);
+                            record.set("created_at", Value::UnsignedInteger(entity.created_at));
+                            record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+                            record.set("key", Value::text(key.clone()));
+                            record.set(
+                                "value",
+                                kv_value_from_entity(&entity)
+                                    .unwrap_or(crate::storage::schema::Value::Null),
+                            );
+                            record.set("tags", kv_tags_value(&ops.tags_for_key(collection, &key)));
+                            result.push(record);
+                        }
+                        Ok(RuntimeQueryResult {
+                            query: raw_query.to_string(),
+                            mode: crate::storage::query::modes::QueryMode::Sql,
+                            statement: "kv_list",
+                            engine: "kv",
+                            result,
+                            affected_rows: 0,
+                            statement_type: "select",
+                            bookmark: None,
+                        })
                     }
-                    for (key, entity) in entries
-                        .into_iter()
-                        .skip(*offset)
-                        .take(limit.unwrap_or(usize::MAX))
-                    {
-                        let mut record = UnifiedRecord::new();
-                        record.set("rid", Value::UnsignedInteger(entity.id.raw()));
-                        record.set("collection", Value::text(collection.clone()));
-                        record.set("kind", Value::text("kv"));
-                        record.set("tenant", Value::Null);
-                        record.set("created_at", Value::UnsignedInteger(entity.created_at));
-                        record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
-                        record.set("key", Value::text(key.clone()));
-                        record.set(
-                            "value",
-                            kv_value_from_entity(&entity)
-                                .unwrap_or(crate::storage::schema::Value::Null),
-                        );
-                        record.set("tags", kv_tags_value(&ops.tags_for_key(collection, &key)));
-                        result.push(record);
-                    }
-                    return Ok(RuntimeQueryResult {
-                        query: raw_query.to_string(),
-                        mode: crate::storage::query::modes::QueryMode::Sql,
-                        statement: "kv_list",
-                        engine: "kv",
-                        result,
-                        affected_rows: 0,
-                        statement_type: "select",
-                        bookmark: None,
-                    });
                 }
             }
 

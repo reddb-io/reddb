@@ -1,41 +1,12 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use std::sync::{Mutex, OnceLock};
-
 use reddb::RedDBRuntime;
 use serde_json::Value as JsonValue;
 use support::prometheus::{
     encode_query_value, get, label, post_remote_write, sample, TimeSeries, WriteRequest,
 };
 use support::{checkpoint_and_reopen, PersistentDbPath};
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
     rt.execute_query(sql)
@@ -72,8 +43,11 @@ fn prom_query(rt: &RedDBRuntime, promql: &str) -> JsonValue {
 
 #[test]
 fn cardinality_budget_partially_accepts_and_persists_series_registry() {
-    let _lock = env_lock().lock().expect("env lock");
-    let _budget = EnvGuard::set("REDDB_METRICS_MAX_SERIES_PER_METRIC", "2");
+    let _lock = crate::timeseries_remaining_shared::metrics_env_lock();
+    let _budget = crate::timeseries_remaining_shared::EnvGuard::set(
+        "REDDB_METRICS_MAX_SERIES_PER_METRIC",
+        "2",
+    );
     let path = PersistentDbPath::new("metrics_cardinality_budget");
     let rt = path.open_runtime();
     exec(&rt, "CREATE METRICS sre RETENTION 30 d");

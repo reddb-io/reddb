@@ -17,8 +17,25 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
 }
 
+fn run_with_large_stack(name: &str, f: fn()) {
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn materialized view backing test")
+        .join()
+        .expect("materialized view backing test panicked");
+}
+
 #[test]
 fn create_materialized_view_provisions_empty_backing_collection() {
+    run_with_large_stack(
+        "create-materialized-view-provisions-empty-backing-collection",
+        create_materialized_view_provisions_empty_backing_collection_impl,
+    );
+}
+
+fn create_materialized_view_provisions_empty_backing_collection_impl() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE orders (id INT, total INT, status TEXT)");
     exec(
@@ -63,6 +80,13 @@ fn create_materialized_view_provisions_empty_backing_collection() {
 
 #[test]
 fn drop_materialized_view_drops_backing_collection() {
+    run_with_large_stack(
+        "drop-materialized-view-drops-backing-collection",
+        drop_materialized_view_drops_backing_collection_impl,
+    );
+}
+
+fn drop_materialized_view_drops_backing_collection_impl() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE t (id INT)");
     exec(&rt, "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t");
@@ -87,6 +111,13 @@ fn drop_materialized_view_drops_backing_collection() {
 
 #[test]
 fn regular_view_rewrite_unchanged_after_slice_9b() {
+    run_with_large_stack(
+        "regular-view-rewrite-unchanged-after-slice-9b",
+        regular_view_rewrite_unchanged_after_slice_9b_impl,
+    );
+}
+
+fn regular_view_rewrite_unchanged_after_slice_9b_impl() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE users (id INT, active BOOLEAN)");
     exec(

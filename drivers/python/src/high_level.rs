@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
-use pyo3::IntoPyObject;
+use pyo3::{IntoPyObject, Py};
 
 #[cfg(feature = "embedded")]
 use crate::embedded::{EmbeddedRuntime, ParamValue, QueryRows, ScalarOut};
@@ -211,7 +211,7 @@ impl RedDb {
                 let mut ids = Vec::with_capacity(payloads.len());
                 for item in payloads.iter() {
                     let dict = item
-                        .downcast::<PyDict>()
+                        .cast::<PyDict>()
                         .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
                     let fields = pydict_to_fields(dict)?;
                     let result = rt
@@ -232,7 +232,7 @@ impl RedDb {
                 let mut encoded = Vec::with_capacity(payloads.len());
                 for item in payloads.iter() {
                     let dict = item
-                        .downcast::<PyDict>()
+                        .cast::<PyDict>()
                         .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
                     encoded.push(pydict_to_json_str(dict)?);
                 }
@@ -316,11 +316,11 @@ impl RedDb {
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let result = grpc_query_json_to_pydict(py, &json_str)?;
                 let rows_any = result.get_item("rows")?.expect("rows set");
-                let rows = rows_any.downcast::<PyList>()?;
+                let rows = rows_any.cast::<PyList>()?;
                 if rows.is_empty() {
                     Ok(None)
                 } else {
-                    Ok(Some(rows.get_item(0)?.downcast_into::<PyDict>()?))
+                    Ok(Some(rows.get_item(0)?.cast_into::<PyDict>()?))
                 }
             }
         }
@@ -371,7 +371,7 @@ impl RedDb {
                 grpc_query_json_to_pydict(py, &json_str)?
                     .get_item("rows")?
                     .expect("rows set")
-                    .downcast_into::<PyList>()?
+                    .cast_into::<PyList>()?
             }
         };
         let out = PyDict::new(py);
@@ -1325,14 +1325,14 @@ fn collect_params<'py>(
         if kw.is_none() {
             return collect_args(args);
         }
-        if let Ok(list) = kw.downcast::<PyList>() {
+        if let Ok(list) = kw.cast::<PyList>() {
             let mut out = Vec::with_capacity(list.len());
             for item in list.iter() {
                 out.push(item);
             }
             return Ok(out);
         }
-        if let Ok(tuple) = kw.downcast::<PyTuple>() {
+        if let Ok(tuple) = kw.cast::<PyTuple>() {
             let mut out = Vec::with_capacity(tuple.len());
             for item in tuple.iter() {
                 out.push(item);
@@ -1388,10 +1388,10 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
         }
     }
 
-    if let Ok(b) = value.downcast::<PyBytes>() {
+    if let Ok(b) = value.cast::<PyBytes>() {
         return Ok(SV::Blob(b.as_bytes().to_vec()));
     }
-    if let Ok(ba) = value.downcast::<PyByteArray>() {
+    if let Ok(ba) = value.cast::<PyByteArray>() {
         let bytes = unsafe { ba.as_bytes() }.to_vec();
         return Ok(SV::Blob(bytes));
     }
@@ -1399,7 +1399,7 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
     // int — try i64 first, then fall back to u64 for values above i64::MAX.
     // Floats also extract as i64 in pyo3 when the fractional part is zero,
     // so guard by `PyFloat` first.
-    if value.downcast::<PyFloat>().is_err() {
+    if value.cast::<PyFloat>().is_err() {
         if let Ok(i) = value.extract::<i64>() {
             return Ok(SV::Integer(i));
         }
@@ -1416,7 +1416,7 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
     }
 
     // list[float|int] -> Vector
-    if let Ok(list) = value.downcast::<PyListT>() {
+    if let Ok(list) = value.cast::<PyListT>() {
         let mut floats: Vec<f32> = Vec::with_capacity(list.len());
         let mut all_numeric = true;
         for item in list.iter() {
@@ -1452,7 +1452,7 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
 
     // uuid.UUID -> Uuid([u8;16]) via the `.bytes` attribute.
     if let Ok(bytes_attr) = value.getattr("bytes") {
-        if let Ok(b) = bytes_attr.downcast::<PyBytes>() {
+        if let Ok(b) = bytes_attr.cast::<PyBytes>() {
             let raw = b.as_bytes();
             if raw.len() == 16 {
                 let mut arr = [0u8; 16];
@@ -1462,7 +1462,7 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
         }
     }
 
-    if let Ok(dict) = value.downcast::<PyDictT>() {
+    if let Ok(dict) = value.cast::<PyDictT>() {
         let json_str = pydict_to_json_str(dict)?;
         return Ok(SV::Json(json_str.into_bytes()));
     }
@@ -1535,7 +1535,7 @@ fn query_rows_to_pydict<'py>(py: Python<'py>, qr: QueryRows) -> PyResult<Bound<'
 }
 
 #[cfg(feature = "embedded")]
-fn scalar_to_py(py: Python<'_>, v: ScalarOut) -> PyObject {
+fn scalar_to_py(py: Python<'_>, v: ScalarOut) -> Py<PyAny> {
     use pyo3::IntoPyObject;
     match v {
         ScalarOut::Null => py.None(),
@@ -1667,7 +1667,7 @@ fn sql_value_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Strin
             return Ok(if b { "true" } else { "false" }.to_string());
         }
     }
-    if value.downcast::<pyo3::types::PyFloat>().is_err() {
+    if value.cast::<pyo3::types::PyFloat>().is_err() {
         if let Ok(i) = value.extract::<i64>() {
             return Ok(i.to_string());
         }
@@ -1681,7 +1681,7 @@ fn sql_value_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Strin
     if let Ok(s) = value.extract::<String>() {
         return Ok(sql_string_literal(&s));
     }
-    if value.downcast::<PyDict>().is_ok() || value.downcast::<PyList>().is_ok() {
+    if value.cast::<PyDict>().is_ok() || value.cast::<PyList>().is_ok() {
         return sql_json_literal(py, value);
     }
     Err(err(

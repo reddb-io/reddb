@@ -44,12 +44,13 @@ fn json_field(row: &reddb::storage::query::UnifiedRecord, field: &str) -> JsonVa
     }
 }
 
-fn spawn_http_server() -> String {
-    let server = RedDBServer::new(runtime());
+fn spawn_http_server() -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime("documents-crud-http");
+    let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
-    addr.to_string()
+    (db, addr.to_string())
 }
 
 fn http_request(addr: &str, method: &str, path: &str, body: Option<JsonValue>) -> (u16, JsonValue) {
@@ -145,7 +146,7 @@ fn create_document_insert_returning_select_and_reopen() {
 
 #[test]
 fn http_document_insert_get_scan_and_delete() {
-    let addr = spawn_http_server();
+    let (_db, addr) = spawn_http_server();
 
     let payload = json!({
         "body": {

@@ -41,7 +41,8 @@ fn bools(result: &reddb::runtime::RuntimeQueryResult, column: &str) -> Vec<bool>
 
 #[test]
 fn test_tree_lifecycle_rebalance_and_delete_subtree() {
-    let rt = rt();
+    let path = PersistentDbPath::new("tree_lifecycle");
+    let rt = path.open_runtime();
 
     let created = exec(
         &rt,

@@ -25,6 +25,12 @@ fn spawn_http_server(rt: RedDBRuntime) -> String {
     addr.to_string()
 }
 
+fn spawn_persistent_http_server(tag: &str) -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime(tag);
+    let addr = spawn_http_server(rt);
+    (db, addr)
+}
+
 fn send(addr: &str, method: &str, path: &str, body: &str) -> (u16, String) {
     let request = format!(
         "{method} {path} HTTP/1.1\r\n\
@@ -90,7 +96,7 @@ fn configure_cache_dir(addr: &str, path: &Path) {
 
 #[test]
 fn pull_installs_artifact_from_fixture_and_writes_manifest() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-pull");
     let cache_dir = unique_temp_dir("pull_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -136,7 +142,7 @@ fn pull_installs_artifact_from_fixture_and_writes_manifest() {
 
 #[test]
 fn pull_without_fixture_returns_actionable_error() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-no-fixture");
     let cache_dir = unique_temp_dir("no_fixture_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -152,7 +158,7 @@ fn pull_without_fixture_returns_actionable_error() {
 
 #[test]
 fn pull_with_missing_fixture_dir_returns_400() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-missing-fixture");
     let cache_dir = unique_temp_dir("missing_fixture_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -176,7 +182,7 @@ fn pull_with_missing_fixture_dir_returns_400() {
 
 #[test]
 fn pull_against_unregistered_model_returns_404() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-unregistered");
     let cache_dir = unique_temp_dir("unreg_cache");
     configure_cache_dir(&addr, &cache_dir);
     let fixture = make_fixture("unreg");
@@ -187,7 +193,7 @@ fn pull_against_unregistered_model_returns_404() {
 
 #[test]
 fn cache_drop_removes_artifacts_but_keeps_registration() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-drop");
     let cache_dir = unique_temp_dir("drop_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -226,7 +232,7 @@ fn cache_drop_removes_artifacts_but_keeps_registration() {
 
 #[test]
 fn corrupt_manifest_makes_cache_unhealthy() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-corrupt");
     let cache_dir = unique_temp_dir("corrupt_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -248,7 +254,7 @@ fn corrupt_manifest_makes_cache_unhealthy() {
 
 #[test]
 fn missing_artifact_file_makes_cache_unhealthy() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-missing-artifact");
     let cache_dir = unique_temp_dir("missing_file_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -267,7 +273,7 @@ fn missing_artifact_file_makes_cache_unhealthy() {
 
 #[test]
 fn pull_is_idempotent_and_overwrites_existing_install() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-idempotent");
     let cache_dir = unique_temp_dir("idempotent_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -300,7 +306,7 @@ fn pull_is_idempotent_and_overwrites_existing_install() {
 
 #[test]
 fn fixture_dir_via_config_works_when_request_omits_it() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-config-fixture");
     let cache_dir = unique_temp_dir("config_fixture_cache");
     configure_cache_dir(&addr, &cache_dir);
     register(&addr);
@@ -322,7 +328,7 @@ fn fixture_dir_via_config_works_when_request_omits_it() {
 
 #[test]
 fn cache_status_404_for_unregistered_model() {
-    let addr = spawn_http_server(RedDBRuntime::in_memory().expect("rt"));
+    let (_db, addr) = spawn_persistent_http_server("ai-cache-status-404");
     let (status, body) = send(&addr, "GET", "/ai/models/does-not-exist/cache", "");
     assert_eq!(status, 404, "{body}");
 }

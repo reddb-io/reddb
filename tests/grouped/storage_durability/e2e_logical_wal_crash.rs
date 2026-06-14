@@ -25,13 +25,13 @@ fn spool_file_path(data_path: &std::path::Path) -> PathBuf {
 
 #[test]
 fn truncated_tail_after_append_returns_valid_prefix_only() {
-    let data_path = support::temp_data_dir("logical-wal-truncated-tail");
-    let spool_path = spool_file_path(&data_path);
+    let data_path = support::temp_db_file("logical-wal-truncated-tail");
+    let spool_path = spool_file_path(data_path.path());
 
     // Write three records via the public API. After this, every
     // record on disk has a valid v2 frame + crc.
     {
-        let spool = LogicalWalSpool::open(&data_path).expect("open spool");
+        let spool = LogicalWalSpool::open(data_path.path()).expect("open spool");
         spool.append(1, b"first record").unwrap();
         spool.append(2, b"second record").unwrap();
         spool.append(3, b"third record").unwrap();
@@ -58,7 +58,7 @@ fn truncated_tail_after_append_returns_valid_prefix_only() {
     // drop the torn third record. The file is rewritten to the
     // post-truncate length so a subsequent append produces a clean
     // sequence.
-    let spool = LogicalWalSpool::open(&data_path).expect("re-open spool");
+    let spool = LogicalWalSpool::open(data_path.path()).expect("re-open spool");
     let entries = spool.read_since(0, 100).expect("read");
     assert_eq!(
         entries.len(),
@@ -78,12 +78,12 @@ fn truncated_tail_after_append_returns_valid_prefix_only() {
 
 #[test]
 fn checksum_flip_in_middle_record_truncates_at_corrupt_offset() {
-    let data_path = support::temp_data_dir("logical-wal-crc-flip");
-    let spool_path = spool_file_path(&data_path);
+    let data_path = support::temp_db_file("logical-wal-crc-flip");
+    let spool_path = spool_file_path(data_path.path());
 
     // Three records, every byte covered by crc32.
     {
-        let spool = LogicalWalSpool::open(&data_path).expect("open");
+        let spool = LogicalWalSpool::open(data_path.path()).expect("open");
         spool.append(10, b"alpha").unwrap();
         spool.append(11, b"bravo").unwrap();
         spool.append(12, b"charlie").unwrap();
@@ -116,7 +116,7 @@ fn checksum_flip_in_middle_record_truncates_at_corrupt_offset() {
     // boundary, so it's also gone — that's intentional: once a
     // corrupt record is found, no further records are trusted because
     // their LSNs may have been duplicated by primary recovery.
-    let spool = LogicalWalSpool::open(&data_path).expect("re-open");
+    let spool = LogicalWalSpool::open(data_path.path()).expect("re-open");
     let entries = spool.read_since(0, 100).expect("read");
     assert_eq!(
         entries.len(),
@@ -129,9 +129,9 @@ fn checksum_flip_in_middle_record_truncates_at_corrupt_offset() {
 
 #[test]
 fn empty_file_recovers_to_empty_state() {
-    let data_path = support::temp_data_dir("logical-wal-empty");
+    let data_path = support::temp_db_file("logical-wal-empty");
 
-    let spool = LogicalWalSpool::open(&data_path).expect("open empty");
+    let spool = LogicalWalSpool::open(data_path.path()).expect("open empty");
     let entries = spool.read_since(0, 100).expect("read");
     assert!(entries.is_empty());
     assert_eq!(spool.current_lsn(), 0);
@@ -139,12 +139,12 @@ fn empty_file_recovers_to_empty_state() {
 
 #[test]
 fn first_record_torn_leaves_clean_empty_spool() {
-    let data_path = support::temp_data_dir("logical-wal-first-torn");
-    let spool_path = spool_file_path(&data_path);
+    let data_path = support::temp_db_file("logical-wal-first-torn");
+    let spool_path = spool_file_path(data_path.path());
 
     // Single record then chop the crc.
     {
-        let spool = LogicalWalSpool::open(&data_path).expect("open");
+        let spool = LogicalWalSpool::open(data_path.path()).expect("open");
         spool.append(1, b"only").unwrap();
     }
     {
@@ -158,7 +158,7 @@ fn first_record_torn_leaves_clean_empty_spool() {
         f.sync_all().unwrap();
     }
 
-    let spool = LogicalWalSpool::open(&data_path).expect("re-open");
+    let spool = LogicalWalSpool::open(data_path.path()).expect("re-open");
     let entries = spool.read_since(0, 100).unwrap();
     assert!(
         entries.is_empty(),
@@ -181,10 +181,10 @@ fn append_is_synced_when_call_returns() {
     // true even for unsynced writes, so the assertion is a regression
     // canary against a future buffered-writer change that would only
     // flush on drop.
-    let data_path = support::temp_data_dir("logical-wal-sync");
-    let spool_path = spool_file_path(&data_path);
+    let data_path = support::temp_db_file("logical-wal-sync");
+    let spool_path = spool_file_path(data_path.path());
 
-    let spool = LogicalWalSpool::open(&data_path).expect("open");
+    let spool = LogicalWalSpool::open(data_path.path()).expect("open");
     let before = std::fs::metadata(&spool_path).unwrap().len();
     spool.append(1, b"x").unwrap();
     let after = std::fs::metadata(&spool_path).unwrap().len();

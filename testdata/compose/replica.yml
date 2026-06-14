@@ -32,6 +32,7 @@ services:
       - ALL
     environment:
       - RUST_LOG=info
+      - RED_HTTP_TLS_DEV=1
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
@@ -47,7 +48,6 @@ services:
     ports:
       - "50052:50051"
       - "8081:8080"
-      - "8444:8443"
     volumes:
       - replica-data:/data
     command:
@@ -60,8 +60,6 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -1,41 +1,12 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use std::sync::{Mutex, OnceLock};
-
 use reddb::RedDBRuntime;
 use serde_json::Value as JsonValue;
 use support::prometheus::{
     encode_query_value, get, get_with_headers, label, post_remote_write,
     post_remote_write_with_headers, sample, TimeSeries, WriteRequest,
 };
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
     rt.execute_query(sql)
@@ -139,7 +110,7 @@ fn first_value(response: &JsonValue) -> &str {
 
 #[test]
 fn grafana_prometheus_datasource_panels_render_representative_metrics() {
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = crate::timeseries_remaining_shared::metrics_env_lock();
     let rt = RedDBRuntime::in_memory().expect("runtime");
     exec(
         &rt,
@@ -299,8 +270,11 @@ fn grafana_prometheus_datasource_panels_render_representative_metrics() {
 
 #[test]
 fn grafana_smoke_surfaces_cardinality_rejection_visibility() {
-    let _lock = env_lock().lock().expect("env lock");
-    let _budget = EnvGuard::set("REDDB_METRICS_MAX_SERIES_PER_METRIC", "1");
+    let _lock = crate::timeseries_remaining_shared::metrics_env_lock();
+    let _budget = crate::timeseries_remaining_shared::EnvGuard::set(
+        "REDDB_METRICS_MAX_SERIES_PER_METRIC",
+        "1",
+    );
     let rt = RedDBRuntime::in_memory().expect("runtime");
     exec(&rt, "CREATE METRICS sre RETENTION 30 d");
 

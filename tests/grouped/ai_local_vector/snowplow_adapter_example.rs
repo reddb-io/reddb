@@ -3,22 +3,24 @@
 //! collection contains the expected rows. Keeps the example
 //! from going stale — referenced by `docs/migrating-from-snowplow.md`.
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
 use std::time::Duration;
 
 use reddb::server::RedDBServer;
-use reddb::RedDBRuntime;
 use serde_json::{json, Value};
 
-fn spawn_http_server() -> String {
-    let rt = RedDBRuntime::in_memory().expect("runtime");
+fn spawn_http_server() -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime("snowplow-http");
     let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
-    addr.to_string()
+    (db, addr.to_string())
 }
 
 fn post_query(addr: &str, query: &str) -> Value {
@@ -59,7 +61,7 @@ fn snowplow_adapter_example_ingests_events_end_to_end() {
         return;
     }
 
-    let addr = spawn_http_server();
+    let (_db, addr) = spawn_http_server();
     let create = post_query(
         &addr,
         "CREATE TABLE events (event_id TEXT, collector_tstamp INTEGER, event_name TEXT, payload TEXT)",

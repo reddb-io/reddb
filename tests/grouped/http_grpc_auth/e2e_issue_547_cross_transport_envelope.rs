@@ -23,12 +23,14 @@
 
 #![cfg(all(feature = "redwire", feature = "embedded"))]
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
-use reddb::api::RedDBOptions;
 use reddb::auth::store::AuthStore;
 use reddb::auth::AuthConfig;
 use reddb::grpc::proto::query_value::Kind as GrpcValueKind;
@@ -36,7 +38,7 @@ use reddb::grpc::proto::red_db_client::RedDbClient;
 use reddb::grpc::proto::{QueryRequest, QueryValue};
 use reddb::server::RedDBServer;
 use reddb::wire::redwire::start_redwire_listener_on;
-use reddb::{GrpcServerOptions, RedDBGrpcServer, RedDBRuntime};
+use reddb::{GrpcServerOptions, RedDBGrpcServer};
 
 use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
 use reddb_client::{QueryResult, Value};
@@ -145,7 +147,7 @@ async fn cross_transport_select_envelope_matches() {
     // before any listener is online — every transport observes the
     // exact same row set, so any envelope diff is a true diff and not
     // a write-visibility race.
-    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    let (_db, runtime) = support::persistent_runtime("cross-transport-envelope");
     runtime
         .execute_query(&format!("CREATE TABLE {TABLE} (id INTEGER, name TEXT)"))
         .expect("create table");

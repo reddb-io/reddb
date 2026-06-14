@@ -107,8 +107,25 @@ fn snapshot(store: &Arc<UnifiedStore>, collection: &str) -> Vec<(u64, Vec<(Strin
     rows
 }
 
+fn run_with_large_stack(name: &str, f: fn()) {
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn materialized view replica replay test")
+        .join()
+        .expect("materialized view replica replay test panicked");
+}
+
 #[test]
 fn replica_replay_of_refresh_collection_matches_primary_row_for_row() {
+    run_with_large_stack(
+        "replica-replay-of-refresh-collection-matches-primary-row-for-row",
+        replica_replay_of_refresh_collection_matches_primary_row_for_row_impl,
+    );
+}
+
+fn replica_replay_of_refresh_collection_matches_primary_row_for_row_impl() {
     let primary_path = temp_path("primary-rowforrow");
     let replica_path = temp_path("replica-rowforrow");
 
@@ -168,6 +185,13 @@ fn replica_replay_of_refresh_collection_matches_primary_row_for_row() {
 
 #[test]
 fn replica_replay_of_refresh_collection_is_idempotent() {
+    run_with_large_stack(
+        "replica-replay-of-refresh-collection-is-idempotent",
+        replica_replay_of_refresh_collection_is_idempotent_impl,
+    );
+}
+
+fn replica_replay_of_refresh_collection_is_idempotent_impl() {
     let path = temp_path("idempotent");
     let primary_path = temp_path("idempotent-primary");
 
@@ -221,6 +245,13 @@ fn replica_replay_of_refresh_collection_is_idempotent() {
 
 #[test]
 fn primary_refresh_materialized_view_emits_refresh_cdc_event() {
+    run_with_large_stack(
+        "primary-refresh-materialized-view-emits-refresh-cdc-event",
+        primary_refresh_materialized_view_emits_refresh_cdc_event_impl,
+    );
+}
+
+fn primary_refresh_materialized_view_emits_refresh_cdc_event_impl() {
     let primary_path = temp_path("primary-cdc");
     let opts =
         RedDBOptions::persistent(&primary_path).with_replication(ReplicationConfig::primary());

@@ -268,15 +268,13 @@ fn red_system_schema_is_read_only_for_dml() {
     }
 }
 
-fn spawn_http(rt: RedDBRuntime) -> String {
+fn spawn_http(rt: RedDBRuntime) -> (String, thread::JoinHandle<std::io::Result<()>>) {
     let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        let _ = server.serve_on(listener);
-    });
+    let handle = thread::spawn(move || server.serve_one_on(listener));
     thread::sleep(Duration::from_millis(80));
-    addr.to_string()
+    (addr.to_string(), handle)
 }
 
 fn http_post_query(addr: &str, query: &str) -> (u16, serde_json::Value) {
@@ -315,9 +313,13 @@ fn http_post_query(addr: &str, query: &str) -> (u16, serde_json::Value) {
 fn http_query_endpoint_returns_red_collections_inventory() {
     let rt = open_runtime();
     seed_collection_inventory(&rt);
-    let addr = spawn_http(rt);
+    let (addr, handle) = spawn_http(rt);
 
     let (status, body) = http_post_query(&addr, "SELECT * FROM red.collections");
+    handle
+        .join()
+        .expect("HTTP server thread should not panic")
+        .expect("HTTP server should serve one request");
 
     assert_eq!(status, 200, "body = {body}");
     assert_eq!(body["ok"], true);

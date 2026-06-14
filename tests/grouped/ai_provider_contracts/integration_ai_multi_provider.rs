@@ -11,6 +11,9 @@
 //! We do not hit real network. Compatible providers reach the HTTP
 //! transport and fail there, which proves the guard was passed.
 
+#[path = "../../support/mod.rs"]
+mod support;
+
 use reddb::ai::{grpc_embeddings, parse_provider};
 use reddb::application::{ExecuteQueryInput, QueryUseCases, SearchSimilarInput};
 use reddb::json::{Map, Value as JsonValue};
@@ -38,6 +41,12 @@ fn spawn_http_server(rt: RedDBRuntime) -> String {
     let addr = listener.local_addr().expect("local addr");
     server.serve_in_background_on(listener);
     addr.to_string()
+}
+
+fn spawn_persistent_http_server(tag: &str) -> (support::TempDbFile, String) {
+    let (db, rt) = support::persistent_runtime(tag);
+    let addr = spawn_http_server(rt);
+    (db, addr)
 }
 
 fn post_json(addr: &str, path: &str, body: &str) -> (u16, String) {
@@ -162,7 +171,7 @@ fn grpc_embeddings_huggingface_dispatches_to_hf_client() {
 #[test]
 #[cfg(not(feature = "local-models"))]
 fn http_embeddings_rejects_local_when_local_models_feature_is_disabled() {
-    let addr = spawn_http_server(rt());
+    let (_db, addr) = spawn_persistent_http_server("ai-multi-local-embeddings-http");
     let (status, body) = post_json(
         &addr,
         "/ai/embeddings",
@@ -175,7 +184,7 @@ fn http_embeddings_rejects_local_when_local_models_feature_is_disabled() {
 
 #[test]
 fn http_prompt_rejects_local_because_generation_is_out_of_scope() {
-    let addr = spawn_http_server(rt());
+    let (_db, addr) = spawn_persistent_http_server("ai-multi-local-prompt-http");
     let (status, body) = post_json(
         &addr,
         "/ai/prompt",

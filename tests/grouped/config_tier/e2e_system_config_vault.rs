@@ -11,8 +11,10 @@ use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 fn runtime(name: &str) -> (support::TempDbFile, RedDBRuntime) {
     let path = support::temp_db_file(name);
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
-        .expect("runtime should open");
+    let rt = crate::config_tier_shared::open_runtime_with_options(
+        RedDBOptions::persistent(path.path()),
+        "runtime should open",
+    );
     (path, rt)
 }
 
@@ -24,7 +26,7 @@ fn runtime_with_vault(
     let options = RedDBOptions::persistent(path.path())
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
         .expect("serverless storage profile should expose pager");
-    let rt = RedDBRuntime::with_options(options).expect("runtime should open");
+    let rt = crate::config_tier_shared::open_runtime_with_options(options, "runtime should open");
     let pager = Arc::clone(
         rt.db()
             .store()
