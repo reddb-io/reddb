@@ -26,7 +26,7 @@ test("red_client size guard is wired to a documented local and CI budget check",
 test("red_client container release contract uses the thin client Dockerfile and package", () => {
   const dockerfile = read("Dockerfile.client");
   const releaseWorkflow = read(".github/workflows/release.yml");
-  const adr = read("docs/adr/0004-red-client-container-image.md");
+  const adr = read(".red/adr/0004-red-client-container-image.md");
 
   assert.match(dockerfile, /--bin red_client -p reddb-io-client\s+--no-default-features/);
   assert.match(dockerfile, /FROM gcr\.io\/distroless\/static-debian12:nonroot AS runtime/);
@@ -43,7 +43,7 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
   const releaseDockerfile = read("Dockerfile.release");
   const dockerHubHost = new RegExp(["docker", "io"].join("\\."));
   const dockerHubSecretPrefix = new RegExp(["DOCKER", "HUB_"].join(""));
-  const legacyPersonalNamespace = new RegExp(["foratt", "ini"].join(""), "i");
+  const legacyPersonalGhcrNamespace = new RegExp(["ghcr\\.io/[^\\s'\"]*foratt", "ini"].join(""), "i");
 
   assert.match(releaseWorkflow, /publish-docker:/);
   assert.match(releaseWorkflow, /ghcr\.io\/\$\{\{ github\.repository \}\}/);
@@ -52,7 +52,7 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
   assert.doesNotMatch(releaseDockerfile, /cargo build/);
   assert.doesNotMatch(releaseWorkflow, dockerHubHost);
   assert.doesNotMatch(releaseWorkflow, dockerHubSecretPrefix);
-  assert.doesNotMatch(releaseWorkflow, legacyPersonalNamespace);
+  assert.doesNotMatch(releaseWorkflow, legacyPersonalGhcrNamespace);
 
   const publishDocker = releaseWorkflow.match(/publish-docker:[\s\S]*?(?=\n  publish-client-image:)/)?.[0] ?? "";
   assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-x86_64/);
@@ -128,4 +128,21 @@ test("nightly DR drill workflow uses the current-shell runner and public make ta
   assert.doesNotMatch(script, /bash -lc "\$CMD"/);
   assert.match(script, /issue #116/);
   assert.match(workflow, /run: make drill-nightly/);
+});
+
+test("changesets checkout uses the default token before release PAT handoff", () => {
+  const workflow = read(".github/workflows/changesets.yml");
+  const checkoutStep = workflow.match(/- uses: actions\/checkout@v5[\s\S]*?(?=\n\n      - uses: pnpm\/action-setup@v4)/)?.[0] ?? "";
+
+  assert.match(checkoutStep, /fetch-depth: 0/);
+  assert.doesNotMatch(checkoutStep, /\n\s+token:/);
+  assert.match(workflow, /GITHUB_TOKEN: \$\{\{ secrets\.RELEASE_PAT \|\| secrets\.GITHUB_TOKEN \}\}/);
+});
+
+test("wire coverage gate installs protoc and preserves llvm-cov failures", () => {
+  const workflow = read(".github/workflows/wire-coverage.yml");
+
+  assert.match(workflow, /uses: \.\/\.github\/actions\/install-protoc[\s\S]*version: '28\.3'/);
+  assert.match(workflow, /set -o pipefail[\s\S]*cargo llvm-cov -p reddb-io-wire/);
+  assert.match(workflow, /cargo llvm-cov -p reddb-io-wire[\s\S]*\| tee coverage-summary\.txt/);
 });
