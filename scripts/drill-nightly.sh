@@ -18,7 +18,7 @@ if [[ ! -f "$HISTORY" ]]; then
   } > "$HISTORY"
 fi
 
-CMD="cargo test --locked --test 'drill_*' --no-fail-fast"
+CMD="cargo test --locked --test grouped_pitr_drills --no-fail-fast"
 START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # Keep the runner log out of the `reddb-*` temp namespace: the drills
 # intentionally clean that namespace while checking for leaked DB files.
