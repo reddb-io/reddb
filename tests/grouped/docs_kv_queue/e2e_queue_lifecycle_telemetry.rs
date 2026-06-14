@@ -87,7 +87,12 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
         .unwrap_or_else(|err| panic!("audit log read at {audit_path:?}: {err}"));
     let promotion_line = audit_body
         .lines()
-        .find(|line| line.contains("operator/queue_dlq_promoted"))
+        .find(|line| {
+            line.contains("operator/queue_dlq_promoted")
+                && line.contains("\"queue\":\"tasks\"")
+                && line.contains("\"group\":\"workers\"")
+                && line.contains("\"dlq\":\"failed_tasks\"")
+        })
         .unwrap_or_else(|| {
             panic!("audit log did not include operator/queue_dlq_promoted. body:\n{audit_body}")
         });
