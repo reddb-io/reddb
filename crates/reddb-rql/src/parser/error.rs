@@ -42,6 +42,11 @@ pub enum ParseErrorKind {
         limit_name: &'static str,
         value: usize,
     },
+    /// Parser consumed more tokens than the configured cap.
+    TokenLimit {
+        limit_name: &'static str,
+        value: usize,
+    },
     /// A literal value (integer / float) parsed cleanly but lies
     /// outside the semantic range expected for its slot — e.g.
     /// `MAX_SIZE 0`, `lat = 91.0`, `K = 0`, or a negative integer
@@ -140,6 +145,16 @@ impl ParseError {
             position,
             expected: Vec::new(),
             kind: ParseErrorKind::IdentifierTooLong { limit_name, value },
+        }
+    }
+
+    /// Token budget exceeded during parsing.
+    pub fn token_limit(limit_name: &'static str, value: usize, position: Position) -> Self {
+        Self {
+            message: format!("parser token limit exceeded ({} = {})", limit_name, value),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::TokenLimit { limit_name, value },
         }
     }
 

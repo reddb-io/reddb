@@ -91,6 +91,10 @@ pub struct Parser<'a> {
     /// Counter for `?` positional placeholders, numbered 1-based
     /// in source. Unused when mode is `Dollar` or `None`.
     pub(crate) question_count: usize,
+    /// Number of tokens consumed through `advance`.
+    pub(crate) tokens_consumed: usize,
+    /// Maximum token budget for this parse.
+    pub(crate) max_tokens: usize,
 }
 
 /// Placeholder style locked in by the first placeholder seen.
@@ -128,6 +132,8 @@ impl<'a> Parser<'a> {
             depth: DepthCounter::new(limits.max_depth),
             placeholder_mode: PlaceholderMode::None,
             question_count: 0,
+            tokens_consumed: 0,
+            max_tokens: limits.max_tokens,
         })
     }
 
@@ -163,6 +169,14 @@ impl<'a> Parser<'a> {
 
     /// Advance to next token
     pub fn advance(&mut self) -> Result<Token, ParseError> {
+        self.tokens_consumed += 1;
+        if self.tokens_consumed > self.max_tokens {
+            return Err(ParseError::token_limit(
+                "max_tokens",
+                self.max_tokens,
+                self.position(),
+            ));
+        }
         let old = std::mem::replace(&mut self.current, self.lexer.next_token()?);
         Ok(old.token)
     }

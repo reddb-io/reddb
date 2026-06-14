@@ -49,6 +49,7 @@ pub fn test_safe_limits() -> ParserLimits {
         max_depth: 32,
         max_input_bytes: 1024 * 1024,
         max_identifier_chars: 256,
+        max_tokens: 8192,
     }
 }
 

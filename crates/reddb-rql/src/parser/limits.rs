@@ -9,11 +9,13 @@
 //!
 //! | Limit                 | Default | Rationale                                       |
 //! |-----------------------|---------|-------------------------------------------------|
-//! | `max_depth`           | 128     | Recursive descent + Pratt; well above hand-     |
-//! |                       |         | written queries (typical ≤ 12).                  |
+//! | `max_depth`           | 32      | Recursive descent + Pratt; above typical        |
+//! |                       |         | hand-written queries (≤ 12).                     |
 //! | `max_input_bytes`     | 1 MiB   | Hard cap on the token stream input.              |
 //! | `max_identifier_chars`| 256     | Long enough for legitimate UUID-tagged names,    |
 //! |                       |         | short enough to bound HashMap pressure.          |
+//! | `max_tokens`          | 8192    | Bounds token-driven parser work even when input  |
+//! |                       |         | bytes and recursion depth stay below their caps. |
 //!
 //! Callers that need different limits (replication apply, admin DDL
 //! migrations) construct a custom [`ParserLimits`] and pass it to
