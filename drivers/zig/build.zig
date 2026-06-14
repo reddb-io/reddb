@@ -47,8 +47,8 @@ pub fn build(b: *std.Build) void {
     });
     lib.root_module.addOptions("build_options", build_options);
     if (enable_zstd) {
-        lib.linkSystemLibrary("zstd");
-        lib.linkLibC();
+        lib.root_module.linkSystemLibrary("zstd", .{});
+        lib.root_module.link_libc = true;
     }
     b.installArtifact(lib);
 
@@ -84,8 +84,8 @@ pub fn build(b: *std.Build) void {
             t.root_module.addImport("reddb", reddb_mod);
         }
         if (enable_zstd) {
-            t.linkSystemLibrary("zstd");
-            t.linkLibC();
+            t.root_module.linkSystemLibrary("zstd", .{});
+            t.root_module.link_libc = true;
         }
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
@@ -102,8 +102,8 @@ pub fn build(b: *std.Build) void {
     });
     param_fixtures.root_module.addImport("reddb", reddb_mod);
     if (enable_zstd) {
-        param_fixtures.linkSystemLibrary("zstd");
-        param_fixtures.linkLibC();
+        param_fixtures.root_module.linkSystemLibrary("zstd", .{});
+        param_fixtures.root_module.link_libc = true;
     }
     const run_param_fixtures = b.addRunArtifact(param_fixtures);
     param_fixtures_step.dependOn(&run_param_fixtures.step);

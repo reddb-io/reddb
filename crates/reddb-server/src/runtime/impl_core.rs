@@ -7876,6 +7876,16 @@ impl RedDBRuntime {
                 retention_duration_ms: descriptor.retention_duration_ms,
             };
             self.inner.materialized_views.write().register(def);
+            if let Err(err) = self.ensure_materialized_view_backing(&view_name) {
+                crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
+                    collection: crate::runtime::continuous_materialized_view::CATALOG_COLLECTION
+                        .to_string(),
+                    detail: format!(
+                        "failed to rehydrate backing collection for materialized view {view_name}: {err}"
+                    ),
+                }
+                .emit_global();
+            }
         }
         // A rehydrated view shape may differ from any plans the cache
         // bootstrapped before this method ran — flush to be safe.
