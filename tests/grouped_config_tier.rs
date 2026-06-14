@@ -3,6 +3,9 @@
 #[path = "grouped/config_tier/e2e_config_crud.rs"]
 mod e2e_config_crud;
 
+#[path = "grouped/config_tier/e2e_config_matrix.rs"]
+mod e2e_config_matrix;
+
 #[path = "grouped/config_tier/e2e_config_secret_ref.rs"]
 mod e2e_config_secret_ref;
 

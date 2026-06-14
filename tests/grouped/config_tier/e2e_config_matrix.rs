@@ -5,6 +5,7 @@
 //! keys stay silent until a user `SET CONFIG` writes them.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::{RedDBOptions, RedDBRuntime};
