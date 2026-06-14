@@ -699,6 +699,11 @@ impl RedDBServer {
     /// `model_source`, `model_revision`, `model_engine`, `dimensions`
     /// fields that the local catalog publishes.
     fn handle_ai_embeddings_local(&self, payload: &JsonValue) -> HttpResponse {
+        if let Err(err) = crate::runtime::ai::local_embedding::ensure_local_embedding_available() {
+            let (status, msg) = crate::server::transport::map_runtime_error(&err);
+            return json_error(status, msg);
+        }
+
         let model_name = match json_string_field(payload, "model") {
             Some(name) if !name.trim().is_empty() => name.trim().to_string(),
             _ => {

@@ -183,6 +183,19 @@ fn current_backend() -> Option<BackendSlot> {
         .map(Arc::clone)
 }
 
+/// Return the deterministic feature-disabled error before callers do
+/// request-shape validation. Tests may install a backend without the
+/// Cargo feature, so a present backend still means local embeddings are
+/// available for that process.
+pub fn ensure_local_embedding_available() -> RedDBResult<()> {
+    if current_backend().is_none() && !cfg!(feature = "local-models") {
+        return Err(RedDBError::FeatureNotEnabled(
+            LOCAL_MODELS_DISABLED_MESSAGE.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve and run a local embedding request end-to-end.
 ///
 /// Performs, in order:
@@ -225,11 +238,7 @@ pub fn preflight_local_embedding(db: &RedDB, name: &str) -> RedDBResult<u32> {
     // Mirror the backend-availability gate from `embed_local_with_db`
     // so a feature-off build fails before the write phase rather than
     // after we have already inserted rows.
-    if current_backend().is_none() && !cfg!(feature = "local-models") {
-        return Err(RedDBError::FeatureNotEnabled(
-            LOCAL_MODELS_DISABLED_MESSAGE.to_string(),
-        ));
-    }
+    ensure_local_embedding_available()?;
 
     let descriptor = read_model_descriptor(db, name)?;
     if descriptor.provider != PROVIDER_LOCAL {
