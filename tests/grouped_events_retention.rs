@@ -3,6 +3,9 @@
 #[path = "grouped/events_retention/e2e_events_backfill.rs"]
 mod e2e_events_backfill;
 
+#[path = "grouped/events_retention/e2e_collection_retention_policy.rs"]
+mod e2e_collection_retention_policy;
+
 #[path = "grouped/events_retention/e2e_events_cdc_rid.rs"]
 mod e2e_events_cdc_rid;
 

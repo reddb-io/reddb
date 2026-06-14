@@ -26,3 +26,6 @@ mod e2e_metrics_tenant_isolation;
 
 #[path = "grouped/timeseries_remaining/e2e_sessionize_operator.rs"]
 mod e2e_sessionize_operator;
+
+#[path = "grouped/timeseries_remaining/e2e_timeseries_session_descriptor.rs"]
+mod e2e_timeseries_session_descriptor;

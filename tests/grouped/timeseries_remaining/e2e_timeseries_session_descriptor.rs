@@ -4,26 +4,21 @@
 //! across an engine restart.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
-
-fn unique_dir(prefix: &str) -> support::TempDataDir {
-    support::temp_data_dir(prefix)
-}
+use reddb::{QueryUseCases, RedDBRuntime};
 
 #[test]
 fn session_clause_persists_across_restart() {
-    let dir = unique_dir("timeseries-session");
-    let data_path = dir.join("data.rdb");
+    let path = support::PersistentDbPath::new("timeseries-session");
 
-    // First boot — create a timeseries with the WITH clause and force a
-    // metadata flush so the contract is durable before the runtime
-    // drops.
-    {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path))
-            .expect("open persistent runtime");
+    // First boot — create a timeseries with the WITH clause. The
+    // explicit checkpoint below is the durability boundary that makes
+    // the collection contract available to the reopened runtime.
+    let rt = {
+        let rt = path.open_runtime();
         let q = QueryUseCases::new(&rt);
         q.execute(ExecuteQueryInput {
             query: "CREATE TIMESERIES events WITH SESSION_KEY user_id SESSION_GAP 30 m".into(),
@@ -40,15 +35,15 @@ fn session_clause_persists_across_restart() {
         assert_eq!(descriptor.session_gap_ms, Some(30 * 60_000));
 
         // `execute_create_timeseries` already calls `persist_metadata`
-        // at the end of the DDL path, so the contract is durable by
-        // the time the runtime drops here.
-    }
+        // at the end of the DDL path; `checkpoint_and_reopen` below
+        // flushes the storage boundary before reopening.
+        rt
+    };
 
     // Second boot — descriptor is rehydrated from the persisted
     // contract; both fields survive the restart.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path))
-            .expect("reopen persistent runtime");
+        let rt = support::checkpoint_and_reopen(&path, rt);
         let snapshot = rt.db().catalog_model_snapshot();
         let descriptor = snapshot
             .collections

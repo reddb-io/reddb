@@ -15,15 +15,12 @@
 //!    added in slice 12).
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::application::ExecuteQueryInput;
 use reddb::storage::schema::Value;
-use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
-
-fn unique_dir(prefix: &str) -> support::TempDataDir {
-    support::temp_data_dir(prefix)
-}
+use reddb::{QueryUseCases, RedDBRuntime};
 
 #[test]
 fn lazy_filter_drops_expired_then_unset_reveals_them_again() {
@@ -113,12 +110,10 @@ fn alter_set_retention_without_timestamp_column_is_rejected() {
 
 #[test]
 fn retention_policy_persists_across_restart() {
-    let dir = unique_dir("retention-policy");
-    let data_path = dir.join("data.rdb");
+    let path = support::PersistentDbPath::new("retention-policy");
 
-    {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path))
-            .expect("open persistent runtime");
+    let rt = {
+        let rt = path.open_runtime();
         let q = QueryUseCases::new(&rt);
         q.execute(ExecuteQueryInput {
             query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
@@ -135,11 +130,11 @@ fn retention_policy_persists_across_restart() {
             .find(|c| c.name == "events")
             .expect("events descriptor before restart");
         assert_eq!(desc.retention_duration_ms, Some(7 * 86_400_000));
-    }
+        rt
+    };
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path))
-            .expect("reopen persistent runtime");
+        let rt = support::checkpoint_and_reopen(&path, rt);
         let snapshot = rt.db().catalog_model_snapshot();
         let desc = snapshot
             .collections
