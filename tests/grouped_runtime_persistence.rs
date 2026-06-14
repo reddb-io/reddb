@@ -9,6 +9,9 @@ mod e2e_issue_859_columnar_chunk_eviction;
 #[path = "grouped/runtime_persistence/e2e_materialized_view_refresh_every.rs"]
 mod e2e_materialized_view_refresh_every;
 
+#[path = "grouped/runtime_persistence/e2e_meta_json_sidecar_policy.rs"]
+mod e2e_meta_json_sidecar_policy;
+
 #[path = "grouped/runtime_persistence/e2e_query_audit.rs"]
 mod e2e_query_audit;
 
