@@ -4804,10 +4804,14 @@ impl RedDBRuntime {
             QueryExpr::TreeCommand(ref cmd) => self.execute_tree_command(query, cmd),
             // SET CONFIG key = value
             QueryExpr::SetConfig { ref key, ref value } => {
-                if key.starts_with("red.secret.") || key.starts_with("red.secrets.") {
+                if key.starts_with("red.secret.") {
                     return Err(RedDBError::Query(
-                        "red.secret.* / red.secrets.* are reserved for vault secrets; use SET SECRET"
-                            .to_string(),
+                        "red.secret.* is reserved for vault secrets; use SET SECRET".to_string(),
+                    ));
+                }
+                if key.starts_with("red.secrets.") {
+                    return Err(RedDBError::Query(
+                        "red.secrets.* is reserved for vault secrets; use SET SECRET".to_string(),
                     ));
                 }
                 match self.check_managed_config_write_for_set_config(key) {

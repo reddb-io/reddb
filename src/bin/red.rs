@@ -42,8 +42,11 @@ fn json_ok(command: &str, data: &str) {
 fn open_local_runtime(flags: &HashMap<String, FlagValue>) -> Result<reddb::RedDBRuntime, String> {
     match flag_string(flags, "path") {
         Some(path) if !path.is_empty() => {
-            reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path))
-                .map_err(|e| format!("open {path}: {e}"))
+            let storage_profile = resolve_storage_profile(flags, "local")?;
+            let options = reddb::api::RedDBOptions::persistent(&path)
+                .with_storage_profile(storage_profile)
+                .map_err(|e| format!("storage profile: {e}"))?;
+            reddb::RedDBRuntime::with_options(options).map_err(|e| format!("open {path}: {e}"))
         }
         _ => reddb::RedDBRuntime::in_memory().map_err(|e| e.to_string()),
     }
@@ -2913,6 +2916,12 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("path")
                     .with_description("Local database file to dump from")
                     .with_default("./data/reddb.rdb"),
+                cli::types::FlagSchema::new("storage-profile")
+                    .with_description("Storage profile for local --path (embedded|serverless|primary-replica|cluster)"),
+                cli::types::FlagSchema::new("storage-packaging")
+                    .with_description("Storage packaging for local --path (single-file|operational-directory)"),
+                cli::types::FlagSchema::new("storage-preset")
+                    .with_description("Storage preset for local --path (embedded|serverless|primary-replica-dev|primary-replica-small|primary-replica-production-ha|primary-replica-backup|primary-replica-wal-retention|cluster)"),
                 cli::types::FlagSchema::new("collection")
                     .with_short('c')
                     .with_description("Single collection to dump"),
@@ -2926,6 +2935,12 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("path")
                     .with_description("Local database file to restore into")
                     .with_default("./data/reddb.rdb"),
+                cli::types::FlagSchema::new("storage-profile")
+                    .with_description("Storage profile for local --path (embedded|serverless|primary-replica|cluster)"),
+                cli::types::FlagSchema::new("storage-packaging")
+                    .with_description("Storage packaging for local --path (single-file|operational-directory)"),
+                cli::types::FlagSchema::new("storage-preset")
+                    .with_description("Storage preset for local --path (embedded|serverless|primary-replica-dev|primary-replica-small|primary-replica-production-ha|primary-replica-backup|primary-replica-wal-retention|cluster)"),
                 cli::types::FlagSchema::new("input")
                     .with_short('i')
                     .with_description("Dump file to read"),
