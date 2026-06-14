@@ -11,13 +11,20 @@ use std::time::Duration;
 use reddb::server::RedDBServer;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-fn drain_status_line(stream: &mut TcpStream) -> String {
-    // Read up to the end of the first line. The 503 response is
-    // small (~80 bytes); use a generous read.
-    let mut buf = [0u8; 256];
-    let n = stream.read(&mut buf).unwrap_or(0);
-    let text = String::from_utf8_lossy(&buf[..n]).to_string();
-    text
+fn send_request(addr: &str, path: &str) -> String {
+    let mut tcp = TcpStream::connect(addr).expect("connect");
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    tcp.write_all(req.as_bytes()).unwrap();
+    tcp.flush().unwrap();
+    let mut buf = Vec::new();
+    let _ = tcp.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn spawn_slow_request(addr: String) -> thread::JoinHandle<String> {
+    thread::spawn(move || send_request(&addr, "/health/live"))
 }
 
 fn boot(cap: usize) -> (String, RedDBServer) {
@@ -40,15 +47,14 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
     let cap = 2;
     let (addr, server) = boot(cap);
 
-    // Saturate the cap with `cap` open connections that never send a
-    // request. The handler thread is parked on `read_timeout_ms`
-    // (5s default) waiting for bytes; that keeps the permit held.
-    let mut held: Vec<TcpStream> = Vec::new();
+    // The async HTTP edge limits in-flight requests, not idle TCP
+    // connections. Saturate the cap with real requests held inside the
+    // test slow-inject hook.
+    server.set_test_slow_inject_ms(2_000);
+    let mut held = Vec::new();
     for _ in 0..cap {
-        let s = TcpStream::connect(&addr).expect("connect-hold");
-        held.push(s);
+        held.push(spawn_slow_request(addr.clone()));
     }
-    // Give the accept thread a moment to take both permits.
     for _ in 0..50 {
         if server.http_limiter().current() == cap {
             break;
@@ -62,29 +68,26 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
     );
 
     // Next connection must be rejected with 503.
-    let mut rejected = TcpStream::connect(&addr).expect("connect-rejected");
-    rejected
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    let text = drain_status_line(&mut rejected);
+    let text = send_request(&addr, "/health/live");
     assert!(
         text.starts_with("HTTP/1.1 503"),
         "expected 503 status line, got: {text:?}"
     );
+    let text_lower = text.to_ascii_lowercase();
     assert!(
-        text.contains("Retry-After: 5"),
+        text_lower.contains("retry-after: 5"),
         "expected Retry-After header, got: {text:?}"
     );
-    assert!(
-        text.contains("Connection: close"),
-        "expected Connection: close, got: {text:?}"
-    );
 
-    // Drain the held connections — closing the client side lets the
-    // handler thread observe EOF / error and exit, releasing permits.
-    for s in held.drain(..) {
-        let _ = s.shutdown(std::net::Shutdown::Both);
-        drop(s);
+    // Drain the held requests; their handlers finish once the
+    // slow-inject sleep expires, releasing permits.
+    server.set_test_slow_inject_ms(0);
+    for handle in held {
+        let body = handle.join().expect("held request thread");
+        assert!(
+            body.starts_with("HTTP/1.1 2"),
+            "held request should complete normally, got: {body:?}"
+        );
     }
     // Wait for permits to drop back down.
     for _ in 0..100 {
@@ -113,11 +116,13 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
     let mut buf = Vec::new();
     let _ = tcp.read_to_end(&mut buf);
     let resp = String::from_utf8_lossy(&buf);
-    // The fresh connection must NOT be the limiter's static 503
-    // (signature: `Retry-After: 5` + `Content-Length: 0`). The
-    // request itself is allowed to return any status — the point is
+    // The fresh connection must NOT be the limiter's capacity 503.
+    // The request itself is allowed to return any status — the point is
     // that it was admitted past the limiter and routed normally.
-    let is_limiter_reject = resp.contains("Retry-After: 5") && resp.contains("Content-Length: 0");
+    let resp_lower = resp.to_ascii_lowercase();
+    let is_limiter_reject = resp.starts_with("HTTP/1.1 503")
+        && resp_lower.contains("retry-after: 5")
+        && resp.contains("server at capacity");
     assert!(
         !is_limiter_reject,
         "fresh connection should not be rejected by the limiter, got: {resp:?}"

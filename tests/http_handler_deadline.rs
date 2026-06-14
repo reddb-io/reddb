@@ -59,15 +59,16 @@ fn handler_deadline_emits_503_then_recovers() {
         resp.starts_with("HTTP/1.1 503"),
         "expected 503 status line, got: {resp:?}"
     );
+    let resp_lower = resp.to_ascii_lowercase();
     assert!(
-        resp.contains("Connection: close"),
+        resp_lower.contains("connection: close"),
         "expected Connection: close, got: {resp:?}"
     );
     // The deadline-503 has no Retry-After (that signature belongs to
     // the limiter's static reject). This keeps the two failure modes
     // distinguishable in logs and tests.
     assert!(
-        !resp.contains("Retry-After:"),
+        !resp_lower.contains("retry-after:"),
         "deadline-503 should not carry Retry-After, got: {resp:?}"
     );
 

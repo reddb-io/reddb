@@ -45,6 +45,10 @@ fn send_request(addr: &str, path: &str) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+fn spawn_slow_request(addr: String) -> thread::JoinHandle<String> {
+    thread::spawn(move || send_request(&addr, "/health/live"))
+}
+
 fn metric_value(body: &str, line_prefix: &str) -> u64 {
     for line in body.lines() {
         if let Some(rest) = line.strip_prefix(line_prefix) {
@@ -74,7 +78,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
     // Cap=2 so we can saturate with a single held connection that
     // never sends a request and still leave room for the scrape.
     let cap = 2;
-    let handler_timeout = Duration::from_millis(200);
+    let handler_timeout = Duration::from_millis(3_000);
     let (addr, server) = boot(cap, handler_timeout);
 
     // (1) Happy-path request — records one sample in the http
@@ -85,13 +89,14 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
         "happy-path /health/live should succeed: {happy:?}"
     );
 
-    // (2) Saturate the cap with `cap` held connections that never
-    // send a request — the handler threads park inside
-    // `HttpRequest::read_from` until the read timeout expires, so the
-    // permit stays held.
-    let mut held: Vec<TcpStream> = Vec::new();
+    // (2) Saturate the cap with real in-flight requests. The async edge
+    // limits requests, not idle sockets, so the test slow-inject hook
+    // keeps each request occupying a permit long enough to observe the
+    // cap-exhausted path.
+    server.set_test_slow_inject_ms(2_000);
+    let mut held = Vec::new();
     for _ in 0..cap {
-        held.push(TcpStream::connect(&addr).expect("connect-hold"));
+        held.push(spawn_slow_request(addr.clone()));
     }
     for _ in 0..50 {
         if server.http_limiter().current() == cap {
@@ -113,10 +118,14 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
         "expected limiter 503, got: {rejected:?}"
     );
 
-    // Drain held connections so the cap recovers.
-    for s in held.drain(..) {
-        let _ = s.shutdown(std::net::Shutdown::Both);
-        drop(s);
+    // Drain held requests so the cap recovers.
+    server.set_test_slow_inject_ms(0);
+    for handle in held {
+        let body = handle.join().expect("held request thread");
+        assert!(
+            body.starts_with("HTTP/1.1 2"),
+            "held request should complete normally: {body:?}"
+        );
     }
     for _ in 0..100 {
         if server.http_limiter().current() == 0 {
@@ -130,7 +139,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
     thread::sleep(Duration::from_millis(100));
 
     // (3) Trip the slice-2 deadline once — handler_timeout reason.
-    server.set_test_slow_inject_ms(500);
+    server.set_test_slow_inject_ms(4_000);
     let timed_out = send_request(&addr, "/health/live");
     assert!(
         timed_out.starts_with("HTTP/1.1 503"),
