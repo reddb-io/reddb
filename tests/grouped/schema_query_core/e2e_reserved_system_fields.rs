@@ -1,9 +1,12 @@
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
+
+use std::path::Path;
 
 use reddb::application::{CreateDocumentInput, EntityUseCases};
 use reddb::json::json;
-use reddb::{PhysicalMetadataFile, RedDBOptions, RedDBRuntime};
+use reddb::{PhysicalMetadataFile, RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
@@ -11,6 +14,12 @@ fn runtime() -> RedDBRuntime {
 
 fn persistent_path(prefix: &str) -> support::TempDbFile {
     support::temp_db_file(prefix)
+}
+
+fn physical_metadata_options(path: &Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+        .expect("operational profile should persist physical metadata")
 }
 
 fn assert_reserved_error(message: &str, field: &str, context: &str) {
@@ -79,7 +88,7 @@ fn startup_rejects_persisted_table_contract_reserved_columns() {
     let path = persistent_path("reserved_startup");
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
+        let rt = RedDBRuntime::with_options(physical_metadata_options(path.path()))
             .expect("persistent runtime should open");
         rt.execute_query("CREATE TABLE persisted_rows (name TEXT)")
             .expect("table should be created");
@@ -112,7 +121,7 @@ fn startup_rejects_persisted_table_contract_reserved_columns() {
         .save_for_data_path(&path)
         .expect("metadata should be saved");
 
-    let err = match RedDBRuntime::with_options(RedDBOptions::persistent(path.path())) {
+    let err = match RedDBRuntime::with_options(physical_metadata_options(path.path())) {
         Ok(_) => panic!("reserved persisted contract should fail startup"),
         Err(err) => err,
     };
