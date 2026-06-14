@@ -12,12 +12,16 @@
 //! issue notes).
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::wal::reader::WalReader;
 use reddb::storage::wal::record::WalRecord;
 use reddb::storage::wal::writer::WalWriter;
-use reddb::{fold_dwb_into_wal_enabled, set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime};
+use reddb::{
+    fold_dwb_into_wal_enabled, set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime,
+    StorageDeployPreset,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -34,7 +38,10 @@ fn dwb_path(data: &Path) -> PathBuf {
 fn open_persistent(path: &Path) -> RedDBRuntime {
     let mut last_error = String::new();
     for _ in 0..20 {
-        match RedDBRuntime::with_options(RedDBOptions::persistent(path)) {
+        let options = RedDBOptions::persistent(path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+            .expect("production HA profile should expose DWB sidecar behavior");
+        match RedDBRuntime::with_options(options) {
             Ok(rt) => return rt,
             Err(err) if err.to_string().contains("Database is locked") => {
                 last_error = err.to_string();
