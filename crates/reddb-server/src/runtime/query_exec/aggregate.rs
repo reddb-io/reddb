@@ -295,11 +295,7 @@ pub(crate) fn execute_aggregate_query(
     let mut spill_agg = crate::storage::query::executors::agg_spill::SpilledHashAgg::<
         AggregateGroupKey,
         AggregateGroup,
-    >::new(
-        spill_dir.path().to_path_buf(),
-        WORK_MEM_BYTES,
-        ESTIMATED_ENTRY_BYTES,
-    );
+    >::new(spill_dir.path(), WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
 
     let table_row_resolver = TableRowMvccReadResolver::current_statement();
