@@ -43,6 +43,9 @@ jobs:
         with:
           components: llvm-tools-preview
 
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
 
@@ -58,6 +61,7 @@ jobs:
         env:
           RUSTC_WRAPPER: ""
         run: |
+          set -o pipefail
           cargo llvm-cov -p reddb-io-wire --summary-only \
             --ignore-filename-regex 'crates/reddb-types/' \
             --fail-under-lines 90 \
