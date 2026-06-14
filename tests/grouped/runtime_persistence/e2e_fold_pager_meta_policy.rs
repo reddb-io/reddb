@@ -9,9 +9,13 @@
 //!  - tests cover massive allocation forcing overflow.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::{fold_pager_meta_enabled, set_fold_pager_meta_enabled, RedDBOptions, RedDBRuntime};
+use reddb::{
+    fold_pager_meta_enabled, set_fold_pager_meta_enabled, RedDBOptions, RedDBRuntime,
+    StorageDeployPreset,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -22,6 +26,12 @@ fn meta_shadow_path(data: &Path) -> PathBuf {
     let mut p = data.to_path_buf().into_os_string();
     p.push("-meta");
     PathBuf::from(p)
+}
+
+fn pager_meta_options(path: &Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+        .expect("production HA profile should expose pager metadata")
 }
 
 #[test]
@@ -35,8 +45,8 @@ fn fold_off_default_preserves_meta_shadow() {
     let path = db.path();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
-            .expect("persistent runtime opens");
+        let rt =
+            RedDBRuntime::with_options(pager_meta_options(path)).expect("persistent runtime opens");
         rt.execute_query("CREATE TABLE fold_off_a (name TEXT)")
             .expect("ddl");
         rt.checkpoint().expect("flush");
@@ -58,8 +68,8 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
     let path = db.path();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
-            .expect("persistent runtime opens");
+        let rt =
+            RedDBRuntime::with_options(pager_meta_options(path)).expect("persistent runtime opens");
         rt.execute_query("CREATE TABLE fold_on_a (name TEXT)")
             .expect("ddl");
         rt.execute_query("INSERT INTO fold_on_a (name) VALUES ('alpha')")
@@ -75,7 +85,7 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
 
     // Reopen: catalog and data must survive without the shadow.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
+        let rt = RedDBRuntime::with_options(pager_meta_options(path))
             .expect("persistent runtime reopens");
         let _ = rt
             .execute_query("SELECT name FROM fold_on_a")
@@ -105,8 +115,8 @@ fn massive_catalog_forces_meta_overflow_chain() {
         .collect();
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
-            .expect("persistent runtime opens");
+        let rt =
+            RedDBRuntime::with_options(pager_meta_options(path)).expect("persistent runtime opens");
         for name in &names {
             rt.execute_query(&format!("CREATE TABLE {name} (id INTEGER)"))
                 .expect("ddl");
@@ -115,7 +125,7 @@ fn massive_catalog_forces_meta_overflow_chain() {
     }
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
+        let rt = RedDBRuntime::with_options(pager_meta_options(path))
             .expect("persistent runtime reopens");
         for name in &names {
             // SELECT against the catalog: parse must succeed (no truncation).
