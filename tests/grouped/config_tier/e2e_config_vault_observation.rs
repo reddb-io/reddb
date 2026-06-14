@@ -5,9 +5,10 @@ use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::replication::cdc::ChangeOperation;
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::storage::schema::Value;
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
 fn rt() -> RedDBRuntime {
@@ -15,8 +16,10 @@ fn rt() -> RedDBRuntime {
 }
 
 fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
-    let rt =
-        RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("runtime should open");
+    let options = RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should expose pager");
+    let rt = RedDBRuntime::with_options(options).expect("runtime should open");
     let pager = Arc::clone(
         rt.db()
             .store()
