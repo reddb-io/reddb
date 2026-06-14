@@ -634,6 +634,7 @@ impl RedDBRuntime {
             // side-effect fires when policy denies.
             crate::runtime::ai::provider_gate::enforce(self, &provider)?;
             if matches!(provider, crate::ai::AiProvider::Local) {
+                crate::runtime::ai::local_embedding::ensure_local_embedding_available()?;
                 // Issue #682 — pre-flight the local model registry before
                 // any row write. Missing model, uninstalled artifacts,
                 // wrong task, and disabled-feature failures surface as
