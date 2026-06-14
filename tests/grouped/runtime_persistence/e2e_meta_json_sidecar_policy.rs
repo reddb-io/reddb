@@ -5,9 +5,13 @@
 //! `REDDB_META_JSON_SIDECAR=1` env escape hatch.
 
 #[allow(dead_code)]
+#[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::{set_meta_json_sidecar_enabled, PhysicalMetadataFile, RedDBOptions, RedDBRuntime};
+use reddb::{
+    set_meta_json_sidecar_enabled, PhysicalMetadataFile, RedDBOptions, RedDBRuntime,
+    StorageDeployPreset,
+};
 use std::sync::Mutex;
 
 // Serialises the two tests because they mutate a process-global toggle.
@@ -15,6 +19,12 @@ static POLICY_GUARD: Mutex<()> = Mutex::new(());
 
 fn persistent_path(prefix: &str) -> support::TempDbFile {
     support::temp_db_file(prefix)
+}
+
+fn sidecar_options(path: &std::path::Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+        .expect("production HA profile should write physical metadata sidecars")
 }
 
 #[test]
@@ -26,7 +36,7 @@ fn standard_tier_default_does_not_write_json_sidecar() {
     let path = persistent_path("meta_sidecar_off");
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
+        let rt = RedDBRuntime::with_options(sidecar_options(path.path()))
             .expect("persistent runtime opens");
         rt.execute_query("CREATE TABLE sidecar_off (name TEXT)")
             .expect("ddl");
@@ -65,7 +75,7 @@ fn max_opt_in_writes_json_sidecar() {
     let path = persistent_path("meta_sidecar_on");
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path.path()))
+        let rt = RedDBRuntime::with_options(sidecar_options(path.path()))
             .expect("persistent runtime opens");
         rt.execute_query("CREATE TABLE sidecar_on (name TEXT)")
             .expect("ddl");
