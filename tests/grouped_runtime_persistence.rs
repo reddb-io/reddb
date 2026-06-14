@@ -9,6 +9,9 @@ mod e2e_issue_859_columnar_chunk_eviction;
 #[path = "grouped/runtime_persistence/e2e_fold_pager_meta_policy.rs"]
 mod e2e_fold_pager_meta_policy;
 
+#[path = "grouped/runtime_persistence/e2e_fold_dwb_into_wal_policy.rs"]
+mod e2e_fold_dwb_into_wal_policy;
+
 #[path = "grouped/runtime_persistence/e2e_materialized_view_refresh_every.rs"]
 mod e2e_materialized_view_refresh_every;
 
