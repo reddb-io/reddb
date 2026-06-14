@@ -9,11 +9,13 @@
 //!
 //! | Limit                 | Default | Rationale                                       |
 //! |-----------------------|---------|-------------------------------------------------|
-//! | `max_depth`           | 128     | Recursive descent + Pratt; well above hand-     |
-//! |                       |         | written queries (typical ≤ 12).                  |
+//! | `max_depth`           | 32      | Recursive descent + Pratt; above typical        |
+//! |                       |         | hand-written queries (≤ 12).                     |
 //! | `max_input_bytes`     | 1 MiB   | Hard cap on the token stream input.              |
 //! | `max_identifier_chars`| 256     | Long enough for legitimate UUID-tagged names,    |
 //! |                       |         | short enough to bound HashMap pressure.          |
+//! | `max_tokens`          | 8192    | Bounds token-driven parser work even when input  |
+//! |                       |         | bytes and recursion depth stay below their caps. |
 //!
 //! `ParserLimits` is consumed both by the [`crate::lexer`] (identifier and
 //! input-byte caps, checked during tokenization) and by the parser proper
@@ -36,14 +38,19 @@ pub struct ParserLimits {
     /// Maximum identifier length in characters. Checked when an
     /// identifier token is constructed in the lexer.
     pub max_identifier_chars: usize,
+    /// Maximum number of tokens the parser may consume. This bounds
+    /// flat adversarial inputs such as long operator chains that do
+    /// not trip byte, identifier, or recursion-depth limits.
+    pub max_tokens: usize,
 }
 
 impl Default for ParserLimits {
     fn default() -> Self {
         Self {
-            max_depth: 128,
+            max_depth: 32,
             max_input_bytes: 1024 * 1024, // 1 MiB
             max_identifier_chars: 256,
+            max_tokens: 8192,
         }
     }
 }
@@ -56,6 +63,7 @@ impl ParserLimits {
             max_depth: 1024,
             max_input_bytes: 16 * 1024 * 1024,
             max_identifier_chars: 4096,
+            max_tokens: 65_536,
         }
     }
 }

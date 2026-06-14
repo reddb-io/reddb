@@ -6491,6 +6491,118 @@ fn dos_limit_recursion_depth_is_structured() {
 }
 
 #[test]
+fn dos_limit_token_budget_is_structured() {
+    use super::limits::ParserLimits;
+    let limits = ParserLimits {
+        max_tokens: 8,
+        ..ParserLimits::default()
+    };
+    let input = format!("SELECT a{} FROM t", " + a".repeat(16));
+    let mut parser = super::Parser::with_limits(&input, limits).expect("ctor ok");
+    let err = parser.parse().err().expect("token budget must error");
+    assert!(matches!(
+        err.kind,
+        super::ParseErrorKind::TokenLimit {
+            limit_name: "max_tokens",
+            value: 8,
+        }
+    ));
+}
+
+#[test]
+fn dos_limit_flat_operator_chain_hits_default_token_budget() {
+    let input = format!(
+        "SELECT a{} FROM t",
+        " + a".repeat(super::ParserLimits::default().max_tokens)
+    );
+    let err = super::parse(&input)
+        .err()
+        .expect("flat operator chain must hit token budget");
+    assert!(
+        matches!(
+            err.kind,
+            super::ParseErrorKind::TokenLimit {
+                limit_name: "max_tokens",
+                ..
+            }
+        ),
+        "kind: {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn fuzz_regression_sql_oom_shape_hits_default_token_budget() {
+    let input = format!(
+        "SELECT secreany.pay5{} FROM t",
+        " / tmpa + r".repeat(super::ParserLimits::default().max_tokens)
+    );
+    let err = super::parse(&input)
+        .err()
+        .expect("fuzzed flat SQL shape must hit token budget");
+    assert!(
+        matches!(
+            err.kind,
+            super::ParseErrorKind::TokenLimit {
+                limit_name: "max_tokens",
+                ..
+            }
+        ),
+        "kind: {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn fuzz_regression_migration_body_token_budget_is_not_swallowed() {
+    let body = "SELECT\nKV(INSERTCATESE, ApTLTEttt, ETOPOLOGICALSORT, "
+        .repeat(super::ParserLimits::default().max_tokens);
+    let input = format!("CREATE MIGRATION m AS {body}");
+    let err = super::parse(&input)
+        .err()
+        .expect("long migration body must hit token budget");
+    assert!(
+        matches!(
+            err.kind,
+            super::ParseErrorKind::TokenLimit {
+                limit_name: "max_tokens",
+                ..
+            }
+        ),
+        "kind: {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn fuzz_regression_nested_select_kv_shape_hits_default_depth_limit() {
+    let levels = super::ParserLimits::default().max_depth + 8;
+    let mut input = String::from("SELECT ");
+    for _ in 0..levels {
+        input.push_str("KV(INSERTCATESE, ApTLTEttt, ETOPOLOGICALSORT, (SELECT ");
+    }
+    input.push('1');
+    for _ in 0..levels {
+        input.push_str("))");
+    }
+
+    let err = super::parse(&input)
+        .err()
+        .expect("nested SELECT/KV fuzz shape must hit recursion depth");
+    assert!(
+        matches!(
+            err.kind,
+            super::ParseErrorKind::DepthLimit {
+                limit_name: "max_depth",
+                ..
+            }
+        ),
+        "kind: {:?}",
+        err.kind
+    );
+}
+
+#[test]
 fn dos_limit_no_panic_on_pathological_input() {
     // Adversarial inputs return Err but never panic / OOM.
     let mut adversarial = "(".repeat(2_000);
@@ -6515,7 +6627,7 @@ fn dos_limit_chained_not_in_where_does_not_overflow_stack() {
     // `parse_not_expr` recursed into itself for `NOT NOT NOT … x`
     // without entering the depth counter — only the leaf reached
     // `parse_expr_prec`'s `enter_depth()`, so a 10k-NOT payload
-    // overflowed the Rust stack BEFORE `max_depth=128` could fire.
+    // overflowed the Rust stack before the default depth guard could fire.
     //
     // We run on a generous-stack thread so that, in the unfixed
     // build, the test reliably reports the overflow as a panic

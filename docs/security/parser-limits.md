@@ -1,7 +1,7 @@
 # Parser DoS Limits
 
 The RedDB query parser ships with hard limits on input size,
-recursion depth, and identifier length. The limits exist to keep
+recursion depth, identifier length, and consumed token count. The limits exist to keep
 adversarial query strings — a small payload that triggers
 unbounded recursion or memory growth — bounded by structured
 errors instead of process panics or OOM.
@@ -10,19 +10,19 @@ errors instead of process panics or OOM.
 
 | Limit                  | Default | Configured by               |
 |------------------------|---------|-----------------------------|
-| `max_depth`            | 128     | `ParserLimits::max_depth`   |
+| `max_depth`            | 32      | `ParserLimits::max_depth`   |
 | `max_input_bytes`      | 1 MiB   | `ParserLimits::max_input_bytes` |
 | `max_identifier_chars` | 256     | `ParserLimits::max_identifier_chars` |
+| `max_tokens`           | 8192    | `ParserLimits::max_tokens`  |
 
-Source: `crates/reddb-server/src/storage/query/parser/limits.rs`.
+Source: `crates/reddb-rql/src/limits.rs`.
 
 ## Rationale
 
-- **`max_depth = 128`**. Hand-written queries top out around
-  10–12 levels (CTE → subquery → expression). 128 leaves an order
-  of magnitude of headroom for tools that machine-generate
-  queries while still bounding recursion well below typical
-  thread-stack ceilings (8 MiB on tokio worker threads).
+- **`max_depth = 32`**. Hand-written queries top out around
+  10–12 levels (CTE → subquery → expression). 32 leaves headroom
+  for generated queries while keeping nested SELECT/function-call
+  payloads below the default test/fuzz thread stack.
 - **`max_input_bytes = 1 MiB`**. Queries that exceed 1 MiB are
   almost always tooling regressions — even bulk INSERT statements
   belong on the binary `INSERT … VALUES (?, ?, ?)` path, not as a
@@ -32,6 +32,10 @@ Source: `crates/reddb-server/src/storage/query/parser/limits.rs`.
   exist on every code path that walks an AST; capping identifier
   length keeps that pressure predictable. 256 chars covers
   legitimate UUID-tagged column names with room to spare.
+- **`max_tokens = 8192`**. Flat adversarial inputs can stay under
+  byte, identifier, and recursion-depth limits while still forcing
+  long token streams and large expression/projection trees. Capping
+  consumed tokens keeps parser work bounded for those cases.
 
 ## Error surface
 
@@ -41,6 +45,7 @@ of:
 - `ParseErrorKind::DepthLimit { limit_name, value }`
 - `ParseErrorKind::InputTooLarge { limit_name, value }`
 - `ParseErrorKind::IdentifierTooLong { limit_name, value }`
+- `ParseErrorKind::TokenLimit { limit_name, value }`
 
 Callers that want to differentiate DoS refusals from grammar
 errors pattern-match on `kind`. The harness (issue #87) and the

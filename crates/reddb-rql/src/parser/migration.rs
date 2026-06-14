@@ -57,7 +57,7 @@ impl<'a> Parser<'a> {
         let _ = self.consume(&Token::As)?;
 
         // Everything remaining until EOF is the body
-        let body = self.collect_remaining_input();
+        let body = self.collect_remaining_input()?;
 
         Ok(QueryExpr::CreateMigration(CreateMigrationQuery {
             name,
@@ -134,19 +134,16 @@ impl<'a> Parser<'a> {
 
     /// Collect all remaining tokens into a single string (joined with spaces).
     /// Used to capture the raw SQL body of a migration.
-    pub fn collect_remaining_input(&mut self) -> String {
+    pub fn collect_remaining_input(&mut self) -> Result<String, ParseError> {
         let mut parts: Vec<String> = Vec::new();
         loop {
             if self.check(&Token::Eof) {
                 break;
             }
             parts.push(self.current.token.to_string());
-            // Advance, ignoring errors (at worst we stop early)
-            if self.advance().is_err() {
-                break;
-            }
+            self.advance()?;
         }
-        parts.join(" ")
+        Ok(parts.join(" "))
     }
 
     /// Try to consume a bare identifier or a single-quoted string literal.
