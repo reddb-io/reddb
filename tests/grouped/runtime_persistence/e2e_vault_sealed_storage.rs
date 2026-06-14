@@ -1,3 +1,4 @@
+#[path = "../../support/mod.rs"]
 #[allow(dead_code)]
 mod support;
 
@@ -8,12 +9,17 @@ use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::control_events::CONTROL_EVENTS_COLLECTION;
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::storage::schema::Value;
-use reddb::storage::EntityData;
+use reddb::storage::{EntityData, StorageDeployPreset};
 use reddb::{RedDBOptions, RedDBRuntime};
 
+fn pager_backed_options(path: &Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should expose pager")
+}
+
 fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
-    let rt =
-        RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("runtime should open");
+    let rt = RedDBRuntime::with_options(pager_backed_options(path)).expect("runtime should open");
     let pager = Arc::clone(
         rt.db()
             .store()
@@ -116,11 +122,12 @@ fn control_event_rows(rt: &RedDBRuntime) -> Vec<std::collections::HashMap<String
         .collect()
 }
 
-fn named_text(row: &std::collections::HashMap<String, Value>, name: &str) -> String {
-    match row.get(name) {
-        Some(Value::Text(value)) => value.to_string(),
-        other => panic!("expected text field {name}, got {other:?}"),
-    }
+fn text_field_eq(
+    row: &std::collections::HashMap<String, Value>,
+    name: &str,
+    expected: &str,
+) -> bool {
+    matches!(row.get(name), Some(Value::Text(value)) if value.as_ref() == expected)
 }
 
 #[test]
@@ -195,7 +202,7 @@ fn vault_put_seals_payload_before_persistence() {
     );
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(path))
+        let rt = RedDBRuntime::with_options(pager_backed_options(path))
             .expect("runtime should reopen without key provider");
         let get = rt
             .execute_query("VAULT GET secrets.api_key")
@@ -307,7 +314,7 @@ fn vault_metadata_and_unseal_control_events_minimize_evidence() {
     assert!(ledger_body.contains("version"), "{ledger_body}");
     assert!(rows
         .iter()
-        .any(|row| named_text(row, "actor_user_id") == "alice"));
+        .any(|row| text_field_eq(row, "actor_user_id", "alice")));
     assert!(
         rows.iter()
             .all(|row| row.contains_key("scope") && row.contains_key("resource")),
@@ -663,7 +670,7 @@ fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited() {
 #[test]
 fn create_vault_requires_unsealed_key_provider() {
     let guard = support::temp_db_file("vault-create-requires-key");
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(guard.path()))
+    let rt = RedDBRuntime::with_options(pager_backed_options(guard.path()))
         .expect("runtime should open");
 
     let err = rt
