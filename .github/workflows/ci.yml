@@ -515,8 +515,8 @@ jobs:
 
   chaos:
     # PLAN.md Phase 8.4 — chaos & crash hardening matrix.
-    # Runs the 8 chaos tests + 3 backup/restore drills shipped in
-    # tests/chaos_*.rs and tests/drill_*.rs. Failure is a release blocker.
+    # Runs the chaos tests plus backup/restore drills shipped in
+    # the consolidated grouped test binaries. Failure is a release blocker.
     name: Chaos & Drill Suite
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'workflow_dispatch' && inputs.full_ci
@@ -538,9 +538,9 @@ jobs:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
       - name: Run chaos tests
-        run: cargo test --locked --test 'chaos_*' --no-fail-fast
+        run: cargo test --locked --test grouped_chaos --no-fail-fast
       - name: Run drill tests
-        run: cargo test --locked --test 'drill_*' --no-fail-fast
+        run: cargo test --locked --test grouped_pitr_drills --no-fail-fast
 
   chaos-minio:
     # PLAN.md Phase 8.4 — chaos suite against an S3-compatible
