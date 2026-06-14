@@ -17,7 +17,7 @@
 //!     match existing OpenAI-path semantics, so the assertion is on
 //!     the deterministic error variant.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::runtime::ai::local_embedding::{
@@ -27,10 +27,7 @@ use reddb::runtime::ai::local_embedding::{
 use reddb::storage::schema::Value;
 use reddb::{RedDBError, RedDBResult, RedDBRuntime};
 
-fn backend_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use super::support::backend_lock;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
