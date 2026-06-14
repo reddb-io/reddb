@@ -65,6 +65,30 @@ impl Drop for QueryTempDir {
     }
 }
 
+#[cfg(test)]
+mod query_temp_dir_tests {
+    use super::QueryTempDir;
+
+    #[test]
+    fn query_temp_dir_new_creates_directory() {
+        let dir = QueryTempDir::new("reddb-agg-test-").expect("temp dir should be created");
+
+        assert!(dir.path().is_dir());
+    }
+
+    #[test]
+    fn query_temp_dir_drop_removes_directory() {
+        let path = {
+            let dir = QueryTempDir::new("reddb-agg-test-").expect("temp dir should be created");
+            let path = dir.path().to_path_buf();
+            assert!(path.is_dir());
+            path
+        };
+
+        assert!(!path.exists());
+    }
+}
+
 /// Return `true` when any projection in the query is a known aggregate
 /// function. Used by the executor to decide whether to dispatch to
 /// [`execute_aggregate_query`].

@@ -446,7 +446,7 @@ fn e2e_comments_embedding_cluster_label_and_writeback() {
     ]);
 
     let rt = rt();
-    seed_comments(&rt);
+    seed_comments(rt.runtime());
     let http_base = spawn_reddb_http(rt.clone_runtime());
     let query = QueryUseCases::new(rt.runtime());
 

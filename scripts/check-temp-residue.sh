@@ -23,7 +23,7 @@ tmpdir="${TMPDIR:-/tmp}"
 entries=()
 while IFS= read -r -d '' entry; do
     entries+=("$entry")
-done < <(find "$tmpdir" -maxdepth 1 \
+done < <(find "$tmpdir" -mindepth 1 -maxdepth 1 \
     \( -name 'reddb-*' -o -name 'reddb_*' -o -name '*.rdb' -o -name '*.wal' \) \
     -print0 2>/dev/null || true)
 
