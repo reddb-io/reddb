@@ -511,6 +511,11 @@ impl RedDB {
                 options.replication.quorum.clone(),
             ))
         });
+        let ephemeral_cleanup = path
+            .as_ref()
+            .filter(|path| super::is_ephemeral_data_path(path))
+            .cloned()
+            .map(super::EphemeralDataPathCleanup::new);
 
         Self {
             store: Arc::new(store),
@@ -534,6 +539,7 @@ impl RedDB {
             continuous_aggregates: std::sync::OnceLock::new(),
             turbo_collections: std::sync::OnceLock::new(),
             turbo_rebuild_workers: parking_lot::Mutex::new(Vec::new()),
+            _ephemeral_cleanup: ephemeral_cleanup,
         }
         .with_initialized_metadata()
         .map_err(|err| format!("initialize RedDB metadata: {err}").into())

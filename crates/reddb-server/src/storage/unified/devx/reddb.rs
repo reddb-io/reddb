@@ -144,6 +144,69 @@ pub struct RedDB {
     /// `store`, so a runtime restart on the same database path is
     /// not racy with an in-flight rebuild holding the file lock.
     pub(crate) turbo_rebuild_workers: parking_lot::Mutex<Vec<std::thread::JoinHandle<()>>>,
+    _ephemeral_cleanup: Option<EphemeralDataPathCleanup>,
+}
+
+pub(super) struct EphemeralDataPathCleanup {
+    path: PathBuf,
+}
+
+impl EphemeralDataPathCleanup {
+    pub(super) fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for EphemeralDataPathCleanup {
+    fn drop(&mut self) {
+        for path in ephemeral_data_artifacts(&self.path) {
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(path);
+            } else {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+pub(super) fn is_ephemeral_data_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !file_name.starts_with("reddb-ephemeral-") || !file_name.ends_with(".rdb") {
+        return false;
+    }
+    path.parent()
+        .map(|parent| parent == std::env::temp_dir())
+        .unwrap_or(false)
+}
+
+fn ephemeral_data_artifacts(data_path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        data_path.to_path_buf(),
+        reddb_file::layout::unified_wal_path(data_path),
+        reddb_file::layout::logical_wal_path(data_path),
+        reddb_file::layout::temp_path(data_path),
+        reddb_file::layout::result_cache_l2_path(data_path),
+        reddb_file::layout::pager_legacy_wal_path(data_path),
+        reddb_file::layout::engine_wal_path(data_path),
+        reddb_file::layout::pager_header_path(data_path),
+        reddb_file::layout::pager_meta_path(data_path),
+        reddb_file::layout::pager_dwb_path(data_path),
+        reddb_file::layout::shm_path(data_path),
+        reddb_file::layout::physical_metadata_json_path(data_path),
+        reddb_file::layout::physical_metadata_binary_path(data_path),
+        reddb_file::layout::rebootstrap_staging_root(data_path),
+        reddb_file::layout::rebootstrap_pending_path(data_path),
+        reddb_file::layout::rebootstrap_ready_marker_path(data_path),
+        reddb_file::layout::rebootstrap_intent_log_path(data_path),
+        reddb_file::layout::rebootstrap_previous_path(data_path),
+        reddb_file::layout::primary_replica_root(data_path),
+        reddb_file::layout::serverless_root(data_path),
+    ];
+    paths.extend(reddb_file::layout::pager_shadow_sidecar_paths(data_path));
+    paths.push(reddb_file::layout::support_dir_for(data_path));
+    paths
 }
 
 impl Drop for RedDB {
