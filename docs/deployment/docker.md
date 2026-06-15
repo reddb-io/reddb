@@ -261,20 +261,20 @@ Docker secrets, either inject them with `valueFrom`/secret env vars or use the
 Mount JSON at `/etc/reddb/config.json` or set `REDDB_CONFIG_FILE` to another
 path. The file is parsed on boot and seeds missing keys into `red.config`.
 
-Effective precedence is:
+Separate boot/topology config from runtime config:
 
-1. Env overrides for config-matrix keys, such as `REDDB_DURABILITY_MODE`, win
-   for the current boot.
-2. Persisted `red.config` values set by `SET CONFIG` are the durable source of truth.
-3. Built-in boot defaults fill required gaps.
+- Boot config must stay in args/env because it is needed before the DB opens:
+  role, primary address, storage preset/profile, remote backend, lease, data
+  path, and secret material.
+- Runtime config is stored in `red.config` after boot.
 
-The mounted config file is different: it writes missing keys into `red.config`
-with write-if-absent semantics. It is a bootstrap/defaulting mechanism, not an
-override layer.
+For runtime config, env overrides for matrix keys such as
+`REDDB_DURABILITY_MODE` win for the current boot and are not persisted. The
+mounted config file writes missing keys into `red.config` with write-if-absent
+semantics. Existing rows from a prior boot, `SET CONFIG`, or boot defaults are
+not overwritten.
 
-After a key is stored in `red.config`, changing the mounted file does not
-overwrite it. Use `SET CONFIG` or an explicit migration when the stored value
-must change.
+Use `SET CONFIG` or an explicit migration when a stored value must change.
 
 You can also pass flags via the Docker `command`:
 

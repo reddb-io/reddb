@@ -91,14 +91,16 @@ config:
 ```
 
 The file mounts at `/etc/reddb/config.json`, and `REDDB_CONFIG_FILE` points to
-it. RedDB seeds missing keys into `red.config` on boot. Existing `red.config`
-values are not overwritten.
+it. RedDB seeds missing keys into `red.config` on boot. Existing rows from a
+prior boot, `SET CONFIG`, or boot defaults are not overwritten.
 
-Effective precedence:
+Separate boot/topology config from runtime config:
 
-1. Env overrides for matrix keys win for the current boot.
-2. Persisted `red.config` values are the durable source of truth.
-3. Built-in defaults fill gaps.
+- Boot config remains args/env: role, primary address, storage preset/profile,
+  remote backend, lease settings, data path, and secrets.
+- Runtime config lives in `red.config`.
+- Env overrides for config-matrix keys win for the current boot and are not
+  persisted.
 
 Use `SET CONFIG` for persistent config changes after first boot.
 

@@ -53,16 +53,20 @@ Set `storage.preset` to override the mode-derived preset. Use
 
 ## Config Precedence
 
-The chart follows the binary's current boot contract:
+There are two configuration classes:
 
-1. Env overrides for config-matrix keys win on every boot.
-2. Persisted `red.config` values set by `SET CONFIG` are the durable source of truth.
-3. Built-in boot defaults fill required gaps.
+- Boot/topology config is read before the database opens and must come from
+  args/env: process role, data path, storage preset/profile, primary address,
+  remote backend, lease settings, and secret material.
+- Runtime config lives in `red.config` after boot.
 
 `config.file` mounts JSON at `/etc/reddb/config.json` and writes missing keys
-into `red.config` with write-if-absent semantics. It is best used for first-boot
-defaults and a small hot-reloadable set. Do not expect changing the ConfigMap to
-overwrite values that were already stored in `red.config`.
+into `red.config` with write-if-absent semantics. Existing rows from a prior
+boot, `SET CONFIG`, or boot defaults are not overwritten. Env overrides for
+config-matrix keys still win for the current boot and are not persisted.
+
+Use the config file for first-boot defaults and a small hot-reloadable set. Use
+`SET CONFIG` or a migration when a stored value must change.
 
 ```yaml
 config:
