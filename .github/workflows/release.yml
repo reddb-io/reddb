@@ -47,7 +47,7 @@ jobs:
       github_prerelease: ${{ steps.plan.outputs.github_prerelease }}
       publish_cargo: ${{ steps.plan.outputs.publish_cargo }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Decide release target
@@ -183,7 +183,7 @@ jobs:
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false, optional: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Sync release version
         shell: bash
@@ -308,7 +308,7 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Sync release version
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
@@ -341,7 +341,7 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           # git-cliff walks the full commit history to build the changelog.
           fetch-depth: 0
@@ -441,7 +441,7 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Assert every postinstall-required asset is published
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -456,7 +456,7 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -493,7 +493,7 @@ jobs:
       needs.plan.outputs.release_channel == 'stable' &&
       needs.plan.outputs.publish_cargo == 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
       - uses: ./.github/actions/install-protoc
         with:
@@ -555,7 +555,7 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -591,7 +591,7 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -627,7 +627,7 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -664,7 +664,7 @@ jobs:
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64
@@ -746,7 +746,7 @@ jobs:
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64
@@ -841,7 +841,7 @@ jobs:
           - { os: windows-latest,target: x86_64-pc-windows-msvc,    manylinux: 'auto' }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
