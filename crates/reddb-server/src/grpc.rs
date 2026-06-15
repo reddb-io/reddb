@@ -453,11 +453,9 @@ fn execute_grpc_query_with_optional_params(
         .into_iter()
         .map(grpc_query_value_to_schema_value)
         .collect::<Result<Vec<_>, _>>()?;
-    let parsed = crate::storage::query::modes::parse_multi(&query)
-        .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
-    let bound = crate::storage::query::user_params::bind(&parsed, &binds)
-        .map_err(|e| Status::invalid_argument(format!("bind error: {e}")))?;
-    let result = runtime.execute_query_expr(bound).map_err(to_status)?;
+    let result = runtime
+        .execute_query_with_params(&query, &binds)
+        .map_err(to_status)?;
     enforce_grpc_commit_policy_after_query_result(runtime, &result)?;
     Ok(result)
 }

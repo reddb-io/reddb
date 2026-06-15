@@ -130,8 +130,7 @@ fn ast_side_to_lc(side: crate::storage::query::ast::QueueSide) -> LcQueueSide {
 }
 
 /// Map a `QueueStoreError` (returned by lifecycle methods) onto the
-/// runtime-facing `RedDBError`. Mirrors the wire-error shapes the legacy
-/// `queue_delivery::*` helpers produced.
+/// runtime-facing `RedDBError`.
 fn map_qse(err: QueueStoreError) -> RedDBError {
     match err {
         QueueStoreError::UnknownDelivery(id) => RedDBError::NotFound(format!(

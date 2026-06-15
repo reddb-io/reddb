@@ -163,6 +163,18 @@ Validate the deployment mode.
 {{- if and .Values.config.file.enabled (not .Values.config.file.existingConfigMap) (empty .Values.config.file.inline) -}}
 {{- fail "config.file.enabled=true requires config.file.existingConfigMap or non-empty config.file.inline" -}}
 {{- end -}}
+{{- $preset := default "" .Values.storage.preset -}}
+{{- if and $preset (not (has $preset (list "embedded" "serverless" "primary-replica-dev" "primary-replica-small" "primary-replica-production-ha" "primary-replica-backup" "primary-replica-wal-retention" "cluster"))) -}}
+{{- fail (printf "values.storage.preset is not supported (got %q)" $preset) -}}
+{{- end -}}
+{{- $profile := default "" .Values.storage.profile -}}
+{{- if and $profile (not (has $profile (list "embedded" "serverless" "primary-replica" "cluster"))) -}}
+{{- fail (printf "values.storage.profile is not supported (got %q)" $profile) -}}
+{{- end -}}
+{{- $packaging := default "" .Values.storage.packaging -}}
+{{- if and $packaging (not (has $packaging (list "single-file" "operational-directory"))) -}}
+{{- fail (printf "values.storage.packaging must be 'single-file' or 'operational-directory' (got %q)" $packaging) -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "reddb.storagePreset" -}}
@@ -193,11 +205,23 @@ embedded
 {{- end -}}
 {{- end -}}
 
+{{- define "reddb.storagePackaging" -}}
+{{- if .Values.storage.packaging -}}
+{{- .Values.storage.packaging -}}
+{{- else if eq .Values.mode "standalone" -}}
+single-file
+{{- else -}}
+operational-directory
+{{- end -}}
+{{- end -}}
+
 {{- define "reddb.storageReplicaCount" -}}
 {{- if eq .Values.mode "primary-replica" -}}
 {{- .Values.replica.replicaCount -}}
 {{- else if eq .Values.mode "cluster" -}}
 {{- .Values.cluster.replicaCount -}}
+{{- else -}}
+0
 {{- end -}}
 {{- end -}}
 
@@ -208,15 +232,11 @@ embedded
   value: {{ include "reddb.storagePreset" . | quote }}
 - name: REDDB_STORAGE_PROFILE
   value: {{ include "reddb.storageProfile" . | quote }}
-{{- with .Values.storage.packaging }}
 - name: REDDB_STORAGE_PACKAGING
-  value: {{ . | quote }}
-{{- end }}
-{{- $replicaCount := include "reddb.storageReplicaCount" . -}}
-{{- if $replicaCount }}
+  value: {{ include "reddb.storagePackaging" . | quote }}
+{{- $replicaCount := include "reddb.storageReplicaCount" . }}
 - name: REDDB_REPLICA_COUNT
   value: {{ $replicaCount | quote }}
-{{- end }}
 {{- if ne (toString .Values.storage.managedBackup) "" }}
 - name: REDDB_MANAGED_BACKUP
   value: {{ .Values.storage.managedBackup | quote }}

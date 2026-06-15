@@ -25,6 +25,10 @@ services:
       - "8080:8080"
       - "50051:50051"
     environment:
+      REDDB_STORAGE_PRESET: embedded
+      REDDB_STORAGE_PROFILE: embedded
+      REDDB_STORAGE_PACKAGING: single-file
+      REDDB_REPLICA_COUNT: "0"
       RED_BACKEND: "fs"
       RED_FS_PATH: "/backups"
       RED_AUTO_RESTORE: "true"

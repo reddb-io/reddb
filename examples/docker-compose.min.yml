@@ -23,6 +23,10 @@ services:
       - "0.0.0.0:8080"
     environment:
       RUST_LOG: info
+      REDDB_STORAGE_PRESET: embedded
+      REDDB_STORAGE_PROFILE: embedded
+      REDDB_STORAGE_PACKAGING: single-file
+      REDDB_REPLICA_COUNT: "0"
       # Uncomment when promoting to vault mode + add `--vault` to command:
       # REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     # secrets:

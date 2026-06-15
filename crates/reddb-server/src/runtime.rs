@@ -1381,7 +1381,6 @@ pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub mod query_audit;
 pub(crate) mod query_exec;
-mod queue_delivery;
 pub(crate) mod queue_lifecycle;
 pub(crate) mod queue_telemetry;
 pub(crate) mod queue_wait_registry;

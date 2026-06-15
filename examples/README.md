@@ -15,6 +15,11 @@ Available profiles:
 - `serverless`: single remote-backed node + MinIO for serverless-style readiness/warmup flows
 - `cluster`: three symmetric cluster-shape members with stable identity/discovery env
 
+Each Compose profile sets the same storage contract consumed by the CLI:
+`REDDB_STORAGE_PRESET`, `REDDB_STORAGE_PROFILE`, `REDDB_STORAGE_PACKAGING`, and
+`REDDB_REPLICA_COUNT`. There is no `cluster` Compose profile yet; cluster should
+only be added here once the symmetric pod/node discovery topology is implemented.
+
 Quick commands:
 
 ```bash

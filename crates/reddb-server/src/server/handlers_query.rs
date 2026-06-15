@@ -14,23 +14,8 @@ impl RedDBServer {
         } = request;
         let stream_ask = is_stream_ask_query(&query);
 
-        // #358: when the client supplied `params`, bind them through the
-        // shared user_params binder before dispatch. Falls back to the
-        // legacy `execute_query` path when `params` is absent.
         let exec_result = match params {
-            Some(binds) => {
-                use crate::storage::query::modes::parse_multi;
-                use crate::storage::query::user_params;
-                match parse_multi(&query) {
-                    Ok(parsed) => match user_params::bind(&parsed, &binds) {
-                        Ok(bound) => self.runtime.execute_query_expr(bound),
-                        Err(err) => {
-                            return json_error_code(400, "INVALID_PARAMS", err.to_string());
-                        }
-                    },
-                    Err(err) => return json_error_code(400, "QUERY_ERROR", err.to_string()),
-                }
-            }
+            Some(binds) => self.runtime.execute_query_with_params(&query, &binds),
             None => self.query_use_cases().execute(ExecuteQueryInput { query }),
         };
 
@@ -71,6 +56,19 @@ impl RedDBServer {
             Err(err) => {
                 if stream_ask {
                     return ask_sse_error_response(&err);
+                }
+                if let crate::api::RedDBError::Validation {
+                    message,
+                    validation,
+                } = &err
+                {
+                    if validation
+                        .get("code")
+                        .and_then(crate::json::Value::as_str)
+                        .is_some_and(|code| code == "INVALID_PARAMS")
+                    {
+                        return json_error_code(400, "INVALID_PARAMS", message.clone());
+                    }
                 }
                 if let crate::api::RedDBError::Validation {
                     message,
