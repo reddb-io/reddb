@@ -190,6 +190,7 @@
   - [Server Mode](/deployment/server.md)
   - [Serverless Mode](/deployment/serverless.md)
   - [Docker](/deployment/docker.md)
+  - [Kubernetes and Helm](/deployment/kubernetes.md)
   - [Replication](/deployment/replication.md)
   - [Remote Backends (S3, R2, Turso, D1)](/deployment/backends.md)
 

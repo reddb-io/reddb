@@ -1,26 +1,26 @@
 {{- include "reddb.validateMode" . -}}
-{{- if ne .Values.mode "cluster" -}}
+{{- if eq .Values.mode "cluster" -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "reddb.primary.fullname" . }}
+  name: {{ include "reddb.cluster.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "reddb.labels" . | nindent 4 }}
-    app.kubernetes.io/component: primary
+    app.kubernetes.io/component: cluster
 spec:
-  serviceName: {{ include "reddb.primary.headless" . }}
-  replicas: 1
-  podManagementPolicy: OrderedReady
+  serviceName: {{ include "reddb.cluster.headless" . }}
+  replicas: {{ .Values.cluster.replicaCount }}
+  podManagementPolicy: Parallel
   updateStrategy:
-    {{- toYaml .Values.primary.updateStrategy | nindent 4 }}
+    {{- toYaml .Values.cluster.updateStrategy | nindent 4 }}
   selector:
     matchLabels:
-      {{- include "reddb.primary.selectorLabels" . | nindent 6 }}
+      {{- include "reddb.cluster.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "reddb.primary.selectorLabels" . | nindent 8 }}
+        {{- include "reddb.cluster.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -35,27 +35,29 @@ spec:
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      terminationGracePeriodSeconds: {{ .Values.primary.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ .Values.cluster.terminationGracePeriodSeconds }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.primary.priorityClassName }}
+      {{- with .Values.cluster.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      {{- with .Values.primary.nodeSelector }}
+      {{- with .Values.cluster.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.primary.tolerations }}
+      {{- with .Values.cluster.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.primary.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.primary.topologySpreadConstraints }}
+        {{- if .Values.cluster.affinity }}
+        {{- toYaml .Values.cluster.affinity | nindent 8 }}
+        {{- else }}
+        {{- include "reddb.cluster.defaultAffinity" . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.cluster.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -70,11 +72,7 @@ spec:
             - --path
             - /data/data.rdb
             - --role
-            {{- if eq .Values.mode "primary-replica" }}
-            - primary
-            {{- else }}
             - standalone
-            {{- end }}
             - --grpc-bind
             - 0.0.0.0:50051
             - --http-bind
@@ -101,7 +99,8 @@ spec:
           env:
             {{- include "reddb.commonEnv" . | nindent 12 }}
             - name: REDDB_NODE_ROLE
-              value: {{ ternary "primary" .Values.mode (eq .Values.mode "primary-replica") | quote }}
+              value: "cluster-member"
+            {{- include "reddb.clusterEnv" . | nindent 12 }}
             {{- if .Values.grpc.tls.enabled }}
             - name: REDDB_GRPC_TLS_BIND
               value: {{ .Values.grpc.tls.bindAddr | quote }}
@@ -121,7 +120,7 @@ spec:
               protocol: TCP
             {{- if .Values.grpc.tls.enabled }}
             - name: grpc-tls
-              containerPort: {{ .Values.primary.service.grpcTlsPort | default 50052 }}
+              containerPort: {{ .Values.cluster.service.grpcTlsPort | default 50052 }}
               protocol: TCP
             {{- end }}
             - name: http
@@ -129,12 +128,12 @@ spec:
               protocol: TCP
             {{- if .Values.http.tls.enabled }}
             - name: https
-              containerPort: {{ .Values.primary.service.httpTlsPort | default 8443 }}
+              containerPort: {{ .Values.cluster.service.httpTlsPort | default 8443 }}
               protocol: TCP
             {{- end }}
           {{- include "reddb.probes" . | nindent 10 }}
           resources:
-            {{- toYaml .Values.primary.resources | nindent 12 }}
+            {{- toYaml .Values.cluster.resources | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /data
@@ -166,7 +165,7 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if not .Values.primary.persistence.enabled }}
+        {{- if not .Values.cluster.persistence.enabled }}
         - name: data
           emptyDir: {}
         {{- end }}
@@ -197,24 +196,24 @@ spec:
         {{- include "reddb.configFileVolume" . | nindent 8 }}
         {{- include "reddb.vaultVolume" . | nindent 8 }}
         {{- include "reddb.extraSecretVolumes" . | nindent 8 }}
-  {{- if .Values.primary.persistence.enabled }}
+  {{- if .Values.cluster.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: data
         labels:
-          {{- include "reddb.primary.selectorLabels" . | nindent 10 }}
-        {{- with .Values.primary.persistence.annotations }}
+          {{- include "reddb.cluster.selectorLabels" . | nindent 10 }}
+        {{- with .Values.cluster.persistence.annotations }}
         annotations:
           {{- toYaml . | nindent 10 }}
         {{- end }}
       spec:
         accessModes:
-          {{- toYaml .Values.primary.persistence.accessModes | nindent 10 }}
+          {{- toYaml .Values.cluster.persistence.accessModes | nindent 10 }}
         resources:
           requests:
-            storage: {{ .Values.primary.persistence.size | quote }}
-        {{- if .Values.primary.persistence.storageClass }}
-        storageClassName: {{ .Values.primary.persistence.storageClass | quote }}
+            storage: {{ .Values.cluster.persistence.size | quote }}
+        {{- if .Values.cluster.persistence.storageClass }}
+        storageClassName: {{ .Values.cluster.persistence.storageClass | quote }}
         {{- end }}
   {{- end }}
 {{- end }}
