@@ -203,6 +203,11 @@ syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [
   'reddb-io-crypto',
   'reddb-io-file',
   'reddb-io-rql',
+  'reddb-io-wire',
+  'reddb-io-grpc-proto',
+  'reddb-io-server',
+  'reddb-io-client',
+  'reddb-io-client-connector',
   'reddb-io-python',
 ])
 
