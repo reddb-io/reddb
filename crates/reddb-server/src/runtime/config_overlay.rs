@@ -59,10 +59,12 @@ pub fn env_name_for(key: &str) -> String {
     format!("REDDB_{}", key.to_ascii_uppercase().replace('.', "_"))
 }
 
-/// Resolve the config-file path. `REDDB_CONFIG_FILE` wins, else
-/// `/etc/reddb/config.json` (the container convention).
+/// Resolve the config-file path. `REDDB_CONFIG_FILE` wins, else the
+/// operational bootstrap default container path.
 pub fn config_file_path() -> String {
-    std::env::var("REDDB_CONFIG_FILE").unwrap_or_else(|_| "/etc/reddb/config.json".to_string())
+    crate::operational_bootstrap::resolve_config_file_path(
+        std::env::var("REDDB_CONFIG_FILE").ok().as_deref(),
+    )
 }
 
 /// Read the mounted config file (if present) and seed its keys into

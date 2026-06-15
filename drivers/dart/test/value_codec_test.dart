@@ -156,7 +156,7 @@ void main() {
 
     test('shared parameter fixtures match manifest', () {
       final manifest = jsonDecode(
-        File('../../crates/reddb-wire/tests/fixtures/params/manifest.json')
+        File('../../testdata/conformance/redwire/params/manifest.json')
             .readAsStringSync(),
       ) as Map<String, dynamic>;
 

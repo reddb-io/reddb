@@ -116,6 +116,12 @@ serverless:
 Use `config.extraEnv` and `extraSecretMounts` for backend-specific knobs not yet
 typed in the chart.
 
+`mode` renders the human bootstrap env contract (`REDDB_TOPOLOGY` and
+`REDDB_NODE_ROLE`) plus the storage env. The chart also renders
+`REDDB_CONFIG_FILE` when `config.file.enabled` is set. The `red` binary consumes
+that layer when explicit args are absent; explicit args still win, and
+`storage.*` values override topology-derived storage defaults.
+
 ## Primary-Replica
 
 `primary-replica` mode always renders one primary. Set

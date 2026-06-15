@@ -96,8 +96,10 @@ prior boot, `SET CONFIG`, or boot defaults are not overwritten.
 
 Separate boot/topology config from runtime config:
 
-- Boot config remains args/env: role, primary address, storage preset/profile,
-  remote backend, lease settings, data path, and secrets.
+- Boot config remains args/env: topology, node role, process role, primary
+  address, storage preset/profile, remote backend, lease settings, data path,
+  config file path, and secrets. Explicit args win over the human topology env
+  layer; storage env overrides topology-derived storage defaults.
 - Runtime config lives in `red.config`.
 - Env overrides for config-matrix keys win for the current boot and are not
   persisted.

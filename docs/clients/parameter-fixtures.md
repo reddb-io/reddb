@@ -1,6 +1,6 @@
 # Parameter Fixture Conformance
 
-`crates/reddb-wire/tests/fixtures/params/manifest.json` is the canonical
+`testdata/conformance/redwire/params/manifest.json` is the canonical
 fixture manifest for RedWire `QueryWithParams` and gRPC `QueryValue`
 parameter encoding.
 

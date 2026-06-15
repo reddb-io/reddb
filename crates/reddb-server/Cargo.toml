@@ -1,12 +1,12 @@
 [package]
 name = "reddb-io-server"
 version = "1.10.1"
-edition = "2021"
-authors = ["RedDB.io <hello@reddb.io>"]
+edition.workspace = true
+authors.workspace = true
 description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."
-license = "AGPL-3.0-only"
-homepage = "https://github.com/reddb-io/reddb"
-repository = "https://github.com/reddb-io/reddb"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/reddb-io-server"
 readme = "README.md"
 keywords = ["database", "vector-search", "graph", "document-store", "rust"]
@@ -19,21 +19,21 @@ path = "src/lib.rs"
 [dependencies]
 # Neutral keystone: the logical type vocabulary (Value/DataType/...) re-homed
 # from storage::schema (#1061, ADR 0052). storage::schema keeps a re-export shim.
-reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
+reddb-types = { workspace = true }
 # RQL language front-end authority (#1102, ADR 0053): the lexer and front-end
 # DoS limits live here now; storage::query keeps re-export shims so every
 # existing call-site path resolves unchanged. (rql dev-depends back on the
 # server for its conformance harness — a dev-only edge, so no build cycle.)
-reddb-rql = { package = "reddb-io-rql", version = "1.0", path = "../reddb-rql" }
-reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "../reddb-wire" }
-reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
-reddb-file = { package = "reddb-io-file", version = "1.0", path = "../reddb-file" }
+reddb-rql = { workspace = true }
+reddb-wire = { workspace = true }
+reddb-grpc-proto = { workspace = true }
+reddb-file = { workspace = true }
 # Canonical per-page encryption-at-rest envelope + params (#1053, ADR 0054).
-reddb-crypto = { package = "reddb-io-crypto", version = "1.0", path = "../reddb-crypto" }
+reddb-crypto = { workspace = true }
 # rpc_stdio's Remote backend wraps the same gRPC client that the
 # `red` binary uses for the `red rpc` subcommand. Single-direction
 # dep — the client crate does not depend on the server.
-reddb-client-connector = { package = "reddb-io-client-connector", version = "1.0", path = "../reddb-client-connector" }
+reddb-client-connector = { workspace = true }
 aes-gcm = "0.10"
 blake3 = "1"
 # SIMD/PCLMULQDQ CRC32 (IEEE 802.3 polynomial) for WAL/page record

@@ -11,8 +11,10 @@ use serde_json::Value;
 
 #[test]
 fn params_manifest_is_complete_and_well_formed() {
-    let manifest: Value =
-        serde_json::from_str(include_str!("fixtures/params/manifest.json")).expect("manifest json");
+    let manifest: Value = serde_json::from_str(include_str!(
+        "../../../testdata/conformance/redwire/params/manifest.json"
+    ))
+    .expect("manifest json");
 
     assert_eq!(manifest["version"], 1);
     assert_eq!(manifest["layout"], "redwire-query-with-params-v1");

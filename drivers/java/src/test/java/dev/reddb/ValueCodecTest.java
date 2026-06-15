@@ -177,7 +177,7 @@ class ValueCodecTest {
     }
 
     private static JsonNode readFixtureManifest() throws IOException {
-        Path path = Path.of("..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json");
+        Path path = Path.of("..", "..", "testdata", "conformance", "redwire", "params", "manifest.json");
         return MAPPER.readTree(Files.readString(path));
     }
 
