@@ -1228,6 +1228,10 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
 
+        if ask.as_rql {
+            return self.execute_ask_as_rql(raw_query, ask);
+        }
+
         // S3 / #711: planner-level provider gate. Runs as the first
         // step — before the AskPipeline and before the credential
         // resolver — so a policy-denied query never spends cycles on
@@ -1682,6 +1686,72 @@ impl RedDBRuntime {
             mode: QueryMode::Sql,
             statement: "ask",
             engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+
+    fn execute_ask_as_rql(
+        &self,
+        raw_query: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let scope = self.ai_scope();
+        let tokens = crate::runtime::ask_pipeline::extract_tokens(&ask.question);
+        if tokens.is_empty() {
+            return Err(RedDBError::Query(
+                "ASK AS RQL question yielded no usable tokens".to_string(),
+            ));
+        }
+        let candidates = crate::runtime::ask_pipeline::match_schema(self, &scope, &tokens)?;
+        let plan = crate::runtime::ai::ask_rql_planner::plan(
+            &ask.question,
+            &tokens,
+            &candidates,
+            ask.collection.as_deref(),
+        )?;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "rql".into(),
+            "statement_type".into(),
+            "field".into(),
+            "value".into(),
+            "collection".into(),
+            "candidate_fields".into(),
+            "candidate_collections".into(),
+            "warnings".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("rql", Value::text(plan.rql));
+        record.set("statement_type", Value::text("select"));
+        record.set("field", Value::text(plan.field));
+        record.set("value", Value::text(plan.value));
+        if let Some(collection) = plan.collection {
+            record.set("collection", Value::text(collection));
+        } else {
+            record.set("collection", Value::Null);
+        }
+        record.set(
+            "candidate_fields",
+            Value::Json(json_string_array_bytes(&plan.candidate_fields)),
+        );
+        record.set(
+            "candidate_collections",
+            Value::Json(json_string_array_bytes(&plan.candidate_collections)),
+        );
+        record.set(
+            "warnings",
+            Value::Json(json_string_array_bytes(&plan.warnings)),
+        );
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask_as_rql",
+            engine: "runtime-ai-rql-planner",
             result,
             affected_rows: 0,
             statement_type: "select",
@@ -2652,6 +2722,16 @@ fn provider_list_from_json_value(value: &crate::json::Value) -> Option<Vec<Strin
         crate::json::Value::String(text) => parse_provider_list_text(text),
         _ => None,
     }
+}
+
+fn json_string_array_bytes(values: &[String]) -> Vec<u8> {
+    crate::json::to_vec(&crate::json::Value::Array(
+        values
+            .iter()
+            .map(|value| crate::json::Value::String(value.clone()))
+            .collect(),
+    ))
+    .unwrap_or_else(|_| b"[]".to_vec())
 }
 
 fn parse_provider_list_text(raw: &str) -> Option<Vec<String>> {
@@ -4069,6 +4149,37 @@ mod citation_wedge_tests {
                 .map(|v| matches!(v, crate::json::Value::Null))
                 .unwrap_or(false),
             "expected urn=null for out-of-range source_index"
+        );
+    }
+
+    #[test]
+    fn ask_as_rql_returns_validated_universal_select_without_provider() {
+        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        rt.execute_query("CREATE TABLE travelers (passport TEXT, name TEXT)")
+            .expect("create table");
+        rt.execute_query("INSERT INTO travelers (passport, name) VALUES ('FDD-12313', 'Ada')")
+            .expect("insert row");
+
+        let planned = rt
+            .execute_query("ASK 'who owns passport FDD-12313?' AS RQL")
+            .expect("ASK AS RQL should not require an AI provider");
+        assert_eq!(planned.engine, "runtime-ai-rql-planner");
+
+        let record = planned.result.records.first().expect("one plan row");
+        let rql = match record.get("rql") {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("rql column should be text, got {other:?}"),
+        };
+        assert_eq!(rql, "SELECT * WHERE passport = 'FDD-12313'");
+
+        let selected = rt
+            .execute_query(&rql)
+            .expect("generated RQL should parse and execute");
+        assert_eq!(selected.engine, "runtime-table");
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("name"),
+            Some(&Value::text("Ada".to_string()))
         );
     }
 

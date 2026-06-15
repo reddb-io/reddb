@@ -570,9 +570,10 @@ ASK 'question'
   └─ Audit + optional cache             ← red_ask_audit, CACHE TTL / NOCACHE
 ```
 
-`ASK` does not translate English into RQL. It retrieves allowed context first,
-sends those sources to the model, and returns a single answer row. If you need
-deterministic cross-collection retrieval by field, use SQL/RQL directly:
+Plain `ASK` does not translate English into RQL. It retrieves allowed context
+first, sends those sources to the model, and returns a single answer row. If
+you need deterministic cross-collection retrieval by field, use SQL/RQL
+directly:
 
 ```sql
 SELECT * WHERE host = $1
@@ -580,6 +581,17 @@ SELECT * WHERE host = $1
 
 That form is parsed as the universal source `any`, equivalent in intent to
 `FROM ANY` plus a `WHERE` filter.
+
+When you want a prompt converted into a query candidate, request that contract
+explicitly:
+
+```sql
+ASK 'host 10.0.0.5' AS RQL
+```
+
+The `AS RQL` path does not call the LLM. It uses schema vocabulary and literal
+extraction, validates the generated read-only query through the parser, and
+returns the candidate in the `rql` column for the caller to execute or approve.
 
 ### SEARCH CONTEXT = 3-Tier Strategy
 
@@ -617,7 +629,7 @@ paths. The provider boundary is enforced as follows:
 | `SELECT … COUNT/SUM/AVG/MIN/MAX(…)` | SQL planner + executor | Exact, reproducible, no network call. |
 | `SEARCH CONTEXT 'term'` | Multi-tier index (field → token → scan) | Returns table rows, documents, KV entries, graph nodes/edges, and vectors when each backing collection exists. Empty result set when nothing matches &mdash; the contract is "ground or fall silent". |
 | `ASK '…'` | `AskPipeline` funnel + LLM synthesis | Pipeline grounds first (Stage 4 literal filter / Stage 3 BM25 + vector / Stage 3c graph), then the LLM rewrites the grounded rows into a citation-bearing sentence. |
-| Prompt-to-RQL / generated queries | Not part of `ASK` today | A generated query would need a separate parse, authorization, explain, and approval path. `ASK` deliberately never re-executes model output. |
+| `ASK '…' AS RQL` | Deterministic RQL planner | Uses schema vocabulary + literal extraction to return a parser-validated read-only query candidate. It does not call the LLM and does not execute the generated RQL. |
 | Missing or unsupported analytics inside an `ASK` question | Pipeline short-circuits with a structured error OR returns an answer that openly cites "no matching sources" | The LLM never invents a number; it can only quote what `sources_flat` contains. |
 
 A practical rule: if the question is a calculation (`how many incidents are

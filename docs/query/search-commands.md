@@ -235,11 +235,10 @@ stable URNs for UI deep-links. See
 [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md) for the grounding contract.
 
 > [!IMPORTANT]
-> `ASK` is retrieval-grounded answer synthesis, not prompt-to-RQL. RedDB does
-> not convert the question into a `SELECT`, and LLM output is never parsed or
-> executed as RQL. Use explicit SQL/RQL for deterministic filters,
-> aggregations, and writes; use `ASK` when you want a cited natural-language
-> answer over retrieved context.
+> Plain `ASK` is retrieval-grounded answer synthesis. It does not convert the
+> question into a `SELECT`, and LLM output is never parsed or executed as RQL.
+> Use `ASK ... AS RQL` when you want RedDB to return a validated read-only RQL
+> candidate for caller approval/execution.
 
 ```sql
 ASK 'what happened on host 10.0.0.1?' USING groq
@@ -262,6 +261,7 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 | `STREAM` | No | HTTP/SSE token stream; transports without SSE return non-streaming rows |
 | `CACHE TTL '5m'` | No | Cache this answer for the supplied TTL |
 | `NOCACHE` | No | Bypass the global ASK cache default |
+| `AS RQL` | No | Return a deterministic, parser-validated RQL candidate instead of calling an AI provider |
 
 ### Examples
 
@@ -274,6 +274,9 @@ ASK 'summarize all vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250
 
 -- Scope to a collection with a result limit
 ASK 'what changed today?' COLLECTION audit_logs LIMIT 50
+
+-- Convert a field/literal prompt into validated RQL without an LLM call
+ASK 'who owns passport FDD-12313?' AS RQL
 
 -- All optional clauses combined
 ASK 'explain the network topology' USING ollama MODEL 'llama3' STRICT ON CACHE TTL '5m' DEPTH 3 LIMIT 100 COLLECTION network
@@ -302,8 +305,19 @@ is "find records where a field has this value", write that directly:
 SELECT * WHERE passport = $1
 ```
 
-Missing `FROM` means the universal source `any`, so the engine searches
-eligible collections and applies the `WHERE` filter itself.
+If you want RedDB to produce that query shape from a prompt, ask for an RQL
+candidate explicitly:
+
+```sql
+ASK 'passport FDD-12313' AS RQL
+```
+
+`ASK ... AS RQL` uses schema vocabulary and literal extraction to produce a
+read-only `SELECT`, validates the generated text through the parser, and
+returns it in the `rql` column. Missing `FROM` means the universal source
+`any`, so the eventual query searches eligible collections and applies the
+`WHERE` filter itself. This path does not call an AI provider and does not
+execute the generated RQL for you.
 
 If no provider is configured, ASK returns an error. Configure one with:
 

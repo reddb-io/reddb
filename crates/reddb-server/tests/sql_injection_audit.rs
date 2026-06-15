@@ -159,11 +159,11 @@ fn rls_policy_body_with_comment_metacharacters_parses_as_literal() {
 }
 
 /// V4 — `ASK '...'` parses into an `AskQuery` AST node whose only
-/// free-text field is the `question` string. The runtime executes ASK
-/// as RAG (search context + LLM Q&A), returning text in a result
-/// column — the LLM output is never re-parsed as SQL. This test pins
-/// the AST shape: any future refactor that introduces a `synthesised_sql`
-/// or similar field will need to revisit this audit.
+/// free-text field is the `question` string. Plain ASK executes as RAG
+/// (search context + LLM Q&A), returning text in a result column — the
+/// LLM output is never re-parsed as SQL. `ASK ... AS RQL` is represented
+/// by a boolean flag and uses a server-side deterministic planner, not a
+/// string field populated by the model.
 #[test]
 fn ask_path_does_not_re_execute_llm_output_as_sql() {
     let parsed = parse_multi("ASK 'who owns the users table'").expect("parse ASK");
@@ -184,7 +184,17 @@ fn ask_path_does_not_re_execute_llm_output_as_sql() {
         &ask.min_score,
         &ask.provider,
         &ask.model,
+        &ask.as_rql,
     );
+    assert!(!ask.as_rql);
+
+    let parsed =
+        parse_multi("ASK 'who owns passport FDD-12313?' AS RQL").expect("parse ASK AS RQL");
+    let ask = match parsed {
+        QueryExpr::Ask(a) => a,
+        other => panic!("expected Ask, got {:?}", other),
+    };
+    assert!(ask.as_rql);
 
     // Sanity: an injection-shaped question string is just text.
     let parsed = parse_multi("ASK '''; DROP TABLE users; --'").expect("parse ASK with payload");

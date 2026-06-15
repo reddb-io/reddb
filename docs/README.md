@@ -120,8 +120,8 @@ patterns.
 ## Query languages plus ASK
 
 Write deterministic queries in explicit syntax, and use `ASK` when you want a
-grounded natural-language answer over retrieved context. `ASK` does not
-translate the prompt into RQL and execute it.
+grounded natural-language answer over retrieved context. Use `ASK ... AS RQL`
+when you want a prompt converted into a validated read-only RQL candidate.
 
 ```sql
 -- RQL / SQL
@@ -132,6 +132,9 @@ g.V().hasLabel('user').has('active', true).values('name')
 
 -- Natural-language answer over retrieved context
 ASK 'which users logged in this week?' USING groq
+
+-- Prompt to RQL candidate, not executed automatically
+ASK 'user alice' AS RQL
 ```
 
 ## Native time-series and queues
