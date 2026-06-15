@@ -536,10 +536,13 @@ jobs:
             fi
           }
 
+          publish_one reddb-io-types
+          publish_one reddb-io-crypto
+          publish_one reddb-io-file
+          publish_one reddb-io-rql
           publish_one reddb-io-wire
           publish_one reddb-io-grpc-proto
           publish_one reddb-io-client-connector
-          publish_one reddb-io-file
           publish_one reddb-io-server
           publish_one reddb-io-client
           publish_one reddb-io
