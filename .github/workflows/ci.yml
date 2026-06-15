@@ -616,7 +616,7 @@ jobs:
             docker logs reddb-ci-floci || true
             exit 1
           fi
-      - run: cargo test --locked --test 'chaos_*' --no-fail-fast
+      - run: cargo test --locked --test grouped_chaos --no-fail-fast
       - name: Stop Floci
         if: always()
         run: docker rm -f reddb-ci-floci || true
