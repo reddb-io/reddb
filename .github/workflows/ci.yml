@@ -589,9 +589,31 @@ jobs:
             minio/minio:latest server /data
       - name: Wait for MinIO + create bucket
         run: |
-          curl -fsS --retry 10 --retry-delay 2 http://localhost:9000/minio/health/ready
-          docker run --rm --network host minio/mc:latest \
-            sh -c "mc alias set ci http://localhost:9000 minioadmin minioadmin && mc mb -p ci/reddb-ci || true"
+          ready=false
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/minio/health/ready; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "true" ]; then
+            docker logs reddb-ci-minio || true
+            exit 1
+          fi
+          bucket=false
+          for _ in $(seq 1 10); do
+            if docker run --rm --network host minio/mc:latest \
+              sh -c "mc alias set ci http://localhost:9000 minioadmin minioadmin && mc mb -p ci/reddb-ci || true"; then
+              bucket=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$bucket" != "true" ]; then
+            docker logs reddb-ci-minio || true
+            exit 1
+          fi
       - run: cargo test --locked --test 'chaos_*' --no-fail-fast
       - name: Stop MinIO
         if: always()
