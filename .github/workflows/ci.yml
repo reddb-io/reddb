@@ -167,6 +167,17 @@ jobs:
       - name: Doc-generation tooling contract test
         run: node --test scripts/docs_matrix_contract.test.mjs
 
+  helm-chart:
+    name: Helm Chart
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Azure/setup-helm@v5
+      - name: Lint and render topology matrix
+        run: make check-helm
+
   afk-validation-sidecar:
     # Issue #970 — machine-check AFK's structured validation sidecar against
     # the actual merged diff. The contract test always runs; the live diff
