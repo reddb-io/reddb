@@ -500,10 +500,8 @@ fn execute_pg_query_result(
         };
     }
 
-    let parsed = crate::storage::query::modes::parse_multi(sql).map_err(|err| err.to_string())?;
-    let bound =
-        crate::storage::query::user_params::bind(&parsed, params).map_err(|err| err.to_string())?;
-    run_runtime_blocking(|| runtime.execute_query_expr(bound)).map_err(|err| err.to_string())
+    run_runtime_blocking(|| runtime.execute_query_with_params(sql, params))
+        .map_err(|err| err.to_string())
 }
 
 fn try_execute_pg_scalar_select(

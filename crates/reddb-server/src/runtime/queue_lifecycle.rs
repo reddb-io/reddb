@@ -1,19 +1,9 @@
-//! `QueueLifecycle` Module — slice 2 of PRD #527.
+//! `QueueLifecycle` Module.
 //!
-//! WORK-mode `deliver` + `ack` happy path against a `QueueStore`. The
-//! Module owns transition policy (which available messages get reserved,
-//! how the lock deadline is computed); storage owns persistence. No
-//! `&Engine` dependency — only the `QueueStore` trait — so lifecycle
-//! transitions can be exercised in unit tests against the in-memory fake
-//! without booting the engine.
-//!
-//! Scope of this slice (per issue #529):
-//! - WORK mode only (no FANOUT)
-//! - happy path only (no NACK, no DLQ routing, no lock expiry)
-//! - no caller in `impl_queue.rs` yet (module is `pub(crate)`)
-//!
-//! Retry/lock policy parameters arrive via `LifecycleConfig` rather than
-//! a catalog lookup — the catalog wiring lands in a later slice.
+//! Owns queue delivery and retirement policy over a narrow `QueueStore`
+//! trait: WORK/FANOUT selection, pending locks, ACK/NACK, retries, DLQ,
+//! claim, pop, purge, and move. Storage owns persistence; callers own
+//! auth/statement framing.
 //!
 //! `EffectiveScope` / auth checks stay with the Statement frame at the
 //! caller; this Module trusts that callers have already authorised.
@@ -95,7 +85,7 @@ pub(crate) struct Delivery {
 /// Non-mutating view of a queue message, returned by [`QueueLifecycle::peek`].
 /// Carries the per-message retry budget (sourced via
 /// [`QueueStore::read_max_attempts`]) so callers don't need a second lookup
-/// to mirror the legacy `queue_delivery::peek_messages` + max-attempts pair.
+/// to build the peek projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QueueMessageView {
     pub(crate) message_id: MessageId,
@@ -115,8 +105,7 @@ pub(crate) struct QueueMessageView {
 ///   consumer threaded straight through — matching the legacy projection),
 /// - the `delivery_count` after this delivery's bump.
 ///
-/// Mirrors the legacy `queue_delivery::DeliveredMessage` so the eventual
-/// call-site flip (PRD #527) preserves the client-visible columns exactly.
+/// Preserves the client-visible columns from the pre-lifecycle read path.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DeliveredMessage {
     pub(crate) message_id: MessageId,
@@ -245,7 +234,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// per-message attempt counter (WORK) and surfaces the entity
     /// `message_id`, echoed `consumer`, and `delivery_count` columns
     /// clients see today, so the eventual call-site flip preserves the
-    /// wire shape exactly. Mirrors `queue_delivery::read_messages`:
+    /// wire shape exactly. Matches the pre-lifecycle `QUEUE READ` shape:
     ///
     /// - WORK: `delivery_count` is the bumped attempt counter; FANOUT:
     ///   each delivery is the group's first, so `delivery_count` is always
@@ -376,7 +365,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     }
 
     /// Non-mutating peek — returns up to `count` available messages on
-    /// `queue` from the left, mirroring `queue_delivery::peek_messages`.
+    /// `queue` from the left.
     /// Does **not** mark anything pending, does **not** record tombstones,
     /// does **not** bump attempt counters. The `&QueueTxn` parameter is
     /// kept for shape-consistency with the mutating ops (so the bridge
@@ -404,7 +393,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
 
     /// Non-mutating read — returns the payload backing `delivery_id` if it
     /// is currently held pending. Mirrors the read-shaped portion of
-    /// `queue_delivery::read_messages` without touching pending state or
+    /// queue delivery without touching pending state or
     /// the attempts counter. Returns `None` for unknown / already-retired
     /// delivery ids.
     pub(crate) fn read(&self, delivery_id: &str, _txn: &QueueTxn) -> Option<Value> {
@@ -412,8 +401,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     }
 
     /// Claim (steal) every pending delivery on `queue` whose lock has
-    /// expired beyond `min_idle_ms`. Mirrors
-    /// `queue_delivery::claim_messages` semantics:
+    /// expired beyond `min_idle_ms`.
     ///
     /// - selection criterion is `(now - lock_deadline) >= min_idle_ms`;
     ///   non-expired locks are skipped silently
@@ -426,7 +414,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     ///   returned to the caller
     ///
     /// `new_consumer` is accepted for shape-consistency with the legacy
-    /// `queue_delivery::claim_messages` signature; the lifecycle layer
+    /// the legacy `CLAIM` signature; the lifecycle layer
     /// does not track per-consumer identity (the pending row is keyed by
     /// consumer group, not consumer), so the parameter is intentionally
     /// not persisted here.
@@ -450,7 +438,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// delivery handles. `new_consumer` is echoed into each returned
     /// `consumer` field (the lifecycle store keys pending by group, not
     /// consumer, so the value is threaded straight through — matching the
-    /// legacy `queue_delivery::claim_messages` projection). The
+    /// legacy `CLAIM` projection). The
     /// `delivery_count` is the attempt counter after the claim's bump.
     ///
     /// [`claim`]: Self::claim
@@ -561,7 +549,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// `queue`. Records one tombstone per removed message id via
     /// `txn.record_pending_tombstone(...)`, in the same shape
     /// `ack_pending` uses. Returns the count of message ids purged.
-    /// Mirrors `queue_delivery::purge_messages` semantics; failure modes
+    /// Mirrors legacy `QUEUE PURGE` semantics; failure modes
     /// propagate and no partial purge is observable.
     pub(crate) fn purge(&self, queue: &str, txn: &QueueTxn) -> Result<usize> {
         self.store.purge_queue(txn, queue)
@@ -570,9 +558,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// Destructive read: pop up to `count` messages from `queue`,
     /// scanning from `side`, retiring each through the MVCC tombstone
     /// path. Returns `(message_id, payload)` pairs in scan order.
-    /// Lifecycle-side replacement for `queue_delivery::pop_messages` —
-    /// the call sites in `impl_queue::QueueCommand::Pop` will move onto
-    /// this surface during the PRD #527 atomic cutover.
+    /// Backing operation for `QueueCommand::Pop`.
     pub(crate) fn pop(
         &self,
         queue: &str,
@@ -584,11 +570,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     }
 
     /// Retire `(queue, message_id)` through the same MVCC tombstone path
-    /// `ack` uses, without going through a pending row. Lifecycle-side
-    /// replacement for `queue_delivery::delete_message_with_state` —
-    /// callers that already hold the `(queue, message_id)` pair
-    /// (auto-DLQ branch on read, MOVE delete side) will move onto this
-    /// surface during the PRD #527 atomic cutover.
+    /// `ack` uses, without going through a pending row.
     pub(crate) fn delete_with_state(
         &self,
         queue: &str,
@@ -1303,7 +1285,7 @@ mod tests {
         // FANOUT acceptance: peek behaves like WORK — the store-level
         // `available_messages` filter (pending across any group) is the
         // same surface both modes use. Acked-per-group state is not
-        // peek's concern (peek mirrors `queue_delivery::peek_messages`
+        // peek's concern (peek mirrors the non-mutating queue projection
         // which is mode-agnostic).
         let store = store_with(&[(1, "x"), (2, "y")]);
         let lc = QueueLifecycle::new(store, fanout_config());

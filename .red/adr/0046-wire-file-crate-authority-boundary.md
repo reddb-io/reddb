@@ -53,8 +53,8 @@ driver.
   authority for external contracts.
 - Tests may grep for forbidden redeclarations in `reddb-server` and client
   adapters. These tests are architectural guardrails, not style preferences.
-- Moving an existing contract into `reddb-wire` or `reddb-file` is behavior
-  preserving unless the old local implementation was already divergent.
+- Moving an existing contract into `reddb-io-wire` or `reddb-io-file` is
+  behavior preserving unless the old local implementation was already divergent.
 - Adding a cross-driver contract fixture should update the contract crate test
   first, then each adapter that claims support for that contract.
 

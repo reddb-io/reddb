@@ -20,7 +20,8 @@ use crate::connector::RedDBClient;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::params::Value as ParamValue;
-use crate::router::{ClusterMembership, HealthAwareRouter, Outcome};
+use crate::router::{HealthAwareRouter, Outcome};
+use crate::topology::ClusterMembership;
 use crate::types::{BulkInsertResult, InsertResult, JsonValue, QueryResult, ValueOut};
 
 /// Default per-endpoint pool size when callers don't specify one.
@@ -135,7 +136,7 @@ impl GrpcClient {
     /// without the legacy `Mutex` serialization.
     pub async fn connect_with_pool_size(endpoint: String, pool_size: usize) -> Result<Self> {
         let primary = Endpoint::connect(endpoint, pool_size).await?;
-        let membership = ClusterMembership::new(primary.url.clone(), Vec::new());
+        let membership = ClusterMembership::from_uri_addresses(primary.url.clone(), Vec::new());
         let router = RwLock::new(HealthAwareRouter::with_force_primary(membership, true));
         Ok(Self {
             primary,
@@ -173,7 +174,7 @@ impl GrpcClient {
         for url in replicas {
             replica_eps.push(Endpoint::connect(url, pool_size).await?);
         }
-        let membership = ClusterMembership::new(
+        let membership = ClusterMembership::from_uri_addresses(
             primary_ep.url.clone(),
             replica_eps.iter().map(|e| e.url.clone()).collect(),
         );
@@ -231,9 +232,7 @@ impl GrpcClient {
         }
     }
 
-    /// Refresh routing state from a new cluster membership. Called
-    /// by Lane P's TopologyConsumer when it observes a topology
-    /// delta.
+    /// Refresh routing state from a new canonical cluster membership.
     pub fn update_membership(&self, new_membership: ClusterMembership) {
         self.router
             .write()
@@ -254,21 +253,22 @@ impl GrpcClient {
     /// This is the only hook the topology refresh loop needs: the
     /// caller decodes `TopologyReply.topology_bytes` via
     /// [`crate::topology::TopologyConsumer`] and hands the resulting
-    /// `(primary_addr, replica_addrs)` straight in here.
-    pub async fn apply_topology(&self, primary_addr: &str, replica_addrs: &[String]) -> Result<()> {
+    /// [`ClusterMembership`] straight in here.
+    pub async fn apply_membership(&self, membership: &ClusterMembership) -> Result<()> {
         // Reject a primary swap — that would invalidate the writer
         // path and is out of scope for this slice. ADR 0008 §2's
         // "advertised primary always wins" still holds for the URI
         // seed; cross-session primary failover is tracked separately.
-        if primary_addr != self.primary.url {
+        if membership.primary.addr != self.primary.url {
             return Err(ClientError::new(
                 ErrorCode::InvalidUri,
                 format!(
                     "topology advertised primary {} differs from connected {}; primary failover is out of scope for #172",
-                    primary_addr, self.primary.url
+                    membership.primary.addr, self.primary.url
                 ),
             ));
         }
+        let replica_addrs = membership.replica_addrs();
         // Snapshot current URLs without holding the lock across the
         // (potentially blocking) `Endpoint::connect` calls.
         let current_urls: Vec<String> = self
@@ -281,7 +281,7 @@ impl GrpcClient {
 
         // Build the new pool: keep existing endpoints, dial new ones.
         let mut next: Vec<Endpoint> = Vec::with_capacity(replica_addrs.len());
-        for url in replica_addrs {
+        for url in &replica_addrs {
             if current_urls.iter().any(|u| u == url) {
                 // Existing — move it across by re-acquiring the lock
                 // briefly. We swap_remove from the existing pool so
@@ -302,13 +302,24 @@ impl GrpcClient {
         }
         // Sync the router's view of membership so its index space
         // matches the pool's index space.
-        let membership = ClusterMembership::new(self.primary.url.clone(), replica_addrs.to_vec());
-        self.router.write().unwrap().update_membership(membership);
+        self.router
+            .write()
+            .unwrap()
+            .update_membership(membership.clone());
         Ok(())
     }
 
+    /// Backwards-compatible adapter for callers that still hand the
+    /// topology in split string form. The canonical path is
+    /// [`Self::apply_membership`].
+    pub async fn apply_topology(&self, primary_addr: &str, replica_addrs: &[String]) -> Result<()> {
+        let membership =
+            ClusterMembership::from_uri_addresses(primary_addr.to_string(), replica_addrs.to_vec());
+        self.apply_membership(&membership).await
+    }
+
     /// Fetch a topology snapshot from the primary and apply it via
-    /// [`Self::apply_topology`]. Convenience for tests and the
+    /// [`Self::apply_membership`]. Convenience for tests and the
     /// background refresh loop.
     pub async fn refresh_topology(&self) -> Result<()> {
         let mut client = self.primary.pick();
@@ -320,13 +331,11 @@ impl GrpcClient {
             crate::topology::TopologyConsumer::consume_bytes(&bytes, None).map_err(|e| {
                 ClientError::new(ErrorCode::QueryError, format!("decode topology: {e}"))
             })?;
-        let replicas: Vec<String> = membership.replicas.iter().map(|r| r.addr.clone()).collect();
-        self.apply_topology(&membership.primary.addr, &replicas)
-            .await
+        self.apply_membership(&membership).await
     }
 
     /// Record an observation against an endpoint by index. Exposed
-    /// for Lane P's probe loop and integration tests.
+    /// for the probe loop and integration tests.
     pub(crate) fn observe(&self, idx: usize, outcome: Outcome) {
         self.router.read().unwrap().observe_index(idx, outcome);
     }
@@ -479,13 +488,10 @@ impl GrpcClient {
     /// Topology refresh hook (issue #168, ADR 0008).
     ///
     /// Single integration point between `GrpcClient` and the
-    /// [`crate::topology`] deep module. Lane O (#167) wires the
-    /// connector's `Topology` RPC; once those bytes land, callers
-    /// pass them straight in here and get back a merged
-    /// [`crate::topology::ClusterMembership`] ready for
-    /// the future `HealthAwareRouter` (lane Q, #171). No routing
-    /// changes happen here — this slice only emits the membership
-    /// data structure.
+    /// [`crate::topology`] deep module. Callers pass topology bytes
+    /// straight in here and get back a merged
+    /// [`crate::topology::ClusterMembership`] that can be handed to
+    /// [`HealthAwareRouter`] or [`Self::apply_membership`].
     ///
     /// `uri_seed` is the parsed `grpc://primary,replica1,...` host
     /// list from the connection string. It's a hint, not a

@@ -22,6 +22,10 @@ to update downstream code.
 > | `reddb-client-connector`  | `reddb-io-client-connector`  |
 > | `reddb-grpc-proto`        | `reddb-io-grpc-proto`        |
 > | `reddb-wire`              | `reddb-io-wire`              |
+> | `reddb-file`              | `reddb-io-file`              |
+> | `reddb-types`             | `reddb-io-types`             |
+> | `reddb-rql`               | `reddb-io-rql`               |
+> | `reddb-crypto`            | `reddb-io-crypto`            |
 
 ## TL;DR — nothing breaks
 
@@ -44,16 +48,20 @@ member crates, but the umbrella re-exports them.
 | `reddb-io-client-connector` | `reddb_client_connector` | `crates/reddb-client-connector/` | Tiny tonic-only gRPC connector. Exists solely to break the `reddb-io-client[embedded] → reddb-io-server → reddb-io-client` path-dependency cycle. Re-exported as `reddb_client::connector::RedDBClient` for back-compat |
 | `reddb-io-grpc-proto`       | `reddb_grpc_proto`     | `crates/reddb-grpc-proto/`    | Generated tonic protobuf stubs (server + client)    |
 | `reddb-io-wire`             | `reddb_wire`           | `crates/reddb-wire/`          | Connection-string parser + RedWire frames           |
+| `reddb-io-file`             | `reddb_file`           | `crates/reddb-file/`          | File artifact contracts: paths, manifests, WAL envelopes, snapshots, checkpoints, and recovery metadata |
+| `reddb-io-types`            | `reddb_types`          | `crates/reddb-types/`         | Neutral logical type vocabulary shared by authority crates |
+| `reddb-io-rql`              | `reddb_rql`            | `crates/reddb-rql/`           | RQL front-end and conformance corpus authority |
+| `reddb-io-crypto`           | `reddb_crypto`         | `crates/reddb-crypto/`        | Cryptographic envelope and key parsing authority |
 
 ## What moved where
 
-| Old path                                         | New canonical path                                  |
+| Old path                                         | New canonical home                                  |
 |--------------------------------------------------|-----------------------------------------------------|
-| `reddb::storage`, `reddb::engine`, `reddb::runtime`, `reddb::replication`, `reddb::server`, `reddb::auth`, `reddb::mcp`, `reddb::ai`, `reddb::api`, `reddb::application`, `reddb::grpc`, `reddb::health`, `reddb::index`, `reddb::physical`, `reddb::regress`, `reddb::serde_json`, `reddb::sqlstate`, `reddb::telemetry`, `reddb::utils`, `reddb::wire`, `reddb::cli`, `reddb::service_cli` | `reddb-server` (re-exported by `reddb::*`)           |
-| `reddb::client::RedDBClient`, `reddb::client::repl` | `reddb-client` (re-exported as `reddb::client`) |
-| `reddb::grpc::proto::*` (the generated tonic types) | `reddb-grpc-proto` (re-exported as `reddb::grpc::proto`) |
-| `reddb::wire::redwire::Frame`, `MessageKind`, `Flags`, `encode_frame`, `decode_frame`, `REDWIRE_MAGIC`, `MAX_KNOWN_MINOR_VERSION`, `DEFAULT_REDWIRE_PORT` | `reddb-wire::redwire::*` (re-exported via `reddb::wire::redwire::*` and `reddb::wire_proto::redwire::*`) |
-| `reddb::wire_proto`                              | `reddb-wire` (new alias added during the split)     |
+| `reddb::storage`, `reddb::engine`, `reddb::runtime`, `reddb::replication`, `reddb::server`, `reddb::auth`, `reddb::mcp`, `reddb::ai`, `reddb::api`, `reddb::application`, `reddb::grpc`, `reddb::health`, `reddb::index`, `reddb::physical`, `reddb::regress`, `reddb::serde_json`, `reddb::sqlstate`, `reddb::telemetry`, `reddb::utils`, `reddb::wire`, `reddb::cli`, `reddb::service_cli` | `reddb-io-server` package, `reddb_server` import, re-exported by `reddb::*` |
+| `reddb::client::RedDBClient`, `reddb::client::repl` | `reddb-io-client` package, `reddb_client` import, re-exported as `reddb::client` |
+| `reddb::grpc::proto::*` (the generated tonic types) | `reddb-io-grpc-proto` package, `reddb_grpc_proto` import, re-exported as `reddb::grpc::proto` |
+| `reddb::wire::redwire::Frame`, `MessageKind`, `Flags`, `encode_frame`, `decode_frame`, `REDWIRE_MAGIC`, `MAX_KNOWN_MINOR_VERSION`, `DEFAULT_REDWIRE_PORT` | `reddb-io-wire` package, `reddb_wire::redwire::*` import, re-exported via `reddb::wire::redwire::*` and `reddb::wire_proto::redwire::*` |
+| `reddb::wire_proto`                              | `reddb-io-wire` package, `reddb_wire` import, new alias added during the split |
 
 ## Picking the right crate to depend on
 
@@ -95,7 +103,7 @@ features) is unchanged. A handful of intentional changes:
 |-----------------------------------------|-------------------------------------|------------------------------------------------|
 | Crate location                          | `drivers/rust/Cargo.toml`           | `crates/reddb-client/Cargo.toml`               |
 | License                                 | MIT                                 | AGPL-3.0-only (matches the rest of the workspace) |
-| `connect::parse` parser                 | local copy                          | thin shim over [`reddb-wire::parse`][rwp]      |
+| `connect::parse` parser                 | local copy                          | thin shim over [`reddb_wire::parse`][rwp]      |
 | `Target` variants                       | `Memory`, `File`, `Grpc`, `GrpcCluster`, `Http` | unchanged (the wire crate's `RedWire` variant is folded onto `Target::Grpc` for back-compat) |
 | `embedded` feature engine dep           | `reddb` (umbrella)                  | `reddb-io-server` (workspace leaf, breaks a cycle) |
 | `grpc.rs` JSON parsing                  | `reddb::json::Value`                | `serde_json::Value` (drops one engine coupling) |
@@ -111,6 +119,7 @@ name `reddb` — which re-exports the same paths).
 
 - PRD [#54][prd]
 - [Connection strings](../clients/connection-strings.md)
+- [Monorepo structure](../dev/monorepo-structure.md)
 - [ADR 0001 — RedWire](../../.red/adr/0001-redwire-tcp-protocol.md)
 
 [prd]: https://github.com/reddb-io/reddb/issues/54

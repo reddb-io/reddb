@@ -21,6 +21,25 @@ more bootstrap behavior, prefer moving that behavior into a deep module first;
 move the binary into a dedicated `crates/reddb-cli` or `apps/red` package only
 when the package split removes real complexity.
 
+## Published Package Names
+
+Public package names carry the `reddb-io` identity across registries:
+
+- The Rust umbrella crate is published as `reddb-io`.
+- Every other published Rust workspace crate must use the `reddb-io-*`
+  crates.io prefix, for example `reddb-io-wire`, `reddb-io-file`,
+  `reddb-io-rql`, `reddb-io-types`, and `reddb-io-server`.
+- npm packages publish under `@reddb-io/*`, including `@reddb-io/sdk`,
+  `@reddb-io/client`, `@reddb-io/cli`, and `@reddb-io/internal-*`.
+
+Rust import names stay idiomatic and use underscores because hyphens are not
+valid Rust identifiers: `reddb-io-wire` imports as `reddb_wire`,
+`reddb-io-file` as `reddb_file`, and so on.
+
+Do not introduce public Rust packages named `reddb-*` or short package names
+such as `red-rql`; they break the registry naming pattern and make the crate
+graph harder to scan.
+
 ## Contract Modules
 
 Contract modules are the authority for formats shared across runtimes or

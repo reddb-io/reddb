@@ -59,6 +59,10 @@ services:
       - "0.0.0.0:8080"
     environment:
       RUST_LOG: info
+      REDDB_STORAGE_PRESET: primary-replica-wal-retention
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "0"
       REDDB_REMOTE_BACKEND: s3
       REDDB_REMOTE_KEY: pitr/demo/data.rdb
       REDDB_S3_ENDPOINT: http://minio:9000
