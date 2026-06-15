@@ -12,15 +12,33 @@ members = [
 ]
 resolver = "2"
 
-[package]
-name = "reddb-io"
-version = "1.10.1"
+[workspace.package]
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
-description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine. Umbrella crate that hosts the `red` binary and re-exports the workspace."
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
+
+[workspace.dependencies]
+reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client" }
+reddb-client-connector = { package = "reddb-io-client-connector", version = "1.0", path = "crates/reddb-client-connector" }
+reddb-crypto = { package = "reddb-io-crypto", version = "1.0", path = "crates/reddb-crypto" }
+reddb-file = { package = "reddb-io-file", version = "1.0", path = "crates/reddb-file" }
+reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "crates/reddb-grpc-proto" }
+reddb-rql = { package = "reddb-io-rql", version = "1.0", path = "crates/reddb-rql" }
+reddb-server = { package = "reddb-io-server", version = "1.0", path = "crates/reddb-server" }
+reddb-types = { package = "reddb-io-types", version = "1.0", path = "crates/reddb-types" }
+reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "crates/reddb-wire" }
+
+[package]
+name = "reddb-io"
+version = "1.10.1"
+edition.workspace = true
+authors.workspace = true
+description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine. Umbrella crate that hosts the `red` binary and re-exports the workspace."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/reddb-io"
 readme = "README.md"
 keywords = ["database", "vector-search", "graph", "document-store", "rust"]
@@ -42,10 +60,10 @@ name = "reddb"
 path = "src/lib.rs"
 
 [dependencies]
-reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "crates/reddb-wire" }
-reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "crates/reddb-grpc-proto" }
-reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client" }
-reddb-server = { package = "reddb-io-server", version = "1.0", path = "crates/reddb-server" }
+reddb-wire = { workspace = true }
+reddb-grpc-proto = { workspace = true }
+reddb-client = { workspace = true }
+reddb-server = { workspace = true }
 # `red` bin spins up its own multi-thread tokio runtime (server
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
@@ -69,13 +87,13 @@ redwire = ["reddb-client/redwire"]
 # integration smoke). The crate-root dep keeps `default-features
 # = false`; the dev-only entry layers in the published features
 # the tests need.
-reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client", features = ["embedded", "redwire"] }
-reddb-file = { package = "reddb-io-file", version = "1.0", path = "crates/reddb-file" }
+reddb-client = { workspace = true, features = ["embedded", "redwire"] }
+reddb-file = { workspace = true }
 # Workspace-level RQL conformance drivers execute the corpus owned by
 # `crates/reddb-rql` against the current in-server engine. Keeping these deps
 # here preserves the pure `reddb-io-rql -> reddb-io-types` crate graph.
-reddb-rql = { package = "reddb-io-rql", version = "1.0", path = "crates/reddb-rql" }
-reddb-types = { package = "reddb-io-types", version = "1.0", path = "crates/reddb-types" }
+reddb-rql = { workspace = true }
+reddb-types = { workspace = true }
 sqllogictest = "0.29"
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.

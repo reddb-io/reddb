@@ -7,14 +7,24 @@ Namespace: {{ .Release.Namespace }}
 ────────────────────────────────────────────────────────────────────────────
 Endpoints
 ────────────────────────────────────────────────────────────────────────────
+{{- if eq .Values.mode "cluster" }}
+Cluster members:
+  gRPC: {{ include "reddb.cluster.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.cluster.service.grpcPort }}
+  HTTP: http://{{ include "reddb.cluster.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.cluster.service.httpPort }}
+  Headless: {{ include "reddb.cluster.headless" . }}.{{ .Release.Namespace }}.svc.cluster.local
+{{- else }}
 Primary (writer):
   gRPC: {{ include "reddb.primary.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.primary.service.grpcPort }}
   HTTP: http://{{ include "reddb.primary.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.primary.service.httpPort }}
-{{- if eq .Values.mode "primary-replica" }}
+{{- if and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) }}
 
 Replicas (readers, {{ .Values.replica.replicaCount }} pod(s)):
   gRPC: {{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.grpcPort }}
   HTTP: http://{{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.httpPort }}
+{{- else if eq .Values.mode "primary-replica" }}
+
+Replicas: disabled (replica.replicaCount=0)
+{{- end }}
 {{- end }}
 {{- if .Values.ingress.enabled }}
 
@@ -28,8 +38,8 @@ Ingress hosts:
 Quick checks
 ────────────────────────────────────────────────────────────────────────────
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
-  kubectl -n {{ .Release.Namespace }} exec -it {{ include "reddb.primary.fullname" . }}-0 -- red status
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "reddb.primary.fullname" . }} 8080:{{ .Values.primary.service.httpPort }}
+  kubectl -n {{ .Release.Namespace }} exec -it {{ include "reddb.activeHttpServiceName" . }}-0 -- red status
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "reddb.activeHttpServiceName" . }} 8080:{{ include "reddb.activeHttpServicePort" . }}
 
 {{- if .Values.auth.enabled }}
 
@@ -43,7 +53,7 @@ Auth bootstrap is ENABLED. Initial admin credentials live in secret:
 ENCRYPTED VAULT — ACTION REQUIRED
 ────────────────────────────────────────────────────────────────────────────
 config.vault is ON. RedDB stores the auth state in encrypted reserved
-pages of {{ .Values.primary.service.httpPort | toString | replace "8080" "/data/data.rdb" }}.
+pages of /data/data.rdb.
 
   {{- if .Values.auth.vault.bootstrapJob.enabled }}
 A one-off bootstrap Job ran (or is running) and wrote the freshly-minted
@@ -86,7 +96,7 @@ HSM, KMS-wrapped object). Rotate via the documented vault-rekey runbook.
 
 {{- end }}
 
-{{- if not .Values.primary.persistence.enabled }}
+{{- if or (and (ne .Values.mode "cluster") (not .Values.primary.persistence.enabled)) (and (eq .Values.mode "cluster") (not .Values.cluster.persistence.enabled)) }}
 
-WARNING: Persistence is DISABLED on the primary — data lives in an emptyDir and is lost on pod restart.
+WARNING: Persistence is DISABLED on the primary/active writer — data lives in an emptyDir and is lost on pod restart.
 {{- end }}

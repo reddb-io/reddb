@@ -1,8 +1,10 @@
 {{- if .Values.ingress.enabled -}}
 {{- $primarySvc := include "reddb.primary.fullname" . -}}
 {{- $replicaSvc := include "reddb.replica.fullname" . -}}
+{{- $clusterSvc := include "reddb.cluster.fullname" . -}}
 {{- $primaryPort := .Values.primary.service.httpPort -}}
 {{- $replicaPort := .Values.replica.service.httpPort -}}
+{{- $clusterPort := .Values.cluster.service.httpPort -}}
 {{- $mode := .Values.mode -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -29,11 +31,14 @@ spec:
       http:
         paths:
           {{- range .paths }}
-          {{- $svcName := $primarySvc -}}
-          {{- $svcPort := $primaryPort -}}
-          {{- if and (eq .backend "replica") (eq $mode "primary-replica") }}
+          {{- $svcName := ternary $clusterSvc $primarySvc (eq $mode "cluster") -}}
+          {{- $svcPort := ternary $clusterPort $primaryPort (eq $mode "cluster") -}}
+          {{- if and (eq .backend "replica") (eq $mode "primary-replica") (gt (int $.Values.replica.replicaCount) 0) }}
           {{- $svcName = $replicaSvc -}}
           {{- $svcPort = $replicaPort -}}
+          {{- else if eq .backend "cluster" }}
+          {{- $svcName = $clusterSvc -}}
+          {{- $svcPort = $clusterPort -}}
           {{- end }}
           - path: {{ .path }}
             pathType: {{ .pathType | default "Prefix" }}

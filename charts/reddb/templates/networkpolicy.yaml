@@ -1,4 +1,5 @@
 {{- if .Values.networkPolicy.enabled -}}
+{{- if ne .Values.mode "cluster" }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -19,8 +20,9 @@ spec:
           protocol: TCP
         - port: 8080
           protocol: TCP
+      {{- if or (and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0)) .Values.networkPolicy.ingressFrom }}
       from:
-        {{- if eq .Values.mode "primary-replica" }}
+        {{- if and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) }}
         - podSelector:
             matchLabels:
               {{- include "reddb.replica.selectorLabels" . | nindent 14 }}
@@ -28,7 +30,8 @@ spec:
         {{- with .Values.networkPolicy.ingressFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-{{- if eq .Values.mode "primary-replica" }}
+      {{- end }}
+{{- if and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -54,5 +57,35 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
+{{- end }}
+{{- if eq .Values.mode "cluster" }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "reddb.cluster.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "reddb.cluster.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 50051
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "reddb.cluster.selectorLabels" . | nindent 14 }}
+        {{- with .Values.networkPolicy.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
 {{- end }}
 {{- end }}

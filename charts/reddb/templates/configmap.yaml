@@ -1,0 +1,13 @@
+{{- include "reddb.validateMode" . -}}
+{{- if and .Values.config.file.enabled (not .Values.config.file.existingConfigMap) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "reddb.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+data:
+  {{ .Values.config.file.key }}: |
+    {{- toPrettyJson .Values.config.file.inline | nindent 4 }}
+{{- end }}

@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn grpc_params_match_shared_fixtures() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(
-            "../../reddb-wire/tests/fixtures/params/manifest.json"
+            "../../../testdata/conformance/redwire/params/manifest.json"
         ))
         .expect("manifest json");
 

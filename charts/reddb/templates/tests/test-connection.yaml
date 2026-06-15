@@ -28,4 +28,4 @@ spec:
         - health
         - --http
         - --bind
-        - {{ include "reddb.primary.fullname" . }}:{{ .Values.primary.service.httpPort }}
+        - {{ include "reddb.activeHttpServiceName" . }}:{{ include "reddb.activeHttpServicePort" . }}

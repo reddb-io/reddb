@@ -337,7 +337,7 @@ type paramQueryFixture struct {
 
 func loadParamFixtures(t *testing.T) paramFixtureManifest {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json")
+	path := filepath.Join("..", "..", "..", "testdata", "conformance", "redwire", "params", "manifest.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

@@ -23,7 +23,7 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PARAM_FIXTURES = JSON.parse(readFileSync(
-  resolve(HERE, '../../../crates/reddb-wire/tests/fixtures/params/manifest.json'),
+  resolve(HERE, '../../../testdata/conformance/redwire/params/manifest.json'),
   'utf8',
 ))
 
