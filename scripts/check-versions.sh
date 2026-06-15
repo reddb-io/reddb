@@ -39,13 +39,21 @@ lock_version() {
   ' "$lockfile"
 }
 
-# Lock-step with engine: workspace member crates, drivers, npm package
+# Lock-step with engine: publishable workspace member crates, drivers, npm package
+check "crates/reddb-types"       "$(grep -m1 '^version' crates/reddb-types/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "crates/reddb-crypto"      "$(grep -m1 '^version' crates/reddb-crypto/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "crates/reddb-file"        "$(grep -m1 '^version' crates/reddb-file/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "crates/reddb-rql"         "$(grep -m1 '^version' crates/reddb-rql/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-wire"        "$(grep -m1 '^version' crates/reddb-wire/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-grpc-proto"  "$(grep -m1 '^version' crates/reddb-grpc-proto/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-server"      "$(grep -m1 '^version' crates/reddb-server/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-client"            "$(grep -m1 '^version' crates/reddb-client/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-client-connector"  "$(grep -m1 '^version' crates/reddb-client-connector/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "Cargo.lock reddb-io"         "$(lock_version Cargo.lock reddb-io)"
+check "Cargo.lock reddb-io-types"   "$(lock_version Cargo.lock reddb-io-types)"
+check "Cargo.lock reddb-io-crypto"  "$(lock_version Cargo.lock reddb-io-crypto)"
+check "Cargo.lock reddb-io-file"    "$(lock_version Cargo.lock reddb-io-file)"
+check "Cargo.lock reddb-io-rql"     "$(lock_version Cargo.lock reddb-io-rql)"
 check "Cargo.lock reddb-io-wire"    "$(lock_version Cargo.lock reddb-io-wire)"
 check "Cargo.lock reddb-io-grpc-proto" "$(lock_version Cargo.lock reddb-io-grpc-proto)"
 check "Cargo.lock reddb-io-server"  "$(lock_version Cargo.lock reddb-io-server)"
