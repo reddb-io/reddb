@@ -59,6 +59,7 @@ services:
     environment:
       RUST_LOG: info
       REDDB_TOPOLOGY: serverless
+      REDDB_NODE_ROLE: serverless
       REDDB_STORAGE_PRESET: serverless
       REDDB_STORAGE_PROFILE: serverless
       REDDB_CONFIG_FILE: /etc/reddb/config.json

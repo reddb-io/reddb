@@ -1,12 +1,12 @@
 [package]
 name = "reddb-io-types"
 version = "1.0.0"
-edition = "2021"
-authors = ["RedDB.io <hello@reddb.io>"]
+edition.workspace = true
+authors.workspace = true
 description = "RedDB logical type system: the neutral keystone vocabulary — Value, DataType, SqlTypeName, TypeModifier, TypeCategory, ValueError, Row — depended on by every authority crate and depending on none."
-license = "AGPL-3.0-only"
-homepage = "https://github.com/reddb-io/reddb"
-repository = "https://github.com/reddb-io/reddb"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/reddb-io-types"
 keywords = ["database", "type-system", "value", "sql-types"]
 categories = ["database-implementations", "data-structures"]

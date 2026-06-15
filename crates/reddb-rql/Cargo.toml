@@ -1,12 +1,12 @@
 [package]
 name = "reddb-io-rql"
 version = "1.0.0"
-edition = "2021"
-authors = ["RedDB.io <hello@reddb.io>"]
+edition.workspace = true
+authors.workspace = true
 description = "RedDB Query Language (RQL) front-end + conformance authority (ADR 0053). Owns the sqllogictest-format conformance suite whose truth comes from the public SQLite corpus; depends only on reddb-io-types."
-license = "AGPL-3.0-only"
-homepage = "https://github.com/reddb-io/reddb"
-repository = "https://github.com/reddb-io/reddb"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/reddb-io-rql"
 keywords = ["database", "sql", "rql", "conformance", "sqllogictest"]
 categories = ["database-implementations", "parser-implementations"]
@@ -19,7 +19,7 @@ path = "src/lib.rs"
 # the neutral keystone type vocabulary (ADR 0052) and nothing else of the
 # workspace.
 [dependencies]
-reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
+reddb-types = { workspace = true }
 
 [dev-dependencies]
 # Parser property round-trip tests (issue #87) moved in with the parser family

@@ -60,11 +60,24 @@ REDDB_STORAGE_PRESET=serverless|primary-replica-production-ha|cluster
 REDDB_STORAGE_PROFILE=serverless|primary-replica|cluster
 REDDB_STORAGE_PACKAGING=operational-directory
 REDDB_REPLICA_COUNT=3
+REDDB_CONFIG_FILE=/etc/reddb/config.json
 ```
 
-The current binary consumes `REDDB_STORAGE_*`, `REDDB_REPLICA_COUNT`, remote
-backend env, lease env, and replica args. `REDDB_TOPOLOGY`, `REDDB_NODE_ROLE`,
-and `REDDB_CLUSTER_*` are the orchestrator-facing identity/discovery contract.
+The binary consumes `REDDB_TOPOLOGY` and `REDDB_NODE_ROLE` as the human
+topology layer when explicit args are absent. They compile into the process role
+and storage defaults. `REDDB_CONFIG_FILE` is resolved by the same operational
+bootstrap contract; the runtime still applies the file after storage opens so
+write-if-absent `red.config` semantics are preserved:
+
+- `serverless` runs the standalone process role with serverless storage.
+- `primary-replica` uses `REDDB_NODE_ROLE=primary|replica` to select the
+  process role.
+- `cluster` runs the standalone process role today with cluster storage and
+  cluster discovery env.
+
+Explicit CLI args still win. `REDDB_STORAGE_*` overrides the topology-derived
+storage default, and `REDDB_CLUSTER_*` remains the cluster identity/discovery
+contract.
 
 ## Persist Data
 
@@ -237,6 +250,8 @@ curl -X POST http://localhost:8080/auth/bootstrap \
 The container entrypoint supports these environment variables:
 
 - `REDDB_DATA_PATH`
+- `REDDB_TOPOLOGY`
+- `REDDB_NODE_ROLE`
 - `REDDB_GRPC_BIND_ADDR`
 - `REDDB_HTTP_BIND_ADDR`
 - `REDDB_BIND_ADDR` as a legacy fallback for gRPC

@@ -77,7 +77,7 @@ final class ValueCodecTest extends TestCase
     public function test_param_fixture_manifest(): void
     {
         $manifest = json_decode(
-            file_get_contents(__DIR__ . '/../../../crates/reddb-wire/tests/fixtures/params/manifest.json'),
+            file_get_contents(__DIR__ . '/../../../testdata/conformance/redwire/params/manifest.json'),
             true,
             flags: JSON_THROW_ON_ERROR,
         );
