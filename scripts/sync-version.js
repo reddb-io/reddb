@@ -21,7 +21,7 @@
  *   - package.json                    (@reddb-io/cli npm — source of truth)
  *   - Cargo.toml                      (engine crate)
  *   - Cargo.lock                      (workspace package versions)
- *   - crates/reddb-client-connector/Cargo.toml (workspace internal)
+ *   - crates/reddb-* Cargo.toml       (publishable workspace crates)
  *   - drivers/js/package.json         (@reddb-io/sdk npm)
  *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
  *   - drivers/bun/package.json        (@reddb-io/client-bun npm)
@@ -59,9 +59,29 @@ const targets = [
     file: path.join(root, 'Cargo.toml'),
     type: 'cargo-toml',
   },
-  // Workspace members introduced by PRD #54. They publish (or stay
-  // pinned at) the same version as the umbrella reddb crate so the
-  // release workflow doesn't have to special-case them.
+  // Publishable workspace members stay at the same version as the
+  // umbrella reddb crate so the release workflow can publish them in
+  // dependency order without version drift.
+  {
+    label: 'crates/reddb-types/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-types', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-crypto/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-crypto', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-file/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-file', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-rql/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-rql', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
   {
     label: 'crates/reddb-wire/Cargo.toml',
     file: path.join(root, 'crates', 'reddb-wire', 'Cargo.toml'),
@@ -167,6 +187,10 @@ if (failed > 0) {
 // release version bumps should not do that.
 syncCargoLock(path.join(root, 'Cargo.lock'), [
   'reddb-io',
+  'reddb-io-types',
+  'reddb-io-crypto',
+  'reddb-io-file',
+  'reddb-io-rql',
   'reddb-io-wire',
   'reddb-io-grpc-proto',
   'reddb-io-server',
@@ -181,6 +205,10 @@ const stageList = [
   'package.json',
   'Cargo.toml',
   'Cargo.lock',
+  'crates/reddb-types/Cargo.toml',
+  'crates/reddb-crypto/Cargo.toml',
+  'crates/reddb-file/Cargo.toml',
+  'crates/reddb-rql/Cargo.toml',
   'crates/reddb-wire/Cargo.toml',
   'crates/reddb-grpc-proto/Cargo.toml',
   'crates/reddb-server/Cargo.toml',

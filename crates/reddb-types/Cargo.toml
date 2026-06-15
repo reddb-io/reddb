@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-types"
-version = "1.0.0"
+version = "1.10.1"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB logical type system: the neutral keystone vocabulary — Value, DataType, SqlTypeName, TypeModifier, TypeCategory, ValueError, Row — depended on by every authority crate and depending on none."
