@@ -234,6 +234,13 @@ citations. Markers map to the flat `sources_flat` array by position and carry
 stable URNs for UI deep-links. See
 [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md) for the grounding contract.
 
+> [!IMPORTANT]
+> `ASK` is retrieval-grounded answer synthesis, not prompt-to-RQL. RedDB does
+> not convert the question into a `SELECT`, and LLM output is never parsed or
+> executed as RQL. Use explicit SQL/RQL for deterministic filters,
+> aggregations, and writes; use `ASK` when you want a cited natural-language
+> answer over retrieved context.
+
 ```sql
 ASK 'what happened on host 10.0.0.1?' USING groq
 ASK 'summarize all vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250514'
@@ -277,9 +284,9 @@ ASK 'explain the network topology' USING ollama MODEL 'llama3' STRICT ON CACHE T
 
 ### How ASK Works
 
-ASK executes a three-phase pipeline:
+ASK executes a retrieval-then-synthesis pipeline:
 
-1. **Search Context** — Runs `SEARCH CONTEXT` with your question as the query. Finds all related entities across tables, graphs, vectors, documents, and key-values.
+1. **Grounded Retrieval** — `AskPipeline` extracts tokens, matches schema vocabulary, searches text/vector/graph surfaces scoped to visible collections, and filters literal values before any LLM call.
 
 2. **Build LLM Context** — Serializes the search results into a structured prompt. Includes:
    - Database schema (collection names and entity counts)
@@ -287,6 +294,16 @@ ASK executes a three-phase pipeline:
    - Graph edges and cross-references between found entities
 
 3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural-language answer with inline `[^N]` markers, and RedDB validates those markers against `sources_flat`.
+
+There is no generated query-plan step in this pipeline. If the right operation
+is "find records where a field has this value", write that directly:
+
+```sql
+SELECT * WHERE passport = $1
+```
+
+Missing `FROM` means the universal source `any`, so the engine searches
+eligible collections and applies the `WHERE` filter itself.
 
 If no provider is configured, ASK returns an error. Configure one with:
 

@@ -570,6 +570,17 @@ ASK 'question'
   └─ Audit + optional cache             ← red_ask_audit, CACHE TTL / NOCACHE
 ```
 
+`ASK` does not translate English into RQL. It retrieves allowed context first,
+sends those sources to the model, and returns a single answer row. If you need
+deterministic cross-collection retrieval by field, use SQL/RQL directly:
+
+```sql
+SELECT * WHERE host = $1
+```
+
+That form is parsed as the universal source `any`, equivalent in intent to
+`FROM ANY` plus a `WHERE` filter.
+
 ### SEARCH CONTEXT = 3-Tier Strategy
 
 The context search uses three tiers, stopping when it has enough results:
@@ -606,6 +617,7 @@ paths. The provider boundary is enforced as follows:
 | `SELECT … COUNT/SUM/AVG/MIN/MAX(…)` | SQL planner + executor | Exact, reproducible, no network call. |
 | `SEARCH CONTEXT 'term'` | Multi-tier index (field → token → scan) | Returns table rows, documents, KV entries, graph nodes/edges, and vectors when each backing collection exists. Empty result set when nothing matches &mdash; the contract is "ground or fall silent". |
 | `ASK '…'` | `AskPipeline` funnel + LLM synthesis | Pipeline grounds first (Stage 4 literal filter / Stage 3 BM25 + vector / Stage 3c graph), then the LLM rewrites the grounded rows into a citation-bearing sentence. |
+| Prompt-to-RQL / generated queries | Not part of `ASK` today | A generated query would need a separate parse, authorization, explain, and approval path. `ASK` deliberately never re-executes model output. |
 | Missing or unsupported analytics inside an `ASK` question | Pipeline short-circuits with a structured error OR returns an answer that openly cites "no matching sources" | The LLM never invents a number; it can only quote what `sources_flat` contains. |
 
 A practical rule: if the question is a calculation (`how many incidents are

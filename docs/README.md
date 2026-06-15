@@ -117,9 +117,11 @@ Start with [Auth & Security Overview](/security/overview.md), then use the
 [Permission Recipes](/guides/permissions-cookbook.md) for copyable production
 patterns.
 
-## Six query languages
+## Query languages plus ASK
 
-Write queries in the style you already know. RedDB parses RQL, SQL, Gremlin, SPARQL, Cypher, and natural language.
+Write deterministic queries in explicit syntax, and use `ASK` when you want a
+grounded natural-language answer over retrieved context. `ASK` does not
+translate the prompt into RQL and execute it.
 
 ```sql
 -- RQL / SQL
@@ -128,8 +130,8 @@ SELECT name, email FROM users WHERE active = true LIMIT 10
 -- Gremlin
 g.V().hasLabel('user').has('active', true).values('name')
 
--- Natural language
-FIND users who logged in this week
+-- Natural-language answer over retrieved context
+ASK 'which users logged in this week?' USING groq
 ```
 
 ## Native time-series and queues
