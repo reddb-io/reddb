@@ -197,7 +197,14 @@ syncCargoLock(path.join(root, 'Cargo.lock'), [
   'reddb-io-client',
   'reddb-io-client-connector',
 ])
-syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), ['reddb-io', 'reddb-io-python'])
+syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [
+  'reddb-io',
+  'reddb-io-types',
+  'reddb-io-crypto',
+  'reddb-io-file',
+  'reddb-io-rql',
+  'reddb-io-python',
+])
 
 // Stage every file that the version bump touches so pnpm's
 // version commit picks them up in one atomic commit.

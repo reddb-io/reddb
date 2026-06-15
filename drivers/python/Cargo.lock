@@ -1943,14 +1943,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.0.0"
+version = "1.10.1"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.0.0"
+version = "1.10.1"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.0.0"
+version = "1.10.1"
 dependencies = [
  "reddb-io-types",
 ]
@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.0.0"
+version = "1.10.1"
 dependencies = [
  "zstd",
 ]
