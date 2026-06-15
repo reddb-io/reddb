@@ -15,6 +15,7 @@ services:
       - "8080:8080"
     volumes:
       - primary-data:/data
+      - ./container-config.json:/etc/reddb/config.json:ro
     command:
       - "server"
       - "--path"
@@ -31,13 +32,12 @@ services:
       - ALL
     environment:
       - RUST_LOG=info
-      - REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate
-    secrets:
-      - source: reddb_certificate
-        target: reddb_certificate
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
+      - REDDB_TOPOLOGY=primary-replica
+      - REDDB_NODE_ROLE=primary
+      - REDDB_STORAGE_PRESET=primary-replica-production-ha
+      - REDDB_STORAGE_PROFILE=primary-replica
+      - REDDB_REPLICA_COUNT=1
+      - REDDB_CONFIG_FILE=/etc/reddb/config.json
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
@@ -55,6 +55,7 @@ services:
       - "8081:8080"
     volumes:
       - replica-data:/data
+      - ./container-config.json:/etc/reddb/config.json:ro
     command:
       - "replica"
       - "--primary-addr"
@@ -71,14 +72,13 @@ services:
       - ALL
     environment:
       - RUST_LOG=info
+      - REDDB_TOPOLOGY=primary-replica
+      - REDDB_NODE_ROLE=replica
+      - REDDB_STORAGE_PRESET=primary-replica-production-ha
+      - REDDB_STORAGE_PROFILE=primary-replica
+      - REDDB_REPLICA_COUNT=1
       - REDDB_PRIMARY_ADDR=http://primary:50051
-      - REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate
-    secrets:
-      - source: reddb_certificate
-        target: reddb_certificate
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
+      - REDDB_CONFIG_FILE=/etc/reddb/config.json
     depends_on:
       primary:
         condition: service_healthy
@@ -88,10 +88,6 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
-
-secrets:
-  reddb_certificate:
-    external: true
 
 volumes:
   primary-data:

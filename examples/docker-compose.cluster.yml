@@ -1,0 +1,109 @@
+# Symmetric cluster-shape demo. Current `red` boots each member with
+# `red server --role standalone` plus the cluster storage preset; the
+# cluster supervisor consumes the stable identity/discovery contract as it
+# matures.
+
+x-reddb-cluster-env: &reddb-cluster-env
+  RUST_LOG: info
+  REDDB_TOPOLOGY: cluster
+  REDDB_STORAGE_PRESET: cluster
+  REDDB_STORAGE_PROFILE: cluster
+  REDDB_REPLICA_COUNT: "3"
+  RED_CLUSTER_HA_INTENT: declared
+  REDDB_CLUSTER_PEERS: cluster-0:50051,cluster-1:50051,cluster-2:50051
+  REDDB_CONFIG_FILE: /etc/reddb/config.json
+
+x-reddb-cluster-command: &reddb-cluster-command
+  - "server"
+  - "--path"
+  - "/data/data.rdb"
+  - "--role"
+  - "standalone"
+  - "--grpc-bind"
+  - "0.0.0.0:50051"
+  - "--http-bind"
+  - "0.0.0.0:8080"
+
+services:
+  cluster-0:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: reddb-cluster-0
+    hostname: cluster-0
+    ports:
+      - "50100:50051"
+      - "8100:8080"
+    volumes:
+      - cluster-0-data:/data
+      - ./container-config.json:/etc/reddb/config.json:ro
+    command: *reddb-cluster-command
+    environment:
+      <<: *reddb-cluster-env
+      REDDB_NODE_ROLE: cluster-member
+      REDDB_CLUSTER_NODE_ID: cluster-0
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  cluster-1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: reddb-cluster-1
+    hostname: cluster-1
+    ports:
+      - "50101:50051"
+      - "8101:8080"
+    volumes:
+      - cluster-1-data:/data
+      - ./container-config.json:/etc/reddb/config.json:ro
+    command: *reddb-cluster-command
+    environment:
+      <<: *reddb-cluster-env
+      REDDB_NODE_ROLE: cluster-member
+      REDDB_CLUSTER_NODE_ID: cluster-1
+    depends_on:
+      cluster-0:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  cluster-2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: reddb-cluster-2
+    hostname: cluster-2
+    ports:
+      - "50102:50051"
+      - "8102:8080"
+    volumes:
+      - cluster-2-data:/data
+      - ./container-config.json:/etc/reddb/config.json:ro
+    command: *reddb-cluster-command
+    environment:
+      <<: *reddb-cluster-env
+      REDDB_NODE_ROLE: cluster-member
+      REDDB_CLUSTER_NODE_ID: cluster-2
+    depends_on:
+      cluster-0:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  cluster-0-data:
+  cluster-1-data:
+  cluster-2-data:

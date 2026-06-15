@@ -173,10 +173,9 @@ public class ValueCodecTests
         {
             string path = Path.Combine(
                 dir.FullName,
-                "crates",
-                "reddb-wire",
-                "tests",
-                "fixtures",
+                "testdata",
+                "conformance",
+                "redwire",
                 "params",
                 "manifest.json");
             if (File.Exists(path))

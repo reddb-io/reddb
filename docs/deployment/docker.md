@@ -1,6 +1,9 @@
 # Docker Deployment
 
 RedDB ships as a single binary that runs inside a minimal Docker container.
+The same image is used for serverless, primary-replica, and cluster-shaped
+deployments. Runtime shape is selected by command args and env vars, not by
+using different images.
 
 The container image now defaults to a dual-stack server:
 
@@ -33,6 +36,48 @@ red server \
   --grpc-bind 0.0.0.0:50051 \
   --http-bind 0.0.0.0:8080
 ```
+
+## Container Topology Contract
+
+Use one image and make the topology explicit:
+
+| Topology | Command shape | Required storage env |
+|---|---|---|
+| `serverless` | `red server --path /data/data.rdb ...` | `REDDB_STORAGE_PRESET=serverless` |
+| `primary-replica` primary | `red server --role primary --path /data/data.rdb ...` | `REDDB_STORAGE_PRESET=primary-replica-production-ha` |
+| `primary-replica` replica | `red replica --primary-addr http://primary:50051 --path /data/data.rdb ...` | same storage preset plus `REDDB_PRIMARY_ADDR` |
+| `cluster` | `red server --role standalone --path /data/data.rdb ...` today, with cluster identity/discovery env | `REDDB_STORAGE_PRESET=cluster` |
+
+`embedded` is a library/local mode and is not a separate production container
+topology.
+
+The common env contract is:
+
+```bash
+REDDB_TOPOLOGY=serverless|primary-replica|cluster
+REDDB_NODE_ROLE=serverless|primary|replica|cluster-member
+REDDB_STORAGE_PRESET=serverless|primary-replica-production-ha|cluster
+REDDB_STORAGE_PROFILE=serverless|primary-replica|cluster
+REDDB_STORAGE_PACKAGING=operational-directory
+REDDB_REPLICA_COUNT=3
+REDDB_CONFIG_FILE=/etc/reddb/config.json
+```
+
+The binary consumes `REDDB_TOPOLOGY` and `REDDB_NODE_ROLE` as the human
+topology layer when explicit args are absent. They compile into the process role
+and storage defaults. `REDDB_CONFIG_FILE` is resolved by the same operational
+bootstrap contract; the runtime still applies the file after storage opens so
+write-if-absent `red.config` semantics are preserved:
+
+- `serverless` runs the standalone process role with serverless storage.
+- `primary-replica` uses `REDDB_NODE_ROLE=primary|replica` to select the
+  process role.
+- `cluster` runs the standalone process role today with cluster storage and
+  cluster discovery env.
+
+Explicit CLI args still win. `REDDB_STORAGE_*` overrides the topology-derived
+storage default, and `REDDB_CLUSTER_*` remains the cluster identity/discovery
+contract.
 
 ## Persist Data
 
@@ -158,6 +203,14 @@ volumes:
   replica-data:
 ```
 
+For full files that can be run directly:
+
+```bash
+docker compose -f examples/docker-compose.serverless.yml up --build
+docker compose -f examples/docker-compose.replica.yml up --build
+docker compose -f examples/docker-compose.cluster.yml up --build
+```
+
 ### With Auth Vault
 
 ```yaml
@@ -197,9 +250,46 @@ curl -X POST http://localhost:8080/auth/bootstrap \
 The container entrypoint supports these environment variables:
 
 - `REDDB_DATA_PATH`
+- `REDDB_TOPOLOGY`
+- `REDDB_NODE_ROLE`
 - `REDDB_GRPC_BIND_ADDR`
 - `REDDB_HTTP_BIND_ADDR`
 - `REDDB_BIND_ADDR` as a legacy fallback for gRPC
+- `REDDB_STORAGE_PRESET`
+- `REDDB_STORAGE_PROFILE`
+- `REDDB_STORAGE_PACKAGING`
+- `REDDB_REPLICA_COUNT`
+- `RED_BACKEND`, `RED_REMOTE_KEY`, and backend-specific `RED_S3_*`,
+  `RED_FS_PATH`, or `RED_HTTP_BACKEND_*`
+- `RED_AUTO_RESTORE`, `RED_BACKUP_ON_SHUTDOWN`, `RED_LEASE_REQUIRED`,
+  `RED_LEASE_TTL_SECS`, and `RED_LEASE_PREFIX` for serverless writers
+- `RED_PRIMARY_COMMIT_POLICY`, `RED_PRIMARY_COMMIT_ACK_N`, and
+  `RED_PRIMARY_COMMIT_DEADLINE_MS` for primary-replica durability policy
+
+Secrets should come from orchestrator-native secret stores. For Kubernetes and
+Docker secrets, either inject them with `valueFrom`/secret env vars or use the
+`*_FILE` convention where supported, for example `RED_S3_SECRET_KEY_FILE` or
+`REDDB_CERTIFICATE_FILE`.
+
+## Config File Precedence
+
+Mount JSON at `/etc/reddb/config.json` or set `REDDB_CONFIG_FILE` to another
+path. The file is parsed on boot and seeds missing keys into `red.config`.
+
+Separate boot/topology config from runtime config:
+
+- Boot config must stay in args/env because it is needed before the DB opens:
+  role, primary address, storage preset/profile, remote backend, lease, data
+  path, and secret material.
+- Runtime config is stored in `red.config` after boot.
+
+For runtime config, env overrides for matrix keys such as
+`REDDB_DURABILITY_MODE` win for the current boot and are not persisted. The
+mounted config file writes missing keys into `red.config` with write-if-absent
+semantics. Existing rows from a prior boot, `SET CONFIG`, or boot defaults are
+not overwritten.
+
+Use `SET CONFIG` or an explicit migration when a stored value must change.
 
 You can also pass flags via the Docker `command`:
 

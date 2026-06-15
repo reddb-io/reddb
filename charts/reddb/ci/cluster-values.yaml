@@ -1,0 +1,7 @@
+mode: cluster
+
+cluster:
+  replicaCount: 3
+
+storage:
+  preset: cluster

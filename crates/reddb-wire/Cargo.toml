@@ -1,12 +1,12 @@
 [package]
 name = "reddb-io-wire"
 version = "1.10.1"
-edition = "2021"
-authors = ["RedDB.io <hello@reddb.io>"]
+edition.workspace = true
+authors.workspace = true
 description = "RedDB wire protocol vocabulary: connection-string parser, RedWire frames, payload codecs, topology, sanitizers, and replication messages."
-license = "AGPL-3.0-only"
-homepage = "https://github.com/reddb-io/reddb"
-repository = "https://github.com/reddb-io/reddb"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/reddb-io-wire"
 readme = "README.md"
 keywords = ["reddb", "wire", "protocol", "connection-string"]
@@ -20,7 +20,7 @@ path = "src/lib.rs"
 # Keystone type vocabulary (ADR 0052). Owns the engine `Value`; the legacy
 # protocol's WireValue<->Value conversions live in `legacy` because the orphan
 # rule pins them to WireValue's home crate once Value moved below wire.
-reddb-types = { package = "reddb-io-types", version = "1.0", path = "../reddb-types" }
+reddb-types = { workspace = true }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["io-util"] }
 url = "2"
@@ -37,4 +37,4 @@ proptest = "1"
 insta = { version = "1", features = ["filters"] }
 regex = "1"
 prost = "0.14"
-reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
+reddb-grpc-proto = { workspace = true }

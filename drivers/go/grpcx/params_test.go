@@ -64,8 +64,8 @@ func TestEncodeParamsMatchesSharedFixtures(t *testing.T) {
 func loadParamsManifest(t *testing.T) paramsManifest {
 	t.Helper()
 	for _, path := range []string{
-		filepath.Join("..", "..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json"),
-		filepath.Join("..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json"),
+		filepath.Join("..", "..", "..", "testdata", "conformance", "redwire", "params", "manifest.json"),
+		filepath.Join("..", "..", "testdata", "conformance", "redwire", "params", "manifest.json"),
 	} {
 		body, err := os.ReadFile(path)
 		if err != nil {

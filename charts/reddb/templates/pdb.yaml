@@ -1,4 +1,4 @@
-{{- if and .Values.pdb.enabled (eq .Values.mode "primary-replica") -}}
+{{- if and .Values.pdb.enabled (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -16,4 +16,23 @@ spec:
   selector:
     matchLabels:
       {{- include "reddb.replica.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- if and .Values.pdb.enabled (eq .Values.mode "cluster") -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "reddb.cluster.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster
+spec:
+  {{- if .Values.pdb.maxUnavailable }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "reddb.cluster.selectorLabels" . | nindent 6 }}
 {{- end }}

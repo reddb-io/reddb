@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-full test-persistent test-persistent-grimms drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
+.PHONY: help build build-fast release warm test test-fast test-full test-persistent test-persistent-grimms drill-nightly clean run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -31,6 +31,7 @@ help:
 	@echo "  make fmt           - Format code"
 	@echo "  make lint          - Run clippy"
 	@echo "  make check         - Quick compile check"
+	@echo "  make check-helm    - Lint/render the Helm chart topology matrix"
 	@echo "  make check-driver-rust - Compile-check the Rust SDK with gRPC enabled"
 	@echo "  make check-driver-python - Compile-check the Python SDK"
 	@echo "  make timings       - Generate cargo build timings for the red binary"
@@ -107,6 +108,9 @@ lint:
 # Quick compile check
 check:
 	./scripts/cargo-fast.sh check --locked
+
+check-helm:
+	@./scripts/verify-helm-chart.sh
 
 check-driver-rust:
 	./scripts/cargo-fast.sh check -p reddb-io-client --features grpc

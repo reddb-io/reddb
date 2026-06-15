@@ -1,139 +1,167 @@
 # RedDB Helm Chart
 
-A production-grade Helm chart for [RedDB](https://github.com/reddb-io/reddb) — a unified multi-model database engine (tables, documents, graphs, vectors, key-value).
+Production-oriented Helm chart for [RedDB](https://github.com/reddb-io/reddb).
+The chart uses one container image and selects the deployment shape through
+Kubernetes values rendered into `red` args and env vars.
 
 ## TL;DR
 
 ```bash
-# Single-node (standalone)
+# Standalone dev/demo writer
 helm install reddb ./charts/reddb
 
-# Single primary + 3 read replicas
+# Serverless writer with a mounted config file and remote backend values
+helm install reddb ./charts/reddb \
+  --set mode=serverless \
+  --set remote.enabled=true \
+  --set remote.backend=fs \
+  --set remote.fs.path=/data/remote \
+  --set serverless.lease.required=true
+
+# Primary plus three read replicas
 helm install reddb ./charts/reddb \
   --set mode=primary-replica \
   --set replica.replicaCount=3
+
+# Symmetric cluster shape
+helm install reddb ./charts/reddb \
+  --set mode=cluster \
+  --set cluster.replicaCount=3
 ```
 
 ## Topologies
 
-| `mode`            | Description                                                                                          |
-|-------------------|------------------------------------------------------------------------------------------------------|
-| `standalone`      | One StatefulSet, one pod, role `standalone`. Reads + writes on the same node. Default.               |
-| `primary-replica` | One primary StatefulSet (1 pod, single writer) plus a replica StatefulSet (`replica.replicaCount` read-only pods streaming via gRPC). |
+| `mode` | Runtime shape | Storage preset |
+|---|---|---|
+| `standalone` | One writer StatefulSet, `red server --role standalone`. Default for local/dev. | `embedded` |
+| `serverless` | One writer StatefulSet, local cache/PVC plus optional remote backend and lease. | `serverless` |
+| `primary-replica` | One primary StatefulSet plus optional replica StatefulSet. Replicas run `red replica --primary-addr ...`. | `primary-replica-production-ha` |
+| `cluster` | One symmetric StatefulSet with stable pod identity and headless discovery. Current CLI still runs `red server --role standalone` with the cluster storage preset. | `cluster` |
 
-Replicas wait for the primary to become healthy via an init container before starting `red replica --primary-addr ...`.
+Set `storage.preset` to override the mode-derived preset. Use
+`storage.profile`, `storage.packaging`, `storage.managedBackup`, and
+`storage.walRetention` only when you intentionally need lower-level overrides.
 
-## Resources rendered
+## Rendered Resources
 
-| Mode              | StatefulSets               | Services (ClusterIP + headless) | Optional                                                |
-|-------------------|----------------------------|---------------------------------|---------------------------------------------------------|
-| `standalone`      | `<release>-primary`        | `<release>-primary` + headless  | Ingress, NetworkPolicy, ServiceMonitor, Auth Secret     |
-| `primary-replica` | `+ <release>-replica`      | `+ <release>-replica` + headless | + PodDisruptionBudget on the replica set                |
+| Mode | StatefulSets | Services | Optional |
+|---|---|---|---|
+| `standalone` | `<release>-primary` | `<release>-primary` + headless | Ingress, NetworkPolicy, ServiceMonitor, Auth Secret |
+| `serverless` | `<release>-primary` | `<release>-primary` + headless | Remote backend env, lease env, config file ConfigMap |
+| `primary-replica` | `<release>-primary`; `<release>-replica` when `replica.replicaCount > 0` | Primary service; replica service when replicas exist | Replica PDB, NetworkPolicy primary<-replica |
+| `cluster` | `<release>-cluster` | `<release>-cluster` + headless | Cluster PDB, peer discovery env |
 
-## Endpoints
+## Config Precedence
 
-After install:
+There are two configuration classes:
 
-- Primary writer (gRPC + HTTP): `<release>-primary.<namespace>.svc.cluster.local`
-- Read replicas (gRPC + HTTP): `<release>-replica.<namespace>.svc.cluster.local`
+- Boot/topology config is read before the database opens and must come from
+  args/env: process role, data path, storage preset/profile, primary address,
+  remote backend, lease settings, and secret material.
+- Runtime config lives in `red.config` after boot.
 
-Default ports: `50051` (gRPC), `8080` (HTTP). The HTTP port is also used by liveness/readiness probes via `red health`.
+`config.file` mounts JSON at `/etc/reddb/config.json` and writes missing keys
+into `red.config` with write-if-absent semantics. Existing rows from a prior
+boot, `SET CONFIG`, or boot defaults are not overwritten. Env overrides for
+config-matrix keys still win for the current boot and are not persisted.
 
-## Persistence
-
-Each pod gets a `data` PVC (default `10Gi`, `ReadWriteOnce`) mounted at `/data`. The DB file lives at `/data/data.rdb`. Configure via `primary.persistence.*` and `replica.persistence.*`.
-
-To run ephemerally for testing, set `primary.persistence.enabled=false` (data lives in an `emptyDir`).
-
-## Auth bootstrap
-
-Enable the chart-managed Secret to auto-create the first admin on startup:
-
-```yaml
-auth:
-  enabled: true
-  username: admin
-  password: change-me-please
-```
-
-Or reference an existing Secret with keys `username` / `password`:
+Use the config file for first-boot defaults and a small hot-reloadable set. Use
+`SET CONFIG` or a migration when a stored value must change.
 
 ```yaml
-auth:
-  enabled: true
-  existingSecret: reddb-admin
+config:
+  file:
+    enabled: true
+    inline:
+      red:
+        logging:
+          level: info
+          format: json
+      slow_query:
+        threshold_ms: 500
 ```
 
-## Security
-
-- Non-root UID/GID `10001` (matches the Dockerfile).
-- `readOnlyRootFilesystem: true`, all capabilities dropped, `RuntimeDefault` seccomp.
-- `automountServiceAccountToken: false` by default.
-- Optional NetworkPolicy locks ingress to: replicas → primary, plus user-supplied selectors.
-
-## Common values
-
-| Key                              | Default                              | Notes                                 |
-|----------------------------------|--------------------------------------|---------------------------------------|
-| `mode`                           | `standalone`                         | `standalone` or `primary-replica`     |
-| `image.repository`               | `ghcr.io/reddb-io/reddb`        |                                       |
-| `image.tag`                      | `""` (chart `appVersion`)            |                                       |
-| `primary.persistence.size`       | `10Gi`                               |                                       |
-| `replica.replicaCount`           | `2`                                  | Only used in `primary-replica`        |
-| `replica.persistence.size`       | `10Gi`                               |                                       |
-| `pdb.enabled`                    | `false`                              | Applies only to the replica set       |
-| `networkPolicy.enabled`          | `false`                              |                                       |
-| `ingress.enabled`                | `false`                              | HTTP only                             |
-| `metrics.serviceMonitor.enabled` | `false`                              | Requires prometheus-operator CRDs     |
-| `auth.enabled`                   | `false`                              | Bootstrap first admin user            |
-
-See `values.yaml` for the full list.
-
-## Examples
-
-### Standalone with persistence and ingress
+To mount an existing ConfigMap instead:
 
 ```yaml
-mode: standalone
-primary:
-  persistence:
-    size: 50Gi
-    storageClass: gp3
-ingress:
-  enabled: true
-  className: nginx
-  hosts:
-    - host: reddb.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-          backend: primary
+config:
+  file:
+    enabled: true
+    existingConfigMap: reddb-config
+    key: config.json
 ```
 
-### HA-ish reads: 1 primary + 3 replicas with PDB and NetworkPolicy
+## Remote Backend
+
+The chart emits the current cloud-agnostic env names:
+
+```yaml
+mode: serverless
+remote:
+  enabled: true
+  backend: s3
+  key: prod/main/data.rdb
+  s3:
+    endpoint: https://s3.us-east-1.amazonaws.com
+    bucket: reddb-prod
+    region: us-east-1
+    existingSecret: reddb-s3
+    accessKeyKey: access-key
+    secretKeyKey: secret-key
+serverless:
+  lease:
+    required: true
+```
+
+Use `config.extraEnv` and `extraSecretMounts` for backend-specific knobs not yet
+typed in the chart.
+
+`mode` renders the human bootstrap env contract (`REDDB_TOPOLOGY` and
+`REDDB_NODE_ROLE`) plus the storage env. The chart also renders
+`REDDB_CONFIG_FILE` when `config.file.enabled` is set. The `red` binary consumes
+that layer when explicit args are absent; explicit args still win, and
+`storage.*` values override topology-derived storage defaults.
+
+## Primary-Replica
+
+`primary-replica` mode always renders one primary. Set
+`replica.replicaCount=0` for a primary-only deployment that still uses the
+primary-replica storage profile.
 
 ```yaml
 mode: primary-replica
 replica:
   replicaCount: 3
-  persistence:
-    size: 50Gi
-    storageClass: gp3
+replication:
+  commitPolicy: quorum
 pdb:
   enabled: true
   minAvailable: 2
-networkPolicy:
-  enabled: true
-  ingressFrom:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: apps
 ```
+
+Replicas wait for the primary HTTP health endpoint before starting
+`red replica --primary-addr http://<primary>:50051`.
+
+## Cluster
+
+Cluster mode renders stable StatefulSet identities and `REDDB_CLUSTER_PEERS`.
+The current `red` CLI does not expose a distinct `cluster` process role, so the
+pods run `red server --role standalone` with `REDDB_STORAGE_PRESET=cluster` and
+`RED_CLUSTER_HA_INTENT=declared`. Treat this as the Kubernetes contract for the
+cluster supervisor and range ownership runtime as those pieces mature.
+
+## Security
+
+- Non-root UID/GID `10001` by chart default.
+- `readOnlyRootFilesystem: true`, all capabilities dropped, `RuntimeDefault` seccomp.
+- `automountServiceAccountToken: false` by default.
+- Auth bootstrap supports chart-managed or existing Secrets.
+- Vault certificates can be injected through env or mounted file using the
+  existing `auth.vault.certificate.fileMount` path.
 
 ## Uninstall
 
 ```bash
 helm uninstall reddb
-# PVCs are NOT deleted by Helm — clean them up explicitly if needed:
 kubectl delete pvc -l app.kubernetes.io/instance=reddb
 ```

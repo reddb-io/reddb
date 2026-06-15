@@ -170,7 +170,7 @@ class ValueCodecTest {
     @Test
     fun sharedParameterFixturesMatchManifest() {
         val manifest = mapper.readTree(
-            Files.readString(Path.of("..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json")),
+            Files.readString(Path.of("..", "..", "testdata", "conformance", "redwire", "params", "manifest.json")),
         )
 
         for (fixture in manifest["values"]) {
