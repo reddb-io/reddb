@@ -562,18 +562,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     timeout-minutes: 25
     needs: tests
-    services:
-      minio:
-        image: minio/minio:latest
-        ports: ['9000:9000']
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
     env:
       RED_BACKEND: s3
       RED_S3_ENDPOINT: http://localhost:9000
@@ -592,12 +580,22 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
+      - name: Start MinIO
+        run: |
+          docker run -d --name reddb-ci-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
       - name: Wait for MinIO + create bucket
         run: |
           curl -fsS --retry 10 --retry-delay 2 http://localhost:9000/minio/health/ready
           docker run --rm --network host minio/mc:latest \
             sh -c "mc alias set ci http://localhost:9000 minioadmin minioadmin && mc mb -p ci/reddb-ci || true"
       - run: cargo test --locked --test 'chaos_*' --no-fail-fast
+      - name: Stop MinIO
+        if: always()
+        run: docker rm -f reddb-ci-minio || true
 
   windows:
     # Phase 3.6 PG parity — verify RedDB compiles + passes the core unit
