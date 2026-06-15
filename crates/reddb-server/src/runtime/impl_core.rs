@@ -3610,9 +3610,7 @@ impl RedDBRuntime {
             });
     }
 
-    /// Slice 10 of issue #527 — shared queue telemetry counters
-    /// (delivered/acked/nacked). Cloned by `queue_delivery.rs` on
-    /// each transition.
+    /// Shared queue telemetry counters (delivered/acked/nacked).
     pub(crate) fn queue_telemetry(
         &self,
     ) -> &crate::runtime::queue_telemetry::QueueTelemetryCounters {
@@ -4166,7 +4164,36 @@ impl RedDBRuntime {
     /// cost on below-threshold paths is one relaxed atomic load.
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
-        let mut result = self.execute_query_inner(query);
+        let result = self.execute_query_inner(query);
+        self.finish_query_lifecycle(query, started, result)
+    }
+
+    /// Execute a SQL statement with already-decoded positional bind
+    /// parameters. Transports should call this instead of parsing +
+    /// binding on their side and then reaching for `execute_query_expr`:
+    /// this entry keeps parameterized statements inside the same
+    /// statement lifecycle as textual SQL (snapshot guard, config/secret
+    /// guards, coarse auth, intent locks, slow-query logging, integrity
+    /// tombstone filtering, and causal bookmarks).
+    pub fn execute_query_with_params(
+        &self,
+        query: &str,
+        params: &[Value],
+    ) -> RedDBResult<RuntimeQueryResult> {
+        if params.is_empty() {
+            return self.execute_query(query);
+        }
+        let started = std::time::Instant::now();
+        let result = self.execute_query_with_params_inner(query, params);
+        self.finish_query_lifecycle(query, started, result)
+    }
+
+    fn finish_query_lifecycle(
+        &self,
+        query: &str,
+        started: std::time::Instant,
+        mut result: RedDBResult<RuntimeQueryResult>,
+    ) -> RedDBResult<RuntimeQueryResult> {
         // Issue #765 / S6 — filter integrity-tombstoned rows out of SELECT
         // results before they reach any consumer. Fast no-op (one relaxed
         // atomic load) unless an input-stream digest mismatch has tombstoned
@@ -4214,6 +4241,63 @@ impl RedDBRuntime {
         }
 
         result
+    }
+
+    fn execute_query_with_params_inner(
+        &self,
+        query: &str,
+        params: &[Value],
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let parsed = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        let bound = crate::storage::query::user_params::bind(&parsed, params).map_err(|err| {
+            RedDBError::Validation {
+                message: err.to_string(),
+                validation: crate::json!({
+                    "code": "INVALID_PARAMS",
+                    "surface": "query.params",
+                }),
+            }
+        })?;
+        self.execute_bound_query_expr_in_frame(query, bound)
+    }
+
+    fn execute_bound_query_expr_in_frame(
+        &self,
+        query: &str,
+        expr: QueryExpr,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let rewritten_query = super::red_schema::rewrite_virtual_names(query);
+        let execution_query = rewritten_query.as_deref().unwrap_or(query);
+        let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
+        let _frame_guards = frame.install(self);
+        let _log_span = crate::telemetry::span::query_span(query).entered();
+
+        let expr = self.rewrite_view_refs(expr);
+        let mode = detect_mode(execution_query);
+        let control_event_specs = query_control_event_specs(&expr);
+        let _lock_guard = match frame.prepare_dispatch(self, &expr) {
+            Ok(guard) => guard,
+            Err(err) => {
+                let outcome = control_event_outcome_for_error(&err);
+                for spec in &control_event_specs {
+                    self.emit_control_event(
+                        spec.kind,
+                        outcome,
+                        spec.action,
+                        spec.resource.clone(),
+                        Some(err.to_string()),
+                        spec.fields.clone(),
+                    )?;
+                }
+                return Err(err);
+            }
+        };
+
+        let mut result = self.dispatch_expr(expr, query, mode)?;
+        if result.statement_type == "select" {
+            self.apply_secret_decryption(&mut result);
+        }
+        Ok(result)
     }
 
     pub fn causal_session(&self) -> crate::runtime::CausalSession {
@@ -6007,10 +6091,10 @@ impl RedDBRuntime {
             }
             // GRANT / REVOKE / ALTER USER (RBAC milestone).
             //
-            // These hit the AuthStore directly. The privilege-check
-            // gate at the top of `execute_query_expr` already decided
-            // whether the caller may even run the statement; here we
-            // just translate the AST into AuthStore calls.
+            // These hit the AuthStore directly. The statement frame /
+            // privilege gate has already decided whether the caller may
+            // even run the statement; here we just translate the AST into
+            // AuthStore calls.
             QueryExpr::Grant(ref g) => self.execute_grant_statement(query, g),
             QueryExpr::Revoke(ref r) => self.execute_revoke_statement(query, r),
             QueryExpr::AlterUser(ref a) => self.execute_alter_user_statement(query, a),
@@ -6510,9 +6594,8 @@ impl RedDBRuntime {
         }
     }
 
-    /// Internal dispatch: route a `QueryExpr` to the appropriate executor.
-    /// Shared by `execute_query` (after parse/cache) and `execute_query_expr`
-    /// (direct call from prepared-statement handler).
+    /// Apply table-level read authorization and RLS rewriting for a
+    /// relational SELECT leaf.
     fn authorize_relational_table_select(
         &self,
         mut table: TableQuery,

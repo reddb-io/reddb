@@ -6,5 +6,7 @@
 # the release gate, requires sign-off from the release-policy owner — this is
 # the human-in-the-loop control the issue called for.
 /docs/conformance/                       @filipeforattini
+/testdata/conformance/                   @filipeforattini
+/scripts/check-contract-authorities.mjs  @filipeforattini
 /scripts/verify-contract-matrix.mjs      @filipeforattini
 /scripts/contract_matrix_contract.test.mjs @filipeforattini

@@ -1,27 +1,24 @@
 # ADR 0020: QueueLifecycle Module Contract
 
-Status: proposed
+Status: accepted
 Date: 2026-05-16
-Issue: TBD
+Implemented: 2026-06-15
 
 ## Context
 
-Queue delivery and retirement logic today is split between
-`runtime/impl_queue.rs` (2122 LOC) and `runtime/queue_delivery.rs` (470 LOC,
-`pub(super)` only). The split is structural but not encapsulated:
-`queue_delivery` reaches back into `impl_queue` for
-`queue_message_lock_handle`, `queue_message_pending_any`, and
-`queue_message_view_by_id`. Callers repeat the same decision sequence —
-is-locked? → is-pending? → work-vs-fanout? → retry-or-DLQ? — at every
-ACK/NACK/POP site.
+Queue delivery and retirement logic used to be split between
+`runtime/impl_queue.rs` and `runtime/queue_delivery.rs`. The split was
+structural but not encapsulated: the helper module reached back into
+`impl_queue` for lock, pending, and message-view helpers. Callers repeated
+the same decision sequence — is-locked? → is-pending? → work-vs-fanout? →
+retry-or-DLQ? — at ACK/NACK/POP sites.
 
-`.red/CONTEXT.md` already names the sub-steps (**Queue delivery**, **Queue
-retirement**, **Pending delivery**) but no Module owns them. This ADR records
-the contract for a deep `QueueLifecycle` Module that owns the full state
-machine. Decisions below are interlocking — the replica path only works
-because the primary owns decisions in the caller's transaction; the
-`QueueStore` adapter only earns its keep because the replica is a second real
-adapter.
+`.red/CONTEXT.md` names the sub-steps (**Queue delivery**, **Queue
+retirement**, **Pending delivery**). This ADR records the contract for the
+deep `QueueLifecycle` Module that owns the full state machine. Decisions
+below are interlocking — the replica path only works because the primary owns
+decisions in the caller's transaction; the `QueueStore` adapter only earns its
+keep because the replica is a second real adapter.
 
 ## Decision
 
@@ -119,9 +116,10 @@ adapter.
   optional response field; legacy `(queue, message_id, consumer)` tuple
   path still works one minor release. Avoids forcing redwire + gRPC +
   Postgres-wire driver bumps simultaneously.
-- Atomic switch — `QueueLifecycle` replaces `impl_queue` + `queue_delivery`
-  in one PR. The two paths share state (pending deliveries, attempt
-  counters); flag-gating risks divergent decisions on the same message.
+- Atomic switch — delivery and retirement call sites route through
+  `QueueLifecycle`; `PrimaryQueueStore` owns the production storage adapter and
+  retains a one-way migration for legacy `queue_pending` rows that may exist
+  before the cutover.
 
 ### Introspection
 
@@ -138,11 +136,11 @@ adapter.
 ## Consequences
 
 - The state machine concentrates in one Module with one test suite. Future
-  bug fixes to transitions don't have to be applied at three call sites.
+  bug fixes to transitions do not have to be applied at multiple call sites.
 - Replicas stay deterministic; primary failover preserves decisions because
   outcomes — not inputs — are replicated.
-- `QueueStore` trait enables unit-level testing without booting the engine.
-  Currently every queue test is an integration test.
+- `QueueStore` trait enables unit-level testing without booting the engine,
+  while `PrimaryQueueStore` covers runtime/MVCC parity against the real engine.
 - Wire compatibility window: drivers have one minor release to adopt
   `delivery_id`. Beyond that, tuple ACKs hard-deprecated.
 - No background machinery — no sweeper, no TTL reaper, no lock extender. The

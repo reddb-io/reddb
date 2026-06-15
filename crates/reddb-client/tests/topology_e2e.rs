@@ -166,7 +166,15 @@ impl RedDb for MockServer {
             columns: vec![],
             record_count: 0,
             result_json: r#"{"statement":"select","affected":0,"columns":[],"rows":[]}"#.into(),
+            affected_rows: 0,
         }))
+    }
+
+    async fn batch_insert(
+        &self,
+        _request: Request<tonic::Streaming<BatchInsertChunk>>,
+    ) -> Result<Response<BatchInsertReply>, Status> {
+        Ok(Response::new(BatchInsertReply { ok: true, count: 0 }))
     }
 
     async fn topology(

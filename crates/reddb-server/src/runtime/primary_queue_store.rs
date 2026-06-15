@@ -4,11 +4,10 @@
 //! real `UnifiedStore`. Lets `QueueLifecycle` drive deliver/ack/nack/dlq
 //! through an actual engine instead of the in-memory fake.
 //!
-//! Parallel implementation: this adapter writes its own meta-row kinds
-//! (`queue_pending_lc`, `queue_acked_lc`, `queue_attempts_lc`) so the
-//! legacy plumbing in `impl_queue.rs` / `queue_delivery.rs` (which uses
-//! `queue_pending` / `queue_ack`) keeps working untouched. Atomic cutover
-//! is slice 12.
+//! The adapter owns the production storage implementation for
+//! `QueueLifecycle`. It still understands legacy `queue_pending` rows so
+//! in-flight deliveries created before the cutover can be resolved, but
+//! new lifecycle POP/MOVE/delete paths are owned here.
 //!
 //! Policy fields (`max_attempts`, `lock_deadline_ms`,
 //! `in_flight_cap_per_group`, `dlq_target`) are read from the
@@ -87,12 +86,8 @@ impl PrimaryQueueStore {
         txn.record_pending_tombstone(queue, message_id);
         if !txn.has_context() {
             let store = self.store();
-            let _ = super::queue_delivery::delete_message_with_state(
-                Some(&self.runtime),
-                &store,
-                queue,
-                EntityId::new(message_id),
-            );
+            let _ =
+                delete_message_with_state(Some(&self.runtime), store.as_ref(), queue, message_id);
         }
     }
 
@@ -480,34 +475,60 @@ pub(crate) struct RuntimeQueueBridge {
     runtime: RedDBRuntime,
 }
 
-/// Bridge between the lifecycle `QueueSide` (defined in
-/// `storage::queue::deque`) and the AST `QueueSide` (defined in
-/// `storage::query::ast::core`) that `queue_delivery::pop_messages`
-/// consumes. Both enums have the same two variants but they live in
-/// separate modules and don't share a `From` impl — they may unify in a
-/// later cleanup, but for now this helper keeps the trait signature
-/// clean.
-fn queue_side_to_ast(
-    side: crate::storage::queue::lifecycle::QueueSide,
-) -> crate::storage::query::ast::QueueSide {
-    use crate::storage::query::ast::QueueSide as Ast;
-    use crate::storage::queue::lifecycle::QueueSide as Lc;
-    match side {
-        Lc::Left => Ast::Left,
-        Lc::Right => Ast::Right,
-    }
-}
-
 impl QueueTxnContext for RuntimeQueueBridge {
     fn retire_message(&self, queue: &str, message_id: MessageId) {
         let store = self.runtime.db().store();
-        let _ = super::queue_delivery::delete_message_with_state(
-            Some(&self.runtime),
-            &store,
-            queue,
-            EntityId::new(message_id),
-        );
+        let _ = delete_message_with_state(Some(&self.runtime), store.as_ref(), queue, message_id);
     }
+}
+
+fn delete_message_with_state(
+    runtime: Option<&RedDBRuntime>,
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: MessageId,
+) -> Result<()> {
+    let entity_id = EntityId::new(message_id);
+    if let Some(runtime) = runtime {
+        if let Some(xid) = runtime.current_xid() {
+            if let Some(manager) = store.get_collection(queue) {
+                if let Some(mut entity) = manager.get(entity_id) {
+                    if entity.xmax == 0 {
+                        let previous_xmax = entity.xmax;
+                        entity.set_xmax(xid);
+                        if manager.update(entity).is_ok() {
+                            let conn_id = crate::runtime::impl_core::current_connection_id();
+                            runtime.record_pending_tombstone(
+                                conn_id,
+                                queue,
+                                entity_id,
+                                xid,
+                                previous_xmax,
+                            );
+                            super::impl_queue::forget_queue_message_lock(runtime, queue, entity_id);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    remove_message_state(store, queue, message_id);
+    store
+        .delete(queue, entity_id)
+        .map_err(|_| QueueStoreError::UnknownQueue(queue.to_string()))?;
+    if let Some(runtime) = runtime {
+        super::impl_queue::forget_queue_message_lock(runtime, queue, entity_id);
+    }
+    Ok(())
+}
+
+fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: MessageId) {
+    super::impl_queue::remove_meta_rows(store, |row| {
+        super::impl_queue::row_text(row, "queue").as_deref() == Some(queue)
+            && super::impl_queue::row_u64(row, "message_id") == Some(message_id)
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -684,8 +705,7 @@ impl QueueStore for PrimaryQueueStore {
         // Retire the underlying message through the runtime MVCC path
         // (current_xid → set_xmax → record_pending_tombstone) rather than
         // an immediate hard delete, so an ack inside a statement that
-        // rolls back leaves the message visible again — parity with the
-        // legacy `queue_delivery::delete_message_with_state`.
+        // rolls back leaves the message visible again.
         self.retire_message_mvcc(txn, &row.queue, row.message_id);
         Ok(())
     }
@@ -902,56 +922,57 @@ impl QueueStore for PrimaryQueueStore {
 
     fn pop_available(
         &self,
-        _txn: &QueueTxn,
+        txn: &QueueTxn,
         queue: &str,
         side: QueueSide,
         count: usize,
     ) -> Result<Vec<(MessageId, Value)>> {
-        // Shim onto the existing `queue_delivery::pop_messages` flow.
-        // That helper holds the per-message lock, skips currently-pending
-        // rows, and retires each popped message through the same MVCC
-        // tombstone path `record_pending_tombstone` would route to via
-        // the live `QueueTxnContext`. The `_txn` argument is accepted
-        // for trait parity but ignored on the primary — the runtime
-        // tombstone bookkeeping happens inside `delete_message_with_state`.
+        if !self.queue_exists(queue) {
+            return Err(QueueStoreError::UnknownQueue(queue.to_string()));
+        }
         if count == 0 {
             return Ok(Vec::new());
         }
-        let store = self.runtime.db().store();
-        let popped = super::queue_delivery::pop_messages(
-            &self.runtime,
-            &store,
-            queue,
-            queue_side_to_ast(side),
-            count,
-        )
-        .map_err(|_| QueueStoreError::UnknownQueue(queue.to_string()))?;
-        Ok(popped
-            .into_iter()
-            .map(|m| (m.message_id.raw(), m.payload))
-            .collect())
+        let mut popped = Vec::new();
+        for message_id in self.available_messages(queue, side) {
+            if popped.len() >= count {
+                break;
+            }
+
+            let entity_id = EntityId::new(message_id);
+            let message_lock =
+                super::impl_queue::queue_message_lock_handle(&self.runtime, queue, entity_id);
+            let Some(_guard) = message_lock.try_lock() else {
+                continue;
+            };
+            if self.pending_message_ids(queue, None).contains(&message_id) {
+                continue;
+            }
+            let Some(payload) = self.read_message(queue, message_id) else {
+                continue;
+            };
+
+            popped.push((message_id, payload));
+            self.retire_message_mvcc(txn, queue, message_id);
+        }
+        Ok(popped)
     }
 
-    fn delete_with_state(&self, _txn: &QueueTxn, queue: &str, message_id: MessageId) -> Result<()> {
-        // Shim onto `queue_delivery::delete_message_with_state`, which
-        // walks the same `current_xid → set_xmax → record_pending_tombstone`
-        // path the `RuntimeQueueBridge::retire_message` adapter uses.
-        // `_txn` is accepted for trait parity but ignored — the runtime
-        // owns the tombstone log on the primary.
+    fn delete_with_state(&self, txn: &QueueTxn, queue: &str, message_id: MessageId) -> Result<()> {
+        if !self.queue_exists(queue) {
+            return Err(QueueStoreError::UnknownQueue(queue.to_string()));
+        }
+        if txn.has_context() {
+            txn.record_pending_tombstone(queue, message_id);
+            return Ok(());
+        }
         let store = self.runtime.db().store();
-        super::queue_delivery::delete_message_with_state(
-            Some(&self.runtime),
-            &store,
-            queue,
-            EntityId::new(message_id),
-        )
-        .map_err(|_| QueueStoreError::UnknownQueue(queue.to_string()))?;
-        Ok(())
+        delete_message_with_state(Some(&self.runtime), store.as_ref(), queue, message_id)
     }
 
     fn move_to_queue(
         &self,
-        _txn: &QueueTxn,
+        txn: &QueueTxn,
         source: &str,
         dest: &str,
         side: QueueSide,
@@ -968,21 +989,13 @@ impl QueueStore for PrimaryQueueStore {
             return Ok(0);
         }
         let store = self.runtime.db().store();
-        let popped = super::queue_delivery::pop_messages(
-            &self.runtime,
-            &store,
-            source,
-            queue_side_to_ast(side),
-            count,
-        )
-        .map_err(|_| QueueStoreError::UnknownQueue(source.to_string()))?;
+        let popped = self.pop_available(txn, source, side, count)?;
         if popped.is_empty() {
             return Ok(0);
         }
         let mut inserted: Vec<EntityId> = Vec::with_capacity(popped.len());
-        for msg in &popped {
-            match super::impl_queue::insert_moved_queue_message_payload(&store, dest, &msg.payload)
-            {
+        for (_, payload) in &popped {
+            match super::impl_queue::insert_moved_queue_message_payload(&store, dest, payload) {
                 Ok(id) => inserted.push(id),
                 Err(_) => {
                     for id in inserted {
@@ -1380,7 +1393,7 @@ mod tests {
     // `current_xid → set_xmax → record_pending_tombstone` instead of an
     // immediate hard delete. Inside a transaction that rolls back, the
     // message must be visible again; on commit it must be gone — parity
-    // with the legacy `queue_delivery::delete_message_with_state`.
+    // with the pre-lifecycle delete-with-state behavior.
     //
     // Observable through the legacy `QUEUE READ` path, which applies MVCC
     // snapshot visibility (so a committed tombstone hides the message and

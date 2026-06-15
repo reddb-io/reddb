@@ -36,6 +36,7 @@ services:
       - REDDB_NODE_ROLE=primary
       - REDDB_STORAGE_PRESET=primary-replica-production-ha
       - REDDB_STORAGE_PROFILE=primary-replica
+      - REDDB_STORAGE_PACKAGING=operational-directory
       - REDDB_REPLICA_COUNT=1
       - REDDB_CONFIG_FILE=/etc/reddb/config.json
     healthcheck:
@@ -76,6 +77,7 @@ services:
       - REDDB_NODE_ROLE=replica
       - REDDB_STORAGE_PRESET=primary-replica-production-ha
       - REDDB_STORAGE_PROFILE=primary-replica
+      - REDDB_STORAGE_PACKAGING=operational-directory
       - REDDB_REPLICA_COUNT=1
       - REDDB_PRIMARY_ADDR=http://primary:50051
       - REDDB_CONFIG_FILE=/etc/reddb/config.json

@@ -79,9 +79,22 @@
     "storage": {
       "type": "object",
       "properties": {
-        "preset": { "type": "string" },
-        "profile": { "type": "string" },
-        "packaging": { "type": "string" },
+        "preset": {
+          "type": "string",
+          "enum": [
+            "",
+            "embedded",
+            "serverless",
+            "primary-replica-dev",
+            "primary-replica-small",
+            "primary-replica-production-ha",
+            "primary-replica-backup",
+            "primary-replica-wal-retention",
+            "cluster"
+          ]
+        },
+        "profile": { "type": "string", "enum": ["", "embedded", "serverless", "primary-replica", "cluster"] },
+        "packaging": { "type": "string", "enum": ["", "single-file", "operational-directory"] },
         "managedBackup": { "type": ["boolean", "string"] },
         "walRetention": { "type": ["boolean", "string"] }
       }

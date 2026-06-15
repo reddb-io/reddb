@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "description": "Index of RedDB contract authorities. Shared cross-driver fixtures may live under testdata/conformance, but each fixture must be listed here with its owning contract.",
+  "authorities": [
+    {
+      "id": "public-surface-contract-matrix",
+      "type": "file",
+      "path": "docs/conformance/public-surface-contract-matrix.json",
+      "owns": "public promise support status and backing-test requirements"
+    },
+    {
+      "id": "sdk-helper-spec",
+      "type": "file",
+      "path": "docs/spec/sdk-helpers.md",
+      "owns": "driver helper API behavior"
+    },
+    {
+      "id": "rust-sdk-helper-reference",
+      "type": "file",
+      "path": "crates/reddb-client/tests/conformance.rs",
+      "owns": "reference SDK helper conformance harness"
+    },
+    {
+      "id": "rql-standard-corpus",
+      "type": "directory",
+      "path": "crates/reddb-rql/tests/corpus",
+      "owns": "standard SQL sqllogictest corpus"
+    },
+    {
+      "id": "rql-reddb-corpus",
+      "type": "directory",
+      "path": "crates/reddb-rql/tests/reddb_corpus",
+      "owns": "RedDB-only RQL sqllogictest corpus"
+    },
+    {
+      "id": "rql-rendering-authority",
+      "type": "file",
+      "path": "crates/reddb-rql/src/conformance.rs",
+      "owns": "storage-agnostic sqllogictest cell rendering"
+    },
+    {
+      "id": "redwire-param-fixtures",
+      "type": "file",
+      "path": "testdata/conformance/redwire/params/manifest.json",
+      "owns": "RedWire parameter/value golden fixtures"
+    },
+    {
+      "id": "redwire-protocol-authority",
+      "type": "file",
+      "path": "crates/reddb-wire/tests/protocol_authority.rs",
+      "owns": "RedWire protocol authority fence"
+    },
+    {
+      "id": "file-layout-authority",
+      "type": "file",
+      "path": "crates/reddb-file/tests/layout_authority.rs",
+      "owns": "file layout authority fence"
+    },
+    {
+      "id": "file-layout-authority-modules",
+      "type": "directory",
+      "path": "crates/reddb-file/tests/layout_authority",
+      "owns": "file layout authority module tests"
+    }
+  ]
+}

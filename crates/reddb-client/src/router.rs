@@ -40,6 +40,8 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::topology::ClusterMembership;
+
 /// EWMA smoothing factor. New samples get 20% weight; the existing
 /// average keeps 80%. This corresponds to a soft window of ~5
 /// samples for trend tracking; the formal "100 calls" window from the
@@ -57,42 +59,6 @@ pub const DEFAULT_TIMEOUT_THRESHOLD: u32 = 3;
 
 /// Default probe cadence for the health checker.
 pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Cluster membership snapshot the router consumes.
-///
-/// Lane P (#168 `TopologyConsumer`) emits a richer struct; for now
-/// the router only needs the URLs in primary-then-replicas order so
-/// it can map them onto the `GrpcClient`'s endpoint pool.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClusterMembership {
-    /// Primary endpoint URL.
-    pub primary: String,
-    /// Replica endpoint URLs in declaration order.
-    pub replicas: Vec<String>,
-}
-
-impl ClusterMembership {
-    pub fn new(primary: String, replicas: Vec<String>) -> Self {
-        Self { primary, replicas }
-    }
-
-    /// Total endpoint count (primary + replicas).
-    pub fn len(&self) -> usize {
-        1 + self.replicas.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        false
-    }
-
-    /// All URLs in primary-then-replicas order.
-    fn urls(&self) -> Vec<String> {
-        let mut out = Vec::with_capacity(self.len());
-        out.push(self.primary.clone());
-        out.extend(self.replicas.iter().cloned());
-        out
-    }
-}
 
 /// Result of an RPC the router cares about. Either we measured an
 /// RTT (success) or the call hit a timeout (failure that contributes
@@ -277,7 +243,7 @@ impl HealthAwareRouter {
         clock: Box<dyn Clock>,
     ) -> Self {
         let endpoints: Vec<EndpointHealth> = membership
-            .urls()
+            .endpoint_addrs()
             .into_iter()
             .map(EndpointHealth::new)
             .collect();
@@ -403,7 +369,7 @@ impl HealthAwareRouter {
     /// disappear are dropped.
     pub fn update_membership(&mut self, new_membership: ClusterMembership) {
         let mut endpoints = self.endpoints.lock().unwrap();
-        let new_urls = new_membership.urls();
+        let new_urls = new_membership.endpoint_addrs();
         let mut next: Vec<EndpointHealth> = Vec::with_capacity(new_urls.len());
         for url in new_urls {
             if let Some(existing) = endpoints.iter().find(|ep| ep.url == url) {
@@ -500,7 +466,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn membership(primary: &str, replicas: &[&str]) -> ClusterMembership {
-        ClusterMembership::new(
+        ClusterMembership::from_uri_addresses(
             primary.to_string(),
             replicas.iter().map(|s| s.to_string()).collect(),
         )
@@ -692,7 +658,10 @@ mod proptest_router {
             let names: Vec<String> = (0..rtts.len()).map(|i| format!("r{i}")).collect();
             let replicas: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let router = HealthAwareRouter::new(
-                ClusterMembership::new("primary".into(), replicas.iter().map(|s| s.to_string()).collect())
+                ClusterMembership::from_uri_addresses(
+                    "primary".to_string(),
+                    replicas.iter().map(|s| s.to_string()).collect(),
+                )
             );
             // Seed RTTs.
             for (i, &rtt_ms) in rtts.iter().enumerate() {
@@ -730,7 +699,7 @@ mod proptest_router {
             seq in proptest::collection::vec(any::<bool>(), 1..40usize),
         ) {
             let router = HealthAwareRouter::with_config(
-                ClusterMembership::new("p".into(), vec!["r1".into()]),
+                ClusterMembership::from_uri_addresses("p".to_string(), vec!["r1".into()]),
                 RouterConfig { timeout_threshold: DEFAULT_TIMEOUT_THRESHOLD, probe_interval: DEFAULT_PROBE_INTERVAL },
                 Box::new(SystemClock),
             );

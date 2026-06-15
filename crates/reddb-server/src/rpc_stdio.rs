@@ -706,15 +706,15 @@ fn dispatch_method(
                 .transpose()?;
 
             if let Some(binds) = bind_values {
-                use crate::storage::query::modes::parse_multi;
-                use crate::storage::query::user_params;
-                let parsed =
-                    parse_multi(sql).map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-                let bound = user_params::bind(&parsed, &binds)
-                    .map_err(|e| (error_code::INVALID_PARAMS, e.to_string()))?;
                 let qr = runtime
-                    .execute_query_expr(bound)
-                    .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+                    .execute_query_with_params(sql, &binds)
+                    .map_err(|e| {
+                        if matches!(e, crate::api::RedDBError::Validation { .. }) {
+                            (error_code::INVALID_PARAMS, e.to_string())
+                        } else {
+                            (error_code::QUERY_ERROR, e.to_string())
+                        }
+                    })?;
                 return Ok(query_result_to_json(&qr));
             }
 

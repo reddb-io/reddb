@@ -1087,7 +1087,7 @@ mod tests {
             .expect("SELECT 1 executes under tenant=acme/identity=alice");
         assert_eq!(result.statement_type, "select");
 
-        // The SELECT path (in `execute_query_expr`) builds a frame and
+        // The textual SELECT path builds a frame and
         // writes its result through `frame.cache_key()`. That key folds
         // tenant + identity in via `result_cache_key`, so finding "acme"
         // and "alice" inside any cached key proves the frame was the
@@ -1394,12 +1394,15 @@ mod tests {
         // > DEFAULT_HIGH_WATER_MARK (1024) rows so the streaming channel
         // spans multiple chunks and the arena buffer is reused.
         const N: usize = 2_500;
-        let values = (0..N)
-            .map(|i| format!("({i})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        rt.execute_query(&format!("INSERT INTO big (id) VALUES {values}"))
-            .expect("insert rows");
+        for start in (0..N).step_by(250) {
+            let end = (start + 250).min(N);
+            let values = (start..end)
+                .map(|i| format!("({i})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            rt.execute_query(&format!("INSERT INTO big (id) VALUES {values}"))
+                .unwrap_or_else(|err| panic!("insert rows {start}..{end}: {err:?}"));
+        }
 
         let result = rt
             .execute_query("SELECT id FROM big ORDER BY id")
@@ -1419,6 +1422,38 @@ mod tests {
         }
 
         reset_thread_locals();
+    }
+
+    /// Transport adapters may decode their wire-specific parameter value
+    /// shapes, but SQL parsing/binding must stay behind the runtime's
+    /// statement entrypoint. This pins the deeper seam introduced for
+    /// parameterized query execution: HTTP, JSON-RPC, RedWire, PG wire,
+    /// and gRPC all call `RedDBRuntime::execute_query_with_params`, which
+    /// installs a real `StatementExecutionFrame` before dispatch.
+    #[test]
+    fn parameterized_transport_adapters_delegate_binding_to_runtime() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let adapters = [
+            "src/server/handlers_query.rs",
+            "src/rpc_stdio.rs",
+            "src/wire/redwire/session.rs",
+            "src/wire/postgres/server.rs",
+            "src/grpc.rs",
+        ];
+
+        for relative in adapters {
+            let path = manifest_dir.join(relative);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            assert!(
+                text.contains("execute_query_with_params"),
+                "{relative} should delegate parameterized query execution to the runtime"
+            );
+            assert!(
+                !text.contains("user_params::bind"),
+                "{relative} must not bind SQL params in the transport adapter"
+            );
+        }
     }
 
     /// Deletion-test for `ReadFrame::lock_intent`: a transaction

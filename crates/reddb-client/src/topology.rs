@@ -27,7 +27,7 @@
 //!
 //! [`TopologyConsumer::should_refresh`] short-circuits when the
 //! observed epoch matches the current one. A higher-level driver
-//! (the future `HealthAwareRouter` in lane Q) is expected to:
+//! such as `GrpcClient` / `HealthAwareRouter` is expected to:
 //!
 //! * Poll the [`Topology`] RPC at a configured interval (default
 //!   30s — see [`DEFAULT_REFRESH_INTERVAL`]).
@@ -92,12 +92,55 @@ impl UriSeed {
 /// The merged, route-ready view of the cluster.
 ///
 /// The fields are the wire-canonical types from `reddb-wire` so a
-/// future router can read them without translating shapes again.
+/// router can read them without translating shapes again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterMembership {
     pub primary: WireEndpoint,
     pub replicas: Vec<ReplicaInfo>,
     pub epoch: u64,
+}
+
+impl ClusterMembership {
+    /// Build a canonical membership snapshot from URI-only routing
+    /// hints. This is the fallback shape used before a topology
+    /// advertisement arrives, or when an advertisement is recoverably
+    /// rejected. Wire-derived metadata is intentionally defaulted:
+    /// unknown region, healthy until observed otherwise, no known lag,
+    /// and no applied frontier.
+    pub fn from_uri_addresses(primary: impl Into<String>, replicas: Vec<String>) -> Self {
+        Self {
+            primary: WireEndpoint {
+                addr: primary.into(),
+                region: String::new(),
+            },
+            replicas: replicas
+                .into_iter()
+                .map(|addr| ReplicaInfo {
+                    addr,
+                    region: String::new(),
+                    healthy: true,
+                    lag_ms: 0,
+                    last_applied_lsn: 0,
+                    rebootstrapping: false,
+                })
+                .collect(),
+            epoch: 0,
+        }
+    }
+
+    /// Endpoint addresses in the router/pool index order:
+    /// primary first, then advertised replicas.
+    pub fn endpoint_addrs(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(1 + self.replicas.len());
+        out.push(self.primary.addr.clone());
+        out.extend(self.replicas.iter().map(|r| r.addr.clone()));
+        out
+    }
+
+    /// Replica endpoint addresses in advertised order.
+    pub fn replica_addrs(&self) -> Vec<String> {
+        self.replicas.iter().map(|r| r.addr.clone()).collect()
+    }
 }
 
 /// Decode + merge errors. The unknown-version and malformed-envelope
@@ -503,6 +546,24 @@ mod tests {
         let field = encode_topology_for_hello_ack(&t);
         let recovered = decode_base64(&field).expect("base64");
         assert_eq!(recovered, a);
+    }
+
+    #[test]
+    fn uri_addresses_build_canonical_membership() {
+        let m = ClusterMembership::from_uri_addresses(
+            "primary:5050".to_string(),
+            vec!["replica-a:5050".to_string(), "replica-b:5050".to_string()],
+        );
+        assert_eq!(m.epoch, 0);
+        assert_eq!(m.primary.addr, "primary:5050");
+        assert_eq!(m.primary.region, "");
+        assert_eq!(
+            m.endpoint_addrs(),
+            vec!["primary:5050", "replica-a:5050", "replica-b:5050"]
+        );
+        assert_eq!(m.replica_addrs(), vec!["replica-a:5050", "replica-b:5050"]);
+        assert!(m.replicas.iter().all(|r| r.healthy));
+        assert!(m.replicas.iter().all(|r| r.region.is_empty()));
     }
 
     // ---- merge rule ----

@@ -102,14 +102,16 @@ All lock-stepped targets must report the same version.
 RedDB publishes under two registry conventions:
 
 - npm packages use the `@reddb-io/*` organization scope.
-- crates.io packages use the `reddb` / `reddb-*` prefix because crates.io
-  does not support npm-style organization scopes.
+- crates.io packages use the `reddb-io` / `reddb-io-*` prefix to mirror the
+  npm organization name even though crates.io does not support npm-style
+  organization scopes.
 - container images publish to GHCR under the `reddb-io` GitHub organization.
 
 Run this local invariant before changing release or driver manifests:
 
 ```bash
 node scripts/check-registry-names.mjs
+node scripts/check-contract-authorities.mjs
 ```
 
 ### npm
@@ -221,7 +223,8 @@ fallback.
 Probe the current state at any time:
 
 ```bash
-bash scripts/check-registry-names.mjs   # local invariants
+node scripts/check-registry-names.mjs   # local invariants
+node scripts/check-contract-authorities.mjs
 node -e "fetch('https://crates.io/api/v1/crates/reddb-io').then(r=>r.json()).then(j=>console.log(j.crate&&j.crate.max_version||'NONE'))"
 curl -fsSL https://pypi.org/pypi/reddb/json | jq -r .info.version
 curl -fsSL https://pypi.org/pypi/reddb-asyncio/json | jq -r .info.version
