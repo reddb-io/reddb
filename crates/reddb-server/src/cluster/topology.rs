@@ -40,9 +40,10 @@ use std::collections::BTreeMap;
 use super::identity::NodeIdentity;
 use super::ownership::{
     CatalogVersion, CollectionId, OwnershipEpoch, RangeBounds, RangeId, RangeOwnership,
-    ShardOwnershipCatalog,
+    ShardKeyMode, ShardOwnershipCatalog,
 };
 use super::routing::RoutingHint;
+use super::slot::hash_shard_key_to_range_key;
 
 /// One range's routing metadata as a driver sees it.
 ///
@@ -56,6 +57,7 @@ use super::routing::RoutingHint;
 pub struct TopologyRange {
     collection: CollectionId,
     range_id: RangeId,
+    shard_key_mode: ShardKeyMode,
     bounds: RangeBounds,
     owner: NodeIdentity,
     replicas: Vec<NodeIdentity>,
@@ -68,6 +70,7 @@ impl TopologyRange {
         Self {
             collection: range.collection().clone(),
             range_id: range.range_id(),
+            shard_key_mode: range.shard_key_mode(),
             bounds: range.bounds().clone(),
             owner: range.owner().clone(),
             replicas: range.replicas().to_vec(),
@@ -82,6 +85,10 @@ impl TopologyRange {
 
     pub fn range_id(&self) -> RangeId {
         self.range_id
+    }
+
+    pub fn shard_key_mode(&self) -> ShardKeyMode {
+        self.shard_key_mode
     }
 
     pub fn bounds(&self) -> &RangeBounds {
@@ -115,12 +122,12 @@ impl TopologyRange {
 /// A point-in-time, driver-facing projection of the ownership catalog — the
 /// payload a topology poll returns.
 ///
-/// The [`version`](Self::version) is the snapshot's generation: the **maximum**
-/// catalog version across its ranges (or [`CatalogVersion::initial`] for an empty
-/// cluster). Because every accepted catalog edit strictly advances a range's
-/// version, this max is a monotonic high-water mark — a snapshot with a strictly
-/// greater version is strictly newer, which is exactly what a driver compares to
-/// decide whether to adopt a freshly polled or pushed snapshot.
+/// The [`version`](Self::version) is the snapshot's high-water mark: the
+/// **maximum** catalog version across its ranges (or [`CatalogVersion::initial`]
+/// for an empty cluster). It is monotonic, but not a complete generation number:
+/// two different ranges can independently advance to the same version. Drivers
+/// therefore use it as a cheap stale-snapshot guard and still compare per-range
+/// content for same-version full refreshes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopologySnapshot {
     version: CatalogVersion,
@@ -145,13 +152,34 @@ impl TopologySnapshot {
             .find(|r| r.collection() == collection && r.range_id() == range_id)
     }
 
-    /// Route a key to the range that owns it, by the same half-open containment
-    /// predicate the server uses — so a driver can resolve owners locally without
-    /// a round trip.
+    /// Route a normalized range key to the range that owns it, by the same
+    /// half-open containment predicate the server uses.
     pub fn route(&self, collection: &CollectionId, key: &[u8]) -> Option<&TopologyRange> {
         self.ranges
             .iter()
             .find(|r| r.collection() == collection && r.bounds().contains(key))
+    }
+
+    /// Route a logical shard key through the collection's shard-key mode.
+    pub fn route_shard_key(
+        &self,
+        collection: &CollectionId,
+        shard_key: &[u8],
+    ) -> Option<&TopologyRange> {
+        match self.shard_key_mode(collection)? {
+            ShardKeyMode::Ordered => self.route(collection, shard_key),
+            ShardKeyMode::Hash => {
+                let range_key = hash_shard_key_to_range_key(shard_key);
+                self.route(collection, &range_key)
+            }
+        }
+    }
+
+    fn shard_key_mode(&self, collection: &CollectionId) -> Option<ShardKeyMode> {
+        self.ranges
+            .iter()
+            .find(|range| range.collection() == collection)
+            .map(TopologyRange::shard_key_mode)
     }
 }
 
@@ -271,8 +299,7 @@ impl ClientTopology {
         self.needs_refresh
     }
 
-    /// The cached range owning `key`, by the same half-open routing predicate the
-    /// server uses.
+    /// The cached range owning a normalized range key.
     pub fn route(&self, collection: &CollectionId, key: &[u8]) -> Option<&TopologyRange> {
         self.ranges
             .values()
@@ -281,7 +308,30 @@ impl ClientTopology {
 
     /// The owner a driver should send a request for `key` to — the routing answer.
     pub fn resolve(&self, collection: &CollectionId, key: &[u8]) -> Option<&NodeIdentity> {
-        self.route(collection, key).map(TopologyRange::owner)
+        self.route_shard_key(collection, key)
+            .map(TopologyRange::owner)
+    }
+
+    /// The cached range owning a logical shard key.
+    pub fn route_shard_key(
+        &self,
+        collection: &CollectionId,
+        shard_key: &[u8],
+    ) -> Option<&TopologyRange> {
+        match self.shard_key_mode(collection)? {
+            ShardKeyMode::Ordered => self.route(collection, shard_key),
+            ShardKeyMode::Hash => {
+                let range_key = hash_shard_key_to_range_key(shard_key);
+                self.route(collection, &range_key)
+            }
+        }
+    }
+
+    fn shard_key_mode(&self, collection: &CollectionId) -> Option<ShardKeyMode> {
+        self.ranges
+            .values()
+            .find(|range| range.collection() == collection)
+            .map(TopologyRange::shard_key_mode)
     }
 
     /// One cached range by identity.
@@ -291,14 +341,17 @@ impl ClientTopology {
 
     /// Adopt a freshly polled snapshot — the authoritative refresh path.
     ///
-    /// Monotonic: the snapshot is adopted only if its generation strictly advances
-    /// the cache's authoritative [`version`](Self::version) (or the cache is
-    /// empty). A newer snapshot replaces the cached ranges wholesale and clears
-    /// [`needs_refresh`](Self::needs_refresh); an equal-or-older one is
-    /// [`Ignored`](RefreshOutcome::Ignored), so a late or duplicated poll can never
-    /// roll the cache backwards.
+    /// Monotonic: the snapshot is adopted if its generation advances the cache's
+    /// authoritative [`version`](Self::version), or if it carries same-generation
+    /// range content that does not roll any cached range backwards. An adopted
+    /// snapshot replaces the cached ranges wholesale and clears
+    /// [`needs_refresh`](Self::needs_refresh); an older or duplicate one is
+    /// [`Ignored`](RefreshOutcome::Ignored).
     pub fn apply_refresh(&mut self, snapshot: TopologySnapshot) -> RefreshOutcome {
-        if !self.ranges.is_empty() && snapshot.version() <= self.version {
+        if !self.ranges.is_empty() && snapshot.version() < self.version {
+            return RefreshOutcome::Ignored;
+        }
+        if self.snapshot_rolls_back_any_range(&snapshot) {
             return RefreshOutcome::Ignored;
         }
         let mut changed = 0usize;
@@ -310,12 +363,23 @@ impl ClientTopology {
             }
             next.insert(key, range);
         }
+        if !self.ranges.is_empty() && snapshot.version <= self.version && changed == 0 {
+            return RefreshOutcome::Ignored;
+        }
         self.ranges = next;
         self.version = snapshot.version;
         self.needs_refresh = false;
         RefreshOutcome::Applied {
             ranges_changed: changed,
         }
+    }
+
+    fn snapshot_rolls_back_any_range(&self, snapshot: &TopologySnapshot) -> bool {
+        snapshot.ranges().iter().any(|incoming| {
+            self.ranges
+                .get(&incoming.key())
+                .is_some_and(|current| incoming.version() < current.version())
+        })
     }
 
     /// Fold a pushed topology update in — the optional push/subscription path.
@@ -423,6 +487,35 @@ mod tests {
         )
     }
 
+    fn single_hash_slot_bounds(key: &[u8]) -> RangeBounds {
+        let slot = super::super::slot::hash_shard_key_to_slot(key);
+        let lower = RangeBound::key(slot.range_key());
+        let upper = match slot.value().checked_add(1) {
+            Some(next) if next < super::super::slot::PRODUCTION_HASH_SLOT_COUNT => {
+                RangeBound::key(super::super::slot::HashSlot::new(next).unwrap().range_key())
+            }
+            _ => RangeBound::Max,
+        };
+        RangeBounds::new(lower, upper).unwrap()
+    }
+
+    fn hash_slot_range(
+        coll: &CollectionId,
+        id: u64,
+        shard_key: &[u8],
+        owner: &str,
+    ) -> RangeOwnership {
+        RangeOwnership::establish(
+            coll.clone(),
+            RangeId::new(id),
+            ShardKeyMode::Hash,
+            single_hash_slot_bounds(shard_key),
+            ident(owner),
+            Vec::<NodeIdentity>::new(),
+            PlacementMetadata::with_replication_factor(1),
+        )
+    }
+
     fn catalog_with(ranges: impl IntoIterator<Item = RangeOwnership>) -> ShardOwnershipCatalog {
         let mut catalog = ShardOwnershipCatalog::new();
         for range in ranges {
@@ -495,6 +588,20 @@ mod tests {
         assert!(!client.needs_refresh());
     }
 
+    #[test]
+    fn client_resolves_hash_collection_by_shard_key_slot() {
+        let orders = collection("orders");
+        let key = b"tenant:42";
+        let catalog = catalog_with([hash_slot_range(&orders, 1, key, "CN=node-a")]);
+        let client = ClientTopology::from_snapshot(catalog.topology_snapshot());
+
+        let routed = client
+            .route_shard_key(&orders, key)
+            .expect("hash slot range covers the logical shard key");
+        assert_eq!(routed.owner(), &ident("CN=node-a"));
+        assert_eq!(client.resolve(&orders, key).unwrap(), &ident("CN=node-a"));
+    }
+
     // AC #3 + polling baseline: refresh is monotonic — a newer poll is adopted, a
     // stale or duplicate poll is ignored and cannot roll the cache backwards.
     #[test]
@@ -520,6 +627,109 @@ mod tests {
 
         // Re-applying the same snapshot is a no-op.
         assert_eq!(client.apply_refresh(fresh), RefreshOutcome::Ignored);
+    }
+
+    #[test]
+    fn refresh_applies_same_generation_snapshot_when_another_range_changed() {
+        let parts = collection("parts");
+        let mut catalog = catalog_with([
+            split_range(
+                &parts,
+                1,
+                RangeBound::Min,
+                RangeBound::key(b"m"),
+                "CN=node-a",
+            ),
+            split_range(
+                &parts,
+                2,
+                RangeBound::key(b"m"),
+                RangeBound::Max,
+                "CN=node-b",
+            ),
+        ]);
+        let mut client = ClientTopology::from_snapshot(catalog.topology_snapshot());
+
+        let r1 = catalog.range(&parts, RangeId::new(1)).unwrap().clone();
+        catalog
+            .apply_update(r1.transfer_to(ident("CN=node-c"), Vec::<NodeIdentity>::new()))
+            .unwrap();
+        assert_eq!(
+            client.apply_refresh(catalog.topology_snapshot()),
+            RefreshOutcome::Applied { ranges_changed: 1 }
+        );
+        assert_eq!(
+            client.resolve(&parts, b"apple").unwrap(),
+            &ident("CN=node-c")
+        );
+
+        let r2 = catalog.range(&parts, RangeId::new(2)).unwrap().clone();
+        catalog
+            .apply_update(r2.transfer_to(ident("CN=node-d"), Vec::<NodeIdentity>::new()))
+            .unwrap();
+        let same_generation = catalog.topology_snapshot();
+        assert_eq!(same_generation.version(), client.version());
+
+        assert_eq!(
+            client.apply_refresh(same_generation),
+            RefreshOutcome::Applied { ranges_changed: 1 }
+        );
+        assert_eq!(
+            client.resolve(&parts, b"zebra").unwrap(),
+            &ident("CN=node-d")
+        );
+    }
+
+    #[test]
+    fn equal_generation_refresh_does_not_roll_back_a_newer_range() {
+        let parts = collection("parts");
+        let base = catalog_with([
+            split_range(
+                &parts,
+                1,
+                RangeBound::Min,
+                RangeBound::key(b"m"),
+                "CN=node-a",
+            ),
+            split_range(
+                &parts,
+                2,
+                RangeBound::key(b"m"),
+                RangeBound::Max,
+                "CN=node-b",
+            ),
+        ]);
+        let mut current_catalog = base.clone();
+        let mut stale_fork = base;
+        let mut client = ClientTopology::from_snapshot(current_catalog.topology_snapshot());
+
+        let r1 = current_catalog
+            .range(&parts, RangeId::new(1))
+            .unwrap()
+            .clone();
+        current_catalog
+            .apply_update(r1.transfer_to(ident("CN=node-c"), Vec::<NodeIdentity>::new()))
+            .unwrap();
+        assert!(client
+            .apply_refresh(current_catalog.topology_snapshot())
+            .was_applied());
+
+        let r2 = stale_fork.range(&parts, RangeId::new(2)).unwrap().clone();
+        stale_fork
+            .apply_update(r2.transfer_to(ident("CN=node-d"), Vec::<NodeIdentity>::new()))
+            .unwrap();
+        let fork_snapshot = stale_fork.topology_snapshot();
+        assert_eq!(fork_snapshot.version(), client.version());
+
+        assert_eq!(client.apply_refresh(fork_snapshot), RefreshOutcome::Ignored);
+        assert_eq!(
+            client.resolve(&parts, b"apple").unwrap(),
+            &ident("CN=node-c")
+        );
+        assert_eq!(
+            client.resolve(&parts, b"zebra").unwrap(),
+            &ident("CN=node-b")
+        );
     }
 
     // AC #2 + AC #3: a stale-ownership redirect hint corrects the cache without

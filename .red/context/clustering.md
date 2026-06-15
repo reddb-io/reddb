@@ -18,10 +18,16 @@ Part of the [glossary map](../CONTEXT-MAP.md). Multi-writer clusters where data 
 
 ## Shard/range ownership
 
+- **Shard key** — collection/table field or key expression used to place user data in cluster mode. Cluster collections either declare `SHARD BY` or use an explicit collection-kind default. This is the user-facing logical choice; users choose `tenant_id`, primary key, document id, etc., not physical ranges or node numbers. A good shard key is high-cardinality, naturally spread out, and aligned with common point queries.
+- **Hash slot** — fixed logical bucket produced by hashing a shard key in hash-partitioned cluster collections. Slots are stable cluster-format units; they are not recalculated from the current member count and are not chosen directly by users.
+- **Cluster slot map** — operator/runtime view of which shard group owns each hash slot or contiguous slot span. In RedDB this is projected from the shard ownership catalog; it is routing metadata, not a separate authority.
+- **Routing cache** — driver or node-local cache from collection/range or collection/hash-slot to owner, replicas, ownership epoch, and cluster-map epoch/catalog version. It is an optimization over topology refresh and routing hints; ownership fencing below routing remains the correctness mechanism.
+- **Shard group** — one owned partition group in a cluster: a slot/range write primary plus its configured range replicas. A cluster is many shard groups under one control plane, and each shard group behaves like a small primary-replica group for HA, catch-up, read routing, and promotion safety.
 - **Shard/range ownership** — write authority for a bounded partition of collection data. In a multi-writer RedDB cluster, ownership is assigned at shard/range granularity rather than whole-collection granularity.
+- **Range placement** — internal RedDB control-plane decision that maps an ordered key span or hash-slot span to a shard group and current range owner. The Cluster Supervisor may split, move, or rebalance ranges without changing the collection's logical `SHARD BY` contract.
 - **Range owner** — current writer for one shard/range. In a multi-writer cluster, write authority is a per-range role rather than a global node role.
 - **Range replica** — read-only/catch-up copy of one shard/range that can be promoted to range owner if it covers the range commit watermark and wins the required ownership transition.
-- **Shard key mode** — collection-level partitioning mode for shard/range ownership. Hash mode is the default for uniform distribution; ordered mode is declared when range locality and ordered scans matter more than automatic hotspot resistance.
+- **Shard key mode** — collection-level partitioning mode for shard/range ownership. Hash mode is the default for uniform distribution: `shard key -> hash -> slot -> range`. Ordered mode is declared when range locality and ordered scans matter more than automatic hotspot resistance: `shard key -> range`.
 - **Shard ownership catalog** — explicit, versioned RedDB catalog state that records shard/range bounds, current writer owner, replicas, and ownership epoch/version. It is the source of truth for range routing, failover, split/merge, and rebalancing decisions. It is special global control-plane state replicated to all data members rather than sharded like ordinary user collections. Normal writes to it are performed by the Cluster Supervisor leader; administrative recovery may force transitions under the forced-ownership rules.
 - **Ownership transition** — fenced, audited change to shard/range ownership, requested either by the Cluster Supervisor or by an authorized administrative recovery command. Operators request transitions such as move, split, merge, or promote; they do not mutate shard ownership catalog rows arbitrarily.
 - **Forced ownership transition** — disaster-recovery form of an ownership transition that can proceed without ordinary cluster quorum. It requires a special administrative capability, explicit operator reason, audit evidence, and an ownership epoch bump that fences any old owner still alive.
@@ -35,12 +41,16 @@ Part of the [glossary map](../CONTEXT-MAP.md). Multi-writer clusters where data 
 
 ## Cross-range operations
 
+- **Cross-shard operation** — product-facing name for an operation whose target set spans multiple shard groups. The implementation-level term is cross-range because ownership and fencing are recorded at range granularity.
 - **Cross-range write transaction** — transaction whose write set spans shard/ranges owned by different writers. The first multi-writer cluster cut rejects these transactions rather than committing partial work or introducing two-phase commit in the ownership/failover milestone.
 - **Cross-range read** — read query whose target set spans shard/ranges that may be owned by different writers. The first multi-writer cluster cut supports a simple fanout mode without a global snapshot, while explicit consistent/transactional reads require a global causal watermark or equivalent safe snapshot point.
+- **Bounded scatter-gather** — cross-range read execution shape where a coordinator fans out to participating shard groups, collects partial results, and merges them under explicit timeout, shard-count, row/byte, memory, partial-response, and tracing budgets.
+- **Cross-shard result cache** — short-lived cache for expensive global read results keyed by query identity and catalog generation, with safe-snapshot/watermark identity included when the result claims consistency.
 - **Stale ownership response** — routing correction returned when a request uses an old shard/range ownership epoch. The response carries enough current epoch/owner information for clients or routers to refresh and retry; pushed topology updates are an optimization, not the correctness mechanism.
 
 ## Placement & rebalancing
 
+- **Hot-key splitting** — explicit future placement mode that stripes one logical shard-key value across additional buckets to relieve a dominant tenant/entity. It improves write distribution for a hot key but makes formerly single-shard tenant/entity queries cross-shard, so it is not a default.
 - **Range striping** — distribution of collection data across multiple shard/ranges so different writers can own different parts of the data set. This is analogous to RAID striping at the cluster-data level, not block-level disk striping.
 - **Range replication** — full-copy replication of each shard/range according to the cluster replication factor. The first multi-writer hot path uses full range replicas rather than parity or erasure coding.
 - **Weighted placement** — shard/range placement policy that accounts for advertised node capacity such as usable disk, health, and operator weights. Expanding a node's disk changes its placement weight; data moves only through explicit rebalancing transitions.

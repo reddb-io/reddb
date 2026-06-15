@@ -457,7 +457,7 @@ impl ShardOwnershipCatalog {
     ) -> Result<Vec<ResolvedTarget>, (CollectionId, Vec<u8>)> {
         let mut resolved = Vec::with_capacity(targets.len());
         for t in targets {
-            match self.route(t.collection(), t.key()) {
+            match self.route_shard_key(t.collection(), t.key()) {
                 Some(range) => resolved.push(ResolvedTarget {
                     collection: t.collection().clone(),
                     key: t.key().to_vec(),
