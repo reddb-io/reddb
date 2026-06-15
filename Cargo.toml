@@ -32,7 +32,7 @@ reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "crates/reddb-
 
 [package]
 name = "reddb-io"
-version = "1.10.1"
+version = "1.11.0"
 edition.workspace = true
 authors.workspace = true
 description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine. Umbrella crate that hosts the `red` binary and re-exports the workspace."

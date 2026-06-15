@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.0
+
+### Minor Changes
+
+- [#1206](https://github.com/reddb-io/reddb/pull/1206) [`6f29076`](https://github.com/reddb-io/reddb/commit/6f29076fe701822d0f576fa9cf49ec5d67b8f94a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Centralize operational topology, monorepo contract authorities, client routing membership, queue lifecycle delivery, and parameterized statement execution.
+
 ## 1.10.1
 
 ## 1.10.0
