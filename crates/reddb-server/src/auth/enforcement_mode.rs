@@ -143,6 +143,7 @@ fn required_role_for_action(action: &str) -> Role {
             | ActionCategory::Function
             | ActionCategory::Mgmt
             | ActionCategory::Policy
+            | ActionCategory::User
             | ActionCategory::Admin
             | ActionCategory::Config
             | ActionCategory::Vault

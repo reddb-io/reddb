@@ -81,7 +81,7 @@ pub fn is_unlock_policy(policy_id: &str) -> bool {
 
 /// Build the `EvalContext` for the synthetic principal. Marks it as
 /// system-owned, admin-role, and platform-scoped so policies with
-/// conditions targeting "non-admin / tenant / non-system" principals
+/// conditions targeting non-admin or tenant-scoped principals
 /// don't match and don't block the invariant.
 pub fn synthetic_eval_context() -> EvalContext {
     EvalContext {
@@ -257,8 +257,8 @@ mod tests {
 
     #[test]
     fn invariant_allows_narrower_deny() {
-        // Deny only for non-system-owned principals. The synthetic
-        // principal is system-owned, so the condition skips this
+        // Deny only for tenant-scoped principals. The synthetic
+        // principal is platform-scoped, so the condition skips this
         // statement and the unlock policy still grants Allow.
         let p = parse(
             r#"{
@@ -268,7 +268,7 @@ mod tests {
                     "effect": "deny",
                     "actions": ["policy:detach"],
                     "resources": ["*"],
-                    "condition": { "system_owned": false }
+                    "condition": { "platform_scoped": false }
                 }]
             }"#,
         );
@@ -417,7 +417,7 @@ mod tests {
                         "effect": "deny",
                         "actions": ["policy:detach"],
                         "resources": ["*"],
-                        "condition": { "system_owned": false }
+                        "condition": { "platform_scoped": false }
                     }]
                 }"#,
             )

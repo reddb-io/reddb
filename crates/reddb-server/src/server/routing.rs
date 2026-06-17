@@ -366,7 +366,7 @@ impl RedDBServer {
             ("GET", "/auth/policies") => self.handle_auth_list_policies(&headers),
             ("POST", "/auth/can") => self.handle_auth_can(&headers, body),
             ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
-            ("POST", "/auth/change-password") => self.handle_auth_change_password(body),
+            ("POST", "/auth/change-password") => self.handle_auth_change_password(&headers, body),
             ("GET", "/auth/whoami") => self.handle_auth_whoami(&headers),
             ("GET", "/config") => self.handle_config_export(),
             ("POST", "/config") => self.handle_config_import(body),
@@ -1196,9 +1196,9 @@ impl RedDBServer {
                     let id = rest.trim_matches('/');
                     if !id.is_empty() && !id.contains('/') {
                         return match method.as_str() {
-                            "PUT" => self.handle_iam_policy_put(id, body),
+                            "PUT" => self.handle_iam_policy_put(&headers, id, body),
                             "GET" => self.handle_iam_policy_get(id),
-                            "DELETE" => self.handle_iam_policy_delete(id),
+                            "DELETE" => self.handle_iam_policy_delete(&headers, id),
                             _ => json_error(405, "method not allowed"),
                         };
                     }
@@ -1225,8 +1225,8 @@ impl RedDBServer {
                             let pid = pid.trim_matches('/');
                             if !pid.is_empty() && !pid.contains('/') {
                                 return match method.as_str() {
-                                    "PUT" => self.handle_iam_attach_user(user, pid),
-                                    "DELETE" => self.handle_iam_detach_user(user, pid),
+                                    "PUT" => self.handle_iam_attach_user(&headers, user, pid),
+                                    "DELETE" => self.handle_iam_detach_user(&headers, user, pid),
                                     _ => json_error(405, "method not allowed"),
                                 };
                             }
@@ -1239,8 +1239,8 @@ impl RedDBServer {
                             let pid = pid.trim_matches('/');
                             if !pid.is_empty() && !pid.contains('/') {
                                 return match method.as_str() {
-                                    "PUT" => self.handle_iam_attach_group(group, pid),
-                                    "DELETE" => self.handle_iam_detach_group(group, pid),
+                                    "PUT" => self.handle_iam_attach_group(&headers, group, pid),
+                                    "DELETE" => self.handle_iam_detach_group(&headers, group, pid),
                                     _ => json_error(405, "method not allowed"),
                                 };
                             }
@@ -2498,7 +2498,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_system_users_requires_shared_secret_and_marks_user_system_owned() {
+    fn admin_system_users_requires_shared_secret_without_special_ownership() {
         let previous = std::env::var_os("RED_ADMIN_TOKEN");
         std::env::set_var("RED_ADMIN_TOKEN", "admin-secret");
 
@@ -2533,7 +2533,7 @@ mod tests {
         );
 
         let user = auth.get_user(Some("acme"), "system").unwrap();
-        assert!(user.system_owned);
+        assert!(!user.system_owned);
         assert_eq!(user.role, crate::auth::Role::Admin);
 
         match previous {
@@ -2938,6 +2938,81 @@ mod tests {
 
     fn parse_json(body: &[u8]) -> crate::json::Value {
         crate::json::from_slice(body).expect("json parse")
+    }
+
+    fn attach_policy_json(auth: &crate::auth::AuthStore, user: &str, policy_json: &str) {
+        let policy = crate::auth::policies::Policy::from_json_str(policy_json).unwrap();
+        let policy_id = policy.id.clone();
+        auth.put_policy(policy).unwrap();
+        auth.attach_policy(
+            crate::auth::store::PrincipalRef::User(crate::auth::UserId::platform(user)),
+            &policy_id,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auth_user_delete_honors_user_lifecycle_deny_policy() {
+        let (server, auth) = auth_server(true);
+        auth.create_user("cloud-admin", "pw", crate::auth::Role::Admin)
+            .unwrap();
+        let customer_token = issue_token(&auth, None, "customer-admin", crate::auth::Role::Admin);
+        attach_policy_json(
+            &auth,
+            "customer-admin",
+            r#"{"id":"customer-allow-all","version":1,"statements":[{"effect":"allow","actions":["*"],"resources":["*"]}]}"#,
+        );
+        attach_policy_json(
+            &auth,
+            "customer-admin",
+            r#"{"id":"protect-cloud-admin","version":1,"statements":[{"effect":"deny","actions":["user:delete"],"resources":["user:cloud-admin"]}]}"#,
+        );
+
+        let response = server.route(request_with_bearer(
+            "DELETE",
+            "/auth/users/cloud-admin",
+            Vec::new(),
+            &customer_token,
+        ));
+
+        assert_eq!(
+            response.status,
+            403,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(auth.get_user(None, "cloud-admin").is_some());
+    }
+
+    #[test]
+    fn iam_policy_delete_honors_policy_deny() {
+        let (server, auth) = auth_server(true);
+        let customer_token = issue_token(&auth, None, "customer-admin", crate::auth::Role::Admin);
+        attach_policy_json(
+            &auth,
+            "customer-admin",
+            r#"{"id":"customer-allow-all","version":1,"statements":[{"effect":"allow","actions":["*"],"resources":["*"]}]}"#,
+        );
+        attach_policy_json(
+            &auth,
+            "customer-admin",
+            r#"{"id":"protect-cloud-admin","version":1,"statements":[{"effect":"deny","actions":["policy:drop"],"resources":["policy:protect-cloud-admin"]}]}"#,
+        );
+
+        let response = server.route(request_with_bearer(
+            "DELETE",
+            "/admin/policies/protect-cloud-admin",
+            Vec::new(),
+            &customer_token,
+        ));
+
+        assert_eq!(
+            response.status,
+            403,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(auth.get_policy("protect-cloud-admin").is_some());
     }
 
     #[test]

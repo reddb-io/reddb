@@ -1,6 +1,36 @@
 //! IAM policy admin HTTP endpoints.
 
 use super::*;
+use std::collections::BTreeMap;
+
+struct IamPolicyCaller {
+    id: crate::auth::UserId,
+    role: crate::auth::Role,
+}
+
+fn resolve_iam_policy_caller(
+    server: &RedDBServer,
+    headers: &BTreeMap<String, String>,
+) -> Option<IamPolicyCaller> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))?;
+    let auth_store = server.auth_store.as_ref()?;
+    if super::routing::looks_like_jwt(token) {
+        if let Some(validator) = server.runtime.oauth_validator() {
+            if let Ok((tenant, username, role)) =
+                crate::wire::redwire::auth::validate_oauth_jwt_full(&validator, token)
+            {
+                return Some(IamPolicyCaller {
+                    id: crate::auth::UserId::from_parts(tenant.as_deref(), &username),
+                    role,
+                });
+            }
+        }
+    }
+    let (id, role) = auth_store.validate_token_full(token)?;
+    Some(IamPolicyCaller { id, role })
+}
 
 impl RedDBServer {
     fn iam_audit(&self, action: &str, target: &str, outcome: &str) {
@@ -9,11 +39,50 @@ impl RedDBServer {
             .record(action, "operator", target, outcome, JsonValue::Null);
     }
 
+    fn authorize_policy_mutation(
+        &self,
+        headers: &BTreeMap<String, String>,
+        action: &str,
+        policy_id: &str,
+    ) -> Option<HttpResponse> {
+        let Some(store) = self.auth_store.as_ref() else {
+            return Some(json_error(503, "auth store not configured"));
+        };
+        if !store.iam_authorization_enabled() {
+            return None;
+        }
+        let caller = resolve_iam_policy_caller(self, headers);
+        let Some(caller) = caller else {
+            if store.is_enabled() && store.config().require_auth {
+                return Some(json_error(401, "authentication required"));
+            }
+            return None;
+        };
+        let resource = crate::auth::policies::ResourceRef::new("policy", policy_id);
+        let ctx = store.eval_context_for_principal(&caller.id, caller.role, None);
+        if store.check_policy_authz_with_role(&caller.id, action, &resource, &ctx, caller.role) {
+            None
+        } else {
+            Some(json_error(
+                403,
+                format!("policy denied {action} on policy:{policy_id}"),
+            ))
+        }
+    }
+
     /// `PUT /admin/policies/:id` — install or replace an IAM policy.
-    pub(crate) fn handle_iam_policy_put(&self, id: &str, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_iam_policy_put(
+        &self,
+        headers: &BTreeMap<String, String>,
+        id: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
             return json_error(503, "auth store not configured");
         };
+        if let Some(response) = self.authorize_policy_mutation(headers, "policy:put", id) {
+            return response;
+        }
         let Ok(text) = std::str::from_utf8(&body) else {
             return json_error(400, "body must be utf-8 JSON");
         };
@@ -269,10 +338,17 @@ impl RedDBServer {
     }
 
     /// `DELETE /admin/policies/:id` — drop a policy.
-    pub(crate) fn handle_iam_policy_delete(&self, id: &str) -> HttpResponse {
+    pub(crate) fn handle_iam_policy_delete(
+        &self,
+        headers: &BTreeMap<String, String>,
+        id: &str,
+    ) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
             return json_error(503, "auth store not configured");
         };
+        if let Some(response) = self.authorize_policy_mutation(headers, "policy:drop", id) {
+            return response;
+        }
         match store.delete_policy(id) {
             Ok(()) => {
                 self.runtime.invalidate_result_cache();
@@ -290,10 +366,19 @@ impl RedDBServer {
 
     /// `PUT /admin/users/:user/policies/:policy_id`. `:user` may
     /// optionally be tenant-qualified as `tenant.username`.
-    pub(crate) fn handle_iam_attach_user(&self, user: &str, policy_id: &str) -> HttpResponse {
+    pub(crate) fn handle_iam_attach_user(
+        &self,
+        headers: &BTreeMap<String, String>,
+        user: &str,
+        policy_id: &str,
+    ) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
             return json_error(503, "auth store not configured");
         };
+        if let Some(response) = self.authorize_policy_mutation(headers, "policy:attach", policy_id)
+        {
+            return response;
+        }
         let uid = decode_user_arg(user);
         match store.attach_policy(
             crate::auth::store::PrincipalRef::User(uid.clone()),
@@ -315,10 +400,19 @@ impl RedDBServer {
     }
 
     /// `DELETE /admin/users/:user/policies/:policy_id`.
-    pub(crate) fn handle_iam_detach_user(&self, user: &str, policy_id: &str) -> HttpResponse {
+    pub(crate) fn handle_iam_detach_user(
+        &self,
+        headers: &BTreeMap<String, String>,
+        user: &str,
+        policy_id: &str,
+    ) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
             return json_error(503, "auth store not configured");
         };
+        if let Some(response) = self.authorize_policy_mutation(headers, "policy:detach", policy_id)
+        {
+            return response;
+        }
         let uid = decode_user_arg(user);
         match store.detach_policy(
             crate::auth::store::PrincipalRef::User(uid.clone()),
@@ -386,10 +480,19 @@ impl RedDBServer {
     }
 
     /// `PUT /admin/groups/:group/policies/:policy_id`.
-    pub(crate) fn handle_iam_attach_group(&self, group: &str, policy_id: &str) -> HttpResponse {
+    pub(crate) fn handle_iam_attach_group(
+        &self,
+        headers: &BTreeMap<String, String>,
+        group: &str,
+        policy_id: &str,
+    ) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
             return json_error(503, "auth store not configured");
         };
+        if let Some(response) = self.authorize_policy_mutation(headers, "policy:attach", policy_id)
+        {
+            return response;
+        }
         match store.attach_policy(
             crate::auth::store::PrincipalRef::Group(group.to_string()),
             policy_id,
@@ -410,10 +513,19 @@ impl RedDBServer {
     }
 
     /// `DELETE /admin/groups/:group/policies/:policy_id`.
-    pub(crate) fn handle_iam_detach_group(&self, group: &str, policy_id: &str) -> HttpResponse {
+    pub(crate) fn handle_iam_detach_group(
+        &self,
+        headers: &BTreeMap<String, String>,
+        group: &str,
+        policy_id: &str,
+    ) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
             return json_error(503, "auth store not configured");
         };
+        if let Some(response) = self.authorize_policy_mutation(headers, "policy:detach", policy_id)
+        {
+            return response;
+        }
         match store.detach_policy(
             crate::auth::store::PrincipalRef::Group(group.to_string()),
             policy_id,

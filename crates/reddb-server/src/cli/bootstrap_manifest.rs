@@ -210,25 +210,14 @@ impl BootstrapManifest {
         self.validate_against_current_state(auth_store, registry)?;
 
         for user in &self.users {
-            if user.system_owned {
-                auth_store
-                    .create_system_user(
-                        &user.username,
-                        &user.password,
-                        user.role,
-                        user.tenant.as_deref(),
-                    )
-                    .map_err(|err| format!("create user `{}`: {err}", user.username))?;
-            } else {
-                auth_store
-                    .create_user_in_tenant(
-                        user.tenant.as_deref(),
-                        &user.username,
-                        &user.password,
-                        user.role,
-                    )
-                    .map_err(|err| format!("create user `{}`: {err}", user.username))?;
-            }
+            auth_store
+                .create_user_in_tenant(
+                    user.tenant.as_deref(),
+                    &user.username,
+                    &user.password,
+                    user.role,
+                )
+                .map_err(|err| format!("create user `{}`: {err}", user.username))?;
         }
 
         for policy in &self.policies {
@@ -367,7 +356,12 @@ fn parse_users(values: &[JsonValue]) -> Result<Vec<ManifestUser>, String> {
                 password,
                 role,
                 tenant: optional_string(obj, "tenant"),
-                system_owned: optional_bool(obj, "system_owned").unwrap_or(false),
+                // Legacy manifests may still carry `system_owned`; it
+                // is accepted for wire compatibility but no longer
+                // carries authorization semantics.
+                system_owned: optional_bool(obj, "system_owned")
+                    .map(|_| false)
+                    .unwrap_or(false),
             })
         })
         .collect()
@@ -761,7 +755,7 @@ fn manifest_user_context(user: &ManifestUser) -> EvalContext {
         mfa_present: false,
         now_ms: current_unix_ms(),
         principal_is_admin_role: user.role == Role::Admin,
-        principal_is_system_owned: user.system_owned,
+        principal_is_system_owned: false,
         principal_is_platform_scoped: user.tenant.is_none(),
     }
 }

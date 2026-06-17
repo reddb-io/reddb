@@ -15,7 +15,7 @@
 use super::*;
 use crate::auth::policies::{Decision, EvalContext, ResourceRef};
 use crate::auth::store::SimCtx;
-use crate::auth::{AuthError, Role, UserId};
+use crate::auth::{AuthError, AuthStore, Role, UserId};
 use std::collections::BTreeSet;
 
 /// Resolved caller for an admin-only auth endpoint.
@@ -63,6 +63,25 @@ fn resolve_auth_caller(
     }
     let (id, role) = auth_store.validate_token_full(token)?;
     Some(AuthCaller { id, role })
+}
+
+fn authorize_user_lifecycle_mutation(
+    auth_store: &AuthStore,
+    caller: Option<&AuthCaller>,
+    action: &str,
+    target: &UserId,
+) -> Option<HttpResponse> {
+    let Some(caller) = caller else {
+        return None;
+    };
+    if auth_store.check_user_lifecycle_authz(&caller.id, caller.role, action, target) {
+        None
+    } else {
+        Some(json_error(
+            403,
+            format!("policy denied {action} on user:{target}"),
+        ))
+    }
 }
 
 impl RedDBServer {
@@ -322,6 +341,16 @@ impl RedDBServer {
             }
         }
 
+        let target_id = UserId::from_parts(target_tenant.as_deref(), &username);
+        if let Some(response) = authorize_user_lifecycle_mutation(
+            auth_store,
+            caller.as_ref(),
+            "user:create",
+            &target_id,
+        ) {
+            return response;
+        }
+
         match auth_store.create_user_in_tenant(target_tenant.as_deref(), &username, &password, role)
         {
             Ok(user) => {
@@ -475,6 +504,14 @@ impl RedDBServer {
         };
 
         let principal = UserId::from_parts(target_tenant.as_deref(), username);
+        if let Some(response) = authorize_user_lifecycle_mutation(
+            auth_store,
+            caller.as_ref(),
+            "user:delete",
+            &principal,
+        ) {
+            return response;
+        }
         match auth_store.delete_user_in_tenant(target_tenant.as_deref(), username) {
             Ok(()) => {
                 tracing::info!(
@@ -484,7 +521,6 @@ impl RedDBServer {
                 );
                 json_ok(format!("user '{}' deleted", principal))
             }
-            Err(err @ AuthError::SystemUserImmutable { .. }) => json_error(409, err.to_string()),
             Err(err) => json_error(404, err.to_string()),
         }
     }
@@ -555,7 +591,11 @@ impl RedDBServer {
     ///
     /// Changes a user's password.
     /// Body: `{ "username": "alice", "old_password": "old", "new_password": "new" }`
-    pub(crate) fn handle_auth_change_password(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_auth_change_password(
+        &self,
+        headers: &BTreeMap<String, String>,
+        body: Vec<u8>,
+    ) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
@@ -579,9 +619,25 @@ impl RedDBServer {
             None => return json_error(400, "missing 'new_password' field"),
         };
 
+        let caller = resolve_auth_caller(self, headers);
+        let target = UserId::platform(username.clone());
+        let changes_other_user = caller
+            .as_ref()
+            .map(|caller| &caller.id != &target)
+            .unwrap_or(false);
+        if changes_other_user {
+            if let Some(response) = authorize_user_lifecycle_mutation(
+                auth_store,
+                caller.as_ref(),
+                "user:password:change",
+                &target,
+            ) {
+                return response;
+            }
+        }
+
         match auth_store.change_password(&username, &old_password, &new_password) {
             Ok(()) => json_ok("password changed"),
-            Err(err @ AuthError::SystemUserImmutable { .. }) => json_error(409, err.to_string()),
             Err(err) => json_error(400, err.to_string()),
         }
     }

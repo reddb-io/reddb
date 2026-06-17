@@ -142,7 +142,9 @@ pub struct Condition {
     pub source_ip: Option<Vec<IpCidr>>,
     pub mfa: Option<bool>,
     pub time_window: Option<TimeWindow>,
-    /// Require the principal to be (or not be) system-owned.
+    /// Legacy field retained for in-memory/backward compatibility.
+    /// New policy JSON rejects `condition.system_owned`; ownership is
+    /// not an authorization primitive.
     pub system_owned: Option<bool>,
     /// Require the principal to be (or not be) platform-scoped.
     pub platform_scoped: Option<bool>,
@@ -206,10 +208,9 @@ pub struct EvalContext {
     /// an allow-all policy to the bootstrap admin
     /// (see `service_cli::FIRST_ADMIN_ALLOW_ALL_POLICY`).
     pub principal_is_admin_role: bool,
-    /// Set when the principal's user record is system-owned (operator-owned,
-    /// immutable through the normal user-management API). Policies can match
-    /// on this via the `system_owned` condition key to distinguish operator
-    /// principals from ordinary users without a separate login type.
+    /// Legacy context bit retained while vault/user serialization still
+    /// carries `system_owned`. Policy evaluation no longer treats this
+    /// as an authorization primitive.
     pub principal_is_system_owned: bool,
     /// Set when the principal is platform-scoped (no tenant — `tenant_id`
     /// is `None`). Matched via the `platform_scoped` condition key.
@@ -540,7 +541,13 @@ impl Condition {
         };
         let tenant_match = obj.get("tenant_match").and_then(|v| v.as_bool());
         let mfa = obj.get("mfa").and_then(|v| v.as_bool());
-        let system_owned = obj.get("system_owned").and_then(|v| v.as_bool());
+        if obj.contains_key("system_owned") {
+            return Err(PolicyError::InvalidCondition(
+                "condition.system_owned is no longer supported; use explicit user/policy resources"
+                    .into(),
+            ));
+        }
+        let system_owned = None;
         let platform_scoped = obj.get("platform_scoped").and_then(|v| v.as_bool());
 
         let source_ip = match obj.get("source_ip") {
@@ -591,9 +598,7 @@ impl Condition {
         if let Some(b) = self.mfa {
             obj.insert("mfa".into(), Value::Bool(b));
         }
-        if let Some(b) = self.system_owned {
-            obj.insert("system_owned".into(), Value::Bool(b));
-        }
+        let _ = self.system_owned;
         if let Some(b) = self.platform_scoped {
             obj.insert("platform_scoped".into(), Value::Bool(b));
         }
@@ -1068,10 +1073,8 @@ fn condition_holds(cond: Option<&Condition>, resource: &ResourceRef, ctx: &EvalC
             return false;
         }
     }
-    if let Some(want) = c.system_owned {
-        if ctx.principal_is_system_owned != want {
-            return false;
-        }
+    if c.system_owned.is_some() {
+        return false;
     }
     if let Some(want) = c.platform_scoped {
         if ctx.principal_is_platform_scoped != want {
@@ -1398,7 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_principal_attribute_conditions() {
+    fn roundtrip_platform_scoped_condition() {
         let p = Policy::from_json_str(
             r#"{
                 "id": "p-attrs",
@@ -1407,21 +1410,20 @@ mod tests {
                     "effect": "allow",
                     "actions": ["admin:reload"],
                     "resources": ["*"],
-                    "condition": { "system_owned": true, "platform_scoped": false }
+                    "condition": { "platform_scoped": false }
                 }]
             }"#,
         )
         .unwrap();
         let c = p.statements[0].condition.as_ref().unwrap();
-        assert_eq!(c.system_owned, Some(true));
         assert_eq!(c.platform_scoped, Some(false));
         let p2 = Policy::from_json_str(&p.to_json_string()).unwrap();
         assert_eq!(p, p2);
     }
 
     #[test]
-    fn condition_principal_attributes_gate_evaluation() {
-        let p = Policy::from_json_str(
+    fn system_owned_condition_is_rejected() {
+        let err = Policy::from_json_str(
             r#"{
                 "id": "p-sys",
                 "version": 1,
@@ -1433,19 +1435,8 @@ mod tests {
                 }]
             }"#,
         )
-        .unwrap();
-        let r = ResourceRef::new("config", "global");
-        let mut ctx = ctx_now(1_700_000_000_000);
-        ctx.principal_is_system_owned = false;
-        assert!(matches!(
-            evaluate(&[&p], "admin:reload", &r, &ctx),
-            Decision::DefaultDeny
-        ));
-        ctx.principal_is_system_owned = true;
-        assert!(matches!(
-            evaluate(&[&p], "admin:reload", &r, &ctx),
-            Decision::Allow { .. }
-        ));
+        .unwrap_err();
+        assert!(matches!(err, PolicyError::InvalidCondition(_)));
     }
 
     #[test]
