@@ -103,7 +103,6 @@ fn attach_policy(auth: &AuthStore, user: &UserId, policy: Policy) {
 fn registry_ctx() -> EvalContext {
     EvalContext {
         principal_is_admin_role: true,
-        principal_is_system_owned: true,
         principal_is_platform_scoped: true,
         ..EvalContext::default()
     }
@@ -197,7 +196,7 @@ fn managed_config_gate_denial_emits_denied_event() {
     let rt = runtime_with_ledger(ledger.clone());
     let auth = Arc::new(AuthStore::new(AuthConfig::default()));
     let seeder = UserId::platform("seeder");
-    auth.create_system_user("seeder", "p", Role::Admin, None)
+    auth.create_admin_user("seeder", "p", Role::Admin, None)
         .unwrap();
     attach_policy(&auth, &seeder, allow_registry_policy("p-registry"));
     auth.create_user("alice", "p", Role::Admin).unwrap();
@@ -238,7 +237,7 @@ fn managed_config_gate_denial_emits_denied_event() {
         .reason
         .as_ref()
         .unwrap()
-        .contains("structurally eligible"));
+        .contains("required policy permission was denied"));
     assert_raw_field(&event, "id", "managed_flag");
     assert_raw_field(&event, "managed", "true");
     assert!(matches!(
@@ -290,7 +289,7 @@ fn registry_supersede_emits_allowed_event_and_bootstrap_actor_is_system() {
     let ledger = CapturingLedger::default();
     let actor = UserId::platform("bootstrap");
     store
-        .create_system_user("bootstrap", "p", Role::Admin, None)
+        .create_admin_user("bootstrap", "p", Role::Admin, None)
         .unwrap();
     attach_policy(&store, &actor, allow_registry_policy("p-registry"));
     let event_ctx = ControlEventCtx {

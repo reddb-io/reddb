@@ -132,7 +132,6 @@ pub struct User {
     pub created_at: u128,
     pub updated_at: u128,
     pub enabled: bool,
-    pub system_owned: bool,
 }
 
 // ---------------------------------------------------------------------------

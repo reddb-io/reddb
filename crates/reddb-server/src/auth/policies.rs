@@ -142,10 +142,6 @@ pub struct Condition {
     pub source_ip: Option<Vec<IpCidr>>,
     pub mfa: Option<bool>,
     pub time_window: Option<TimeWindow>,
-    /// Legacy field retained for in-memory/backward compatibility.
-    /// New policy JSON rejects `condition.system_owned`; ownership is
-    /// not an authorization primitive.
-    pub system_owned: Option<bool>,
     /// Require the principal to be (or not be) platform-scoped.
     pub platform_scoped: Option<bool>,
 }
@@ -208,10 +204,6 @@ pub struct EvalContext {
     /// an allow-all policy to the bootstrap admin
     /// (see `service_cli::FIRST_ADMIN_ALLOW_ALL_POLICY`).
     pub principal_is_admin_role: bool,
-    /// Legacy context bit retained while vault/user serialization still
-    /// carries `system_owned`. Policy evaluation no longer treats this
-    /// as an authorization primitive.
-    pub principal_is_system_owned: bool,
     /// Set when the principal is platform-scoped (no tenant — `tenant_id`
     /// is `None`). Matched via the `platform_scoped` condition key.
     pub principal_is_platform_scoped: bool,
@@ -547,7 +539,6 @@ impl Condition {
                     .into(),
             ));
         }
-        let system_owned = None;
         let platform_scoped = obj.get("platform_scoped").and_then(|v| v.as_bool());
 
         let source_ip = match obj.get("source_ip") {
@@ -579,7 +570,6 @@ impl Condition {
             source_ip,
             mfa,
             time_window,
-            system_owned,
             platform_scoped,
         })
     }
@@ -598,7 +588,6 @@ impl Condition {
         if let Some(b) = self.mfa {
             obj.insert("mfa".into(), Value::Bool(b));
         }
-        let _ = self.system_owned;
         if let Some(b) = self.platform_scoped {
             obj.insert("platform_scoped".into(), Value::Bool(b));
         }
@@ -1072,9 +1061,6 @@ fn condition_holds(cond: Option<&Condition>, resource: &ResourceRef, ctx: &EvalC
         if !ctx.mfa_present {
             return false;
         }
-    }
-    if c.system_owned.is_some() {
-        return false;
     }
     if let Some(want) = c.platform_scoped {
         if ctx.principal_is_platform_scoped != want {
@@ -1670,7 +1656,6 @@ mod tests {
             source_ip: None,
             mfa: None,
             time_window: None,
-            system_owned: None,
             platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");
@@ -1688,7 +1673,6 @@ mod tests {
             source_ip: None,
             mfa: None,
             time_window: None,
-            system_owned: None,
             platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");
@@ -1706,7 +1690,6 @@ mod tests {
             source_ip: Some(vec![parse_cidr("10.0.0.0/8").unwrap()]),
             mfa: None,
             time_window: None,
-            system_owned: None,
             platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");
@@ -1731,7 +1714,6 @@ mod tests {
             source_ip: Some(vec![cidr]),
             mfa: None,
             time_window: None,
-            system_owned: None,
             platform_scoped: None,
         };
         let r = ResourceRef::new("table", "public.x");
@@ -1751,7 +1733,6 @@ mod tests {
             source_ip: None,
             mfa: None,
             time_window: None,
-            system_owned: None,
             platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x").with_tenant("acme");
@@ -1771,7 +1752,6 @@ mod tests {
             source_ip: None,
             mfa: Some(true),
             time_window: None,
-            system_owned: None,
             platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");

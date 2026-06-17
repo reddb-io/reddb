@@ -134,13 +134,13 @@ impl RedDBServer {
         }
     }
 
-    /// POST /v1/_admin/system-users
+    /// POST /v1/_admin/users
     ///
-    /// Creates an operator-owned user. Routing gates this endpoint with
-    /// `RED_ADMIN_TOKEN`; regular auth tokens are intentionally ignored.
+    /// Creates an admin-token managed user. Routing gates this endpoint
+    /// with `RED_ADMIN_TOKEN`; regular auth tokens are intentionally ignored.
     /// Body: `{ "username": "system", "password": "secret", "role": "admin",
     ///          "tenant_id": "acme" }`
-    pub(crate) fn handle_admin_create_system_user(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_admin_create_user(&self, body: Vec<u8>) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
@@ -171,17 +171,13 @@ impl RedDBServer {
         };
         let tenant_id = json_string_field(&payload, "tenant_id");
 
-        match auth_store.create_system_user(&username, &password, role, tenant_id.as_deref()) {
+        match auth_store.create_admin_user(&username, &password, role, tenant_id.as_deref()) {
             Ok(user) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert("username".to_string(), JsonValue::String(user.username));
                 object.insert("role".to_string(), JsonValue::String(user.role.to_string()));
                 object.insert("enabled".to_string(), JsonValue::Bool(user.enabled));
-                object.insert(
-                    "system_owned".to_string(),
-                    JsonValue::Bool(user.system_owned),
-                );
                 if let Some(tenant_id) = user.tenant_id {
                     object.insert("tenant_id".to_string(), JsonValue::String(tenant_id));
                 }
@@ -371,10 +367,6 @@ impl RedDBServer {
                 }
                 object.insert("role".to_string(), JsonValue::String(user.role.to_string()));
                 object.insert("enabled".to_string(), JsonValue::Bool(user.enabled));
-                object.insert(
-                    "system_owned".to_string(),
-                    JsonValue::Bool(user.system_owned),
-                );
                 json_response(201, JsonValue::Object(object))
             }
             Err(err) => json_error(409, err.to_string()),
@@ -430,7 +422,6 @@ impl RedDBServer {
                 }
                 obj.insert("role".to_string(), JsonValue::String(u.role.to_string()));
                 obj.insert("enabled".to_string(), JsonValue::Bool(u.enabled));
-                obj.insert("system_owned".to_string(), JsonValue::Bool(u.system_owned));
                 obj.insert(
                     "created_at".to_string(),
                     JsonValue::Number(u.created_at as f64),
@@ -1077,7 +1068,6 @@ impl RedDBServer {
                 .or_else(|| principal.tenant.clone());
 
             let principal_is_admin_role = role == Role::Admin;
-            let principal_is_system_owned = auth_store.principal_is_system_owned(&principal);
             let ctx = EvalContext {
                 principal_tenant: principal.tenant.clone(),
                 current_tenant: current_tenant.clone(),
@@ -1085,7 +1075,6 @@ impl RedDBServer {
                 mfa_present: false,
                 now_ms,
                 principal_is_admin_role,
-                principal_is_system_owned,
                 principal_is_platform_scoped: principal.tenant.is_none(),
             };
 

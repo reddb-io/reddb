@@ -591,7 +591,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         }
     }

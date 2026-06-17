@@ -2141,8 +2141,8 @@ fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String
         })?;
 
     // (1) Create the first admin as an ordinary platform-scoped user.
-    // Managed guardrails are policy-derived; no bootstrap path should
-    // rely on `system_owned` for authorization.
+    // Managed guardrails are policy-derived; bootstrap does not stamp a
+    // parallel ownership flag.
     let result = auth_store
         .bootstrap(&username, &password)
         .map_err(|err| format!("bootstrap first admin: {err}"))?;
@@ -3234,10 +3234,6 @@ mod tests {
         let admin = &users[0];
         assert_eq!(admin.username, "ops");
         assert!(
-            !admin.system_owned,
-            "first admin authority must come from policies, not system_owned"
-        );
-        assert!(
             admin.tenant_id.is_none(),
             "first admin must be platform-scoped (tenant=None)"
         );
@@ -3258,7 +3254,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         let arbitrary_resource = ResourceRef::new("config", "red.config.audit.enabled");
@@ -3461,7 +3456,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         assert!(
@@ -3639,10 +3633,7 @@ mod tests {
         let users = auth_store.list_users();
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].username, "ops");
-        assert!(
-            !users[0].system_owned,
-            "manifest accepts legacy system_owned but ignores it semantically"
-        );
+        assert!(users[0].tenant_id.is_none());
 
         let actor = UserId::platform("ops");
         let ctx = EvalContext {
@@ -3652,7 +3643,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         // Manifest fixture pins a canonical data-plane read action.

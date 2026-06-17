@@ -61,7 +61,6 @@ pub fn simulate_migration_delta(
         let uid = UserId::from_parts(user.tenant_id.as_deref(), &user.username);
         let role = user.role;
         let principal_is_admin_role = role == Role::Admin;
-        let principal_is_system_owned = store.principal_is_system_owned(&uid);
         let principal_is_platform_scoped = uid.tenant.is_none();
         let ctx = EvalContext {
             principal_tenant: uid.tenant.clone(),
@@ -70,7 +69,6 @@ pub fn simulate_migration_delta(
             mfa_present: false,
             now_ms,
             principal_is_admin_role,
-            principal_is_system_owned,
             principal_is_platform_scoped,
         };
         let pols = store.effective_policies(&uid);

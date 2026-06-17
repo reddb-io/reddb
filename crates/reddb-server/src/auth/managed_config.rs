@@ -219,7 +219,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         }
     }
@@ -395,7 +394,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_001,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &alice, &ctx, "red.config.audit.enabled");
@@ -412,7 +410,7 @@ mod tests {
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Admin, None)
+            .create_admin_user("ops", "p", Role::Admin, None)
             .expect("create user");
         let ops = UserId::platform("ops");
         store
@@ -443,7 +441,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_002,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &ops, &ctx, "red.config.audit.enabled");
@@ -461,7 +458,7 @@ mod tests {
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Write, None)
+            .create_admin_user("ops", "p", Role::Write, None)
             .unwrap();
         let ops = UserId::platform("ops");
         // Attach an unrelated policy so the evaluator runs through IAM
@@ -496,7 +493,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_003,
             principal_is_admin_role: false,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &ops, &ctx, "red.config.audit.enabled");
@@ -515,7 +511,7 @@ mod tests {
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Admin, None)
+            .create_admin_user("ops", "p", Role::Admin, None)
             .unwrap();
         let ops = UserId::platform("ops");
         store.put_policy(allow_all_config("p-allow")).unwrap();
@@ -547,7 +543,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_004,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &ops, &ctx, "red.config.audit.enabled");
@@ -584,7 +579,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_005,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &alice, &ctx, "red.config.backup.retention_days");
@@ -673,7 +667,6 @@ mod tests {
         let gate = ManagedConfigGate::new(&reg);
         let alice = UserId::platform("alice");
         let ctx = EvalContext {
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
             ..EvalContext::default()
         };
@@ -729,7 +722,6 @@ mod tests {
         let gate = ManagedConfigGate::new(&reg);
         let alice = UserId::platform("alice");
         let ctx = EvalContext {
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
             ..EvalContext::default()
         };

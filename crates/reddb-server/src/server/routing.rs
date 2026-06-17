@@ -359,7 +359,8 @@ impl RedDBServer {
             ("POST", "/auth/browser/login") => self.handle_browser_login(body),
             ("POST", "/auth/browser/refresh") => self.handle_browser_refresh(&headers),
             ("POST", "/auth/browser/logout") => self.handle_browser_logout(),
-            ("POST", "/v1/_admin/system-users") => self.handle_admin_create_system_user(body),
+            ("POST", "/v1/_admin/users") => self.handle_admin_create_user(body),
+            ("POST", "/v1/_admin/system-users") => self.handle_admin_create_user(body),
             ("POST", "/auth/users") => self.handle_auth_create_user(&headers, body, None),
             ("GET", "/auth/users") => self.handle_auth_list_users(&headers, &query),
             ("GET", "/auth/tenants") => self.handle_auth_list_tenants(&headers),
@@ -2498,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_system_users_requires_shared_secret_without_special_ownership() {
+    fn admin_users_requires_shared_secret_and_creates_regular_user() {
         let previous = std::env::var_os("RED_ADMIN_TOKEN");
         std::env::set_var("RED_ADMIN_TOKEN", "admin-secret");
 
@@ -2512,16 +2513,12 @@ mod tests {
         let body =
             br#"{"username":"system","password":"pw","role":"admin","tenant_id":"acme"}"#.to_vec();
 
-        let unauthorized = server.route(request_with(
-            "POST",
-            "/v1/_admin/system-users",
-            body.clone(),
-        ));
+        let unauthorized = server.route(request_with("POST", "/v1/_admin/users", body.clone()));
         assert_eq!(unauthorized.status, 401);
 
         let created = server.route(request_with_bearer(
             "POST",
-            "/v1/_admin/system-users",
+            "/v1/_admin/users",
             body,
             "admin-secret",
         ));
@@ -2533,7 +2530,6 @@ mod tests {
         );
 
         let user = auth.get_user(Some("acme"), "system").unwrap();
-        assert!(!user.system_owned);
         assert_eq!(user.role, crate::auth::Role::Admin);
 
         match previous {

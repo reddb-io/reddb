@@ -83,7 +83,6 @@ struct ManifestUser {
     password: String,
     role: Role,
     tenant: Option<String>,
-    system_owned: bool,
 }
 
 struct ManagedPolicy {
@@ -351,17 +350,14 @@ fn parse_users(values: &[JsonValue]) -> Result<Vec<ManifestUser>, String> {
             }
             let role = Role::from_str(&required_string(obj, "role", "users", idx)?)
                 .ok_or_else(|| format!("users[{idx}].role must be read, write, or admin"))?;
+            // Legacy manifests may still carry `system_owned`; unknown
+            // fields are accepted, but authorization is policy-first.
+            let _ = obj.get("system_owned");
             Ok(ManifestUser {
                 username,
                 password,
                 role,
                 tenant: optional_string(obj, "tenant"),
-                // Legacy manifests may still carry `system_owned`; it
-                // is accepted for wire compatibility but no longer
-                // carries authorization semantics.
-                system_owned: optional_bool(obj, "system_owned")
-                    .map(|_| false)
-                    .unwrap_or(false),
             })
         })
         .collect()
@@ -742,7 +738,6 @@ fn registry_context(user: &User) -> EvalContext {
         mfa_present: false,
         now_ms: current_unix_ms(),
         principal_is_admin_role: user.role == Role::Admin,
-        principal_is_system_owned: user.system_owned,
         principal_is_platform_scoped: user.tenant_id.is_none(),
     }
 }
@@ -755,7 +750,6 @@ fn manifest_user_context(user: &ManifestUser) -> EvalContext {
         mfa_present: false,
         now_ms: current_unix_ms(),
         principal_is_admin_role: user.role == Role::Admin,
-        principal_is_system_owned: false,
         principal_is_platform_scoped: user.tenant.is_none(),
     }
 }
