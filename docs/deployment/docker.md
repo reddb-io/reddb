@@ -75,7 +75,9 @@ write-if-absent `red.config` semantics are preserved:
 - `primary-replica` declares `REDDB_NODE_ROLE=primary|replica`; the rendered
   command selects the process role.
 - `cluster` runs the standalone process role today with cluster storage and
-  cluster discovery env.
+  cluster discovery env. The range ownership and sharding contract is documented
+  in [Cluster Sharding](../architecture/cluster-sharding.md); the container
+  profile should not be treated as full production multi-writer serving yet.
 
 `REDDB_STORAGE_*` overrides the topology-derived storage default, and
 `REDDB_CLUSTER_*` remains the cluster identity/discovery contract.

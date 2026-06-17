@@ -75,7 +75,10 @@ cluster:
 The chart gives each pod a stable StatefulSet DNS name and sets
 `REDDB_CLUSTER_PEERS`. The current binary does not expose a separate
 `--role cluster`; cluster pods use `red server --role standalone` with
-`REDDB_STORAGE_PRESET=cluster` and `RED_CLUSTER_HA_INTENT=declared`.
+`REDDB_STORAGE_PRESET=cluster` and `RED_CLUSTER_HA_INTENT=declared`. The range
+ownership and sharding contract is documented in
+[Cluster Sharding](../architecture/cluster-sharding.md); this Helm mode should
+not be treated as full production multi-writer serving yet.
 
 ## Config File
 
