@@ -42,6 +42,7 @@ pub struct MockAiProviderCounters {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MockAiProviderLatency {
+    pub sample_count: usize,
     pub p50_ms: f64,
     pub p99_ms: f64,
 }
@@ -125,6 +126,7 @@ impl MockAiProvider {
             .clone();
         samples.sort_unstable();
         MockAiProviderLatency {
+            sample_count: samples.len(),
             p50_ms: percentile_ms(&samples, 0.50),
             p99_ms: percentile_ms(&samples, 0.99),
         }
