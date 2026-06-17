@@ -99,6 +99,7 @@
 - **Architecture**
   - [Collection Contract (ADR)](/architecture/collection-contract-adr.md)
   - [Competitive Positioning](/architecture/competitive-positioning.md)
+  - [Cluster Sharding Contract](/architecture/cluster-sharding.md)
   - [Distributed Roadmap](/architecture/distributed-roadmap.md)
   - [MVCC Read Resolver Seam](/architecture/mvcc-read-resolver.md)
 
