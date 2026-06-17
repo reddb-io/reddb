@@ -21,6 +21,10 @@ services:
       - "--http-bind"
       - "0.0.0.0:8080"
     environment:
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "2"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     secrets:
       - source: reddb_certificate
@@ -46,6 +50,10 @@ services:
       - "--http-bind"
       - "0.0.0.0:8080"
     environment:
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "2"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     secrets:
       - source: reddb_certificate
@@ -73,6 +81,10 @@ services:
       - "--http-bind"
       - "0.0.0.0:8080"
     environment:
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "2"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     secrets:
       - source: reddb_certificate

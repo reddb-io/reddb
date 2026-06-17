@@ -1,9 +1,7 @@
 //! Queue lifecycle telemetry — slice 10 of issue #527.
 //!
 //! Process-local Prometheus counters per ADR-0017 that the
-//! `QueueLifecycle` Module (plus the legacy `queue_delivery` path
-//! that still serves the user-facing `QUEUE READ` / `ACK` / `NACK`
-//! today) bumps on every state transition. Rendered onto the
+//! `QueueLifecycle` Module bumps on every state transition. Rendered onto the
 //! `/metrics` body alongside the rest of the engine's exposition.
 //!
 //! Series exposed:

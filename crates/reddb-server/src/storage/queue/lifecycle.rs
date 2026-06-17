@@ -85,8 +85,7 @@ pub(crate) struct TombstoneRecord {
 /// `current_xid → set_xmax → record_pending_tombstone`, making lifecycle
 /// ack/purge **rollback-safe**: a retirement inside a statement that
 /// later rolls back leaves the message visible again, and on commit the
-/// message is gone — parity with the legacy
-/// `queue_delivery::delete_message_with_state`.
+/// message is gone — parity with the pre-lifecycle queue retirement path.
 pub(crate) trait QueueTxnContext: Send + Sync {
     /// Retire `(queue, message_id)` through the runtime MVCC path. Inside
     /// an open transaction this stamps `xmax` and records a pending
@@ -287,7 +286,7 @@ pub(crate) trait QueueStore {
     /// and currently-pending ones. Records a tombstone per removed
     /// `(queue, message_id)` through `txn.record_pending_tombstone(...)`,
     /// in the same shape as `ack_pending`. Returns the count of message
-    /// ids purged. Mirrors `queue_delivery::purge_messages` semantics:
+    /// ids purged. Mirrors legacy `QUEUE PURGE` semantics:
     /// every pending row, every available row, and the underlying
     /// payloads all go away. Failure modes propagate; no partial purge
     /// is observable to readers after a successful return.
@@ -307,8 +306,7 @@ pub(crate) trait QueueStore {
     /// cannot be acquired non-blockingly. Group-less — caller does not
     /// hold a delivery handle.
     ///
-    /// Prereq for `QueueLifecycle::pop`, the lifecycle-side replacement
-    /// for `queue_delivery::pop_messages` (PRD #527 atomic cutover).
+    /// Backing store operation for `QueueLifecycle::pop`.
     fn pop_available(
         &self,
         txn: &QueueTxn,
@@ -324,8 +322,7 @@ pub(crate) trait QueueStore {
     /// message_id) pair directly. Idempotent — calling on a
     /// already-retired message is a no-op.
     ///
-    /// Prereq for `QueueLifecycle::delete_with_state`, the lifecycle-side
-    /// replacement for `queue_delivery::delete_message_with_state`.
+    /// Backing store operation for `QueueLifecycle::delete_with_state`.
     fn delete_with_state(&self, txn: &QueueTxn, queue: &str, message_id: MessageId) -> Result<()>;
 
     /// Atomically move up to `count` messages from `source` onto `dest`,

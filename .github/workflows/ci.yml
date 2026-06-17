@@ -167,6 +167,17 @@ jobs:
       - name: Doc-generation tooling contract test
         run: node --test scripts/docs_matrix_contract.test.mjs
 
+  helm-chart:
+    name: Helm Chart
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Azure/setup-helm@v5
+      - name: Lint and render topology matrix
+        run: make check-helm
+
   afk-validation-sidecar:
     # Issue #970 — machine-check AFK's structured validation sidecar against
     # the actual merged diff. The contract test always runs; the live diff
@@ -542,35 +553,23 @@ jobs:
       - name: Run drill tests
         run: cargo test --locked --test grouped_pitr_drills --no-fail-fast
 
-  chaos-minio:
+  chaos-floci:
     # PLAN.md Phase 8.4 — chaos suite against an S3-compatible
-    # backend (MinIO) so the LocalBackend coverage doesn't mask
+    # backend (Floci) so the LocalBackend coverage doesn't mask
     # backend-specific failure modes.
-    name: Chaos Suite (MinIO S3 backend)
+    name: Chaos Suite (Floci S3 backend)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     timeout-minutes: 25
     needs: tests
-    services:
-      minio:
-        image: minio/minio:latest
-        ports: ['9000:9000']
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
     env:
       RED_BACKEND: s3
-      RED_S3_ENDPOINT: http://localhost:9000
+      RED_S3_ENDPOINT: http://localhost:4566
       RED_S3_BUCKET: reddb-ci
       RED_S3_REGION: us-east-1
       RED_S3_PATH_STYLE: "true"
-      RED_S3_ACCESS_KEY: minioadmin
-      RED_S3_SECRET_KEY: minioadmin
+      RED_S3_ACCESS_KEY: test
+      RED_S3_SECRET_KEY: test
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.91.0
@@ -581,12 +580,46 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
-      - name: Wait for MinIO + create bucket
+      - name: Start Floci
         run: |
-          curl -fsS --retry 10 --retry-delay 2 http://localhost:9000/minio/health/ready
-          docker run --rm --network host minio/mc:latest \
-            sh -c "mc alias set ci http://localhost:9000 minioadmin minioadmin && mc mb -p ci/reddb-ci || true"
-      - run: cargo test --locked --test 'chaos_*' --no-fail-fast
+          docker run -d --name reddb-ci-floci \
+            -p 4566:4566 \
+            floci/floci:latest
+      - name: Wait for Floci + create bucket
+        run: |
+          ready=false
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:4566/_localstack/health; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "true" ]; then
+            docker logs reddb-ci-floci || true
+            exit 1
+          fi
+          bucket=false
+          for _ in $(seq 1 10); do
+            if docker run --rm --network host \
+              -e AWS_ACCESS_KEY_ID=test \
+              -e AWS_SECRET_ACCESS_KEY=test \
+              -e AWS_DEFAULT_REGION=us-east-1 \
+              amazon/aws-cli:latest \
+              --endpoint-url http://localhost:4566 s3 mb s3://reddb-ci; then
+              bucket=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$bucket" != "true" ]; then
+            docker logs reddb-ci-floci || true
+            exit 1
+          fi
+      - run: cargo test --locked --test grouped_chaos --no-fail-fast
+      - name: Stop Floci
+        if: always()
+        run: docker rm -f reddb-ci-floci || true
 
   windows:
     # Phase 3.6 PG parity — verify RedDB compiles + passes the core unit

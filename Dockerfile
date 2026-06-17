@@ -72,6 +72,10 @@ ENV RUST_MIN_STACK=8388608
 # REDDB_CONFIG_FILE overrides the default path if you need a non-standard
 # location. Missing config files are treated as no-op overlays.
 
+# Topology is intentionally not baked into the image. Use the same image for
+# serverless, primary-replica, and cluster-shaped deployments; select the mode at
+# runtime with args plus REDDB_STORAGE_PRESET / REDDB_STORAGE_PROFILE.
+
 # === Secrets via file mounts ====================================================
 # DO NOT bake REDDB_CERTIFICATE / REDDB_VAULT_KEY / REDDB_PASSWORD into this image.
 # Mount them at runtime via Docker/Swarm secrets, K8s Secret volumes, or any

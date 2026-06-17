@@ -25,6 +25,11 @@ apply policy, own storage-engine semantics, and adapt internal types to the
 contracts above. It must not introduce new persisted file formats or binary/wire
 payload formats directly.
 
+Cross-language fixtures for these contracts live under `testdata/conformance`.
+The contract crate owns the encoding or format; Rust tests and official language
+drivers consume the same fixture files instead of copying golden data into each
+driver.
+
 ## Rules
 
 - A new transport-visible payload or protocol discriminator starts in
@@ -35,6 +40,12 @@ payload formats directly.
   boundary has already parsed or produced the external contract.
 - Compatibility shims are allowed only when they delegate to the canonical crate
   and do not carry a second frame, payload, path, manifest, or WAL format.
+- A fixture that proves behavior across Rust and non-Rust adapters belongs under
+  `testdata/conformance`, with the owning contract crate documented next to the
+  fixture root.
+- Official language drivers may translate contract values into local idioms, but
+  must not fork protocol discriminators, binary layouts, file artifact names, or
+  golden fixtures.
 
 ## Consequences
 
@@ -42,8 +53,10 @@ payload formats directly.
   authority for external contracts.
 - Tests may grep for forbidden redeclarations in `reddb-server` and client
   adapters. These tests are architectural guardrails, not style preferences.
-- Moving an existing contract into `reddb-wire` or `reddb-file` is behavior
-  preserving unless the old local implementation was already divergent.
+- Moving an existing contract into `reddb-io-wire` or `reddb-io-file` is
+  behavior preserving unless the old local implementation was already divergent.
+- Adding a cross-driver contract fixture should update the contract crate test
+  first, then each adapter that claims support for that contract.
 
 ## Related
 

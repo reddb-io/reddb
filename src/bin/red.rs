@@ -3301,11 +3301,9 @@ fn build_server_config(
         || explicit_http_bind_from_env.is_some()
         || (legacy_bind_explicit && http_bind_addr.is_some() && grpc_bind_addr.is_none());
     let path = resolve_server_path(flags).map(PathBuf::from);
-    let role = forced_role
-        .map(|value| value.to_string())
-        .or_else(|| flag_string(flags, "role"))
-        .unwrap_or_else(|| "standalone".to_string());
-    let storage_profile = resolve_storage_profile(flags, &role)?;
+    let bootstrap = resolve_operational_bootstrap(flags, forced_role)?;
+    let storage_profile = bootstrap.storage_profile;
+    let role = bootstrap.process_role;
 
     let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
 
@@ -3426,68 +3424,58 @@ fn resolve_storage_profile(
     flags: &HashMap<String, FlagValue>,
     role: &str,
 ) -> Result<reddb::storage::StorageProfileSelection, String> {
-    use reddb::storage::{
-        DeployProfile, StorageDeployPreset, StoragePackaging, StorageProfileSelection,
-    };
+    let forced_role = matches!(role, "standalone" | "primary" | "replica").then(|| role);
+    Ok(resolve_operational_bootstrap_without_topology_env(flags, forced_role)?.storage_profile)
+}
 
-    let preset_raw = flag_string(flags, "storage-preset")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env_string("REDDB_STORAGE_PRESET"));
+fn resolve_operational_bootstrap(
+    flags: &HashMap<String, FlagValue>,
+    forced_role: Option<&str>,
+) -> Result<reddb::operational_bootstrap::OperationalBootstrapPlan, String> {
+    let mut input = operational_bootstrap_input(flags, forced_role);
+    input.topology = env_string("REDDB_TOPOLOGY");
+    input.node_role = env_string("REDDB_NODE_ROLE");
+    input.config_file_path = env_string("REDDB_CONFIG_FILE");
+    reddb::operational_bootstrap::resolve_operational_bootstrap(input)
+}
 
-    let mut selection = if let Some(raw) = preset_raw {
-        let preset = StorageDeployPreset::parse(&raw).ok_or_else(|| {
-            format!(
-                "storage preset {raw:?} is not recognised (expected embedded, serverless, primary-replica-dev, primary-replica-small, primary-replica-production-ha, primary-replica-backup, primary-replica-wal-retention, or cluster)"
-            )
-        })?;
-        preset.selection()
-    } else if matches!(role, "primary" | "replica") {
-        StorageDeployPreset::PrimaryReplicaDev.selection()
-    } else {
-        StorageProfileSelection::embedded_single_file()
-    };
+fn resolve_operational_bootstrap_without_topology_env(
+    flags: &HashMap<String, FlagValue>,
+    forced_role: Option<&str>,
+) -> Result<reddb::operational_bootstrap::OperationalBootstrapPlan, String> {
+    reddb::operational_bootstrap::resolve_operational_bootstrap(operational_bootstrap_input(
+        flags,
+        forced_role,
+    ))
+}
 
-    if let Some(raw) = flag_string(flags, "storage-profile")
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            env_string("REDDB_STORAGE_PROFILE").or_else(|| env_string("REDDB_DEPLOY_PROFILE"))
-        })
-    {
-        selection.deploy_profile = DeployProfile::parse(&raw).ok_or_else(|| {
-            format!(
-                "storage profile {raw:?} is not recognised (expected embedded, serverless, primary-replica, or cluster)"
-            )
-        })?;
+fn operational_bootstrap_input(
+    flags: &HashMap<String, FlagValue>,
+    forced_role: Option<&str>,
+) -> reddb::operational_bootstrap::OperationalBootstrapInput {
+    reddb::operational_bootstrap::OperationalBootstrapInput {
+        forced_role: forced_role.map(str::to_string),
+        role_flag: flag_string(flags, "role").filter(|value| !value.is_empty()),
+        topology: None,
+        node_role: None,
+        storage_preset: flag_string(flags, "storage-preset")
+            .filter(|value| !value.is_empty())
+            .or_else(|| env_string("REDDB_STORAGE_PRESET")),
+        storage_profile: flag_string(flags, "storage-profile")
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                env_string("REDDB_STORAGE_PROFILE").or_else(|| env_string("REDDB_DEPLOY_PROFILE"))
+            }),
+        storage_packaging: flag_string(flags, "storage-packaging")
+            .filter(|value| !value.is_empty())
+            .or_else(|| env_string("REDDB_STORAGE_PACKAGING")),
+        replica_count: flag_string(flags, "replica-count")
+            .filter(|value| !value.is_empty())
+            .or_else(|| env_string("REDDB_REPLICA_COUNT")),
+        managed_backup: flag_bool(flags, "managed-backup") || env_truthy("REDDB_MANAGED_BACKUP"),
+        wal_retention: flag_bool(flags, "wal-retention") || env_truthy("REDDB_WAL_RETENTION"),
+        config_file_path: None,
     }
-
-    if let Some(raw) = flag_string(flags, "storage-packaging")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env_string("REDDB_STORAGE_PACKAGING"))
-    {
-        selection.packaging = StoragePackaging::parse(&raw).ok_or_else(|| {
-            format!(
-                "storage packaging {raw:?} is not recognised (expected single-file or operational-directory)"
-            )
-        })?;
-    }
-
-    if let Some(raw) = flag_string(flags, "replica-count")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env_string("REDDB_REPLICA_COUNT"))
-    {
-        selection.replica_count = raw
-            .parse::<u16>()
-            .map_err(|_| format!("replica-count must be a non-negative integer, got {raw:?}"))?;
-    }
-
-    if flag_bool(flags, "managed-backup") || env_truthy("REDDB_MANAGED_BACKUP") {
-        selection.managed_backup = true;
-    }
-    if flag_bool(flags, "wal-retention") || env_truthy("REDDB_WAL_RETENTION") {
-        selection.wal_retention = true;
-    }
-
-    selection.validate()
 }
 
 /// Read the three slice-5 HTTP limiter knobs from CLI flags and env
@@ -5864,6 +5852,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_TOPOLOGY",
+            "REDDB_NODE_ROLE",
         ]);
         let flags = HashMap::from([("role".to_string(), str_flag("primary"))]);
         let config = build_server_config(&flags, None).unwrap();
@@ -5878,6 +5868,105 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     }
 
     #[test]
+    fn build_server_config_uses_topology_env_for_storage_default() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_TOPOLOGY", "serverless"),
+            ("REDDB_NODE_ROLE", "serverless"),
+        ]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+
+        let config = build_server_config(&HashMap::new(), None).unwrap();
+
+        assert_eq!(config.role, "standalone");
+        assert_eq!(
+            config.storage_profile.deploy_profile,
+            reddb::storage::DeployProfile::Serverless
+        );
+    }
+
+    #[test]
+    fn operational_bootstrap_uses_config_file_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[("REDDB_CONFIG_FILE", "/etc/reddb/custom.json")]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_TOPOLOGY",
+            "REDDB_NODE_ROLE",
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+
+        let plan = resolve_operational_bootstrap(&HashMap::new(), None).unwrap();
+
+        assert_eq!(plan.config_file_path, "/etc/reddb/custom.json");
+    }
+
+    #[test]
+    fn build_server_config_uses_node_role_env_for_primary_replica() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_TOPOLOGY", "primary-replica"),
+            ("REDDB_NODE_ROLE", "replica"),
+        ]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+
+        let config = build_server_config(&HashMap::new(), None).unwrap();
+
+        assert_eq!(config.role, "replica");
+        assert_eq!(
+            config.storage_profile.deploy_profile,
+            reddb::storage::DeployProfile::PrimaryReplica
+        );
+    }
+
+    #[test]
+    fn build_server_config_keeps_cluster_member_on_standalone_process_role() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_TOPOLOGY", "cluster"),
+            ("REDDB_NODE_ROLE", "cluster-member"),
+        ]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+
+        let config = build_server_config(&HashMap::new(), None).unwrap();
+
+        assert_eq!(config.role, "standalone");
+        assert_eq!(
+            config.storage_profile.deploy_profile,
+            reddb::storage::DeployProfile::Cluster
+        );
+    }
+
+    #[test]
     fn build_server_config_accepts_production_ha_storage_preset() {
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::clear(&[
@@ -5888,6 +5977,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_TOPOLOGY",
+            "REDDB_NODE_ROLE",
         ]);
         let flags = HashMap::from([(
             "storage-preset".to_string(),
@@ -5916,6 +6007,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_TOPOLOGY",
+            "REDDB_NODE_ROLE",
         ]);
         let flags = HashMap::from([
             ("storage-profile".to_string(), str_flag("primary-replica")),
@@ -5938,6 +6031,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_TOPOLOGY",
+            "REDDB_NODE_ROLE",
         ]);
         let flags = HashMap::from([
             ("storage-profile".to_string(), str_flag("cluster")),

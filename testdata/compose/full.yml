@@ -24,6 +24,10 @@ services:
       REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "2"
     ports:
       - "55551:50051"
       - "55880:8080"
@@ -51,6 +55,10 @@ services:
       REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "2"
     ports:
       - "55552:50051"
       - "55881:8080"
@@ -79,6 +87,10 @@ services:
       REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "2"
     ports:
       - "55553:50051"
       - "55882:8080"

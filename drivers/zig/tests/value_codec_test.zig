@@ -26,9 +26,9 @@ fn makeVector128() [128]f32 {
 
 fn readFixtureManifest(allocator: std.mem.Allocator) ![]u8 {
     const candidates = [_][]const u8{
-        "../../crates/reddb-wire/tests/fixtures/params/manifest.json",
-        "crates/reddb-wire/tests/fixtures/params/manifest.json",
-        "../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
+        "../../testdata/conformance/redwire/params/manifest.json",
+        "testdata/conformance/redwire/params/manifest.json",
+        "../../../testdata/conformance/redwire/params/manifest.json",
     };
 
     const io = std.Options.debug_io;

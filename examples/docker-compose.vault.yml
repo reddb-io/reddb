@@ -54,6 +54,10 @@ services:
       - reddb-data:/data
     environment:
       RUST_LOG: info
+      REDDB_STORAGE_PRESET: embedded
+      REDDB_STORAGE_PROFILE: embedded
+      REDDB_STORAGE_PACKAGING: single-file
+      REDDB_REPLICA_COUNT: "0"
       # The entrypoint shim AND the binary both honour these *_FILE vars.
       # The cert never appears as a process env variable — only the path does.
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
