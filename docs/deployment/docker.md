@@ -82,6 +82,29 @@ write-if-absent `red.config` semantics are preserved:
 `REDDB_STORAGE_*` overrides the topology-derived storage default, and
 `REDDB_CLUSTER_*` remains the cluster identity/discovery contract.
 
+## Auth First Boot
+
+For an automatic first boot, set the production preset only on the writer
+container:
+
+```bash
+REDDB_PRESET=production
+REDDB_USERNAME=admin
+REDDB_PASSWORD_FILE=/run/secrets/reddb_password
+```
+
+Use this on:
+
+- the `serverless` container
+- the `primary` container in `primary-replica`
+
+Do not set these variables on `red replica` containers. A replica should receive
+the replicated auth state from its primary, not create its own first admin. The
+same rule applies to Docker secrets with `_FILE` variables. For `cluster`, the
+Compose profile is a stable identity/discovery contract today; bootstrap cluster
+admins with an external one-shot workflow or manifest once a concrete writer is
+selected.
+
 ## Persist Data
 
 Mount a volume to `/data` to persist the database across container restarts:

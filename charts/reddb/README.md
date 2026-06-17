@@ -155,7 +155,11 @@ cluster supervisor and range ownership runtime as those pieces mature.
 - Non-root UID/GID `10001` by chart default.
 - `readOnlyRootFilesystem: true`, all capabilities dropped, `RuntimeDefault` seccomp.
 - `automountServiceAccountToken: false` by default.
-- Auth bootstrap supports chart-managed or existing Secrets.
+- Auth bootstrap supports chart-managed or existing Secrets. When
+  `auth.enabled=true`, `REDDB_PRESET=production`, `REDDB_USERNAME`, and
+  `REDDB_PASSWORD` are rendered only into the writer pod: serverless or primary.
+  Replica pods never receive bootstrap credentials, and `mode=cluster` rejects
+  chart-managed auth bootstrap until a concrete writer bootstrap path exists.
 - Vault certificates can be injected through env or mounted file using the
   existing `auth.vault.certificate.fileMount` path.
 

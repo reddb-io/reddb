@@ -128,3 +128,10 @@ remote:
 
 For secret-file workflows, mount the Secret with `extraSecretMounts` and pass the
 matching `*_FILE` env var through `config.extraEnv`.
+
+When `auth.enabled=true`, the chart renders `REDDB_PRESET=production`,
+`REDDB_USERNAME`, and `REDDB_PASSWORD` only into the writer StatefulSet: the
+serverless pod or the primary pod. Replica StatefulSets never receive bootstrap
+credentials. `mode=cluster` rejects `auth.enabled=true`; bootstrap cluster
+admins with an external one-shot job or manifest once a concrete writer is
+selected.
