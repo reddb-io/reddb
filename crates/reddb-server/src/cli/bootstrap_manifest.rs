@@ -350,9 +350,11 @@ fn parse_users(values: &[JsonValue]) -> Result<Vec<ManifestUser>, String> {
             }
             let role = Role::from_str(&required_string(obj, "role", "users", idx)?)
                 .ok_or_else(|| format!("users[{idx}].role must be read, write, or admin"))?;
-            // Legacy manifests may still carry `system_owned`; unknown
-            // fields are accepted, but authorization is policy-first.
-            let _ = obj.get("system_owned");
+            if obj.contains_key("system_owned") {
+                return Err(format!(
+                    "users[{idx}].system_owned is no longer supported; use explicit policies"
+                ));
+            }
             Ok(ManifestUser {
                 username,
                 password,
@@ -904,4 +906,30 @@ fn secret_ref_storage_value(value: &JsonValue, idx: usize) -> Result<Value, Stri
         crate::serde_json::to_vec(&JsonValue::Object(out))
             .map_err(|err| format!("serialize config[{idx}].secret_ref: {err}"))?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BootstrapManifest;
+
+    #[test]
+    fn rejects_system_owned_user_field() {
+        let result = BootstrapManifest::parse(
+            r#"{
+                "users": [
+                    {
+                        "username": "ops",
+                        "password": "hunter2",
+                        "role": "admin",
+                        "system_owned": true
+                    }
+                ]
+            }"#,
+        );
+
+        match result {
+            Ok(_) => panic!("manifest accepted users[0].system_owned"),
+            Err(err) => assert!(err.contains("users[0].system_owned"), "got: {err}"),
+        }
+    }
 }

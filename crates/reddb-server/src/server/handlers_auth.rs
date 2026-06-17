@@ -71,9 +71,7 @@ fn authorize_user_lifecycle_mutation(
     action: &str,
     target: &UserId,
 ) -> Option<HttpResponse> {
-    let Some(caller) = caller else {
-        return None;
-    };
+    let caller = caller?;
     if auth_store.check_user_lifecycle_authz(&caller.id, caller.role, action, target) {
         None
     } else {
@@ -614,7 +612,7 @@ impl RedDBServer {
         let target = UserId::platform(username.clone());
         let changes_other_user = caller
             .as_ref()
-            .map(|caller| &caller.id != &target)
+            .map(|caller| caller.id != target)
             .unwrap_or(false);
         if changes_other_user {
             if let Some(response) = authorize_user_lifecycle_mutation(

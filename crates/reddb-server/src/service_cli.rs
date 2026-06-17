@@ -3568,8 +3568,7 @@ mod tests {
                     {
                         "username": "ops",
                         "password": "hunter2",
-                        "role": "admin",
-                        "system_owned": true
+                        "role": "admin"
                     }
                 ],
                 "policies": [
