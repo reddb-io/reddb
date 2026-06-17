@@ -415,8 +415,8 @@ For production, always pass `--vault` and a certificate.
 
 ## 7. Docker deploy
 
-The production-secure pattern uses Docker secrets + a tmpfs mount + an
-entrypoint that expands `*_FILE` variables. This avoids every common
+The production-secure pattern uses Docker secrets + a tmpfs mount + the
+binary's supported `*_FILE` variables. This avoids every common
 secret-leakage anti-pattern.
 
 ### docker-compose.vault.yml
@@ -427,8 +427,8 @@ services:
   reddb:
     image: ghcr.io/reddb-io/reddb:latest
     ports:
-      - "8080:8080"
-      - "5050:5050"
+      - "55880:8080"
+      - "55050:5050"
     volumes:
       - reddb-data:/data
     environment:

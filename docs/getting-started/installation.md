@@ -208,7 +208,7 @@ Run HTTP:
 
 ```bash
 docker run --rm -it \
-  -p 8080:8080 \
+  -p 55880:8080 \
   -v $(pwd)/data:/data \
   reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
 ```
@@ -217,7 +217,7 @@ Run gRPC:
 
 ```bash
 docker run --rm -it \
-  -p 50051:50051 \
+  -p 55551:50051 \
   -v $(pwd)/data:/data \
   reddb red server --grpc --path /data/reddb.rdb --bind 0.0.0.0:50051
 ```

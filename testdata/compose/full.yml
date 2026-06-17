@@ -25,9 +25,9 @@ services:
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
     ports:
-      - "50051:50051"
-      - "8080:8080"
-      - "8443:8443"
+      - "55551:50051"
+      - "55880:8080"
+      - "55843:8443"
     command:
       - "server"
       - "--role"
@@ -52,9 +52,9 @@ services:
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
     ports:
-      - "50052:50051"
-      - "8081:8080"
-      - "8444:8443"
+      - "55552:50051"
+      - "55881:8080"
+      - "55844:8443"
     command:
       - "replica"
       - "--primary-addr"
@@ -80,9 +80,9 @@ services:
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
     ports:
-      - "50053:50051"
-      - "8082:8080"
-      - "8445:8443"
+      - "55553:50051"
+      - "55882:8080"
+      - "55845:8443"
     command:
       - "replica"
       - "--primary-addr"

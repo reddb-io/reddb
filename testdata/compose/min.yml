@@ -5,9 +5,9 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-server-min
     ports:
-      - "50051:50051"
-      - "8080:8080"
-      - "8443:8443"
+      - "55551:50051"
+      - "55880:8080"
+      - "55843:8443"
     volumes:
       - server-data:/data
     command:

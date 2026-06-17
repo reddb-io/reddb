@@ -1,0 +1,15 @@
+{
+  "red": {
+    "logging": {
+      "level": "info",
+      "format": "json"
+    }
+  },
+  "slow_query": {
+    "threshold_ms": 500,
+    "sample_pct": 10
+  },
+  "disk_space": {
+    "critical_pct": 90
+  }
+}

@@ -9,9 +9,9 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-primary
     ports:
-      - "50051:50051"
-      - "8080:8080"
-      - "8443:8443"
+      - "55551:50051"
+      - "55880:8080"
+      - "55843:8443"
     volumes:
       - primary-data:/data
     command:
@@ -33,6 +33,10 @@ services:
     environment:
       - RUST_LOG=info
       - RED_HTTP_TLS_DEV=1
+      - REDDB_STORAGE_PRESET=primary-replica-production-ha
+      - REDDB_STORAGE_PROFILE=primary-replica
+      - REDDB_STORAGE_PACKAGING=operational-directory
+      - REDDB_REPLICA_COUNT=1
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
@@ -46,8 +50,8 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-replica
     ports:
-      - "50052:50051"
-      - "8081:8080"
+      - "55552:50051"
+      - "55881:8080"
     volumes:
       - replica-data:/data
     command:
@@ -66,6 +70,10 @@ services:
       - ALL
     environment:
       - RUST_LOG=info
+      - REDDB_STORAGE_PRESET=primary-replica-production-ha
+      - REDDB_STORAGE_PROFILE=primary-replica
+      - REDDB_STORAGE_PACKAGING=operational-directory
+      - REDDB_REPLICA_COUNT=1
       - REDDB_PRIMARY_ADDR=http://primary:50051
     depends_on:
       primary:

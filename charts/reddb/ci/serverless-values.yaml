@@ -1,0 +1,25 @@
+mode: serverless
+
+storage:
+  preset: serverless
+
+remote:
+  enabled: true
+  backend: fs
+  key: serverless/ci/data.rdb
+  fs:
+    path: /data/remote
+
+serverless:
+  autoRestore: true
+  backupOnShutdown: true
+  lease:
+    required: true
+
+config:
+  file:
+    enabled: true
+    inline:
+      red:
+        logging:
+          level: info

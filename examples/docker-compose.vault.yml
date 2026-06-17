@@ -48,8 +48,8 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "8080:8080"
-      - "50051:50051"
+      - "55880:8080"
+      - "55551:50051"
     volumes:
       - reddb-data:/data
     environment:

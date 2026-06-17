@@ -1,11 +1,12 @@
 # =============================================================================
 # RedDB Helm chart values
 # =============================================================================
-# Two deployment modes:
+# Four deployment modes:
 #
-#   mode: standalone        -> single StatefulSet, role=standalone (1 pod)
-#   mode: primary-replica   -> primary StatefulSet (1 pod) + replica StatefulSet (N pods)
-#                              replicas stream from the primary via gRPC
+#   mode: standalone        -> single StatefulSet, role=standalone (dev/demo default)
+#   mode: serverless        -> single writer StatefulSet with serverless storage preset
+#   mode: primary-replica   -> primary StatefulSet (1 pod) + optional replica StatefulSet (N pods)
+#   mode: cluster           -> symmetric StatefulSet with stable identity + headless discovery
 # =============================================================================
 
 mode: standalone
@@ -24,10 +25,91 @@ image:
   pullSecrets: []
 
 # -----------------------------------------------------------------------------
+# Storage/deploy profile
+# -----------------------------------------------------------------------------
+# These values compile to the REDDB_STORAGE_* env contract understood by `red`.
+# When storage.preset is empty, the chart derives it from mode:
+#   standalone      -> embedded
+#   serverless      -> serverless
+#   primary-replica -> primary-replica-production-ha
+#   cluster         -> cluster
+storage:
+  # Override the mode-derived preset. Valid values include:
+  # embedded, serverless, primary-replica-dev, primary-replica-small,
+  # primary-replica-production-ha, primary-replica-backup,
+  # primary-replica-wal-retention, cluster.
+  preset: ""
+  # Optional lower-level overrides. Leave empty to let the preset decide.
+  profile: ""
+  packaging: ""
+  managedBackup: ""
+  walRetention: ""
+
+# -----------------------------------------------------------------------------
+# Remote backend / serverless storage
+# -----------------------------------------------------------------------------
+# Renders the cloud-agnostic RED_BACKEND / RED_REMOTE_KEY / RED_S3_* contract.
+# The binary also accepts older REDDB_REMOTE_* names, but the chart emits the
+# current names.
+remote:
+  enabled: false
+  backend: "" # s3 | fs | http | none
+  key: ""
+
+  fs:
+    path: ""
+
+  http:
+    url: ""
+    prefix: ""
+    conditionalWrites: false
+    authHeader:
+      value: ""
+      existingSecret: ""
+      existingSecretKey: auth-header
+
+  s3:
+    endpoint: ""
+    bucket: ""
+    region: us-east-1
+    keyPrefix: ""
+    pathStyle: true
+    # Plain values are for local/dev only. Prefer existingSecret or file mounts.
+    accessKey: ""
+    secretKey: ""
+    existingSecret: ""
+    accessKeyKey: access-key
+    secretKeyKey: secret-key
+
+# -----------------------------------------------------------------------------
+# Serverless lifecycle
+# -----------------------------------------------------------------------------
+serverless:
+  autoRestore: true
+  backupOnShutdown: true
+  lease:
+    required: false
+    ttlSeconds: 60
+    prefix: leases/
+
+# -----------------------------------------------------------------------------
+# Primary-replica commit policy
+# -----------------------------------------------------------------------------
+replication:
+  # Leave empty for the binary default (`local`). Common values: local, remote_wal,
+  # ack_n, ack_n=1, quorum.
+  commitPolicy: ""
+  commitAckN: ""
+  commitDeadlineMs: ""
+
+# -----------------------------------------------------------------------------
 # Auth bootstrap
 # -----------------------------------------------------------------------------
-# When enabled, REDDB_USERNAME / REDDB_PASSWORD are injected so the server
-# auto-creates the first admin user on startup.
+# When enabled, the writer pod receives REDDB_PRESET=production plus
+# REDDB_USERNAME / REDDB_PASSWORD so first boot creates the initial admin
+# through the policy-first bootstrap preset. Replica pods never receive
+# these bootstrap env vars. Cluster mode rejects auth.enabled because the
+# current chart renders symmetric members and cannot safely pick one writer.
 auth:
   enabled: false
   username: admin
@@ -147,6 +229,18 @@ config:
   logLevel: info
   # Enable encrypted auth vault (reserved pages in main .rdb file)
   vault: false
+  # Mount a JSON config file for boot-time write-if-absent seeding into
+  # red.config. REDDB_CONFIG_FILE points at mountPath when enabled.
+  file:
+    enabled: false
+    mountPath: /etc/reddb/config.json
+    # Use an existing ConfigMap with key `key`, or provide `inline` below and
+    # let the chart create one.
+    existingConfigMap: ""
+    key: config.json
+    inline: {}
+  # Extra envFrom entries appended to every RedDB container.
+  extraEnvFrom: []
   # Extra environment variables, list of {name, value} or {name, valueFrom}
   extraEnv: []
   # Extra CLI args appended to the `red server` / `red replica` command
@@ -167,7 +261,8 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
-# Matches the non-root reddb user baked into the Dockerfile (uid/gid 10001)
+# Non-root runtime defaults used by the chart. Override if your image variant
+# uses a different numeric user.
 podSecurityContext:
   fsGroup: 10001
   runAsNonRoot: true
@@ -260,6 +355,7 @@ replica:
     type: ClusterIP
     annotations: {}
     grpcPort: 50051
+    grpcTlsPort: 50052
     httpPort: 8080
     httpTlsPort: 8443
 
@@ -275,6 +371,51 @@ replica:
     type: RollingUpdate
     rollingUpdate:
       partition: 0
+
+# -----------------------------------------------------------------------------
+# Cluster members (only rendered when mode=cluster)
+# -----------------------------------------------------------------------------
+cluster:
+  replicaCount: 3
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes: ["ReadWriteOnce"]
+    size: 10Gi
+    annotations: {}
+
+  service:
+    type: ClusterIP
+    annotations: {}
+    grpcPort: 50051
+    grpcTlsPort: 50052
+    httpPort: 8080
+    httpTlsPort: 8443
+
+  discovery:
+    # Optional static peer list. Empty means the chart generates StatefulSet DNS
+    # names: <release>-cluster-0.<headless>.<namespace>.svc.cluster.local:50051
+    staticPeers: []
+
+  nodeSelector: {}
+  tolerations: []
+  # When empty, a soft pod anti-affinity across hostnames is injected.
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 60
+
+  updateStrategy:
+    type: RollingUpdate
 
 # -----------------------------------------------------------------------------
 # Probes — exec the local `red health` CLI against the in-pod HTTP port.
@@ -299,7 +440,8 @@ probes:
     failureThreshold: 3
 
 # -----------------------------------------------------------------------------
-# PodDisruptionBudget — only meaningful for the replica StatefulSet.
+# PodDisruptionBudget — applies to the replica StatefulSet in primary-replica
+# mode and to the cluster StatefulSet in cluster mode.
 # -----------------------------------------------------------------------------
 pdb:
   enabled: false

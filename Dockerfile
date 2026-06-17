@@ -47,12 +47,12 @@ WORKDIR /data
 VOLUME /data
 VOLUME /etc/reddb
 
-# Wire (5050), gRPC (5055) and HTTP (8080) ports
-EXPOSE 5050 5055 8080
+# Wire (5050), gRPC (50051) and HTTP (8080) ports
+EXPOSE 5050 50051 8080
 
 ENV REDDB_DATA_PATH=/data/data.rdb
 ENV REDDB_BIND_ADDR=0.0.0.0:5050
-ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:5055
+ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:50051
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:8080
 ENV RUST_MIN_STACK=8388608
 
@@ -69,9 +69,8 @@ ENV RUST_MIN_STACK=8388608
 #   docker run -v ./my-config.json:/etc/reddb/config.json reddb
 # Format is JSON with dotted keys flattened: {"durability":{"mode":"async"}}
 #
-# REDDB_CONFIG_FILE overrides the default path if you need a
-# non-standard location.
-ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
+# REDDB_CONFIG_FILE overrides the default path if you need a non-standard
+# location. Missing config files are treated as no-op overlays.
 
 # === Secrets via file mounts ====================================================
 # DO NOT bake REDDB_CERTIFICATE / REDDB_VAULT_KEY / REDDB_PASSWORD into this image.
@@ -96,4 +95,4 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
 
 ENTRYPOINT ["/usr/local/bin/red"]
-CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--wire-bind", "0.0.0.0:5050", "--grpc-bind", "0.0.0.0:5055"]
+CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--wire-bind", "0.0.0.0:5050", "--grpc-bind", "0.0.0.0:50051"]
