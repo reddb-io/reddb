@@ -21,8 +21,9 @@ properties:
       transport: http
       allowInsecure: false
     secrets:
-      # Encrypted-vault key. Bootstrap once via `red bootstrap --print-certificate`,
-      # store the result in Azure Key Vault, then reference it here.
+      # Encrypted-vault key. Bootstrap the real database volume once via
+      # `red bootstrap --print-certificate`, store the result in Azure Key
+      # Vault, then reference it here.
       #   az keyvault secret set --vault-name VAULT \
       #       --name reddb-vault-cert --value "$CERT"
       - name: vault-certificate

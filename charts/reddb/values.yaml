@@ -141,9 +141,9 @@ auth:
       fileMount:
         enabled: false
         path: /run/secrets/reddb_certificate
-    # Optional one-off Job that runs `red bootstrap` to mint the first
-    # admin user + certificate, then writes the cert into a Secret.
-    # See templates/bootstrap-job.yaml for caveats.
+    # Disabled fail-closed. The legacy hook bootstrapped an emptyDir DB,
+    # not the writer PVC, so it could publish a certificate unrelated to
+    # the real database. Bootstrap the writer volume manually instead.
     bootstrapJob:
       enabled: false
       username: admin

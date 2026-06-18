@@ -94,6 +94,7 @@ docker run --rm \
   ghcr.io/reddb-io/reddb:latest \
   bootstrap \
     --path /data/data.rdb \
+    --vault \
     --username admin \
     --password "$(openssl rand -base64 24)" \
     --print-certificate \
@@ -110,6 +111,9 @@ shred -u /tmp/reddb-bootstrap.log
 
 The cert is 64 hex chars. The bootstrap also creates `admin` and prints
 its initial API key — capture both.
+
+Bootstrap must run against the same mounted data volume that the server will
+use. A certificate minted from a scratch DB will not unseal a different DB.
 
 ### Step 2 — Store the certificate
 

@@ -1,7 +1,14 @@
 {{- if and .Values.auth.vault.enabled .Values.auth.vault.bootstrapJob.enabled -}}
 {{/*
-One-off Job that mints the first admin user + the encrypted-vault
-certificate via `red bootstrap`. The Job:
+Legacy one-off Job that mints the first admin user + the encrypted-vault
+certificate via `red bootstrap`.
+
+This hook is intentionally blocked by reddb.validateMode. It bootstraps an
+emptyDir DB file, not the StatefulSet PVC, so the generated admin/certificate
+do not belong to the writer's real database. Keep the template as historical
+scaffolding until a same-volume bootstrap design exists.
+
+The Job:
 
   1. initContainer `bootstrap`: runs `red bootstrap --print-certificate
      --json` against an emptyDir DB file, capturing the cert into
@@ -20,9 +27,7 @@ Caveats / known limitations:
     chart namespace. We create a Role + RoleBinding scoped to the
     Job's ServiceAccount only (deleted when the Job is deleted).
   * If you cannot grant the cluster permission, set
-    bootstrapJob.enabled=false and bootstrap manually:
-        kubectl create secret generic reddb-vault \
-          --from-literal=certificate=$(red bootstrap ... --print-certificate)
+    bootstrapJob.enabled=false and bootstrap the real writer volume manually.
 */}}
 ---
 apiVersion: v1

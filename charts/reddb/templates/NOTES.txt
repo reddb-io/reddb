@@ -72,10 +72,11 @@ The chart materialised the certificate into:
     secret/{{ include "reddb.authSecretName" . }} (key: {{ default "certificate" .Values.auth.vault.certificate.existingSecretKey }})
   {{- else }}
 WARNING: config.vault is ON but no certificate source is configured.
-The pod will fail to start until you set ONE of:
+The pod will fail to start until you configure a certificate source:
     auth.vault.certificate.value
     auth.vault.certificate.existingSecret
-    auth.vault.bootstrapJob.enabled=true
+or run a pre-start red bootstrap against the same PVC used by the writer,
+then store the emitted certificate in one of those sources.
   {{- end }}
 
   {{- if .Values.auth.vault.certificate.fileMount.enabled }}

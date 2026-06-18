@@ -2146,6 +2146,12 @@ fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String
     let result = auth_store
         .bootstrap(&username, &password)
         .map_err(|err| format!("bootstrap first admin: {err}"))?;
+    if let Some(cert) = result.certificate.as_deref() {
+        eprintln!("[reddb] CERTIFICATE: {}", cert);
+        tracing::warn!(
+            "vault certificate issued by REDDB_PRESET=production -- save it and update the runtime secret before restart"
+        );
+    }
     let first_admin = UserId::platform(result.user.username.clone());
 
     // (2) Install the allow-all policy as an ordinary policy row.

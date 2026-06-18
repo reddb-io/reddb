@@ -162,6 +162,10 @@ cluster supervisor and range ownership runtime as those pieces mature.
   chart-managed auth bootstrap until a concrete writer bootstrap path exists.
 - Vault certificates can be injected through env or mounted file using the
   existing `auth.vault.certificate.fileMount` path.
+- `auth.vault.bootstrapJob.enabled` is disabled fail-closed. The legacy hook
+  bootstrapped an `emptyDir` database, not the writer PVC, so its certificate did
+  not belong to the real database. Run `red bootstrap` against the real writer
+  volume or use HTTP bootstrap after the writer starts.
 
 ## Uninstall
 

@@ -133,5 +133,9 @@ When `auth.enabled=true`, the chart renders `REDDB_PRESET=production`,
 `REDDB_USERNAME`, and `REDDB_PASSWORD` only into the writer StatefulSet: the
 serverless pod or the primary pod. Replica StatefulSets never receive bootstrap
 credentials. `mode=cluster` rejects `auth.enabled=true`; bootstrap cluster
-admins with an external one-shot job or manifest once a concrete writer is
-selected.
+admins only after a concrete writer/volume bootstrap path is selected.
+
+When vault is enabled, bootstrap must happen against the writer database volume
+or via HTTP after the writer is running. The chart's legacy
+`auth.vault.bootstrapJob` is disabled fail-closed because it bootstrapped an
+`emptyDir` database unrelated to the StatefulSet PVC.

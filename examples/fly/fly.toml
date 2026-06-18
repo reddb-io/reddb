@@ -11,12 +11,10 @@
 #     fly launch --copy-config --no-deploy
 #     fly volumes create reddb_data --region gru --size 10
 #
-#     # Generate the vault certificate on a trusted host and push it
-#     # into Fly's secret store BEFORE the first deploy. The cert
-#     # never appears in this fly.toml.
-#     CERT=$(red bootstrap --vault --path ./scratch/data.rdb \
-#                          --username admin --password-stdin \
-#                          --print-certificate --json | jq -r .certificate)
+#     # Bootstrap the /data database on the Fly volume with a one-off
+#     # Machine/console, then push that certificate into Fly's secret
+#     # store BEFORE the long-running deploy. Do not mint a cert from
+#     # a local scratch DB for this app.
 #     fly secrets set REDDB_CERTIFICATE="$CERT" \
 #                     RED_S3_ACCESS_KEY=... RED_S3_SECRET_KEY=...
 #     unset CERT

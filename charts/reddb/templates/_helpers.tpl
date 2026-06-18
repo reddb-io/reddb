@@ -164,7 +164,10 @@ Validate the deployment mode.
 {{- fail "config.file.enabled=true requires config.file.existingConfigMap or non-empty config.file.inline" -}}
 {{- end -}}
 {{- if and (eq .Values.mode "cluster") .Values.auth.enabled -}}
-{{- fail "auth.enabled bootstrap env is not supported in mode=cluster; bootstrap cluster admins with an external one-shot job or manifest" -}}
+{{- fail "auth.enabled bootstrap env is not supported in mode=cluster; bootstrap cluster admins only after a concrete writer/volume bootstrap path exists" -}}
+{{- end -}}
+{{- if .Values.auth.vault.bootstrapJob.enabled -}}
+{{- fail "auth.vault.bootstrapJob.enabled is disabled: the legacy hook bootstraps an emptyDir DB, not the StatefulSet PVC. Run red bootstrap against the real volume or use HTTP bootstrap after the writer starts." -}}
 {{- end -}}
 {{- $preset := default "" .Values.storage.preset -}}
 {{- if and $preset (not (has $preset (list "embedded" "serverless" "primary-replica-dev" "primary-replica-small" "primary-replica-production-ha" "primary-replica-backup" "primary-replica-wal-retention" "cluster"))) -}}

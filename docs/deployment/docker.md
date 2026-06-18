@@ -102,8 +102,12 @@ Do not set these variables on `red replica` containers. A replica should receive
 the replicated auth state from its primary, not create its own first admin. The
 same rule applies to Docker secrets with `_FILE` variables. For `cluster`, the
 Compose profile is a stable identity/discovery contract today; bootstrap cluster
-admins with an external one-shot workflow or manifest once a concrete writer is
-selected.
+admins only after a concrete writer/volume bootstrap path is selected.
+
+When vault is enabled, prefer `red bootstrap --vault` in a one-off container
+mounted to the same data volume. If you use `REDDB_PRESET=production` for
+first-start bootstrap, capture the newly issued certificate from the writer logs
+and update the runtime secret before any restart.
 
 ## Persist Data
 

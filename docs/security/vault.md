@@ -144,6 +144,7 @@ emits the certificate to stdout, exits.
 ```bash
 red bootstrap \
   --path /data/data.rdb \
+  --vault \
   --username admin \
   --password 'change-me-now' \
   --print-certificate
@@ -164,12 +165,18 @@ container's stdout, write it into your secret manager, and **do not**
 log it to your CI system. The CLI prints it to stdout exactly once;
 there is no `red show certificate` command on a bootstrapped database.
 
+The `--path` must point at the database file that will run in production,
+or at a volume/image that is copied to production as-is. Do not bootstrap a
+scratch database just to harvest a certificate for another empty database:
+the certificate unseals the vault pages written by that bootstrap run.
+
 ```bash
 # Production pattern: bootstrap into a one-off container, capture stdout
 docker run --rm \
   -v reddb-data:/data \
   ghcr.io/reddb-io/reddb:latest \
   bootstrap --path /data/data.rdb \
+            --vault \
             --username admin \
             --password "$(openssl rand -base64 24)" \
             --print-certificate \
@@ -503,7 +510,7 @@ FROM ghcr.io/reddb-io/reddb:latest
 
 RUN --mount=type=secret,id=cert,target=/run/secrets/cert \
     REDDB_CERTIFICATE_FILE=/run/secrets/cert \
-    red bootstrap --path /data/data.rdb --print-certificate >/dev/null
+    red bootstrap --path /data/data.rdb --vault --print-certificate >/dev/null
 ```
 
 ```bash
@@ -644,10 +651,12 @@ config:
   vault: true
 ```
 
-The chart wires `REDDB_CERTIFICATE_FILE` and `REDDB_USERNAME_FILE` /
-`REDDB_PASSWORD_FILE` automatically when these fields are set. It does
-not generate a certificate for you — bootstrap remains a one-shot
-operator action.
+The chart wires `REDDB_CERTIFICATE` from `auth.vault.certificate.*`, or
+`REDDB_CERTIFICATE_FILE` when `auth.vault.certificate.fileMount.enabled=true`.
+For auth bootstrap it renders `REDDB_PRESET=production`, `REDDB_USERNAME`, and
+`REDDB_PASSWORD` only into the writer pod. It does not generate a certificate
+for you safely; bootstrap remains a one-shot operator action against the real
+writer database.
 
 ### External Secrets Operator (ESO)
 
@@ -1018,6 +1027,7 @@ curl -X POST http://primary:8080/admin/backup \
 # 2. Bring up a fresh staging instance with a NEW certificate
 docker run --rm -v staging-data:/data ghcr.io/reddb-io/reddb:latest \
   bootstrap --path /data/data.rdb \
+            --vault \
             --username admin \
             --password "$STAGING_ADMIN_PW" \
             --print-certificate
@@ -1106,7 +1116,7 @@ Practical steps:
 ```bash
 # 1. Bootstrap a new instance with a NEW cert
 docker run --rm -v reddb-new:/data ghcr.io/reddb-io/reddb:latest \
-  bootstrap --path /data/data.rdb --print-certificate
+  bootstrap --path /data/data.rdb --vault --print-certificate
 
 # 2. Restore user collections only (skip auth state)
 curl -X POST http://new:8080/admin/restore \
