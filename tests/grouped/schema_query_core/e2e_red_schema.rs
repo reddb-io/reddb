@@ -8,6 +8,7 @@ use reddb::runtime::mvcc::{
     set_current_auth_identity, set_current_connection_id, set_current_tenant,
 };
 use reddb::storage::schema::Value;
+use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 const INDEX_COLUMNS: [&str; 10] = [
@@ -356,11 +357,46 @@ fn select_from_red_collections_materializes_catalog_rows() {
         row.get("in_memory_bytes"),
         Some(Value::UnsignedInteger(_))
     ));
-    assert!(matches!(
-        row.get("on_disk_bytes"),
-        Some(Value::UnsignedInteger(_))
-    ));
+    assert_eq!(row.get("on_disk_bytes"), Some(&Value::Null));
     assert_eq!(row.get("internal"), Some(&Value::Boolean(false)));
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_collections_reports_persistent_collection_on_disk_bytes() {
+    cleanup_scope();
+    let dir = tempfile::Builder::new()
+        .prefix("reddb-red-collections-disk-bytes-")
+        .tempdir()
+        .expect("temp db dir");
+    let path = dir.path().join("data.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should be valid");
+    let rt = RedDBRuntime::with_options(options).expect("persistent runtime should open");
+    exec(&rt, "CREATE TABLE users (id INT, name TEXT)");
+    exec(&rt, "INSERT INTO users (id, name) VALUES (1, 'alice')");
+    rt.checkpoint().expect("checkpoint should flush pages");
+
+    let result = rt
+        .execute_query("SELECT name, on_disk_bytes FROM red.collections WHERE name = 'users'")
+        .expect("red.collections select");
+
+    assert_eq!(result.result.records.len(), 1);
+    let row = &result.result.records[0];
+    let on_disk_bytes = uint_field(row, "on_disk_bytes");
+    let db_size_bytes = std::fs::metadata(&path)
+        .expect("database file should exist")
+        .len();
+    assert!(
+        on_disk_bytes > 0,
+        "persistent collection should report measured bytes, got {row:?}"
+    );
+    assert!(
+        on_disk_bytes <= db_size_bytes,
+        "collection bytes ({on_disk_bytes}) should fit within db file size ({db_size_bytes})"
+    );
 
     cleanup_scope();
 }
