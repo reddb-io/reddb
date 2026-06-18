@@ -39,7 +39,7 @@ jobs:
       RUSTC_WRAPPER: sccache
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
@@ -74,7 +74,7 @@ jobs:
       - name: Restore main coverage baseline
         if: github.event_name == 'pull_request'
         id: cache-baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: coverage-baseline.json
           key: parser-coverage-main-${{ github.event.pull_request.base.sha }}
@@ -175,14 +175,14 @@ jobs:
       # Path matches the restore step so cache keys are symmetric.
       - name: Save main coverage baseline
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: coverage-baseline.json
           key: parser-coverage-main-${{ github.sha }}
 
       - name: Post or update PR comment
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           PARSER_COVERAGE_BODY: ${{ steps.report.outputs.body }}
         with:
