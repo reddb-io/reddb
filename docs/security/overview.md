@@ -28,10 +28,18 @@ flowchart TB
 
 ## Enabling Auth
 
-Auth is enabled by starting the server with `--vault`:
+Auth and the vault are separate knobs:
+
+- `--auth` enables authentication.
+- `--require-auth` rejects anonymous requests and implies auth.
+- `--vault` stores auth and secret state in the encrypted vault.
+
+Production-style first boot can use all three explicitly, or use
+`--bootstrap-preset production` / `REDDB_BOOTSTRAP_PRESET=production`
+which enables them unless `--no-auth` is set.
 
 ```bash
-red server --http --path ./data/reddb.rdb --vault --bind 0.0.0.0:8080
+red server --http --path ./data/reddb.rdb --auth --require-auth --vault --bind 0.0.0.0:8080
 ```
 
 ## Bootstrap

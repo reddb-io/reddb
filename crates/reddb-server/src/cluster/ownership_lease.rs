@@ -522,11 +522,12 @@ pub fn admit_durable_write<'c>(
     current_term: SupervisorTerm,
     now_ms: u64,
 ) -> Result<&'c RangeOwnership, DurableWriteReject> {
-    let range = catalog
-        .route(collection, key)
-        .ok_or_else(|| DurableWriteReject::NoRange {
-            collection: collection.clone(),
-        })?;
+    let range =
+        catalog
+            .route_shard_key(collection, key)
+            .ok_or_else(|| DurableWriteReject::NoRange {
+                collection: collection.clone(),
+            })?;
 
     let role = range.role_of(node);
     if !role.may_write_public() {

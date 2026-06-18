@@ -14,6 +14,7 @@
 
 pub mod answer_cache_key;
 pub mod ask_response_envelope;
+pub mod ask_rql_planner;
 pub mod audit_record_builder;
 pub mod batch_client;
 pub mod citation_parser;

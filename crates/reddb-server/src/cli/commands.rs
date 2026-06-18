@@ -356,14 +356,42 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("read-only").with_description("Open the database in read-only mode"),
         FlagSchema::boolean("no-create-if-missing")
             .with_description("Fail instead of creating the database file"),
-        FlagSchema::boolean("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
+        FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
+        FlagSchema::boolean("require-auth")
+            .with_description("Reject anonymous requests; implies --auth"),
+        FlagSchema::new("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
+            .with_default("false"),
         FlagSchema::boolean("no-auth").with_description(
             "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault, \
              prints a startup warning. Local-dev shortcut — NEVER use in production.",
         ),
         FlagSchema::boolean("dev")
             .with_description("Alias for --no-auth (local development convenience)."),
+        FlagSchema::new("bootstrap-preset")
+            .with_description("First-boot preset")
+            .with_choices(&["simple", "production", "regulated", "cloud"]),
+        FlagSchema::new("bootstrap-manifest")
+            .with_description("Path to first-boot bootstrap manifest JSON"),
+        FlagSchema::new("bootstrap-admin")
+            .with_description("First admin username for production/cloud bootstrap"),
+        FlagSchema::new("bootstrap-admin-password").with_description(
+            "First admin password (DEV ONLY; prefer --bootstrap-admin-password-file)",
+        ),
+        FlagSchema::new("bootstrap-admin-password-file")
+            .with_description("File containing first admin password"),
+        FlagSchema::new("cloud-head-admin")
+            .with_description("Cloud preset head/platform admin username"),
+        FlagSchema::new("cloud-head-admin-password").with_description(
+            "Cloud preset head/platform admin password (DEV ONLY; prefer file flag)",
+        ),
+        FlagSchema::new("cloud-head-admin-password-file")
+            .with_description("File containing cloud head admin password"),
+        FlagSchema::new("customer-admin").with_description("Cloud preset customer admin username"),
+        FlagSchema::new("customer-admin-password")
+            .with_description("Cloud preset customer admin password (DEV ONLY; prefer file flag)"),
+        FlagSchema::new("customer-admin-password-file")
+            .with_description("File containing cloud customer admin password"),
         FlagSchema::new("log-dir").with_description(
             "Directory for rotating log files (defaults to the parent of --path / ./logs)",
         ),
@@ -423,8 +451,14 @@ fn replica_flags() -> Vec<FlagSchema> {
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
         FlagSchema::new("wire-bind")
             .with_description("Explicit wire bind address (host:port or unix:///path/to/socket)"),
-        FlagSchema::boolean("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
+        FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
+        FlagSchema::boolean("require-auth")
+            .with_description("Reject anonymous requests; implies --auth"),
+        FlagSchema::new("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
+            .with_default("false"),
+        FlagSchema::boolean("no-auth")
+            .with_description("Hard-disable auth: anonymous access, ignores vault"),
     ]
 }
 

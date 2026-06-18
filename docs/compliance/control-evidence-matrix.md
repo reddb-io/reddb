@@ -41,7 +41,7 @@ of being presented as already available.
 | Schema, tenant, RLS, and backup control events | Implemented DDL, tenant governance, RLS policy, truncate, and backup actions record allowed, denied, and error outcomes in `red.control_events`. | `tests/e2e_control_events_operational.rs` |
 | Query audit by scope | `red.query_audit` records metadata-only query audit rows when configured by actor, tenant, collection, and action. The default row contains statement kind, touched collections, duration, row count, request id, and query hash, not raw query text. | `tests/e2e_query_audit.rs` |
 | Evidence export | `export_evidence` returns filtered control-event reports with counts, high-water marks, per-event hashes, and export integrity hashes, and records allowed/denied exports in `red.control_events`. | `tests/e2e_evidence_export.rs` |
-| Bootstrap presets | `simple`, `production`, and `regulated` presets are wired through `REDDB_PRESET`; bootstrap manifests can seed users, policies, attachments, managed guardrails, and config. | `crates/reddb-server/src/service_cli.rs` preset and manifest tests |
+| Bootstrap presets | `simple`, `production`, `regulated`, and `cloud` presets are wired through `REDDB_BOOTSTRAP_PRESET` (`REDDB_PRESET` remains a compatibility alias); bootstrap manifests can seed users, policies, attachments, managed guardrails, and config. | `crates/reddb-server/src/service_cli.rs` preset and manifest tests |
 
 ## Required evidence surfaces
 
@@ -67,13 +67,15 @@ surfaces visible.
 
 ## Presets
 
-RedDB exposes three bootstrap presets through `REDDB_PRESET`:
+RedDB exposes four bootstrap presets through `REDDB_BOOTSTRAP_PRESET`
+(`REDDB_PRESET` remains accepted when the canonical env var is unset):
 
 | Preset | Purpose | Evidence behavior |
 |---|---|---|
 | `simple` | Default low-friction bootstrap for local development and small deployments. | Persists bootstrap idempotency state only. The simple preset does not enable regulated evidence overhead, query-audit infrastructure, or fail-closed control-event persistence by itself. |
 | `production` | Creates the first platform-scoped admin from `REDDB_USERNAME`/`REDDB_PASSWORD` or their `_FILE` companions and grants authority through an attached allow-all policy. | Uses policy-derived authority rather than an admin bypass and persists bootstrap state for idempotent restarts. |
 | `regulated` | Enables evidence guardrails for regulated workloads without globally auditing data-plane queries. | Enables fail-closed control-event persistence, creates query-audit infrastructure with no rules, installs managed evidence guardrail policy/config registry entries, and records denied guardrail mutations. |
+| `cloud` | Creates a platform-scoped, system-owned head admin plus an ordinary platform customer admin from `REDDB_CLOUD_HEAD_ADMIN*` and `REDDB_CUSTOMER_ADMIN*` credentials. | Enables auth, require-auth, and vault by default, attaches allow-all policy-derived authority, installs cloud managed guardrails, and relies on system-owned immutability so the customer admin cannot delete or mutate the head admin. |
 
 Bootstrap manifests remain compatible with the preset path. A manifest can seed
 initial users, policies, policy attachments, managed policies, managed config

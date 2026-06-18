@@ -543,7 +543,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n]
-    /// [LIMIT n] [MIN_SCORE x] [COLLECTION col]
+    /// [LIMIT n] [MIN_SCORE x] [COLLECTION col] [AS RQL]
     pub fn parse_ask_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.parse_ask_query_with_explain(false)
     }
@@ -590,10 +590,11 @@ impl<'a> Parser<'a> {
         let mut strict = true;
         let mut stream = false;
         let mut cache = AskCacheClause::Default;
+        let mut as_rql = false;
 
         // Parse optional clauses in any order. Loop bound = number of
         // clause kinds, so each can appear at most once.
-        for _ in 0..12 {
+        for _ in 0..13 {
             if self.consume(&Token::Using)? {
                 provider = Some(match &self.current.token {
                     Token::String(_) => self.parse_string()?,
@@ -647,6 +648,21 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 cache = AskCacheClause::NoCache;
+            } else if self.consume(&Token::As)? {
+                if as_rql {
+                    return Err(ParseError::new(
+                        "ASK AS RQL specified more than once",
+                        self.position(),
+                    ));
+                }
+                let output = self.expect_ident_or_keyword()?;
+                if !output.eq_ignore_ascii_case("RQL") {
+                    return Err(ParseError::new(
+                        "Expected RQL after ASK AS",
+                        self.position(),
+                    ));
+                }
+                as_rql = true;
             } else {
                 break;
             }
@@ -667,6 +683,7 @@ impl<'a> Parser<'a> {
             strict,
             stream,
             cache,
+            as_rql,
         }))
     }
 

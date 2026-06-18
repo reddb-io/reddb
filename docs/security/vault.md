@@ -250,6 +250,8 @@ Kubernetes Secrets, systemd `LoadCredential`, etc.
 | `REDDB_VAULT_KEY`     | `REDDB_VAULT_KEY_FILE`      | Legacy passphrase (Argon2id input, not preferred)  |
 | `REDDB_USERNAME`      | `REDDB_USERNAME_FILE`       | Auto-bootstrap admin username (fresh DB only)      |
 | `REDDB_PASSWORD`      | `REDDB_PASSWORD_FILE`       | Auto-bootstrap admin password (fresh DB only)      |
+| `REDDB_CLOUD_HEAD_ADMIN_PASSWORD` | `REDDB_CLOUD_HEAD_ADMIN_PASSWORD_FILE` | Cloud preset head admin password |
+| `REDDB_CUSTOMER_ADMIN_PASSWORD` | `REDDB_CUSTOMER_ADMIN_PASSWORD_FILE` | Cloud preset customer admin password |
 | `RED_ADMIN_TOKEN`     | `RED_ADMIN_TOKEN_FILE`      | Token used by `/admin/*` endpoints                 |
 | `RED_S3_ACCESS_KEY`   | `RED_S3_ACCESS_KEY_FILE`    | S3 backend creds                                   |
 | `RED_S3_SECRET_KEY`   | `RED_S3_SECRET_KEY_FILE`    | S3 backend creds                                   |
@@ -263,6 +265,12 @@ inline defaults from a Compose file with a real secret mounted into
 contents in the corresponding inline env var, then **strips** the
 `_FILE` companion from the process environment so child processes don't
 see the file path.
+
+For first boot, select presets with `REDDB_BOOTSTRAP_PRESET` (`simple`,
+`production`, `regulated`, or `cloud`). The legacy `REDDB_PRESET` name is
+still accepted when `REDDB_BOOTSTRAP_PRESET` is unset. `production` and
+`cloud` enable auth, require-auth, and vault unless `REDDB_NO_AUTH=true`
+or `--no-auth` is present.
 
 ### Rotation without restart (`SIGHUP`)
 
@@ -416,7 +424,8 @@ vault is "sealed":
   `VERIFY_PASSWORD()` works only after unseal.
 
 A sealed vault is an explicit dev-mode signal, not a security failure.
-For production, always pass `--vault` and a certificate.
+For production, always pass `--auth --require-auth --vault` and a
+certificate, or use a `production`/`cloud` bootstrap preset.
 
 ---
 
@@ -448,6 +457,8 @@ services:
     command:
       - server
       - --path=/data/data.rdb
+      - --auth
+      - --require-auth
       - --vault
       - --http-bind=0.0.0.0:8080
       - --wire-bind=0.0.0.0:5050
@@ -570,6 +581,8 @@ spec:
         args:
           - server
           - --path=/data/data.rdb
+          - --auth
+          - --require-auth
           - --vault
           - --http-bind=0.0.0.0:8080
         envFrom:
@@ -727,7 +740,7 @@ support SIGHUP rotation.
       }
     ],
     "command": [
-      "server", "--path=/data/data.rdb", "--vault",
+      "server", "--path=/data/data.rdb", "--auth", "--require-auth", "--vault",
       "--http-bind=0.0.0.0:8080"
     ]
   }]
@@ -748,7 +761,7 @@ build:
   build: []
   post-build: []
 run:
-  command: server --path /data/data.rdb --vault --http-bind 0.0.0.0:8080
+  command: server --path /data/data.rdb --auth --require-auth --vault --http-bind 0.0.0.0:8080
   network:
     port: 8080
   env:
@@ -792,7 +805,7 @@ gcloud run deploy reddb \
   --service-account=reddb-runtime@PROJECT.iam.gserviceaccount.com \
   --update-secrets=REDDB_CERTIFICATE=reddb-certificate:latest \
   --command=server \
-  --args=--path=/data/data.rdb,--vault,--http-bind=0.0.0.0:8080
+  --args=--path=/data/data.rdb,--auth,--require-auth,--vault,--http-bind=0.0.0.0:8080
 ```
 
 The runtime service account needs `roles/secretmanager.secretAccessor`.
@@ -924,7 +937,7 @@ job "reddb" {
       driver = "docker"
       config {
         image = "ghcr.io/reddb-io/reddb:latest"
-        args  = ["server", "--path", "/data/data.rdb", "--vault",
+        args  = ["server", "--path", "/data/data.rdb", "--auth", "--require-auth", "--vault",
                  "--http-bind", "0.0.0.0:8080"]
       }
       template {
@@ -966,7 +979,7 @@ doppler secrets set REDDB_CERTIFICATE="4b7d1e2c..." \
   --project reddb --config prd
 
 # In your container's entrypoint:
-doppler run -- red server --path /data/data.rdb --vault \
+doppler run -- red server --path /data/data.rdb --auth --require-auth --vault \
                           --http-bind 0.0.0.0:8080
 ```
 

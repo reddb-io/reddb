@@ -51,6 +51,11 @@ The ownership catalog is global control-plane state. Every data member holds a
 full replica of it and routes locally from that catalog. The catalog is not
 itself sharded by the user-data sharding rules it describes.
 
+Logical partitioning is a separate schema/query concept documented in
+[Partitioning](../query/partitioning.md). Cluster shard/range ownership is a
+physical placement and failover concept; the Cluster Supervisor owns live
+placement state, not ordinary table DDL.
+
 ## Hash Vs Ordered Ranges
 
 There are two collection-level sharding modes:

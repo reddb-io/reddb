@@ -37,7 +37,7 @@ RUN cargo build \
 # signal forwarding. Switch the FROM to `scratch` and drop the apk line
 # if you don't need TLS at the engine and rely on the orchestrator's
 # init/PID-1 (k8s, Nomad, ECS all forward SIGTERM correctly without tini).
-FROM alpine:3.23
+FROM alpine:3.24
 
 # Match the non-root reddb user used by the debian-slim image so chart
 # and example manifests work uniformly across both image variants.
