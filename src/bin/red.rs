@@ -3341,9 +3341,8 @@ fn build_server_config(
     let bootstrap = resolve_operational_bootstrap(flags, forced_role)?;
     let storage_profile = bootstrap.storage_profile;
     let role = bootstrap.process_role;
-    let no_auth = flag_bool(flags, "no-auth")
-        || flag_bool(flags, "dev")
-        || env_truthy("REDDB_NO_AUTH");
+    let no_auth =
+        flag_bool(flags, "no-auth") || flag_bool(flags, "dev") || env_truthy("REDDB_NO_AUTH");
     validate_auth_bootstrap_env_for_cluster_shape(bootstrap.topology, storage_profile, no_auth)?;
 
     let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
