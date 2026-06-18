@@ -12,7 +12,7 @@ use reddb::cli;
 use reddb::cli::types::FlagValue;
 use reddb::service_cli::{
     install_systemd_service, probe_listener, render_systemd_unit, run_server_with_large_stack,
-    ServerCommandConfig, ServerTransport, SystemdServiceConfig,
+    BootstrapConfig, ServerCommandConfig, ServerTransport, SystemdServiceConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -2812,6 +2812,10 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Open the database in read-only mode"),
                 cli::types::FlagSchema::boolean("no-create-if-missing")
                     .with_description("Fail instead of creating the database file"),
+                cli::types::FlagSchema::boolean("auth")
+                    .with_description("Enable authentication for this boot"),
+                cli::types::FlagSchema::boolean("require-auth")
+                    .with_description("Reject anonymous requests; implies --auth"),
                 cli::types::FlagSchema::boolean("vault")
                     .with_description("Enable the encrypted auth vault"),
                 cli::types::FlagSchema::boolean("no-auth").with_description(
@@ -2820,6 +2824,32 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 ),
                 cli::types::FlagSchema::boolean("dev")
                     .with_description("Alias for --no-auth (local development convenience)."),
+                cli::types::FlagSchema::new("bootstrap-preset")
+                    .with_description("First-boot preset")
+                    .with_choices(&["simple", "production", "regulated", "cloud"]),
+                cli::types::FlagSchema::new("bootstrap-manifest")
+                    .with_description("Path to first-boot bootstrap manifest JSON"),
+                cli::types::FlagSchema::new("bootstrap-admin")
+                    .with_description("First admin username for production/cloud bootstrap"),
+                cli::types::FlagSchema::new("bootstrap-admin-password").with_description(
+                    "First admin password (DEV ONLY — prefer --bootstrap-admin-password-file)",
+                ),
+                cli::types::FlagSchema::new("bootstrap-admin-password-file")
+                    .with_description("File containing first admin password"),
+                cli::types::FlagSchema::new("cloud-head-admin")
+                    .with_description("Cloud preset head/platform admin username"),
+                cli::types::FlagSchema::new("cloud-head-admin-password").with_description(
+                    "Cloud preset head/platform admin password (DEV ONLY — prefer file flag)",
+                ),
+                cli::types::FlagSchema::new("cloud-head-admin-password-file")
+                    .with_description("File containing cloud head admin password"),
+                cli::types::FlagSchema::new("customer-admin")
+                    .with_description("Cloud preset customer admin username"),
+                cli::types::FlagSchema::new("customer-admin-password").with_description(
+                    "Cloud preset customer admin password (DEV ONLY — prefer file flag)",
+                ),
+                cli::types::FlagSchema::new("customer-admin-password-file")
+                    .with_description("File containing cloud customer admin password"),
                 cli::types::FlagSchema::boolean("ui").with_description(
                     "Serve the pinned red-ui bundle as static assets on the HTTP surface \
                      (reach is governed by the bind address; default localhost)",
@@ -2893,8 +2923,15 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Explicit HTTP bind address (host:port)"),
                 cli::types::FlagSchema::new("wire-bind")
                     .with_description("Wire protocol TCP bind address (host:port)"),
+                cli::types::FlagSchema::boolean("auth")
+                    .with_description("Enable authentication for this boot"),
+                cli::types::FlagSchema::boolean("require-auth")
+                    .with_description("Reject anonymous requests; implies --auth"),
                 cli::types::FlagSchema::boolean("vault")
                     .with_description("Enable the encrypted auth vault"),
+                cli::types::FlagSchema::boolean("no-auth").with_description(
+                    "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault",
+                ),
             ]);
         }
         Some("service") => {
@@ -3377,6 +3414,7 @@ fn build_server_config(
         .map(PathBuf::from);
 
     let http_limits_cli = build_http_limits_cli_input(flags)?;
+    let bootstrap = build_bootstrap_config(flags)?;
 
     Ok(ServerCommandConfig {
         path,
@@ -3407,8 +3445,12 @@ fn build_server_config(
         role,
         primary_addr: flag_string(flags, "primary-addr").filter(|value| !value.is_empty()),
         storage_profile,
-        vault: flag_bool(flags, "vault"),
-        no_auth: flag_bool(flags, "no-auth") || flag_bool(flags, "dev"),
+        auth: flag_bool(flags, "auth") || env_truthy("REDDB_AUTH"),
+        require_auth: flag_bool(flags, "require-auth") || env_truthy("REDDB_REQUIRE_AUTH"),
+        vault: flag_bool(flags, "vault") || env_truthy("REDDB_VAULT"),
+        no_auth: flag_bool(flags, "no-auth")
+            || flag_bool(flags, "dev")
+            || env_truthy("REDDB_NO_AUTH"),
         workers,
         telemetry: Some(telemetry),
         http_limits_cli,
@@ -3419,7 +3461,65 @@ fn build_server_config(
         ui_dir: flag_string(flags, "ui-dir")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from),
+        bootstrap,
     })
+}
+
+fn build_bootstrap_config(flags: &HashMap<String, FlagValue>) -> Result<BootstrapConfig, String> {
+    Ok(BootstrapConfig {
+        preset: flag_string(flags, "bootstrap-preset")
+            .filter(|value| !value.is_empty())
+            .or_else(|| env_string("REDDB_BOOTSTRAP_PRESET"))
+            .or_else(|| env_string("REDDB_PRESET")),
+        manifest: flag_string(flags, "bootstrap-manifest")
+            .filter(|value| !value.is_empty())
+            .or_else(|| env_string("REDDB_BOOTSTRAP_MANIFEST"))
+            .map(PathBuf::from),
+        admin_username: flag_string(flags, "bootstrap-admin").filter(|value| !value.is_empty()),
+        admin_password: flag_or_file_secret(
+            flags,
+            "bootstrap-admin-password",
+            "bootstrap-admin-password-file",
+        )?,
+        cloud_head_admin: flag_string(flags, "cloud-head-admin").filter(|value| !value.is_empty()),
+        cloud_head_admin_password: flag_or_file_secret(
+            flags,
+            "cloud-head-admin-password",
+            "cloud-head-admin-password-file",
+        )?,
+        customer_admin: flag_string(flags, "customer-admin").filter(|value| !value.is_empty()),
+        customer_admin_password: flag_or_file_secret(
+            flags,
+            "customer-admin-password",
+            "customer-admin-password-file",
+        )?,
+    })
+}
+
+fn flag_or_file_secret(
+    flags: &HashMap<String, FlagValue>,
+    value_flag: &str,
+    file_flag: &str,
+) -> Result<Option<String>, String> {
+    let inline = flag_string(flags, value_flag).filter(|value| !value.is_empty());
+    let file = flag_string(flags, file_flag).filter(|value| !value.is_empty());
+    match (inline, file) {
+        (Some(_), Some(_)) => Err(format!(
+            "--{value_flag} and --{file_flag} cannot both be set"
+        )),
+        (Some(value), None) => Ok(Some(value)),
+        (None, Some(path)) => {
+            let value = std::fs::read_to_string(&path)
+                .map_err(|err| format!("read --{file_flag} {path}: {err}"))?;
+            let value = value.trim_end_matches(['\n', '\r']).to_string();
+            if value.is_empty() {
+                Err(format!("--{file_flag} {path} is empty"))
+            } else {
+                Ok(Some(value))
+            }
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 fn resolve_storage_profile(
@@ -5854,6 +5954,62 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     }
 
     #[test]
+    fn build_server_config_reads_auth_and_bootstrap_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_AUTH", "true"),
+            ("REDDB_REQUIRE_AUTH", "true"),
+            ("REDDB_VAULT", "true"),
+            ("REDDB_BOOTSTRAP_PRESET", "production"),
+            ("REDDB_BOOTSTRAP_MANIFEST", "/etc/reddb/bootstrap.json"),
+        ]);
+
+        let config = build_server_config(&HashMap::new(), None).unwrap();
+
+        assert!(config.auth);
+        assert!(config.require_auth);
+        assert!(config.vault);
+        assert_eq!(config.bootstrap.preset.as_deref(), Some("production"));
+        assert_eq!(
+            config.bootstrap.manifest.as_deref(),
+            Some(std::path::Path::new("/etc/reddb/bootstrap.json"))
+        );
+    }
+
+    #[test]
+    fn build_server_config_prefers_cli_bootstrap_preset_over_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[("REDDB_BOOTSTRAP_PRESET", "production")]);
+        let flags = HashMap::from([
+            ("bootstrap-preset".to_string(), str_flag("cloud")),
+            ("bootstrap-admin".to_string(), str_flag("head")),
+            (
+                "bootstrap-admin-password".to_string(),
+                str_flag("head-pass"),
+            ),
+            ("customer-admin".to_string(), str_flag("customer")),
+            (
+                "customer-admin-password".to_string(),
+                str_flag("customer-pass"),
+            ),
+        ]);
+
+        let config = build_server_config(&flags, None).unwrap();
+
+        assert_eq!(config.bootstrap.preset.as_deref(), Some("cloud"));
+        assert_eq!(config.bootstrap.admin_username.as_deref(), Some("head"));
+        assert_eq!(
+            config.bootstrap.admin_password.as_deref(),
+            Some("head-pass")
+        );
+        assert_eq!(config.bootstrap.customer_admin.as_deref(), Some("customer"));
+        assert_eq!(
+            config.bootstrap.customer_admin_password.as_deref(),
+            Some("customer-pass")
+        );
+    }
+
+    #[test]
     fn build_server_config_defaults_primary_role_to_dev_primary_replica_profile() {
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::clear(&[
@@ -6005,6 +6161,51 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
                 .expect("telemetry config")
                 .log_file_disabled
         );
+    }
+
+    #[test]
+    fn parser_accepts_first_boot_server_flags() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_AUTH",
+            "REDDB_REQUIRE_AUTH",
+            "REDDB_VAULT",
+            "REDDB_BOOTSTRAP_PRESET",
+            "REDDB_PRESET",
+        ]);
+
+        let args = vec![
+            "server".to_string(),
+            "--auth".to_string(),
+            "--require-auth".to_string(),
+            "--vault".to_string(),
+            "--bootstrap-preset".to_string(),
+            "cloud".to_string(),
+            "--cloud-head-admin".to_string(),
+            "head".to_string(),
+            "--cloud-head-admin-password".to_string(),
+            "head-pass".to_string(),
+            "--customer-admin".to_string(),
+            "customer".to_string(),
+            "--customer-admin-password".to_string(),
+            "customer-pass".to_string(),
+        ];
+        let tokens = cli::token::tokenize(&args);
+        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("server")));
+        let result = parser.parse(&tokens);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let config = build_server_config(&result.flags, None).unwrap();
+        assert!(config.auth);
+        assert!(config.require_auth);
+        assert!(config.vault);
+        assert_eq!(config.bootstrap.preset.as_deref(), Some("cloud"));
+        assert_eq!(config.bootstrap.cloud_head_admin.as_deref(), Some("head"));
+        assert_eq!(
+            config.bootstrap.cloud_head_admin_password.as_deref(),
+            Some("head-pass")
+        );
+        assert_eq!(config.bootstrap.customer_admin.as_deref(), Some("customer"));
     }
 
     #[test]
