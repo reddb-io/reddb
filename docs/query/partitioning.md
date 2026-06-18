@@ -96,6 +96,23 @@ Partition metadata is persisted in `red_config`:
 This means partition topology survives restart without any extra
 rehydration logic.
 
+## Partitioning vs cluster sharding
+
+Logical partitioning and cluster sharding are related but not the same thing.
+
+`PARTITION BY RANGE`, `LIST`, and `HASH` are user-facing table/collection
+layout tools. They decide which child partition receives a row and let the
+planner prune partitions when a predicate proves some children cannot match.
+
+Cluster sharding is a physical ownership model for multi-writer clusters. The
+cluster owns cataloged shard/ranges with an owner, replicas, bounds, and
+ownership epoch. A hash-sharded cluster collection is still represented as
+ranges over a hash token space; the ownership catalog remains the live source of
+truth for routing, failover, split, move, and rebalance.
+
+See [Cluster Sharding Contract](../architecture/cluster-sharding.md) for the
+range-vs-hash contract and current implementation boundary.
+
 ## Current status
 
 Phase 2.2 (registry-only):
