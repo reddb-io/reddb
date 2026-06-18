@@ -18,7 +18,7 @@ The parameterized-query design is tracked in
 
 ```sql
 SELECT [columns | *]
-FROM table_name [AS alias]
+[FROM table_name [AS alias] | FROM ANY]
 [WHERE condition]
 [GROUP BY column [, ...]]
 [HAVING condition]
@@ -56,6 +56,20 @@ FROM wallets
 ```sql
 SELECT * FROM users WHERE age > $1 AND active = $2
 ```
+
+### Universal SELECT Without FROM
+
+```sql
+SELECT * WHERE passport = $1
+SELECT * WHERE host = $1 AND severity = 'critical'
+```
+
+When `FROM` is omitted, the parser uses the universal source `any`. For plain
+attribute filters, the executor first narrows candidate collections using
+declared columns/contracts when available, keeps dynamic collections whose
+shape is unknown, and then applies the real `WHERE` filter to the records. Use
+this form when you intentionally want to search all eligible collections by
+field. Use `FROM users` when the collection is known.
 
 ### Ordered Results
 

@@ -164,12 +164,12 @@ fragment).
 ### Current state
 
 `ASK 'natural language question'` is parsed into an
-`AskQuery { question, collection, depth, limit, provider, model }` by
+`AskQuery { question, collection, depth, limit, provider, model, as_rql }` by
 `crates/reddb-server/src/storage/query/parser/dml.rs` `parse_ask_query`
 (L389-417). The runtime executor is
 `crates/reddb-server/src/runtime/impl_search.rs` `execute_ask` (L1122).
 
-**Critical observation:** `execute_ask` is RAG, not text-to-SQL. It does:
+**Critical observation:** plain `execute_ask` is RAG, not text-to-SQL. It does:
 
 1. Calls `self.search_context(...)` — a structured search across
    collections, vectors, and graph entities. The search step **enforces
@@ -186,16 +186,21 @@ fragment).
    `completion_tokens`, `sources_count`).
 
 The LLM output is **never** re-parsed as SQL and **never** drives a query
-execution. There is no text-to-SQL synthesis path in the codebase
-(verified by grepping for `synthesise|synthesize|llm.*sql|to_sql|generate.*query`
-across `ai.rs`, `runtime/`, and `storage/query/` — the only matches are
-unrelated comments).
+execution.
+
+`ASK '...' AS RQL` is a separate deterministic planner path. It does not call
+an AI provider. It uses AskPipeline token extraction plus schema vocabulary,
+builds a read-only `SELECT` candidate such as `SELECT * WHERE passport =
+'FDD-12313'`, validates that text through the parser, and returns it in the
+`rql` result column. The generated RQL is not executed automatically.
 
 ### Attacker model
 
 Authed user who can issue `ASK`. The historical concern from issue #95
 was "LLM prompt injection → SQL injection". That requires a path where
 LLM output flows into the parser; this codebase does not have that path.
+The `AS RQL` path parses only server-generated text from a constrained
+read-only planner, not model output.
 
 ### Observed risk
 
@@ -224,8 +229,9 @@ defence, schema disclosure toggle) rather than landed under #95's
 Pinned a regression test
 (`ask_path_does_not_re_execute_llm_output_as_sql`) that asserts
 `AskQuery` is the only frontend statement variant produced by parsing
-`ASK '...'` and that the AST has no field of type `String` that ever
-flows back into `parse_multi` or `execute_query_expr`.
+`ASK '...'`, that `ASK ... AS RQL` is represented by a boolean flag, and
+that no model-populated SQL string field flows back into `parse_multi` or
+`execute_query_expr`.
 
 ---
 

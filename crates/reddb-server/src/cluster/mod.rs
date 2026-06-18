@@ -13,6 +13,7 @@ pub mod ownership_lease;
 pub mod ownership_transition;
 pub mod placement;
 pub mod routing;
+pub mod slot;
 pub mod supervisor;
 pub mod topology;
 
@@ -68,6 +69,10 @@ pub use placement::{
 pub use routing::{
     RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint, RoutingPolicy,
     DEFAULT_MAX_FORWARD_PAYLOAD,
+};
+pub use slot::{
+    hash_shard_key_to_range_key, hash_shard_key_to_slot, HashSlot, HashSlotError,
+    PRODUCTION_HASH_SLOT_COUNT,
 };
 pub use supervisor::{
     BlockedFailover, BlockedReason, ClusterSignals, ClusterSupervisor, FailoverPlan, HealthClass,

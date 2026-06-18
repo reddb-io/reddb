@@ -1945,6 +1945,13 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     };
     assert!(matches!(ask.cache, crate::ast::AskCacheClause::NoCache));
 
+    let query = parse("ASK 'who owns passport FDD-12313?' AS RQL").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(ask.as_rql);
+    assert!(!ask.explain);
+
     let query = parse("EXPLAIN ASK 'q' USING openai LIMIT 3 MIN_SCORE 0.7 DEPTH 2").unwrap();
     let QueryExpr::Ask(ask) = query else {
         panic!("Expected AskQuery");

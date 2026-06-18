@@ -74,7 +74,12 @@ curl -X POST http://127.0.0.1:8080/query \
 
 ## Natural Language
 
-Write queries in plain English:
+RedDB has a legacy best-effort natural mode for a small set of graph and lookup
+phrases. This is not the `ASK` command, and it is not a general prompt-to-RQL
+translator. Use `ASK ... AS RQL` when you want a prompt converted into a
+parser-validated read-only query candidate.
+
+Example inputs:
 
 ```
 show me all hosts with critical alerts in the last 24 hours
@@ -127,4 +132,7 @@ All modes return the same unified envelope:
 The `mode` field tells you which parser was used.
 
 > [!NOTE]
-> Natural language queries are best-effort. For production workloads, use explicit SQL, Gremlin, or SPARQL syntax for deterministic results.
+> Natural language queries are best-effort. For production workloads, use
+> explicit SQL, Gremlin, or SPARQL syntax for deterministic results. For
+> grounded natural-language answers, use `ASK`; for deterministic generated
+> query candidates, use `ASK ... AS RQL`.
