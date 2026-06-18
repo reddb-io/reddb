@@ -1,10 +1,11 @@
 # Distributed Roadmap
 
-RedDB today is single-node or primary-replica at runtime, with
-WAL-based replication + quorum semantics. Distributed query,
-automatic failover, and productive cluster sharding are on the
-roadmap; this page is the honest state-of-the-art and what we're
-building toward. The target sharding contract is documented in
+RedDB today ships production deployment modes for embedded/server,
+serverless-style remote storage, and primary-replica WAL replication with quorum
+semantics. The cluster sharding control-plane model has landed, but the full
+multi-writer runtime is not a production claim yet. This page is the honest
+state-of-the-art and what we're building toward. The target sharding contract
+is documented in
 [Cluster Sharding Contract](cluster-sharding.md).
 
 ## What exists today
@@ -14,6 +15,10 @@ building toward. The target sharding contract is documented in
   `src/replication/primary.rs`, `replica.rs`, `quorum.rs`.
 * **Quorum policies** — `Async`, `Sync { min_replicas }`,
   `Regions { required }`. Wired through the commit path.
+* **Cluster sharding control plane** — a range ownership catalog, hash/ordered
+  collection sharding modes, owner epochs, stale-version rejection, any-node
+  routing decisions, and cross-range guardrails. See
+  [Cluster Sharding](./cluster-sharding.md).
 * **Serialisable batches** — the `ColumnBatch` format introduced in
   B1 is explicitly laid out so a future network layer can ship
   batches between nodes without re-serialising.
@@ -33,10 +38,10 @@ building toward. The target sharding contract is documented in
 
 | Capability | Status |
 |------------|--------|
-| Sharding model | Proposed in ADR 0055: shard key -> hash -> slot -> shard group -> owner |
-| Partition routing across nodes | Pure catalog/routing model exists; runtime integration missing |
-| Distributed query execution | Pure cross-range read/write planning exists; executor/coordinator missing |
-| Automatic failover | Control-plane consensus boundary accepted in ADR 0052; runtime log/leader integration missing |
+| Sharding control-plane model | Landed; runtime integration in progress |
+| Production multi-writer cluster serving | In progress |
+| Distributed query (plan → shards → merge) | Not started |
+| Automatic failover runtime wiring | In progress |
 | Cross-region replication | Async log-shipping works; needs tooling |
 | Control-plane catalog consensus | Designed; durable replicated control-plane log missing |
 
@@ -107,14 +112,14 @@ Write flow:
 
 ## Phasing
 
-| Phase | Content | Estimate |
-|-------|---------|----------|
-| D1 | DDL shard key surface + slot map projected from the ownership catalog | 1 sprint |
-| D2 | Single-shard router: point read/write to owner, stale-route redirect, routing cache | 1 sprint |
-| D3 | Bounded distributed scan: fan-out sub-plans, collect batches, local merge | 2 sprints |
-| D4 | Distributed aggregate: ship partial state, merge at coordinator, cache partials | 1 sprint |
-| D5 | Control-plane catalog log: durable consensus for membership and ownership transitions | 2 sprints |
-| D6 | Auto-failover: ownership lease, commit watermark check, replica promotion | 1 sprint |
+| Phase | Content | Status |
+|-------|---------|--------|
+| D1 | Range ownership catalog, hash/ordered collection modes, owner epochs, routing decisions | Landed as a pure control-plane model |
+| D2 | Wire cluster routing/fencing into the serving request paths | In progress |
+| D3 | Distributed scan: ship sub-plan, collect batches, local merge | Roadmap |
+| D4 | Distributed aggregate: ship partial state, merge at coordinator | Roadmap |
+| D5 | Raft catalog for globally consistent schema/control-plane changes | Roadmap |
+| D6 | Auto-failover runtime wiring: leader lease + replica promotion | In progress |
 
 Total: ~1 trimester of focused work **after** the TS/CH parity
 cycle closes. No commits to a ship date — this page is honest about

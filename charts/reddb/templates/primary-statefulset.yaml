@@ -93,13 +93,13 @@ spec:
             {{- end }}
             {{- if .Values.config.vault }}
             - --vault
-            - "true"
             {{- end }}
             {{- with .Values.config.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
             {{- include "reddb.commonEnv" . | nindent 12 }}
+            {{- include "reddb.bootstrapEnv" . | nindent 12 }}
             - name: REDDB_NODE_ROLE
               value: {{ ternary "primary" .Values.mode (eq .Values.mode "primary-replica") | quote }}
             {{- if .Values.grpc.tls.enabled }}

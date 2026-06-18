@@ -123,7 +123,7 @@ reference; the cookbook is the implementation playbook.
       "effect": "allow",
       "actions": ["insert", "update"],
       "resources": ["table:orders"],
-      "condition": {                // all six keys optional; AND-combined
+      "condition": {                // supported keys optional; AND-combined
         "expires_at": "2026-12-31T23:59:59Z",
         "source_ip": ["10.0.0.0/8"],
         "mfa": true,
@@ -143,7 +143,7 @@ Field rules:
 - `effect` — required, one of `"allow"` or `"deny"`.
 - `actions` — required, max 50, see [action reference](#action-reference).
 - `resources` — required, max 50, see [resource reference](#resource-reference).
-- `condition` — optional; all six keys optional; see [conditions](#condition-reference).
+- `condition` — optional; supported keys are optional; see [conditions](#condition-reference).
 
 ## Action reference
 
@@ -167,6 +167,13 @@ Field rules:
 | `policy:attach` | Policy | Bind a policy to a user or group. |
 | `policy:detach` | Policy | Unbind a policy from a user or group. |
 | `policy:simulate` | Policy | Run the simulator (`SIMULATE …` / `POST /admin/policies/simulate`). |
+| `user:create` | User | Create an auth user. |
+| `user:update` | User | Update non-credential user metadata. |
+| `user:disable` | User | Disable an auth user. |
+| `user:delete` | User | Delete an auth user and revoke sessions/API keys. |
+| `user:password:change` | User | Change another auth user's password. |
+| `user:role:update` | User | Change an auth user's role. |
+| `user:*` | Wildcard | Every user lifecycle verb. |
 | `admin:bootstrap` | Admin | First-run bootstrap of the admin user / vault. |
 | `admin:audit-read` | Admin | Read the audit log. |
 | `admin:reload` | Admin | Force or request a `SIGHUP`-equivalent reload of runtime secrets where supported. |
@@ -203,6 +210,7 @@ of characters within one segment of `spec`.
 | `message` | `message:queue/id` or `message:queue/*` | `message:jobs/*` | Message-level queue authorization vocabulary. |
 | `consumer-group` | `consumer-group:queue/group` | `consumer-group:jobs/workers` | Consumer-group reads and acknowledgments. |
 | `dlq` | `dlq:queue` | `dlq:jobs` | Dead-letter queue inspection and repair. |
+| `user` | `user:<username>` or `user:tenant/<tenant>/<username>` | `user:cloud-admin`, `user:tenant/acme/alice` | Auth user lifecycle target. Use explicit Deny here to protect platform-owned accounts. |
 | Tenant-qualified resource | `<kind>:tenant/<tenant>/<name>` | `table:tenant/acme/public.*` | Explicit cross-tenant form; prefer unqualified resources plus `tenant_match` for ordinary tenant policies. |
 | `*` | (literal) | `*` | Every resource. Pair with `*` action only inside conditioned break-glass policies. |
 
@@ -222,8 +230,12 @@ Gotchas:
 
 ## Condition reference
 
-All six keys are optional; if a `condition` block is present, every key
+Supported keys are optional; if a `condition` block is present, every key
 inside must evaluate true (AND). Missing keys = "don't care".
+
+`condition.system_owned` is no longer supported. User ownership must be
+modeled as explicit `user:*` / `policy:*` allow and deny statements, not as a
+principal flag.
 
 ### `expires_at`
 

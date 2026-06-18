@@ -163,6 +163,12 @@ Validate the deployment mode.
 {{- if and .Values.config.file.enabled (not .Values.config.file.existingConfigMap) (empty .Values.config.file.inline) -}}
 {{- fail "config.file.enabled=true requires config.file.existingConfigMap or non-empty config.file.inline" -}}
 {{- end -}}
+{{- if and (eq .Values.mode "cluster") .Values.auth.enabled -}}
+{{- fail "auth.enabled bootstrap env is not supported in mode=cluster; bootstrap cluster admins only after a concrete writer/volume bootstrap path exists" -}}
+{{- end -}}
+{{- if .Values.auth.vault.bootstrapJob.enabled -}}
+{{- fail "auth.vault.bootstrapJob.enabled is disabled: the legacy hook bootstraps an emptyDir DB, not the StatefulSet PVC. Run red bootstrap against the real volume or use HTTP bootstrap after the writer starts." -}}
+{{- end -}}
 {{- $preset := default "" .Values.storage.preset -}}
 {{- if and $preset (not (has $preset (list "embedded" "serverless" "primary-replica-dev" "primary-replica-small" "primary-replica-production-ha" "primary-replica-backup" "primary-replica-wal-retention" "cluster"))) -}}
 {{- fail (printf "values.storage.preset is not supported (got %q)" $preset) -}}
@@ -432,18 +438,6 @@ Common environment variables for both primary and replica pods.
 - name: REDDB_CONFIG_FILE
   value: {{ .Values.config.file.mountPath | quote }}
 {{- end }}
-{{- if .Values.auth.enabled }}
-- name: REDDB_USERNAME
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "reddb.authSecretName" . }}
-      key: username
-- name: REDDB_PASSWORD
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "reddb.authSecretName" . }}
-      key: password
-{{- end }}
 {{- if include "reddb.vaultCertConfigured" . }}
 {{- if .Values.auth.vault.certificate.fileMount.enabled }}
 - name: REDDB_CERTIFICATE_FILE
@@ -458,6 +452,23 @@ Common environment variables for both primary and replica pods.
 {{- end }}
 {{- with .Values.config.extraEnv }}
 {{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{- define "reddb.bootstrapEnv" -}}
+{{- if .Values.auth.enabled }}
+- name: REDDB_PRESET
+  value: "production"
+- name: REDDB_USERNAME
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "reddb.authSecretName" . }}
+      key: username
+- name: REDDB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "reddb.authSecretName" . }}
+      key: password
 {{- end }}
 {{- end -}}
 

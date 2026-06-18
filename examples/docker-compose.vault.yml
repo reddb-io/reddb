@@ -10,9 +10,13 @@
 # -----------------------------------------------------------------------------
 # Bootstrap flow (one-time, per cluster):
 # -----------------------------------------------------------------------------
-#   1. Generate the certificate on a trusted machine:
-#         red bootstrap \
-#             --path ./scratch/data.rdb \
+#   1. Bootstrap the same Docker volume the server will use:
+#         docker volume create reddb-data
+#         printf '%s' "$ADMIN_PASSWORD" | docker run --rm -i \
+#             -v reddb-data:/data \
+#             reddb-benchmark/reddb:latest \
+#             bootstrap \
+#             --path /data/data.rdb \
 #             --vault \
 #             --username admin \
 #             --password-stdin \
@@ -48,8 +52,8 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "8080:8080"
-      - "50051:50051"
+      - "55880:8080"
+      - "55551:50051"
     volumes:
       - reddb-data:/data
     environment:
@@ -61,8 +65,11 @@ services:
       # The entrypoint shim AND the binary both honour these *_FILE vars.
       # The cert never appears as a process env variable — only the path does.
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
-      # Optional: bootstrap an admin on first start. Mount these as secrets
-      # too if you uncomment them.
+      # Optional first-start bootstrap. If you uncomment these, also set
+      # REDDB_PRESET=production and capture the newly-issued certificate
+      # from the container logs before any restart. Prefer the one-off
+      # bootstrap flow above for production.
+      # REDDB_PRESET: production
       # REDDB_USERNAME_FILE: /run/secrets/reddb_username
       # REDDB_PASSWORD_FILE: /run/secrets/reddb_password
     secrets:

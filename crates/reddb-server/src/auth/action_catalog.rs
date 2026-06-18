@@ -45,6 +45,8 @@ pub enum ActionCategory {
     Mgmt,
     /// Policy lifecycle verbs (`policy:put`, ...).
     Policy,
+    /// User lifecycle verbs (`user:create`, `user:delete`, ...).
+    User,
     /// Admin verbs (`admin:bootstrap`, ...).
     Admin,
     /// Runtime config verbs (`config:read`, ...).
@@ -102,6 +104,7 @@ impl ActionCategory {
             ActionCategory::Function => "function",
             ActionCategory::Mgmt => "mgmt",
             ActionCategory::Policy => "policy",
+            ActionCategory::User => "user",
             ActionCategory::Admin => "admin",
             ActionCategory::Config => "config",
             ActionCategory::Vault => "vault",
@@ -289,6 +292,49 @@ pub const ACTIONS: &[ActionEntry] = &[
         category: ActionCategory::Policy,
         lifecycle_state: LifecycleState::Active,
         gates_description: "run the policy simulator",
+    },
+    // -- User lifecycle --------------------------------------------------
+    ActionEntry {
+        name: "user:create",
+        category: ActionCategory::User,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "create an auth user",
+    },
+    ActionEntry {
+        name: "user:update",
+        category: ActionCategory::User,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "update non-credential user metadata",
+    },
+    ActionEntry {
+        name: "user:disable",
+        category: ActionCategory::User,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "disable an auth user",
+    },
+    ActionEntry {
+        name: "user:delete",
+        category: ActionCategory::User,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "delete an auth user and revoke their sessions/API keys",
+    },
+    ActionEntry {
+        name: "user:password:change",
+        category: ActionCategory::User,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "change an auth user's password",
+    },
+    ActionEntry {
+        name: "user:role:update",
+        category: ActionCategory::User,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "change an auth user's role",
+    },
+    ActionEntry {
+        name: "user:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any user lifecycle verb",
     },
     // -- KV --------------------------------------------------------------
     ActionEntry {

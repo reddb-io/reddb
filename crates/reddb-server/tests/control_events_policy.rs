@@ -130,9 +130,19 @@ fn actor_ctx<'a>(actor: &'a UserId) -> ControlEventCtx<'a> {
 
 fn register_managed_policy(registry: &ConfigRegistry, store: &AuthStore, policy_id: &str) {
     let seeder = UserId::platform("seeder");
+    store
+        .put_policy(allow_policy(
+            "p-registry-register",
+            "red.registry:register",
+            "registry",
+            policy_id,
+        ))
+        .expect("registry allow policy");
+    store
+        .attach_policy(PrincipalRef::User(seeder.clone()), "p-registry-register")
+        .expect("attach registry allow policy");
     let mut ctx = EvalContext::default();
     ctx.principal_is_admin_role = true;
-    ctx.principal_is_system_owned = true;
     ctx.principal_is_platform_scoped = true;
     registry
         .register(
@@ -239,7 +249,10 @@ fn create_policy_denied_emits_control_event() {
         "policy:put",
         "p-managed",
     );
-    assert!(event.reason.unwrap().contains("structurally eligible"));
+    assert!(event
+        .reason
+        .unwrap()
+        .contains("required IAM permission was denied"));
     assert_eq!(event.matched_policy_id.as_deref(), Some("p-managed"));
 }
 

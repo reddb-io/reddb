@@ -2288,11 +2288,18 @@ fn apply_production_preset_from_config(
             .to_string()
     })?;
 
-    // (1) Create the first admin as system-owned + platform-scoped so
-    // #649's `ManagedConfigGate` accepts them on managed-config writes.
+    // (1) Create the first admin as an ordinary platform-scoped user.
+    // Managed guardrails are policy-derived; bootstrap does not stamp a
+    // parallel ownership flag.
     let result = auth_store
-        .bootstrap_system_admin(&username, &password)
+        .bootstrap(&username, &password)
         .map_err(|err| format!("bootstrap first admin: {err}"))?;
+    if let Some(cert) = result.certificate.as_deref() {
+        eprintln!("[reddb] CERTIFICATE: {}", cert);
+        tracing::warn!(
+            "vault certificate issued by REDDB_PRESET=production -- save it and update the runtime secret before restart"
+        );
+    }
     let first_admin = UserId::platform(result.user.username.clone());
 
     // (2) Install the allow-all policy as an ordinary policy row.
@@ -3581,10 +3588,6 @@ mod tests {
         let admin = &users[0];
         assert_eq!(admin.username, "ops");
         assert!(
-            admin.system_owned,
-            "first admin must be system-owned to pass the managed-config gate"
-        );
-        assert!(
             admin.tenant_id.is_none(),
             "first admin must be platform-scoped (tenant=None)"
         );
@@ -3605,7 +3608,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let arbitrary_resource = ResourceRef::new("config", "red.config.audit.enabled");
@@ -3941,7 +3943,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         assert!(
@@ -4054,8 +4055,7 @@ mod tests {
                     {
                         "username": "ops",
                         "password": "hunter2",
-                        "role": "admin",
-                        "system_owned": true
+                        "role": "admin"
                     }
                 ],
                 "policies": [
@@ -4119,7 +4119,7 @@ mod tests {
         let users = auth_store.list_users();
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].username, "ops");
-        assert!(users[0].system_owned);
+        assert!(users[0].tenant_id.is_none());
 
         let actor = UserId::platform("ops");
         let ctx = EvalContext {
@@ -4129,7 +4129,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         // Manifest fixture pins a canonical data-plane read action.

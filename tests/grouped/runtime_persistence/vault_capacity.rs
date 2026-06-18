@@ -58,7 +58,6 @@ fn synth_state(n: usize) -> VaultState {
             created_at: now,
             updated_at: now + i as u128,
             enabled: i % 3 != 0,
-            system_owned: false,
         });
         api_keys.push((
             UserId::platform(username),

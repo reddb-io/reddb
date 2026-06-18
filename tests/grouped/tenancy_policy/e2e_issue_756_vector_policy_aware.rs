@@ -240,7 +240,6 @@ fn search_grant_does_not_unlock_artifact_admin_verbs() {
         mfa_present: false,
         now_ms: 0,
         principal_is_admin_role: false,
-        principal_is_system_owned: false,
         principal_is_platform_scoped: true,
     };
     let principal = reddb::auth::UserId::platform("alice");
@@ -293,7 +292,6 @@ fn vector_admin_verb_is_independently_grantable() {
         mfa_present: false,
         now_ms: 0,
         principal_is_admin_role: false,
-        principal_is_system_owned: false,
         principal_is_platform_scoped: true,
     };
     let principal = reddb::auth::UserId::platform("alice");

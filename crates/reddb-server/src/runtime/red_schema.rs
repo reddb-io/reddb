@@ -368,12 +368,11 @@ const CONTROL_EVENT_COLUMNS: [&str; 14] = [
     "fields_json",
 ];
 
-const USER_COLUMNS: [&str; 8] = [
+const USER_COLUMNS: [&str; 7] = [
     "username",
     "tenant_id",
     "role",
     "enabled",
-    "system_owned",
     "created_at",
     "updated_at",
     "api_key_count",
@@ -1287,7 +1286,6 @@ fn users_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<UnifiedRe
                     user.tenant_id.map(Value::text).unwrap_or(Value::Null),
                     Value::text(user.role.as_str()),
                     Value::Boolean(user.enabled),
-                    Value::Boolean(user.system_owned),
                     timestamp_ms_value(user.created_at),
                     timestamp_ms_value(user.updated_at),
                     Value::UnsignedInteger(user.api_keys.len() as u64),

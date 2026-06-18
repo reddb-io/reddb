@@ -22,8 +22,8 @@ services:
     image: reddb-benchmark/reddb:latest   # replace with your registry
     container_name: reddb
     ports:
-      - "8080:8080"
-      - "50051:50051"
+      - "55880:8080"
+      - "55551:50051"
     environment:
       REDDB_STORAGE_PRESET: embedded
       REDDB_STORAGE_PROFILE: embedded

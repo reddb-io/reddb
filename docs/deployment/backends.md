@@ -9,7 +9,7 @@ deployments. The backend stores snapshots, WAL segments, the unified
 | Backend | Feature flag | `RED_BACKEND=` | Conditional writes (CAS) |
 |---------|--------------|----------------|--------------------------|
 | Local filesystem | (always on) | `fs` | Content-hash + exclusive `flock` |
-| S3 / R2 / MinIO / DO Spaces | `backend-s3` | `s3` | ETag + `If-Match` on PUT/DELETE |
+| S3 / R2 / Floci / DO Spaces | `backend-s3` | `s3` | ETag + `If-Match` on PUT/DELETE |
 | Generic HTTP | `backend-http` | `http` | Opt-in via `RED_HTTP_CONDITIONAL_WRITES=true` |
 | Turso (libSQL) | `backend-turso` | `turso` | n/a — single-writer by construction |
 | Cloudflare D1 | `backend-d1` | `d1` | n/a — single-writer by construction |
@@ -39,7 +39,7 @@ for plain backup/restore but cannot enforce the writer lease — set
 `RED_LEASE_REQUIRED=false` (or omit it) and accept that the
 operator is responsible for serialising writers.
 
-## S3 / R2 / MinIO / DO Spaces
+## S3 / R2 / Floci / DO Spaces
 
 ```bash
 export RED_BACKEND=s3
@@ -48,15 +48,16 @@ export RED_S3_PREFIX=us-east-1/cluster-a
 export RED_S3_REGION=us-east-1
 export RED_S3_ACCESS_KEY_ID=AKIA...
 export RED_S3_SECRET_KEY_FILE=/run/secrets/s3-secret
-# MinIO / R2: set the endpoint
+# Floci / R2: set the endpoint
 export RED_S3_ENDPOINT=https://abc.r2.cloudflarestorage.com
-export RED_S3_PATH_STYLE=true                  # MinIO and a few R2 setups need this
+export RED_S3_PATH_STYLE=true                  # Floci and a few R2 setups need this
 red server --path /var/lib/reddb/data.rdb --http-bind 0.0.0.0:8080
 ```
 
-Compatible with AWS S3, Cloudflare R2, MinIO, DigitalOcean Spaces,
-Backblaze B2 (with `path_style=true`), Wasabi, and any service that
-honours the standard S3 ETag + `If-Match` semantics.
+Compatible with AWS S3, Cloudflare R2, Floci for local AWS-compatible
+testing, DigitalOcean Spaces, Backblaze B2 (with `path_style=true`),
+Wasabi, and any service that honours the standard S3 ETag + `If-Match`
+semantics.
 
 ## Local filesystem
 

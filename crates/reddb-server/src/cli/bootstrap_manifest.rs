@@ -83,7 +83,6 @@ struct ManifestUser {
     password: String,
     role: Role,
     tenant: Option<String>,
-    system_owned: bool,
 }
 
 struct ManagedPolicy {
@@ -210,25 +209,14 @@ impl BootstrapManifest {
         self.validate_against_current_state(auth_store, registry)?;
 
         for user in &self.users {
-            if user.system_owned {
-                auth_store
-                    .create_system_user(
-                        &user.username,
-                        &user.password,
-                        user.role,
-                        user.tenant.as_deref(),
-                    )
-                    .map_err(|err| format!("create user `{}`: {err}", user.username))?;
-            } else {
-                auth_store
-                    .create_user_in_tenant(
-                        user.tenant.as_deref(),
-                        &user.username,
-                        &user.password,
-                        user.role,
-                    )
-                    .map_err(|err| format!("create user `{}`: {err}", user.username))?;
-            }
+            auth_store
+                .create_user_in_tenant(
+                    user.tenant.as_deref(),
+                    &user.username,
+                    &user.password,
+                    user.role,
+                )
+                .map_err(|err| format!("create user `{}`: {err}", user.username))?;
         }
 
         for policy in &self.policies {
@@ -362,12 +350,16 @@ fn parse_users(values: &[JsonValue]) -> Result<Vec<ManifestUser>, String> {
             }
             let role = Role::from_str(&required_string(obj, "role", "users", idx)?)
                 .ok_or_else(|| format!("users[{idx}].role must be read, write, or admin"))?;
+            if obj.contains_key("system_owned") {
+                return Err(format!(
+                    "users[{idx}].system_owned is no longer supported; use explicit policies"
+                ));
+            }
             Ok(ManifestUser {
                 username,
                 password,
                 role,
                 tenant: optional_string(obj, "tenant"),
-                system_owned: optional_bool(obj, "system_owned").unwrap_or(false),
             })
         })
         .collect()
@@ -748,7 +740,6 @@ fn registry_context(user: &User) -> EvalContext {
         mfa_present: false,
         now_ms: current_unix_ms(),
         principal_is_admin_role: user.role == Role::Admin,
-        principal_is_system_owned: user.system_owned,
         principal_is_platform_scoped: user.tenant_id.is_none(),
     }
 }
@@ -761,7 +752,6 @@ fn manifest_user_context(user: &ManifestUser) -> EvalContext {
         mfa_present: false,
         now_ms: current_unix_ms(),
         principal_is_admin_role: user.role == Role::Admin,
-        principal_is_system_owned: user.system_owned,
         principal_is_platform_scoped: user.tenant.is_none(),
     }
 }
@@ -916,4 +906,30 @@ fn secret_ref_storage_value(value: &JsonValue, idx: usize) -> Result<Value, Stri
         crate::serde_json::to_vec(&JsonValue::Object(out))
             .map_err(|err| format!("serialize config[{idx}].secret_ref: {err}"))?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BootstrapManifest;
+
+    #[test]
+    fn rejects_system_owned_user_field() {
+        let result = BootstrapManifest::parse(
+            r#"{
+                "users": [
+                    {
+                        "username": "ops",
+                        "password": "hunter2",
+                        "role": "admin",
+                        "system_owned": true
+                    }
+                ]
+            }"#,
+        );
+
+        match result {
+            Ok(_) => panic!("manifest accepted users[0].system_owned"),
+            Err(err) => assert!(err.contains("users[0].system_owned"), "got: {err}"),
+        }
+    }
 }

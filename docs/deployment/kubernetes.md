@@ -75,7 +75,10 @@ cluster:
 The chart gives each pod a stable StatefulSet DNS name and sets
 `REDDB_CLUSTER_PEERS`. The current binary does not expose a separate
 `--role cluster`; cluster pods use `red server --role standalone` with
-`REDDB_STORAGE_PRESET=cluster` and `RED_CLUSTER_HA_INTENT=declared`.
+`REDDB_STORAGE_PRESET=cluster` and `RED_CLUSTER_HA_INTENT=declared`. The range
+ownership and sharding contract is documented in
+[Cluster Sharding](../architecture/cluster-sharding.md); this Helm mode should
+not be treated as full production multi-writer serving yet.
 
 ## Config File
 
@@ -98,8 +101,9 @@ Separate boot/topology config from runtime config:
 
 - Boot config remains args/env: topology, node role, process role, primary
   address, storage preset/profile, remote backend, lease settings, data path,
-  config file path, and secrets. Explicit args win over the human topology env
-  layer; storage env overrides topology-derived storage defaults.
+  config file path, and secrets. The human topology env layer documents the
+  selected topology and keeps storage env consistent; process roles come from
+  chart-rendered args, and storage env overrides mode-derived storage defaults.
 - Runtime config lives in `red.config`.
 - Env overrides for config-matrix keys win for the current boot and are not
   persisted.
@@ -107,6 +111,9 @@ Separate boot/topology config from runtime config:
 Use `SET CONFIG` for persistent config changes after first boot.
 
 ## Secrets
+
+The complete first-boot contract is documented in
+[First Boot Contract](./first-boot.md).
 
 Use Kubernetes Secrets for credentials:
 
@@ -124,3 +131,16 @@ remote:
 
 For secret-file workflows, mount the Secret with `extraSecretMounts` and pass the
 matching `*_FILE` env var through `config.extraEnv`.
+
+When `auth.enabled=true`, the chart renders `REDDB_PRESET=production`,
+`REDDB_USERNAME`, and `REDDB_PASSWORD` only into the writer StatefulSet: the
+serverless pod or the primary pod. Replica StatefulSets never receive bootstrap
+credentials. `mode=cluster` rejects `auth.enabled=true`; bootstrap cluster
+admins only after a concrete writer/volume bootstrap path is selected. The
+`red server` CLI also rejects bootstrap env in cluster-shaped boots unless
+`--no-auth` or `--dev` is explicit.
+
+When vault is enabled, bootstrap must happen against the writer database volume
+or via HTTP after the writer is running. The chart's legacy
+`auth.vault.bootstrapJob` is disabled fail-closed because it bootstrapped an
+`emptyDir` database unrelated to the StatefulSet PVC.

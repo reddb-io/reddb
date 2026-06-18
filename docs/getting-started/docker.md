@@ -28,7 +28,7 @@ and the secret-management patterns in
 Using the prebuilt GHCR image:
 
 ```bash
-docker run --rm -p 8080:8080 \
+docker run --rm -p 55880:8080 \
   ghcr.io/reddb-io/reddb:latest
 ```
 
@@ -36,7 +36,7 @@ If you do not have GHCR access, build locally instead:
 
 ```bash
 docker build -t reddb .
-docker run --rm -p 8080:8080 reddb
+docker run --rm -p 55880:8080 reddb
 ```
 
 That's it. RedDB binds HTTP on `0.0.0.0:8080`, gRPC on `0.0.0.0:50051`,
@@ -45,14 +45,14 @@ and starts an in-container ephemeral database.
 Open the admin health endpoint:
 
 ```bash
-curl http://127.0.0.1:8080/admin/health
+curl http://127.0.0.1:55880/admin/health
 # {"ok":true,"version":"x.y.z"}
 ```
 
 Run a query:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:55880/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT 1"}'
 ```
@@ -65,7 +65,7 @@ curl -X POST http://127.0.0.1:8080/query \
 To persist data across container restarts, mount a volume:
 
 ```bash
-docker run --rm -p 8080:8080 \
+docker run --rm -p 55880:8080 \
   -v reddb-dev-data:/data \
   ghcr.io/reddb-io/reddb:latest \
   server --path /data/data.rdb --http-bind 0.0.0.0:8080
@@ -94,6 +94,7 @@ docker run --rm \
   ghcr.io/reddb-io/reddb:latest \
   bootstrap \
     --path /data/data.rdb \
+    --vault \
     --username admin \
     --password "$(openssl rand -base64 24)" \
     --print-certificate \
@@ -110,6 +111,9 @@ shred -u /tmp/reddb-bootstrap.log
 
 The cert is 64 hex chars. The bootstrap also creates `admin` and prints
 its initial API key — capture both.
+
+Bootstrap must run against the same mounted data volume that the server will
+use. A certificate minted from a scratch DB will not unseal a different DB.
 
 ### Step 2 — Store the certificate
 
@@ -132,8 +136,8 @@ services:
   reddb:
     image: ghcr.io/reddb-io/reddb:latest
     ports:
-      - "8080:8080"
-      - "5050:5050"
+      - "55880:8080"
+      - "55050:5050"
     volumes:
       - reddb-data:/data
     environment:
@@ -176,7 +180,7 @@ appears in `docker inspect`, and never gets baked into the image.
 Verify the vault is unsealed:
 
 ```bash
-curl -s http://127.0.0.1:8080/admin/status \
+curl -s http://127.0.0.1:55880/admin/status \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN" | jq '.vault'
 # {"state":"unsealed","backend":"page-2-3","cipher":"aes-256-gcm"}
 ```
@@ -198,8 +202,8 @@ production rather than `:latest`.
 
 ```yaml
     ports:
-      - "8080:8080"     # HTTP / admin / metrics
-      - "5050:5050"     # RedWire binary protocol
+      - "55880:8080"   # HTTP / admin / metrics
+      - "55050:5050"   # RedWire binary protocol
 ```
 
 Two transports. PG wire (`--pg-bind`) and a separate admin port (via
@@ -219,9 +223,8 @@ volume = total data loss unless you have backups configured.
 ```
 
 The `*_FILE` form (preferred over inline `REDDB_CERTIFICATE=...`)
-points at the secret mount. The entrypoint reads the file, places its
-contents in `REDDB_CERTIFICATE`, and **strips** `REDDB_CERTIFICATE_FILE`
-from the env so child processes can't see the file path.
+points at the secret mount. The binary reads supported `*_FILE` variables
+without requiring the secret value to appear in container env.
 
 ```yaml
     secrets:
@@ -312,7 +315,7 @@ http: listening on 0.0.0.0:8080
 2. (Optional) take a backup first:
 
    ```bash
-   curl -X POST http://127.0.0.1:8080/admin/backup \
+   curl -X POST http://127.0.0.1:55880/admin/backup \
      -H "Authorization: Bearer $RED_ADMIN_TOKEN"
    ```
 
@@ -337,7 +340,7 @@ migration note in the release notes.
 
 ```bash
 # Mint a new token
-NEW_TOKEN=$(curl -X POST http://127.0.0.1:8080/auth/api-keys \
+NEW_TOKEN=$(curl -X POST http://127.0.0.1:55880/auth/api-keys \
   -H "Authorization: Bearer $OLD_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"username":"admin","name":"rotated","role":"admin"}' \
@@ -362,7 +365,7 @@ vault, just on a different volume populated by snapshot restore.
 services:
   primary:
     image: ghcr.io/reddb-io/reddb:latest
-    ports: [ "8080:8080", "5050:5050" ]
+    ports: [ "55880:8080", "55050:5050" ]
     volumes: [ primary-data:/data ]
     environment:
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
@@ -379,7 +382,7 @@ services:
 
   replica:
     image: ghcr.io/reddb-io/reddb:latest
-    ports: [ "8081:8080", "5051:5050" ]
+    ports: [ "55881:8080", "55051:5050" ]
     volumes: [ replica-data:/data ]
     environment:
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
@@ -420,7 +423,7 @@ from managing certs. Use this only when:
 - You're OK with anonymous read/write to your local DB.
 
 ```bash
-docker run --rm -p 8080:8080 \
+docker run --rm -p 55880:8080 \
   ghcr.io/reddb-io/reddb:latest \
   server --http-bind 0.0.0.0:8080
 ```
@@ -428,7 +431,7 @@ docker run --rm -p 8080:8080 \
 Or, to keep data across restarts:
 
 ```bash
-docker run --rm -p 8080:8080 \
+docker run --rm -p 55880:8080 \
   -v reddb-dev:/data \
   ghcr.io/reddb-io/reddb:latest \
   server --path /data/data.rdb --http-bind 0.0.0.0:8080

@@ -98,6 +98,7 @@
 
 - **Architecture**
   - [Collection Contract (ADR)](/architecture/collection-contract-adr.md)
+  - [Cluster Sharding](/architecture/cluster-sharding.md)
   - [Competitive Positioning](/architecture/competitive-positioning.md)
   - [Cluster Sharding Contract](/architecture/cluster-sharding.md)
   - [Distributed Roadmap](/architecture/distributed-roadmap.md)

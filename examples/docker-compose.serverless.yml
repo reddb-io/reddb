@@ -1,36 +1,31 @@
-# Serverless-style local demo with MinIO. For the canonical secure deploy
+# Serverless-style local demo with Floci. For the canonical secure deploy
 # (vault on, cert via Docker secrets), see examples/docker-compose.vault.yml.
 
 services:
-  minio:
-    image: minio/minio:latest
-    container_name: reddb-minio-serverless
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+  floci:
+    image: floci/floci:latest
+    container_name: reddb-floci-serverless
     ports:
-      - "9030:9000"
-      - "9031:9001"
-    volumes:
-      - minio-serverless-data:/data
+      - "55466:4566"
 
-  minio-init:
-    image: minio/mc:latest
-    container_name: reddb-minio-serverless-init
+  floci-init:
+    image: amazon/aws-cli:2
+    container_name: reddb-floci-serverless-init
     depends_on:
-      - minio
+      - floci
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint:
       - /bin/sh
       - -c
       - |
         set -eu
-        until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin; do
+        until aws --endpoint-url=http://floci:4566 s3 ls >/dev/null 2>&1; do
           sleep 1
         done
-        /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin
-        /usr/bin/mc mb --ignore-existing local/reddb-serverless
-        /usr/bin/mc anonymous set private local/reddb-serverless
+        aws --endpoint-url=http://floci:4566 s3 mb s3://reddb-serverless || true
 
   serverless:
     build:
@@ -40,11 +35,11 @@ services:
         REDDB_CARGO_FEATURES: backend-s3
     container_name: reddb-serverless
     depends_on:
-      minio-init:
+      floci-init:
         condition: service_completed_successfully
     ports:
-      - "50081:50051"
-      - "8110:8080"
+      - "55581:50051"
+      - "55810:8080"
     volumes:
       - serverless-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro
@@ -67,11 +62,12 @@ services:
       REDDB_CONFIG_FILE: /etc/reddb/config.json
       RED_BACKEND: s3
       RED_REMOTE_KEY: serverless/demo/data.rdb
-      RED_S3_ENDPOINT: http://minio:9000
+      RED_S3_ENDPOINT: http://floci:4566
       RED_S3_BUCKET: reddb-serverless
       RED_S3_REGION: us-east-1
-      RED_S3_ACCESS_KEY: minioadmin
-      RED_S3_SECRET_KEY: minioadmin
+      RED_S3_ACCESS_KEY: test
+      RED_S3_SECRET_KEY: test
+      RED_S3_PATH_STYLE: "true"
       RED_AUTO_RESTORE: "true"
       RED_BACKUP_ON_SHUTDOWN: "true"
       RED_LEASE_REQUIRED: "true"
@@ -84,5 +80,4 @@ services:
       start_period: 10s
 
 volumes:
-  minio-serverless-data:
   serverless-data:

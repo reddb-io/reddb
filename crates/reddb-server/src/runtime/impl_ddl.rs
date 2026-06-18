@@ -290,7 +290,7 @@ impl RedDBRuntime {
         ))
     }
 
-    /// Bootstrap a system-owned graph collection declared `WITH ANALYTICS`
+    /// Bootstrap an internal graph collection declared `WITH ANALYTICS`
     /// (issue #803). The SQL DDL path refuses `red.*` names via
     /// [`is_system_schema_name`], so built-ins like `red.topology.cluster`
     /// cannot be created through `CREATE GRAPH`; this method drives the same
@@ -2253,7 +2253,6 @@ fn validate_subscription_auth(
             mfa_present: false,
             now_ms: crate::auth::now_ms(),
             principal_is_admin_role: role == crate::auth::Role::Admin,
-            principal_is_system_owned: auth_store.principal_is_system_owned(&principal),
             principal_is_platform_scoped: principal.tenant.is_none(),
         };
         let mut source_resource = crate::auth::policies::ResourceRef::new("table", source);

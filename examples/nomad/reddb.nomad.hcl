@@ -78,9 +78,10 @@ job "reddb" {
 
       # Encrypted-vault key — fetched from Vault KV and written into the
       # task's runtime secrets dir. The binary reads REDDB_CERTIFICATE_FILE
-      # and the path never appears in the audited env. Bootstrap once via
-      # `red bootstrap --print-certificate` and `vault kv put reddb/vault
-      # certificate=$CERT`. BACK IT UP — there is no recovery.
+      # and the path never appears in the audited env. Bootstrap the real
+      # allocation volume once via `red bootstrap --print-certificate` and
+      # `vault kv put reddb/vault certificate=$CERT`. BACK IT UP — there is
+      # no recovery.
       template {
         destination = "secrets/vault-cert"
         perms       = "0400"

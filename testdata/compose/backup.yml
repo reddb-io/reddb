@@ -1,33 +1,28 @@
 services:
-  minio:
-    image: minio/minio:latest
-    container_name: reddb-minio-backup
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+  floci:
+    image: floci/floci:latest
+    container_name: reddb-floci-backup
     ports:
-      - "9010:9000"
-      - "9011:9001"
-    volumes:
-      - minio-backup-data:/data
+      - "55467:4566"
 
-  minio-init:
-    image: minio/mc:latest
-    container_name: reddb-minio-backup-init
+  floci-init:
+    image: amazon/aws-cli:2
+    container_name: reddb-floci-backup-init
     depends_on:
-      - minio
+      - floci
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint:
       - /bin/sh
       - -c
       - |
         set -eu
-        until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin; do
+        until aws --endpoint-url=http://floci:4566 s3 ls >/dev/null 2>&1; do
           sleep 1
         done
-        /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin
-        /usr/bin/mc mb --ignore-existing local/reddb-backup
-        /usr/bin/mc anonymous set private local/reddb-backup
+        aws --endpoint-url=http://floci:4566 s3 mb s3://reddb-backup || true
 
   server:
     build:
@@ -37,12 +32,12 @@ services:
         REDDB_CARGO_FEATURES: backend-s3
     container_name: reddb-backup-server
     depends_on:
-      minio-init:
+      floci-init:
         condition: service_completed_successfully
     ports:
-      - "50061:50051"
-      - "8090:8080"
-      - "8493:8443"
+      - "55561:50051"
+      - "55890:8080"
+      - "55893:8443"
     volumes:
       - backup-server-data:/data
     command:
@@ -61,13 +56,14 @@ services:
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "0"
-      REDDB_REMOTE_BACKEND: s3
-      REDDB_REMOTE_KEY: backups/demo/data.rdb
-      REDDB_S3_ENDPOINT: http://minio:9000
-      REDDB_S3_BUCKET: reddb-backup
-      REDDB_S3_REGION: us-east-1
-      REDDB_S3_ACCESS_KEY: minioadmin
-      REDDB_S3_SECRET_KEY: minioadmin
+      RED_BACKEND: s3
+      RED_REMOTE_KEY: backups/demo/data.rdb
+      RED_S3_ENDPOINT: http://floci:4566
+      RED_S3_BUCKET: reddb-backup
+      RED_S3_REGION: us-east-1
+      RED_S3_ACCESS_KEY: test
+      RED_S3_SECRET_KEY: test
+      RED_S3_PATH_STYLE: "true"
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
@@ -76,5 +72,4 @@ services:
       start_period: 10s
 
 volumes:
-  minio-backup-data:
   backup-server-data:

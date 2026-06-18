@@ -59,7 +59,6 @@ fn fat_state() -> VaultState {
             created_at: now,
             updated_at: now,
             enabled: true,
-            system_owned: false,
         });
         keys.push((
             UserId::platform(username),

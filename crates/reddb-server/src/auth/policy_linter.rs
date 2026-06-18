@@ -463,7 +463,7 @@ fn lint_self_lock(
         code: DiagnosticCode::SelfLockRisk,
         message,
         suggested_fix: Some(
-            "narrow the Deny with a condition (e.g. `system_owned: false`) or remove it".into(),
+            "narrow the Deny with a condition (e.g. `platform_scoped: false`) or remove it".into(),
         ),
         location,
     });
@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn self_lock_risk_silent_for_narrower_deny() {
-        // The same deny restricted to non-system-owned principals does
+        // The same deny restricted to tenant-scoped principals does
         // not lock the synthetic platform owner out.
         let p = r#"{
             "id": "p-narrow",
@@ -707,7 +707,7 @@ mod tests {
                 "effect": "deny",
                 "actions": ["policy:detach"],
                 "resources": ["*"],
-                "condition": { "system_owned": false }
+                "condition": { "platform_scoped": false }
             }]
         }"#;
         let diags = lint(p);

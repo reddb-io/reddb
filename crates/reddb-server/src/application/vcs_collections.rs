@@ -3,7 +3,7 @@
 //! All VCS-owned collections share the `red_*` prefix — matching existing
 //! internal stores like `red_config`, `red_stats`, and `red_queue_meta`.
 //! Keeping every name in one file makes it obvious which collections are
-//! system-owned and prevents accidental divergence between bootstrap code,
+//! internal and prevents accidental divergence between bootstrap code,
 //! runtime access, and schema documentation.
 
 /// Commit entities: hash, parent pointers, root snapshot xid, author, message,

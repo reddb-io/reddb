@@ -272,9 +272,6 @@ fn policy_principal_attrs(policy: &Policy) -> Option<String> {
         let Some(condition) = &statement.condition else {
             continue;
         };
-        if let Some(value) = condition.system_owned {
-            attrs.push(format!("system_owned={value}"));
-        }
         if let Some(value) = condition.platform_scoped {
             attrs.push(format!("platform_scoped={value}"));
         }
@@ -494,9 +491,9 @@ impl AuthStore {
                 ledger: configured.ledger.as_ref(),
                 config: configured.config,
             };
-            self.bootstrap_with_ownership_and_control_events(username, password, false, &control)
+            self.bootstrap_with_control_events_inner(username, password, &control)
         } else {
-            self.bootstrap_with_ownership(username, password, false)
+            self.bootstrap_unaudited(username, password)
         }
     }
 
@@ -519,47 +516,25 @@ impl AuthStore {
             ledger,
             config,
         };
-        self.bootstrap_with_ownership_and_control_events(username, password, false, &control)
+        self.bootstrap_with_control_events_inner(username, password, &control)
     }
 
-    /// Bootstrap the first admin with `system_owned = true` and platform
-    /// scope (`tenant = None`). The resulting principal carries both
-    /// `principal_is_system_owned` and `principal_is_platform_scoped`,
-    /// which is what #649's `ManagedConfigGate` requires before allowing
-    /// writes to managed config keys. Used by the `production` bootstrap
-    /// preset (issue #650).
+    /// Backwards-compatible bootstrap entry point for older callers
+    /// that used to ask for an operator-owned first admin. Authorization
+    /// is now policy-first, so this creates the same ordinary platform
+    /// admin as [`Self::bootstrap`].
     pub fn bootstrap_system_admin(
         &self,
         username: &str,
         password: &str,
     ) -> Result<BootstrapResult, AuthError> {
-        if let Some(configured) = self.configured_control_events() {
-            let ctx = bootstrap_user_lifecycle_ctx();
-            let control = UserLifecycleControl {
-                ctx: &ctx,
-                ledger: configured.ledger.as_ref(),
-                config: configured.config,
-            };
-            self.bootstrap_with_ownership_and_control_events(username, password, true, &control)
-        } else {
-            self.bootstrap_with_ownership(username, password, true)
-        }
+        self.bootstrap(username, password)
     }
 
-    fn bootstrap_with_ownership(
+    fn bootstrap_unaudited(
         &self,
         username: &str,
         password: &str,
-        system_owned: bool,
-    ) -> Result<BootstrapResult, AuthError> {
-        self.bootstrap_with_ownership_unaudited(username, password, system_owned)
-    }
-
-    fn bootstrap_with_ownership_unaudited(
-        &self,
-        username: &str,
-        password: &str,
-        system_owned: bool,
     ) -> Result<BootstrapResult, AuthError> {
         // Atomic seal: only the first caller wins.
         if self
@@ -582,23 +557,7 @@ impl AuthStore {
             }
         }
 
-        let user = if system_owned {
-            self.create_user_in_tenant_with_ownership_unaudited(
-                None,
-                username,
-                password,
-                Role::Admin,
-                true,
-            )?
-        } else {
-            self.create_user_in_tenant_with_ownership_unaudited(
-                None,
-                username,
-                password,
-                Role::Admin,
-                false,
-            )?
-        };
+        let user = self.create_user_in_tenant_unaudited(None, username, password, Role::Admin)?;
         let key =
             self.create_api_key_in_tenant_unaudited(None, username, "bootstrap", Role::Admin)?;
 
@@ -644,15 +603,14 @@ impl AuthStore {
         })
     }
 
-    fn bootstrap_with_ownership_and_control_events(
+    fn bootstrap_with_control_events_inner(
         &self,
         username: &str,
         password: &str,
-        system_owned: bool,
         control: &UserLifecycleControl<'_>,
     ) -> Result<BootstrapResult, AuthError> {
         let id = UserId::from_parts(None, username);
-        match self.bootstrap_with_ownership_unaudited(username, password, system_owned) {
+        match self.bootstrap_unaudited(username, password) {
             Ok(result) => {
                 let event_result = self.emit_user_lifecycle_allowed(
                     control,
@@ -1113,13 +1071,9 @@ impl AuthStore {
                 ledger: configured.ledger.as_ref(),
                 config: configured.config,
             };
-            self.create_user_in_tenant_with_ownership_controlled(
-                tenant_id, username, password, role, false, &control,
-            )
+            self.create_user_in_tenant_controlled(tenant_id, username, password, role, &control)
         } else {
-            self.create_user_in_tenant_with_ownership_unaudited(
-                tenant_id, username, password, role, false,
-            )
+            self.create_user_in_tenant_unaudited(tenant_id, username, password, role)
         }
     }
 
@@ -1139,12 +1093,10 @@ impl AuthStore {
             ledger,
             config,
         };
-        self.create_user_in_tenant_with_ownership_controlled(
-            tenant_id, username, password, role, false, &control,
-        )
+        self.create_user_in_tenant_controlled(tenant_id, username, password, role, &control)
     }
 
-    pub fn create_system_user(
+    pub fn create_admin_user(
         &self,
         username: &str,
         password: &str,
@@ -1158,23 +1110,18 @@ impl AuthStore {
                 ledger: configured.ledger.as_ref(),
                 config: configured.config,
             };
-            self.create_user_in_tenant_with_ownership_controlled(
-                tenant_id, username, password, role, true, &control,
-            )
+            self.create_user_in_tenant_controlled(tenant_id, username, password, role, &control)
         } else {
-            self.create_user_in_tenant_with_ownership_unaudited(
-                tenant_id, username, password, role, true,
-            )
+            self.create_user_in_tenant_unaudited(tenant_id, username, password, role)
         }
     }
 
-    fn create_user_in_tenant_with_ownership_unaudited(
+    fn create_user_in_tenant_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
         password: &str,
         role: Role,
-        system_owned: bool,
     ) -> Result<User, AuthError> {
         let id = UserId::from_parts(tenant_id, username);
         let mut users = self.users.write().map_err(lock_err)?;
@@ -1193,7 +1140,6 @@ impl AuthStore {
             created_at: now,
             updated_at: now,
             enabled: true,
-            system_owned,
         };
         users.insert(id, user.clone());
         drop(users); // release lock before vault I/O
@@ -1201,23 +1147,16 @@ impl AuthStore {
         Ok(user)
     }
 
-    fn create_user_in_tenant_with_ownership_controlled(
+    fn create_user_in_tenant_controlled(
         &self,
         tenant_id: Option<&str>,
         username: &str,
         password: &str,
         role: Role,
-        system_owned: bool,
         control: &UserLifecycleControl<'_>,
     ) -> Result<User, AuthError> {
         let id = UserId::from_parts(tenant_id, username);
-        match self.create_user_in_tenant_with_ownership_unaudited(
-            tenant_id,
-            username,
-            password,
-            role,
-            system_owned,
-        ) {
+        match self.create_user_in_tenant_unaudited(tenant_id, username, password, role) {
             Ok(user) => {
                 if let Err(err) = self.emit_user_lifecycle_allowed(
                     control,
@@ -1320,16 +1259,51 @@ impl AuthStore {
             .collect()
     }
 
-    /// Look up a single user by `(tenant, username)`. Password hash
-    /// is redacted.
-    /// Whether the given principal's user record is system-owned. Returns
-    /// `false` for unknown principals — an absent record is never treated as
-    /// operator-owned. Used to populate `EvalContext::principal_is_system_owned`
-    /// on the runtime authorization hot path.
-    pub fn principal_is_system_owned(&self, principal: &UserId) -> bool {
-        self.get_user_cloned(principal)
-            .map(|u| u.system_owned)
-            .unwrap_or(false)
+    /// Resource shape used by IAM policies that govern user lifecycle
+    /// mutations. Platform users are addressed as `user:<username>`;
+    /// tenant users are addressed as `user:tenant/<tenant>/<username>`
+    /// by the existing policy resource qualifier.
+    pub fn user_lifecycle_resource(uid: &UserId) -> ResourceRef {
+        let resource = ResourceRef::new("user", uid.username.clone());
+        match &uid.tenant {
+            Some(tenant) => resource.with_tenant(tenant.clone()),
+            None => resource,
+        }
+    }
+
+    pub fn eval_context_for_principal(
+        &self,
+        principal: &UserId,
+        role: Role,
+        current_tenant: Option<String>,
+    ) -> EvalContext {
+        EvalContext {
+            principal_tenant: principal.tenant.clone(),
+            current_tenant,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: now_ms(),
+            principal_is_admin_role: role == Role::Admin,
+            principal_is_platform_scoped: principal.tenant.is_none(),
+        }
+    }
+
+    /// Policy gate for user lifecycle mutations.
+    ///
+    /// This is intentionally separate from the store mutation methods:
+    /// bootstrap and manifest loading can still seed users directly,
+    /// while public surfaces must authorize `user:*` before calling the
+    /// mutator. Explicit Deny wins even in `LegacyRbac` mode.
+    pub fn check_user_lifecycle_authz(
+        &self,
+        actor: &UserId,
+        actor_role: Role,
+        action: &str,
+        target: &UserId,
+    ) -> bool {
+        let resource = Self::user_lifecycle_resource(target);
+        let ctx = self.eval_context_for_principal(actor, actor_role, target.tenant.clone());
+        self.check_policy_authz_with_role(actor, action, &resource, &ctx, actor_role)
     }
 
     pub fn get_user(&self, tenant_id: Option<&str>, username: &str) -> Option<User> {
@@ -1401,10 +1375,6 @@ impl AuthStore {
     ) -> Result<(), AuthError> {
         let id = UserId::from_parts(tenant_id, username);
         let mut users = self.users.write().map_err(lock_err)?;
-        let user = users
-            .get(&id)
-            .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
-        reject_system_owned(&id, user)?;
         let user = users
             .remove(&id)
             .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
@@ -1571,7 +1541,6 @@ impl AuthStore {
         let user = users
             .get_mut(&id)
             .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
-        reject_system_owned(&id, user)?;
 
         if !verify_password(old_password, &user.password_hash) {
             return Err(AuthError::InvalidCredentials);
@@ -1696,7 +1665,6 @@ impl AuthStore {
         let user = users
             .get_mut(&id)
             .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
-        reject_system_owned(&id, user)?;
 
         let prior_role = user.role;
         user.role = new_role;
@@ -2602,7 +2570,6 @@ impl AuthStore {
         let user = users
             .get_mut(uid)
             .ok_or_else(|| AuthError::UserNotFound(uid.to_string()))?;
-        reject_system_owned(uid, user)?;
         user.enabled = enabled;
         user.updated_at = now_ms();
         drop(users);
@@ -3808,7 +3775,6 @@ impl AuthStore {
                 created_at: boot_ts_ms,
                 updated_at: boot_ts_ms,
                 enabled: false,
-                system_owned: true,
             });
         }
 
@@ -3983,12 +3949,11 @@ impl AuthStore {
         resource: &ResourceRef,
         ctx_extras: SimCtx,
     ) -> SimulationOutcome {
-        let (user_role, user_system_owned) = self
+        let user_role = self
             .users
             .read()
             .ok()
-            .and_then(|u| u.get(principal).map(|u| (Some(u.role), u.system_owned)))
-            .unwrap_or((None, false));
+            .and_then(|u| u.get(principal).map(|u| u.role));
         let principal_is_admin_role = user_role == Some(Role::Admin);
         let now = ctx_extras.now_ms.unwrap_or_else(now_ms);
         let ctx = EvalContext {
@@ -3998,7 +3963,6 @@ impl AuthStore {
             mfa_present: ctx_extras.mfa_present,
             now_ms: now,
             principal_is_admin_role,
-            principal_is_system_owned: user_system_owned,
             principal_is_platform_scoped: principal.tenant.is_none(),
         };
         let pols = self.effective_policies(principal);
@@ -4681,15 +4645,6 @@ fn lock_err<T>(_: T) -> AuthError {
     AuthError::Internal("lock poisoned".to_string())
 }
 
-fn reject_system_owned(uid: &UserId, user: &User) -> Result<(), AuthError> {
-    if user.system_owned {
-        return Err(AuthError::SystemUserImmutable {
-            username: uid.to_string(),
-        });
-    }
-    Ok(())
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -4814,90 +4769,122 @@ mod tests {
     }
 
     #[test]
-    fn test_system_owned_user_blocks_destructive_mutations() {
+    fn test_admin_user_mutations_are_policy_controlled_not_flag_guarded() {
         let store = AuthStore::new(test_config());
         store
-            .create_system_user("system", "pass", Role::Admin, None)
+            .create_admin_user("system", "pass", Role::Admin, None)
             .unwrap();
 
         let uid = UserId::platform("system");
-        let err = store.delete_user("system").unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
-
-        let err = store.change_password("system", "pass", "new").unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
-
-        let err = store.change_role("system", Role::Read).unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
-
-        let err = store.set_user_enabled(&uid, false).unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+        store.change_password("system", "pass", "new").unwrap();
+        store.change_role("system", Role::Read).unwrap();
+        store.set_user_enabled(&uid, false).unwrap();
 
         let key = store
-            .create_api_key("system", "rotation", Role::Admin)
+            .create_api_key("system", "rotation", Role::Read)
             .unwrap();
         assert!(store.validate_token(&key.key).is_some());
         store.revoke_api_key(&key.key).unwrap();
         assert!(store.validate_token(&key.key).is_none());
+        store.delete_user("system").unwrap();
     }
 
     #[test]
-    fn test_tenant_scoped_system_owned_user_guardrail_integration() {
-        // Acceptance #1 + #2 + #4 (tenant-scoped half) for issue #647.
-        //
-        // The destructive-mutation guard (`reject_system_owned`) is on
-        // the tenant-aware code paths (`*_in_tenant`), but the existing
-        // `test_system_owned_user_blocks_destructive_mutations` only
-        // exercises the platform shim. Pin the tenant-scoped path so a
-        // future refactor that loses the guard on `*_in_tenant` is
-        // caught.
+    fn test_user_lifecycle_deny_policy_blocks_cloud_admin_deletion() {
+        use crate::auth::policies::Policy;
+
         let store = AuthStore::new(test_config());
         store
-            .create_system_user("ops", "pass", Role::Admin, Some("acme"))
-            .unwrap();
-
-        let uid = UserId::scoped("acme", "ops");
-
-        // delete / disable / password-change / role-change — all four
-        // destructive paths block on a tenant-scoped system-owned user.
-        let err = store
-            .delete_user_in_tenant(Some("acme"), "ops")
-            .unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
-
-        let err = store
-            .change_password_in_tenant(Some("acme"), "ops", "pass", "new")
-            .unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
-
-        let err = store
-            .change_role_in_tenant(Some("acme"), "ops", Role::Read)
-            .unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
-
-        let err = store.set_user_enabled(&uid, false).unwrap_err();
-        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
-
-        // Tenant-isolation sanity: a same-named non-system user under a
-        // different tenant remains fully mutable. Without this the test
-        // above could be passing because the guard refuses all `ops`
-        // users by name rather than by id.
-        store
-            .create_user_in_tenant(Some("globex"), "ops", "pass", Role::Admin)
+            .create_user("cloud-admin", "pass", Role::Admin)
             .unwrap();
         store
-            .change_role_in_tenant(Some("globex"), "ops", Role::Read)
+            .create_user("customer-admin", "pass", Role::Admin)
             .unwrap();
-        store.delete_user_in_tenant(Some("globex"), "ops").unwrap();
 
-        // API-key rotation path still works for the system-owned user
-        // (intentionally bypasses `reject_system_owned`).
-        let key = store
-            .create_api_key_in_tenant(Some("acme"), "ops", "rotation", Role::Admin)
+        store
+            .put_policy(
+                Policy::from_json_str(
+                    r#"{
+                        "id": "customer-admin-allow-all",
+                        "version": 1,
+                        "statements": [{
+                            "effect": "allow",
+                            "actions": ["*"],
+                            "resources": ["*"]
+                        }]
+                    }"#,
+                )
+                .unwrap(),
+            )
             .unwrap();
-        assert!(store.validate_token(&key.key).is_some());
-        store.revoke_api_key(&key.key).unwrap();
-        assert!(store.validate_token(&key.key).is_none());
+        store
+            .put_policy(
+                Policy::from_json_str(
+                    r#"{
+                        "id": "cloud-admin-protection",
+                        "version": 1,
+                        "statements": [{
+                            "effect": "deny",
+                            "actions": [
+                                "user:delete",
+                                "user:disable",
+                                "user:password:change",
+                                "user:role:update"
+                            ],
+                            "resources": ["user:cloud-admin"]
+                        }]
+                    }"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let customer = UserId::platform("customer-admin");
+        store
+            .attach_policy(
+                PrincipalRef::User(customer.clone()),
+                "customer-admin-allow-all",
+            )
+            .unwrap();
+        store
+            .attach_policy(
+                PrincipalRef::User(customer.clone()),
+                "cloud-admin-protection",
+            )
+            .unwrap();
+
+        let cloud_admin = UserId::platform("cloud-admin");
+        assert!(!store.check_user_lifecycle_authz(
+            &customer,
+            Role::Admin,
+            "user:delete",
+            &cloud_admin,
+        ));
+        assert!(!store.check_user_lifecycle_authz(
+            &customer,
+            Role::Admin,
+            "user:disable",
+            &cloud_admin,
+        ));
+        assert!(!store.check_user_lifecycle_authz(
+            &customer,
+            Role::Admin,
+            "user:password:change",
+            &cloud_admin,
+        ));
+        assert!(!store.check_user_lifecycle_authz(
+            &customer,
+            Role::Admin,
+            "user:role:update",
+            &cloud_admin,
+        ));
+
+        let another_user = UserId::platform("someone-else");
+        assert!(store.check_user_lifecycle_authz(
+            &customer,
+            Role::Admin,
+            "user:delete",
+            &another_user,
+        ));
     }
 
     #[test]
@@ -5132,7 +5119,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: role == Role::Admin,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         }
     }

@@ -60,7 +60,6 @@ pub fn enforce(runtime: &RedDBRuntime, provider: &AiProvider) -> RedDBResult<()>
         mfa_present: false,
         now_ms: crate::auth::now_ms(),
         principal_is_admin_role: role == Role::Admin,
-        principal_is_system_owned: auth_store.principal_is_system_owned(&principal),
         principal_is_platform_scoped: principal.tenant.is_none(),
     };
 
