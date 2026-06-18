@@ -100,6 +100,36 @@ materialize ranges, split large or hot ranges, and move ownership through
 explicit transitions. Low-level tests and administrative tooling may establish
 or update ranges directly, but that is not the intended application workflow.
 
+## Application And Operator Contract
+
+From the application point of view, a clustered request names a collection and a
+key. It does not pick a node, range id, modulo bucket, or owner. Routing derives
+the owner from the catalog:
+
+```text
+(collection, key) -> shard key bytes -> token or ordered key -> owned range -> owner
+```
+
+The contract is intentionally split this way:
+
+| Actor | Chooses | Does not choose |
+|---|---|---|
+| Application | Collection, key, and query shape | Node, range id, owner epoch, or range boundary |
+| Collection declaration | Shard key and `Hash` or `Ordered` intent | Per-request placement |
+| Cluster supervisor / placement planner | Range count, split points, replicas, and owner moves | Application semantics |
+| Admin tooling / tests | Explicit catalog entries for drills and repair | Normal request routing |
+
+Conceptually:
+
+```text
+users:  shard key = user_id, mode = Hash     # default, uniform distribution
+events: shard key = tenant_id/time, mode = Ordered  # opt-in for locality
+```
+
+The exact public DDL/config syntax for declaring that intent belongs to the
+runtime integration work. Until then, code and docs should describe the model as
+a catalog contract, not as a finished user-facing cluster DDL surface.
+
 ## Routing
 
 Routing starts by resolving `(collection, key)` to exactly one half-open range in

@@ -19,7 +19,10 @@ Each Compose profile sets the same storage contract consumed by the CLI:
 `REDDB_STORAGE_PRESET`, `REDDB_STORAGE_PROFILE`, `REDDB_STORAGE_PACKAGING`, and
 `REDDB_REPLICA_COUNT`. The `cluster` profile is intentionally a cluster-shaped
 delivery contract: it uses stable identities and cluster storage env today while
-the real cluster supervisor/range ownership runtime continues to mature.
+the real cluster supervisor/range ownership runtime continues to mature. The
+current sharding contract, including hash-vs-ordered ranges and cross-range
+guardrails, is documented in
+[Cluster Sharding](../docs/architecture/cluster-sharding.md).
 
 Quick commands:
 
