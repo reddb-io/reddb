@@ -66,7 +66,18 @@ red server [--grpc] [--http] [--grpc-bind 127.0.0.1:5055] [--http-bind 127.0.0.1
 | `--primary-addr` | | | Primary gRPC address (for replica mode) |
 | `--read-only` | | | Open in read-only mode |
 | `--no-create-if-missing` | | | Fail if database doesn't exist |
-| `--vault` | | `false` | Enable encrypted auth vault |
+| `--auth` | | `false` | Enable authentication |
+| `--require-auth` | | `false` | Reject anonymous requests; implies `--auth` |
+| `--vault` | | `false` | Enable encrypted auth/secret vault |
+| `--no-auth` | | `false` | Hard-disable auth and vault for local/dev boots |
+| `--bootstrap-preset` | | `simple` | First-boot preset: `simple`, `production`, `regulated`, `cloud` |
+| `--bootstrap-manifest` | | | First-boot manifest JSON path |
+| `--bootstrap-admin` | | | First admin username for production/cloud bootstrap |
+| `--bootstrap-admin-password-file` | | | File containing first admin password |
+| `--cloud-head-admin` | | | Cloud preset head/platform admin username |
+| `--cloud-head-admin-password-file` | | | File containing cloud head admin password |
+| `--customer-admin` | | | Cloud preset customer admin username |
+| `--customer-admin-password-file` | | | File containing cloud customer admin password |
 
 Examples:
 
@@ -83,8 +94,8 @@ red server --path ./data/reddb.rdb --wire-bind 127.0.0.1:5050
 # HTTP-only server
 red server --http --bind 0.0.0.0:8080
 
-# Primary mode with vault
-red server --path ./data/primary.rdb --role primary --vault --grpc-bind 0.0.0.0:5055 --http-bind 0.0.0.0:8080
+# Primary mode with auth and vault
+red server --path ./data/primary.rdb --role primary --auth --require-auth --vault --grpc-bind 0.0.0.0:5055 --http-bind 0.0.0.0:8080
 ```
 
 ## red service
@@ -326,7 +337,10 @@ red replica --primary-addr http://primary:5055 [--grpc-bind 127.0.0.1:5055] [--h
 | `--grpc-bind` | | | Explicit gRPC bind address |
 | `--http-bind` | | | Explicit HTTP bind address |
 | `--wire-bind` | | | Explicit wire TCP bind address |
-| `--vault` | | `false` | Enable vault |
+| `--auth` | | `false` | Enable authentication |
+| `--require-auth` | | `false` | Reject anonymous requests; implies `--auth` |
+| `--vault` | | `false` | Enable encrypted auth/secret vault |
+| `--no-auth` | | `false` | Hard-disable auth and vault for local/dev boots |
 
 ## red mcp
 

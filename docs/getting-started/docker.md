@@ -143,6 +143,8 @@ services:
     command:
       - server
       - --path=/data/data.rdb
+      - --auth
+      - --require-auth
       - --vault
       - --http-bind=0.0.0.0:8080
       - --wire-bind=0.0.0.0:5050
@@ -233,13 +235,17 @@ Names the secret bindings. Each named secret in this list is mounted at
     command:
       - server
       - --path=/data/data.rdb
+      - --auth
+      - --require-auth
       - --vault
       - --http-bind=0.0.0.0:8080
       - --wire-bind=0.0.0.0:5050
 ```
 
-`--vault` is the magic flag — without it, the server runs in unauthenticated
-dev mode, and `REDDB_CERTIFICATE_FILE` is silently ignored.
+`--auth` enables authentication, `--require-auth` rejects anonymous
+requests, and `--vault` enables encrypted auth/secret storage. The
+`production` and `cloud` bootstrap presets set all three automatically
+unless `--no-auth` / `REDDB_NO_AUTH=true` is present.
 
 ```yaml
     healthcheck:
@@ -364,6 +370,8 @@ services:
     command:
       - server
       - --path=/data/data.rdb
+      - --auth
+      - --require-auth
       - --vault
       - --role=primary
       - --http-bind=0.0.0.0:8080
@@ -382,6 +390,8 @@ services:
       - replica
       - --primary-addr=http://primary:50051
       - --path=/data/data.rdb
+      - --auth
+      - --require-auth
       - --vault
       - --http-bind=0.0.0.0:8080
 
@@ -424,8 +434,9 @@ docker run --rm -p 8080:8080 \
   server --path /data/data.rdb --http-bind 0.0.0.0:8080
 ```
 
-`--vault` is the difference between dev mode and production mode — the
-vault is what gates auth and `red.secret.*`.
+Production mode requires auth plus a vault: use `--auth --require-auth
+--vault`, or a `production`/`cloud` bootstrap preset. The vault gates
+`red.secret.*`; auth is controlled separately.
 
 ---
 
