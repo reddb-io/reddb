@@ -34,7 +34,7 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
       - uses: ./.github/actions/install-protoc
         with:
@@ -71,7 +71,7 @@ jobs:
         run: bench/kv/check-regression.py bench/results/kv-release-baseline.json bench/results/kv-latest.json
       - name: Upload benchmark result
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kv-benchmark-result
           path: |
