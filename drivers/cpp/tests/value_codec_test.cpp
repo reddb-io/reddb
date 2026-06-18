@@ -27,11 +27,11 @@ uint8_t b(unsigned value) {
 
 std::string read_fixture_manifest() {
     const std::array<const char*, 5> paths = {
-        "crates/reddb-wire/tests/fixtures/params/manifest.json",
-        "../../crates/reddb-wire/tests/fixtures/params/manifest.json",
-        "../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
-        "../../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
-        "../../../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
+        "testdata/conformance/redwire/params/manifest.json",
+        "../../testdata/conformance/redwire/params/manifest.json",
+        "../../../testdata/conformance/redwire/params/manifest.json",
+        "../../../../testdata/conformance/redwire/params/manifest.json",
+        "../../../../../testdata/conformance/redwire/params/manifest.json",
     };
 
     for (const char* path : paths) {

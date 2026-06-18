@@ -1,0 +1,219 @@
+{{- include "reddb.validateMode" . -}}
+{{- if eq .Values.mode "cluster" -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "reddb.cluster.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster
+spec:
+  serviceName: {{ include "reddb.cluster.headless" . }}
+  replicas: {{ .Values.cluster.replicaCount }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    {{- toYaml .Values.cluster.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "reddb.cluster.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "reddb.cluster.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/auth: {{ include (print $.Template.BasePath "/secret-auth.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "reddb.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.cluster.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cluster.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.cluster.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cluster.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if .Values.cluster.affinity }}
+        {{- toYaml .Values.cluster.affinity | nindent 8 }}
+        {{- else }}
+        {{- include "reddb.cluster.defaultAffinity" . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.cluster.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: reddb
+          image: {{ include "reddb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - server
+            - --path
+            - /data/data.rdb
+            - --role
+            - standalone
+            - --grpc-bind
+            - 0.0.0.0:50051
+            - --http-bind
+            - 0.0.0.0:8080
+            {{- if .Values.http.tls.enabled }}
+            - --http-tls-bind
+            - {{ .Values.http.tls.bindAddr | quote }}
+            - --http-tls-cert
+            - {{ printf "%s/%s" .Values.http.tls.mountPath .Values.http.tls.certKey | quote }}
+            - --http-tls-key
+            - {{ printf "%s/%s" .Values.http.tls.mountPath .Values.http.tls.keyKey | quote }}
+            {{- if .Values.http.tls.clientCa.secretName }}
+            - --http-tls-client-ca
+            - {{ printf "%s/%s" .Values.http.tls.clientCa.mountPath .Values.http.tls.clientCa.key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.config.vault }}
+            - --vault
+            - "true"
+            {{- end }}
+            {{- with .Values.config.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- include "reddb.commonEnv" . | nindent 12 }}
+            - name: REDDB_NODE_ROLE
+              value: "cluster-member"
+            {{- include "reddb.clusterEnv" . | nindent 12 }}
+            {{- if .Values.grpc.tls.enabled }}
+            - name: REDDB_GRPC_TLS_BIND
+              value: {{ .Values.grpc.tls.bindAddr | quote }}
+            - name: REDDB_GRPC_TLS_CERT
+              value: {{ printf "%s/%s" .Values.grpc.tls.mountPath .Values.grpc.tls.certKey | quote }}
+            - name: REDDB_GRPC_TLS_KEY
+              value: {{ printf "%s/%s" .Values.grpc.tls.mountPath .Values.grpc.tls.keyKey | quote }}
+            {{- if .Values.grpc.tls.clientCa.secretName }}
+            - name: REDDB_GRPC_TLS_CLIENT_CA
+              value: {{ printf "%s/%s" .Values.grpc.tls.clientCa.mountPath .Values.grpc.tls.clientCa.key | quote }}
+            {{- end }}
+            {{- end }}
+          {{- include "reddb.extraEnvFrom" . | nindent 10 }}
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            {{- if .Values.grpc.tls.enabled }}
+            - name: grpc-tls
+              containerPort: {{ .Values.cluster.service.grpcTlsPort | default 50052 }}
+              protocol: TCP
+            {{- end }}
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            {{- if .Values.http.tls.enabled }}
+            - name: https
+              containerPort: {{ .Values.cluster.service.httpTlsPort | default 8443 }}
+              protocol: TCP
+            {{- end }}
+          {{- include "reddb.probes" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.cluster.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.grpc.tls.enabled }}
+            - name: grpc-tls
+              mountPath: {{ .Values.grpc.tls.mountPath }}
+              readOnly: true
+            {{- if .Values.grpc.tls.clientCa.secretName }}
+            - name: grpc-tls-client-ca
+              mountPath: {{ .Values.grpc.tls.clientCa.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.http.tls.enabled }}
+            - name: http-tls
+              mountPath: {{ .Values.http.tls.mountPath }}
+              readOnly: true
+            {{- if .Values.http.tls.clientCa.secretName }}
+            - name: http-tls-client-ca
+              mountPath: {{ .Values.http.tls.clientCa.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- include "reddb.configFileVolumeMount" . | nindent 12 }}
+            {{- include "reddb.vaultVolumeMount" . | nindent 12 }}
+            {{- include "reddb.extraSecretVolumeMounts" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if not .Values.cluster.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.grpc.tls.enabled }}
+        - name: grpc-tls
+          secret:
+            secretName: {{ required "grpc.tls.secretName is required when grpc.tls.enabled" .Values.grpc.tls.secretName }}
+            defaultMode: 0o400
+        {{- if .Values.grpc.tls.clientCa.secretName }}
+        - name: grpc-tls-client-ca
+          secret:
+            secretName: {{ .Values.grpc.tls.clientCa.secretName }}
+            defaultMode: 0o444
+        {{- end }}
+        {{- end }}
+        {{- if .Values.http.tls.enabled }}
+        - name: http-tls
+          secret:
+            secretName: {{ required "http.tls.secretName is required when http.tls.enabled" .Values.http.tls.secretName }}
+            defaultMode: 0o400
+        {{- if .Values.http.tls.clientCa.secretName }}
+        - name: http-tls-client-ca
+          secret:
+            secretName: {{ .Values.http.tls.clientCa.secretName }}
+            defaultMode: 0o444
+        {{- end }}
+        {{- end }}
+        {{- include "reddb.configFileVolume" . | nindent 8 }}
+        {{- include "reddb.vaultVolume" . | nindent 8 }}
+        {{- include "reddb.extraSecretVolumes" . | nindent 8 }}
+  {{- if .Values.cluster.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "reddb.cluster.selectorLabels" . | nindent 10 }}
+        {{- with .Values.cluster.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.cluster.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.cluster.persistence.size | quote }}
+        {{- if .Values.cluster.persistence.storageClass }}
+        storageClassName: {{ .Values.cluster.persistence.storageClass | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}

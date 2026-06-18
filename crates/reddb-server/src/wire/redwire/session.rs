@@ -1158,15 +1158,7 @@ fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         .into_iter()
         .map(param_to_schema_value)
         .collect::<Vec<_>>();
-    let parsed = match crate::storage::query::modes::parse_multi(&sql) {
-        Ok(parsed) => parsed,
-        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
-    };
-    let bound = match crate::storage::query::user_params::bind(&parsed, &params) {
-        Ok(bound) => bound,
-        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
-    };
-    match runtime.execute_query_expr(bound) {
+    match runtime.execute_query_with_params(&sql, &params) {
         Ok(result) => {
             let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
             if is_mutation {

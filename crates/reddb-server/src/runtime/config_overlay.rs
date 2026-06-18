@@ -1,7 +1,7 @@
 //! Boot-time config overlay.
 //!
-//! Resolves perf / durability / concurrency config in the following
-//! precedence (highest wins):
+//! Resolves perf / durability / concurrency config with the following
+//! effective rules:
 //!
 //! 1. `REDDB_<MATRIX_KEY_UPPERCASED_WITH_DOTS_AS_UNDERSCORES>` env vars
 //!    — in-memory only, re-read every boot, never persisted to
@@ -10,17 +10,19 @@
 //!
 //! 2. Mounted config file at `/etc/reddb/config.json` (override via
 //!    `REDDB_CONFIG_FILE=<path>`) — parsed once on boot, values
-//!    written into red_config with write-if-absent semantics so a
-//!    later `SET CONFIG` by the user always wins.
+//!    written into red_config with write-if-absent semantics. Existing
+//!    rows from a prior boot, `SET CONFIG`, or boot defaults are not
+//!    overwritten.
 //!
 //! 3. Persisted `red_config` rows — values the user set via `SET
 //!    CONFIG` in a previous session.
 //!
-//! 4. Hard-coded defaults from the `config_matrix::MATRIX`.
+//! 4. Hard-coded defaults from the `config_matrix::MATRIX`, some of
+//!    which are healed into red_config before the config file overlay
+//!    runs.
 //!
-//! Tiers 2, 3, 4 are all read through the same red_config collection
-//! (tiers 2 + 4 are seeded there on boot). Tier 1 sits in an
-//! in-memory map; readers must consult that map first.
+//! Tiers 2, 3, 4 are all read through the same red_config collection.
+//! Tier 1 sits in an in-memory map; readers must consult that map first.
 //!
 //! Env var mapping is restricted to keys declared in the matrix:
 //! `durability.mode` → `REDDB_DURABILITY_MODE`. Unknown env vars are
@@ -57,10 +59,12 @@ pub fn env_name_for(key: &str) -> String {
     format!("REDDB_{}", key.to_ascii_uppercase().replace('.', "_"))
 }
 
-/// Resolve the config-file path. `REDDB_CONFIG_FILE` wins, else
-/// `/etc/reddb/config.json` (the container convention).
+/// Resolve the config-file path. `REDDB_CONFIG_FILE` wins, else the
+/// operational bootstrap default container path.
 pub fn config_file_path() -> String {
-    std::env::var("REDDB_CONFIG_FILE").unwrap_or_else(|_| "/etc/reddb/config.json".to_string())
+    crate::operational_bootstrap::resolve_config_file_path(
+        std::env::var("REDDB_CONFIG_FILE").ok().as_deref(),
+    )
 }
 
 /// Read the mounted config file (if present) and seed its keys into

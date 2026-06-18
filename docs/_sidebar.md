@@ -191,10 +191,12 @@
   - [Server Mode](/deployment/server.md)
   - [Serverless Mode](/deployment/serverless.md)
   - [Docker](/deployment/docker.md)
+  - [Kubernetes and Helm](/deployment/kubernetes.md)
   - [Replication](/deployment/replication.md)
   - [Remote Backends (S3, R2, Turso, D1)](/deployment/backends.md)
 
 - **Guides**
+  - [Monorepo Structure](/dev/monorepo-structure.md)
   - [Permission Recipes](/guides/permissions-cookbook.md)
   - [Builds, Targets, and CI Speed](/guides/builds-and-ci-speed.md)
   - [JavaScript and TypeScript Driver](/guides/javascript-typescript-driver.md)

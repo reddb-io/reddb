@@ -50,10 +50,23 @@ published [`reddb-client`](../reddb-client) driver. It depends on
   `REDWIRE_MAGIC`, `MAX_KNOWN_MINOR_VERSION`,
   `DEFAULT_REDWIRE_PORT`.
 
+## Shared fixtures
+
+Cross-driver protocol fixtures live under
+`../../testdata/conformance/redwire/`. Keep fixtures there when non-Rust
+adapters consume them; keep crate-private parser and snapshot fixtures under
+`tests/`.
+
+The parameter manifest at
+`../../testdata/conformance/redwire/params/manifest.json` is consumed by this
+crate, the Rust client gRPC tests, and the official language drivers.
+
 ## References
 
 - [ADR 0001 — RedWire][adr-0001]
 - [Connection strings][conn-strings]
+- [Monorepo structure][monorepo-structure]
 
 [adr-0001]: ../../.red/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md
+[monorepo-structure]: ../../docs/dev/monorepo-structure.md

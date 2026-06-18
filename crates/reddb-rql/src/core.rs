@@ -841,7 +841,7 @@ pub struct DropIndexQuery {
 
 /// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [MIN_SCORE x]
 ///                [COLLECTION col] [TEMPERATURE x] [SEED n] [STRICT ON|OFF] [STREAM]
-///                [CACHE TTL '5m' | NOCACHE]
+///                [CACHE TTL '5m' | NOCACHE] [AS RQL]
 ///
 /// `temperature` and `seed` are per-query overrides resolved by the
 /// `DeterminismDecider` (issue #400). The parser merely surfaces the
@@ -873,6 +873,9 @@ pub struct AskQuery {
     pub stream: bool,
     /// Per-query answer-cache override.
     pub cache: AskCacheClause,
+    /// `ASK '...' AS RQL` returns a validated RQL candidate instead of
+    /// calling an AI provider. The runtime owns translation and validation.
+    pub as_rql: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

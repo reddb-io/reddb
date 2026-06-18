@@ -6,8 +6,12 @@ CRATES=(
   reddb-io
   reddb-io-client
   reddb-io-client-connector
+  reddb-io-crypto
+  reddb-io-file
   reddb-io-grpc-proto
+  reddb-io-rql
   reddb-io-server
+  reddb-io-types
   reddb-io-wire
 )
 

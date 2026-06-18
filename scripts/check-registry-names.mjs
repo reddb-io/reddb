@@ -17,13 +17,23 @@ const npmPrivateWorkspacePackages = [
   "packages/internal-version-compare/package.json",
 ];
 
+function cargoManifestsIn(relativeDir) {
+  const absoluteDir = path.join(repoRoot, relativeDir);
+  if (!fs.existsSync(absoluteDir)) {
+    return [];
+  }
+  return fs
+    .readdirSync(absoluteDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => `${relativeDir}/${entry.name}/Cargo.toml`)
+    .filter((relativePath) => fs.existsSync(path.join(repoRoot, relativePath)))
+    .sort();
+}
+
 const cargoPackages = [
   "Cargo.toml",
-  "crates/reddb-client/Cargo.toml",
-  "crates/reddb-client-connector/Cargo.toml",
-  "crates/reddb-grpc-proto/Cargo.toml",
-  "crates/reddb-server/Cargo.toml",
-  "crates/reddb-wire/Cargo.toml",
+  ...cargoManifestsIn("crates"),
+  ...cargoManifestsIn("drivers"),
 ];
 
 function readJson(relativePath) {
@@ -34,11 +44,24 @@ function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
-function cargoName(relativePath) {
+function cargoPackageSection(relativePath) {
   const manifest = read(relativePath);
-  const match = manifest.match(/^name\s*=\s*"([^"]+)"/m);
+  const packageHeader = manifest.search(/^\[package\]\s*$/m);
+  assert.notEqual(packageHeader, -1, `${relativePath} is missing a [package] section`);
+  const afterPackageHeader = manifest.slice(packageHeader).split("\n").slice(1).join("\n");
+  const nextSection = afterPackageHeader.search(/^\[/m);
+  return nextSection === -1 ? afterPackageHeader : afterPackageHeader.slice(0, nextSection);
+}
+
+function cargoName(relativePath) {
+  const packageSection = cargoPackageSection(relativePath);
+  const match = packageSection.match(/^name\s*=\s*"([^"]+)"/m);
   assert.ok(match, `${relativePath} is missing [package].name`);
   return match[1];
+}
+
+function cargoPublishDisabled(relativePath) {
+  return /^publish\s*=\s*false\s*$/m.test(cargoPackageSection(relativePath));
 }
 
 for (const relativePath of npmPublicPackages) {
@@ -61,6 +84,9 @@ for (const relativePath of npmPrivateWorkspacePackages) {
 }
 
 for (const relativePath of cargoPackages) {
+  if (cargoPublishDisabled(relativePath)) {
+    continue;
+  }
   const name = cargoName(relativePath);
   assert.match(
     name,

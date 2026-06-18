@@ -6,7 +6,7 @@
   "properties": {
     "mode": {
       "type": "string",
-      "enum": ["standalone", "primary-replica"],
+      "enum": ["standalone", "serverless", "primary-replica", "cluster"],
       "description": "Deployment topology"
     },
     "nameOverride": { "type": "string" },
@@ -76,11 +76,63 @@
         }
       }
     },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "preset": {
+          "type": "string",
+          "enum": [
+            "",
+            "embedded",
+            "serverless",
+            "primary-replica-dev",
+            "primary-replica-small",
+            "primary-replica-production-ha",
+            "primary-replica-backup",
+            "primary-replica-wal-retention",
+            "cluster"
+          ]
+        },
+        "profile": { "type": "string", "enum": ["", "embedded", "serverless", "primary-replica", "cluster"] },
+        "packaging": { "type": "string", "enum": ["", "single-file", "operational-directory"] },
+        "managedBackup": { "type": ["boolean", "string"] },
+        "walRetention": { "type": ["boolean", "string"] }
+      }
+    },
+    "remote": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "backend": { "type": "string" },
+        "key": { "type": "string" },
+        "fs": { "type": "object" },
+        "http": { "type": "object" },
+        "s3": { "type": "object" }
+      }
+    },
+    "serverless": {
+      "type": "object",
+      "properties": {
+        "autoRestore": { "type": "boolean" },
+        "backupOnShutdown": { "type": "boolean" },
+        "lease": { "type": "object" }
+      }
+    },
+    "replication": {
+      "type": "object",
+      "properties": {
+        "commitPolicy": { "type": "string" },
+        "commitAckN": { "type": ["integer", "string"] },
+        "commitDeadlineMs": { "type": ["integer", "string"] }
+      }
+    },
     "config": {
       "type": "object",
       "properties": {
         "logLevel": { "type": "string" },
         "vault": { "type": "boolean" },
+        "file": { "type": "object" },
+        "extraEnvFrom": { "type": "array" },
         "extraEnv": { "type": "array" },
         "extraArgs": { "type": "array" }
       }
@@ -134,6 +186,24 @@
         "resources": { "type": "object" },
         "persistence": { "type": "object" },
         "service": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "topologySpreadConstraints": { "type": "array" },
+        "priorityClassName": { "type": "string" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "updateStrategy": { "type": "object" }
+      }
+    },
+    "cluster": {
+      "type": "object",
+      "required": ["replicaCount", "resources", "persistence", "service"],
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" },
+        "persistence": { "type": "object" },
+        "service": { "type": "object" },
+        "discovery": { "type": "object" },
         "nodeSelector": { "type": "object" },
         "tolerations": { "type": "array" },
         "affinity": { "type": "object" },

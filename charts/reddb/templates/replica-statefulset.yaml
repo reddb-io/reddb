@@ -1,5 +1,5 @@
 {{- include "reddb.validateMode" . -}}
-{{- if eq .Values.mode "primary-replica" -}}
+{{- if and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -26,6 +26,7 @@ spec:
         {{- end }}
       annotations:
         checksum/auth: {{ include (print $.Template.BasePath "/secret-auth.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -113,6 +114,8 @@ spec:
             {{- end }}
           env:
             {{- include "reddb.commonEnv" . | nindent 12 }}
+            - name: REDDB_NODE_ROLE
+              value: "replica"
             - name: REDDB_PRIMARY_ADDR
               value: http://{{ include "reddb.primary.fullname" . }}:{{ .Values.primary.service.grpcPort }}
             {{- if .Values.grpc.tls.enabled }}
@@ -127,6 +130,7 @@ spec:
               value: {{ printf "%s/%s" .Values.grpc.tls.clientCa.mountPath .Values.grpc.tls.clientCa.key | quote }}
             {{- end }}
             {{- end }}
+          {{- include "reddb.extraEnvFrom" . | nindent 10 }}
           ports:
             - name: grpc
               containerPort: 50051
@@ -172,6 +176,7 @@ spec:
               readOnly: true
             {{- end }}
             {{- end }}
+            {{- include "reddb.configFileVolumeMount" . | nindent 12 }}
             {{- include "reddb.vaultVolumeMount" . | nindent 12 }}
             {{- include "reddb.extraSecretVolumeMounts" . | nindent 12 }}
       volumes:
@@ -205,6 +210,7 @@ spec:
             defaultMode: 0o444
         {{- end }}
         {{- end }}
+        {{- include "reddb.configFileVolume" . | nindent 8 }}
         {{- include "reddb.vaultVolume" . | nindent 8 }}
         {{- include "reddb.extraSecretVolumes" . | nindent 8 }}
   {{- if .Values.replica.persistence.enabled }}

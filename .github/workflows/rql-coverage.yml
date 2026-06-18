@@ -38,7 +38,7 @@ jobs:
       RUSTC_WRAPPER: sccache
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -201,7 +201,7 @@ jobs:
 
       - name: Post or update PR comment
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RQL_COVERAGE_BODY: ${{ steps.report.outputs.body }}
         with:

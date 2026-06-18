@@ -1,12 +1,12 @@
 [package]
 name = "reddb-io-file"
-version = "1.0.0"
-edition = "2021"
-authors = ["RedDB.io <hello@reddb.io>"]
+version = "1.11.0"
+edition.workspace = true
+authors.workspace = true
 description = "RedDB file artifact layer: single-file .rdb layout, WAL, snapshots, checkpoints, locks, and recovery."
-license = "AGPL-3.0-only"
-homepage = "https://github.com/reddb-io/reddb"
-repository = "https://github.com/reddb-io/reddb"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/reddb-io-file"
 keywords = ["database", "wal", "storage", "filesystem"]
 categories = ["database-implementations", "filesystem"]

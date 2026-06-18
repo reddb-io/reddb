@@ -1,4 +1,5 @@
 {{- include "reddb.validateMode" . -}}
+{{- if ne .Values.mode "cluster" -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -25,6 +26,7 @@ spec:
         {{- end }}
       annotations:
         checksum/auth: {{ include (print $.Template.BasePath "/secret-auth.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -98,6 +100,8 @@ spec:
             {{- end }}
           env:
             {{- include "reddb.commonEnv" . | nindent 12 }}
+            - name: REDDB_NODE_ROLE
+              value: {{ ternary "primary" .Values.mode (eq .Values.mode "primary-replica") | quote }}
             {{- if .Values.grpc.tls.enabled }}
             - name: REDDB_GRPC_TLS_BIND
               value: {{ .Values.grpc.tls.bindAddr | quote }}
@@ -110,6 +114,7 @@ spec:
               value: {{ printf "%s/%s" .Values.grpc.tls.clientCa.mountPath .Values.grpc.tls.clientCa.key | quote }}
             {{- end }}
             {{- end }}
+          {{- include "reddb.extraEnvFrom" . | nindent 10 }}
           ports:
             - name: grpc
               containerPort: 50051
@@ -155,6 +160,7 @@ spec:
               readOnly: true
             {{- end }}
             {{- end }}
+            {{- include "reddb.configFileVolumeMount" . | nindent 12 }}
             {{- include "reddb.vaultVolumeMount" . | nindent 12 }}
             {{- include "reddb.extraSecretVolumeMounts" . | nindent 12 }}
       volumes:
@@ -188,6 +194,7 @@ spec:
             defaultMode: 0o444
         {{- end }}
         {{- end }}
+        {{- include "reddb.configFileVolume" . | nindent 8 }}
         {{- include "reddb.vaultVolume" . | nindent 8 }}
         {{- include "reddb.extraSecretVolumes" . | nindent 8 }}
   {{- if .Values.primary.persistence.enabled }}
@@ -210,3 +217,4 @@ spec:
         storageClassName: {{ .Values.primary.persistence.storageClass | quote }}
         {{- end }}
   {{- end }}
+{{- end }}

@@ -23,6 +23,6 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Check generated SQL reference blocks
         run: python3 scripts/check-sql-reference.py

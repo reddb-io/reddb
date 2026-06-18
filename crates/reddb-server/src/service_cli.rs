@@ -122,6 +122,11 @@ pub struct ServerCommandConfig {
     pub role: String,
     pub primary_addr: Option<String>,
     pub storage_profile: StorageProfileSelection,
+    /// Explicit auth enable switch from CLI/env. `--no-auth` remains
+    /// the final override and forces this off at option resolution time.
+    pub auth: bool,
+    /// Require authenticated requests. Implies `auth = true` when set.
+    pub require_auth: bool,
     pub vault: bool,
     /// Issue #663 — explicit `--no-auth` / `--dev` flag for local
     /// no-password mode. When `true`, the boot pipeline force-disables
@@ -153,6 +158,21 @@ pub struct ServerCommandConfig {
     /// it is served as-is with no download — the seam tests and an
     /// air-gapped deploy use this. `None` resolves the pinned bundle.
     pub ui_dir: Option<PathBuf>,
+    /// First-boot bootstrap settings resolved from CLI flags and, when
+    /// unset here, from environment variables by the bootstrap layer.
+    pub bootstrap: BootstrapConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BootstrapConfig {
+    pub preset: Option<String>,
+    pub manifest: Option<PathBuf>,
+    pub admin_username: Option<String>,
+    pub admin_password: Option<String>,
+    pub cloud_head_admin: Option<String>,
+    pub cloud_head_admin_password: Option<String>,
+    pub customer_admin: Option<String>,
+    pub customer_admin_password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,7 +361,18 @@ impl ServerCommandConfig {
         };
         options.storage_profile = self.storage_profile.validate()?;
 
-        if self.vault {
+        let no_auth = self.no_auth || env_truthy("REDDB_NO_AUTH") || env_truthy("REDDB_DEV");
+        let preset = self.bootstrap.resolved_preset();
+        let preset_requires_auth = matches!(preset.as_str(), PRESET_PRODUCTION | PRESET_CLOUD);
+
+        if self.auth || env_truthy("REDDB_AUTH") || preset_requires_auth {
+            options.auth.enabled = true;
+        }
+        if self.require_auth || env_truthy("REDDB_REQUIRE_AUTH") || preset_requires_auth {
+            options.auth.enabled = true;
+            options.auth.require_auth = true;
+        }
+        if self.vault || env_truthy("REDDB_VAULT") || preset_requires_auth {
             options.auth.vault_enabled = true;
         }
 
@@ -355,7 +386,7 @@ impl ServerCommandConfig {
         // `REDDB_USERNAME`/`REDDB_PASSWORD` even with auth disabled,
         // a footgun for the local-dev workflow this flag exists to
         // support).
-        if self.no_auth {
+        if no_auth {
             options.auth.enabled = false;
             options.auth.require_auth = false;
             options.auth.vault_enabled = false;
@@ -374,7 +405,7 @@ impl ServerCommandConfig {
                 "1" | "true" | "yes" | "on"
             );
         }
-        if env_nonempty(PRESET_ENV).is_some_and(|s| s.trim() == PRESET_REGULATED) {
+        if preset == PRESET_REGULATED {
             options.control_events.compliance_mode = true;
             options.query_audit = crate::runtime::query_audit::QueryAuditConfig::regulated();
         }
@@ -435,6 +466,101 @@ fn env_truthy(name: &str) -> bool {
     env_nonempty(name)
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+impl BootstrapConfig {
+    fn resolved_preset(&self) -> String {
+        self.preset
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| env_nonempty(BOOTSTRAP_PRESET_ENV).or_else(|| env_nonempty(PRESET_ENV)))
+            .unwrap_or_else(|| PRESET_SIMPLE.to_string())
+    }
+
+    fn selected_manifest(&self) -> Option<PathBuf> {
+        self.manifest.clone().or_else(|| {
+            env_nonempty(crate::cli::bootstrap_manifest::MANIFEST_ENV).map(PathBuf::from)
+        })
+    }
+
+    fn explicit_value(value: &Option<String>) -> Option<String> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    fn value_or_env(value: &Option<String>, env: &str) -> Option<String> {
+        Self::explicit_value(value).or_else(|| env_nonempty(env))
+    }
+
+    fn production_username(&self) -> Option<String> {
+        Self::value_or_env(&self.admin_username, "REDDB_USERNAME")
+    }
+
+    fn production_password(&self) -> Option<String> {
+        Self::value_or_env(&self.admin_password, "REDDB_PASSWORD")
+    }
+
+    fn cloud_head_username(&self) -> Option<String> {
+        Self::explicit_value(&self.cloud_head_admin)
+            .or_else(|| Self::explicit_value(&self.admin_username))
+            .or_else(|| env_nonempty("REDDB_CLOUD_HEAD_ADMIN"))
+            .or_else(|| env_nonempty("REDDB_USERNAME"))
+    }
+
+    fn cloud_head_password(&self) -> Option<String> {
+        Self::explicit_value(&self.cloud_head_admin_password)
+            .or_else(|| Self::explicit_value(&self.admin_password))
+            .or_else(|| env_nonempty("REDDB_CLOUD_HEAD_ADMIN_PASSWORD"))
+            .or_else(|| env_nonempty("REDDB_PASSWORD"))
+    }
+
+    fn customer_username(&self) -> Option<String> {
+        Self::value_or_env(&self.customer_admin, "REDDB_CUSTOMER_ADMIN")
+    }
+
+    fn customer_password(&self) -> Option<String> {
+        Self::value_or_env(
+            &self.customer_admin_password,
+            "REDDB_CUSTOMER_ADMIN_PASSWORD",
+        )
+    }
+
+    fn secret_env_vars_to_expand(&self, preset: &str) -> Vec<&'static str> {
+        let mut vars = Vec::new();
+        match preset {
+            PRESET_PRODUCTION => {
+                if Self::explicit_value(&self.admin_username).is_none() {
+                    vars.push("REDDB_USERNAME");
+                }
+                if Self::explicit_value(&self.admin_password).is_none() {
+                    vars.push("REDDB_PASSWORD");
+                }
+            }
+            PRESET_CLOUD => {
+                if Self::explicit_value(&self.cloud_head_admin).is_none()
+                    && Self::explicit_value(&self.admin_username).is_none()
+                {
+                    vars.push("REDDB_USERNAME");
+                }
+                if Self::explicit_value(&self.cloud_head_admin_password).is_none()
+                    && Self::explicit_value(&self.admin_password).is_none()
+                {
+                    vars.push("REDDB_CLOUD_HEAD_ADMIN_PASSWORD");
+                    vars.push("REDDB_PASSWORD");
+                }
+                if Self::explicit_value(&self.customer_admin_password).is_none() {
+                    vars.push("REDDB_CUSTOMER_ADMIN_PASSWORD");
+                }
+            }
+            _ => {}
+        }
+        vars
+    }
 }
 
 /// Apply a parsed [`BackupConfig`] to `options`. Wires the S3
@@ -1425,12 +1551,11 @@ fn handle_sighup_reload(runtime: &RedDBRuntime) {
 #[inline(never)]
 fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
-    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options()?;
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+        build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
 
     spawn_admin_metrics_listeners(&runtime, &auth_store);
@@ -1783,7 +1908,6 @@ fn resolve_wire_tls_config(
 fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Result<(), String> {
     let rt_config = detect_runtime_config();
     let workers = config.workers.unwrap_or(rt_config.suggested_workers);
-    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options()?;
     let mut transport_readiness = TransportReadiness::default();
 
@@ -1798,7 +1922,7 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
     // tokio runtime — dropping it only after the listener returns
     // flushes the file log writer.
     let (runtime, _auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+        build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
@@ -1832,7 +1956,6 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
 fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<(), String> {
     let rt_config = detect_runtime_config();
     let workers = config.workers.unwrap_or(rt_config.suggested_workers);
-    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options()?;
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1843,7 +1966,7 @@ fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<()
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
     let (runtime, _auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+        build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
@@ -1860,8 +1983,8 @@ fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<()
 
 #[inline(never)]
 fn build_runtime_and_auth_store(
+    config: &ServerCommandConfig,
     db_options: RedDBOptions,
-    cli_telemetry: Option<crate::telemetry::TelemetryConfig>,
 ) -> Result<
     (
         RedDBRuntime,
@@ -1876,7 +1999,7 @@ fn build_runtime_and_auth_store(
     // built with `.lossy(true)`, any subsequent log event routed to
     // the file sink is silently dropped — so callers MUST keep the
     // returned `Option<TelemetryGuard>` alive until shutdown.
-    build_runtime_with_telemetry(db_options, cli_telemetry)
+    build_runtime_with_bootstrap(db_options, config.telemetry.clone(), &config.bootstrap)
 }
 
 /// Open the runtime, initialise structured logging from merged CLI +
@@ -1891,6 +2014,22 @@ fn build_runtime_and_auth_store(
 pub(crate) fn build_runtime_with_telemetry(
     db_options: RedDBOptions,
     cli_telemetry: Option<crate::telemetry::TelemetryConfig>,
+) -> Result<
+    (
+        RedDBRuntime,
+        Arc<AuthStore>,
+        Option<crate::telemetry::TelemetryGuard>,
+    ),
+    String,
+> {
+    let bootstrap = BootstrapConfig::default();
+    build_runtime_with_bootstrap(db_options, cli_telemetry, &bootstrap)
+}
+
+fn build_runtime_with_bootstrap(
+    db_options: RedDBOptions,
+    cli_telemetry: Option<crate::telemetry::TelemetryConfig>,
+    bootstrap: &BootstrapConfig,
 ) -> Result<
     (
         RedDBRuntime,
@@ -1979,7 +2118,7 @@ pub(crate) fn build_runtime_with_telemetry(
         eprintln!("{NO_AUTH_WARNING}");
         tracing::warn!("{NO_AUTH_WARNING}");
     } else {
-        apply_preset(&runtime, &auth_store)?;
+        apply_preset_from_config(&runtime, &auth_store, bootstrap)?;
         maybe_apply_policy_break_glass(&auth_store);
     }
 
@@ -2033,25 +2172,31 @@ pub(crate) const BOOTSTRAP_COMPLETED_KEY: &str = "system.bootstrap.completed";
 pub(crate) const BOOTSTRAP_PRESET_KEY: &str = "system.bootstrap.preset";
 pub(crate) const BOOTSTRAP_FIRST_ADMIN_KEY: &str = "system.bootstrap.first_admin_id";
 
-/// Env var selecting the bootstrap preset. Default = `simple`.
+/// Env vars selecting the bootstrap preset. `REDDB_BOOTSTRAP_PRESET`
+/// is canonical; `REDDB_PRESET` remains accepted for compatibility.
+pub(crate) const BOOTSTRAP_PRESET_ENV: &str = "REDDB_BOOTSTRAP_PRESET";
 pub(crate) const PRESET_ENV: &str = "REDDB_PRESET";
 pub(crate) const PRESET_SIMPLE: &str = "simple";
 pub(crate) const PRESET_PRODUCTION: &str = "production";
 pub(crate) const PRESET_REGULATED: &str = "regulated";
+pub(crate) const PRESET_CLOUD: &str = "cloud";
 
 /// Policy id installed by the `production` preset and attached to the
 /// first admin. Grants `"*"` on `"*"` so the admin has policy-derived
 /// broad authority (acceptance #3) — not an authorization bypass.
 pub(crate) const FIRST_ADMIN_ALLOW_ALL_POLICY: &str = "system.bootstrap.first-admin-allow-all";
 pub(crate) const REGULATED_PROTECT_MANAGED_POLICY: &str = "system.regulated.protect-managed";
+pub(crate) const CLOUD_PROTECT_MANAGED_POLICY: &str = "system.cloud.protect-managed";
+pub(crate) const CLOUD_CONFIG_NAMESPACE: &str = "red.config.cloud";
 pub(crate) const REGULATED_AUDIT_CONFIG_NAMESPACE: &str = "red.config.audit";
 pub(crate) const REGULATED_EVIDENCE_CONFIG_NAMESPACE: &str = "red.config.evidence";
 pub(crate) const REGULATED_QUERY_AUDIT_CONFIG_NAMESPACE: &str = "red.config.query_audit";
 
-/// Apply the bootstrap preset selected by `REDDB_PRESET` (default
-/// `simple`). Idempotent — if `system.bootstrap.completed` is already
-/// set, this is a one-line `tracing::info!` no-op and the server proceeds
-/// (issue #650 acceptance #5).
+/// Apply the bootstrap preset selected by `REDDB_BOOTSTRAP_PRESET` (or
+/// legacy `REDDB_PRESET`; default `simple`). Idempotent — if
+/// `system.bootstrap.completed` is already set, this is a one-line
+/// `tracing::info!` no-op and the server proceeds (issue #650
+/// acceptance #5).
 ///
 /// Caller must have already short-circuited the `--no-auth` / `--dev`
 /// path (issue #663): when that flag is set, the preset must be skipped
@@ -2059,6 +2204,15 @@ pub(crate) const REGULATED_QUERY_AUDIT_CONFIG_NAMESPACE: &str = "red.config.quer
 pub(crate) fn apply_preset(
     runtime: &RedDBRuntime,
     auth_store: &Arc<AuthStore>,
+) -> Result<(), String> {
+    let bootstrap = BootstrapConfig::default();
+    apply_preset_from_config(runtime, auth_store, &bootstrap)
+}
+
+fn apply_preset_from_config(
+    runtime: &RedDBRuntime,
+    auth_store: &Arc<AuthStore>,
+    bootstrap: &BootstrapConfig,
 ) -> Result<(), String> {
     let store = runtime.db().store();
 
@@ -2071,32 +2225,26 @@ pub(crate) fn apply_preset(
         return Ok(());
     }
 
-    // `_FILE` companion expansion for k8s secret mounts. Errors here
-    // (e.g. both `REDDB_PASSWORD` and `REDDB_PASSWORD_FILE` set) are
-    // operator misconfigs and should fail the boot loudly.
-    for var in ["REDDB_USERNAME", "REDDB_PASSWORD"] {
+    let preset = bootstrap.resolved_preset();
+
+    // `_FILE` companion expansion for k8s secret mounts. Only expand
+    // vars that this selected preset may read from env; explicit CLI
+    // credentials have already won and should not be blocked by an
+    // unrelated env-file misconfiguration.
+    for var in bootstrap.secret_env_vars_to_expand(&preset) {
         crate::utils::expand_file_env(var).map_err(|err| format!("expand {var}_FILE: {err}"))?;
     }
 
-    let preset = std::env::var(PRESET_ENV)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| PRESET_SIMPLE.to_string());
-
-    if let Ok(path) = std::env::var(crate::cli::bootstrap_manifest::MANIFEST_ENV) {
-        let path = path.trim();
-        if !path.is_empty() {
-            let first_admin_id = crate::cli::bootstrap_manifest::apply_manifest_file(
-                runtime,
-                auth_store,
-                &runtime.config_registry(),
-                std::path::Path::new(path),
-            )?;
-            persist_bootstrap_state(runtime, "manifest", Some(&first_admin_id));
-            tracing::info!("bootstrap manifest applied");
-            return Ok(());
-        }
+    if let Some(path) = bootstrap.selected_manifest() {
+        let first_admin_id = crate::cli::bootstrap_manifest::apply_manifest_file(
+            runtime,
+            auth_store,
+            &runtime.config_registry(),
+            &path,
+        )?;
+        persist_bootstrap_state(runtime, "manifest", Some(&first_admin_id));
+        tracing::info!("bootstrap manifest applied");
+        return Ok(());
     }
 
     let first_admin_id = match preset.as_str() {
@@ -2106,14 +2254,15 @@ pub(crate) fn apply_preset(
             // bootstrap state so subsequent boots are idempotent.
             None
         }
-        PRESET_PRODUCTION => Some(apply_production_preset(auth_store)?),
+        PRESET_PRODUCTION => Some(apply_production_preset_from_config(auth_store, bootstrap)?),
+        PRESET_CLOUD => Some(apply_cloud_preset(runtime, auth_store, bootstrap)?),
         PRESET_REGULATED => {
             apply_regulated_preset(runtime, auth_store)?;
             None
         }
         other => {
             return Err(format!(
-                "REDDB_PRESET={other:?} is not recognised (expected `simple`, `production`, or `regulated`)"
+                "bootstrap preset {other:?} is not recognised (expected `simple`, `production`, `regulated`, or `cloud`)"
             ));
         }
     };
@@ -2123,22 +2272,21 @@ pub(crate) fn apply_preset(
     Ok(())
 }
 
-fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String> {
+fn apply_production_preset_from_config(
+    auth_store: &Arc<AuthStore>,
+    bootstrap: &BootstrapConfig,
+) -> Result<String, String> {
     use crate::auth::store::PrincipalRef;
-    use crate::auth::{policies::Policy, UserId};
+    use crate::auth::UserId;
 
-    let username = std::env::var("REDDB_USERNAME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            "REDDB_PRESET=production requires REDDB_USERNAME (or REDDB_USERNAME_FILE)".to_string()
-        })?;
-    let password = std::env::var("REDDB_PASSWORD")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            "REDDB_PRESET=production requires REDDB_PASSWORD (or REDDB_PASSWORD_FILE)".to_string()
-        })?;
+    let username = bootstrap.production_username().ok_or_else(|| {
+        "production preset requires --bootstrap-admin or REDDB_USERNAME (or REDDB_USERNAME_FILE)"
+            .to_string()
+    })?;
+    let password = bootstrap.production_password().ok_or_else(|| {
+        "production preset requires --bootstrap-admin-password or REDDB_PASSWORD (or REDDB_PASSWORD_FILE)"
+            .to_string()
+    })?;
 
     // (1) Create the first admin as system-owned + platform-scoped so
     // #649's `ManagedConfigGate` accepts them on managed-config writes.
@@ -2148,6 +2296,73 @@ fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String
     let first_admin = UserId::platform(result.user.username.clone());
 
     // (2) Install the allow-all policy as an ordinary policy row.
+    install_allow_all_policy(auth_store)?;
+
+    // (3) Attach the policy to the first admin.
+    auth_store
+        .attach_policy(
+            PrincipalRef::User(first_admin.clone()),
+            FIRST_ADMIN_ALLOW_ALL_POLICY,
+        )
+        .map_err(|err| format!("attach allow-all policy: {err}"))?;
+
+    Ok(first_admin.to_string())
+}
+
+fn apply_cloud_preset(
+    runtime: &RedDBRuntime,
+    auth_store: &Arc<AuthStore>,
+    bootstrap: &BootstrapConfig,
+) -> Result<String, String> {
+    use crate::auth::store::PrincipalRef;
+    use crate::auth::{Role, UserId};
+
+    let head_username = bootstrap.cloud_head_username().ok_or_else(|| {
+        "cloud preset requires --cloud-head-admin or REDDB_CLOUD_HEAD_ADMIN (or REDDB_USERNAME)"
+            .to_string()
+    })?;
+    let head_password = bootstrap.cloud_head_password().ok_or_else(|| {
+        "cloud preset requires --cloud-head-admin-password or REDDB_CLOUD_HEAD_ADMIN_PASSWORD (or REDDB_PASSWORD)"
+            .to_string()
+    })?;
+    let customer_username = bootstrap.customer_username().ok_or_else(|| {
+        "cloud preset requires --customer-admin or REDDB_CUSTOMER_ADMIN".to_string()
+    })?;
+    let customer_password = bootstrap.customer_password().ok_or_else(|| {
+        "cloud preset requires --customer-admin-password or REDDB_CUSTOMER_ADMIN_PASSWORD"
+            .to_string()
+    })?;
+    if head_username == customer_username {
+        return Err("cloud preset requires distinct head and customer admin usernames".to_string());
+    }
+
+    let head = auth_store
+        .bootstrap_system_admin(&head_username, &head_password)
+        .map_err(|err| format!("bootstrap cloud head admin: {err}"))?;
+    let head_id = UserId::platform(head.user.username.clone());
+
+    auth_store
+        .create_user(&customer_username, &customer_password, Role::Admin)
+        .map_err(|err| format!("create cloud customer admin: {err}"))?;
+    let customer_id = UserId::platform(customer_username.clone());
+
+    install_allow_all_policy(auth_store)?;
+    for user_id in [&head_id, &customer_id] {
+        auth_store
+            .attach_policy(
+                PrincipalRef::User(user_id.clone()),
+                FIRST_ADMIN_ALLOW_ALL_POLICY,
+            )
+            .map_err(|err| format!("attach allow-all policy: {err}"))?;
+    }
+    install_cloud_guardrails(runtime, auth_store)?;
+
+    Ok(head_id.to_string())
+}
+
+fn install_allow_all_policy(auth_store: &Arc<AuthStore>) -> Result<(), String> {
+    use crate::auth::policies::Policy;
+
     let policy = Policy::from_json_str(&format!(
         r#"{{
             "id": "{id}",
@@ -2163,17 +2378,70 @@ fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String
     .map_err(|err| format!("compile allow-all policy: {err}"))?;
     auth_store
         .put_policy(policy)
-        .map_err(|err| format!("install allow-all policy: {err}"))?;
+        .map_err(|err| format!("install allow-all policy: {err}"))
+}
 
-    // (3) Attach the policy to the first admin.
+fn install_cloud_guardrails(
+    runtime: &RedDBRuntime,
+    auth_store: &Arc<AuthStore>,
+) -> Result<(), String> {
+    use crate::auth::policies::Policy;
+    use crate::auth::registry::EvidenceRequirement;
+
+    let policy = Policy::from_json_str(&format!(
+        r#"{{
+            "id": "{id}",
+            "version": 1,
+            "statements": [
+                {{
+                    "effect": "deny",
+                    "actions": ["policy:put", "policy:drop", "policy:attach", "policy:detach"],
+                    "resources": ["policy:{id}"]
+                }},
+                {{
+                    "effect": "deny",
+                    "actions": ["config:write"],
+                    "resources": ["config:{cloud}.*"]
+                }}
+            ]
+        }}"#,
+        id = CLOUD_PROTECT_MANAGED_POLICY,
+        cloud = CLOUD_CONFIG_NAMESPACE,
+    ))
+    .map_err(|err| format!("compile cloud guardrail policy: {err}"))?;
     auth_store
-        .attach_policy(
-            PrincipalRef::User(first_admin.clone()),
-            FIRST_ADMIN_ALLOW_ALL_POLICY,
-        )
-        .map_err(|err| format!("attach allow-all policy: {err}"))?;
+        .put_policy(policy)
+        .map_err(|err| format!("install cloud guardrail policy: {err}"))?;
 
-    Ok(first_admin.to_string())
+    let now_ms = crate::utils::now_unix_millis() as u128;
+    let entries = vec![
+        regulated_registry_entry(
+            CLOUD_PROTECT_MANAGED_POLICY,
+            crate::auth::managed_policy::RESOURCE_TYPE_POLICY,
+            "policy",
+            "policy:*",
+            &format!("policy:{CLOUD_PROTECT_MANAGED_POLICY}"),
+            EvidenceRequirement::Metadata,
+            now_ms,
+        ),
+        regulated_registry_entry(
+            CLOUD_CONFIG_NAMESPACE,
+            crate::auth::managed_config::RESOURCE_TYPE_CONFIG_NAMESPACE,
+            "config_namespace",
+            "config:write",
+            &format!("config:{CLOUD_CONFIG_NAMESPACE}.*"),
+            EvidenceRequirement::Metadata,
+            now_ms,
+        ),
+    ];
+    for entry in entries.iter().cloned() {
+        runtime
+            .config_registry()
+            .restore_bootstrap_entry(entry)
+            .map_err(|err| format!("install cloud registry entry: {err}"))?;
+    }
+    crate::cli::bootstrap_manifest::persist_registry_state(runtime, &entries)?;
+    Ok(())
 }
 
 fn apply_regulated_preset(
@@ -2619,7 +2887,6 @@ fn spawn_admin_metrics_listeners(runtime: &RedDBRuntime, auth_store: &Arc<AuthSt
 
 #[inline(never)]
 fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
-    let cli_telemetry = config.telemetry.clone();
     let mut transport_readiness = TransportReadiness::default();
     let Some(listener) = bind_listener_for_startup(
         &mut transport_readiness,
@@ -2635,7 +2902,7 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     };
     let db_options = config.to_db_options()?;
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+        build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     spawn_admin_metrics_listeners(&runtime, &auth_store);
     spawn_http_tls_listener(&config, &runtime, &auth_store)?;
@@ -2713,7 +2980,6 @@ fn resolve_http_tls_config(
 #[inline(never)]
 fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
-    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options()?;
     let rt_config = detect_runtime_config();
     let mut transport_readiness = TransportReadiness::default();
@@ -2741,7 +3007,7 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
 
     // Guard lives on the outer stack so it outlives the tokio runtime.
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+        build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
@@ -2787,7 +3053,6 @@ fn run_dual_server(
     http_bind_addr: String,
 ) -> Result<(), String> {
     let workers = config.workers;
-    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options()?;
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
@@ -2808,7 +3073,7 @@ fn run_dual_server(
         return Err("no listener started; implicit HTTP and gRPC binds failed".to_string());
     }
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+        build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
 
     spawn_admin_metrics_listeners(&runtime, &auth_store);
@@ -3027,6 +3292,8 @@ mod tests {
             role: "standalone".to_string(),
             primary_addr: None,
             storage_profile: StorageProfileSelection::embedded_single_file(),
+            auth: false,
+            require_auth: false,
             // Operator-set `--vault`: `--no-auth` must override this
             // alongside REDDB_USERNAME/PASSWORD.
             vault: true,
@@ -3036,6 +3303,7 @@ mod tests {
             http_limits_cli: crate::server::HttpLimitsCliInput::default(),
             ui: false,
             ui_dir: None,
+            bootstrap: BootstrapConfig::default(),
         }
     }
 
@@ -3138,12 +3406,24 @@ mod tests {
     fn clear_preset_env() {
         // SAFETY: callers hold `no_auth_env_lock()`.
         unsafe {
+            std::env::remove_var(BOOTSTRAP_PRESET_ENV);
             std::env::remove_var(PRESET_ENV);
             std::env::remove_var("REDDB_BOOTSTRAP_MANIFEST");
+            std::env::remove_var("REDDB_AUTH");
+            std::env::remove_var("REDDB_REQUIRE_AUTH");
+            std::env::remove_var("REDDB_NO_AUTH");
+            std::env::remove_var("REDDB_DEV");
+            std::env::remove_var("REDDB_VAULT");
             std::env::remove_var("REDDB_USERNAME");
             std::env::remove_var("REDDB_PASSWORD");
             std::env::remove_var("REDDB_USERNAME_FILE");
             std::env::remove_var("REDDB_PASSWORD_FILE");
+            std::env::remove_var("REDDB_CLOUD_HEAD_ADMIN");
+            std::env::remove_var("REDDB_CLOUD_HEAD_ADMIN_PASSWORD");
+            std::env::remove_var("REDDB_CLOUD_HEAD_ADMIN_PASSWORD_FILE");
+            std::env::remove_var("REDDB_CUSTOMER_ADMIN");
+            std::env::remove_var("REDDB_CUSTOMER_ADMIN_PASSWORD");
+            std::env::remove_var("REDDB_CUSTOMER_ADMIN_PASSWORD_FILE");
         }
     }
 
@@ -3166,6 +3446,74 @@ mod tests {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig::default()));
         (runtime, auth_store)
+    }
+
+    #[test]
+    fn auth_env_knobs_enable_auth_require_auth_and_vault() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var("REDDB_AUTH", "true");
+            std::env::set_var("REDDB_REQUIRE_AUTH", "true");
+            std::env::set_var("REDDB_VAULT", "true");
+        }
+
+        let mut config = no_auth_test_config(false);
+        config.vault = false;
+        let options = config.to_db_options().expect("to_db_options");
+
+        assert!(options.auth.enabled);
+        assert!(options.auth.require_auth);
+        assert!(options.auth.vault_enabled);
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn production_and_cloud_presets_force_auth_require_auth_and_vault() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+
+        for preset in [PRESET_PRODUCTION, PRESET_CLOUD] {
+            let mut config = no_auth_test_config(false);
+            config.vault = false;
+            config.bootstrap.preset = Some(preset.to_string());
+
+            let options = config.to_db_options().expect("to_db_options");
+            assert!(options.auth.enabled, "{preset} should enable auth");
+            assert!(
+                options.auth.require_auth,
+                "{preset} should require authenticated requests"
+            );
+            assert!(options.auth.vault_enabled, "{preset} should enable vault");
+            assert!(!no_auth_active(&options));
+        }
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn no_auth_env_overrides_preset_forced_auth() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var("REDDB_NO_AUTH", "true");
+            std::env::set_var(BOOTSTRAP_PRESET_ENV, PRESET_CLOUD);
+        }
+
+        let mut config = no_auth_test_config(false);
+        config.auth = true;
+        config.require_auth = true;
+        let options = config.to_db_options().expect("to_db_options");
+
+        assert!(no_auth_active(&options));
+        assert!(!options.auth.enabled);
+        assert!(!options.auth.require_auth);
+        assert!(!options.auth.vault_enabled);
+
+        clear_preset_env();
     }
 
     #[test]
@@ -3279,6 +3627,139 @@ mod tests {
             crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
             other => panic!("expected Text(production), got {other:?}"),
         }
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn bootstrap_preset_env_takes_precedence_over_legacy_preset_env() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(BOOTSTRAP_PRESET_ENV, PRESET_REGULATED);
+            std::env::set_var(PRESET_ENV, PRESET_SIMPLE);
+        }
+
+        let options = no_auth_test_config(false)
+            .to_db_options()
+            .expect("regulated options");
+        assert!(
+            options.control_events.compliance_mode,
+            "canonical REDDB_BOOTSTRAP_PRESET should win over REDDB_PRESET"
+        );
+        assert!(options.query_audit.enabled);
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn cloud_preset_creates_system_head_and_customer_admins() {
+        use crate::auth::policies::{EvalContext, ResourceRef};
+        use crate::auth::UserId;
+
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(BOOTSTRAP_PRESET_ENV, PRESET_CLOUD);
+            std::env::set_var("REDDB_CLOUD_HEAD_ADMIN", "head");
+            std::env::set_var("REDDB_CLOUD_HEAD_ADMIN_PASSWORD", "head-pass");
+            std::env::set_var("REDDB_CUSTOMER_ADMIN", "customer");
+            std::env::set_var("REDDB_CUSTOMER_ADMIN_PASSWORD", "customer-pass");
+        }
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset(&runtime, &auth_store).expect("cloud preset applies cleanly");
+
+        let head = auth_store
+            .get_user(None, "head")
+            .expect("head admin should exist");
+        assert!(head.system_owned);
+        assert_eq!(head.tenant_id, None);
+        let customer = auth_store
+            .get_user(None, "customer")
+            .expect("customer admin should exist");
+        assert!(!customer.system_owned);
+        assert_eq!(customer.tenant_id, None);
+
+        let ctx = EvalContext {
+            principal_tenant: None,
+            current_tenant: None,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: 1_700_000_000_000,
+            principal_is_admin_role: true,
+            principal_is_system_owned: false,
+            principal_is_platform_scoped: true,
+        };
+        assert!(auth_store.check_policy_authz(
+            &UserId::platform("customer"),
+            "config:write",
+            &ResourceRef::new("config", "red.config.customer.enabled"),
+            &ctx,
+        ));
+
+        let err = auth_store
+            .delete_user("head")
+            .expect_err("ordinary mutation path must not delete system head admin");
+        assert!(
+            err.to_string().contains("system-owned user is immutable"),
+            "got: {err}"
+        );
+        assert!(auth_store.get_user(None, "head").is_some());
+        assert!(auth_store
+            .get_policy(CLOUD_PROTECT_MANAGED_POLICY)
+            .is_some());
+        assert!(runtime
+            .config_registry()
+            .get_active(CLOUD_CONFIG_NAMESPACE)
+            .is_some());
+
+        let store = runtime.db().store();
+        match store
+            .get_config(BOOTSTRAP_FIRST_ADMIN_KEY)
+            .expect("head admin id persisted")
+        {
+            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), "head"),
+            other => panic!("expected Text(head), got {other:?}"),
+        }
+        match store.get_config(BOOTSTRAP_PRESET_KEY).unwrap() {
+            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
+            other => panic!("expected Text(cloud), got {other:?}"),
+        }
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn cloud_preset_cli_admin_alias_wins_over_cloud_env_password() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var("REDDB_CLOUD_HEAD_ADMIN_PASSWORD", "env-head-pass");
+        }
+
+        let bootstrap = BootstrapConfig {
+            preset: Some(PRESET_CLOUD.to_string()),
+            admin_username: Some("head".to_string()),
+            admin_password: Some("cli-head-pass".to_string()),
+            customer_admin: Some("customer".to_string()),
+            customer_admin_password: Some("customer-pass".to_string()),
+            ..BootstrapConfig::default()
+        };
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset_from_config(&runtime, &auth_store, &bootstrap)
+            .expect("cloud preset applies cleanly");
+
+        auth_store
+            .authenticate("head", "cli-head-pass")
+            .expect("CLI alias password should win");
+        assert!(
+            auth_store.authenticate("head", "env-head-pass").is_err(),
+            "cloud-specific env password must not beat CLI alias"
+        );
 
         clear_preset_env();
     }

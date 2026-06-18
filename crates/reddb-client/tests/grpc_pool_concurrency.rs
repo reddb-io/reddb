@@ -110,7 +110,15 @@ impl RedDb for SlowMock {
             // Minimal valid JSON the client's `parse_query_json`
             // accepts. Empty rows + columns is fine.
             result_json: r#"{"statement":"select","affected":0,"columns":[],"rows":[]}"#.into(),
+            affected_rows: 0,
         }))
+    }
+
+    async fn batch_insert(
+        &self,
+        _request: Request<tonic::Streaming<BatchInsertChunk>>,
+    ) -> Result<Response<BatchInsertReply>, Status> {
+        Ok(Response::new(BatchInsertReply { ok: true, count: 0 }))
     }
 
     // Every other RPC returns `<reply>::default()`. The concurrency

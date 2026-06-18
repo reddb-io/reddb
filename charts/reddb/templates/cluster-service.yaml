@@ -1,0 +1,80 @@
+{{- include "reddb.validateMode" . -}}
+{{- if eq .Values.mode "cluster" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reddb.cluster.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster
+  {{- with .Values.cluster.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.cluster.service.type }}
+  ports:
+    - name: grpc
+      port: {{ .Values.cluster.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+      appProtocol: grpc
+    {{- if .Values.grpc.tls.enabled }}
+    - name: grpc-tls
+      port: {{ .Values.cluster.service.grpcTlsPort }}
+      targetPort: grpc-tls
+      protocol: TCP
+      appProtocol: grpc
+    {{- end }}
+    - name: http
+      port: {{ .Values.cluster.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+    {{- if .Values.http.tls.enabled }}
+    - name: https
+      port: {{ .Values.cluster.service.httpTlsPort }}
+      targetPort: https
+      protocol: TCP
+      appProtocol: https
+    {{- end }}
+  selector:
+    {{- include "reddb.cluster.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reddb.cluster.headless" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cluster
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    {{- if .Values.grpc.tls.enabled }}
+    - name: grpc-tls
+      port: 50052
+      targetPort: grpc-tls
+      protocol: TCP
+    {{- end }}
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    {{- if .Values.http.tls.enabled }}
+    - name: https
+      port: 8443
+      targetPort: https
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "reddb.cluster.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -26,7 +26,12 @@ red server [flags]
 | `--primary-addr` | | Primary gRPC address for replica mode | |
 | `--read-only` | | Open database in read-only mode | `false` |
 | `--no-create-if-missing` | | Fail if database file doesn't exist | `false` |
-| `--vault` | | Enable encrypted auth vault | `false` |
+| `--auth` / `REDDB_AUTH=true` | | Enable authentication | `false` |
+| `--require-auth` / `REDDB_REQUIRE_AUTH=true` | | Reject anonymous requests; implies auth | `false` |
+| `--vault` / `REDDB_VAULT=true` | | Enable encrypted auth/secret vault | `false` |
+| `--no-auth` / `REDDB_NO_AUTH=true` | | Hard-disable auth and vault for local/dev boots | `false` |
+| `--bootstrap-preset` / `REDDB_BOOTSTRAP_PRESET` | | First-boot preset: `simple`, `production`, `regulated`, `cloud` | `simple` |
+| `--bootstrap-manifest` / `REDDB_BOOTSTRAP_MANIFEST` | | First-boot manifest JSON path | |
 
 Recommended patterns:
 

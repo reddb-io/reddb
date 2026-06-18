@@ -1268,9 +1268,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.1"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8be7462df143984c4598a256ef469b251d7d7f9e271135073e78fc535414f3d0"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
  "bytes",
  "itoa",
@@ -1532,14 +1532,15 @@ dependencies = [
 
 [[package]]
 name = "insta"
-version = "1.47.2"
+version = "1.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4a6248eb93a4401ed2f37dfe8ea592d3cf05b7cf4f8efa867b6895af7e094e"
+checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
 dependencies = [
  "console",
  "once_cell",
  "regex",
  "similar",
+ "strip-ansi-escapes",
  "tempfile",
 ]
 
@@ -2171,9 +2172,9 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.14.3"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
+checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -2202,9 +2203,9 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.14.3"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
+checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
  "itertools 0.14.0",
@@ -2428,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "jsonwebtoken",
  "proptest",
@@ -2455,7 +2456,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "async-trait",
  "jsonwebtoken",
@@ -2481,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "reddb-io-grpc-proto",
  "reddb-io-wire",
@@ -2490,14 +2491,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2514,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2526,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "proptest",
  "reddb-io-types",
@@ -2535,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2604,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "proptest",
  "zstd",
@@ -2612,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "insta",
  "proptest",
@@ -2637,9 +2638,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.3"
+version = "1.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -2660,9 +2661,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.10"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reqwest"
@@ -3141,6 +3142,15 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "strip-ansi-escapes"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a8f8038e7e7969abb3f1b7c2a811225e9296da208539e0f79c5251d6cac0025"
+dependencies = [
+ "vte",
+]
 
 [[package]]
 name = "strsim"
@@ -3800,6 +3810,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vte"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "231fdcd7ef3037e8330d8e17e61011a2c244126acc0a982f4040ac3f9f0bc077"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wait-timeout"

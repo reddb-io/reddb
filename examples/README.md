@@ -13,6 +13,12 @@ Available profiles:
 - `backup`: single remote-backed server + MinIO for backup flows
 - `pitr`: single remote-backed primary + MinIO for restore-point flows
 - `serverless`: single remote-backed node + MinIO for serverless-style readiness/warmup flows
+- `cluster`: three symmetric cluster-shape members with stable identity/discovery env
+
+Each Compose profile sets the same storage contract consumed by the CLI:
+`REDDB_STORAGE_PRESET`, `REDDB_STORAGE_PROFILE`, `REDDB_STORAGE_PACKAGING`, and
+`REDDB_REPLICA_COUNT`. There is no `cluster` Compose profile yet; cluster should
+only be added here once the symmetric pod/node discovery topology is implemented.
 
 Quick commands:
 
@@ -31,6 +37,10 @@ make test-env PROFILE=replica
 make test-env PROFILE=remote
 make test-env PROFILE=serverless
 ```
+
+The human-facing examples mount `examples/container-config.json` at
+`/etc/reddb/config.json`. On first boot RedDB seeds missing keys into
+`red.config`; later `SET CONFIG` values in the database win over that file.
 
 The environment test harness does two things:
 

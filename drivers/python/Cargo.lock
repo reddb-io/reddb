@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "reddb-io-client",
  "reddb-io-grpc-proto",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "reddb-io-client-connector",
  "reddb-io-grpc-proto",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "reddb-io-grpc-proto",
  "reddb-io-wire",
@@ -1943,14 +1943,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -1965,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-python"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "prost",
  "pyo3",
@@ -1990,19 +1990,19 @@ dependencies = [
  "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
- "webpki-roots 0.26.11",
+ "webpki-roots",
 ]
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2054,21 +2054,21 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ureq",
- "webpki-roots 1.0.7",
+ "webpki-roots",
  "x509-parser",
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-types"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "reddb-io-types",
  "serde_json",
@@ -2088,9 +2088,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.3"
+version = "1.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -2111,9 +2111,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.10"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rfc6979"
@@ -2937,7 +2937,7 @@ dependencies = [
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.7",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -3098,15 +3098,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.7",
 ]
 
 [[package]]

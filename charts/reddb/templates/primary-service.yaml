@@ -1,4 +1,5 @@
 {{- include "reddb.validateMode" . -}}
+{{- if ne .Values.mode "cluster" -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -22,6 +23,16 @@ spec:
       {{- if and (eq .Values.primary.service.type "NodePort") (.Values.primary.service.grpcNodePort) }}
       nodePort: {{ .Values.primary.service.grpcNodePort }}
       {{- end }}
+    {{- if .Values.grpc.tls.enabled }}
+    - name: grpc-tls
+      port: {{ .Values.primary.service.grpcTlsPort }}
+      targetPort: grpc-tls
+      protocol: TCP
+      appProtocol: grpc
+      {{- if and (eq .Values.primary.service.type "NodePort") (.Values.primary.service.grpcTlsNodePort) }}
+      nodePort: {{ .Values.primary.service.grpcTlsNodePort }}
+      {{- end }}
+    {{- end }}
     - name: http
       port: {{ .Values.primary.service.httpPort }}
       targetPort: http
@@ -30,6 +41,16 @@ spec:
       {{- if and (eq .Values.primary.service.type "NodePort") (.Values.primary.service.httpNodePort) }}
       nodePort: {{ .Values.primary.service.httpNodePort }}
       {{- end }}
+    {{- if .Values.http.tls.enabled }}
+    - name: https
+      port: {{ .Values.primary.service.httpTlsPort }}
+      targetPort: https
+      protocol: TCP
+      appProtocol: https
+      {{- if and (eq .Values.primary.service.type "NodePort") (.Values.primary.service.httpTlsNodePort) }}
+      nodePort: {{ .Values.primary.service.httpTlsNodePort }}
+      {{- end }}
+    {{- end }}
   selector:
     {{- include "reddb.primary.selectorLabels" . | nindent 4 }}
 ---
@@ -50,9 +71,22 @@ spec:
       port: 50051
       targetPort: grpc
       protocol: TCP
+    {{- if .Values.grpc.tls.enabled }}
+    - name: grpc-tls
+      port: 50052
+      targetPort: grpc-tls
+      protocol: TCP
+    {{- end }}
     - name: http
       port: 8080
       targetPort: http
       protocol: TCP
+    {{- if .Values.http.tls.enabled }}
+    - name: https
+      port: 8443
+      targetPort: https
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "reddb.primary.selectorLabels" . | nindent 4 }}
+{{- end }}
