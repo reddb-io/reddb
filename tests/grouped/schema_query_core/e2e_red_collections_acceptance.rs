@@ -13,6 +13,7 @@ use reddb::runtime::within_clause::{FieldOverride, ScopeOverride};
 use reddb::server::RedDBServer;
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
+use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -131,13 +132,7 @@ fn select_star_from_red_collections_returns_collection_inventory() {
         matches!(acme.get("schema_mode"), Some(Value::Text(_))),
         "schema_mode should be present: {acme:?}"
     );
-    for numeric in [
-        "entities",
-        "segments",
-        "indices",
-        "in_memory_bytes",
-        "on_disk_bytes",
-    ] {
+    for numeric in ["entities", "segments", "indices", "in_memory_bytes"] {
         assert!(
             matches!(
                 acme.get(numeric),
@@ -146,6 +141,11 @@ fn select_star_from_red_collections_returns_collection_inventory() {
             "{numeric} should be an integer metric: {acme:?}"
         );
     }
+    assert_eq!(
+        acme.get("on_disk_bytes"),
+        Some(&Value::Null),
+        "in-memory collections should not fabricate on-disk bytes: {acme:?}"
+    );
     assert!(
         matches!(
             acme.get("queue_mode"),
@@ -309,6 +309,32 @@ fn http_post_query(addr: &str, query: &str) -> (u16, serde_json::Value) {
     (status, json)
 }
 
+fn http_get(addr: &str, path: &str) -> (u16, serde_json::Value) {
+    let mut tcp = TcpStream::connect(addr).expect("connect");
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    let req = format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    tcp.write_all(req.as_bytes()).unwrap();
+    tcp.flush().unwrap();
+    let mut buf = Vec::new();
+    let _ = tcp.read_to_end(&mut buf);
+    let resp = String::from_utf8_lossy(&buf).to_string();
+    let status = resp
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let body_idx = resp.find("\r\n\r\n").map(|i| i + 4).unwrap_or(resp.len());
+    let json = serde_json::from_str(&resp[body_idx..])
+        .unwrap_or_else(|err| panic!("HTTP body should be JSON: {err}: {resp}"));
+    (status, json)
+}
+
 #[test]
 fn http_query_endpoint_returns_red_collections_inventory() {
     let rt = open_runtime();
@@ -331,5 +357,54 @@ fn http_query_endpoint_returns_red_collections_inventory() {
     assert!(
         encoded.contains("acme_orders") && encoded.contains("globex_orders"),
         "HTTP /query should return collection rows, got {body}"
+    );
+}
+
+#[test]
+fn persistent_collection_disk_bytes_fit_cluster_status_db_size() {
+    let dir = tempfile::Builder::new()
+        .prefix("reddb-red-collections-cluster-size-")
+        .tempdir()
+        .expect("temp db dir");
+    let path = dir.path().join("data.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should be valid");
+    let rt = RedDBRuntime::with_options(options).expect("persistent runtime should open");
+    exec(&rt, "CREATE TABLE orders (id INT, tenant_id TEXT)");
+    exec(&rt, "INSERT INTO orders (id, tenant_id) VALUES (1, 'acme')");
+    rt.checkpoint().expect("checkpoint should flush pages");
+
+    let catalog = rt
+        .execute_query("SELECT on_disk_bytes FROM red.collections WHERE name = 'orders'")
+        .expect("red.collections should expose collection bytes");
+    let collection_bytes: u64 = catalog
+        .result
+        .records
+        .iter()
+        .map(|row| match row.get("on_disk_bytes") {
+            Some(Value::UnsignedInteger(bytes)) => *bytes,
+            other => panic!("expected measured on_disk_bytes, got {other:?}"),
+        })
+        .sum();
+
+    let (addr, handle) = spawn_http(rt);
+    let (status, body) = http_get(&addr, "/cluster/status");
+    handle
+        .join()
+        .expect("HTTP server thread should not panic")
+        .expect("HTTP server should serve one request");
+
+    assert_eq!(status, 200, "body = {body}");
+    let db_size_bytes = body["storage"]["db_size_bytes"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("cluster status should report db_size_bytes: {body}"));
+    assert!(
+        collection_bytes > 0,
+        "persistent collection should report measured bytes"
+    );
+    assert!(
+        collection_bytes <= db_size_bytes,
+        "collection bytes ({collection_bytes}) should fit within cluster db_size_bytes ({db_size_bytes})"
     );
 }
