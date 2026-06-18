@@ -11,16 +11,10 @@
 //!   rules govern the write (criterion #5: non-managed configs remain
 //!   writable per ordinary policy).
 //!
-//! * If the matched entry is managed, enforces two layers in order:
-//!     1. **Structural eligibility** — caller must be both system-owned
-//!        and platform-scoped (the operator-principal shape). Otherwise
-//!        [`ManagedConfigDecision::Deny`] with
-//!        [`DenyReason::NotStructurallyEligible`].
-//!     2. **Policy permission** — caller must satisfy
-//!        [`AuthStore::check_policy_authz`] against the entry's
-//!        `required_action` / `required_resource`. Otherwise
-//!        [`ManagedConfigDecision::Deny`] with
-//!        [`DenyReason::PolicyDenied`].
+//! * If the matched entry is managed, caller must satisfy
+//!   [`AuthStore::check_policy_authz`] against the entry's
+//!   `required_action` / `required_resource`. Otherwise
+//!   [`ManagedConfigDecision::Deny`] with [`DenyReason::PolicyDenied`].
 //!
 //! Every Deny carries the matched entry id, version, required action,
 //! and required resource so the Control Event Ledger can persist the
@@ -39,10 +33,9 @@ pub enum ManagedConfigDecision {
     /// Key is not governed by a managed registry entry. Caller should
     /// proceed with ordinary policy checks against `config:write` (etc.).
     PassThrough { key: String },
-    /// Key is managed and the caller satisfied both the structural and
-    /// policy gates. Caller may proceed; the returned evidence
-    /// requirement tells the Control Event Ledger how much detail to
-    /// persist.
+    /// Key is managed and the caller satisfied the policy gate. Caller
+    /// may proceed; the returned evidence requirement tells the Control
+    /// Event Ledger how much detail to persist.
     Allow {
         entry_id: String,
         entry_version: u64,
@@ -68,33 +61,17 @@ pub enum ManagedConfigDecision {
 }
 
 /// Why a managed config write was denied. Designed for Control Event
-/// payloads: the variant tells operators what *kind* of guard tripped,
-/// and the structured fields let them see which eligibility flag was
-/// false.
+/// payloads: the variant tells operators what *kind* of guard tripped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DenyReason {
-    /// Caller is not the operator-principal shape required by managed
-    /// guardrails (must be both system-owned and platform-scoped).
-    NotStructurallyEligible {
-        is_system_owned: bool,
-        is_platform_scoped: bool,
-    },
-    /// Caller is structurally eligible but the policy evaluator rejected
-    /// the action/resource pair (either explicit Deny or DefaultDeny).
+    /// The policy evaluator rejected the action/resource pair (either
+    /// explicit Deny or DefaultDeny).
     PolicyDenied,
 }
 
 impl std::fmt::Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotStructurallyEligible {
-                is_system_owned,
-                is_platform_scoped,
-            } => write!(
-                f,
-                "caller is not structurally eligible for managed config \
-                 (system_owned={is_system_owned}, platform_scoped={is_platform_scoped})"
-            ),
             Self::PolicyDenied => write!(f, "managed config required policy permission was denied"),
         }
     }
@@ -152,22 +129,6 @@ impl<'a> ManagedConfigGate<'a> {
 
         let (kind, name) = split_required_resource(&entry.required_resource);
         let matched_resource = format!("{kind}:{name}");
-
-        if !(ctx.principal_is_system_owned && ctx.principal_is_platform_scoped) {
-            return ManagedConfigDecision::Deny {
-                entry_id: entry.id.clone(),
-                entry_version: entry.version,
-                resource_type: entry.resource_type.clone(),
-                managed: entry.managed,
-                mutability: entry.mutability,
-                matched_action: entry.required_action.clone(),
-                matched_resource,
-                reason: DenyReason::NotStructurallyEligible {
-                    is_system_owned: ctx.principal_is_system_owned,
-                    is_platform_scoped: ctx.principal_is_platform_scoped,
-                },
-            };
-        }
 
         let resource = ResourceRef::new(kind, name);
         if !auth.check_policy_authz(actor, &entry.required_action, &resource, ctx) {
@@ -258,7 +219,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         }
     }
@@ -403,10 +363,10 @@ mod tests {
     // ---- acceptance #2 ---------------------------------------------------
 
     #[test]
-    fn ordinary_allow_all_user_is_denied_on_managed_key() {
-        // Allow-all policy ("config:*" on "*") would normally let
-        // alice@platform write any config. The managed gate must block
-        // her because she lacks the structural shape (not system-owned).
+    fn ordinary_allow_all_user_is_allowed_on_managed_key() {
+        // Managed config is policy-first: an ordinary principal with a
+        // matching policy can write a managed key. Protection comes from
+        // explicit Deny or missing permission, not a structural flag.
         let store = store();
         let seeder = seed_registry_admin(&store);
         store.create_user("alice", "p", Role::Admin).unwrap();
@@ -434,46 +394,24 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_001,
             principal_is_admin_role: true,
-            principal_is_system_owned: false, // <-- the key gate
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &alice, &ctx, "red.config.audit.enabled");
-        match decision {
-            ManagedConfigDecision::Deny {
-                entry_id,
-                matched_action,
-                matched_resource,
-                reason,
-                ..
-            } => {
-                assert_eq!(entry_id, "red.config.audit.enabled");
-                assert_eq!(matched_action, "config:write");
-                assert_eq!(matched_resource, "config:red.config.audit.enabled");
-                assert!(
-                    matches!(
-                        reason,
-                        DenyReason::NotStructurallyEligible {
-                            is_system_owned: false,
-                            is_platform_scoped: true
-                        }
-                    ),
-                    "got {reason:?}"
-                );
-            }
-            other => panic!("expected Deny, got {other:?}"),
-        }
+        assert!(
+            matches!(decision, ManagedConfigDecision::Allow { .. }),
+            "got {decision:?}"
+        );
     }
 
     // ---- acceptance #3 ---------------------------------------------------
 
     #[test]
-    fn structurally_eligible_caller_with_matching_policy_is_allowed() {
+    fn caller_with_matching_policy_is_allowed() {
         let store = store();
         let seeder = seed_registry_admin(&store);
-        // System-owned, platform-scoped operator.
         store
-            .create_system_user("ops", "p", Role::Admin, None)
-            .expect("create system-owned user");
+            .create_admin_user("ops", "p", Role::Admin, None)
+            .expect("create user");
         let ops = UserId::platform("ops");
         store
             .put_policy(allow_config_write(
@@ -503,7 +441,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_002,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &ops, &ctx, "red.config.audit.enabled");
@@ -515,13 +452,13 @@ mod tests {
     }
 
     #[test]
-    fn structurally_eligible_caller_without_matching_policy_is_policy_denied() {
-        // Operator shape is right, but no allow grants `config:write`
-        // on the managed key — DefaultDeny falls out of the evaluator.
+    fn caller_without_matching_policy_is_policy_denied() {
+        // No allow grants `config:write` on the managed key —
+        // DefaultDeny falls out of the evaluator.
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Write, None)
+            .create_admin_user("ops", "p", Role::Write, None)
             .unwrap();
         let ops = UserId::platform("ops");
         // Attach an unrelated policy so the evaluator runs through IAM
@@ -556,7 +493,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_003,
             principal_is_admin_role: false,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &ops, &ctx, "red.config.audit.enabled");
@@ -569,14 +505,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deny_overrides_structural_allow() {
-        // System-owned operator with a broad config-write allow *and* an
-        // explicit deny on the managed key — deny wins (policy-first,
-        // per #644).
+    fn explicit_deny_overrides_allow() {
+        // Principal with a broad config-write allow *and* an explicit
+        // deny on the managed key — deny wins.
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Admin, None)
+            .create_admin_user("ops", "p", Role::Admin, None)
             .unwrap();
         let ops = UserId::platform("ops");
         store.put_policy(allow_all_config("p-allow")).unwrap();
@@ -608,7 +543,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_004,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &ops, &ctx, "red.config.audit.enabled");
@@ -645,7 +579,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_005,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         let decision = gate.check_write(&store, &alice, &ctx, "red.config.backup.retention_days");
@@ -662,10 +595,10 @@ mod tests {
                 assert_eq!(entry_version, 1);
                 assert_eq!(matched_action, "config:write");
                 assert_eq!(matched_resource, "config:red.config.backup.retention_days");
-                // The reason is human-presentable and identifies the gate.
+                // The reason is human-presentable and identifies the policy gate.
                 let rendered = reason.to_string();
                 assert!(
-                    rendered.contains("structurally eligible"),
+                    rendered.contains("policy permission"),
                     "reason should be Control-Event-renderable: {rendered}"
                 );
             }
@@ -734,7 +667,6 @@ mod tests {
         let gate = ManagedConfigGate::new(&reg);
         let alice = UserId::platform("alice");
         let ctx = EvalContext {
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
             ..EvalContext::default()
         };
@@ -790,7 +722,6 @@ mod tests {
         let gate = ManagedConfigGate::new(&reg);
         let alice = UserId::platform("alice");
         let ctx = EvalContext {
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
             ..EvalContext::default()
         };

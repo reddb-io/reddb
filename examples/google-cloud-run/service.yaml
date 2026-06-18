@@ -3,10 +3,10 @@
 # Apply with:
 #   gcloud run services replace service.yaml --region us-central1
 #
-# Bootstrap the vault certificate first (one-time, per project):
-#   CERT=$(red bootstrap --vault --path ./scratch/data.rdb \
-#                        --username admin --password-stdin \
-#                        --print-certificate --json | jq -r .certificate)
+# Bootstrap the database artifact or remote-backend snapshot first
+# (one-time, per project), then store the certificate emitted by that
+# bootstrap. Do not mint a cert from an unrelated scratch DB.
+#   CERT=<certificate emitted by red bootstrap on the real database>
 #   printf '%s' "$CERT" | gcloud secrets create reddb-vault-cert \
 #       --data-file=- --replication-policy=automatic
 #   unset CERT

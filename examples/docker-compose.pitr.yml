@@ -1,36 +1,31 @@
-# PITR demo via MinIO. For the canonical secure deploy (vault on,
+# PITR demo via Floci. For the canonical secure deploy (vault on,
 # cert via Docker secrets), see examples/docker-compose.vault.yml.
 
 services:
-  minio:
-    image: minio/minio:latest
-    container_name: reddb-minio-pitr
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+  floci:
+    image: floci/floci:latest
+    container_name: reddb-floci-pitr
     ports:
-      - "9020:9000"
-      - "9021:9001"
-    volumes:
-      - minio-pitr-data:/data
+      - "55468:4566"
 
-  minio-init:
-    image: minio/mc:latest
-    container_name: reddb-minio-pitr-init
+  floci-init:
+    image: amazon/aws-cli:2
+    container_name: reddb-floci-pitr-init
     depends_on:
-      - minio
+      - floci
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint:
       - /bin/sh
       - -c
       - |
         set -eu
-        until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin; do
+        until aws --endpoint-url=http://floci:4566 s3 ls >/dev/null 2>&1; do
           sleep 1
         done
-        /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin
-        /usr/bin/mc mb --ignore-existing local/reddb-pitr
-        /usr/bin/mc anonymous set private local/reddb-pitr
+        aws --endpoint-url=http://floci:4566 s3 mb s3://reddb-pitr || true
 
   primary:
     build:
@@ -40,11 +35,11 @@ services:
         REDDB_CARGO_FEATURES: backend-s3
     container_name: reddb-pitr-primary
     depends_on:
-      minio-init:
+      floci-init:
         condition: service_completed_successfully
     ports:
-      - "50071:50051"
-      - "8100:8080"
+      - "55571:50051"
+      - "55900:8080"
     volumes:
       - pitr-primary-data:/data
     command:
@@ -63,13 +58,14 @@ services:
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "0"
-      REDDB_REMOTE_BACKEND: s3
-      REDDB_REMOTE_KEY: pitr/demo/data.rdb
-      REDDB_S3_ENDPOINT: http://minio:9000
-      REDDB_S3_BUCKET: reddb-pitr
-      REDDB_S3_REGION: us-east-1
-      REDDB_S3_ACCESS_KEY: minioadmin
-      REDDB_S3_SECRET_KEY: minioadmin
+      RED_BACKEND: s3
+      RED_REMOTE_KEY: pitr/demo/data.rdb
+      RED_S3_ENDPOINT: http://floci:4566
+      RED_S3_BUCKET: reddb-pitr
+      RED_S3_REGION: us-east-1
+      RED_S3_ACCESS_KEY: test
+      RED_S3_SECRET_KEY: test
+      RED_S3_PATH_STYLE: "true"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     secrets:
       - source: reddb_certificate
@@ -89,5 +85,4 @@ secrets:
     external: true
 
 volumes:
-  minio-pitr-data:
   pitr-primary-data:

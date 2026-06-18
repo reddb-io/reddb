@@ -7,9 +7,12 @@
 # -----------------------------------------------------------------------------
 # Bootstrap flow (one-time, per cluster)
 # -----------------------------------------------------------------------------
-#   1. Generate the vault certificate on a trusted machine:
+#   1. Bootstrap the writer database, not a scratch file. Run this in a
+#      one-off Pod/Job that mounts the same PVC the StatefulSet will use
+#      (`data-reddb-0` for this manifest), or bootstrap an image/volume that
+#      is copied to that PVC as-is:
 #         red bootstrap \
-#             --path ./scratch/data.rdb \
+#             --path /data/data.rdb \
 #             --vault \
 #             --username admin \
 #             --password-stdin \

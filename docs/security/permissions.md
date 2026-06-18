@@ -426,6 +426,8 @@ svc_job_admin    -> delete/alter on queue:jobs
 | `view:<name>` | View or materialized view | `view:customer_summary` |
 | `function:<name>` | Scalar/stored function | `function:hash_pwd` |
 | `policy:<id>` | Policy document | `policy:analyst` |
+| `user:<username>` | Platform user lifecycle target | `user:cloud-admin` |
+| `user:tenant/<tenant>/<username>` | Tenant user lifecycle target | `user:tenant/acme/alice` |
 | `admin:<surface>` | Admin surface | `admin:audit` |
 | `lease:<name>` | Replication/lease control | `lease:primary` |
 
@@ -441,6 +443,29 @@ Policy management actions are wired today:
       "effect": "allow",
       "actions": ["policy:*"],
       "resources": ["policy:*"]
+    }
+  ]
+}
+```
+
+User lifecycle actions are also wired today. Protect platform-owned accounts
+with explicit Deny statements instead of relying on ownership flags:
+
+```json
+{
+  "version": 1,
+  "id": "cloud-admin-protection",
+  "statements": [
+    {
+      "sid": "protect-cloud-admin",
+      "effect": "deny",
+      "actions": [
+        "user:delete",
+        "user:disable",
+        "user:password:change",
+        "user:role:update"
+      ],
+      "resources": ["user:cloud-admin"]
     }
   ]
 }
@@ -462,6 +487,7 @@ verbs onto these generic actions:
 | Time-series points | `select` | `insert` | `update` for backfill | `delete` | `alter` on retention/downsample |
 | Queues | `select` | `insert` enqueue | `update` ack/nack/retry | `delete` purge | `create`, `alter`, `drop` |
 | Policies | n/a | `policy:put` | `policy:attach` / `policy:detach` | `policy:drop` | `policy:*` |
+| Users | n/a | `user:create` | `user:update`, `user:disable`, `user:password:change`, `user:role:update` | `user:delete` | `user:*` |
 | Admin | `admin:audit-read` | n/a | `admin:reload`, `admin:lease-promote` | n/a | `admin:*` |
 
 Do not create new verbs in policy JSON unless the validator knows them. Use

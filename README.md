@@ -597,7 +597,7 @@ Or via Docker:
 
 ```bash
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin # if GHCR requires auth
-docker run --rm -p 5050:5050 -p 5055:5055 -p 8080:8080 ghcr.io/reddb-io/reddb:latest
+docker run --rm -p 55050:5050 -p 55551:50051 -p 55880:8080 ghcr.io/reddb-io/reddb:latest
 ```
 
 Or, if you only need the thin remote-only client (~7 MB image):
@@ -608,7 +608,7 @@ docker run --rm ghcr.io/reddb-io/reddb-client:latest red://reddb.example.com:505
 ```
 
 For production-secure Docker (vault + secrets) and Kubernetes, see
-[`docs/getting-started/docker.md`](./docs/getting-started/docker.md)
+[`docs/deployment/docker.md`](./docs/deployment/docker.md)
 and [`docs/security/vault.md`](./docs/security/vault.md).
 
 ---

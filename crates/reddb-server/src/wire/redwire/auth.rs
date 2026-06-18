@@ -299,7 +299,6 @@ pub fn validate_oauth_jwt_full(
                 created_at: 0,
                 updated_at: 0,
                 enabled: true,
-                system_owned: false,
             })
         })
         .map_err(|e| format!("{e}"))?;

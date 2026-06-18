@@ -118,12 +118,11 @@ const CONTROL_EVENT_COLUMNS: [&str; 14] = [
     "fields_json",
 ];
 
-const USER_EVIDENCE_COLUMNS: [&str; 8] = [
+const USER_EVIDENCE_COLUMNS: [&str; 7] = [
     "username",
     "tenant_id",
     "role",
     "enabled",
-    "system_owned",
     "created_at",
     "updated_at",
     "api_key_count",
@@ -227,7 +226,6 @@ fn registry_admin_ctx() -> EvalContext {
         mfa_present: false,
         now_ms: 1_700_000_000_000,
         principal_is_admin_role: true,
-        principal_is_system_owned: false,
         principal_is_platform_scoped: true,
     }
 }

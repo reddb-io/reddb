@@ -15,19 +15,10 @@
 //!   rules govern the mutation (criterion #1 baseline: ordinary
 //!   policies remain mutable per ordinary policy).
 //!
-//! * If the matched entry is managed, enforces two layers in order:
-//!     1. **Structural eligibility** — caller must be both system-owned
-//!        and platform-scoped (the operator-principal shape). Otherwise
-//!        [`ManagedPolicyDecision::Deny`] with
-//!        [`DenyReason::NotStructurallyEligible`]. This is the layer
-//!        that blocks ordinary allow-all admins from rewriting,
-//!        dropping, or re-attaching a managed policy (criterion #2).
-//!     2. **Policy permission** — caller must satisfy
-//!        [`AuthStore::check_policy_authz`] against the operation's
-//!        action and the entry's `required_resource`. Otherwise
-//!        [`ManagedPolicyDecision::Deny`] with
-//!        [`DenyReason::PolicyDenied`] (criterion #4: structurally
-//!        eligible caller still needs policy permission).
+//! * If the matched entry is managed, caller must satisfy
+//!   [`AuthStore::check_policy_authz`] against the operation's action
+//!   and the entry's `required_resource`. Otherwise
+//!   [`ManagedPolicyDecision::Deny`] with [`DenyReason::PolicyDenied`].
 //!
 //! Because the `managed=true` bit lives in the registry — not in the
 //! submitted Policy document — re-submitting a Policy JSON that omits
@@ -87,10 +78,9 @@ pub enum ManagedPolicyDecision {
     /// Policy id is not governed by a managed registry entry. Caller
     /// should proceed with ordinary IAM checks.
     PassThrough { policy_id: String, op: PolicyOp },
-    /// Policy is managed and the caller satisfied both the structural
-    /// and policy gates. Caller may proceed; the returned evidence
-    /// requirement tells the Control Event Ledger how much detail to
-    /// persist.
+    /// Policy is managed and the caller satisfied the policy gate.
+    /// Caller may proceed; the returned evidence requirement tells the
+    /// Control Event Ledger how much detail to persist.
     Allow {
         entry_id: String,
         entry_version: u64,
@@ -112,34 +102,17 @@ pub enum ManagedPolicyDecision {
 }
 
 /// Why a managed policy mutation was denied. Designed for Control Event
-/// payloads: the variant tells operators what *kind* of guard tripped,
-/// and the structured fields let them see which eligibility flag was
-/// false.
+/// payloads: the variant tells operators what *kind* of guard tripped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DenyReason {
-    /// Caller is not the operator-principal shape required by managed
-    /// guardrails (must be both system-owned and platform-scoped).
-    NotStructurallyEligible {
-        is_system_owned: bool,
-        is_platform_scoped: bool,
-    },
-    /// Caller is structurally eligible but the policy evaluator rejected
-    /// the op-derived action / required-resource pair (either explicit
-    /// Deny or DefaultDeny).
+    /// The policy evaluator rejected the op-derived action /
+    /// required-resource pair (either explicit Deny or DefaultDeny).
     PolicyDenied,
 }
 
 impl std::fmt::Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotStructurallyEligible {
-                is_system_owned,
-                is_platform_scoped,
-            } => write!(
-                f,
-                "caller is not structurally eligible for managed policy \
-                 (system_owned={is_system_owned}, platform_scoped={is_platform_scoped})"
-            ),
             Self::PolicyDenied => {
                 write!(f, "managed policy required IAM permission was denied")
             }
@@ -192,20 +165,6 @@ impl<'a> ManagedPolicyGate<'a> {
         let (kind, name) = split_required_resource(&entry.required_resource, policy_id);
         let matched_resource = format!("{kind}:{name}");
         let matched_action = op.action().to_string();
-
-        if !(ctx.principal_is_system_owned && ctx.principal_is_platform_scoped) {
-            return ManagedPolicyDecision::Deny {
-                entry_id: entry.id.clone(),
-                entry_version: entry.version,
-                op,
-                matched_action,
-                matched_resource,
-                reason: DenyReason::NotStructurallyEligible {
-                    is_system_owned: ctx.principal_is_system_owned,
-                    is_platform_scoped: ctx.principal_is_platform_scoped,
-                },
-            };
-        }
 
         let resource = ResourceRef::new(kind, name);
         if !auth.check_policy_authz(actor, op.action(), &resource, ctx) {
@@ -277,7 +236,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         }
     }
@@ -413,10 +371,11 @@ mod tests {
     // ---- acceptance #2 ---------------------------------------------------
 
     #[test]
-    fn ordinary_allow_all_user_cannot_put_drop_attach_or_detach_managed_policy() {
-        // alice@platform has `policy:*` on `*` — would normally let her
-        // do anything to any policy. The managed gate must block all
-        // four ops because she lacks the operator structural shape.
+    fn ordinary_allow_all_user_can_put_drop_attach_or_detach_managed_policy() {
+        // Managed policy is policy-first: alice@platform has
+        // `policy:*` on `*`, so the managed gate allows all four ops.
+        // Protection comes from explicit Deny or missing permission,
+        // not a structural flag.
         let store = store();
         let seeder = seed_registry_admin(&store);
         store.create_user("alice", "p", Role::Admin).unwrap();
@@ -446,7 +405,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_001,
             principal_is_admin_role: true,
-            principal_is_system_owned: false, // <-- the key gate
             principal_is_platform_scoped: true,
         };
         for op in [
@@ -456,44 +414,21 @@ mod tests {
             PolicyOp::Detach,
         ] {
             let decision = gate.check_mutation(&store, &alice, &ctx, "p-baseline-readonly", op);
-            match decision {
-                ManagedPolicyDecision::Deny {
-                    entry_id,
-                    matched_action,
-                    matched_resource,
-                    reason,
-                    op: got_op,
-                    ..
-                } => {
-                    assert_eq!(entry_id, "p-baseline-readonly");
-                    assert_eq!(got_op, op);
-                    assert_eq!(matched_action, op.action());
-                    assert_eq!(matched_resource, "policy:p-baseline-readonly");
-                    assert!(
-                        matches!(
-                            reason,
-                            DenyReason::NotStructurallyEligible {
-                                is_system_owned: false,
-                                is_platform_scoped: true
-                            }
-                        ),
-                        "op={op:?} got {reason:?}"
-                    );
-                }
-                other => panic!("expected Deny for {op:?}, got {other:?}"),
-            }
+            assert!(
+                matches!(decision, ManagedPolicyDecision::Allow { op: got_op, .. } if got_op == op),
+                "op={op:?} got {decision:?}"
+            );
         }
     }
 
     // ---- acceptance #3 ---------------------------------------------------
 
     #[test]
-    fn re_putting_managed_policy_without_managed_metadata_still_blocked() {
+    fn re_putting_managed_policy_without_managed_metadata_still_uses_registry_gate() {
         // The "managed" bit lives in the registry, not in the policy
         // document. A caller who rewrites the policy JSON to omit any
-        // managed hint must NOT thereby unlock the policy: the gate is
-        // consulted per call against the registry entry, which still
-        // says managed=true.
+        // managed hint still goes through the registry-backed gate. The
+        // outcome is policy-derived, so alice's allow-all policy permits it.
         let store = store();
         let seeder = seed_registry_admin(&store);
         store.create_user("alice", "p", Role::Admin).unwrap();
@@ -523,20 +458,19 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_002,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
 
-        // First attempt — straightforward put — blocked.
+        // First attempt — straightforward put — allowed by policy.
         let d1 = gate.check_mutation(&store, &alice, &ctx, "p-baseline-readonly", PolicyOp::Put);
-        assert!(matches!(d1, ManagedPolicyDecision::Deny { .. }), "{d1:?}");
+        assert!(matches!(d1, ManagedPolicyDecision::Allow { .. }), "{d1:?}");
 
         // Second attempt — caller "submits" a stripped policy doc; the
         // gate result is identical because it only consults the
         // registry. The registry entry stays managed at v1; no
         // supersede happened.
         let d2 = gate.check_mutation(&store, &alice, &ctx, "p-baseline-readonly", PolicyOp::Put);
-        assert!(matches!(d2, ManagedPolicyDecision::Deny { .. }), "{d2:?}");
+        assert!(matches!(d2, ManagedPolicyDecision::Allow { .. }), "{d2:?}");
 
         assert_eq!(reg.get_active("p-baseline-readonly").unwrap().version, 1);
         assert!(reg.get_active("p-baseline-readonly").unwrap().managed);
@@ -545,12 +479,12 @@ mod tests {
     // ---- acceptance #4 ---------------------------------------------------
 
     #[test]
-    fn structurally_eligible_caller_with_matching_policy_is_allowed() {
+    fn caller_with_matching_policy_is_allowed() {
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Admin, None)
-            .expect("create system-owned user");
+            .create_admin_user("ops", "p", Role::Admin, None)
+            .expect("create user");
         let ops = UserId::platform("ops");
         // Grant ops `policy:*` on the managed policy resource.
         store
@@ -582,7 +516,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_003,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         for op in [
@@ -601,14 +534,13 @@ mod tests {
     }
 
     #[test]
-    fn structurally_eligible_caller_without_matching_policy_is_policy_denied() {
-        // Operator shape is right, but no allow grants the per-op
-        // action on the managed policy — DefaultDeny falls out of the
-        // evaluator.
+    fn caller_without_matching_policy_is_policy_denied() {
+        // No allow grants the per-op action on the managed policy —
+        // DefaultDeny falls out of the evaluator.
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Write, None)
+            .create_admin_user("ops", "p", Role::Write, None)
             .unwrap();
         let ops = UserId::platform("ops");
         // Unrelated policy so the evaluator goes through IAM rather
@@ -643,7 +575,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_004,
             principal_is_admin_role: false,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
         let decision =
@@ -657,14 +588,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deny_overrides_structural_allow() {
-        // System-owned operator with a broad policy-* allow *and* an
-        // explicit deny on the managed policy resource — deny wins
-        // (policy-first, per #644).
+    fn explicit_deny_overrides_allow() {
+        // Principal with a broad policy-* allow *and* an explicit deny
+        // on the managed policy resource — deny wins.
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Admin, None)
+            .create_admin_user("ops", "p", Role::Admin, None)
             .unwrap();
         let ops = UserId::platform("ops");
         store.put_policy(allow_all_policies("p-allow")).unwrap();
@@ -700,11 +630,9 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_005,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: true,
         };
-        // The put op is explicitly denied → PolicyDenied even for the
-        // structurally-eligible operator.
+        // The put op is explicitly denied → PolicyDenied.
         let decision =
             gate.check_mutation(&store, &ops, &ctx, "p-baseline-readonly", PolicyOp::Put);
         match decision {
@@ -749,7 +677,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_006,
             principal_is_admin_role: true,
-            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         let decision =
@@ -770,7 +697,7 @@ mod tests {
                 assert_eq!(matched_resource, "policy:p-tenant-isolation");
                 let rendered = reason.to_string();
                 assert!(
-                    rendered.contains("structurally eligible"),
+                    rendered.contains("IAM permission"),
                     "reason should be audit-renderable: {rendered}"
                 );
             }
@@ -854,28 +781,14 @@ mod tests {
         );
     }
 
-    // ---- #647 system-owned guardrail integration: tenant-scope half ----
-    //
-    // Acceptance #4 for #647 asks that tenant-scoped and platform-scoped
-    // system-owned users be tested *separately*. The Allow-path test
-    // (`structurally_eligible_caller_with_matching_policy_is_allowed`)
-    // already pins the platform-scoped operator. A tenant-scoped
-    // system-owned user is *not* a platform-scoped operator — the gate
-    // requires both flags — so even with `policy:*` granted the gate
-    // must Deny on `NotStructurallyEligible` and never reach the policy
-    // evaluator. Pins acceptance #3 too: system-owned alone is not
-    // enough; platform scope is part of the operator-principal shape.
-
     #[test]
-    fn tenant_scoped_system_owned_user_is_structurally_ineligible_for_managed_policy() {
+    fn tenant_scoped_user_with_matching_policy_can_mutate_managed_policy() {
         let store = store();
         let seeder = seed_registry_admin(&store);
         store
-            .create_system_user("ops", "p", Role::Admin, Some("acme"))
-            .expect("create tenant-scoped system-owned user");
+            .create_admin_user("ops", "p", Role::Admin, Some("acme"))
+            .expect("create tenant-scoped user");
         let ops_acme = UserId::scoped("acme", "ops");
-        // Grant the broadest possible policy permission — proves the
-        // Deny below is structural, not policy-evaluator fallout.
         store
             .put_policy(allow_all_policies("p-ops-acme-allow"))
             .unwrap();
@@ -894,9 +807,6 @@ mod tests {
         .unwrap();
 
         let gate = ManagedPolicyGate::new(&reg);
-        // Mirror the runtime EvalContext shape for a tenant-scoped
-        // system-owned user — system_owned=true (the user record says
-        // so) AND platform_scoped=false (tenant.is_some()).
         let ctx = EvalContext {
             principal_tenant: Some("acme".into()),
             current_tenant: Some("acme".into()),
@@ -904,7 +814,6 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_100,
             principal_is_admin_role: true,
-            principal_is_system_owned: true,
             principal_is_platform_scoped: false,
         };
 
@@ -915,25 +824,10 @@ mod tests {
             PolicyOp::Detach,
         ] {
             let decision = gate.check_mutation(&store, &ops_acme, &ctx, "p-baseline-readonly", op);
-            match decision {
-                ManagedPolicyDecision::Deny {
-                    reason:
-                        DenyReason::NotStructurallyEligible {
-                            is_system_owned,
-                            is_platform_scoped,
-                        },
-                    op: got_op,
-                    ..
-                } => {
-                    assert_eq!(got_op, op);
-                    assert!(is_system_owned, "system_owned flag should propagate");
-                    assert!(
-                        !is_platform_scoped,
-                        "tenant-scoped principal must report platform_scoped=false"
-                    );
-                }
-                other => panic!("expected NotStructurallyEligible Deny for {op:?}, got {other:?}"),
-            }
+            assert!(
+                matches!(decision, ManagedPolicyDecision::Allow { op: got_op, .. } if got_op == op),
+                "op={op:?} got {decision:?}"
+            );
         }
     }
 

@@ -33,7 +33,7 @@ fn mock_ai_provider_serves_openai_compatible_embeddings_and_counts_inputs() {
     assert_eq!(counters.total_requests, 1);
     assert_eq!(counters.total_inputs, 3);
     assert_eq!(counters.unique_inputs, 2);
-    assert!(provider.latency().p50_ms >= 1.0);
+    assert_eq!(wait_for_latency_sample(&provider), 1);
 }
 
 #[test]
@@ -82,4 +82,15 @@ fn post_json(url: &str, body: &str) -> HttpResponse {
             .read_to_string()
             .expect("response body should read"),
     }
+}
+
+fn wait_for_latency_sample(provider: &MockAiProvider) -> usize {
+    for _ in 0..50 {
+        let sample_count = provider.latency().sample_count;
+        if sample_count > 0 {
+            return sample_count;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    provider.latency().sample_count
 }

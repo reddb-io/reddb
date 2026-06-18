@@ -3518,7 +3518,8 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        self.authorize_admin(request.metadata())?;
+        let auth = self.resolve_auth(request.metadata());
+        check_permission(&auth, false, true).map_err(Status::permission_denied)?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
@@ -3528,6 +3529,26 @@ impl RedDb for GrpcRuntime {
         let role_str = json_string_field(&payload, "role").unwrap_or_else(|| "read".to_string());
         let role = crate::auth::Role::from_str(&role_str)
             .ok_or_else(|| Status::invalid_argument(format!("invalid role: {role_str}")))?;
+
+        if let AuthResult::Authenticated {
+            username: actor,
+            role: actor_role,
+            ..
+        } = &auth
+        {
+            let actor = crate::auth::UserId::platform(actor.clone());
+            let target = crate::auth::UserId::platform(username.clone());
+            if !self.auth_store.check_user_lifecycle_authz(
+                &actor,
+                *actor_role,
+                "user:create",
+                &target,
+            ) {
+                return Err(Status::permission_denied(format!(
+                    "policy denied user:create on user:{target}"
+                )));
+            }
+        }
 
         let user = self
             .auth_store
@@ -3557,11 +3578,32 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        self.authorize_admin(request.metadata())?;
+        let auth = self.resolve_auth(request.metadata());
+        check_permission(&auth, false, true).map_err(Status::permission_denied)?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
             .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
+
+        if let AuthResult::Authenticated {
+            username: actor,
+            role: actor_role,
+            ..
+        } = &auth
+        {
+            let actor = crate::auth::UserId::platform(actor.clone());
+            let target = crate::auth::UserId::platform(username.clone());
+            if !self.auth_store.check_user_lifecycle_authz(
+                &actor,
+                *actor_role,
+                "user:delete",
+                &target,
+            ) {
+                return Err(Status::permission_denied(format!(
+                    "policy denied user:delete on user:{target}"
+                )));
+            }
+        }
 
         self.auth_store
             .delete_user(&username)
@@ -3721,6 +3763,20 @@ impl RedDb for GrpcRuntime {
 
         if target_username != caller_username {
             check_permission(&auth, false, true).map_err(Status::permission_denied)?;
+            if let AuthResult::Authenticated { role, .. } = &auth {
+                let actor = crate::auth::UserId::platform(caller_username.clone());
+                let target = crate::auth::UserId::platform(target_username.clone());
+                if !self.auth_store.check_user_lifecycle_authz(
+                    &actor,
+                    *role,
+                    "user:password:change",
+                    &target,
+                ) {
+                    return Err(Status::permission_denied(format!(
+                        "policy denied user:password:change on user:{target}"
+                    )));
+                }
+            }
         }
 
         self.auth_store

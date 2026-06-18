@@ -31,7 +31,7 @@ ASK 'list users with admin access and their login history' USING ollama MODEL 'l
 | You need time-series + SQL joins + graph traversal on the same data | **Strong** — multi-model is the whole point | TimescaleDB + Neo4j bridge |
 | You want ML inline in SQL (`ML_CLASSIFY`, `SEMANTIC_CACHE_*`, `EMBED`) | **Strong** — [AI-first surface](/guides/ask-your-database.md) | Python side-car |
 | You need an OLAP engine pushing 100M+ rows through GROUP BY in sub-second on a single box | **Partial** — we're 2–5× behind ClickHouse on heavy OLAP | ClickHouse |
-| You need distributed sharding across regions today | **Not yet** — single-node; [distributed roadmap](/architecture/distributed-roadmap.md) | CockroachDB, YugabyteDB |
+| You need production distributed sharding across regions today | **Not yet** — cluster sharding foundations are documented, but full runtime is still on the [distributed roadmap](/architecture/distributed-roadmap.md) | CockroachDB, YugabyteDB |
 | You depend on the Postgres extension ecosystem (PostGIS, etc.) | **No** — we speak the Postgres wire protocol but aren't a Postgres fork | Postgres proper |
 
 For the full engine-by-engine breakdown see [Competitive Positioning](/architecture/competitive-positioning.md).

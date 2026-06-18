@@ -21,8 +21,8 @@ docker build -t reddb .
 
 ```bash
 docker run --rm -it \
-  -p 50051:50051 \
-  -p 8080:8080 \
+  -p 55551:50051 \
+  -p 55880:8080 \
   -v $(pwd)/data:/data \
   --name reddb \
   reddb
@@ -60,24 +60,59 @@ REDDB_STORAGE_PRESET=serverless|primary-replica-production-ha|cluster
 REDDB_STORAGE_PROFILE=serverless|primary-replica|cluster
 REDDB_STORAGE_PACKAGING=operational-directory
 REDDB_REPLICA_COUNT=3
-REDDB_CONFIG_FILE=/etc/reddb/config.json
+REDDB_CONFIG_FILE=/etc/reddb/config.json # when mounting a config file
 ```
 
-The binary consumes `REDDB_TOPOLOGY` and `REDDB_NODE_ROLE` as the human
-topology layer when explicit args are absent. They compile into the process role
-and storage defaults. `REDDB_CONFIG_FILE` is resolved by the same operational
-bootstrap contract; the runtime still applies the file after storage opens so
+`REDDB_TOPOLOGY` and `REDDB_NODE_ROLE` are the human topology contract used by
+Compose, Helm, and operators. Today they make the selected topology visible and
+keep storage env consistent; the process role still comes from the rendered
+command args such as `red server --role primary` or `red replica --primary-addr
+...`. `REDDB_CONFIG_FILE` is resolved by the same operational bootstrap
+contract; the runtime still applies the file after storage opens so
 write-if-absent `red.config` semantics are preserved:
 
 - `serverless` runs the standalone process role with serverless storage.
-- `primary-replica` uses `REDDB_NODE_ROLE=primary|replica` to select the
-  process role.
+- `primary-replica` declares `REDDB_NODE_ROLE=primary|replica`; the rendered
+  command selects the process role.
 - `cluster` runs the standalone process role today with cluster storage and
-  cluster discovery env.
+  cluster discovery env. The range ownership and sharding contract is documented
+  in [Cluster Sharding](../architecture/cluster-sharding.md); the container
+  profile should not be treated as full production multi-writer serving yet.
 
-Explicit CLI args still win. `REDDB_STORAGE_*` overrides the topology-derived
-storage default, and `REDDB_CLUSTER_*` remains the cluster identity/discovery
-contract.
+`REDDB_STORAGE_*` overrides the topology-derived storage default, and
+`REDDB_CLUSTER_*` remains the cluster identity/discovery contract.
+
+## Auth First Boot
+
+The complete first-boot contract is documented in
+[First Boot Contract](./first-boot.md).
+
+For an automatic first boot, set the production preset only on the writer
+container:
+
+```bash
+REDDB_PRESET=production
+REDDB_USERNAME=admin
+REDDB_PASSWORD_FILE=/run/secrets/reddb_password
+```
+
+Use this on:
+
+- the `serverless` container
+- the `primary` container in `primary-replica`
+
+Do not set these variables on `red replica` containers. A replica should receive
+the replicated auth state from its primary, not create its own first admin. The
+same rule applies to Docker secrets with `_FILE` variables. For `cluster`, the
+Compose profile is a stable identity/discovery contract today; bootstrap cluster
+admins only after a concrete writer/volume bootstrap path is selected. The
+`red server` CLI rejects bootstrap env in cluster-shaped boots unless
+`--no-auth` or `--dev` is explicit.
+
+When vault is enabled, prefer `red bootstrap --vault` in a one-off container
+mounted to the same data volume. If you use `REDDB_PRESET=production` for
+first-start bootstrap, capture the newly issued certificate from the writer logs
+and update the runtime secret before any restart.
 
 ## Persist Data
 
@@ -87,8 +122,8 @@ Mount a volume to `/data` to persist the database across container restarts:
 mkdir -p data
 
 docker run -d \
-  -p 50051:50051 \
-  -p 8080:8080 \
+  -p 55551:50051 \
+  -p 55880:8080 \
   -v $(pwd)/data:/data \
   --restart unless-stopped \
   --name reddb \
@@ -97,24 +132,26 @@ docker run -d \
 
 ## Override Transport Binds
 
-Use environment variables when you want to keep the default entrypoint:
+Use environment variables when you want to keep the default entrypoint. The
+image command includes explicit bind args, so override the command as well when
+you need bind env vars to change listener addresses:
 
 ```bash
 docker run --rm -it \
-  -p 50051:50051 \
-  -p 8080:8080 \
+  -p 55551:50051 \
+  -p 55880:8080 \
   -e REDDB_DATA_PATH=/data/reddb.rdb \
   -e REDDB_GRPC_BIND_ADDR=0.0.0.0:50051 \
   -e REDDB_HTTP_BIND_ADDR=0.0.0.0:8080 \
   -v $(pwd)/data:/data \
-  reddb
+  reddb server --http
 ```
 
 Or override the command directly:
 
 ```bash
 docker run --rm -it \
-  -p 8080:8080 \
+  -p 55880:8080 \
   -v $(pwd)/data:/data \
   reddb server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
 ```
@@ -128,8 +165,8 @@ services:
   reddb:
     build: .
     ports:
-      - "50051:50051"
-      - "8080:8080"
+      - "55551:50051"
+      - "55880:8080"
     volumes:
       - reddb-data:/data
     restart: unless-stopped
@@ -150,8 +187,8 @@ services:
   primary:
     build: .
     ports:
-      - "50051:50051"
-      - "8080:8080"
+      - "55551:50051"
+      - "55880:8080"
     volumes:
       - primary-data:/data
     restart: unless-stopped
@@ -174,8 +211,8 @@ services:
   replica:
     build: .
     ports:
-      - "50052:50051"
-      - "8081:8080"
+      - "55552:50051"
+      - "55881:8080"
     volumes:
       - replica-data:/data
     depends_on:
@@ -218,8 +255,8 @@ services:
   reddb:
     build: .
     ports:
-      - "50051:50051"
-      - "8080:8080"
+      - "55551:50051"
+      - "55880:8080"
     volumes:
       - reddb-data:/data
     restart: unless-stopped
@@ -240,7 +277,7 @@ volumes:
 After starting, bootstrap the admin user:
 
 ```bash
-curl -X POST http://localhost:8080/auth/bootstrap \
+curl -X POST http://localhost:55880/auth/bootstrap \
   -H 'content-type: application/json' \
   -d '{"username": "admin", "password": "changeme"}'
 ```
@@ -307,13 +344,13 @@ docker run -d \
 The `/health` endpoint returns HTTP 200 when healthy and 503 when degraded:
 
 ```bash
-curl -f http://localhost:8080/health
+curl -f http://localhost:55880/health
 ```
 
 For gRPC health checks, use the `red health` command:
 
 ```bash
-red health --grpc --bind localhost:50051
+red health --grpc --bind localhost:55551
 ```
 
 ## Local Dev and CI
@@ -323,10 +360,10 @@ The repository ships several compose topologies under `examples/`:
 - `examples/docker-compose.min.yml`: single local server
 - `examples/docker-compose.replica.yml`: primary + one read replica
 - `examples/docker-compose.full.yml`: primary + two read replicas
-- `examples/docker-compose.remote.yml`: primary + replica + MinIO for remote snapshot/WAL archive testing
-- `examples/docker-compose.backup.yml`: single server + MinIO for remote backup flows
-- `examples/docker-compose.pitr.yml`: single primary + MinIO for PITR and restore-point flows
-- `examples/docker-compose.serverless.yml`: single remote-backed serverless-style node + MinIO
+- `examples/docker-compose.remote.yml`: primary + replica + Floci for remote snapshot/WAL archive testing
+- `examples/docker-compose.backup.yml`: single server + Floci for remote backup flows
+- `examples/docker-compose.pitr.yml`: single primary + Floci for PITR and restore-point flows
+- `examples/docker-compose.serverless.yml`: single remote-backed serverless-style node + Floci
 
 `examples/` is for manual usage and documentation. The automated test harness uses a separate
 test-only compose tree under `testdata/compose/`.
@@ -356,8 +393,8 @@ Typical local-dev loop:
 ```bash
 docker compose -f examples/docker-compose.replica.yml up -d --build
 docker compose -f examples/docker-compose.replica.yml logs -f
-curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8081/health
+curl -s http://127.0.0.1:55880/health
+curl -s http://127.0.0.1:55881/health
 docker compose -f examples/docker-compose.replica.yml down -v
 ```
 
@@ -368,12 +405,12 @@ For timeline/backup testing against an S3-compatible backend without cloud infra
 ```bash
 docker compose -f examples/docker-compose.remote.yml up -d --build
 docker compose -f examples/docker-compose.remote.yml logs -f
-curl -s http://127.0.0.1:8080/replication/status
-curl -s http://127.0.0.1:8081/replication/status
+curl -s http://127.0.0.1:55880/replication/status
+curl -s http://127.0.0.1:55881/replication/status
 docker compose -f examples/docker-compose.remote.yml down -v
 ```
 
-The dev topology provisions a local MinIO bucket and builds the RedDB image
+The dev topology provisions a local Floci bucket and builds the RedDB image
 with `backend-s3` enabled so snapshot/WAL archive flows can be exercised end-to-end.
 
 ## Resource Recommendations

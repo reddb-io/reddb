@@ -10,8 +10,8 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-primary
     ports:
-      - "50051:50051"
-      - "8080:8080"
+      - "55551:50051"
+      - "55880:8080"
     command:
       - "server"
       - "--role"
@@ -39,8 +39,8 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-replica-1
     ports:
-      - "50052:50051"
-      - "8081:8080"
+      - "55552:50051"
+      - "55881:8080"
     command:
       - "replica"
       - "--primary-addr"
@@ -70,8 +70,8 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-replica-2
     ports:
-      - "50053:50051"
-      - "8082:8080"
+      - "55553:50051"
+      - "55882:8080"
     command:
       - "replica"
       - "--primary-addr"

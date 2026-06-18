@@ -73,7 +73,7 @@ RedDB exposes four bootstrap presets through `REDDB_BOOTSTRAP_PRESET`
 | Preset | Purpose | Evidence behavior |
 |---|---|---|
 | `simple` | Default low-friction bootstrap for local development and small deployments. | Persists bootstrap idempotency state only. The simple preset does not enable regulated evidence overhead, query-audit infrastructure, or fail-closed control-event persistence by itself. |
-| `production` | Creates the first platform-scoped, system-owned admin from `REDDB_USERNAME`/`REDDB_PASSWORD` or their `_FILE` companions and grants authority through an attached allow-all policy. | Uses policy-derived authority rather than an admin bypass and persists bootstrap state for idempotent restarts. |
+| `production` | Creates the first platform-scoped admin from `REDDB_USERNAME`/`REDDB_PASSWORD` or their `_FILE` companions and grants authority through an attached allow-all policy. | Uses policy-derived authority rather than an admin bypass and persists bootstrap state for idempotent restarts. |
 | `regulated` | Enables evidence guardrails for regulated workloads without globally auditing data-plane queries. | Enables fail-closed control-event persistence, creates query-audit infrastructure with no rules, installs managed evidence guardrail policy/config registry entries, and records denied guardrail mutations. |
 | `cloud` | Creates a platform-scoped, system-owned head admin plus an ordinary platform customer admin from `REDDB_CLOUD_HEAD_ADMIN*` and `REDDB_CUSTOMER_ADMIN*` credentials. | Enables auth, require-auth, and vault by default, attaches allow-all policy-derived authority, installs cloud managed guardrails, and relies on system-owned immutability so the customer admin cannot delete or mutate the head admin. |
 

@@ -11,8 +11,8 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-primary
     ports:
-      - "50051:50051"
-      - "8080:8080"
+      - "55551:50051"
+      - "55880:8080"
     volumes:
       - primary-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro
@@ -52,8 +52,8 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-replica
     ports:
-      - "50052:50051"
-      - "8081:8080"
+      - "55552:50051"
+      - "55881:8080"
     volumes:
       - replica-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro

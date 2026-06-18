@@ -6687,11 +6687,7 @@ impl RedDBRuntime {
         let columns = self.resolved_table_projection_columns(table)?;
         let request = ColumnAccessRequest::select(table.table.clone(), columns);
         let principal = UserId::from_parts(frame.effective_scope(), username);
-        let ctx = runtime_iam_context(
-            role,
-            frame.effective_scope(),
-            auth_store.principal_is_system_owned(&principal),
-        );
+        let ctx = runtime_iam_context(role, frame.effective_scope());
         let outcome = auth_store.check_column_projection_authz(&principal, &request, &ctx);
         if outcome.allowed() {
             return Ok(());
@@ -10196,11 +10192,7 @@ impl RedDBRuntime {
         if auth_store.iam_authorization_enabled() {
             let iam_action = legacy_action_to_iam(action);
             let iam_resource = legacy_resource_to_iam(&resource, tenant.as_deref());
-            let iam_ctx = runtime_iam_context(
-                role,
-                tenant.as_deref(),
-                auth_store.principal_is_system_owned(&principal_id),
-            );
+            let iam_ctx = runtime_iam_context(role, tenant.as_deref());
             if !auth_store.check_policy_authz_with_role(
                 &principal_id,
                 iam_action,
@@ -10342,11 +10334,7 @@ impl RedDBRuntime {
         table: &str,
         columns: &[String],
     ) -> Result<(), String> {
-        let iam_ctx = runtime_iam_context(
-            role,
-            tenant,
-            auth_store.principal_is_system_owned(principal),
-        );
+        let iam_ctx = runtime_iam_context(role, tenant);
         let request =
             crate::auth::ColumnAccessRequest::select(table.to_string(), columns.iter().cloned());
         let outcome = auth_store.check_column_projection_authz(principal, &request, &iam_ctx);
@@ -10373,11 +10361,7 @@ impl RedDBRuntime {
         resource_kind: &str,
         resource_name: &str,
     ) -> Result<(), String> {
-        let ctx = runtime_iam_context(
-            role,
-            tenant,
-            auth_store.principal_is_system_owned(principal),
-        );
+        let ctx = runtime_iam_context(role, tenant);
 
         if !auth_store.iam_authorization_enabled() {
             return if role == crate::auth::Role::Admin {
@@ -10415,11 +10399,7 @@ impl RedDBRuntime {
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let tenant = current_tenant();
         let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
-        let ctx = runtime_iam_context(
-            role,
-            tenant.as_deref(),
-            auth_store.principal_is_system_owned(&principal),
-        );
+        let ctx = runtime_iam_context(role, tenant.as_deref());
         let gate = crate::auth::managed_config::ManagedConfigGate::new(
             self.inner.config_registry.as_ref(),
         );
@@ -10466,11 +10446,7 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        let ctx = runtime_iam_context(
-            role,
-            tenant,
-            auth_store.principal_is_system_owned(principal),
-        );
+        let ctx = runtime_iam_context(role, tenant);
         if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
             Ok(())
         } else {
@@ -10516,11 +10492,7 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        let ctx = runtime_iam_context(
-            role,
-            tenant,
-            auth_store.principal_is_system_owned(principal),
-        );
+        let ctx = runtime_iam_context(role, tenant);
         if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
             Ok(())
         } else {
@@ -10562,11 +10534,7 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        let ctx = runtime_iam_context(
-            role,
-            tenant,
-            auth_store.principal_is_system_owned(principal),
-        );
+        let ctx = runtime_iam_context(role, tenant);
         if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
             Ok(())
         } else {
@@ -10668,11 +10636,7 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        let ctx = runtime_iam_context(
-            role,
-            tenant,
-            auth_store.principal_is_system_owned(principal),
-        );
+        let ctx = runtime_iam_context(role, tenant);
         if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
             self.inner.audit_log.record(
                 action,
@@ -11060,11 +11024,7 @@ impl RedDBRuntime {
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
-        let eval_ctx = runtime_iam_context(
-            actor_role,
-            tenant.as_deref(),
-            auth_store.principal_is_system_owned(&actor),
-        );
+        let eval_ctx = runtime_iam_context(actor_role, tenant.as_deref());
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
         let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
@@ -11114,11 +11074,7 @@ impl RedDBRuntime {
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
-        let eval_ctx = runtime_iam_context(
-            actor_role,
-            tenant.as_deref(),
-            auth_store.principal_is_system_owned(&actor),
-        );
+        let eval_ctx = runtime_iam_context(actor_role, tenant.as_deref());
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
         let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
@@ -11184,11 +11140,7 @@ impl RedDBRuntime {
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
-        let eval_ctx = runtime_iam_context(
-            actor_role,
-            tenant.as_deref(),
-            auth_store.principal_is_system_owned(&actor),
-        );
+        let eval_ctx = runtime_iam_context(actor_role, tenant.as_deref());
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
         let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
@@ -11255,11 +11207,7 @@ impl RedDBRuntime {
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
-        let eval_ctx = runtime_iam_context(
-            actor_role,
-            tenant.as_deref(),
-            auth_store.principal_is_system_owned(&actor),
-        );
+        let eval_ctx = runtime_iam_context(actor_role, tenant.as_deref());
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
         let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
@@ -12516,7 +12464,6 @@ fn is_policy_column_name(column: &str) -> bool {
 fn runtime_iam_context(
     role: crate::auth::Role,
     tenant: Option<&str>,
-    principal_is_system_owned: bool,
 ) -> crate::auth::policies::EvalContext {
     crate::auth::policies::EvalContext {
         principal_tenant: tenant.map(|t| t.to_string()),
@@ -12525,7 +12472,6 @@ fn runtime_iam_context(
         mfa_present: false,
         now_ms: crate::auth::now_ms(),
         principal_is_admin_role: role == crate::auth::Role::Admin,
-        principal_is_system_owned,
         principal_is_platform_scoped: tenant.is_none(),
     }
 }
