@@ -356,9 +356,8 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("read-only").with_description("Open the database in read-only mode"),
         FlagSchema::boolean("no-create-if-missing")
             .with_description("Fail instead of creating the database file"),
-        FlagSchema::new("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
-            .with_default("false"),
+        FlagSchema::boolean("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
         FlagSchema::boolean("no-auth").with_description(
             "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault, \
              prints a startup warning. Local-dev shortcut — NEVER use in production.",
@@ -424,9 +423,8 @@ fn replica_flags() -> Vec<FlagSchema> {
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
         FlagSchema::new("wire-bind")
             .with_description("Explicit wire bind address (host:port or unix:///path/to/socket)"),
-        FlagSchema::new("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
-            .with_default("false"),
+        FlagSchema::boolean("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
     ]
 }
 

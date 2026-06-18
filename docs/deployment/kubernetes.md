@@ -112,6 +112,9 @@ Use `SET CONFIG` for persistent config changes after first boot.
 
 ## Secrets
 
+The complete first-boot contract is documented in
+[First Boot Contract](./first-boot.md).
+
 Use Kubernetes Secrets for credentials:
 
 ```yaml

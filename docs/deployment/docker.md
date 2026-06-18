@@ -84,6 +84,9 @@ write-if-absent `red.config` semantics are preserved:
 
 ## Auth First Boot
 
+The complete first-boot contract is documented in
+[First Boot Contract](./first-boot.md).
+
 For an automatic first boot, set the production preset only on the writer
 container:
 
