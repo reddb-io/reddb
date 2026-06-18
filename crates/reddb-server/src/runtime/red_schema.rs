@@ -2478,6 +2478,12 @@ fn render_field_for_catalog(field: &FieldRef) -> String {
     }
 }
 
+fn on_disk_bytes_value(store: &crate::storage::unified::UnifiedStore, collection: &str) -> Value {
+    crate::storage::disk_accountant::bytes_on_disk_for(store, collection)
+        .map(Value::UnsignedInteger)
+        .unwrap_or(Value::Null)
+}
+
 fn collections_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
@@ -2514,10 +2520,7 @@ fn collections_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
-                store.as_ref(),
-                &collection.name,
-            );
+            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
             let queue_mode = if collection.model == CollectionModel::Queue {
                 Value::text(super::impl_queue::queue_mode_str(
                     store.as_ref(),
@@ -2553,7 +2556,7 @@ fn collections_snapshot(
                     Value::UnsignedInteger(collection.segments as u64),
                     Value::UnsignedInteger(collection.indices.len() as u64),
                     Value::UnsignedInteger(in_memory_bytes),
-                    Value::UnsignedInteger(on_disk_bytes),
+                    on_disk_bytes,
                     Value::Boolean(internal),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                     queue_mode,
@@ -2612,10 +2615,7 @@ fn tables_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
-                store.as_ref(),
-                &collection.name,
-            );
+            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
             let owner_tenant = collection_tenant(store.as_ref(), &collection.name);
             let visible_tenant = owner_tenant.as_deref().or(tenant);
             let internal = internal_registry.is_internal(&collection.name);
@@ -2629,7 +2629,7 @@ fn tables_snapshot(
                     Value::UnsignedInteger(collection.indices.len() as u64),
                     Value::Boolean(has_primary_key),
                     Value::UnsignedInteger(in_memory_bytes),
-                    Value::UnsignedInteger(on_disk_bytes),
+                    on_disk_bytes,
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                     Value::Boolean(internal),
                 ],
@@ -2675,10 +2675,7 @@ fn documents_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
-                store.as_ref(),
-                &collection.name,
-            );
+            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
             let internal = internal_registry.is_internal(&collection.name);
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
@@ -2689,7 +2686,7 @@ fn documents_snapshot(
                     Value::UnsignedInteger(inferred_field_count),
                     Value::Boolean(true),
                     Value::UnsignedInteger(in_memory_bytes),
-                    Value::UnsignedInteger(on_disk_bytes),
+                    on_disk_bytes,
                     Value::Boolean(internal),
                 ],
             )
@@ -2767,10 +2764,7 @@ fn kv_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
-                store.as_ref(),
-                &collection.name,
-            );
+            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
             let internal = internal_registry.is_internal(&collection.name);
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
@@ -2781,7 +2775,7 @@ fn kv_snapshot(
                     Value::text(value_type),
                     Value::Boolean(true),
                     Value::UnsignedInteger(in_memory_bytes),
-                    Value::UnsignedInteger(on_disk_bytes),
+                    on_disk_bytes,
                     Value::Boolean(internal),
                 ],
             )
@@ -2830,10 +2824,7 @@ fn vectors_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
-                store.as_ref(),
-                &collection.name,
-            );
+            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
             let owner_tenant = collection_tenant(store.as_ref(), &collection.name);
             let visible_tenant = owner_tenant.as_deref().or(tenant);
             let internal = internal_registry.is_internal(&collection.name);
@@ -2860,7 +2851,7 @@ fn vectors_snapshot(
                     Value::Boolean(search_capable),
                     Value::text(artifact_state),
                     Value::UnsignedInteger(in_memory_bytes),
-                    Value::UnsignedInteger(on_disk_bytes),
+                    on_disk_bytes,
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                     Value::Boolean(internal),
                 ],
@@ -2954,10 +2945,7 @@ fn timeseries_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
-                store.as_ref(),
-                &collection.name,
-            );
+            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
             let owner_tenant = collection_tenant(store.as_ref(), &collection.name);
             let visible_tenant = owner_tenant.as_deref().or(tenant);
             let internal = internal_registry.is_internal(&collection.name);
@@ -3024,7 +3012,7 @@ fn timeseries_snapshot(
                         .map(Value::UnsignedInteger)
                         .unwrap_or(Value::Null),
                     Value::UnsignedInteger(in_memory_bytes),
-                    Value::UnsignedInteger(on_disk_bytes),
+                    on_disk_bytes,
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                     Value::Boolean(internal),
                     downsample_policies_value,
@@ -3375,10 +3363,7 @@ fn graphs_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
-                store.as_ref(),
-                &collection.name,
-            );
+            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
             let internal = internal_registry.is_internal(&collection.name);
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
@@ -3391,7 +3376,7 @@ fn graphs_snapshot(
                     Value::Boolean(true),
                     Value::Boolean(true),
                     Value::UnsignedInteger(in_memory_bytes),
-                    Value::UnsignedInteger(on_disk_bytes),
+                    on_disk_bytes,
                     Value::Boolean(internal),
                 ],
             )
