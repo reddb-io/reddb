@@ -3304,6 +3304,8 @@ fn build_server_config(
     let bootstrap = resolve_operational_bootstrap(flags, forced_role)?;
     let storage_profile = bootstrap.storage_profile;
     let role = bootstrap.process_role;
+    let no_auth = flag_bool(flags, "no-auth") || flag_bool(flags, "dev");
+    validate_auth_bootstrap_env_for_cluster_shape(bootstrap.topology, storage_profile, no_auth)?;
 
     let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
 
@@ -3406,7 +3408,7 @@ fn build_server_config(
         primary_addr: flag_string(flags, "primary-addr").filter(|value| !value.is_empty()),
         storage_profile,
         vault: flag_bool(flags, "vault"),
-        no_auth: flag_bool(flags, "no-auth") || flag_bool(flags, "dev"),
+        no_auth,
         workers,
         telemetry: Some(telemetry),
         http_limits_cli,
@@ -3418,6 +3420,37 @@ fn build_server_config(
             .filter(|v| !v.is_empty())
             .map(PathBuf::from),
     })
+}
+
+fn validate_auth_bootstrap_env_for_cluster_shape(
+    topology: reddb::operational_bootstrap::OperationalTopology,
+    storage_profile: reddb::storage::StorageProfileSelection,
+    no_auth: bool,
+) -> Result<(), String> {
+    let cluster_shape = topology == reddb::operational_bootstrap::OperationalTopology::Cluster
+        || storage_profile.deploy_profile == reddb::storage::DeployProfile::Cluster;
+    if no_auth || !cluster_shape {
+        return Ok(());
+    }
+
+    let bootstrap_vars = [
+        "REDDB_PRESET",
+        "REDDB_BOOTSTRAP_MANIFEST",
+        "REDDB_USERNAME",
+        "REDDB_USERNAME_FILE",
+        "REDDB_PASSWORD",
+        "REDDB_PASSWORD_FILE",
+    ];
+    if let Some(var) = bootstrap_vars
+        .iter()
+        .find(|var| std::env::var(var).is_ok_and(|value| !value.trim().is_empty()))
+    {
+        return Err(format!(
+            "{var} is not supported in cluster-shaped boots yet; cluster auth bootstrap needs a concrete writer/volume owner. Use --no-auth for anonymous cluster-shaped boot, or bootstrap auth after the cluster writer path exists."
+        ));
+    }
+
+    Ok(())
 }
 
 fn resolve_storage_profile(
@@ -5882,6 +5915,12 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_PRESET",
+            "REDDB_BOOTSTRAP_MANIFEST",
+            "REDDB_USERNAME",
+            "REDDB_USERNAME_FILE",
+            "REDDB_PASSWORD",
+            "REDDB_PASSWORD_FILE",
         ]);
 
         let config = build_server_config(&HashMap::new(), None).unwrap();
@@ -5960,6 +5999,93 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let config = build_server_config(&HashMap::new(), None).unwrap();
 
         assert_eq!(config.role, "standalone");
+        assert_eq!(
+            config.storage_profile.deploy_profile,
+            reddb::storage::DeployProfile::Cluster
+        );
+    }
+
+    #[test]
+    fn build_server_config_rejects_cluster_auth_bootstrap_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_TOPOLOGY", "cluster"),
+            ("REDDB_NODE_ROLE", "cluster-member"),
+            ("REDDB_PRESET", "production"),
+            ("REDDB_USERNAME", "ops"),
+            ("REDDB_PASSWORD", "hunter2"),
+        ]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+
+        let err = build_server_config(&HashMap::new(), None).unwrap_err();
+
+        assert!(err.contains("REDDB_PRESET"), "got: {err}");
+        assert!(err.contains("cluster-shaped boots"), "got: {err}");
+        assert!(err.contains("writer/volume owner"), "got: {err}");
+    }
+
+    #[test]
+    fn build_server_config_rejects_auth_bootstrap_env_with_cluster_storage_preset() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_STORAGE_PRESET", "cluster"),
+            ("REDDB_BOOTSTRAP_MANIFEST", "/etc/reddb/bootstrap.json"),
+        ]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_TOPOLOGY",
+            "REDDB_NODE_ROLE",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+            "REDDB_PRESET",
+            "REDDB_USERNAME",
+            "REDDB_USERNAME_FILE",
+            "REDDB_PASSWORD",
+            "REDDB_PASSWORD_FILE",
+        ]);
+
+        let err = build_server_config(&HashMap::new(), None).unwrap_err();
+
+        assert!(err.contains("REDDB_BOOTSTRAP_MANIFEST"), "got: {err}");
+        assert!(err.contains("cluster-shaped boots"), "got: {err}");
+    }
+
+    #[test]
+    fn build_server_config_allows_cluster_bootstrap_env_under_no_auth() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_TOPOLOGY", "cluster"),
+            ("REDDB_NODE_ROLE", "cluster-member"),
+            ("REDDB_PRESET", "production"),
+            ("REDDB_USERNAME", "ops"),
+            ("REDDB_PASSWORD", "hunter2"),
+        ]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+        let flags = HashMap::from([("no-auth".to_string(), bool_flag(true))]);
+
+        let config = build_server_config(&flags, None).unwrap();
+
+        assert_eq!(config.role, "standalone");
+        assert!(config.no_auth);
         assert_eq!(
             config.storage_profile.deploy_profile,
             reddb::storage::DeployProfile::Cluster

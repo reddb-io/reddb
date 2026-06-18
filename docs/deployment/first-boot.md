@@ -34,7 +34,7 @@ database does not unseal another database.
 | Standalone / embedded file | Supported with `--no-auth` or `--dev`; this disables vault and skips presets. | Supported through `red bootstrap --vault` on the real file/volume, or `red server --vault` plus `REDDB_PRESET=production` and admin env. | Supported. |
 | Serverless writer | Same as standalone; serverless is a standalone process role with serverless storage/remote backend contract. | Supported on the single writer. Bootstrap the local writer volume before remote backup/restore, or use first-start `REDDB_PRESET=production` and capture the emitted certificate. | Supported for one writer. |
 | Primary-replica | Supported on the primary; replicas should not create local admins. | Supported on the primary only. Replicas must receive replicated auth state from the primary and must not receive bootstrap env. | Supported for the primary-replica writer path. |
-| Cluster | Supported only as today's cluster-shaped storage/discovery contract with standalone process roles. | Not supported by the chart yet. Symmetric members cannot safely pick a first writer, so `mode=cluster` rejects `auth.enabled=true`. | Incomplete until cluster writer election/range ownership defines a single auth bootstrap owner. |
+| Cluster | Supported only as today's cluster-shaped storage/discovery contract with standalone process roles. | Not supported yet. Symmetric members cannot safely pick a first writer, so `mode=cluster` rejects `auth.enabled=true`, and `red server` rejects bootstrap env when the resolved shape is cluster. | Incomplete until cluster writer election/range ownership defines a single auth bootstrap owner. |
 
 ## Config First Boot
 
@@ -129,7 +129,9 @@ user and policy resources.
 - `AuthStore::bootstrap` creates the first admin, API key, vault keypair, and
   certificate when a pager-backed vault exists.
 - Helm renders auth bootstrap env only into the writer StatefulSet and rejects
-  `mode=cluster` with `auth.enabled=true`.
+  `mode=cluster` with `auth.enabled=true`. The `red server` CLI also rejects
+  `REDDB_PRESET`, `REDDB_BOOTSTRAP_MANIFEST`, and admin username/password env
+  in cluster-shaped boots unless `--no-auth` or `--dev` is explicit.
 - User lifecycle policy gates cover `user:create`, `user:delete`,
   `user:disable`, `user:password:change`, and `user:role:update`; public HTTP
   and gRPC user-delete/password-change paths call that gate.
