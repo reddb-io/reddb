@@ -46,6 +46,7 @@
 use std::collections::BTreeMap;
 
 use super::identity::NodeIdentity;
+use super::slot::hash_shard_key_to_range_key;
 
 /// A user collection's stable identity, as recorded in the catalog.
 ///
@@ -794,6 +795,13 @@ impl ShardOwnershipCatalog {
                         attempted: entry.version(),
                     });
                 }
+                if let Some(existing) = self.overlapping_sibling(&entry) {
+                    return Err(CatalogError::OverlappingRange {
+                        collection: entry.collection().clone(),
+                        existing,
+                        attempted: entry.range_id(),
+                    });
+                }
                 self.collections
                     .insert(entry.collection().clone(), entry.shard_key_mode());
                 self.ranges.insert(key, entry);
@@ -802,13 +810,10 @@ impl ShardOwnershipCatalog {
             None => {
                 // Creating a range: it must not overlap any sibling range of the
                 // same collection, or routing would be ambiguous.
-                if let Some(existing) = self
-                    .ranges_for(entry.collection())
-                    .find(|r| r.bounds().overlaps(entry.bounds()))
-                {
+                if let Some(existing) = self.overlapping_sibling(&entry) {
                     return Err(CatalogError::OverlappingRange {
                         collection: entry.collection().clone(),
-                        existing: existing.range_id(),
+                        existing,
                         attempted: entry.range_id(),
                     });
                 }
@@ -818,6 +823,14 @@ impl ShardOwnershipCatalog {
                 Ok(UpdateOutcome::Created)
             }
         }
+    }
+
+    fn overlapping_sibling(&self, entry: &RangeOwnership) -> Option<RangeId> {
+        self.ranges_for(entry.collection())
+            .find(|range| {
+                range.range_id() != entry.range_id() && range.bounds().overlaps(entry.bounds())
+            })
+            .map(RangeOwnership::range_id)
     }
 
     /// The current ownership of one range, addressed directly by identity — no
@@ -838,13 +851,32 @@ impl ShardOwnershipCatalog {
             .map(|(_, r)| r)
     }
 
-    /// Route a key to the range that owns it — the catalog read every routing
-    /// decision makes. Returns the owning [`RangeOwnership`] (whose `owner`,
-    /// `epoch`, and `replicas` the caller uses to send and fence the write), or
-    /// `None` if no range covers the key yet.
+    /// Route a normalized range key to the range that owns it — the catalog read
+    /// every routing decision makes. Returns the owning [`RangeOwnership`] (whose
+    /// `owner`, `epoch`, and `replicas` the caller uses to send and fence the
+    /// write), or `None` if no range covers the key yet.
     pub fn route(&self, collection: &CollectionId, key: &[u8]) -> Option<&RangeOwnership> {
         self.ranges_for(collection)
             .find(|r| r.bounds().contains(key))
+    }
+
+    /// Route a logical shard key according to the collection's declared mode.
+    ///
+    /// Ordered collections route the shard key bytes directly. Hash collections
+    /// first map the shard key into a stable hash slot and route that slot's
+    /// range key through the same `collection -> range` catalog.
+    pub fn route_shard_key(
+        &self,
+        collection: &CollectionId,
+        shard_key: &[u8],
+    ) -> Option<&RangeOwnership> {
+        match self.shard_key_mode(collection)? {
+            ShardKeyMode::Ordered => self.route(collection, shard_key),
+            ShardKeyMode::Hash => {
+                let range_key = hash_shard_key_to_range_key(shard_key);
+                self.route(collection, &range_key)
+            }
+        }
     }
 
     /// This node's [`RangeRole`] for a directly-addressed range (issue #990).
@@ -883,11 +915,11 @@ impl ShardOwnershipCatalog {
         key: &[u8],
         expected_epoch: OwnershipEpoch,
     ) -> Result<&RangeOwnership, RangeWriteReject> {
-        let range = self
-            .route(collection, key)
-            .ok_or_else(|| RangeWriteReject::NoRange {
-                collection: collection.clone(),
-            })?;
+        let range =
+            self.route_shard_key(collection, key)
+                .ok_or_else(|| RangeWriteReject::NoRange {
+                    collection: collection.clone(),
+                })?;
         let role = range.role_of(node);
         if !role.may_write_public() {
             return Err(RangeWriteReject::NotOwner {
@@ -948,6 +980,18 @@ mod tests {
             [ident("CN=replica-1")],
             PlacementMetadata::with_replication_factor(3),
         )
+    }
+
+    fn single_hash_slot_bounds(key: &[u8]) -> RangeBounds {
+        let slot = super::super::slot::hash_shard_key_to_slot(key);
+        let lower = RangeBound::key(slot.range_key());
+        let upper = match slot.value().checked_add(1) {
+            Some(next) if next < super::super::slot::PRODUCTION_HASH_SLOT_COUNT => {
+                RangeBound::key(super::super::slot::HashSlot::new(next).unwrap().range_key())
+            }
+            _ => RangeBound::Max,
+        };
+        RangeBounds::new(lower, upper).unwrap()
     }
 
     #[test]
@@ -1011,6 +1055,26 @@ mod tests {
         let r = catalog.route(&orders, &[0x10]).unwrap();
         assert_eq!(r.replicas(), &[ident("CN=replica-1")]);
         assert_eq!(r.epoch(), OwnershipEpoch::initial());
+    }
+
+    #[test]
+    fn hash_mode_routes_logical_shard_key_through_hash_slot() {
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        let key = b"tenant:42";
+        catalog
+            .apply_update(hash_range(
+                &orders,
+                1,
+                single_hash_slot_bounds(key),
+                "CN=node-a",
+            ))
+            .unwrap();
+
+        let routed = catalog
+            .route_shard_key(&orders, key)
+            .expect("hash slot range covers the logical shard key");
+        assert_eq!(routed.owner(), &ident("CN=node-a"));
     }
 
     #[test]
@@ -1197,6 +1261,46 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_range_update_is_rejected() {
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        catalog
+            .apply_update(hash_range(
+                &orders,
+                1,
+                bounds(&[0x00], &[0x80]),
+                "CN=node-a",
+            ))
+            .unwrap();
+        catalog
+            .apply_update(hash_range(
+                &orders,
+                2,
+                RangeBounds::new(RangeBound::key([0x80]), RangeBound::Max).unwrap(),
+                "CN=node-b",
+            ))
+            .unwrap();
+
+        let widened = catalog
+            .range(&orders, RangeId::new(1))
+            .unwrap()
+            .with_bounds(bounds(&[0x00], &[0xc0]));
+        let err = catalog.apply_update(widened).unwrap_err();
+        assert_eq!(
+            err,
+            CatalogError::OverlappingRange {
+                collection: orders.clone(),
+                existing: RangeId::new(2),
+                attempted: RangeId::new(1),
+            }
+        );
+        assert_eq!(
+            catalog.range(&orders, RangeId::new(1)).unwrap().bounds(),
+            &bounds(&[0x00], &[0x80])
+        );
+    }
+
+    #[test]
     fn catalog_replicates_to_data_members_with_read_visibility() {
         // Leader writes the catalog; a data member holds its own replica and
         // applies the same versioned updates — no user-data sharding involved.
@@ -1357,6 +1461,26 @@ mod tests {
             )
             .expect("owner at current epoch may write");
         assert_eq!(admitted.owner(), &ident("CN=node-a"));
+        assert_eq!(admitted.range_id(), RangeId::new(1));
+    }
+
+    #[test]
+    fn public_write_uses_hash_slot_routing_for_hash_collections() {
+        let mut catalog = ShardOwnershipCatalog::new();
+        let orders = collection("orders");
+        let key = b"tenant:42";
+        catalog
+            .apply_update(hash_range(
+                &orders,
+                1,
+                single_hash_slot_bounds(key),
+                "CN=node-a",
+            ))
+            .unwrap();
+
+        let admitted = catalog
+            .admit_public_write(&ident("CN=node-a"), &orders, key, OwnershipEpoch::initial())
+            .expect("hash owner admits write routed by shard-key slot");
         assert_eq!(admitted.range_id(), RangeId::new(1));
     }
 

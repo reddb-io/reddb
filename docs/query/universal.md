@@ -19,6 +19,8 @@ The parameterized-query design is tracked in
 
 ```sql
 FROM ANY [WHERE condition] [ORDER BY field [ASC|DESC]] [LIMIT n] [OFFSET n]
+SELECT * FROM ANY [WHERE condition] [ORDER BY field [ASC|DESC]] [LIMIT n] [OFFSET n]
+SELECT * [WHERE condition] [ORDER BY field [ASC|DESC]] [LIMIT n] [OFFSET n]
 ```
 
 ## Basic Usage
@@ -50,6 +52,18 @@ FROM ANY WHERE collection = $1 LIMIT $2
 ```sql
 FROM ANY WHERE kind = $1 AND collection = $2 ORDER BY rid DESC LIMIT $3
 ```
+
+### Implicit ANY from SELECT
+
+```sql
+SELECT * WHERE passport = $1
+```
+
+`SELECT` without `FROM` is parsed as the universal source `any`. When the
+`WHERE` clause references simple attributes, RedDB can use those field names to
+reduce the candidate collection set before scanning; collections with dynamic
+or unknown shape remain eligible, and the final `WHERE` predicate is still
+applied to every returned record.
 
 ## Item Kinds
 

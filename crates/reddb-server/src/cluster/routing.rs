@@ -351,7 +351,7 @@ impl ShardOwnershipCatalog {
         request: &RoutedRequest,
         policy: &RoutingPolicy,
     ) -> RouteDecision {
-        let range = match self.route(request.collection(), request.key()) {
+        let range = match self.route_shard_key(request.collection(), request.key()) {
             Some(range) => range,
             None => {
                 return RouteDecision::Unroutable {
