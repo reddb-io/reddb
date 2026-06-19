@@ -228,6 +228,7 @@ pub(crate) struct RouteCatalog {
     routes: Vec<CompiledRoute>,
     exact_index: BTreeMap<(RouteMethod, &'static str), usize>,
     dynamic_indices: Vec<usize>,
+    aliases: Vec<CompiledAlias>,
 }
 
 impl RouteCatalog {
@@ -247,7 +248,25 @@ impl RouteCatalog {
                     reason,
                 }
             })?;
-            routes.push(CompiledRoute { spec, pattern });
+            let mut aliases = Vec::with_capacity(spec.aliases.len());
+            for alias in spec.aliases {
+                let pattern = RoutePattern::parse(alias.pattern).map_err(|reason| {
+                    RouteCatalogError::InvalidPattern {
+                        route_id: spec.id,
+                        pattern: alias.pattern,
+                        reason,
+                    }
+                })?;
+                aliases.push(CompiledRouteAlias {
+                    alias: *alias,
+                    pattern,
+                });
+            }
+            routes.push(CompiledRoute {
+                spec,
+                pattern,
+                aliases,
+            });
         }
 
         for left in 0..routes.len() {
@@ -282,11 +301,19 @@ impl RouteCatalog {
 
         let mut exact_index = BTreeMap::new();
         let mut dynamic_indices = Vec::new();
+        let mut aliases = Vec::new();
         for (index, route) in routes.iter().enumerate() {
             if route.pattern.is_exact() {
                 exact_index.insert((route.spec.method, route.pattern.raw), index);
             } else {
                 dynamic_indices.push(index);
+            }
+            for alias in &route.aliases {
+                aliases.push(CompiledAlias {
+                    route_index: index,
+                    alias: alias.alias,
+                    pattern: alias.pattern.clone(),
+                });
             }
         }
 
@@ -294,6 +321,7 @@ impl RouteCatalog {
             routes,
             exact_index,
             dynamic_indices,
+            aliases,
         })
     }
 
@@ -327,6 +355,21 @@ impl RouteCatalog {
                     params,
                 });
             }
+        }
+
+        None
+    }
+
+    pub(crate) fn resolve_alias(&self, method: RouteMethod, path: &str) -> Option<String> {
+        for alias in &self.aliases {
+            if !alias.alias.method.overlaps(method) {
+                continue;
+            }
+            let Some(params) = alias.pattern.matches(path) else {
+                continue;
+            };
+            let route = &self.routes[alias.route_index];
+            return route.pattern.render(&params);
         }
 
         None
@@ -400,6 +443,20 @@ impl std::error::Error for RouteCatalogError {}
 #[derive(Clone, Debug)]
 struct CompiledRoute {
     spec: RouteSpec,
+    pattern: RoutePattern,
+    aliases: Vec<CompiledRouteAlias>,
+}
+
+#[derive(Clone, Debug)]
+struct CompiledRouteAlias {
+    alias: RouteAlias,
+    pattern: RoutePattern,
+}
+
+#[derive(Clone, Debug)]
+struct CompiledAlias {
+    route_index: usize,
+    alias: RouteAlias,
     pattern: RoutePattern,
 }
 
@@ -530,6 +587,35 @@ impl RoutePattern {
             }
         }
     }
+
+    fn render(&self, params: &BTreeMap<String, String>) -> Option<String> {
+        if self.raw == "*" {
+            return Some(
+                params
+                    .get("*")
+                    .map(|value| format!("/{value}"))
+                    .unwrap_or_else(|| "/".to_string()),
+            );
+        }
+        if self.segments.is_empty() {
+            return Some("/".to_string());
+        }
+
+        let mut rendered = String::new();
+        for segment in &self.segments {
+            rendered.push('/');
+            match segment {
+                RouteSegment::Static(value) => rendered.push_str(value),
+                RouteSegment::Param(name) => rendered.push_str(params.get(name)?),
+                RouteSegment::Wildcard => {
+                    if let Some(value) = params.get("*") {
+                        rendered.push_str(value);
+                    }
+                }
+            }
+        }
+        Some(rendered)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -568,6 +654,18 @@ mod tests {
             stability: RouteStability::Stable,
             aliases: &[],
             middlewares: NO_MIDDLEWARE,
+        }
+    }
+
+    fn spec_with_alias(
+        id: &'static str,
+        method: RouteMethod,
+        pattern: &'static str,
+        aliases: &'static [RouteAlias],
+    ) -> RouteSpec {
+        RouteSpec {
+            aliases,
+            ..spec(id, method, pattern)
         }
     }
 
@@ -649,5 +747,47 @@ mod tests {
 
         assert!(matches!(err, RouteCatalogError::InvalidPattern { .. }));
         assert!(err.to_string().contains("optional path parameters"));
+    }
+
+    #[test]
+    fn exact_aliases_resolve_to_live_route_path() {
+        const ALIASES: &[RouteAlias] = &[RouteAlias::canonical(
+            RouteMethod::Post,
+            "/v1/auth/login",
+            "canonical auth path",
+        )];
+        let catalog = RouteCatalog::build(vec![spec_with_alias(
+            "auth.login",
+            RouteMethod::Post,
+            "/auth/login",
+            ALIASES,
+        )])
+        .unwrap();
+
+        assert_eq!(
+            catalog.resolve_alias(RouteMethod::Post, "/v1/auth/login"),
+            Some("/auth/login".to_string())
+        );
+    }
+
+    #[test]
+    fn dynamic_aliases_resolve_to_live_route_path_with_params() {
+        const ALIASES: &[RouteAlias] = &[RouteAlias::canonical(
+            RouteMethod::Get,
+            "/v1/ai/models/:name",
+            "canonical AI model path",
+        )];
+        let catalog = RouteCatalog::build(vec![spec_with_alias(
+            "ai.models.get",
+            RouteMethod::Get,
+            "/ai/models/:name",
+            ALIASES,
+        )])
+        .unwrap();
+
+        assert_eq!(
+            catalog.resolve_alias(RouteMethod::Get, "/v1/ai/models/embedding-small"),
+            Some("/ai/models/embedding-small".to_string())
+        );
     }
 }

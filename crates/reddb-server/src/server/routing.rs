@@ -81,6 +81,8 @@ impl RedDBServer {
         request: &HttpRequest,
         writer: &mut W,
     ) -> io::Result<bool> {
+        let request_path = Self::route_alias_target(&request.method, &request.path)
+            .unwrap_or_else(|| request.path.clone());
         // Two streaming dispatch paths share this entry:
         //   * SSE for `ASK ... STREAM` queries (pre-existing).
         //   * NDJSON for clients that opt in with
@@ -89,11 +91,11 @@ impl RedDBServer {
         // surface inherits the non-streaming /query authorisation
         // model unchanged.
         let is_query_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/query")
         );
         let is_input_stream_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/streams/input")
         ) && content_type_is_ndjson(&request.headers);
         // Issue #805 / #750 — the dedicated read-only SELECT streaming
@@ -102,7 +104,7 @@ impl RedDBServer {
         // `/query/stream` is inherently a streaming endpoint: any POST
         // to it streams NDJSON, so no content negotiation is needed.
         let is_select_stream_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/query/stream")
         );
         if !is_query_post && !is_input_stream_post && !is_select_stream_post {
@@ -114,13 +116,13 @@ impl RedDBServer {
             return Ok(false);
         }
 
-        if !self.surface_allows(&request.method, &request.path) {
+        if !self.surface_allows(&request.method, &request_path) {
             writer.write_all(&json_error(404, "not found on this listener").to_http_bytes())?;
             writer.flush()?;
             return Ok(true);
         }
 
-        if !self.is_authorized(&request.method, &request.path, &request.headers) {
+        if !self.is_authorized(&request.method, &request_path, &request.headers) {
             writer.write_all(&json_error(401, "unauthorized").to_http_bytes())?;
             writer.flush()?;
             return Ok(true);
@@ -291,6 +293,7 @@ impl RedDBServer {
     }
 
     pub(crate) fn route(&self, request: HttpRequest) -> HttpResponse {
+        let request = Self::rewrite_route_alias(request);
         let HttpRequest {
             method,
             path,
@@ -1989,6 +1992,18 @@ impl RedDBServer {
         }
     }
 
+    fn rewrite_route_alias(mut request: HttpRequest) -> HttpRequest {
+        if let Some(target) = Self::route_alias_target(&request.method, &request.path) {
+            request.path = target;
+        }
+        request
+    }
+
+    fn route_alias_target(method: &str, path: &str) -> Option<String> {
+        let method = route_catalog::RouteMethod::from_http_method(method)?;
+        routes::discovered_route_catalog().resolve_alias(method, path)
+    }
+
     fn discovered_route(method: &str, path: &str) -> Option<route_catalog::RouteMatch<'static>> {
         let method = route_catalog::RouteMethod::from_http_method(method)?;
         routes::discovered_route_catalog().find(method, path)
@@ -2421,6 +2436,29 @@ mod tests {
                 String::from_utf8_lossy(&response.body)
             );
         }
+    }
+
+    #[test]
+    fn canonical_v1_alias_rewrites_to_legacy_dispatch_path() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/v1/capabilities"));
+
+        assert_eq!(
+            response.status,
+            200,
+            "expected /v1/capabilities alias to dispatch to /capabilities: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    #[test]
+    fn dynamic_alias_rewrites_with_captured_params() {
+        assert_eq!(
+            RedDBServer::route_alias_target("GET", "/v1/ai/models/embedding-small"),
+            Some("/ai/models/embedding-small".to_string())
+        );
     }
 
     #[test]

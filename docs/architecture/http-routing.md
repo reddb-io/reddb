@@ -52,9 +52,12 @@ ai
 
 For those families, route files now declare method, current live path,
 audience, auth class, listener surfaces, middleware intent, and selected
-canonical `/v1/*` aliases. Dispatch migration is intentionally incremental:
-route metadata lands first, then each family moves off the legacy matcher once
-its auth and compatibility behavior is covered by tests.
+canonical `/v1/*` aliases. Alias requests are resolved through the catalog and
+rewritten to the live path before legacy dispatch, so a canonical path can be
+activated without duplicating handlers. Dispatch migration is still
+incremental: route metadata and aliasing land first, then each family moves off
+the legacy matcher once its auth and compatibility behavior is covered by
+tests.
 
 ## Catalog Contract
 
