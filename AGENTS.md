@@ -80,6 +80,8 @@ Run `cargo check` after non-trivial edits. Add unit tests next to local behavior
 
 Rust uses edition 2021 and `rustfmt.toml` sets `max_width = 100`. Use `snake_case` for files, modules, and functions; `PascalCase` for types and traits; and `SCREAMING_SNAKE_CASE` for constants.
 
+See [`STYLE.md`](STYLE.md) for the house engineering style (error handling, assertions, function shape, naming, off-by-one, performance, bounded untrusted input) — a TigerStyle-derived subset. The rules we consciously rejected and why are in [ADR 0056](.red/adr/0056-tigerstyle-house-style.md).
+
 Recent commits follow Conventional Commit style such as `feat(views): ...`, `fix(timeseries): ...`, `docs: ...`, and `chore: ...`. Keep commit subjects imperative and scoped when useful. PRs should describe the behavioral change, note storage or compatibility risks, link the issue when available, and list the verification commands that were run.
 
 ## Security & Configuration
