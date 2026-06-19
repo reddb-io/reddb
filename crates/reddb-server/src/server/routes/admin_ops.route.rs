@@ -4,6 +4,7 @@ use crate::server::route_catalog::{
 };
 use crate::server::routes::common::{
     ADMIN_TOKEN_MIDDLEWARE, ALL_SURFACES, PUBLIC_ADMIN_SURFACES, PUBLIC_MIDDLEWARE,
+    PUBLIC_NO_QUOTA_MIDDLEWARE,
 };
 
 const ADMIN_SURFACES: &[ListenerSurface] = &[ListenerSurface::Public, ListenerSurface::Admin];
@@ -56,6 +57,15 @@ const OPS_PUBLIC: RouteGroupDefaults = RouteGroupDefaults {
     surfaces: ALL_SURFACES,
     stability: RouteStability::Stable,
     middlewares: PUBLIC_MIDDLEWARE,
+};
+
+const OPS_PUBLIC_PROBE: RouteGroupDefaults = RouteGroupDefaults {
+    family: "ops",
+    audience: RouteAudience::Infra,
+    auth: RouteAuth::Public,
+    surfaces: ALL_SURFACES,
+    stability: RouteStability::Stable,
+    middlewares: PUBLIC_NO_QUOTA_MIDDLEWARE,
 };
 
 const ADMIN_STATUS_ALIASES: &[RouteAlias] = &[RouteAlias::canonical(
@@ -348,7 +358,7 @@ const OPS_READ_ROUTES: &[RouteEntry] = &[
     ),
 ];
 
-const OPS_PUBLIC_ROUTES: &[RouteEntry] = &[
+const OPS_PUBLIC_PROBE_ROUTES: &[RouteEntry] = &[
     RouteEntry::new("ops.health.aggregate", RouteMethod::Get, "/health"),
     RouteEntry::new("ops.ready.aggregate", RouteMethod::Get, "/ready"),
     RouteEntry::new("ops.ready.query", RouteMethod::Get, "/ready/query"),
@@ -370,6 +380,9 @@ const OPS_PUBLIC_ROUTES: &[RouteEntry] = &[
         RouteMethod::Get,
         "/ready/serverless/repair",
     ),
+];
+
+const OPS_PUBLIC_ROUTES: &[RouteEntry] = &[
     RouteEntry::with_aliases(
         "ops.capabilities",
         RouteMethod::Get,
@@ -390,5 +403,6 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
     );
     registry.routes(ADMIN_POLICY, ADMIN_POLICY_ROUTES);
     registry.routes(OPS_READ, OPS_READ_ROUTES);
+    registry.routes(OPS_PUBLIC_PROBE, OPS_PUBLIC_PROBE_ROUTES);
     registry.routes(OPS_PUBLIC, OPS_PUBLIC_ROUTES);
 }
