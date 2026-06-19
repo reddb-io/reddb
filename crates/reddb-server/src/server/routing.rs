@@ -365,6 +365,9 @@ impl RedDBServer {
         {
             return response;
         }
+        if Self::discovered_route_method_not_allowed(&method, &path) {
+            return json_error(405, "method not allowed");
+        }
         // Cataloged routes must not silently fall through to the legacy matcher.
         if Self::discovered_route(&method, &path).is_some() {
             return json_error(404, "not found");
@@ -2912,6 +2915,14 @@ impl RedDBServer {
     fn discovered_route(method: &str, path: &str) -> Option<route_catalog::RouteMatch<'static>> {
         let method = route_catalog::RouteMethod::from_http_method(method)?;
         routes::discovered_route_catalog().find(method, path)
+    }
+
+    fn discovered_route_method_not_allowed(method: &str, path: &str) -> bool {
+        let Some(method) = route_catalog::RouteMethod::from_http_method(method) else {
+            return false;
+        };
+        let catalog = routes::discovered_route_catalog();
+        catalog.find(method, path).is_none() && catalog.path_exists(path)
     }
 
     fn discovered_route_uses_middleware(
