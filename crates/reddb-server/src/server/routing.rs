@@ -81,6 +81,8 @@ impl RedDBServer {
         request: &HttpRequest,
         writer: &mut W,
     ) -> io::Result<bool> {
+        let request_path = Self::route_alias_target(&request.method, &request.path)
+            .unwrap_or_else(|| request.path.clone());
         // Two streaming dispatch paths share this entry:
         //   * SSE for `ASK ... STREAM` queries (pre-existing).
         //   * NDJSON for clients that opt in with
@@ -89,11 +91,11 @@ impl RedDBServer {
         // surface inherits the non-streaming /query authorisation
         // model unchanged.
         let is_query_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/query")
         );
         let is_input_stream_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/streams/input")
         ) && content_type_is_ndjson(&request.headers);
         // Issue #805 / #750 — the dedicated read-only SELECT streaming
@@ -102,7 +104,7 @@ impl RedDBServer {
         // `/query/stream` is inherently a streaming endpoint: any POST
         // to it streams NDJSON, so no content negotiation is needed.
         let is_select_stream_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/query/stream")
         );
         if !is_query_post && !is_input_stream_post && !is_select_stream_post {
@@ -114,13 +116,13 @@ impl RedDBServer {
             return Ok(false);
         }
 
-        if !self.surface_allows(&request.path) {
+        if !self.surface_allows(&request.method, &request_path) {
             writer.write_all(&json_error(404, "not found on this listener").to_http_bytes())?;
             writer.flush()?;
             return Ok(true);
         }
 
-        if !self.is_authorized(&request.method, &request.path, &request.headers) {
+        if !self.is_authorized(&request.method, &request_path, &request.headers) {
             writer.write_all(&json_error(401, "unauthorized").to_http_bytes())?;
             writer.flush()?;
             return Ok(true);
@@ -236,16 +238,18 @@ impl RedDBServer {
     /// buffered body — the detection here must stay in lock-step with the
     /// guards at the top of `try_route_streaming`.
     pub(crate) fn is_streaming_request(&self, request: &HttpRequest) -> bool {
+        let request_path = Self::route_alias_target(&request.method, &request.path)
+            .unwrap_or_else(|| request.path.clone());
         let is_query_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/query")
         );
         let is_input_stream_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/streams/input")
         ) && content_type_is_ndjson(&request.headers);
         let is_select_stream_post = matches!(
-            (request.method.as_str(), request.path.as_str()),
+            (request.method.as_str(), request_path.as_str()),
             ("POST", "/query/stream")
         );
         if !is_query_post && !is_input_stream_post && !is_select_stream_post {
@@ -291,6 +295,7 @@ impl RedDBServer {
     }
 
     pub(crate) fn route(&self, request: HttpRequest) -> HttpResponse {
+        let request = Self::rewrite_route_alias(request);
         let HttpRequest {
             method,
             path,
@@ -317,7 +322,7 @@ impl RedDBServer {
         // to the dedicated admin / metrics ports refuse paths
         // outside their surface so accidentally exposing them does
         // not leak the rest of the API.
-        if !self.surface_allows(&path) {
+        if !self.surface_allows(&method, &path) {
             return json_error(404, "not found on this listener");
         }
 
@@ -327,11 +332,11 @@ impl RedDBServer {
 
         // PLAN.md Phase 4.4 — per-caller QPS quota. Health probes
         // skip the gate so probes never trip 429 on a hot instance.
-        let is_health_probe = matches!(
-            (method.as_str(), path.as_str()),
-            ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
-        );
-        if !is_health_probe {
+        if !self.discovered_route_uses_middleware(
+            &method,
+            &path,
+            route_catalog::RouteMiddleware::QuotaBypass,
+        ) {
             let principal = principal_for(&headers);
             match self.runtime.quota_bucket().consume(&principal) {
                 crate::runtime::quota_bucket::QuotaOutcome::Throttled => {
@@ -351,24 +356,24 @@ impl RedDBServer {
             }
         }
 
+        if let Some(deny) = self.discovered_route_ops_policy(&method, &path, &headers) {
+            return deny;
+        }
+
+        if let Some(response) =
+            self.route_discovered_buffered(&method, &path, &query, &headers, &body)
+        {
+            return response;
+        }
+        if Self::discovered_route_method_not_allowed(&method, &path) {
+            return json_error(405, "method not allowed");
+        }
+        // Cataloged routes must not silently fall through to the legacy matcher.
+        if Self::discovered_route(&method, &path).is_some() {
+            return json_error(404, "not found");
+        }
+
         match (method.as_str(), path.as_str()) {
-            // Auth endpoints
-            ("POST", "/auth/bootstrap") => self.handle_auth_bootstrap(body),
-            ("POST", "/auth/login") => self.handle_auth_login(body),
-            // Browser credential layer — hybrid token (issue #936).
-            ("POST", "/auth/browser/login") => self.handle_browser_login(body),
-            ("POST", "/auth/browser/refresh") => self.handle_browser_refresh(&headers),
-            ("POST", "/auth/browser/logout") => self.handle_browser_logout(),
-            ("POST", "/v1/_admin/users") => self.handle_admin_create_user(body),
-            ("POST", "/v1/_admin/system-users") => self.handle_admin_create_user(body),
-            ("POST", "/auth/users") => self.handle_auth_create_user(&headers, body, None),
-            ("GET", "/auth/users") => self.handle_auth_list_users(&headers, &query),
-            ("GET", "/auth/tenants") => self.handle_auth_list_tenants(&headers),
-            ("GET", "/auth/policies") => self.handle_auth_list_policies(&headers),
-            ("POST", "/auth/can") => self.handle_auth_can(&headers, body),
-            ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
-            ("POST", "/auth/change-password") => self.handle_auth_change_password(&headers, body),
-            ("GET", "/auth/whoami") => self.handle_auth_whoami(&headers),
             ("GET", "/config") => self.handle_config_export(),
             ("POST", "/config") => self.handle_config_import(body),
             ("POST", "/ai/ask") => self.handle_ai_ask(body),
@@ -388,7 +393,6 @@ impl RedDBServer {
                     .unwrap_or_else(|| self.handle_root_discovery()),
                 None => self.handle_root_discovery(),
             },
-            ("GET", "/query") => self.handle_query_contract(),
             ("GET", "/grpc") => self.handle_grpc_discovery(),
 
             // Eventual Consistency endpoints
@@ -453,10 +457,6 @@ impl RedDBServer {
                 self.handle_admin_replication_confirm_rewind(body)
             }
 
-            // PLAN.md Phase 1 — universal lifecycle/health contract.
-            ("GET", "/health/live") => self.handle_health_live(),
-            ("GET", "/health/ready") => self.handle_health_ready(),
-            ("GET", "/health/startup") => self.handle_health_startup(),
             ("POST", "/admin/shutdown") => self.handle_admin_shutdown(),
             ("POST", "/admin/drain") => self.handle_admin_drain(),
             // PLAN.md Phase 3.2 / 3.3 — admin restore + backup.
@@ -485,26 +485,6 @@ impl RedDBServer {
             }
             // PLAN.md Phase 11.6 — manual replica → primary promotion.
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
-            // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
-            ("GET", "/metrics") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "metrics")
-                {
-                    return deny;
-                }
-                self.handle_metrics()
-            }
-            ("GET", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, None),
-            ("POST", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, Some(body)),
-            ("GET", "/api/v1/query_range") => {
-                self.handle_prometheus_query_range(&headers, &query, None)
-            }
-            ("POST", "/api/v1/query_range") => {
-                self.handle_prometheus_query_range(&headers, &query, Some(body))
-            }
-            ("POST", "/api/v1/write") => {
-                self.handle_prometheus_remote_write(&query, &headers, body)
-            }
             ("GET", "/admin/status") => {
                 if let Some(deny) =
                     self.check_ops_http_policy(&headers, "ops:read:cluster", "admin-status")
@@ -528,7 +508,6 @@ impl RedDBServer {
             // static/system capabilities and the effective principal
             // view. Both are on the public allowlist in `is_authorized`.
             ("GET", "/capabilities") => self.handle_capabilities(),
-            ("GET", "/auth/capabilities") => self.handle_auth_capabilities(&headers),
             // SOC 2 / HIPAA structured audit query — JSONL/JSON over
             // the active `.audit.log` plus rotated archives.
             ("GET", "/admin/audit") => {
@@ -1093,23 +1072,6 @@ impl RedDBServer {
                 Ok(()) => json_ok("maintenance completed"),
                 Err(err) => json_error(500, err.to_string()),
             },
-            ("POST", "/query/explain") => self.handle_query_explain(body),
-            // Issue #808 / 750d — explicit out-of-band cancel for a live
-            // `/query/stream`. Accepts `{"cursor":"<token>"}`, scoped to the
-            // caller, and tombstones the cursor + raises its executor cancel
-            // token. Not a streaming route, so it rides the standard
-            // request/response path here rather than `try_route_streaming`.
-            ("POST", "/query/stream/cancel") => {
-                let principal = principal_for(&headers);
-                let tenant = self.stream_tenant_for(&headers);
-                self.handle_query_stream_cancel(&body, &principal, &tenant)
-            }
-            ("POST", "/query") => self.handle_query(body),
-            ("POST", "/search") => self.handle_universal_search(body),
-            ("POST", "/context") => self.handle_context_search(body),
-            ("POST", "/text/search") => self.handle_text_search(body),
-            ("POST", "/multimodal/search") => self.handle_multimodal_search(body),
-            ("POST", "/hybrid/search") => self.handle_hybrid_search(body),
             ("POST", "/graph/neighborhood") => self.handle_graph_neighborhood(body),
             ("POST", "/graph/traverse") => self.handle_graph_traverse(body),
             ("POST", "/graph/shortest-path") => self.handle_graph_shortest_path(body),
@@ -1451,22 +1413,6 @@ impl RedDBServer {
                 }
 
                 if method == "GET" {
-                    // Auth: GET /auth/tenants/:tenant/users — list
-                    // users scoped to that tenant. Platform admins can
-                    // hit any tenant; tenant-scoped admins only their
-                    // own (the handler enforces this).
-                    if let Some(rest) = path.strip_prefix("/auth/tenants/") {
-                        if let Some((tenant, tail)) = rest.split_once('/') {
-                            if tail == "users" {
-                                let tenant = tenant.trim_matches('/');
-                                if !tenant.is_empty() {
-                                    let mut q = query.clone();
-                                    q.insert("tenant".to_string(), tenant.to_string());
-                                    return self.handle_auth_list_users(&headers, &q);
-                                }
-                            }
-                        }
-                    }
                     if let Some(collection) = collection_from_schema_path(&path) {
                         if let Some(deny) =
                             self.check_collection_http_policy(&headers, "select", collection)
@@ -1621,23 +1567,6 @@ impl RedDBServer {
                             return json_error(401, "clear-integrity-flag requires admin token");
                         }
                         return handle_clear_integrity_flag(&self.runtime, collection);
-                    }
-                    // Auth: POST /auth/tenants/:tenant/users — explicit
-                    // tenant-scoped user creation. Equivalent to the
-                    // body-`tenant_id` field on /auth/users.
-                    if let Some(rest) = path.strip_prefix("/auth/tenants/") {
-                        if let Some((tenant, tail)) = rest.split_once('/') {
-                            if tail == "users" {
-                                let tenant = tenant.trim_matches('/');
-                                if !tenant.is_empty() {
-                                    return self.handle_auth_create_user(
-                                        &headers,
-                                        body,
-                                        Some(tenant),
-                                    );
-                                }
-                            }
-                        }
                     }
                     if let Some(collection) = collection_from_action_path(&path, "trees") {
                         return self.handle_create_tree(collection, body);
@@ -1908,37 +1837,6 @@ impl RedDBServer {
                     if let Some(name) = collection_from_bare_path(&path) {
                         return self.handle_drop_collection(name);
                     }
-                    // Auth: DELETE /auth/tenants/:tenant/users/:username
-                    if let Some(rest) = path.strip_prefix("/auth/tenants/") {
-                        if let Some((tenant, tail)) = rest.split_once('/') {
-                            if let Some(username) = tail.strip_prefix("users/") {
-                                let username = username.trim_matches('/');
-                                let tenant = tenant.trim_matches('/');
-                                if !username.is_empty() && !tenant.is_empty() {
-                                    return self.handle_auth_delete_user(
-                                        &headers,
-                                        &query,
-                                        Some(tenant),
-                                        username,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    // Auth: DELETE /auth/users/:username
-                    if let Some(username) = path.strip_prefix("/auth/users/") {
-                        let username = username.trim_matches('/');
-                        if !username.is_empty() {
-                            return self.handle_auth_delete_user(&headers, &query, None, username);
-                        }
-                    }
-                    // Auth: DELETE /auth/api-keys/:key
-                    if let Some(key) = path.strip_prefix("/auth/api-keys/") {
-                        let key = key.trim_matches('/');
-                        if !key.is_empty() {
-                            return self.handle_auth_revoke_api_key(key);
-                        }
-                    }
                     if let Some((collection, id)) = collection_entity_path(&path) {
                         if let Some(deny) =
                             self.check_collection_http_policy(&headers, "delete", collection)
@@ -1979,11 +1877,1117 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
+    fn route_discovered_buffered(
+        &self,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        let matched = Self::discovered_route(method, path)?;
+        match matched.spec.id {
+            "auth.bootstrap" => Some(self.handle_auth_bootstrap(body.to_vec())),
+            "auth.login" => Some(self.handle_auth_login(body.to_vec())),
+            "auth.browser.login" => Some(self.handle_browser_login(body.to_vec())),
+            "auth.browser.refresh" => Some(self.handle_browser_refresh(headers)),
+            "auth.browser.logout" => Some(self.handle_browser_logout()),
+            "auth.capabilities" => Some(self.handle_auth_capabilities(headers)),
+            "auth.users.list" => Some(self.handle_auth_list_users(headers, query)),
+            "auth.users.create" => Some(self.handle_auth_create_user(headers, body.to_vec(), None)),
+            "auth.users.delete" => {
+                let username = matched.params.get("username")?;
+                Some(self.handle_auth_delete_user(headers, query, None, username))
+            }
+            "auth.tenants.list" => Some(self.handle_auth_list_tenants(headers)),
+            "auth.tenant_users.list" => {
+                let tenant = matched.params.get("tenant")?;
+                let mut tenant_query = query.clone();
+                tenant_query.insert("tenant".to_string(), tenant.to_string());
+                Some(self.handle_auth_list_users(headers, &tenant_query))
+            }
+            "auth.tenant_users.create" => {
+                let tenant = matched.params.get("tenant")?;
+                Some(self.handle_auth_create_user(headers, body.to_vec(), Some(tenant)))
+            }
+            "auth.tenant_users.delete" => {
+                let tenant = matched.params.get("tenant")?;
+                let username = matched.params.get("username")?;
+                Some(self.handle_auth_delete_user(headers, query, Some(tenant), username))
+            }
+            "auth.policies.list" => Some(self.handle_auth_list_policies(headers)),
+            "auth.can" => Some(self.handle_auth_can(headers, body.to_vec())),
+            "auth.api_keys.create" => Some(self.handle_auth_create_api_key(body.to_vec())),
+            "auth.api_keys.delete" => {
+                let key = matched.params.get("key")?;
+                Some(self.handle_auth_revoke_api_key(key))
+            }
+            "auth.change_password" => {
+                Some(self.handle_auth_change_password(headers, body.to_vec()))
+            }
+            "auth.whoami" => Some(self.handle_auth_whoami(headers)),
+            "auth.admin.users.create" | "auth.admin.system_users.create" => {
+                Some(self.handle_admin_create_user(body.to_vec()))
+            }
+            "health.live" => Some(self.handle_health_live()),
+            "health.ready" => Some(self.handle_health_ready()),
+            "health.startup" => Some(self.handle_health_startup()),
+            "query.contract" => Some(self.handle_query_contract()),
+            "query.execute" => Some(self.handle_query(body.to_vec())),
+            "query.explain" => Some(self.handle_query_explain(body.to_vec())),
+            "query.search" => Some(self.handle_universal_search(body.to_vec())),
+            "query.context" => Some(self.handle_context_search(body.to_vec())),
+            "query.text_search" => Some(self.handle_text_search(body.to_vec())),
+            "query.multimodal_search" => Some(self.handle_multimodal_search(body.to_vec())),
+            "query.hybrid_search" => Some(self.handle_hybrid_search(body.to_vec())),
+            "streams.query.cancel" => {
+                let principal = principal_for(headers);
+                let tenant = self.stream_tenant_for(headers);
+                Some(self.handle_query_stream_cancel(body, &principal, &tenant))
+            }
+            "admin.shutdown" => Some(self.handle_admin_shutdown()),
+            "admin.drain" => Some(self.handle_admin_drain()),
+            "admin.restore" => Some(self.handle_admin_restore(body.to_vec())),
+            "admin.backup" => Some(self.handle_admin_backup(query)),
+            "admin.readonly" => Some(self.handle_admin_readonly(body.to_vec())),
+            "admin.blob_cache.sweep" => Some(self.handle_admin_blob_cache_sweep(body.to_vec())),
+            "admin.blob_cache.flush_namespace" => {
+                Some(self.handle_admin_blob_cache_flush_namespace(body.to_vec()))
+            }
+            "admin.cache.compare_and_set" => {
+                Some(self.handle_admin_blob_cache_compare_and_set(body.to_vec()))
+            }
+            "admin.failover.promote" => Some(self.handle_admin_failover_promote(body.to_vec())),
+            "admin.replication.confirm_rewind" => {
+                Some(self.handle_admin_replication_confirm_rewind(body.to_vec()))
+            }
+            "admin.audit" => Some(self.handle_admin_audit_query(query)),
+            "admin.policies.list" => Some(self.handle_iam_policy_list()),
+            "admin.policies.put" => {
+                let id = matched.params.get("id")?;
+                Some(self.handle_iam_policy_put(headers, id, body.to_vec()))
+            }
+            "admin.policies.get" => {
+                let id = matched.params.get("id")?;
+                Some(self.handle_iam_policy_get(id))
+            }
+            "admin.policies.delete" => {
+                let id = matched.params.get("id")?;
+                Some(self.handle_iam_policy_delete(headers, id))
+            }
+            "admin.policies.simulate" => Some(self.handle_iam_simulate(body.to_vec())),
+            "admin.policies.lint" => Some(self.handle_iam_policy_lint(body.to_vec())),
+            "admin.policies.migrate_mode" => {
+                Some(self.handle_iam_policy_migrate_mode(body.to_vec()))
+            }
+            "admin.policies.actions" => Some(self.handle_iam_policy_actions()),
+            "admin.users.effective_permissions" => {
+                let user = matched.params.get("user")?;
+                Some(self.handle_iam_effective_permissions(user, query))
+            }
+            "admin.users.groups.add" => {
+                let user = matched.params.get("user")?;
+                let group = matched.params.get("group")?;
+                Some(self.handle_iam_add_user_group(user, group))
+            }
+            "admin.users.groups.remove" => {
+                let user = matched.params.get("user")?;
+                let group = matched.params.get("group")?;
+                Some(self.handle_iam_remove_user_group(user, group))
+            }
+            "admin.users.policies.attach" => {
+                let user = matched.params.get("user")?;
+                let policy = matched.params.get("policy")?;
+                Some(self.handle_iam_attach_user(headers, user, policy))
+            }
+            "admin.users.policies.detach" => {
+                let user = matched.params.get("user")?;
+                let policy = matched.params.get("policy")?;
+                Some(self.handle_iam_detach_user(headers, user, policy))
+            }
+            "admin.groups.policies.attach" => {
+                let group = matched.params.get("group")?;
+                let policy = matched.params.get("policy")?;
+                Some(self.handle_iam_attach_group(headers, group, policy))
+            }
+            "admin.groups.policies.detach" => {
+                let group = matched.params.get("group")?;
+                let policy = matched.params.get("policy")?;
+                Some(self.handle_iam_detach_group(headers, group, policy))
+            }
+            "admin.status" => Some(self.handle_admin_status()),
+            "admin.blob_cache.stats" => Some(self.handle_admin_blob_cache_stats(query)),
+            "ops.ec.status" => Some(handlers_ec::handle_ec_global_status(&self.runtime)),
+            "ops.backup.status" => Some(self.handle_backup_status()),
+            "ops.backup.trigger" => Some(self.handle_backup_trigger()),
+            "ops.recovery.restore_points" => Some(self.handle_restore_points()),
+            "ops.replication.status" => Some(self.handle_replication_status()),
+            "ops.replication.snapshot" => Some(self.handle_replication_snapshot()),
+            "ops.topology.graph" => Some(self.handle_topology_graph()),
+            "ops.cluster.status" => Some(self.handle_cluster_status()),
+            "ops.deployment.profiles" => {
+                let profile = query
+                    .get("profile")
+                    .and_then(|value| deployment_profile_from_token(value.as_str()));
+                Some(json_response(
+                    200,
+                    match profile {
+                        Some(profile) => {
+                            crate::presentation::deployment_json::deployment_profile_json(
+                                match profile {
+                                    DeploymentProfile::Embedded => crate::presentation::deployment_json::DeploymentProfileView::Embedded,
+                                    DeploymentProfile::Server => crate::presentation::deployment_json::DeploymentProfileView::Server,
+                                    DeploymentProfile::Serverless => crate::presentation::deployment_json::DeploymentProfileView::Serverless,
+                                },
+                            )
+                        }
+                        None => crate::presentation::deployment_json::deployment_profiles_catalog_json(
+                            &[
+                                crate::presentation::deployment_json::DeploymentProfileView::Embedded,
+                                crate::presentation::deployment_json::DeploymentProfileView::Server,
+                                crate::presentation::deployment_json::DeploymentProfileView::Serverless,
+                            ],
+                            "Use /deployment/profiles?profile=serverless to get the exact serverless contract.",
+                        ),
+                    },
+                ))
+            }
+            "ops.grpc.discovery" => Some(self.handle_grpc_discovery()),
+            "ops.cdc.changes" => Some(self.handle_cdc_poll(query)),
+            "ops.health.aggregate" => {
+                let report = self.native_use_cases().health();
+                let status = if report.allows_serving_traffic() {
+                    200
+                } else {
+                    503
+                };
+                Some(json_response(
+                    status,
+                    self.health_json_with_transport(&report),
+                ))
+            }
+            "ops.ready.aggregate" => {
+                let report = self.native_use_cases().health();
+                let status = if report.allows_serving_traffic() {
+                    200
+                } else {
+                    503
+                };
+                Some(json_response(
+                    status,
+                    self.health_json_with_transport(&report),
+                ))
+            }
+            "ops.ready.query" => {
+                let ready = self.native_use_cases().readiness().query;
+                Some(json_response(
+                    if ready { 200 } else { 503 },
+                    crate::presentation::catalog_json::readiness_json("query", ready),
+                ))
+            }
+            "ops.ready.write" => {
+                let ready = self.native_use_cases().readiness().write;
+                Some(json_response(
+                    if ready { 200 } else { 503 },
+                    crate::presentation::catalog_json::readiness_json("write", ready),
+                ))
+            }
+            "ops.ready.repair" => {
+                let ready = self.native_use_cases().readiness().repair;
+                Some(json_response(
+                    if ready { 200 } else { 503 },
+                    crate::presentation::catalog_json::readiness_json("repair", ready),
+                ))
+            }
+            "ops.ready.serverless" => {
+                let native = self.native_use_cases();
+                let readiness = native.readiness();
+                let health = native.health();
+                let authority = native.physical_authority_status();
+                let (query_ready, write_ready, repair_ready) = (
+                    readiness.query_serverless,
+                    readiness.write_serverless,
+                    readiness.repair_serverless,
+                );
+                let ready = query_ready && write_ready && repair_ready;
+                Some(json_response(
+                    if ready { 200 } else { 503 },
+                    serverless_readiness_summary_to_json(
+                        query_ready,
+                        write_ready,
+                        repair_ready,
+                        &health,
+                        &authority,
+                    ),
+                ))
+            }
+            "ops.ready.serverless.query" => {
+                let ready = self.native_use_cases().readiness().query_serverless;
+                Some(json_response(
+                    if ready { 200 } else { 503 },
+                    crate::presentation::catalog_json::readiness_json("query", ready),
+                ))
+            }
+            "ops.ready.serverless.write" => {
+                let ready = self.native_use_cases().readiness().write_serverless;
+                Some(json_response(
+                    if ready { 200 } else { 503 },
+                    crate::presentation::catalog_json::readiness_json("write", ready),
+                ))
+            }
+            "ops.ready.serverless.repair" => {
+                let ready = self.native_use_cases().readiness().repair_serverless;
+                Some(json_response(
+                    if ready { 200 } else { 503 },
+                    crate::presentation::catalog_json::readiness_json("repair", ready),
+                ))
+            }
+            "ops.capabilities" => Some(self.handle_capabilities()),
+            "catalog.readiness" => {
+                let native = self.native_use_cases();
+                let readiness = native.readiness();
+                let health = native.health();
+                let authority = native.physical_authority_status();
+                Some(json_response(
+                    200,
+                    crate::presentation::ops_json::catalog_readiness_json(
+                        readiness.query,
+                        readiness.write,
+                        readiness.repair,
+                        &health,
+                        &authority,
+                    ),
+                ))
+            }
+            "catalog.snapshot" => {
+                let snapshot = self.catalog_use_cases().snapshot();
+                let native = self.native_use_cases();
+                let readiness = native.readiness();
+                let health = native.health();
+                let authority = native.physical_authority_status();
+                Some(json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_model_snapshot_with_readiness_json(
+                        &snapshot,
+                        crate::presentation::ops_json::catalog_readiness_json(
+                            readiness.query,
+                            readiness.write,
+                            readiness.repair,
+                            &health,
+                            &authority,
+                        ),
+                    ),
+                ))
+            }
+            "catalog.attention" => Some(json_response(
+                200,
+                crate::presentation::catalog_json::catalog_attention_summary_json(
+                    &self.catalog_use_cases().attention_summary(),
+                ),
+            )),
+            "catalog.consistency" => Some(json_response(
+                200,
+                crate::presentation::catalog_json::catalog_consistency_json(
+                    &self.catalog_use_cases().consistency_report(),
+                ),
+            )),
+            "catalog.collections.metadata" => {
+                let name = matched.params.get("name")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "select", name) {
+                    return Some(deny);
+                }
+                Some(self.handle_collection_ui_metadata(name, headers))
+            }
+            "catalog.collections.readiness" => {
+                let catalog = self.catalog_use_cases().snapshot();
+                Some(deprecated_catalog_response(
+                    "/catalog/collections/readiness",
+                    json_response(
+                        200,
+                        crate::presentation::catalog_json::catalog_collection_readiness_json(
+                            &catalog.collections,
+                        ),
+                    ),
+                ))
+            }
+            "catalog.collections.readiness_attention" => Some(deprecated_catalog_response(
+                "/catalog/collections/readiness/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_collection_attention_json(
+                        &self.catalog_use_cases().collection_attention(),
+                    ),
+                ),
+            )),
+            "catalog.indexes.declared" => Some(deprecated_catalog_response(
+                "/catalog/indexes/declared",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::indexes_json(
+                        &self.catalog_use_cases().declared_indexes(),
+                    ),
+                ),
+            )),
+            "catalog.indexes.operational" => Some(deprecated_catalog_response(
+                "/catalog/indexes/operational",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::indexes_json(
+                        &self.catalog_use_cases().indexes(),
+                    ),
+                ),
+            )),
+            "catalog.indexes.status" => Some(deprecated_catalog_response(
+                "/catalog/indexes/status",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_index_statuses_json(
+                        &self.catalog_use_cases().index_statuses(),
+                    ),
+                ),
+            )),
+            "catalog.indexes.attention" => Some(deprecated_catalog_response(
+                "/catalog/indexes/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_index_attention_json(
+                        &self.catalog_use_cases().index_attention(),
+                    ),
+                ),
+            )),
+            "catalog.graph.projections.declared" => Some(deprecated_catalog_response(
+                "/catalog/graph/projections/declared",
+                match self.catalog_use_cases().graph_projections() {
+                    Ok(projections) => json_response(
+                        200,
+                        crate::presentation::admin_json::graph_projections_json(&projections),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                },
+            )),
+            "catalog.graph.projections.operational" => Some(deprecated_catalog_response(
+                "/catalog/graph/projections/operational",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::graph_projections_json(
+                        &self.catalog_use_cases().operational_graph_projections(),
+                    ),
+                ),
+            )),
+            "catalog.graph.projections.status" => Some(deprecated_catalog_response(
+                "/catalog/graph/projections/status",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
+                        &self.catalog_use_cases().graph_projection_statuses(),
+                    ),
+                ),
+            )),
+            "catalog.graph.projections.attention" => Some(deprecated_catalog_response(
+                "/catalog/graph/projections/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_graph_projection_attention_json(
+                        &self.catalog_use_cases().graph_projection_attention(),
+                    ),
+                ),
+            )),
+            "catalog.analytics_jobs.declared" => Some(deprecated_catalog_response(
+                "/catalog/analytics-jobs/declared",
+                match self.catalog_use_cases().analytics_jobs() {
+                    Ok(jobs) => json_response(
+                        200,
+                        crate::presentation::admin_json::analytics_jobs_json(&jobs),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                },
+            )),
+            "catalog.analytics_jobs.operational" => Some(deprecated_catalog_response(
+                "/catalog/analytics-jobs/operational",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::analytics_jobs_json(
+                        &self.catalog_use_cases().operational_analytics_jobs(),
+                    ),
+                ),
+            )),
+            "catalog.analytics_jobs.status" => Some(deprecated_catalog_response(
+                "/catalog/analytics-jobs/status",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
+                        &self.catalog_use_cases().analytics_job_statuses(),
+                    ),
+                ),
+            )),
+            "catalog.analytics_jobs.attention" => Some(deprecated_catalog_response(
+                "/catalog/analytics-jobs/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_analytics_job_attention_json(
+                        &self.catalog_use_cases().analytics_job_attention(),
+                    ),
+                ),
+            )),
+            "physical.metadata" => Some(match self.native_use_cases().physical_metadata() {
+                Ok(metadata) => json_response(200, metadata.to_json_value()),
+                Err(err) => json_error(404, err.to_string()),
+            }),
+            "physical.native_header" => Some(match self.native_use_cases().native_header() {
+                Ok(header) => json_response(
+                    200,
+                    crate::presentation::native_json::native_header_json(header),
+                ),
+                Err(err) => json_error(404, err.to_string()),
+            }),
+            "physical.native_collection_roots" => {
+                Some(match self.native_use_cases().native_collection_roots() {
+                    Ok(roots) => json_response(
+                        200,
+                        crate::presentation::native_json::collection_roots_json(&roots),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_manifest" => {
+                Some(match self.native_use_cases().native_manifest_summary() {
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::native_json::native_manifest_summary_json(&summary),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_registry" => {
+                Some(match self.native_use_cases().native_registry_summary() {
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::ops_json::native_registry_summary_json(&summary),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_recovery" => {
+                Some(match self.native_use_cases().native_recovery_summary() {
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_recovery_summary_json(
+                            &summary,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_catalog" => {
+                Some(match self.native_use_cases().native_catalog_summary() {
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_catalog_summary_json(
+                            &summary,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_metadata_state" => Some(
+                match self.native_use_cases().native_metadata_state_summary() {
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_metadata_state_summary_json(
+                            &summary,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                },
+            ),
+            "physical.authority" => Some(json_response(
+                200,
+                crate::presentation::ops_json::physical_authority_status_json(
+                    &self.native_use_cases().physical_authority_status(),
+                ),
+            )),
+            "physical.native_state" => {
+                Some(match self.native_use_cases().native_physical_state() {
+                    Ok(state) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_physical_state_json(
+                            &state,
+                            crate::presentation::native_json::native_header_json,
+                            crate::presentation::native_json::collection_roots_json,
+                            crate::presentation::native_json::native_manifest_summary_json,
+                            crate::presentation::ops_json::native_registry_summary_json,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_vector_artifacts" => Some(
+                match self.native_use_cases().native_vector_artifact_pages() {
+                    Ok(summaries) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_pages_json(
+                            &summaries,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                },
+            ),
+            "physical.native_vector_artifacts.inspect" => {
+                Some(match self.native_use_cases().inspect_vector_artifacts() {
+                    Ok(batch) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_batch_json(
+                            &batch,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_header.repair_policy" => Some(
+                match self.native_use_cases().native_header_repair_policy() {
+                    Ok(policy) => json_response(
+                        200,
+                        crate::presentation::native_json::repair_policy_json(&policy),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                },
+            ),
+            "physical.manifest" => Some(
+                match self.native_use_cases().manifest_events_filtered(
+                    query.get("collection").map(String::as_str),
+                    query.get("kind").map(String::as_str),
+                    query
+                        .get("since_snapshot")
+                        .and_then(|value| value.parse::<u64>().ok()),
+                ) {
+                    Ok(events) => json_response(
+                        200,
+                        crate::presentation::native_json::manifest_events_json(&events),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                },
+            ),
+            "physical.roots" => Some(match self.native_use_cases().collection_roots() {
+                Ok(roots) => json_response(
+                    200,
+                    crate::presentation::native_json::collection_roots_json(&roots),
+                ),
+                Err(err) => json_error(404, err.to_string()),
+            }),
+            "physical.snapshots" => Some(match self.native_use_cases().snapshots() {
+                Ok(snapshots) => json_response(
+                    200,
+                    crate::presentation::native_json::snapshots_json(&snapshots),
+                ),
+                Err(err) => json_error(404, err.to_string()),
+            }),
+            "physical.exports" => Some(match self.native_use_cases().exports() {
+                Ok(exports) => json_response(
+                    200,
+                    crate::presentation::native_json::exports_json(&exports),
+                ),
+                Err(err) => json_error(404, err.to_string()),
+            }),
+            "physical.indexes" => Some(json_response(
+                200,
+                crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
+            )),
+            "physical.stats" => Some(json_response(
+                200,
+                crate::presentation::query_result_json::runtime_stats_json(
+                    &self.catalog_use_cases().stats(),
+                ),
+            )),
+            "physical.checkpoint" => Some(match self.native_use_cases().checkpoint() {
+                Ok(()) => json_ok("checkpoint completed"),
+                Err(err) => json_error(500, err.to_string()),
+            }),
+            "physical.snapshot.create" => Some(match self.native_use_cases().create_snapshot() {
+                Ok(snapshot) => json_response(
+                    200,
+                    crate::presentation::native_json::snapshot_descriptor_json(&snapshot),
+                ),
+                Err(err) => json_error(500, err.to_string()),
+            }),
+            "physical.export.create" => Some(self.handle_export(body.to_vec())),
+            "physical.indexes.rebuild" => Some(self.handle_rebuild_indexes(body.to_vec(), None)),
+            "physical.retention.apply" => {
+                Some(match self.native_use_cases().apply_retention_policy() {
+                    Ok(()) => json_ok("retention policy applied"),
+                    Err(err) => json_error(500, err.to_string()),
+                })
+            }
+            "physical.maintenance" => Some(match self.native_use_cases().run_maintenance() {
+                Ok(()) => json_ok("maintenance completed"),
+                Err(err) => json_error(500, err.to_string()),
+            }),
+            "physical.native_header.repair" => Some(
+                match self.native_use_cases().repair_native_header_from_metadata() {
+                    Ok(policy) => json_response(
+                        200,
+                        crate::presentation::native_json::repair_policy_json(&policy),
+                    ),
+                    Err(err) => json_error(500, err.to_string()),
+                },
+            ),
+            "physical.metadata.rebuild" => Some(
+                match self
+                    .native_use_cases()
+                    .rebuild_physical_metadata_from_native_state()
+                {
+                    Ok(true) => json_ok("physical metadata rebuilt from native state"),
+                    Ok(false) => {
+                        json_error(409, "native state is not available for metadata rebuild")
+                    }
+                    Err(err) => json_error(500, err.to_string()),
+                },
+            ),
+            "physical.native_state.repair" => Some(
+                match self
+                    .native_use_cases()
+                    .repair_native_physical_state_from_metadata()
+                {
+                    Ok(true) => json_ok("native physical state republished from physical metadata"),
+                    Ok(false) => json_error(
+                        409,
+                        "native physical state repair is not available in this mode",
+                    ),
+                    Err(err) => json_error(500, err.to_string()),
+                },
+            ),
+            "physical.native_vector_artifacts.warmup" => {
+                Some(match self.native_use_cases().warmup_vector_artifacts() {
+                    Ok(batch) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_batch_json(
+                            &batch,
+                        ),
+                    ),
+                    Err(err) => json_error(500, err.to_string()),
+                })
+            }
+            "physical.collections.vector_artifacts.inspect" => {
+                let collection = matched.params.get("collection")?;
+                Some(match self.native_use_cases().inspect_vector_artifact(
+                    InspectNativeArtifactInput {
+                        collection: collection.to_string(),
+                        artifact_kind: query.get("kind").cloned(),
+                    },
+                ) {
+                    Ok(artifact) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
+                            &artifact,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.collections.vector_artifacts.warmup" => {
+                let collection = matched.params.get("collection")?;
+                Some(match self.native_use_cases().warmup_vector_artifact(
+                    InspectNativeArtifactInput {
+                        collection: collection.to_string(),
+                        artifact_kind: query.get("kind").cloned(),
+                    },
+                ) {
+                    Ok(artifact) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
+                            &artifact,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.collections.indexes" => {
+                let collection = matched.params.get("collection")?;
+                Some(json_response(
+                    200,
+                    crate::presentation::admin_json::indexes_json(
+                        &self.catalog_use_cases().indexes_for_collection(collection),
+                    ),
+                ))
+            }
+            "physical.collections.indexes.rebuild" => {
+                let collection = matched.params.get("collection")?;
+                Some(self.handle_rebuild_indexes(body.to_vec(), Some(collection)))
+            }
+            "graph.neighborhood" => Some(self.handle_graph_neighborhood(body.to_vec())),
+            "graph.traverse" => Some(self.handle_graph_traverse(body.to_vec())),
+            "graph.shortest_path" => Some(self.handle_graph_shortest_path(body.to_vec())),
+            "graph.analytics.components" => Some(self.handle_graph_components(body.to_vec())),
+            "graph.analytics.centrality" => Some(self.handle_graph_centrality(body.to_vec())),
+            "graph.analytics.community" => Some(self.handle_graph_community(body.to_vec())),
+            "graph.analytics.clustering" => Some(self.handle_graph_clustering(body.to_vec())),
+            "graph.analytics.pagerank_personalized" => {
+                Some(self.handle_graph_personalized_pagerank(body.to_vec()))
+            }
+            "graph.analytics.hits" => Some(self.handle_graph_hits(body.to_vec())),
+            "graph.analytics.cycles" => Some(self.handle_graph_cycles(body.to_vec())),
+            "graph.analytics.topological_sort" => {
+                Some(self.handle_graph_topological_sort(body.to_vec()))
+            }
+            "graph.analytics.properties" => Some(self.handle_graph_properties(body.to_vec())),
+            "graph.projections.list" => Some(match self.catalog_use_cases().graph_projections() {
+                Ok(projections) => json_response(
+                    200,
+                    crate::presentation::admin_json::graph_projections_json(&projections),
+                ),
+                Err(err) => json_error(404, err.to_string()),
+            }),
+            "graph.projections.upsert" => Some(self.handle_graph_projection_upsert(body.to_vec())),
+            "graph.projections.materialize" => {
+                let name = matched.params.get("name")?;
+                Some(self.materialize_graph_projection_transition(name))
+            }
+            "graph.projections.materializing" => {
+                let name = matched.params.get("name")?;
+                Some(
+                    match self
+                        .admin_use_cases()
+                        .mark_graph_projection_materializing(name)
+                    {
+                        Ok(projection) => json_response(200, graph_projection_json(&projection)),
+                        Err(err) => json_error(400, err.to_string()),
+                    },
+                )
+            }
+            "graph.projections.fail" => {
+                let name = matched.params.get("name")?;
+                Some(match self.admin_use_cases().fail_graph_projection(name) {
+                    Ok(projection) => json_response(200, graph_projection_json(&projection)),
+                    Err(err) => json_error(400, err.to_string()),
+                })
+            }
+            "graph.projections.stale" => {
+                let name = matched.params.get("name")?;
+                Some(
+                    match self.admin_use_cases().mark_graph_projection_stale(name) {
+                        Ok(projection) => json_response(200, graph_projection_json(&projection)),
+                        Err(err) => json_error(400, err.to_string()),
+                    },
+                )
+            }
+            "graph.jobs.list" => Some(match self.catalog_use_cases().analytics_jobs() {
+                Ok(jobs) => json_response(
+                    200,
+                    crate::presentation::admin_json::analytics_jobs_json(&jobs),
+                ),
+                Err(err) => json_error(404, err.to_string()),
+            }),
+            "graph.jobs.upsert" => Some(self.handle_analytics_job_upsert(body.to_vec())),
+            "graph.jobs.queue" => Some(self.handle_analytics_job_queue(body.to_vec())),
+            "graph.jobs.start" => Some(self.handle_analytics_job_start(body.to_vec())),
+            "graph.jobs.complete" => Some(self.handle_analytics_job_complete(body.to_vec())),
+            "graph.jobs.stale" => Some(self.handle_analytics_job_stale(body.to_vec())),
+            "graph.jobs.fail" => Some(self.handle_analytics_job_fail(body.to_vec())),
+            "repo.info" => Some(handlers_vcs::handle_repo_info(&self.runtime)),
+            "repo.refs.list" => Some(handlers_vcs::handle_refs_list(&self.runtime, query)),
+            "repo.refs.heads.list" => Some(handlers_vcs::handle_branches_list(&self.runtime)),
+            "repo.refs.heads.create" => Some(handlers_vcs::handle_branch_create(
+                &self.runtime,
+                body.to_vec(),
+            )),
+            "repo.refs.heads.show" => {
+                let name = matched.params.get("*")?;
+                Some(handlers_vcs::handle_branch_show(&self.runtime, name))
+            }
+            "repo.refs.heads.move" => {
+                let name = matched.params.get("*")?;
+                Some(handlers_vcs::handle_branch_move(
+                    &self.runtime,
+                    name,
+                    body.to_vec(),
+                ))
+            }
+            "repo.refs.heads.delete" => {
+                let name = matched.params.get("*")?;
+                Some(handlers_vcs::handle_branch_delete(&self.runtime, name))
+            }
+            "repo.refs.tags.list" => Some(handlers_vcs::handle_tags_list(&self.runtime)),
+            "repo.refs.tags.create" => Some(handlers_vcs::handle_tag_create(
+                &self.runtime,
+                body.to_vec(),
+            )),
+            "repo.refs.tags.show" => {
+                let name = matched.params.get("*")?;
+                Some(handlers_vcs::handle_tag_show(&self.runtime, name))
+            }
+            "repo.refs.tags.delete" => {
+                let name = matched.params.get("*")?;
+                Some(handlers_vcs::handle_tag_delete(&self.runtime, name))
+            }
+            "repo.commits.list" => Some(handlers_vcs::handle_commits_list(&self.runtime, query)),
+            "repo.commits.create" => Some(handlers_vcs::handle_commit_create(
+                &self.runtime,
+                body.to_vec(),
+            )),
+            "repo.commits.show" => {
+                let hash = matched.params.get("hash")?;
+                Some(handlers_vcs::handle_commit_show(&self.runtime, hash))
+            }
+            "repo.commits.diff" => {
+                let a = matched.params.get("a")?;
+                let b = matched.params.get("b")?;
+                Some(handlers_vcs::handle_commit_diff(&self.runtime, a, b, query))
+            }
+            "repo.commits.lca" => {
+                let a = matched.params.get("a")?;
+                let b = matched.params.get("b")?;
+                Some(handlers_vcs::handle_commit_lca(&self.runtime, a, b))
+            }
+            "repo.sessions.status" => {
+                let conn = match matched
+                    .params
+                    .get("conn")
+                    .and_then(|value| value.parse().ok())
+                {
+                    Some(conn) => conn,
+                    None => return Some(json_error(404, "not found")),
+                };
+                Some(handlers_vcs::handle_session_status(&self.runtime, conn))
+            }
+            "repo.sessions.checkout" => {
+                let conn = match matched
+                    .params
+                    .get("conn")
+                    .and_then(|value| value.parse().ok())
+                {
+                    Some(conn) => conn,
+                    None => return Some(json_error(404, "not found")),
+                };
+                Some(handlers_vcs::handle_session_checkout(
+                    &self.runtime,
+                    conn,
+                    body.to_vec(),
+                ))
+            }
+            "repo.sessions.merge" => {
+                let conn = match matched
+                    .params
+                    .get("conn")
+                    .and_then(|value| value.parse().ok())
+                {
+                    Some(conn) => conn,
+                    None => return Some(json_error(404, "not found")),
+                };
+                Some(handlers_vcs::handle_session_merge(
+                    &self.runtime,
+                    conn,
+                    body.to_vec(),
+                ))
+            }
+            "repo.sessions.reset" => {
+                let conn = match matched
+                    .params
+                    .get("conn")
+                    .and_then(|value| value.parse().ok())
+                {
+                    Some(conn) => conn,
+                    None => return Some(json_error(404, "not found")),
+                };
+                Some(handlers_vcs::handle_session_reset(
+                    &self.runtime,
+                    conn,
+                    body.to_vec(),
+                ))
+            }
+            "repo.sessions.cherry_pick" => {
+                let conn = match matched
+                    .params
+                    .get("conn")
+                    .and_then(|value| value.parse().ok())
+                {
+                    Some(conn) => conn,
+                    None => return Some(json_error(404, "not found")),
+                };
+                Some(handlers_vcs::handle_session_cherry_pick(
+                    &self.runtime,
+                    conn,
+                    body.to_vec(),
+                ))
+            }
+            "repo.sessions.revert" => {
+                let conn = match matched
+                    .params
+                    .get("conn")
+                    .and_then(|value| value.parse().ok())
+                {
+                    Some(conn) => conn,
+                    None => return Some(json_error(404, "not found")),
+                };
+                Some(handlers_vcs::handle_session_revert(
+                    &self.runtime,
+                    conn,
+                    body.to_vec(),
+                ))
+            }
+            "repo.merges.show" => {
+                let msid = matched.params.get("msid")?;
+                Some(handlers_vcs::handle_merge_show(&self.runtime, msid))
+            }
+            "repo.merges.conflicts" => {
+                let msid = matched.params.get("msid")?;
+                Some(handlers_vcs::handle_merge_conflicts(&self.runtime, msid))
+            }
+            "repo.merges.conflicts.resolve" => {
+                let msid = matched.params.get("msid")?;
+                let cid = matched.params.get("cid")?;
+                Some(handlers_vcs::handle_conflict_resolve(
+                    &self.runtime,
+                    msid,
+                    cid,
+                    body.to_vec(),
+                ))
+            }
+            "repo.collections.vcs.show" => {
+                let name = matched.params.get("name")?;
+                Some(handlers_vcs::handle_collection_vcs_show(
+                    &self.runtime,
+                    name,
+                ))
+            }
+            "repo.collections.vcs.set" => {
+                let name = matched.params.get("name")?;
+                Some(handlers_vcs::handle_collection_vcs_set(
+                    &self.runtime,
+                    name,
+                    body.to_vec(),
+                ))
+            }
+            "ai.ask" => Some(self.handle_ai_ask(body.to_vec())),
+            "ai.embeddings" => Some(self.handle_ai_embeddings(body.to_vec())),
+            "ai.prompt" => Some(self.handle_ai_prompt(body.to_vec())),
+            "ai.credentials" => Some(self.handle_ai_credentials(body.to_vec())),
+            "ai.models.list" => Some(self.handle_ai_model_list()),
+            "ai.models.register" => Some(self.handle_ai_model_register(body.to_vec())),
+            "ai.models.get" => {
+                let name = matched.params.get("name")?;
+                Some(self.handle_ai_model_get(name))
+            }
+            "ai.models.update" => {
+                let name = matched.params.get("name")?;
+                Some(self.handle_ai_model_update(name, body.to_vec()))
+            }
+            "ai.models.pull" => {
+                let name = matched.params.get("name")?;
+                Some(self.handle_ai_model_pull(name, body.to_vec()))
+            }
+            "ai.models.cache_status" => {
+                let name = matched.params.get("name")?;
+                Some(self.handle_ai_model_cache_status(name))
+            }
+            "ai.models.cache_drop" => {
+                let name = matched.params.get("name")?;
+                Some(self.handle_ai_model_cache_drop(name))
+            }
+            "metrics.scrape" => Some(self.handle_metrics()),
+            "prometheus.query.get" => Some(self.handle_prometheus_query(headers, query, None)),
+            "prometheus.query.post" => {
+                Some(self.handle_prometheus_query(headers, query, Some(body.to_vec())))
+            }
+            "prometheus.query_range.get" => {
+                Some(self.handle_prometheus_query_range(headers, query, None))
+            }
+            "prometheus.query_range.post" => {
+                Some(self.handle_prometheus_query_range(headers, query, Some(body.to_vec())))
+            }
+            "prometheus.remote_write" => {
+                Some(self.handle_prometheus_remote_write(query, headers, body.to_vec()))
+            }
+            _ => None,
+        }
+    }
+
+    fn rewrite_route_alias(mut request: HttpRequest) -> HttpRequest {
+        if let Some(target) = Self::route_alias_target(&request.method, &request.path) {
+            request.path = target;
+        }
+        request
+    }
+
+    fn route_alias_target(method: &str, path: &str) -> Option<String> {
+        let method = route_catalog::RouteMethod::from_http_method(method)?;
+        routes::discovered_route_catalog().resolve_alias(method, path)
+    }
+
+    fn discovered_route(method: &str, path: &str) -> Option<route_catalog::RouteMatch<'static>> {
+        let method = route_catalog::RouteMethod::from_http_method(method)?;
+        routes::discovered_route_catalog().find(method, path)
+    }
+
+    fn discovered_route_method_not_allowed(method: &str, path: &str) -> bool {
+        let Some(method) = route_catalog::RouteMethod::from_http_method(method) else {
+            return false;
+        };
+        let catalog = routes::discovered_route_catalog();
+        catalog.find(method, path).is_none() && catalog.path_exists(path)
+    }
+
+    fn discovered_route_uses_middleware(
+        &self,
+        method: &str,
+        path: &str,
+        middleware: route_catalog::RouteMiddleware,
+    ) -> bool {
+        Self::discovered_route(method, path)
+            .map(|matched| matched.spec.middlewares.contains(&middleware))
+            .unwrap_or(false)
+    }
+
+    fn discovered_route_ops_policy(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Option<HttpResponse> {
+        let matched = Self::discovered_route(method, path)?;
+        for middleware in matched.spec.middlewares {
+            if let route_catalog::RouteMiddleware::OpsPolicy(action) = *middleware {
+                return self.check_ops_http_policy(
+                    headers,
+                    action,
+                    Self::ops_policy_resource_name(matched.spec.id),
+                );
+            }
+        }
+        None
+    }
+
+    fn ops_policy_resource_name(route_id: &'static str) -> &'static str {
+        match route_id {
+            "admin.audit" => "audit",
+            "admin.blob_cache.stats" => "blob-cache-stats",
+            "admin.status" => "admin-status",
+            "metrics.scrape" => "metrics",
+            "ops.backup.status" => "backup-status",
+            "ops.cluster.status" => "cluster-status",
+            "ops.ec.status" => "eventual-consistency",
+            "ops.replication.status" => "replication-status",
+            "ops.topology.graph" => "topology-graph",
+            _ => route_id,
+        }
+    }
+
+    fn listener_surface(&self) -> route_catalog::ListenerSurface {
+        match self.options.surface {
+            crate::server::ServerSurface::Public => route_catalog::ListenerSurface::Public,
+            crate::server::ServerSurface::AdminOnly => route_catalog::ListenerSurface::Admin,
+            crate::server::ServerSurface::MetricsOnly => route_catalog::ListenerSurface::Metrics,
+        }
+    }
+
     /// PLAN.md Phase 6.2 — return whether `path` is reachable on
     /// this listener given its `ServerSurface` (Public / AdminOnly /
-    /// MetricsOnly). `/health/*` always passes so orchestrator
-    /// probes work on every bind.
-    fn surface_allows(&self, path: &str) -> bool {
+    /// MetricsOnly). Cataloged routes use their declared listener
+    /// surfaces; legacy routes keep the old path-prefix fallback until
+    /// their families migrate.
+    fn surface_allows(&self, method: &str, path: &str) -> bool {
+        if let Some(matched) = Self::discovered_route(method, path) {
+            return matched.spec.surfaces.contains(&self.listener_surface());
+        }
+
         match self.options.surface {
             crate::server::ServerSurface::Public => true,
             crate::server::ServerSurface::AdminOnly => {
@@ -2005,15 +3009,26 @@ impl RedDBServer {
     }
 
     fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
-        // PLAN.md Phase 1.2 — health probes are unauthenticated by
-        // contract: orchestrator probes can't carry tokens and a 401
-        // there would mark the pod unhealthy on the first scrape.
-        // Liveness, readiness, and startup all stay public.
-        if matches!(
-            (method, path),
-            ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
-        ) {
-            return true;
+        if let Some(matched) = Self::discovered_route(method, path) {
+            if matches!(
+                matched.spec.auth,
+                route_catalog::RouteAuth::Public | route_catalog::RouteAuth::OptionalUser
+            ) {
+                return true;
+            }
+            if matches!(matched.spec.auth, route_catalog::RouteAuth::AdminToken) {
+                if let Some(expected) = read_admin_token() {
+                    let presented = headers
+                        .get("authorization")
+                        .and_then(|v| v.strip_prefix("Bearer "))
+                        .unwrap_or("");
+                    return crate::crypto::constant_time_eq(
+                        presented.as_bytes(),
+                        expected.as_bytes(),
+                    );
+                }
+                return !path.starts_with("/v1/_admin/");
+            }
         }
 
         // `red server --ui` (#1047, ADR 0051) — the served bundle is inert
@@ -2371,6 +3386,140 @@ mod tests {
     }
 
     #[test]
+    fn discovered_lifecycle_health_routes_dispatch() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        for path in ["/health/live", "/health/ready", "/health/startup"] {
+            let response = server.route(request(path));
+            assert_eq!(
+                response.status,
+                200,
+                "expected discovered health route {path} to dispatch: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_v1_alias_rewrites_to_legacy_dispatch_path() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/v1/capabilities"));
+
+        assert_eq!(
+            response.status,
+            200,
+            "expected /v1/capabilities alias to dispatch to /capabilities: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    #[test]
+    fn dynamic_alias_rewrites_with_captured_params() {
+        assert_eq!(
+            RedDBServer::route_alias_target("GET", "/v1/ai/models/embedding-small"),
+            Some("/ai/models/embedding-small".to_string())
+        );
+    }
+
+    #[test]
+    fn auth_routes_dispatch_from_catalog() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let matched = RedDBServer::discovered_route("POST", "/auth/login")
+            .expect("auth login route should be cataloged");
+        assert_eq!(matched.spec.id, "auth.login");
+
+        let response = server.route(request_with(
+            "POST",
+            "/v1/auth/login",
+            br#"{"username":"admin","password":"pw"}"#.to_vec(),
+        ));
+        assert_eq!(
+            response.status,
+            501,
+            "canonical auth alias should dispatch to auth handler: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    #[test]
+    fn dynamic_auth_alias_rewrites_with_captured_params() {
+        assert_eq!(
+            RedDBServer::route_alias_target("DELETE", "/v1/auth/users/cloud-admin"),
+            Some("/auth/users/cloud-admin".to_string())
+        );
+        assert_eq!(
+            RedDBServer::route_alias_target("DELETE", "/v1/auth/tenants/acme/users/alice"),
+            Some("/auth/tenants/acme/users/alice".to_string())
+        );
+    }
+
+    #[test]
+    fn query_routes_dispatch_from_catalog_aliases() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/v1/query"));
+
+        assert_eq!(
+            response.status,
+            405,
+            "canonical query discovery alias should dispatch through the catalog: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(
+            response
+                .extra_headers
+                .iter()
+                .any(|(name, value)| *name == "Allow" && value == "POST"),
+            "GET /v1/query should keep the query discovery Allow header"
+        );
+    }
+
+    #[test]
+    fn streaming_detection_recognizes_canonical_query_alias() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+        let mut request = request_with(
+            "POST",
+            "/v1/query",
+            br#"{"query":"SELECT 1 as n"}"#.to_vec(),
+        );
+        request
+            .headers
+            .insert("accept".to_string(), "application/x-ndjson".to_string());
+
+        assert!(server.is_streaming_request(&request));
+    }
+
+    #[test]
+    fn metrics_route_dispatches_from_catalog() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/metrics"));
+
+        assert_eq!(
+            response.status,
+            200,
+            "expected catalog-dispatched /metrics response: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    #[test]
+    fn prometheus_namespace_alias_rewrites_to_grafana_compatible_path() {
+        assert_eq!(
+            RedDBServer::route_alias_target("GET", "/prometheus/api/v1/query"),
+            Some("/api/v1/query".to_string())
+        );
+    }
+
+    #[test]
     fn get_grpc_explains_grpc_contract() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let server = RedDBServer::new(runtime);
@@ -2531,6 +3680,24 @@ mod tests {
 
         let user = auth.get_user(Some("acme"), "system").unwrap();
         assert_eq!(user.role, crate::auth::Role::Admin);
+
+        let alias_body =
+            br#"{"username":"alias-system","password":"pw","role":"admin","tenant_id":"acme"}"#
+                .to_vec();
+        let alias_created = server.route(request_with_bearer(
+            "POST",
+            "/v1/admin/system-users",
+            alias_body,
+            "admin-secret",
+        ));
+        assert_eq!(
+            alias_created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&alias_created.body)
+        );
+        let alias_user = auth.get_user(Some("acme"), "alias-system").unwrap();
+        assert_eq!(alias_user.role, crate::auth::Role::Admin);
 
         match previous {
             Some(value) => std::env::set_var("RED_ADMIN_TOKEN", value),
