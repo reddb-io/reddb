@@ -40,6 +40,13 @@ mod tests {
         assert!(route_ids.contains(&"metrics.scrape"));
         assert!(route_ids.contains(&"prometheus.query.get"));
         assert!(route_ids.contains(&"ai.models.get"));
+        assert!(route_ids.contains(&"admin.shutdown"));
+        assert!(route_ids.contains(&"admin.policies.get"));
+        assert!(route_ids.contains(&"ops.cluster.status"));
+        assert!(route_ids.contains(&"catalog.snapshot"));
+        assert!(route_ids.contains(&"graph.neighborhood"));
+        assert!(route_ids.contains(&"repo.commits.diff"));
+        assert!(route_ids.contains(&"physical.metadata"));
     }
 
     #[test]
@@ -80,5 +87,14 @@ mod tests {
             .aliases
             .iter()
             .any(|alias| alias.pattern == "/prometheus/api/v1/query"));
+
+        let physical = catalog
+            .routes()
+            .find(|route| route.id == "physical.metadata")
+            .expect("physical metadata route is discovered");
+        assert!(physical
+            .aliases
+            .iter()
+            .any(|alias| alias.pattern == "/v1/ops/physical/metadata"));
     }
 }
