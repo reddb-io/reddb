@@ -24,7 +24,7 @@ fn build_discovered_route_catalog() -> Result<RouteCatalog, RouteCatalogError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::route_catalog::RouteMethod;
+    use crate::server::route_catalog::{RouteAudience, RouteMethod, RouteStability};
 
     #[test]
     fn build_time_discovery_registers_route_files() {
@@ -96,5 +96,62 @@ mod tests {
             .aliases
             .iter()
             .any(|alias| alias.pattern == "/v1/ops/physical/metadata"));
+
+        let graph_job = catalog
+            .routes()
+            .find(|route| route.id == "graph.jobs.queue")
+            .expect("graph job queue route is discovered");
+        assert!(graph_job
+            .aliases
+            .iter()
+            .any(|alias| alias.pattern == "/v1/graph/jobs/queue"));
+
+        let repo_diff = catalog
+            .routes()
+            .find(|route| route.id == "repo.commits.diff")
+            .expect("repo diff route is discovered");
+        assert!(repo_diff
+            .aliases
+            .iter()
+            .any(|alias| alias.pattern == "/v1/repo/commits/:a/diff/:b"));
+    }
+
+    #[test]
+    fn stable_product_routes_have_v1_canonical_entry() {
+        let catalog = build_discovered_route_catalog().unwrap();
+        let missing: Vec<&str> = catalog
+            .routes()
+            .filter(|route| route.stability == RouteStability::Stable)
+            .filter(|route| route.audience != RouteAudience::CompatibilityAdapter)
+            .filter(|route| route.family != "health")
+            .filter(|route| {
+                !matches!(
+                    route.pattern,
+                    "/health"
+                        | "/ready"
+                        | "/ready/query"
+                        | "/ready/write"
+                        | "/ready/repair"
+                        | "/ready/serverless"
+                        | "/ready/serverless/query"
+                        | "/ready/serverless/write"
+                        | "/ready/serverless/repair"
+                        | "/grpc"
+                )
+            })
+            .filter(|route| {
+                !route.pattern.starts_with("/v1/")
+                    && !route
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.pattern.starts_with("/v1/"))
+            })
+            .map(|route| route.id)
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "stable product routes missing canonical /v1 entry: {missing:?}"
+        );
     }
 }

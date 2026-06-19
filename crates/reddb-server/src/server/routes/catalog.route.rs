@@ -35,11 +35,36 @@ const COLLECTION_ALIASES: &[RouteAlias] = &[RouteAlias::canonical(
     "canonical v1 catalog collection path",
 )];
 
+macro_rules! catalog_aliases {
+    ($method:expr, $pattern:expr) => {
+        &[RouteAlias::canonical(
+            $method,
+            $pattern,
+            "canonical v1 catalog path",
+        )]
+    };
+}
+
 const CATALOG_ROUTES: &[RouteEntry] = &[
     RouteEntry::with_aliases("catalog.snapshot", RouteMethod::Get, "/catalog", CATALOG_ALIASES),
-    RouteEntry::new("catalog.readiness", RouteMethod::Get, "/catalog/readiness"),
-    RouteEntry::new("catalog.attention", RouteMethod::Get, "/catalog/attention"),
-    RouteEntry::new("catalog.consistency", RouteMethod::Get, "/catalog/consistency"),
+    RouteEntry::with_aliases(
+        "catalog.readiness",
+        RouteMethod::Get,
+        "/catalog/readiness",
+        catalog_aliases!(RouteMethod::Get, "/v1/catalog/readiness"),
+    ),
+    RouteEntry::with_aliases(
+        "catalog.attention",
+        RouteMethod::Get,
+        "/catalog/attention",
+        catalog_aliases!(RouteMethod::Get, "/v1/catalog/attention"),
+    ),
+    RouteEntry::with_aliases(
+        "catalog.consistency",
+        RouteMethod::Get,
+        "/catalog/consistency",
+        catalog_aliases!(RouteMethod::Get, "/v1/catalog/consistency"),
+    ),
     RouteEntry::with_aliases(
         "catalog.collections.metadata",
         RouteMethod::Get,

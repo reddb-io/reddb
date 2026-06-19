@@ -40,10 +40,10 @@ ai
 ```
 
 For those families, route files declare method, current live path, audience,
-auth class, listener surfaces, middleware intent, and selected canonical
-`/v1/*` aliases. Alias requests are resolved through the catalog and rewritten
-to the live path before dispatch, so a canonical path can be activated without
-duplicating handlers.
+auth class, listener surfaces, middleware intent, and canonical `/v1/*` aliases
+for stable product routes. Alias requests are resolved through the catalog and
+rewritten to the live path before dispatch, so a canonical path can be
+activated without duplicating handlers.
 
 The two streaming-only routes, `POST /streams/input` and `POST /query/stream`,
 remain dispatched by `try_route_streaming` because they write incremental
@@ -106,5 +106,6 @@ expect them:
 ```
 
 Prometheus/Grafana compatibility remains an adapter surface. Keep `/api/v1/*`
-where Grafana and Prometheus tooling expect it, and model any RedDB-native
-metrics API separately under `/v1`.
+where Grafana and Prometheus tooling expect it, expose explicit
+`/prometheus/api/v1/*` compatibility aliases, and model RedDB-native metrics
+under `/v1/ops/metrics`.
