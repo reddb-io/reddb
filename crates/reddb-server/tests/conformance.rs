@@ -269,6 +269,7 @@ fn parse_error_kind_name(kind: &ParseErrorKind) -> &'static str {
         ParseErrorKind::DepthLimit { .. } => "DepthLimit",
         ParseErrorKind::InputTooLarge { .. } => "InputTooLarge",
         ParseErrorKind::IdentifierTooLong { .. } => "IdentifierTooLong",
+        ParseErrorKind::TokenLimit { .. } => "TokenLimit",
         ParseErrorKind::ValueOutOfRange { .. } => "ValueOutOfRange",
         ParseErrorKind::UnsupportedToken { .. } => "UnsupportedToken",
     }
