@@ -1,6 +1,8 @@
 use super::route_catalog::{RouteCatalog, RouteCatalogError, RouteRegistry};
 use std::sync::OnceLock;
 
+pub(crate) mod common;
+
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/route_discovery.rs"));
 }
@@ -32,6 +34,12 @@ mod tests {
         assert!(route_ids.contains(&"health.live"));
         assert!(route_ids.contains(&"health.ready"));
         assert!(route_ids.contains(&"health.startup"));
+        assert!(route_ids.contains(&"auth.login"));
+        assert!(route_ids.contains(&"query.execute"));
+        assert!(route_ids.contains(&"streams.input"));
+        assert!(route_ids.contains(&"metrics.scrape"));
+        assert!(route_ids.contains(&"prometheus.query.get"));
+        assert!(route_ids.contains(&"ai.models.get"));
     }
 
     #[test]
@@ -40,5 +48,37 @@ mod tests {
         let matched = catalog.find(RouteMethod::Get, "/health/live").unwrap();
 
         assert_eq!(matched.spec.id, "health.live");
+    }
+
+    #[test]
+    fn discovered_routes_carry_canonical_aliases() {
+        let catalog = build_discovered_route_catalog().unwrap();
+
+        let auth_login = catalog
+            .routes()
+            .find(|route| route.id == "auth.login")
+            .expect("auth.login route is discovered");
+        assert!(auth_login
+            .aliases
+            .iter()
+            .any(|alias| alias.pattern == "/v1/auth/login"));
+
+        let query = catalog
+            .routes()
+            .find(|route| route.id == "query.execute")
+            .expect("query.execute route is discovered");
+        assert!(query
+            .aliases
+            .iter()
+            .any(|alias| alias.pattern == "/v1/query"));
+
+        let prometheus = catalog
+            .routes()
+            .find(|route| route.id == "prometheus.query.get")
+            .expect("prometheus query route is discovered");
+        assert!(prometheus
+            .aliases
+            .iter()
+            .any(|alias| alias.pattern == "/prometheus/api/v1/query"));
     }
 }
