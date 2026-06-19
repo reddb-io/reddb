@@ -24,7 +24,9 @@ fn build_discovered_route_catalog() -> Result<RouteCatalog, RouteCatalogError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::route_catalog::{RouteAudience, RouteMethod, RouteStability};
+    use crate::server::route_catalog::{
+        RouteAudience, RouteMethod, RouteMiddleware, RouteStability,
+    };
 
     #[test]
     fn build_time_discovery_registers_route_files() {
@@ -152,6 +154,44 @@ mod tests {
         assert!(
             missing.is_empty(),
             "stable product routes missing canonical /v1 entry: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn readiness_probes_bypass_quota_but_capabilities_do_not() {
+        let catalog = build_discovered_route_catalog().unwrap();
+        for path in [
+            "/health",
+            "/ready",
+            "/ready/query",
+            "/ready/write",
+            "/ready/repair",
+            "/ready/serverless",
+            "/ready/serverless/query",
+            "/ready/serverless/write",
+            "/ready/serverless/repair",
+        ] {
+            let matched = catalog
+                .find(RouteMethod::Get, path)
+                .unwrap_or_else(|| panic!("missing probe route {path}"));
+            assert!(
+                matched
+                    .spec
+                    .middlewares
+                    .contains(&RouteMiddleware::QuotaBypass),
+                "probe route {path} must bypass quota"
+            );
+        }
+
+        let capabilities = catalog
+            .find(RouteMethod::Get, "/capabilities")
+            .expect("missing capabilities route");
+        assert!(
+            capabilities
+                .spec
+                .middlewares
+                .contains(&RouteMiddleware::QuotaGate),
+            "capabilities should remain quota-gated"
         );
     }
 }
