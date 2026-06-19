@@ -35,6 +35,27 @@ Those routes now use catalog metadata for listener-surface checks, public auth,
 quota bypass, and buffered dispatch. Non-migrated routes continue through the
 legacy router until their families move.
 
+The catalog also inventories the current public route contract for these
+families:
+
+```text
+auth
+query / streams
+metrics / prometheus
+admin / ops
+catalog
+graph
+repo
+physical
+ai
+```
+
+For those families, route files now declare method, current live path,
+audience, auth class, listener surfaces, middleware intent, and selected
+canonical `/v1/*` aliases. Dispatch migration is intentionally incremental:
+route metadata lands first, then each family moves off the legacy matcher once
+its auth and compatibility behavior is covered by tests.
+
 ## Catalog Contract
 
 Every route must declare:
