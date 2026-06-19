@@ -114,7 +114,7 @@ impl RedDBServer {
             return Ok(false);
         }
 
-        if !self.surface_allows(&request.path) {
+        if !self.surface_allows(&request.method, &request.path) {
             writer.write_all(&json_error(404, "not found on this listener").to_http_bytes())?;
             writer.flush()?;
             return Ok(true);
@@ -317,7 +317,7 @@ impl RedDBServer {
         // to the dedicated admin / metrics ports refuse paths
         // outside their surface so accidentally exposing them does
         // not leak the rest of the API.
-        if !self.surface_allows(&path) {
+        if !self.surface_allows(&method, &path) {
             return json_error(404, "not found on this listener");
         }
 
@@ -327,11 +327,11 @@ impl RedDBServer {
 
         // PLAN.md Phase 4.4 — per-caller QPS quota. Health probes
         // skip the gate so probes never trip 429 on a hot instance.
-        let is_health_probe = matches!(
-            (method.as_str(), path.as_str()),
-            ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
-        );
-        if !is_health_probe {
+        if !self.discovered_route_uses_middleware(
+            &method,
+            &path,
+            route_catalog::RouteMiddleware::QuotaBypass,
+        ) {
             let principal = principal_for(&headers);
             match self.runtime.quota_bucket().consume(&principal) {
                 crate::runtime::quota_bucket::QuotaOutcome::Throttled => {
@@ -349,6 +349,10 @@ impl RedDBServer {
                 crate::runtime::quota_bucket::QuotaOutcome::Granted
                 | crate::runtime::quota_bucket::QuotaOutcome::NotConfigured => {}
             }
+        }
+
+        if let Some(response) = self.route_discovered_buffered(&method, &path) {
+            return response;
         }
 
         match (method.as_str(), path.as_str()) {
@@ -453,10 +457,6 @@ impl RedDBServer {
                 self.handle_admin_replication_confirm_rewind(body)
             }
 
-            // PLAN.md Phase 1 — universal lifecycle/health contract.
-            ("GET", "/health/live") => self.handle_health_live(),
-            ("GET", "/health/ready") => self.handle_health_ready(),
-            ("GET", "/health/startup") => self.handle_health_startup(),
             ("POST", "/admin/shutdown") => self.handle_admin_shutdown(),
             ("POST", "/admin/drain") => self.handle_admin_drain(),
             // PLAN.md Phase 3.2 / 3.3 — admin restore + backup.
@@ -1979,11 +1979,50 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
+    fn route_discovered_buffered(&self, method: &str, path: &str) -> Option<HttpResponse> {
+        let matched = Self::discovered_route(method, path)?;
+        match matched.spec.id {
+            "health.live" => Some(self.handle_health_live()),
+            "health.ready" => Some(self.handle_health_ready()),
+            "health.startup" => Some(self.handle_health_startup()),
+            _ => None,
+        }
+    }
+
+    fn discovered_route(method: &str, path: &str) -> Option<route_catalog::RouteMatch<'static>> {
+        let method = route_catalog::RouteMethod::from_http_method(method)?;
+        routes::discovered_route_catalog().find(method, path)
+    }
+
+    fn discovered_route_uses_middleware(
+        &self,
+        method: &str,
+        path: &str,
+        middleware: route_catalog::RouteMiddleware,
+    ) -> bool {
+        Self::discovered_route(method, path)
+            .map(|matched| matched.spec.middlewares.contains(&middleware))
+            .unwrap_or(false)
+    }
+
+    fn listener_surface(&self) -> route_catalog::ListenerSurface {
+        match self.options.surface {
+            crate::server::ServerSurface::Public => route_catalog::ListenerSurface::Public,
+            crate::server::ServerSurface::AdminOnly => route_catalog::ListenerSurface::Admin,
+            crate::server::ServerSurface::MetricsOnly => route_catalog::ListenerSurface::Metrics,
+        }
+    }
+
     /// PLAN.md Phase 6.2 — return whether `path` is reachable on
     /// this listener given its `ServerSurface` (Public / AdminOnly /
-    /// MetricsOnly). `/health/*` always passes so orchestrator
-    /// probes work on every bind.
-    fn surface_allows(&self, path: &str) -> bool {
+    /// MetricsOnly). Cataloged routes use their declared listener
+    /// surfaces; legacy routes keep the old path-prefix fallback until
+    /// their families migrate.
+    fn surface_allows(&self, method: &str, path: &str) -> bool {
+        if let Some(matched) = Self::discovered_route(method, path) {
+            return matched.spec.surfaces.contains(&self.listener_surface());
+        }
+
         match self.options.surface {
             crate::server::ServerSurface::Public => true,
             crate::server::ServerSurface::AdminOnly => {
@@ -2005,15 +2044,13 @@ impl RedDBServer {
     }
 
     fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
-        // PLAN.md Phase 1.2 — health probes are unauthenticated by
-        // contract: orchestrator probes can't carry tokens and a 401
-        // there would mark the pod unhealthy on the first scrape.
-        // Liveness, readiness, and startup all stay public.
-        if matches!(
-            (method, path),
-            ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
-        ) {
-            return true;
+        if let Some(matched) = Self::discovered_route(method, path) {
+            if matches!(
+                matched.spec.auth,
+                route_catalog::RouteAuth::Public | route_catalog::RouteAuth::OptionalUser
+            ) {
+                return true;
+            }
         }
 
         // `red server --ui` (#1047, ADR 0051) — the served bundle is inert

@@ -23,6 +23,18 @@ pub(crate) fn register(registry: &mut RouteRegistry)
 module in `OUT_DIR`. This gives us filesystem organization without runtime
 dynamic imports.
 
+The first migrated family is the lifecycle health trio:
+
+```text
+GET /health/live
+GET /health/ready
+GET /health/startup
+```
+
+Those routes now use catalog metadata for listener-surface checks, public auth,
+quota bypass, and buffered dispatch. Non-migrated routes continue through the
+legacy router until their families move.
+
 ## Catalog Contract
 
 Every route must declare:
