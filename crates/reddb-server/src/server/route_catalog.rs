@@ -14,6 +14,20 @@ pub(crate) enum RouteMethod {
 }
 
 impl RouteMethod {
+    pub(crate) fn from_http_method(method: &str) -> Option<Self> {
+        match method {
+            "GET" => Some(Self::Get),
+            "POST" => Some(Self::Post),
+            "PUT" => Some(Self::Put),
+            "PATCH" => Some(Self::Patch),
+            "DELETE" => Some(Self::Delete),
+            "OPTIONS" => Some(Self::Options),
+            "HEAD" => Some(Self::Head),
+            "*" => Some(Self::Any),
+            _ => None,
+        }
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Get => "GET",
