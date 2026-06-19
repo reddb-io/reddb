@@ -2408,6 +2408,22 @@ mod tests {
     }
 
     #[test]
+    fn discovered_lifecycle_health_routes_dispatch() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        for path in ["/health/live", "/health/ready", "/health/startup"] {
+            let response = server.route(request(path));
+            assert_eq!(
+                response.status,
+                200,
+                "expected discovered health route {path} to dispatch: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+        }
+    }
+
+    #[test]
     fn get_grpc_explains_grpc_contract() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let server = RedDBServer::new(runtime);
