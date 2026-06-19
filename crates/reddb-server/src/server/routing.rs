@@ -354,7 +354,9 @@ impl RedDBServer {
             }
         }
 
-        if let Some(response) = self.route_discovered_buffered(&method, &path) {
+        if let Some(response) =
+            self.route_discovered_buffered(&method, &path, &query, &headers, &body)
+        {
             return response;
         }
 
@@ -488,26 +490,6 @@ impl RedDBServer {
             }
             // PLAN.md Phase 11.6 — manual replica → primary promotion.
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
-            // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
-            ("GET", "/metrics") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "metrics")
-                {
-                    return deny;
-                }
-                self.handle_metrics()
-            }
-            ("GET", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, None),
-            ("POST", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, Some(body)),
-            ("GET", "/api/v1/query_range") => {
-                self.handle_prometheus_query_range(&headers, &query, None)
-            }
-            ("POST", "/api/v1/query_range") => {
-                self.handle_prometheus_query_range(&headers, &query, Some(body))
-            }
-            ("POST", "/api/v1/write") => {
-                self.handle_prometheus_remote_write(&query, &headers, body)
-            }
             ("GET", "/admin/status") => {
                 if let Some(deny) =
                     self.check_ops_http_policy(&headers, "ops:read:cluster", "admin-status")
@@ -1982,12 +1964,40 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
-    fn route_discovered_buffered(&self, method: &str, path: &str) -> Option<HttpResponse> {
+    fn route_discovered_buffered(
+        &self,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
         let matched = Self::discovered_route(method, path)?;
         match matched.spec.id {
             "health.live" => Some(self.handle_health_live()),
             "health.ready" => Some(self.handle_health_ready()),
             "health.startup" => Some(self.handle_health_startup()),
+            "metrics.scrape" => {
+                if let Some(deny) =
+                    self.check_ops_http_policy(headers, "ops:read:cluster", "metrics")
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_metrics())
+            }
+            "prometheus.query.get" => Some(self.handle_prometheus_query(headers, query, None)),
+            "prometheus.query.post" => {
+                Some(self.handle_prometheus_query(headers, query, Some(body.to_vec())))
+            }
+            "prometheus.query_range.get" => {
+                Some(self.handle_prometheus_query_range(headers, query, None))
+            }
+            "prometheus.query_range.post" => {
+                Some(self.handle_prometheus_query_range(headers, query, Some(body.to_vec())))
+            }
+            "prometheus.remote_write" => {
+                Some(self.handle_prometheus_remote_write(query, headers, body.to_vec()))
+            }
             _ => None,
         }
     }
@@ -2458,6 +2468,29 @@ mod tests {
         assert_eq!(
             RedDBServer::route_alias_target("GET", "/v1/ai/models/embedding-small"),
             Some("/ai/models/embedding-small".to_string())
+        );
+    }
+
+    #[test]
+    fn metrics_route_dispatches_from_catalog() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/metrics"));
+
+        assert_eq!(
+            response.status,
+            200,
+            "expected catalog-dispatched /metrics response: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    #[test]
+    fn prometheus_namespace_alias_rewrites_to_grafana_compatible_path() {
+        assert_eq!(
+            RedDBServer::route_alias_target("GET", "/prometheus/api/v1/query"),
+            Some("/api/v1/query".to_string())
         );
     }
 
