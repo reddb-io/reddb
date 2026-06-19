@@ -60,3 +60,6 @@ perf.data.old
 !crates/reddb-server/src/storage/wal/
 !crates/reddb-server/src/storage/wal/*.rs
 .red/brain/
+
+# RedSkills wiki — local-only, never committed
+.red/wiki/
