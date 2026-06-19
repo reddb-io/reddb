@@ -74,79 +74,200 @@ const CAPABILITIES_ALIASES: &[RouteAlias] = &[RouteAlias::canonical(
     "canonical v1 capabilities path",
 )];
 
+macro_rules! admin_aliases {
+    ($method:expr, $pattern:expr) => {
+        &[RouteAlias::canonical(
+            $method,
+            $pattern,
+            "canonical v1 admin path",
+        )]
+    };
+}
+
+macro_rules! ops_aliases {
+    ($method:expr, $pattern:expr) => {
+        &[RouteAlias::canonical(
+            $method,
+            $pattern,
+            "canonical v1 ops path",
+        )]
+    };
+}
+
 const ADMIN_MUTATION_ROUTES: &[RouteEntry] = &[
-    RouteEntry::new("admin.shutdown", RouteMethod::Post, "/admin/shutdown"),
-    RouteEntry::new("admin.drain", RouteMethod::Post, "/admin/drain"),
-    RouteEntry::new("admin.restore", RouteMethod::Post, "/admin/restore"),
-    RouteEntry::new("admin.backup", RouteMethod::Post, "/admin/backup"),
-    RouteEntry::new("admin.readonly", RouteMethod::Post, "/admin/readonly"),
-    RouteEntry::new("admin.blob_cache.sweep", RouteMethod::Post, "/admin/blob_cache/sweep"),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
+        "admin.shutdown",
+        RouteMethod::Post,
+        "/admin/shutdown",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/shutdown"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.drain",
+        RouteMethod::Post,
+        "/admin/drain",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/drain"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.restore",
+        RouteMethod::Post,
+        "/admin/restore",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/restore"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.backup",
+        RouteMethod::Post,
+        "/admin/backup",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/backup"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.readonly",
+        RouteMethod::Post,
+        "/admin/readonly",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/readonly"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.blob_cache.sweep",
+        RouteMethod::Post,
+        "/admin/blob_cache/sweep",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/blob-cache/sweep"),
+    ),
+    RouteEntry::with_aliases(
         "admin.blob_cache.flush_namespace",
         RouteMethod::Post,
         "/admin/blob_cache/flush_namespace",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/blob-cache/flush-namespace"),
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "admin.cache.compare_and_set",
         RouteMethod::Post,
         "/admin/cache/compare-and-set",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/cache/compare-and-set"),
     ),
-    RouteEntry::new("admin.failover.promote", RouteMethod::Post, "/admin/failover/promote"),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
+        "admin.failover.promote",
+        RouteMethod::Post,
+        "/admin/failover/promote",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/failover/promote"),
+    ),
+    RouteEntry::with_aliases(
         "admin.replication.confirm_rewind",
         RouteMethod::Post,
         "/admin/replication/rejoin/confirm-rewind",
+        admin_aliases!(
+            RouteMethod::Post,
+            "/v1/admin/replication/rejoin/confirm-rewind"
+        ),
     ),
 ];
 
 const ADMIN_POLICY_ROUTES: &[RouteEntry] = &[
-    RouteEntry::new("admin.audit", RouteMethod::Get, "/admin/audit"),
-    RouteEntry::new("admin.policies.list", RouteMethod::Get, "/admin/policies"),
-    RouteEntry::new("admin.policies.put", RouteMethod::Put, "/admin/policies/:id"),
-    RouteEntry::new("admin.policies.get", RouteMethod::Get, "/admin/policies/:id"),
-    RouteEntry::new("admin.policies.delete", RouteMethod::Delete, "/admin/policies/:id"),
-    RouteEntry::new("admin.policies.simulate", RouteMethod::Post, "/admin/policies/simulate"),
-    RouteEntry::new("admin.policies.lint", RouteMethod::Post, "/admin/policies/lint"),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
+        "admin.audit",
+        RouteMethod::Get,
+        "/admin/audit",
+        admin_aliases!(RouteMethod::Get, "/v1/admin/audit"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.policies.list",
+        RouteMethod::Get,
+        "/admin/policies",
+        admin_aliases!(RouteMethod::Get, "/v1/admin/policies"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.policies.simulate",
+        RouteMethod::Post,
+        "/admin/policies/simulate",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/policies/simulate"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.policies.lint",
+        RouteMethod::Post,
+        "/admin/policies/lint",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/policies/lint"),
+    ),
+    RouteEntry::with_aliases(
         "admin.policies.migrate_mode",
         RouteMethod::Post,
         "/admin/policies/migrate-mode",
+        admin_aliases!(RouteMethod::Post, "/v1/admin/policies/migrate-mode"),
     ),
-    RouteEntry::new("admin.policies.actions", RouteMethod::Get, "/admin/policies/actions"),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
+        "admin.policies.actions",
+        RouteMethod::Get,
+        "/admin/policies/actions",
+        admin_aliases!(RouteMethod::Get, "/v1/admin/policies/actions"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.policies.put",
+        RouteMethod::Put,
+        "/admin/policies/:id",
+        admin_aliases!(RouteMethod::Put, "/v1/admin/policies/:id"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.policies.get",
+        RouteMethod::Get,
+        "/admin/policies/:id",
+        admin_aliases!(RouteMethod::Get, "/v1/admin/policies/:id"),
+    ),
+    RouteEntry::with_aliases(
+        "admin.policies.delete",
+        RouteMethod::Delete,
+        "/admin/policies/:id",
+        admin_aliases!(RouteMethod::Delete, "/v1/admin/policies/:id"),
+    ),
+    RouteEntry::with_aliases(
         "admin.users.effective_permissions",
         RouteMethod::Get,
         "/admin/users/:user/effective-permissions",
+        admin_aliases!(
+            RouteMethod::Get,
+            "/v1/admin/users/:user/effective-permissions"
+        ),
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "admin.users.groups.add",
         RouteMethod::Put,
         "/admin/users/:user/groups/:group",
+        admin_aliases!(RouteMethod::Put, "/v1/admin/users/:user/groups/:group"),
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "admin.users.groups.remove",
         RouteMethod::Delete,
         "/admin/users/:user/groups/:group",
+        admin_aliases!(RouteMethod::Delete, "/v1/admin/users/:user/groups/:group"),
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "admin.users.policies.attach",
         RouteMethod::Put,
         "/admin/users/:user/policies/:policy",
+        admin_aliases!(RouteMethod::Put, "/v1/admin/users/:user/policies/:policy"),
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "admin.users.policies.detach",
         RouteMethod::Delete,
         "/admin/users/:user/policies/:policy",
+        admin_aliases!(
+            RouteMethod::Delete,
+            "/v1/admin/users/:user/policies/:policy"
+        ),
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "admin.groups.policies.attach",
         RouteMethod::Put,
         "/admin/groups/:group/policies/:policy",
+        admin_aliases!(
+            RouteMethod::Put,
+            "/v1/admin/groups/:group/policies/:policy"
+        ),
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "admin.groups.policies.detach",
         RouteMethod::Delete,
         "/admin/groups/:group/policies/:policy",
+        admin_aliases!(
+            RouteMethod::Delete,
+            "/v1/admin/groups/:group/policies/:policy"
+        ),
     ),
 ];
 
@@ -157,23 +278,73 @@ const OPS_READ_ROUTES: &[RouteEntry] = &[
         "/admin/status",
         ADMIN_STATUS_ALIASES,
     ),
-    RouteEntry::new("admin.blob_cache.stats", RouteMethod::Get, "/admin/blob_cache/stats"),
-    RouteEntry::new("ops.ec.status", RouteMethod::Get, "/ec/status"),
-    RouteEntry::new("ops.backup.status", RouteMethod::Get, "/backup/status"),
-    RouteEntry::new("ops.backup.trigger", RouteMethod::Post, "/backup/trigger"),
-    RouteEntry::new("ops.recovery.restore_points", RouteMethod::Get, "/recovery/restore-points"),
-    RouteEntry::new("ops.replication.status", RouteMethod::Get, "/replication/status"),
-    RouteEntry::new("ops.replication.snapshot", RouteMethod::Post, "/replication/snapshot"),
-    RouteEntry::new("ops.topology.graph", RouteMethod::Get, "/v1/topology/graph"),
+    RouteEntry::with_aliases(
+        "admin.blob_cache.stats",
+        RouteMethod::Get,
+        "/admin/blob_cache/stats",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/blob-cache/stats"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.ec.status",
+        RouteMethod::Get,
+        "/ec/status",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/ec/status"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.backup.status",
+        RouteMethod::Get,
+        "/backup/status",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/backup/status"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.backup.trigger",
+        RouteMethod::Post,
+        "/backup/trigger",
+        ops_aliases!(RouteMethod::Post, "/v1/ops/backup/trigger"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.recovery.restore_points",
+        RouteMethod::Get,
+        "/recovery/restore-points",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/recovery/restore-points"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.replication.status",
+        RouteMethod::Get,
+        "/replication/status",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/replication/status"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.replication.snapshot",
+        RouteMethod::Post,
+        "/replication/snapshot",
+        ops_aliases!(RouteMethod::Post, "/v1/ops/replication/snapshot"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.topology.graph",
+        RouteMethod::Get,
+        "/v1/topology/graph",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/topology/graph"),
+    ),
     RouteEntry::with_aliases(
         "ops.cluster.status",
         RouteMethod::Get,
         "/cluster/status",
         CLUSTER_STATUS_ALIASES,
     ),
-    RouteEntry::new("ops.deployment.profiles", RouteMethod::Get, "/deployment/profiles"),
+    RouteEntry::with_aliases(
+        "ops.deployment.profiles",
+        RouteMethod::Get,
+        "/deployment/profiles",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/deployment/profiles"),
+    ),
     RouteEntry::new("ops.grpc.discovery", RouteMethod::Get, "/grpc"),
-    RouteEntry::new("ops.cdc.changes", RouteMethod::Get, "/changes"),
+    RouteEntry::with_aliases(
+        "ops.cdc.changes",
+        RouteMethod::Get,
+        "/changes",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/cdc/changes"),
+    ),
 ];
 
 const OPS_PUBLIC_ROUTES: &[RouteEntry] = &[
