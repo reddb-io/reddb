@@ -106,6 +106,34 @@ pub(crate) struct RouteAlias {
     pub(crate) note: &'static str,
 }
 
+impl RouteAlias {
+    pub(crate) const fn canonical(
+        method: RouteMethod,
+        pattern: &'static str,
+        note: &'static str,
+    ) -> Self {
+        Self {
+            method,
+            pattern,
+            stability: RouteStability::Stable,
+            note,
+        }
+    }
+
+    pub(crate) const fn compatibility(
+        method: RouteMethod,
+        pattern: &'static str,
+        note: &'static str,
+    ) -> Self {
+        Self {
+            method,
+            pattern,
+            stability: RouteStability::Compatibility,
+            note,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RouteSpec {
     pub(crate) id: &'static str,
@@ -120,6 +148,49 @@ pub(crate) struct RouteSpec {
     pub(crate) middlewares: &'static [RouteMiddleware],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RouteGroupDefaults {
+    pub(crate) family: &'static str,
+    pub(crate) audience: RouteAudience,
+    pub(crate) auth: RouteAuth,
+    pub(crate) surfaces: &'static [ListenerSurface],
+    pub(crate) stability: RouteStability,
+    pub(crate) middlewares: &'static [RouteMiddleware],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RouteEntry {
+    pub(crate) id: &'static str,
+    pub(crate) method: RouteMethod,
+    pub(crate) pattern: &'static str,
+    pub(crate) aliases: &'static [RouteAlias],
+}
+
+impl RouteEntry {
+    pub(crate) const fn new(id: &'static str, method: RouteMethod, pattern: &'static str) -> Self {
+        Self {
+            id,
+            method,
+            pattern,
+            aliases: &[],
+        }
+    }
+
+    pub(crate) const fn with_aliases(
+        id: &'static str,
+        method: RouteMethod,
+        pattern: &'static str,
+        aliases: &'static [RouteAlias],
+    ) -> Self {
+        Self {
+            id,
+            method,
+            pattern,
+            aliases,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct RouteRegistry {
     specs: Vec<RouteSpec>,
@@ -128,6 +199,23 @@ pub(crate) struct RouteRegistry {
 impl RouteRegistry {
     pub(crate) fn route(&mut self, spec: RouteSpec) {
         self.specs.push(spec);
+    }
+
+    pub(crate) fn routes(&mut self, defaults: RouteGroupDefaults, entries: &[RouteEntry]) {
+        for entry in entries {
+            self.route(RouteSpec {
+                id: entry.id,
+                method: entry.method,
+                pattern: entry.pattern,
+                family: defaults.family,
+                audience: defaults.audience,
+                auth: defaults.auth,
+                surfaces: defaults.surfaces,
+                stability: defaults.stability,
+                aliases: entry.aliases,
+                middlewares: defaults.middlewares,
+            });
+        }
     }
 
     pub(crate) fn into_specs(self) -> Vec<RouteSpec> {
