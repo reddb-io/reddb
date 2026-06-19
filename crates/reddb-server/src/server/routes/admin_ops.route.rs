@@ -34,10 +34,10 @@ const ADMIN_MUTATION: RouteGroupDefaults = RouteGroupDefaults {
 const ADMIN_POLICY: RouteGroupDefaults = RouteGroupDefaults {
     family: "admin",
     audience: RouteAudience::Operator,
-    auth: RouteAuth::OpsCapability("ops:admin"),
+    auth: RouteAuth::AdminToken,
     surfaces: ADMIN_SURFACES,
     stability: RouteStability::Stable,
-    middlewares: OPS_ADMIN_MIDDLEWARE,
+    middlewares: ADMIN_TOKEN_MIDDLEWARE,
 };
 
 const OPS_READ: RouteGroupDefaults = RouteGroupDefaults {
@@ -160,13 +160,14 @@ const ADMIN_MUTATION_ROUTES: &[RouteEntry] = &[
     ),
 ];
 
+const ADMIN_POLICY_AUDIT_ROUTES: &[RouteEntry] = &[RouteEntry::with_aliases(
+    "admin.audit",
+    RouteMethod::Get,
+    "/admin/audit",
+    admin_aliases!(RouteMethod::Get, "/v1/admin/audit"),
+)];
+
 const ADMIN_POLICY_ROUTES: &[RouteEntry] = &[
-    RouteEntry::with_aliases(
-        "admin.audit",
-        RouteMethod::Get,
-        "/admin/audit",
-        admin_aliases!(RouteMethod::Get, "/v1/admin/audit"),
-    ),
     RouteEntry::with_aliases(
         "admin.policies.list",
         RouteMethod::Get,
@@ -379,6 +380,14 @@ const OPS_PUBLIC_ROUTES: &[RouteEntry] = &[
 
 pub(crate) fn register(registry: &mut RouteRegistry) {
     registry.routes(ADMIN_MUTATION, ADMIN_MUTATION_ROUTES);
+    registry.routes(
+        RouteGroupDefaults {
+            auth: RouteAuth::OpsCapability("ops:admin"),
+            middlewares: OPS_ADMIN_MIDDLEWARE,
+            ..ADMIN_POLICY
+        },
+        ADMIN_POLICY_AUDIT_ROUTES,
+    );
     registry.routes(ADMIN_POLICY, ADMIN_POLICY_ROUTES);
     registry.routes(OPS_READ, OPS_READ_ROUTES);
     registry.routes(OPS_PUBLIC, OPS_PUBLIC_ROUTES);

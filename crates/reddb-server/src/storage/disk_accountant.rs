@@ -15,9 +15,7 @@ fn estimate_bytes_on_disk(store: &UnifiedStore, collection: &str) -> Option<u64>
     let Some(root_page) = store.collection_root_page(collection) else {
         return Some(0);
     };
-    let Some(pages) = reachable_btree_pages(store, root_page) else {
-        return None;
-    };
+    let pages = reachable_btree_pages(store, root_page)?;
     Some(pages.saturating_mul(PAGE_SIZE as u64))
 }
 

@@ -344,6 +344,14 @@ impl RouteCatalog {
             });
         }
 
+        if self
+            .exact_index
+            .keys()
+            .any(|(_, exact_path)| *exact_path == path)
+        {
+            return None;
+        }
+
         for index in &self.dynamic_indices {
             let route = &self.routes[*index];
             if !route.spec.method.overlaps(method) {
@@ -358,6 +366,24 @@ impl RouteCatalog {
         }
 
         None
+    }
+
+    pub(crate) fn path_exists(&self, path: &str) -> bool {
+        if self
+            .exact_index
+            .keys()
+            .any(|(_, exact_path)| *exact_path == path)
+        {
+            return true;
+        }
+
+        self.dynamic_indices
+            .iter()
+            .any(|index| self.routes[*index].pattern.matches(path).is_some())
+            || self
+                .aliases
+                .iter()
+                .any(|alias| alias.pattern.matches(path).is_some())
     }
 
     pub(crate) fn resolve_alias(&self, method: RouteMethod, path: &str) -> Option<String> {
@@ -713,6 +739,51 @@ mod tests {
         .unwrap();
 
         assert!(catalog.find(RouteMethod::Get, "/collections/").is_none());
+    }
+
+    #[test]
+    fn exact_path_in_other_method_blocks_dynamic_match() {
+        let catalog = RouteCatalog::build(vec![
+            spec("policy.lint", RouteMethod::Post, "/admin/policies/lint"),
+            spec("policy.get", RouteMethod::Get, "/admin/policies/:id"),
+        ])
+        .unwrap();
+
+        assert!(catalog
+            .find(RouteMethod::Get, "/admin/policies/lint")
+            .is_none());
+        assert!(catalog.path_exists("/admin/policies/lint"));
+    }
+
+    #[test]
+    fn path_exists_matches_dynamic_routes() {
+        let catalog = RouteCatalog::build(vec![spec(
+            "policy.get",
+            RouteMethod::Get,
+            "/admin/policies/:id",
+        )])
+        .unwrap();
+
+        assert!(catalog.path_exists("/admin/policies/p1"));
+        assert!(!catalog.path_exists("/admin/policies/p1/extra"));
+    }
+
+    #[test]
+    fn path_exists_matches_alias_routes() {
+        const ALIASES: &[RouteAlias] = &[RouteAlias::canonical(
+            RouteMethod::Post,
+            "/v1/admin/policies/lint",
+            "canonical policy lint path",
+        )];
+        let catalog = RouteCatalog::build(vec![spec_with_alias(
+            "policy.lint",
+            RouteMethod::Post,
+            "/admin/policies/lint",
+            ALIASES,
+        )])
+        .unwrap();
+
+        assert!(catalog.path_exists("/v1/admin/policies/lint"));
     }
 
     #[test]
