@@ -23,20 +23,9 @@ pub(crate) fn register(registry: &mut RouteRegistry)
 module in `OUT_DIR`. This gives us filesystem organization without runtime
 dynamic imports.
 
-The first migrated family is the lifecycle health trio:
-
-```text
-GET /health/live
-GET /health/ready
-GET /health/startup
-```
-
-Those routes now use catalog metadata for listener-surface checks, public auth,
-quota bypass, and buffered dispatch. Non-migrated routes continue through the
-legacy router until their families move.
-
-The catalog also inventories the current public route contract for these
-families:
+The catalog owns listener-surface checks, public/admin-token auth metadata,
+quota bypass, ops-policy middleware, alias resolution, and buffered dispatch for
+these route families:
 
 ```text
 auth
@@ -50,14 +39,18 @@ physical
 ai
 ```
 
-For those families, route files now declare method, current live path,
-audience, auth class, listener surfaces, middleware intent, and selected
-canonical `/v1/*` aliases. Alias requests are resolved through the catalog and
-rewritten to the live path before legacy dispatch, so a canonical path can be
-activated without duplicating handlers. Dispatch migration is still
-incremental: route metadata and aliasing land first, then each family moves off
-the legacy matcher once its auth and compatibility behavior is covered by
-tests.
+For those families, route files declare method, current live path, audience,
+auth class, listener surfaces, middleware intent, and selected canonical
+`/v1/*` aliases. Alias requests are resolved through the catalog and rewritten
+to the live path before dispatch, so a canonical path can be activated without
+duplicating handlers.
+
+The two streaming-only routes, `POST /streams/input` and `POST /query/stream`,
+remain dispatched by `try_route_streaming` because they write incremental
+responses rather than a buffered `HttpResponse`. They still use catalog aliases
+and listener/auth/quota gates before streaming starts. Cataloged buffered routes
+must not fall through to the legacy matcher; if the catalog recognizes a path
+and no buffered handler exists, the server returns `404`.
 
 ## Catalog Contract
 
