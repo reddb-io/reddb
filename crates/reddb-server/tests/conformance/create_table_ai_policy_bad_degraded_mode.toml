@@ -1,0 +1,4 @@
+input = "CREATE TABLE posts (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'openai', model = 'omni-moderation-latest', degraded = maybe))"
+expected_error_substring = "unsupported MODERATE degraded mode"
+source = "crates/reddb-rql/src/parser/ddl.rs:160"
+kind = "negative"
