@@ -17,3 +17,6 @@ path = "src/lib.rs"
 
 [dependencies]
 aes-gcm = "0.10"
+
+[lints]
+workspace = true

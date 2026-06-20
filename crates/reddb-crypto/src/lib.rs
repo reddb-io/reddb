@@ -30,6 +30,8 @@
 //! OS-CSPRNG nonce source, and key parser carried forward here. See
 //! ADR 0054 for the full rationale.
 
+#![allow(clippy::unwrap_used)]
+
 pub mod aes_gcm;
 pub mod key;
 pub mod os_random;
