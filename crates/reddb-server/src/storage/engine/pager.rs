@@ -286,28 +286,35 @@ mod tests {
         );
 
         let dwb_path = dwb_path_for(path);
-        let mut file = fs::File::create(&dwb_path).unwrap();
-        file.write_all(&buf).unwrap();
-        file.sync_all().unwrap();
+        let mut file = fs::File::create(&dwb_path).expect("create() should succeed");
+        file.write_all(&buf).expect("write_all() should succeed");
+        file.sync_all().expect("sync_all() should succeed");
     }
 
     fn write_page_bytes(path: &Path, page_id: u32, page: &Page) {
-        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open() should succeed");
         file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
-            .unwrap();
-        file.write_all(page.as_bytes()).unwrap();
-        file.sync_all().unwrap();
+            .expect("value is present");
+        file.write_all(page.as_bytes())
+            .expect("write_all() should succeed");
+        file.sync_all().expect("sync_all() should succeed");
     }
 
     fn write_torn_page_bytes(path: &Path, page_id: u32, before: &Page, after: &Page) {
         let mut torn = *before.as_bytes();
         torn[..PAGE_SIZE / 2].copy_from_slice(&after.as_bytes()[..PAGE_SIZE / 2]);
 
-        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open() should succeed");
         file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
-            .unwrap();
-        file.write_all(&torn).unwrap();
-        file.sync_all().unwrap();
+            .expect("value is present");
+        file.write_all(&torn).expect("write_all() should succeed");
+        file.sync_all().expect("sync_all() should succeed");
     }
 
     #[test]
@@ -316,8 +323,9 @@ mod tests {
         cleanup(&path);
 
         {
-            let pager = Pager::open_default(&path).unwrap();
-            assert_eq!(pager.page_count().unwrap(), 3); // Header + reserved pages
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            assert_eq!(pager.page_count().expect("page_count() should succeed"), 3);
+            // Header + reserved pages
         }
 
         cleanup(&path);
@@ -330,19 +338,22 @@ mod tests {
 
         // Create and write
         {
-            let pager = Pager::open_default(&path).unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
 
             // Allocate a page
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             assert_eq!(page.page_id(), 3);
 
-            pager.sync().unwrap();
+            pager.sync().expect("sync() should succeed");
         }
 
         // Reopen and verify
         {
-            let pager = Pager::open_default(&path).unwrap();
-            assert_eq!(pager.page_count().unwrap(), 4); // Header + reserved pages + 1 data page
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            assert_eq!(pager.page_count().expect("page_count() should succeed"), 4);
+            // Header + reserved pages + 1 data page
         }
 
         cleanup(&path);
@@ -354,18 +365,25 @@ mod tests {
         cleanup(&path);
 
         {
-            let pager = Pager::open_default(&path).unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
 
             // Allocate and write
-            let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let mut page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             let page_id = page.page_id();
 
-            page.insert_cell(b"key", b"value").unwrap();
-            pager.write_page(page_id, page).unwrap();
+            page.insert_cell(b"key", b"value")
+                .expect("insert_cell() should succeed");
+            pager
+                .write_page(page_id, page)
+                .expect("write_page() should succeed");
 
             // Read back
-            let read_page = pager.read_page(page_id).unwrap();
-            let (key, value) = read_page.read_cell(0).unwrap();
+            let read_page = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
+            let (key, value) = read_page.read_cell(0).expect("read_cell() should succeed");
             assert_eq!(key, b"key");
             assert_eq!(value, b"value");
         }
@@ -379,17 +397,23 @@ mod tests {
         cleanup(&path);
 
         {
-            let pager = Pager::open_default(&path).unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
 
             // Allocate a page
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             let page_id = page.page_id();
 
             // First read - should be cached from allocate
-            let _ = pager.read_page(page_id).unwrap();
+            let _ = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
 
             // Second read - should hit cache
-            let _ = pager.read_page(page_id).unwrap();
+            let _ = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
 
             let stats = pager.cache_stats();
             assert!(stats.hits >= 1);
@@ -404,20 +428,26 @@ mod tests {
         cleanup(&path);
 
         {
-            let pager = Pager::open_default(&path).unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
 
             // Allocate pages
-            let page1 = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-            let page2 = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let page1 = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            let page2 = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
 
             let id1 = page1.page_id();
             let id2 = page2.page_id();
 
             // Free page 1
-            pager.free_page(id1).unwrap();
+            pager.free_page(id1).expect("free_page() should succeed");
 
             // Next allocation should reuse page 1
-            let page3 = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let page3 = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             assert_eq!(page3.page_id(), id1);
         }
 
@@ -431,18 +461,26 @@ mod tests {
 
         let freed_id;
         {
-            let pager = Pager::open_default(&path).unwrap();
-            let page1 = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-            let _page2 = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            let page1 = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            let _page2 = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             freed_id = page1.page_id();
 
-            pager.free_page(freed_id).unwrap();
-            pager.sync().unwrap();
+            pager
+                .free_page(freed_id)
+                .expect("free_page() should succeed");
+            pager.sync().expect("sync() should succeed");
         }
 
         {
-            let pager = Pager::open_default(&path).unwrap();
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             assert_eq!(page.page_id(), freed_id);
         }
 
@@ -456,8 +494,8 @@ mod tests {
 
         // Create database
         {
-            let pager = Pager::open_default(&path).unwrap();
-            pager.sync().unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            pager.sync().expect("sync() should succeed");
         }
 
         // Open read-only
@@ -467,7 +505,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let pager = Pager::open(&path, config).unwrap();
+            let pager = Pager::open(&path, config).expect("open() should succeed");
             assert!(pager.is_read_only());
 
             // Should fail to allocate
@@ -489,38 +527,63 @@ mod tests {
 
         let page_id;
         {
-            let pager = Pager::open(&path, config.clone()).unwrap();
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let pager = Pager::open(&path, config.clone()).expect("open() should succeed");
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             page_id = page.page_id();
-            pager.sync().unwrap();
+            pager.sync().expect("sync() should succeed");
         }
 
         let mut recovered_page = Page::new(PageType::BTreeLeaf, page_id);
-        recovered_page.insert_cell(b"key", b"value").unwrap();
+        recovered_page
+            .insert_cell(b"key", b"value")
+            .expect("insert_cell() should succeed");
         write_dwb_fixture(&path, &[(page_id, recovered_page.clone())]);
 
         let dwb_path = dwb_path_for(&path);
         assert!(dwb_path.exists());
-        assert!(fs::metadata(&dwb_path).unwrap().len() > 0);
+        assert!(
+            fs::metadata(&dwb_path)
+                .expect("metadata() should succeed")
+                .len()
+                > 0
+        );
 
         {
-            let pager = Pager::open(&path, config).unwrap();
+            let pager = Pager::open(&path, config).expect("open() should succeed");
 
-            let read_page = pager.read_page(page_id).unwrap();
-            let (key, value) = read_page.read_cell(0).unwrap();
+            let read_page = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
+            let (key, value) = read_page.read_cell(0).expect("read_cell() should succeed");
             assert_eq!(key, b"key");
             assert_eq!(value, b"value");
 
             assert!(dwb_path.exists());
-            assert_eq!(fs::metadata(&dwb_path).unwrap().len(), 0);
+            assert_eq!(
+                fs::metadata(&dwb_path)
+                    .expect("metadata() should succeed")
+                    .len(),
+                0
+            );
 
             let mut updated_page = recovered_page.clone();
-            updated_page.insert_cell(b"key2", b"value2").unwrap();
-            pager.write_page(page_id, updated_page).unwrap();
-            pager.flush().unwrap();
+            updated_page
+                .insert_cell(b"key2", b"value2")
+                .expect("insert_cell() should succeed");
+            pager
+                .write_page(page_id, updated_page)
+                .expect("write_page() should succeed");
+            pager.flush().expect("flush() should succeed");
 
             assert!(dwb_path.exists());
-            assert_eq!(fs::metadata(&dwb_path).unwrap().len(), 0);
+            assert_eq!(
+                fs::metadata(&dwb_path)
+                    .expect("metadata() should succeed")
+                    .len(),
+                0
+            );
         }
 
         cleanup(&path);
@@ -592,10 +655,14 @@ mod tests {
                 double_write: false,
                 ..Default::default()
             };
-            let pager = Pager::open(&path, config).unwrap();
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-            pager.write_page(page.page_id(), page).unwrap();
-            pager.flush().unwrap();
+            let pager = Pager::open(&path, config).expect("open() should succeed");
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            pager
+                .write_page(page.page_id(), page)
+                .expect("write_page() should succeed");
+            pager.flush().expect("flush() should succeed");
         }
 
         assert!(
@@ -617,10 +684,14 @@ mod tests {
                 double_write: false,
                 ..Default::default()
             };
-            let pager = Pager::open(&path, config).unwrap();
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-            pager.write_page(page.page_id(), page).unwrap();
-            pager.flush().unwrap();
+            let pager = Pager::open(&path, config).expect("open() should succeed");
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            pager
+                .write_page(page.page_id(), page)
+                .expect("write_page() should succeed");
+            pager.flush().expect("flush() should succeed");
         }
 
         assert!(
@@ -639,14 +710,18 @@ mod tests {
 
         let page_id;
         {
-            let pager = Pager::open(&path, PagerConfig::default()).unwrap();
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let pager = Pager::open(&path, PagerConfig::default()).expect("open() should succeed");
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             page_id = page.page_id();
-            pager.sync().unwrap();
+            pager.sync().expect("sync() should succeed");
         }
 
         let mut recovered_page = Page::new(PageType::BTreeLeaf, page_id);
-        recovered_page.insert_cell(b"key", b"value").unwrap();
+        recovered_page
+            .insert_cell(b"key", b"value")
+            .expect("insert_cell() should succeed");
         write_dwb_fixture(&path, &[(page_id, recovered_page)]);
 
         {
@@ -654,9 +729,11 @@ mod tests {
                 double_write: false,
                 ..Default::default()
             };
-            let pager = Pager::open(&path, config).unwrap();
-            let read_page = pager.read_page(page_id).unwrap();
-            let (key, value) = read_page.read_cell(0).unwrap();
+            let pager = Pager::open(&path, config).expect("open() should succeed");
+            let read_page = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
+            let (key, value) = read_page.read_cell(0).expect("read_cell() should succeed");
             assert_eq!(key, b"key");
             assert_eq!(value, b"value");
         }
@@ -684,19 +761,31 @@ mod tests {
         let before;
         let after;
         {
-            let pager = Pager::open(&path, config.clone()).unwrap();
-            let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let pager = Pager::open(&path, config.clone()).expect("open() should succeed");
+            let mut page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             page_id = page.page_id();
-            page.insert_cell(b"phase", b"before").unwrap();
-            pager.write_page(page_id, page).unwrap();
-            pager.sync().unwrap();
-            before = pager.read_page(page_id).unwrap();
+            page.insert_cell(b"phase", b"before")
+                .expect("insert_cell() should succeed");
+            pager
+                .write_page(page_id, page)
+                .expect("write_page() should succeed");
+            pager.sync().expect("sync() should succeed");
+            before = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
 
             let mut page = before.clone();
-            page.insert_cell(b"phase2", b"after").unwrap();
-            pager.write_page(page_id, page).unwrap();
-            pager.flush().unwrap();
-            after = pager.read_page(page_id).unwrap();
+            page.insert_cell(b"phase2", b"after")
+                .expect("insert_cell() should succeed");
+            pager
+                .write_page(page_id, page)
+                .expect("write_page() should succeed");
+            pager.flush().expect("flush() should succeed");
+            after = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
         }
 
         // CoW crash model: the interrupted write leaves either the old full
@@ -704,14 +793,16 @@ mod tests {
         for (whole_page, expected_cells) in [(&before, 1), (&after, 2)] {
             write_page_bytes(&path, page_id, whole_page);
 
-            let pager = Pager::open(&path, config.clone()).unwrap();
-            let recovered = pager.read_page(page_id).unwrap();
+            let pager = Pager::open(&path, config.clone()).expect("open() should succeed");
+            let recovered = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
             assert_eq!(recovered.cell_count(), expected_cells);
-            let (key, value) = recovered.read_cell(0).unwrap();
+            let (key, value) = recovered.read_cell(0).expect("read_cell() should succeed");
             assert_eq!(key, b"phase");
             assert_eq!(value, b"before");
             if expected_cells == 2 {
-                let (key, value) = recovered.read_cell(1).unwrap();
+                let (key, value) = recovered.read_cell(1).expect("read_cell() should succeed");
                 assert_eq!(key, b"phase2");
                 assert_eq!(value, b"after");
             }
@@ -736,39 +827,58 @@ mod tests {
         let before;
         let after;
         {
-            let pager = Pager::open(&path, config.clone()).unwrap();
-            let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            let pager = Pager::open(&path, config.clone()).expect("open() should succeed");
+            let mut page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
             page_id = page.page_id();
-            page.insert_cell(b"phase", b"before").unwrap();
-            pager.write_page(page_id, page).unwrap();
-            pager.sync().unwrap();
-            before = pager.read_page(page_id).unwrap();
+            page.insert_cell(b"phase", b"before")
+                .expect("insert_cell() should succeed");
+            pager
+                .write_page(page_id, page)
+                .expect("write_page() should succeed");
+            pager.sync().expect("sync() should succeed");
+            before = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
 
             let mut page = before.clone();
-            page.insert_cell(b"phase2", b"after").unwrap();
-            pager.write_page(page_id, page).unwrap();
-            pager.flush().unwrap();
-            after = pager.read_page(page_id).unwrap();
+            page.insert_cell(b"phase2", b"after")
+                .expect("insert_cell() should succeed");
+            pager
+                .write_page(page_id, page)
+                .expect("write_page() should succeed");
+            pager.flush().expect("flush() should succeed");
+            after = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
         }
 
         write_dwb_fixture(&path, &[(page_id, after.clone())]);
         write_torn_page_bytes(&path, page_id, &before, &after);
 
         {
-            let pager = Pager::open(&path, config).unwrap();
-            let recovered = pager.read_page(page_id).unwrap();
+            let pager = Pager::open(&path, config).expect("open() should succeed");
+            let recovered = pager
+                .read_page(page_id)
+                .expect("read_page() should succeed");
             assert_eq!(recovered.cell_count(), 2);
 
-            let (key, value) = recovered.read_cell(0).unwrap();
+            let (key, value) = recovered.read_cell(0).expect("read_cell() should succeed");
             assert_eq!(key, b"phase");
             assert_eq!(value, b"before");
 
-            let (key, value) = recovered.read_cell(1).unwrap();
+            let (key, value) = recovered.read_cell(1).expect("read_cell() should succeed");
             assert_eq!(key, b"phase2");
             assert_eq!(value, b"after");
         }
 
-        assert_eq!(fs::metadata(dwb_path_for(&path)).unwrap().len(), 0);
+        assert_eq!(
+            fs::metadata(dwb_path_for(&path))
+                .expect("metadata() should succeed")
+                .len(),
+            0
+        );
         cleanup(&path);
     }
 
@@ -779,7 +889,7 @@ mod tests {
     #[test]
     fn pager_starts_without_wal_writer() {
         let path = temp_db_path();
-        let pager = Pager::open(&path, PagerConfig::default()).unwrap();
+        let pager = Pager::open(&path, PagerConfig::default()).expect("open() should succeed");
         assert!(!pager.has_wal_writer());
         drop(pager);
         cleanup(&path);
@@ -794,8 +904,10 @@ mod tests {
         let wal_path = reddb_file::layout::pager_legacy_wal_path(&db_path);
         let _ = fs::remove_file(&wal_path);
 
-        let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-        let wal = Arc::new(Mutex::new(WalWriter::open(&wal_path).unwrap()));
+        let pager = Pager::open(&db_path, PagerConfig::default()).expect("open() should succeed");
+        let wal = Arc::new(Mutex::new(
+            WalWriter::open(&wal_path).expect("open() should succeed"),
+        ));
         pager.set_wal_writer(Arc::clone(&wal));
         assert!(pager.has_wal_writer());
 
@@ -821,25 +933,32 @@ mod tests {
         let wal_path = reddb_file::layout::pager_legacy_wal_path(&db_path);
         let _ = fs::remove_file(&wal_path);
 
-        let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-        let wal = Arc::new(Mutex::new(WalWriter::open(&wal_path).unwrap()));
+        let pager = Pager::open(&db_path, PagerConfig::default()).expect("open() should succeed");
+        let wal = Arc::new(Mutex::new(
+            WalWriter::open(&wal_path).expect("open() should succeed"),
+        ));
         let initial_durable = {
-            let g = wal.lock().unwrap();
+            let g = wal.lock().expect("lock() should succeed");
             g.durable_lsn()
         };
         pager.set_wal_writer(Arc::clone(&wal));
 
         // Allocate and write a page with lsn = 0.
-        let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-        page.insert_cell(b"k", b"v").unwrap();
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
+        page.insert_cell(b"k", b"v")
+            .expect("insert_cell() should succeed");
         // header.lsn stays at 0 — caller did not stamp.
-        pager.write_page(page.page_id(), page).unwrap();
-        pager.flush().unwrap();
+        pager
+            .write_page(page.page_id(), page)
+            .expect("write_page() should succeed");
+        pager.flush().expect("flush() should succeed");
 
         // WAL durable_lsn must be unchanged because flush_until was
         // never called (max lsn over dirty pages was 0).
         let after_flush = {
-            let g = wal.lock().unwrap();
+            let g = wal.lock().expect("lock() should succeed");
             g.durable_lsn()
         };
         assert_eq!(after_flush, initial_durable);
@@ -862,27 +981,38 @@ mod tests {
         let wal_path = reddb_file::layout::pager_legacy_wal_path(&db_path);
         let _ = fs::remove_file(&wal_path);
 
-        let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-        let wal = Arc::new(Mutex::new(WalWriter::open(&wal_path).unwrap()));
+        let pager = Pager::open(&db_path, PagerConfig::default()).expect("open() should succeed");
+        let wal = Arc::new(Mutex::new(
+            WalWriter::open(&wal_path).expect("open() should succeed"),
+        ));
         pager.set_wal_writer(Arc::clone(&wal));
 
         // Stamp two dirty pages with a real WAL LSN.
         let stamped_lsn = {
-            let mut wal_guard = wal.lock().unwrap();
-            wal_guard.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-            wal_guard.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+            let mut wal_guard = wal.lock().expect("lock() should succeed");
+            wal_guard
+                .append(&WalRecord::Begin { tx_id: 1 })
+                .expect("append() should succeed");
+            wal_guard
+                .append(&WalRecord::Commit { tx_id: 1 })
+                .expect("append() should succeed");
             wal_guard.current_lsn()
         };
-        let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-        page.insert_cell(b"k", b"v").unwrap();
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
+        page.insert_cell(b"k", b"v")
+            .expect("insert_cell() should succeed");
         // Use the public Page API to set the LSN.
         page.set_lsn(stamped_lsn);
-        pager.write_page(page.page_id(), page).unwrap();
-        pager.flush().unwrap();
+        pager
+            .write_page(page.page_id(), page)
+            .expect("write_page() should succeed");
+        pager.flush().expect("flush() should succeed");
 
         // After flush, the WAL is durable at least up to our stamp.
         let after_flush = {
-            let g = wal.lock().unwrap();
+            let g = wal.lock().expect("lock() should succeed");
             g.durable_lsn()
         };
         assert!(
