@@ -1,0 +1,54 @@
+// tests/lint-fixtures/cast_possible_truncation_ratchet.rs.fixture
+//
+// Demonstrates the clippy::cast_possible_truncation ratchet established for the
+// TigerStyle-derived house style (PRD #1252). This is the mechanical half of
+// the off-by-one / index-count-size discipline documented in STYLE.md: silent
+// `as` truncations on lengths and on-disk offsets get surfaced so they become
+// checked/explicit casts.
+//
+//   - Lint level: `clippy::cast_possible_truncation = "warn"` in
+//     [workspace.lints.clippy] (root Cargo.toml). CI runs
+//     `cargo clippy --workspace -D warnings`, so a warn-level hit fails the
+//     gate exactly like a deny.
+//   - The lint fires when an `as` cast narrows an integer/float to a type that
+//     cannot represent every value of the source (e.g. `u64 as u8`,
+//     `usize as u32`, `i64 as i32`, `f64 as u64`). Widening casts and casts the
+//     compiler can prove are lossless do NOT fire.
+//
+// This file is NOT compiled — the `.rs.fixture` extension keeps it outside the
+// cargo workspace target tree. It is a human-readable reference for the ratchet
+// behaviour; clippy is exercised by the CI gate.
+//
+// Ratchet rules (do not re-litigate):
+//   - Legacy crates whose pre-existing tree already truncates carry a
+//     crate-level `#![allow(clippy::cast_possible_truncation)]`:
+//       reddb-io-file, reddb-io-rql, reddb-io-server, reddb-io-types,
+//       reddb-io-wire, reddb-io-client, and the root `reddb-io` binary
+//       (src/bin/red.rs). These allows keep CI green on the existing tree; they
+//       are removed crate-by-crate as the casts are made explicit/checked.
+//   - Note: `#![allow(clippy::all)]` does NOT cover `cast_possible_truncation` —
+//     it lives in the pedantic group — so a crate that only allows
+//     `clippy::all` still enforces this lint (e.g. reddb-io-grpc-proto, which
+//     happens to have no truncating casts and therefore needs no allow).
+//   - Crates WITHOUT the legacy allow enforce the rule immediately:
+//     reddb-io-client-connector, reddb-io-crypto, and reddb-io-grpc-proto. A
+//     new truncating `as` cast added to any of those fails
+//     `cargo clippy --workspace -D warnings` without further config.
+
+// ── FAILS clippy (truncating `as` cast, in a crate without the allow) ────────
+//
+// fn encode_len(buf: &[u8]) -> u32 {
+//     buf.len() as u32
+//     // error: casting `usize` to `u32` may truncate the value
+//     //   = help: if this is intentional allow the lint with
+//     //           `#[allow(clippy::cast_possible_truncation)]`
+//     //           ... or use `u32::try_from(buf.len())` instead
+// }
+
+// ── PASSES clippy (explicit checked conversion) ──────────────────────────────
+//
+// fn encode_len(buf: &[u8]) -> Result<u32, std::num::TryFromIntError> {
+//     // A length that does not fit a u32 frame header is a real error, not a
+//     // value to silently wrap — surface it with a checked conversion.
+//     u32::try_from(buf.len())
+// }
