@@ -121,6 +121,7 @@ mod tests {
             subscriptions: Vec::new(),
             analytics_config: Vec::new(),
             vault_own_master_key: false,
+            ai_policy: None,
         }
     }
 

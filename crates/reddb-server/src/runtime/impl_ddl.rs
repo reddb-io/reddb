@@ -33,6 +33,12 @@ impl RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
         analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        // Reject an AI policy that wires a provider/model to a modality it
+        // cannot serve — fail at DDL time, before the collection exists,
+        // using the capability matrix from #1269.
+        if let Some(policy) = &query.ai_policy {
+            validate_ai_policy_modalities(policy)?;
+        }
         crate::reserved_fields::ensure_no_reserved_public_item_fields(
             query.columns.iter().map(|column| column.name.as_str()),
             &format!("table '{}'", query.name),
@@ -407,6 +413,7 @@ impl RedDBRuntime {
             subscriptions: Vec::new(),
             analytics_config: Vec::new(),
             vault_own_master_key: false,
+            ai_policy: None,
         };
         let result = self.execute_create_table(raw_query, &create)?;
         if query.kind == "blockchain" {
@@ -1727,6 +1734,31 @@ fn entity_index_fields(data: &EntityData) -> Vec<(String, Value)> {
     }
 }
 
+/// DDL-time gate for a declared AI policy (issue #1271). Each declared
+/// modality block is checked against the provider capability matrix
+/// (#1269): a provider/model that cannot serve the requested modality is
+/// rejected before the collection is created. Uses the built-in registry
+/// (no per-deployment overrides at DDL time).
+fn validate_ai_policy_modalities(policy: &crate::catalog::AiPolicy) -> RedDBResult<()> {
+    use crate::runtime::ai::provider_capabilities::{Modality, Registry};
+    let registry = Registry::new();
+    let check = |provider: &str, model: &str, modality: Modality| -> RedDBResult<()> {
+        registry
+            .validate_policy_modality(provider, model, modality)
+            .map_err(|err| RedDBError::Query(err.to_string()))
+    };
+    if let Some(embed) = &policy.embed {
+        check(&embed.provider, &embed.model, Modality::Embed)?;
+    }
+    if let Some(moderate) = &policy.moderate {
+        check(&moderate.provider, &moderate.model, Modality::Moderate)?;
+    }
+    if let Some(vision) = &policy.vision {
+        check(&vision.provider, &vision.model, Modality::Vision)?;
+    }
+    Ok(())
+}
+
 fn collection_contract_from_create_table(
     query: &CreateTableQuery,
 ) -> RedDBResult<crate::physical::CollectionContract> {
@@ -1795,6 +1827,7 @@ fn collection_contract_from_create_table(
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+        ai_policy: query.ai_policy.clone(),
     })
 }
 
@@ -1829,6 +1862,8 @@ fn default_collection_contract_for_existing_table(
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+
+        ai_policy: None,
     }
 }
 
@@ -1865,6 +1900,8 @@ fn keyed_collection_contract(
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+
+        ai_policy: None,
     }
 }
 
@@ -1902,6 +1939,8 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+
+        ai_policy: None,
     }
 }
 
@@ -1934,6 +1973,8 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+
+        ai_policy: None,
     }
 }
 
@@ -2517,6 +2558,8 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+
+        ai_policy: None,
     }
 }
 
@@ -3240,5 +3283,65 @@ mod tests {
             &store, "turbo_v"
         ));
         assert!(rt.db().turbo_state("turbo_v").is_some());
+    }
+
+    /// Issue #1271: a declared AI policy is persisted in the catalog and
+    /// reads back identical via the collection contract (introspection).
+    #[test]
+    fn create_table_persists_and_introspects_ai_policy() {
+        use crate::catalog::{ModerateDegradedMode, ModerateRejectAction};
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE posts (id INT, title TEXT, body TEXT, photo TEXT) WITH ( \
+               EMBED (fields = ('title', 'body'), provider = 'openai', model = 'text-embedding-3-small'), \
+               MODERATE (fields = ('body'), provider = 'openai', model = 'omni-moderation-latest', sync = true, degraded = closed, on_reject = flag), \
+               VISION (image_field = 'photo', outputs = ('caption'), provider = 'openai', model = 'gpt-4o') \
+             )",
+        )
+        .expect("create table with ai policy");
+
+        let contracts = rt.db().collection_contracts();
+        let contract = contracts
+            .iter()
+            .find(|c| c.name == "posts")
+            .expect("contract persisted");
+        let policy = contract.ai_policy.as_ref().expect("ai policy persisted");
+
+        let embed = policy.embed.as_ref().expect("embed");
+        assert_eq!(embed.fields, vec!["title".to_string(), "body".to_string()]);
+        assert_eq!(embed.model, "text-embedding-3-small");
+
+        let moderate = policy.moderate.as_ref().expect("moderate");
+        assert!(moderate.sync_gate);
+        assert_eq!(moderate.degraded_mode, ModerateDegradedMode::Closed);
+        assert_eq!(moderate.reject_action, ModerateRejectAction::Flag);
+
+        let vision = policy.vision.as_ref().expect("vision");
+        assert_eq!(vision.image_field, "photo");
+        assert_eq!(vision.model, "gpt-4o");
+    }
+
+    /// Issue #1271 / #1269: a policy wiring a provider to a modality it
+    /// cannot serve is rejected at DDL time, and the collection is not
+    /// created. Anthropic has no embeddings product in the matrix.
+    #[test]
+    fn create_table_rejects_ai_policy_incapable_provider() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        let err = rt
+            .execute_query(
+                "CREATE TABLE bad (id INT, body TEXT) WITH ( \
+                   EMBED (fields = ('body'), provider = 'anthropic', model = 'claude-3-5-sonnet') \
+                 )",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot serve the 'embed' modality"),
+            "{err}"
+        );
+        assert!(
+            rt.db().store().get_collection("bad").is_none(),
+            "rejected DDL must not create the collection"
+        );
     }
 }

@@ -1,0 +1,4 @@
+input = "CREATE TABLE media (id INT, title TEXT, body TEXT, photo TEXT) WITH (EMBED (fields = ('title', 'body'), provider = 'openai', model = 'text-embedding-3-small'), MODERATE (fields = ('body'), provider = 'openai', model = 'omni-moderation-latest', sync = true, degraded = closed, on_reject = flag), VISION (image_field = 'photo', outputs = ('caption', 'tags'), provider = 'openai', model = 'gpt-4o'))"
+expected_kind = "CreateTable"
+source = "crates/reddb-rql/src/parser/ddl.rs:160"
+kind = "positive"

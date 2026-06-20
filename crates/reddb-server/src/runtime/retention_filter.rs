@@ -133,6 +133,8 @@ mod tests {
             session_gap_ms: None,
             retention_duration_ms: Some(60_000), // 1 minute
             analytical_storage: None,
+
+            ai_policy: None,
         }
     }
 

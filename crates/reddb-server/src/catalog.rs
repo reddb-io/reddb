@@ -51,8 +51,9 @@ pub enum SchemaMode {
 // `reddb-server` edge. This shim keeps `crate::catalog::{...}` valid for
 // existing call-sites.
 pub use reddb_types::catalog::{
-    AnalyticsOutput, AnalyticsViewDescriptor, CollectionModel, SubscriptionDescriptor,
-    SubscriptionOperation,
+    AiPolicy, AnalyticsOutput, AnalyticsViewDescriptor, CollectionModel, EmbedPolicy,
+    ModerateDegradedMode, ModeratePolicy, ModerateRejectAction, SubscriptionDescriptor,
+    SubscriptionOperation, VisionPolicy,
 };
 
 #[derive(Debug, Clone)]
@@ -110,6 +111,11 @@ pub struct CollectionDescriptor {
     /// collections without the clause. Sourced from the persisted
     /// `CollectionContract` so it survives restarts (issue #800).
     pub analytics_config: Vec<AnalyticsViewDescriptor>,
+    /// Per-collection AI policy declared by `WITH (EMBED|MODERATE|VISION
+    /// (...))`. `None` when no AI clause is present. Sourced from the
+    /// persisted `CollectionContract` so introspection survives restarts
+    /// (issue #1271).
+    pub ai_policy: Option<AiPolicy>,
     pub resources_in_sync: bool,
     pub attention_required: bool,
     pub attention_score: usize,
@@ -430,6 +436,7 @@ pub fn snapshot_store_with_declarations(
             analytics_config: contract
                 .map(|contract| contract.analytics_config.clone())
                 .unwrap_or_default(),
+            ai_policy: contract.and_then(|contract| contract.ai_policy.clone()),
             resources_in_sync,
             attention_required,
             attention_score,

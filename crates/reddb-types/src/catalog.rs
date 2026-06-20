@@ -141,9 +141,189 @@ pub struct AnalyticsViewDescriptor {
     pub tolerance: Option<f64>,
 }
 
+/// Per-collection AI policy declared via DDL `WITH (...)` (PRD #1267,
+/// issue #1271). Each modality block is optional; an absent block means
+/// the collection opts out of that modality. Persisted in the
+/// `CollectionContract` (versioned/migrated with the schema) and surfaced
+/// via introspection.
+///
+/// This slice carries the *declaration* only — no enrichment/gating
+/// behaviour. Provider/model capability validation against the matrix
+/// (#1269) happens at DDL execution time in the server, where the
+/// capability registry lives.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AiPolicy {
+    /// `EMBED (...)` — which fields embed into which provider/model.
+    pub embed: Option<EmbedPolicy>,
+    /// `MODERATE (...)` — content moderation gate.
+    pub moderate: Option<ModeratePolicy>,
+    /// `VISION (...)` — image-reference understanding.
+    pub vision: Option<VisionPolicy>,
+}
+
+impl AiPolicy {
+    /// True when no modality block is declared. Callers treat an empty
+    /// policy the same as an absent one (`None`).
+    pub fn is_empty(&self) -> bool {
+        self.embed.is_none() && self.moderate.is_none() && self.vision.is_none()
+    }
+}
+
+/// `EMBED (fields = (...), provider = '..', model = '..')`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedPolicy {
+    /// Source fields whose text is embedded.
+    pub fields: Vec<String>,
+    /// Provider token (e.g. `openai`).
+    pub provider: String,
+    /// Model name as written in the policy.
+    pub model: String,
+}
+
+/// `MODERATE (fields = (...), provider, model, sync, degraded, on_reject)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeratePolicy {
+    /// Source fields screened by the moderation provider.
+    pub fields: Vec<String>,
+    pub provider: String,
+    pub model: String,
+    /// When true the moderation check is a synchronous gate on the write
+    /// (`sync = true`); when false it runs out-of-band.
+    pub sync_gate: bool,
+    /// Behaviour when the moderation provider is unavailable.
+    pub degraded_mode: ModerateDegradedMode,
+    /// What happens to content that fails moderation.
+    pub reject_action: ModerateRejectAction,
+}
+
+/// Behaviour when the moderation provider can't be reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModerateDegradedMode {
+    /// Fail open — let the write through unmoderated (default).
+    #[default]
+    Open,
+    /// Fail closed — reject the write when moderation can't run.
+    Closed,
+}
+
+impl ModerateDegradedMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+
+    // `from_str` returns `Option`, not `Result` — different semantics from the
+    // `std::str::FromStr` trait method, so the trait is intentionally not used.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "open" => Some(Self::Open),
+            "closed" => Some(Self::Closed),
+            _ => None,
+        }
+    }
+}
+
+/// Disposition applied to content that fails moderation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModerateRejectAction {
+    /// Reject the write outright (default).
+    #[default]
+    Reject,
+    /// Accept the write but mark it as flagged.
+    Flag,
+    /// Accept the write with the offending content redacted.
+    Redact,
+}
+
+impl ModerateRejectAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::Flag => "flag",
+            Self::Redact => "redact",
+        }
+    }
+
+    // `from_str` returns `Option`, not `Result` — different semantics from the
+    // `std::str::FromStr` trait method, so the trait is intentionally not used.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "reject" => Some(Self::Reject),
+            "flag" => Some(Self::Flag),
+            "redact" => Some(Self::Redact),
+            _ => None,
+        }
+    }
+}
+
+/// `VISION (image_field = '..', outputs = (...), provider, model)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisionPolicy {
+    /// Field holding the image reference (URL / blob id).
+    pub image_field: String,
+    /// Output kinds requested (e.g. `caption`, `tags`, `objects`).
+    pub output_kinds: Vec<String>,
+    pub provider: String,
+    pub model: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moderate_degraded_mode_round_trips() {
+        for (mode, name) in [
+            (ModerateDegradedMode::Open, "open"),
+            (ModerateDegradedMode::Closed, "closed"),
+        ] {
+            assert_eq!(mode.as_str(), name);
+            assert_eq!(
+                ModerateDegradedMode::from_str(&name.to_ascii_uppercase()),
+                Some(mode)
+            );
+        }
+        assert_eq!(ModerateDegradedMode::from_str("ajar"), None);
+        assert_eq!(ModerateDegradedMode::default(), ModerateDegradedMode::Open);
+    }
+
+    #[test]
+    fn moderate_reject_action_round_trips() {
+        for (action, name) in [
+            (ModerateRejectAction::Reject, "reject"),
+            (ModerateRejectAction::Flag, "flag"),
+            (ModerateRejectAction::Redact, "redact"),
+        ] {
+            assert_eq!(action.as_str(), name);
+            assert_eq!(
+                ModerateRejectAction::from_str(&name.to_ascii_uppercase()),
+                Some(action)
+            );
+        }
+        assert_eq!(ModerateRejectAction::from_str("ban"), None);
+        assert_eq!(
+            ModerateRejectAction::default(),
+            ModerateRejectAction::Reject
+        );
+    }
+
+    #[test]
+    fn ai_policy_empty_detection() {
+        assert!(AiPolicy::default().is_empty());
+        let with_embed = AiPolicy {
+            embed: Some(EmbedPolicy {
+                fields: vec!["body".to_string()],
+                provider: "openai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            }),
+            ..AiPolicy::default()
+        };
+        assert!(!with_embed.is_empty());
+    }
 
     #[test]
     fn subscription_operations_round_trip_canonical_names() {

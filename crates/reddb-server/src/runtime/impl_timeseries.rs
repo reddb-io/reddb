@@ -595,6 +595,8 @@ fn hypertable_collection_contract(
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: analytical_storage_for(query.columnar, time_key),
+
+        ai_policy: None,
     }
 }
 
@@ -639,6 +641,8 @@ fn timeseries_collection_contract(
         // Plain timeseries store points under the `timestamp` axis
         // convention (the `value` column carries the measurement).
         analytical_storage: analytical_storage_for(query.columnar, "timestamp"),
+
+        ai_policy: None,
     }
 }
 
