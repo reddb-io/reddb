@@ -46,6 +46,10 @@
 //! `reddb-client-internal` crate.
 
 #![allow(clippy::unwrap_used)]
+// Legacy allow for the cast_possible_truncation ratchet (PRD #1252):
+// pre-existing truncating `as` casts (e.g. f64→u64 narrowing). The lint bites
+// on new/changed code; remove once those casts become checked conversions.
+#![allow(clippy::cast_possible_truncation)]
 #![deny(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
