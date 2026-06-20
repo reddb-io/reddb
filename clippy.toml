@@ -1,0 +1,13 @@
+# Function-length nudge for the TigerStyle-derived house style (PRD #1252).
+#
+# `clippy::too_many_lines` fires when a function's *code* lines (blank and
+# comment-only lines excluded) exceed this threshold. We pick 120 — the
+# lenient end of the ~100–120 window — so the lint captures TigerStyle's
+# "doesn't fit on a screen" discontinuity without raining false positives on
+# idiomatic `match`/builder code (a hard 70-line TigerStyle limit would).
+#
+# The lint is wired as a warn-level ratchet in [workspace.lints.clippy].
+# Legacy crates whose existing tree (incl. generated gRPC stubs) already
+# exceeds the threshold carry a crate-level `#![allow(clippy::too_many_lines)]`
+# so the gate bites on new/changed code rather than the pre-existing tree.
+too-many-lines-threshold = 120
