@@ -38,3 +38,6 @@ insta = { version = "1", features = ["filters"] }
 regex = "1"
 prost = "0.14"
 reddb-grpc-proto = { workspace = true }
+
+[lints]
+workspace = true
