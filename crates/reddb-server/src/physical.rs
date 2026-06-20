@@ -221,6 +221,12 @@ pub struct CollectionContract {
     /// keeps the row engine. Decodes to `None` on sidecars written before
     /// the feature.
     pub analytical_storage: Option<crate::catalog::AnalyticalStorageConfig>,
+    /// Per-collection AI policy declared by `WITH (EMBED|MODERATE|VISION
+    /// (...))` (PRD #1267, issue #1271). `None` when no AI clause is
+    /// present, and decodes to `None` on sidecars written before the
+    /// feature (versioned/migrated with the schema). Validated against
+    /// the provider capability matrix (#1269) at DDL execution time.
+    pub ai_policy: Option<crate::catalog::AiPolicy>,
 }
 
 /// Canonical artifact lifecycle states.
