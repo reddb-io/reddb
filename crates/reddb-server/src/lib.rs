@@ -13,7 +13,12 @@
     // Legacy allow for the too_many_lines ratchet (PRD #1252): this crate has
     // many pre-existing functions over the 120-line threshold. The lint bites
     // on new/changed code; remove once those functions are split up.
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    // Legacy allow for the cast_possible_truncation ratchet (PRD #1252): this
+    // crate has many pre-existing truncating `as` casts on lengths/offsets and
+    // numeric narrowing. The lint bites on new/changed code; remove once those
+    // casts become explicit checked conversions.
+    clippy::cast_possible_truncation
 )]
 
 pub mod ai;

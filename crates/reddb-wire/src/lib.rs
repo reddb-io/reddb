@@ -12,6 +12,10 @@
 //! runtime integration stay in `reddb-server`.
 
 #![allow(clippy::unwrap_used)]
+// Legacy allow for the cast_possible_truncation ratchet (PRD #1252):
+// pre-existing truncating `as` casts on frame lengths/offsets. The lint bites
+// on new/changed code; remove once those casts become checked conversions.
+#![allow(clippy::cast_possible_truncation)]
 
 pub mod auth;
 pub mod conn_string;
