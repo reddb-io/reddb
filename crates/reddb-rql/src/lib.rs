@@ -24,6 +24,7 @@
 // blanket here keeps the relocation a pure move — the parser's helper methods,
 // keyword-import lists, and parse-loop bindings stay exactly as authored
 // (matching the precedent set by `reddb-io-types`, ADR 0052).
+#![allow(clippy::unwrap_used)]
 #![allow(dead_code, unused_imports, unused_variables)]
 // The parser dispatch carries deep recursive-descent signatures the source
 // crate already opted out of linting; mirror that subset so the move stays a

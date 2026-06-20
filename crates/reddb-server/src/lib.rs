@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 #![allow(dead_code, unused_imports, unused_variables)]
 // Structural lints we accept for API design reasons:
 #![allow(

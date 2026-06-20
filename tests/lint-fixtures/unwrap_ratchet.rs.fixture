@@ -1,0 +1,36 @@
+// tests/lint-fixtures/unwrap_ratchet.rs.fixture
+//
+// Demonstrates the clippy::unwrap_used ratchet established in the root
+// Cargo.toml ([workspace.lints.clippy] unwrap_used = "deny").
+//
+// This file is NOT compiled — the `.rs.fixture` extension keeps it outside
+// the cargo workspace target tree. It is a human-readable reference for the
+// ratchet behaviour; clippy is exercised by the CI gate.
+//
+// Ratchet rules (do not re-litigate):
+//   - `clippy::unwrap_used = "deny"` at workspace level (root Cargo.toml)
+//   - `clippy::expect_used = "allow"` at workspace level (expect-with-reason
+//     is the sanctioned replacement)
+//   - Legacy crates carry a crate-level `#![allow(clippy::unwrap_used)]` to
+//     keep CI green on the ~4 900 pre-existing call sites.  That allow is
+//     removed crate-by-crate as the codebase is cleaned up (#1258).
+//   - Any crate WITHOUT the legacy allow enforces the rule immediately:
+//     adding a bare `.unwrap()` fails `cargo clippy --workspace -D warnings`.
+
+// ── FAILS clippy (unwrap_used is denied at workspace level) ──────────────────
+//
+// fn bad(x: Option<i32>) -> i32 {
+//     x.unwrap()          // error: used `unwrap()` on an `Option` value
+// }
+
+// ── PASSES clippy (expect_used is allowed at workspace level) ────────────────
+//
+// fn good(x: Option<i32>) -> i32 {
+//     x.expect("caller guarantees x is Some")
+// }
+
+// ── Crates WITHOUT the legacy allow enforce the rule immediately ─────────────
+//
+// `reddb-io-client-connector` and `reddb-io-grpc-proto` carry no
+// `#![allow(clippy::unwrap_used)]`.  Any bare `.unwrap()` added to either
+// of those crates will fail CI without further configuration.

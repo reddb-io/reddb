@@ -5,6 +5,8 @@
 //! SQL, and storage-engine payload semantics stay in `reddb-server`; this crate
 //! works with bytes, offsets, locks, checkpoints, manifests, and recovery rules.
 
+#![allow(clippy::unwrap_used)]
+
 pub mod ai_model_cache;
 pub mod audit_log;
 pub mod backup_manifest;
