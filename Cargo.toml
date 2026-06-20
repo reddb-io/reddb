@@ -30,6 +30,10 @@ reddb-server = { package = "reddb-io-server", version = "1.0", path = "crates/re
 reddb-types = { package = "reddb-io-types", version = "1.0", path = "crates/reddb-types" }
 reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "crates/reddb-wire" }
 
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "allow"
+
 [package]
 name = "reddb-io"
 version = "1.11.0"
@@ -58,6 +62,9 @@ path = "src/bin/red.rs"
 [lib]
 name = "reddb"
 path = "src/lib.rs"
+
+[lints]
+workspace = true
 
 [dependencies]
 reddb-wire = { workspace = true }

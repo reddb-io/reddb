@@ -119,3 +119,6 @@ tempfile = "3"
 [[bin]]
 name = "red_client"
 path = "src/bin/red_client.rs"
+
+[lints]
+workspace = true
