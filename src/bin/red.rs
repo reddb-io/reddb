@@ -3,6 +3,11 @@
 // dispatchers in this binary exceed the 120-line threshold. The lint bites on
 // new/changed code; remove once those functions are split up.
 #![allow(clippy::too_many_lines)]
+// Legacy allow for the cast_possible_truncation ratchet (PRD #1252): the CLI
+// has pre-existing truncating `as` casts (e.g. f64→u64 narrowing). The lint
+// bites on new/changed code; remove once those casts become checked
+// conversions.
+#![allow(clippy::cast_possible_truncation)]
 /// `red` -- RedDB unified CLI binary.
 ///
 /// Parses argv using the schema-driven CLI parser, routes to the
