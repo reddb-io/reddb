@@ -1,13 +1,19 @@
 use reddb::application::{CreateVectorInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::runtime::ai::cdc_enrichment::CdcEnrichmentConsumer;
+use reddb::runtime::ai::local_embedding::{
+    clear_local_embedding_backend_for_tests, install_local_embedding_backend,
+    LocalEmbeddingBackend, LocalEmbeddingRequest,
+};
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
-use reddb::RedDBRuntime;
+use reddb::{RedDBResult, RedDBRuntime};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::Arc;
 use std::thread;
 
-use super::support::env_lock;
+use super::support::{backend_lock, env_lock};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
@@ -173,6 +179,79 @@ fn test_vector_search_with_reference_source_uses_stored_vector() {
     assert_eq!(result.result.records.len(), 1);
     assert_eq!(text(&result.result.records[0], "content"), "anchor");
     assert_eq!(text(&result.result.records[0], "red_entity_type"), "vector");
+}
+
+/// Backend returning a fixed vector for every input — the mock provider for
+/// the CDC enrichment path.
+struct FixedBackend {
+    vector: Vec<f32>,
+}
+
+impl LocalEmbeddingBackend for FixedBackend {
+    fn embed(&self, request: &LocalEmbeddingRequest) -> RedDBResult<Vec<Vec<f32>>> {
+        Ok(request.inputs.iter().map(|_| self.vector.clone()).collect())
+    }
+}
+
+fn register_installed_local_model(rt: &RedDBRuntime, name: &str, dimensions: u32) {
+    let payload = format!(
+        r#"{{"name":"{name}","provider":"local","source":"sentence-transformers/all-MiniLM-L6-v2","task":"embedding","revision":"main","engine":"candle","dimensions":{dimensions},"status":"installed","pull_policy":"if_missing"}}"#
+    );
+    EntityUseCases::new(rt)
+        .create_kv(reddb::application::CreateKvInput {
+            collection: "red_config".to_string(),
+            key: format!("red.config.ai.models.{name}"),
+            value: Value::text(payload),
+            metadata: Vec::new(),
+        })
+        .expect("register model entry");
+}
+
+/// Issue #1272: a row whose embed-policy enrichment is still pending is
+/// absent from `VECTOR SEARCH`, and appears once the CDC enrichment consumer
+/// attaches its vector.
+#[test]
+fn vector_search_excludes_pending_until_cdc_enrichment_attaches() {
+    let _bg = backend_lock().lock().unwrap_or_else(|p| p.into_inner());
+    install_local_embedding_backend(Arc::new(FixedBackend {
+        vector: vec![1.0, 0.0],
+    }));
+
+    let rt = rt();
+    register_installed_local_model(&rt, "mini", 2);
+    exec(
+        &rt,
+        "CREATE TABLE notes (id INT, body TEXT) WITH ( \
+           EMBED (fields = ('body'), provider = 'local', model = 'mini') \
+         )",
+    );
+    exec(&rt, "INSERT INTO notes (id, body) VALUES (1, 'alpha')");
+
+    // Pending: no vector yet, so the row is not surfaced.
+    let pending = QueryUseCases::new(&rt)
+        .execute(ExecuteQueryInput {
+            query: "VECTOR SEARCH notes SIMILAR TO [1.0, 0.0] LIMIT 5".to_string(),
+        })
+        .map(|r| r.result.records.len())
+        .unwrap_or(0);
+    assert_eq!(
+        pending, 0,
+        "pending row must be excluded from vector search"
+    );
+
+    let mut consumer = CdcEnrichmentConsumer::with_defaults();
+    let stats = consumer.tick(&rt, 0).expect("enrichment tick");
+    assert_eq!(stats.attached, 1, "consumer attaches the pending vector");
+
+    let result = exec(&rt, "VECTOR SEARCH notes SIMILAR TO [1.0, 0.0] LIMIT 5");
+    assert_eq!(
+        result.result.records.len(),
+        1,
+        "row is included once the enrichment consumer attaches the vector"
+    );
+    assert_eq!(text(&result.result.records[0], "content"), "alpha");
+
+    clear_local_embedding_backend_for_tests();
 }
 
 #[test]
