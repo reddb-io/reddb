@@ -242,6 +242,8 @@ mod tests {
             session_gap_ms: Some(30_000),
             retention_duration_ms: None,
             analytical_storage: None,
+
+            ai_policy: None,
         }
     }
 
