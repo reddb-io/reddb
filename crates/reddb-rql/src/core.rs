@@ -876,6 +876,10 @@ pub struct AskQuery {
     /// `ASK '...' AS RQL` returns a validated RQL candidate instead of
     /// calling an AI provider. The runtime owns translation and validation.
     pub as_rql: bool,
+    /// `ASK '...' EXECUTE` opts in to auto-running a generated RQL
+    /// candidate when (and only when) it is read-only. A mutating
+    /// candidate is refused for auto-execution regardless of this flag.
+    pub execute: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -220,6 +220,7 @@ fn ask_query_from_request(
         stream,
         cache: crate::storage::query::ast::AskCacheClause::Default,
         as_rql: false,
+        execute: false,
     })
 }
 
