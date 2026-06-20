@@ -25,6 +25,11 @@
 // codec/type functions exceed the 120-line threshold. The lint bites on
 // new/changed code; remove once those functions are split up.
 #![allow(clippy::too_many_lines)]
+// Legacy allow for the cast_possible_truncation ratchet (PRD #1252):
+// pre-existing codec/coercion functions truncate via `as` on lengths and
+// numeric narrowing. The lint bites on new/changed code; remove once those
+// casts become explicit checked conversions.
+#![allow(clippy::cast_possible_truncation)]
 
 pub mod canonical_key;
 pub mod cast_catalog;
