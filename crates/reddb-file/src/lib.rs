@@ -6,6 +6,10 @@
 //! works with bytes, offsets, locks, checkpoints, manifests, and recovery rules.
 
 #![allow(clippy::unwrap_used)]
+// Legacy allow for the too_many_lines ratchet (PRD #1252): this crate has
+// pre-existing functions over the 120-line threshold. The lint bites on
+// new/changed code; remove this once the existing functions are split up.
+#![allow(clippy::too_many_lines)]
 
 pub mod ai_model_cache;
 pub mod audit_log;
