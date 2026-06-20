@@ -9,7 +9,11 @@
     clippy::new_without_default,  // some constructors have side effects
     clippy::enum_variant_names,   // JoinPhase variants all end in Start by design
     clippy::wrong_self_convention, // to_bytes on Copy types in our serialization
-    clippy::len_without_is_empty  // segment structs don't need is_empty
+    clippy::len_without_is_empty, // segment structs don't need is_empty
+    // Legacy allow for the too_many_lines ratchet (PRD #1252): this crate has
+    // many pre-existing functions over the 120-line threshold. The lint bites
+    // on new/changed code; remove once those functions are split up.
+    clippy::too_many_lines
 )]
 
 pub mod ai;
