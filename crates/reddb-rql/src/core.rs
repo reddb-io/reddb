@@ -1955,6 +1955,13 @@ pub struct CreateTableQuery {
     /// `CREATE VAULT ... WITH OWN MASTER KEY`: provision per-vault
     /// key material instead of using the cluster vault key.
     pub vault_own_master_key: bool,
+    /// Per-collection AI policy declared by `WITH (EMBED (...) | MODERATE
+    /// (...) | VISION (...))` (PRD #1267, issue #1271). `None` when no AI
+    /// clause is present. The parser validates the grammar; the runtime
+    /// validates each modality's provider/model against the capability
+    /// matrix (#1269) at DDL execution time and persists the policy in
+    /// the `CollectionContract`.
+    pub ai_policy: Option<reddb_types::catalog::AiPolicy>,
 }
 
 /// CREATE METRIC path TYPE kind ROLE role
