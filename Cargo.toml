@@ -39,6 +39,13 @@ expect_used = "allow"
 # new/changed code, not the pre-existing oversized functions (incl. the
 # generated gRPC stubs in reddb-grpc-proto).
 too_many_lines = "warn"
+# Truncating-cast nudge (PRD #1252). The mechanical half of the
+# index/count/size discipline in STYLE.md: silent `as` truncations on lengths
+# and on-disk offsets get surfaced so they become checked/explicit casts.
+# Wired as a warn-level ratchet — legacy crates carry
+# `#![allow(clippy::cast_possible_truncation)]` so the gate bites on
+# new/changed code, not the pre-existing truncating casts.
+cast_possible_truncation = "warn"
 
 [package]
 name = "reddb-io"
