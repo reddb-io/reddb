@@ -463,7 +463,7 @@ mod tests {
     fn temp_dir() -> PathBuf {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("value is present")
             .as_nanos();
         std::env::temp_dir().join(format!("reddb_tx_test_{}", timestamp))
     }
@@ -484,33 +484,40 @@ mod tests {
         let wal_path = temp_wal_path(&dir, "commit");
 
         // Create pager
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
 
         // Allocate a page
-        let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        let page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
         let page_id = page.page_id();
 
         // Create transaction manager
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // Begin transaction
-        let mut tx = tm.begin().unwrap();
+        let mut tx = tm.begin().expect("begin() should succeed");
         assert!(tx.is_active());
 
         // Write through transaction
         let mut page = Page::new(PageType::BTreeLeaf, page_id);
         page.as_bytes_mut()[100] = 0xAB;
-        tx.write_page(page_id, page).unwrap();
+        tx.write_page(page_id, page)
+            .expect("write_page() should succeed");
 
         // Read through transaction (should see buffered write)
-        let read_page = tx.read_page(page_id).unwrap();
+        let read_page = tx.read_page(page_id).expect("read_page() should succeed");
         assert_eq!(read_page.as_bytes()[100], 0xAB);
 
         // Commit
-        tx.commit().unwrap();
+        tx.commit().expect("commit() should succeed");
 
         // Verify write is visible through pager
-        let final_page = pager.read_page(page_id).unwrap();
+        let final_page = pager
+            .read_page(page_id)
+            .expect("read_page() should succeed");
         assert_eq!(final_page.as_bytes()[100], 0xAB);
 
         cleanup(&dir);
@@ -524,34 +531,43 @@ mod tests {
         let wal_path = temp_wal_path(&dir, "rollback");
 
         // Create pager
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
 
         // Allocate a page and write initial value
-        let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
         let page_id = page.page_id();
         page.as_bytes_mut()[100] = 0x11;
-        pager.write_page(page_id, page).unwrap();
+        pager
+            .write_page(page_id, page)
+            .expect("write_page() should succeed");
 
         // Create transaction manager
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // Begin transaction
-        let mut tx = tm.begin().unwrap();
+        let mut tx = tm.begin().expect("begin() should succeed");
 
         // Write through transaction
         let mut page = Page::new(PageType::BTreeLeaf, page_id);
         page.as_bytes_mut()[100] = 0xAB;
-        tx.write_page(page_id, page).unwrap();
+        tx.write_page(page_id, page)
+            .expect("write_page() should succeed");
 
         // Read through transaction (should see buffered write)
-        let read_page = tx.read_page(page_id).unwrap();
+        let read_page = tx.read_page(page_id).expect("read_page() should succeed");
         assert_eq!(read_page.as_bytes()[100], 0xAB);
 
         // Rollback
-        tx.rollback().unwrap();
+        tx.rollback().expect("rollback() should succeed");
 
         // Original value should be preserved
-        let final_page = pager.read_page(page_id).unwrap();
+        let final_page = pager
+            .read_page(page_id)
+            .expect("read_page() should succeed");
         assert_eq!(final_page.as_bytes()[100], 0x11);
 
         cleanup(&dir);
@@ -565,34 +581,46 @@ mod tests {
         let wal_path = temp_wal_path(&dir, "multiple");
 
         // Create pager
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
 
         // Allocate two pages
-        let page1 = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-        let page2 = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        let page1 = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
+        let page2 = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
         let page1_id = page1.page_id();
         let page2_id = page2.page_id();
 
         // Create transaction manager
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // Transaction 1: Write to page 1
-        let mut tx1 = tm.begin().unwrap();
+        let mut tx1 = tm.begin().expect("begin() should succeed");
         let mut page1 = Page::new(PageType::BTreeLeaf, page1_id);
         page1.as_bytes_mut()[100] = 0x11;
-        tx1.write_page(page1_id, page1).unwrap();
-        tx1.commit().unwrap();
+        tx1.write_page(page1_id, page1)
+            .expect("write_page() should succeed");
+        tx1.commit().expect("commit() should succeed");
 
         // Transaction 2: Write to page 2
-        let mut tx2 = tm.begin().unwrap();
+        let mut tx2 = tm.begin().expect("begin() should succeed");
         let mut page2 = Page::new(PageType::BTreeLeaf, page2_id);
         page2.as_bytes_mut()[100] = 0x22;
-        tx2.write_page(page2_id, page2).unwrap();
-        tx2.commit().unwrap();
+        tx2.write_page(page2_id, page2)
+            .expect("write_page() should succeed");
+        tx2.commit().expect("commit() should succeed");
 
         // Verify both writes
-        let final_page1 = pager.read_page(page1_id).unwrap();
-        let final_page2 = pager.read_page(page2_id).unwrap();
+        let final_page1 = pager
+            .read_page(page1_id)
+            .expect("read_page() should succeed");
+        let final_page2 = pager
+            .read_page(page2_id)
+            .expect("read_page() should succeed");
         assert_eq!(final_page1.as_bytes()[100], 0x11);
         assert_eq!(final_page2.as_bytes()[100], 0x22);
 
@@ -607,36 +635,47 @@ mod tests {
         let wal_path = temp_wal_path(&dir, "isolation");
 
         // Create pager
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
 
         // Allocate a page with initial value
-        let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
         let page_id = page.page_id();
         page.as_bytes_mut()[100] = 0x00;
-        pager.write_page(page_id, page).unwrap();
+        pager
+            .write_page(page_id, page)
+            .expect("write_page() should succeed");
 
         // Create transaction manager
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // Transaction 1: Begin and write (but don't commit yet)
-        let mut tx1 = tm.begin().unwrap();
+        let mut tx1 = tm.begin().expect("begin() should succeed");
         let mut page1 = Page::new(PageType::BTreeLeaf, page_id);
         page1.as_bytes_mut()[100] = 0x11;
-        tx1.write_page(page_id, page1).unwrap();
+        tx1.write_page(page_id, page1)
+            .expect("write_page() should succeed");
 
         // Transaction 1 should see its own write
-        let tx1_read = tx1.read_page(page_id).unwrap();
+        let tx1_read = tx1.read_page(page_id).expect("read_page() should succeed");
         assert_eq!(tx1_read.as_bytes()[100], 0x11);
 
         // Another read from pager should not see uncommitted write
-        let pager_read = pager.read_page(page_id).unwrap();
+        let pager_read = pager
+            .read_page(page_id)
+            .expect("read_page() should succeed");
         assert_eq!(pager_read.as_bytes()[100], 0x00);
 
         // Commit tx1
-        tx1.commit().unwrap();
+        tx1.commit().expect("commit() should succeed");
 
         // Now pager should see the write
-        let final_read = pager.read_page(page_id).unwrap();
+        let final_read = pager
+            .read_page(page_id)
+            .expect("read_page() should succeed");
         assert_eq!(final_read.as_bytes()[100], 0x11);
 
         cleanup(&dir);
@@ -649,25 +688,27 @@ mod tests {
         let db_path = dir.join("test.db");
         let wal_path = temp_wal_path(&dir, "tracking");
 
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         assert!(!tm.has_active_transactions());
 
-        let tx1 = tm.begin().unwrap();
+        let tx1 = tm.begin().expect("begin() should succeed");
         let tx1_id = tx1.id();
         assert!(tm.has_active_transactions());
         assert!(tm.active_transactions().contains(&tx1_id));
 
-        let tx2 = tm.begin().unwrap();
+        let tx2 = tm.begin().expect("begin() should succeed");
         let tx2_id = tx2.id();
         assert_eq!(tm.active_transactions().len(), 2);
 
-        tx1.commit().unwrap();
+        tx1.commit().expect("commit() should succeed");
         assert!(!tm.active_transactions().contains(&tx1_id));
         assert!(tm.active_transactions().contains(&tx2_id));
 
-        tx2.rollback().unwrap();
+        tx2.rollback().expect("rollback() should succeed");
         assert!(!tm.has_active_transactions());
 
         cleanup(&dir);
@@ -680,13 +721,15 @@ mod tests {
         let db_path = dir.join("test.db");
         let wal_path = temp_wal_path(&dir, "double-commit");
 
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // The transaction is consumed on commit, so double commit is impossible at compile time
         // This test just verifies commit works
-        let tx = tm.begin().unwrap();
-        tx.commit().unwrap();
+        let tx = tm.begin().expect("begin() should succeed");
+        tx.commit().expect("commit() should succeed");
 
         cleanup(&dir);
     }
@@ -704,8 +747,10 @@ mod tests {
         let db_path = dir.join("test.db");
         let wal_path = temp_wal_path(&dir, "panic-lock-holder");
 
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         let poison_target = Arc::clone(&tm);
         let _ = std::thread::spawn(move || {
@@ -734,23 +779,25 @@ mod tests {
         let db_path = dir.join("ro_durable.db");
         let wal_path = temp_wal_path(&dir, "ro-durable");
 
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // Snapshot the WAL durable_lsn BEFORE the txn.
         let before = {
-            let wal = tm.wal_writer().unwrap();
+            let wal = tm.wal_writer().expect("wal_writer() should succeed");
             wal.durable_lsn()
         };
 
-        let tx = tm.begin().unwrap();
+        let tx = tm.begin().expect("begin() should succeed");
         // Empty write_set on purpose — read-only.
-        tx.commit().unwrap();
+        tx.commit().expect("commit() should succeed");
 
         // After RO commit, the WAL durable_lsn must NOT have advanced.
         // No Begin record, no Commit record, no fsync.
         let after = {
-            let wal = tm.wal_writer().unwrap();
+            let wal = tm.wal_writer().expect("wal_writer() should succeed");
             wal.durable_lsn()
         };
         assert_eq!(
@@ -769,11 +816,15 @@ mod tests {
         let db_path = dir.join("ro_size.db");
         let wal_path = temp_wal_path(&dir, "ro-size");
 
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // Snapshot file size after WAL header.
-        let size_before = std::fs::metadata(&wal_path).unwrap().len();
+        let size_before = std::fs::metadata(&wal_path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(
             size_before,
             reddb_file::WAL_FILE_HEADER_BYTES as u64,
@@ -782,11 +833,13 @@ mod tests {
 
         // 100 read-only commits in a loop.
         for _ in 0..100 {
-            let tx = tm.begin().unwrap();
-            tx.commit().unwrap();
+            let tx = tm.begin().expect("begin() should succeed");
+            tx.commit().expect("commit() should succeed");
         }
 
-        let size_after = std::fs::metadata(&wal_path).unwrap().len();
+        let size_after = std::fs::metadata(&wal_path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(
             size_after, size_before,
             "100 read-only commits should not have written any WAL bytes"
@@ -801,12 +854,14 @@ mod tests {
         let db_path = dir.join("ro_state.db");
         let wal_path = temp_wal_path(&dir, "ro-state");
 
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
-        let tx = tm.begin().unwrap();
+        let tx = tm.begin().expect("begin() should succeed");
         let id = tx.id();
-        tx.commit().unwrap();
+        tx.commit().expect("commit() should succeed");
 
         // Manager must have unregistered this txn — the active list
         // no longer contains its id.
@@ -828,29 +883,38 @@ mod tests {
         let db_path = dir.join("rw_after_ro.db");
         let wal_path = temp_wal_path(&dir, "rw-after-ro");
 
-        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
-        let allocated = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let allocated = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
         let page_id = allocated.page_id();
-        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+        let tm = Arc::new(
+            TransactionManager::new(Arc::clone(&pager), &wal_path).expect("new() should succeed"),
+        );
 
         // First a RO commit (must take the fast path).
-        let ro = tm.begin().unwrap();
-        ro.commit().unwrap();
+        let ro = tm.begin().expect("begin() should succeed");
+        ro.commit().expect("commit() should succeed");
 
         // Then a real writing commit.
-        let mut rw = tm.begin().unwrap();
+        let mut rw = tm.begin().expect("begin() should succeed");
         let mut page = Page::new(PageType::BTreeLeaf, page_id);
         page.as_bytes_mut()[42] = 0x77;
-        rw.write_page(page_id, page).unwrap();
-        rw.commit().unwrap();
+        rw.write_page(page_id, page)
+            .expect("write_page() should succeed");
+        rw.commit().expect("commit() should succeed");
 
         // The WAL file must now contain bytes (PageWrite + Commit
         // records, and the BufWriter has been flushed by sync()).
-        let size = std::fs::metadata(&wal_path).unwrap().len();
+        let size = std::fs::metadata(&wal_path)
+            .expect("metadata() should succeed")
+            .len();
         assert!(size > 8, "writing commit should grow the WAL");
 
         // The pager cache must reflect the write.
-        let read_back = pager.read_page(page_id).unwrap();
+        let read_back = pager
+            .read_page(page_id)
+            .expect("read_page() should succeed");
         assert_eq!(read_back.as_bytes()[42], 0x77);
 
         cleanup(&dir);
