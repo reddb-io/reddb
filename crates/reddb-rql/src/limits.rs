@@ -67,3 +67,15 @@ impl ParserLimits {
         }
     }
 }
+
+/// Maximum nesting depth for JSON object literals, validated after
+/// parsing by [`crate::parser::dml::json_literal_depth_check`] using
+/// an iterative stack walk.
+///
+/// Defined here — alongside [`ParserLimits`] and [`DepthCounter`] —
+/// so every depth-cap constant is co-located in one module. Expression
+/// and subquery nesting are guarded inline by
+/// [`crate::parser::Parser::enter_depth`] /
+/// [`crate::parser::Parser::exit_depth`] against
+/// [`ParserLimits::max_depth`].
+pub const JSON_LITERAL_MAX_DEPTH: u32 = 128;
