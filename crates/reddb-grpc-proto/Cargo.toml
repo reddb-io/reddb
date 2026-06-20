@@ -30,3 +30,6 @@ reddb-wire = { workspace = true }
 [build-dependencies]
 tonic-build = "0.14"
 tonic-prost-build = "0.14"
+
+[lints]
+workspace = true

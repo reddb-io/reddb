@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 /// `red` -- RedDB unified CLI binary.
 ///
 /// Parses argv using the schema-driven CLI parser, routes to the

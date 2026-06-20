@@ -11,6 +11,8 @@
 //! messages. Listener loops, authentication policy, SQL dispatch, and
 //! runtime integration stay in `reddb-server`.
 
+#![allow(clippy::unwrap_used)]
+
 pub mod auth;
 pub mod conn_string;
 pub mod jsonrpc;

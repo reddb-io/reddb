@@ -29,3 +29,6 @@ proptest = "1"
 # Embedded parser tests assert on parsed SECRET_REF JSON via the upstream
 # `serde_json` crate (the server carries the same dependency).
 serde_json = "1"
+
+[lints]
+workspace = true

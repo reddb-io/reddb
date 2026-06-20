@@ -19,6 +19,7 @@
 // Ipv6Addr}` in its module-level `use` even though the non-test paths
 // reference them fully-qualified and the test module re-imports them
 // locally; carrying the allow here keeps the move a pure relocation.
+#![allow(clippy::unwrap_used)]
 #![allow(unused_imports)]
 
 pub mod canonical_key;
