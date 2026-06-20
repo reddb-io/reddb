@@ -591,10 +591,11 @@ impl<'a> Parser<'a> {
         let mut stream = false;
         let mut cache = AskCacheClause::Default;
         let mut as_rql = false;
+        let mut execute = false;
 
         // Parse optional clauses in any order. Loop bound = number of
         // clause kinds, so each can appear at most once.
-        for _ in 0..13 {
+        for _ in 0..14 {
             if self.consume(&Token::Using)? {
                 provider = Some(match &self.current.token {
                     Token::String(_) => self.parse_string()?,
@@ -663,6 +664,14 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 as_rql = true;
+            } else if self.consume_ident_ci("EXECUTE")? {
+                if execute {
+                    return Err(ParseError::new(
+                        "ASK EXECUTE specified more than once",
+                        self.position(),
+                    ));
+                }
+                execute = true;
             } else {
                 break;
             }
@@ -684,6 +693,7 @@ impl<'a> Parser<'a> {
             stream,
             cache,
             as_rql,
+            execute,
         }))
     }
 
