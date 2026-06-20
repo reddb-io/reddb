@@ -7399,3 +7399,85 @@ fn test_parse_vault_list_and_watch() {
         }) if collection == "secrets" && key == "api"
     ));
 }
+
+// ============================================================================
+// Depth-cap conformance — issue #1255
+//
+// Expression and subquery nesting paths are depth-bounded through the
+// shared `Parser::enter_depth` / `Parser::exit_depth` mechanism and
+// `ParserLimits::max_depth` (default 32).  Feeding input nested past
+// that cap must return a bounded `ParseError` mentioning "max_depth" —
+// never a panic or stack overflow.  Mirrors the `json_literal_table`
+// DoS tests as prior art.
+// ============================================================================
+
+#[test]
+fn dos_expr_paren_nesting_depth_exceeded() {
+    // 200 layers of parentheses — exceeds the default max_depth (32).
+    let open: String = "(".repeat(200);
+    let close: String = ")".repeat(200);
+    let sql = format!("SELECT * FROM t WHERE x = {}1{}", open, close);
+    let err = parse(&sql).expect_err("expected depth-limit error for expression nesting");
+    assert!(
+        err.to_string().contains("max_depth"),
+        "expected depth error mentioning 'max_depth', got: {}",
+        err
+    );
+}
+
+#[test]
+fn dos_expr_paren_nesting_at_cap_passes() {
+    // 10 layers — well under the default max_depth cap of 32.
+    let open: String = "(".repeat(10);
+    let close: String = ")".repeat(10);
+    let sql = format!("SELECT * FROM t WHERE x = {}1{}", open, close);
+    parse(&sql).expect("10 levels of paren nesting must parse");
+}
+
+#[test]
+fn dos_filter_not_nesting_depth_exceeded() {
+    // 200 chained NOTs — each recurse through `parse_not_expr` which
+    // calls `enter_depth`, so this hits the default max_depth (32) cap.
+    let nots: String = "NOT ".repeat(200);
+    let sql = format!("SELECT * FROM t WHERE {}x = 1", nots);
+    let err = parse(&sql).expect_err("expected depth-limit error for NOT nesting");
+    assert!(
+        err.to_string().contains("max_depth"),
+        "expected depth error mentioning 'max_depth', got: {}",
+        err
+    );
+}
+
+#[test]
+fn dos_filter_not_nesting_at_cap_passes() {
+    // 5 levels of NOT — well under the default max_depth cap of 32.
+    let nots: String = "NOT ".repeat(5);
+    let sql = format!("SELECT * FROM t WHERE {}x = 1", nots);
+    parse(&sql).expect("5 levels of NOT nesting must parse");
+}
+
+#[test]
+fn dos_subquery_nesting_depth_exceeded() {
+    // Build `SELECT (SELECT (SELECT … FROM t) FROM t) FROM t` × 200.
+    // Each SELECT level enters `parse_select_query` (→ enter_depth)
+    // and the wrapping expression enters `parse_expr_prec`
+    // (→ enter_depth again), so depth accumulates quickly.
+    let mut inner = "SELECT 1 FROM t".to_string();
+    for _ in 0..200 {
+        inner = format!("SELECT ({}) FROM t", inner);
+    }
+    let sql = format!("SELECT ({}) FROM t", inner);
+    let err = parse(&sql).expect_err("expected depth-limit error for subquery nesting");
+    assert!(
+        err.to_string().contains("max_depth"),
+        "expected depth error mentioning 'max_depth', got: {}",
+        err
+    );
+}
+
+#[test]
+fn dos_subquery_nesting_at_cap_passes() {
+    // 3 levels — well under the default max_depth cap.
+    let sql = "SELECT (SELECT (SELECT 1 FROM t) FROM t) FROM t";
+    parse(sql).expect("3 levels of subquery nesting must parse");
+}
