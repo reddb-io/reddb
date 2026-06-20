@@ -10,10 +10,10 @@ use crate::lexer::Token;
 use crate::sql_lowering::{filter_to_expr, fold_expr_to_value};
 use reddb_types::types::Value;
 
-/// DoS guard: maximum JSON nesting depth accepted by the parser.
-/// Mirrors typical web-server JSON limits and bails out before stack
-/// usage gets dangerous in downstream traversals.
-pub(crate) const JSON_LITERAL_MAX_DEPTH: u32 = 128;
+/// Maximum nesting depth for JSON object literals — shared constant
+/// that now lives in the crate-level [`crate::limits`] module so every
+/// depth cap is co-located with [`crate::limits::ParserLimits`].
+pub(crate) use crate::limits::JSON_LITERAL_MAX_DEPTH;
 
 /// Walk a parsed `JsonValue` tree and bail out if nesting exceeds
 /// `JSON_LITERAL_MAX_DEPTH`. Iterative to avoid the very stack
