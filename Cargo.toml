@@ -33,6 +33,12 @@ reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "crates/reddb-
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "allow"
+# Function-length nudge (PRD #1252). Threshold lives in clippy.toml
+# (too-many-lines-threshold = 120). Wired as a warn-level ratchet: legacy
+# crates carry `#![allow(clippy::too_many_lines)]` so the gate bites on
+# new/changed code, not the pre-existing oversized functions (incl. the
+# generated gRPC stubs in reddb-grpc-proto).
+too_many_lines = "warn"
 
 [package]
 name = "reddb-io"

@@ -33,7 +33,11 @@
     clippy::too_many_arguments,
     clippy::type_complexity,
     clippy::should_implement_trait,
-    clippy::new_without_default
+    clippy::new_without_default,
+    // Legacy allow for the too_many_lines ratchet (PRD #1252): pre-existing
+    // parser/lexer functions exceed the 120-line threshold. The lint bites on
+    // new/changed code; remove once these functions are split up.
+    clippy::too_many_lines
 )]
 
 pub mod analyzer;

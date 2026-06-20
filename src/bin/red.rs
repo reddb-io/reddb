@@ -1,4 +1,8 @@
 #![allow(clippy::unwrap_used)]
+// Legacy allow for the too_many_lines ratchet (PRD #1252): the CLI command
+// dispatchers in this binary exceed the 120-line threshold. The lint bites on
+// new/changed code; remove once those functions are split up.
+#![allow(clippy::too_many_lines)]
 /// `red` -- RedDB unified CLI binary.
 ///
 /// Parses argv using the schema-driven CLI parser, routes to the
