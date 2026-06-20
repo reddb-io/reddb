@@ -17,6 +17,7 @@ pub mod ask_response_envelope;
 pub mod ask_rql_planner;
 pub mod audit_record_builder;
 pub mod batch_client;
+pub mod cdc_enrichment;
 pub mod citation_parser;
 pub mod cost_guard;
 pub mod dedup_cache;
