@@ -68,6 +68,7 @@ impl RedDBServer {
             crate::ai::AiProvider::Venice,
             crate::ai::AiProvider::Ollama,
             crate::ai::AiProvider::DeepSeek,
+            crate::ai::AiProvider::MiniMax,
             crate::ai::AiProvider::HuggingFace,
             crate::ai::AiProvider::Local,
         ]
