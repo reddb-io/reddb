@@ -1125,6 +1125,77 @@ mod tests {
         assert_eq!(resolved, "default-vault-key");
     }
 
+    // Vault-first credential resolution with env fallback (issue #1270).
+    // Each test uses a unique `Custom` provider token so the derived env
+    // var name (`REDDB_<TOKEN>_API_KEY`) is process-unique and the tests
+    // can set/unset env without racing other tests.
+
+    #[test]
+    fn resolve_api_key_uses_env_when_no_vault_entry() {
+        let provider = AiProvider::Custom("cred1270envonly".to_string());
+        let env_name = provider.default_key_env_name();
+        std::env::set_var(&env_name, "env-fallback-key");
+
+        // kv_getter returns nothing → no vault/legacy entry exists.
+        let resolved = resolve_api_key(&provider, None, |_| Ok(None));
+
+        std::env::remove_var(&env_name);
+        assert_eq!(resolved.expect("resolve"), "env-fallback-key");
+    }
+
+    #[test]
+    fn resolve_api_key_prefers_vault_over_env() {
+        let provider = AiProvider::Custom("cred1270both".to_string());
+        let env_name = provider.default_key_env_name();
+        let secret_path = ai_api_secret_path(&provider, "default");
+        std::env::set_var(&env_name, "env-fallback-key");
+
+        // Both the vault secret and the env var are set; vault wins.
+        let resolved = resolve_api_key(&provider, None, |key| {
+            if key == secret_path {
+                Ok(Some("vault-managed-key".to_string()))
+            } else {
+                Ok(None)
+            }
+        });
+
+        std::env::remove_var(&env_name);
+        assert_eq!(resolved.expect("resolve"), "vault-managed-key");
+    }
+
+    #[test]
+    fn resolve_api_key_alias_prefers_vault_over_env() {
+        let provider = AiProvider::Custom("cred1270alias".to_string());
+        let alias = "prod";
+        let env_name = provider.alias_key_env_name(alias);
+        let secret_path = ai_api_secret_path(&provider, alias);
+        std::env::set_var(&env_name, "env-alias-key");
+
+        let resolved = resolve_api_key(&provider, Some(alias), |key| {
+            if key == secret_path {
+                Ok(Some("vault-alias-key".to_string()))
+            } else {
+                Ok(None)
+            }
+        });
+
+        std::env::remove_var(&env_name);
+        assert_eq!(resolved.expect("resolve"), "vault-alias-key");
+    }
+
+    #[test]
+    fn resolve_api_key_alias_falls_back_to_env_without_vault() {
+        let provider = AiProvider::Custom("cred1270aliasenv".to_string());
+        let alias = "prod";
+        let env_name = provider.alias_key_env_name(alias);
+        std::env::set_var(&env_name, "env-alias-key");
+
+        let resolved = resolve_api_key(&provider, Some(alias), |_| Ok(None));
+
+        std::env::remove_var(&env_name);
+        assert_eq!(resolved.expect("resolve"), "env-alias-key");
+    }
+
     #[test]
     fn openai_prompt_payload_includes_temperature_and_seed_when_present() {
         let payload = build_openai_prompt_payload(
@@ -1818,14 +1889,30 @@ pub fn resolve_defaults_from_runtime_port<
     (provider, model)
 }
 
-/// Resolve an API key for a provider. Uses the chain:
-/// 1. Environment variable with alias: `REDDB_OPENAI_API_KEY_{ALIAS}`
-/// 2. Vault secret lookup via `kv_getter` closure
-/// 3. Legacy KV store lookup via `kv_getter` closure
-/// 4. Default environment variable: `REDDB_OPENAI_API_KEY`
+/// Resolve an API key for a provider, **preferring the encrypted vault
+/// over environment variables** (issue #1270). The env vars are a
+/// bootstrap fallback so a fresh deployment can talk to a provider
+/// before any key has been written to the vault.
 ///
-/// `kv_getter` receives either a `red.secret.*` path or a legacy `red.config.*`
-/// key and returns the value if found.
+/// Aliased lookup (`credential_alias = Some(..)`):
+/// 1. Vault secret path: `red.secret.ai.<provider>.<alias>.api_key`
+/// 2. Vault secret indirected via `red.config.ai.<provider>.<alias>.secret_ref`
+/// 3. Env fallback with alias: `REDDB_<PROVIDER>_API_KEY_{ALIAS}`
+/// 4. Legacy KV config: `red.config.ai.<provider>.<alias>.key`
+///
+/// Default lookup (`credential_alias = None`):
+/// 1. Vault secret path: `red.secret.ai.<provider>.default.api_key`
+/// 2. Vault secret indirected via `secret_ref`
+/// 3. Env fallback: `REDDB_<PROVIDER>_API_KEY`
+/// 4. Legacy KV config (`red.config.ai.<provider>.default.key` and the
+///    short `<provider>/default` form)
+///
+/// `kv_getter` receives either a `red.secret.*` path (routed to the
+/// encrypted vault by [`resolve_api_key_from_runtime`]) or a legacy
+/// `red.config.*` key and returns the value if found. Vault-stored keys
+/// are therefore encrypted at rest and rotatable via the existing vault
+/// KV path; the env vars carry no such guarantees, which is why they are
+/// the fallback rather than the primary source.
 pub fn resolve_api_key<F>(
     provider: &AiProvider,
     credential_alias: Option<&str>,
@@ -1847,21 +1934,23 @@ where
     }
 
     if let Some(alias) = credential_alias.map(str::trim).filter(|a| !a.is_empty()) {
-        // Try env var with alias
-        if let Some(key) = resolve_key_from_env_alias(provider, alias) {
-            return Ok(key);
-        }
+        // 1. Vault secret path (managed, encrypted at rest).
         if let Some(key) = kv_getter(&ai_api_secret_path(provider, alias))? {
             if !key.trim().is_empty() {
                 return Ok(key);
             }
         }
+        // 2. Vault secret reachable through a configured indirection ref.
         if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, alias))? {
             if let Some(key) = kv_getter(secret_ref.trim())? {
                 if !key.trim().is_empty() {
                     return Ok(key);
                 }
             }
+        }
+        // 3. Env fallback with alias (bootstrap before vault is populated).
+        if let Some(key) = resolve_key_from_env_alias(provider, alias) {
+            return Ok(key);
         }
         let legacy_key = ai_api_legacy_config_key(provider, alias);
         if let Some(key) = kv_getter(&legacy_key)? {
@@ -1876,19 +1965,13 @@ where
         )));
     }
 
-    // Default env var
-    if let Ok(value) = std::env::var(provider.default_key_env_name()) {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            return Ok(value);
-        }
-    }
-
+    // 1. Vault secret path (managed, encrypted at rest).
     if let Some(key) = kv_getter(&ai_api_secret_path(provider, "default"))? {
         if !key.trim().is_empty() {
             return Ok(key);
         }
     }
+    // 2. Vault secret reachable through a configured indirection ref.
     if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, "default"))? {
         if let Some(key) = kv_getter(secret_ref.trim())? {
             if !key.trim().is_empty() {
@@ -1896,6 +1979,15 @@ where
             }
         }
     }
+
+    // 3. Env fallback (bootstrap before the vault is populated).
+    if let Ok(value) = std::env::var(provider.default_key_env_name()) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+
     if let Some(key) = kv_getter(&ai_api_legacy_config_key(provider, "default"))? {
         if !key.trim().is_empty() {
             return Ok(key);
