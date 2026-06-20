@@ -12,3 +12,7 @@
 
 dev:
   lock-primary-branch: true
+
+plugins:
+  dev:
+    enabled: true
