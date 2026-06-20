@@ -3177,7 +3177,7 @@ mod tests {
             register_local_model_with(&server, "mini", 4, r#", "credential_alias":"hf_prod""#);
         assert_eq!(resp.status, 201);
         // Stage the credential via the legacy config KV path. The
-        // resolver walks env → vault (red.secret.*) → legacy
+        // resolver walks vault (red.secret.*) → env → legacy
         // (red.config.*.key), so a value here is the simplest stand-in
         // for a real vault that does not need an AuthStore set up.
         let legacy_key =
