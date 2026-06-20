@@ -9,6 +9,11 @@
 //! `tonic_prost_build` at compile time.
 
 #![allow(clippy::all)]
+// `clippy::all` does NOT include the pedantic `too_many_lines` lint, and the
+// tonic-generated service stubs contain functions far over the 120-line
+// threshold (PRD #1252 ratchet). This crate is entirely generated, so the
+// allow is permanent rather than a clean-up TODO.
+#![allow(clippy::too_many_lines)]
 
 tonic::include_proto!("reddb.v1");
 

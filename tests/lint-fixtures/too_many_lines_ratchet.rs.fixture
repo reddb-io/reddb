@@ -1,0 +1,57 @@
+// tests/lint-fixtures/too_many_lines_ratchet.rs.fixture
+//
+// Demonstrates the clippy::too_many_lines ratchet established for the
+// TigerStyle-derived house style (PRD #1252).
+//
+//   - Lint level: `clippy::too_many_lines = "warn"` in [workspace.lints.clippy]
+//     (root Cargo.toml). CI runs `cargo clippy --workspace -D warnings`, so a
+//     warn-level hit fails the gate exactly like a deny.
+//   - Threshold: `too-many-lines-threshold = 120` in `clippy.toml` (workspace
+//     root). 120 is the lenient end of the ~100–120 window: it captures
+//     TigerStyle's "doesn't fit on a screen" discontinuity without a hard
+//     70-line limit that would rain false positives on idiomatic
+//     `match`/builder code. (The function-shape *principle* — "push ifs up,
+//     fors down" — is documented in STYLE.md, not enforced here.)
+//   - clippy counts *code* lines: blank lines and comment-only lines do NOT
+//     count toward the 120.
+//
+// This file is NOT compiled — the `.rs.fixture` extension keeps it outside the
+// cargo workspace target tree. It is a human-readable reference for the ratchet
+// behaviour; clippy is exercised by the CI gate.
+//
+// Ratchet rules (do not re-litigate):
+//   - Legacy crates whose pre-existing tree already exceeds the threshold carry
+//     a crate-level `#![allow(clippy::too_many_lines)]`:
+//       reddb-io-file, reddb-io-rql, reddb-io-server, reddb-io-types,
+//       reddb-io-grpc-proto (generated tonic stubs — permanent), and the root
+//       `reddb-io` binary (src/bin/red.rs). These allows keep CI green on the
+//       existing tree; they are removed crate-by-crate as functions are split.
+//   - Note: `#![allow(clippy::all)]` does NOT cover `too_many_lines` — it lives
+//     in the pedantic group — so reddb-io-grpc-proto needs its own explicit
+//     allow despite already allowing `clippy::all`.
+//   - Crates WITHOUT the legacy allow enforce the rule immediately:
+//     reddb-io-client, reddb-io-client-connector, reddb-io-crypto, and
+//     reddb-io-wire. A new function over 120 code lines added to any of those
+//     fails `cargo clippy --workspace -D warnings` without further config.
+
+// ── FAILS clippy (over the 120-line threshold, in a crate without the allow) ──
+//
+// fn process_everything(input: &[u32]) -> u64 {
+//     let mut acc: u64 = 0;
+//     acc = acc.wrapping_add(input[0] as u64);   // line 1 of body
+//     acc = acc.wrapping_add(input[1] as u64);   // line 2 of body
+//     // ... 120+ more straight-line statements ...
+//     acc = acc.wrapping_add(input[121] as u64); // line 121 of body
+//     acc
+//     // error: this function has too many lines (122/120)
+// }
+
+// ── PASSES clippy (under the threshold) ──────────────────────────────────────
+//
+// fn process_some(input: &[u32]) -> u64 {
+//     let mut acc: u64 = 0;
+//     for &x in input {
+//         acc = acc.wrapping_add(x as u64);
+//     }
+//     acc                       // a handful of code lines — well under 120
+// }
