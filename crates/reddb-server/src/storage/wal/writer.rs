@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn test_create_new_wal() {
         let (_guard, path) = temp_wal("create");
-        let writer = WalWriter::open(&path).unwrap();
+        let writer = WalWriter::open(&path).expect("open() should succeed");
 
         // Should start at LSN 8 (after 8-byte header)
         assert_eq!(writer.current_lsn(), 8);
@@ -497,10 +497,10 @@ mod tests {
     #[test]
     fn test_append_record() {
         let (_guard, path) = temp_wal("append");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
         let record = WalRecord::Begin { tx_id: 42 };
-        let lsn = writer.append(&record).unwrap();
+        let lsn = writer.append(&record).expect("append() should succeed");
 
         // First record starts at LSN 8
         assert_eq!(lsn, 8);
@@ -513,11 +513,17 @@ mod tests {
     #[test]
     fn test_append_multiple_records() {
         let (_guard, path) = temp_wal("multi");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
-        let lsn1 = writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        let lsn2 = writer.append(&WalRecord::Begin { tx_id: 2 }).unwrap();
-        let lsn3 = writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+        let lsn1 = writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        let lsn2 = writer
+            .append(&WalRecord::Begin { tx_id: 2 })
+            .expect("append() should succeed");
+        let lsn3 = writer
+            .append(&WalRecord::Commit { tx_id: 1 })
+            .expect("append() should succeed");
 
         assert_eq!(lsn1, 8);
         assert_eq!(lsn2, 8 + 21);
@@ -527,10 +533,12 @@ mod tests {
     #[test]
     fn test_page_write_lsn() {
         let (_guard, path) = temp_wal("pagewrite");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
         // First record
-        let lsn1 = writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        let lsn1 = writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
         assert_eq!(lsn1, 8);
 
         // PageWrite record: 1 + 8 + 4 + 4 + data_len + 4 = 21 + data_len
@@ -541,7 +549,7 @@ mod tests {
                 page_id: 100,
                 data: data.clone(),
             })
-            .unwrap();
+            .expect("value is present");
 
         assert_eq!(lsn2, 8 + 21); // after Begin
 
@@ -552,10 +560,12 @@ mod tests {
     #[test]
     fn test_sync() {
         let (_guard, path) = temp_wal("sync");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
 
         // File should be synced, just verify no error
         assert!(path.exists());
@@ -564,30 +574,36 @@ mod tests {
     #[test]
     fn test_truncate() {
         let (_guard, path) = temp_wal("truncate");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
         // Write some records
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
         writer
             .append(&WalRecord::PageWrite {
                 tx_id: 1,
                 page_id: 0,
                 data: vec![0; 100],
             })
-            .unwrap();
-        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+            .expect("value is present");
+        writer
+            .append(&WalRecord::Commit { tx_id: 1 })
+            .expect("append() should succeed");
 
         let lsn_before = writer.current_lsn();
         assert!(lsn_before > 8);
 
         // Truncate
-        writer.truncate().unwrap();
+        writer.truncate().expect("truncate() should succeed");
 
         // LSN should be back to 8
         assert_eq!(writer.current_lsn(), 8);
 
         // File should be 8 bytes (just header)
-        let len = std::fs::metadata(&path).unwrap().len();
+        let len = std::fs::metadata(&path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(len, 8);
     }
 
@@ -598,15 +614,19 @@ mod tests {
         // Create and write
         let lsn_after_write;
         {
-            let mut writer = WalWriter::open(&path).unwrap();
-            writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-            writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+            let mut writer = WalWriter::open(&path).expect("open() should succeed");
+            writer
+                .append(&WalRecord::Begin { tx_id: 1 })
+                .expect("append() should succeed");
+            writer
+                .append(&WalRecord::Commit { tx_id: 1 })
+                .expect("append() should succeed");
             lsn_after_write = writer.current_lsn();
         }
 
         // Reopen
         {
-            let writer = WalWriter::open(&path).unwrap();
+            let writer = WalWriter::open(&path).expect("open() should succeed");
             // Should continue from where we left off
             assert_eq!(writer.current_lsn(), lsn_after_write);
         }
@@ -615,12 +635,12 @@ mod tests {
     #[test]
     fn test_checkpoint_record() {
         let (_guard, path) = temp_wal("checkpoint");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
         // Checkpoint is same size as Begin (1 + 8 + 8 + 4 = 21)
         let lsn = writer
             .append(&WalRecord::Checkpoint { lsn: 12345 })
-            .unwrap();
+            .expect("value is present");
         assert_eq!(lsn, 8);
         assert_eq!(writer.current_lsn(), 8 + 21);
     }
@@ -632,7 +652,7 @@ mod tests {
     #[test]
     fn fresh_wal_has_durable_lsn_at_header_end() {
         let (_guard, path) = temp_wal("durable_init");
-        let writer = WalWriter::open(&path).unwrap();
+        let writer = WalWriter::open(&path).expect("open() should succeed");
         assert_eq!(writer.durable_lsn(), 8);
         assert_eq!(writer.current_lsn(), 8);
     }
@@ -640,63 +660,83 @@ mod tests {
     #[test]
     fn flush_until_below_durable_is_noop() {
         let (_guard, path) = temp_wal("flush_noop");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         // After open, durable_lsn == 8.
         let before = writer.durable_lsn();
-        writer.flush_until(0).unwrap();
-        writer.flush_until(8).unwrap();
+        writer.flush_until(0).expect("flush_until() should succeed");
+        writer.flush_until(8).expect("flush_until() should succeed");
         assert_eq!(writer.durable_lsn(), before);
     }
 
     #[test]
     fn flush_until_advances_durable_to_current() {
         let (_guard, path) = temp_wal("flush_advance");
-        let mut writer = WalWriter::open(&path).unwrap();
-        writer.append(&WalRecord::Begin { tx_id: 7 }).unwrap();
-        writer.append(&WalRecord::Commit { tx_id: 7 }).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
+        writer
+            .append(&WalRecord::Begin { tx_id: 7 })
+            .expect("append() should succeed");
+        writer
+            .append(&WalRecord::Commit { tx_id: 7 })
+            .expect("append() should succeed");
         let target = writer.current_lsn();
         // Before flush_until, durable still at the header.
         assert_eq!(writer.durable_lsn(), 8);
-        writer.flush_until(target).unwrap();
+        writer
+            .flush_until(target)
+            .expect("flush_until() should succeed");
         assert_eq!(writer.durable_lsn(), target);
     }
 
     #[test]
     fn flush_until_is_monotonic() {
         let (_guard, path) = temp_wal("flush_monotonic");
-        let mut writer = WalWriter::open(&path).unwrap();
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
         let lo = writer.current_lsn();
-        writer.flush_until(lo).unwrap();
+        writer
+            .flush_until(lo)
+            .expect("flush_until() should succeed");
         let durable_after_lo = writer.durable_lsn();
-        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+        writer
+            .append(&WalRecord::Commit { tx_id: 1 })
+            .expect("append() should succeed");
         let hi = writer.current_lsn();
-        writer.flush_until(hi).unwrap();
+        writer
+            .flush_until(hi)
+            .expect("flush_until() should succeed");
         assert!(writer.durable_lsn() >= durable_after_lo);
         // Calling flush_until(lo) after flush_until(hi) is a no-op.
-        writer.flush_until(lo).unwrap();
+        writer
+            .flush_until(lo)
+            .expect("flush_until() should succeed");
         assert_eq!(writer.durable_lsn(), hi);
     }
 
     #[test]
     fn sync_advances_durable_lsn_too() {
         let (_guard, path) = temp_wal("sync_durable");
-        let mut writer = WalWriter::open(&path).unwrap();
-        writer.append(&WalRecord::Begin { tx_id: 9 }).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
+        writer
+            .append(&WalRecord::Begin { tx_id: 9 })
+            .expect("append() should succeed");
         let before = writer.durable_lsn();
         let after_append = writer.current_lsn();
         assert!(after_append > before);
-        writer.sync().unwrap();
+        writer.sync().expect("sync() should succeed");
         assert_eq!(writer.durable_lsn(), after_append);
     }
 
     #[test]
     fn sync_all_is_used_when_wal_size_grew() {
         let (_guard, path) = temp_wal("sync_all_grew");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
 
         assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
         assert!(writer.last_synced_size >= writer.current_lsn());
@@ -706,7 +746,7 @@ mod tests {
     #[test]
     fn sync_all_is_used_for_metadata_only_preallocation() {
         let (_guard, path) = temp_wal("sync_all_prealloc_metadata");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         if !writer.prealloc_supported {
             return;
         }
@@ -714,7 +754,7 @@ mod tests {
         assert_eq!(writer.current_lsn(), 8);
         assert!(writer.prealloc_metadata_dirty);
 
-        writer.sync().unwrap();
+        writer.sync().expect("sync() should succeed");
 
         assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
         assert_eq!(writer.last_synced_size, writer.preallocated_to);
@@ -724,12 +764,14 @@ mod tests {
     #[test]
     fn sync_data_is_used_when_wal_size_is_unchanged() {
         let (_guard, path) = temp_wal("sync_data_unchanged");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
         let synced_size = writer.last_synced_size;
-        writer.sync().unwrap();
+        writer.sync().expect("sync() should succeed");
 
         assert_eq!(writer.last_sync_method, Some(WalSyncMethod::Data));
         assert_eq!(writer.last_synced_size, synced_size);
@@ -739,17 +781,21 @@ mod tests {
     #[test]
     fn sync_data_is_used_for_appends_within_synced_preallocation() {
         let (_guard, path) = temp_wal("sync_data_preallocated_append");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         if !writer.prealloc_supported {
             return;
         }
 
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
         assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
 
-        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        writer
+            .append(&WalRecord::Commit { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
 
         assert_eq!(writer.last_sync_method, Some(WalSyncMethod::Data));
         assert_eq!(writer.durable_lsn(), writer.current_lsn());
@@ -759,19 +805,25 @@ mod tests {
     #[test]
     fn group_sync_uses_sync_data_within_synced_preallocation() {
         let (_guard, path) = temp_wal("group_sync_data_preallocated_append");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         if !writer.prealloc_supported {
             return;
         }
 
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
         assert_eq!(writer.last_sync_method, Some(WalSyncMethod::All));
 
-        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
-        let sync = writer.drain_for_group_sync().unwrap();
+        writer
+            .append(&WalRecord::Commit { tx_id: 1 })
+            .expect("append() should succeed");
+        let sync = writer
+            .drain_for_group_sync()
+            .expect("drain_for_group_sync() should succeed");
         assert_eq!(sync.method, WalSyncMethod::Data);
-        sync.sync().unwrap();
+        sync.sync().expect("sync() should succeed");
         writer.mark_durable(&sync);
 
         assert_eq!(writer.last_sync_method, Some(WalSyncMethod::Data));
@@ -781,11 +833,13 @@ mod tests {
     #[test]
     fn truncate_resets_durable_lsn() {
         let (_guard, path) = temp_wal("truncate_durable");
-        let mut writer = WalWriter::open(&path).unwrap();
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
         assert!(writer.durable_lsn() > 8);
-        writer.truncate().unwrap();
+        writer.truncate().expect("truncate() should succeed");
         assert_eq!(writer.durable_lsn(), 8);
         assert_eq!(writer.current_lsn(), 8);
     }
@@ -794,11 +848,13 @@ mod tests {
     fn reopen_initialises_durable_to_current() {
         let (_guard, path) = temp_wal("reopen_durable");
         {
-            let mut writer = WalWriter::open(&path).unwrap();
-            writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-            writer.sync().unwrap();
+            let mut writer = WalWriter::open(&path).expect("open() should succeed");
+            writer
+                .append(&WalRecord::Begin { tx_id: 1 })
+                .expect("append() should succeed");
+            writer.sync().expect("sync() should succeed");
         }
-        let writer = WalWriter::open(&path).unwrap();
+        let writer = WalWriter::open(&path).expect("open() should succeed");
         // After reopen, every byte on disk is durable by definition.
         assert_eq!(writer.durable_lsn(), writer.current_lsn());
     }
@@ -813,14 +869,18 @@ mod tests {
         // size must still equal the header (8 bytes) because the
         // bytes are sitting in the BufWriter, not in the kernel.
         let (_guard, path) = temp_wal("bufwriter_coalesce");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         for tx in 0..100u64 {
-            writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
+            writer
+                .append(&WalRecord::Begin { tx_id: tx })
+                .expect("append() should succeed");
         }
         // current_lsn reflects the in-buffer position.
         assert_eq!(writer.current_lsn(), 8 + 100 * 21);
         // But the file on disk only has the header.
-        let on_disk = std::fs::metadata(&path).unwrap().len();
+        let on_disk = std::fs::metadata(&path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(on_disk, 8, "BufWriter leaked bytes to disk before sync");
     }
 
@@ -829,12 +889,16 @@ mod tests {
         // After sync(), the file size must equal current_lsn — the
         // BufWriter has been flushed and sync_all has hit the kernel.
         let (_guard, path) = temp_wal("sync_drains");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         for tx in 0..50u64 {
-            writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
+            writer
+                .append(&WalRecord::Begin { tx_id: tx })
+                .expect("append() should succeed");
         }
-        writer.sync().unwrap();
-        let on_disk = std::fs::metadata(&path).unwrap().len();
+        writer.sync().expect("sync() should succeed");
+        let on_disk = std::fs::metadata(&path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(on_disk, writer.current_lsn());
         assert_eq!(writer.durable_lsn(), writer.current_lsn());
     }
@@ -845,13 +909,19 @@ mod tests {
         // sync_all on the underlying file — otherwise pending bytes
         // never become durable.
         let (_guard, path) = temp_wal("flush_until_drains");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         for tx in 0..30u64 {
-            writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
+            writer
+                .append(&WalRecord::Begin { tx_id: tx })
+                .expect("append() should succeed");
         }
         let target = writer.current_lsn();
-        writer.flush_until(target).unwrap();
-        let on_disk = std::fs::metadata(&path).unwrap().len();
+        writer
+            .flush_until(target)
+            .expect("flush_until() should succeed");
+        let on_disk = std::fs::metadata(&path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(on_disk, target);
         assert_eq!(writer.durable_lsn(), target);
     }
@@ -863,26 +933,42 @@ mod tests {
         // with stale records) or be lost. Verify the resulting file
         // contains only a fresh header.
         let (_guard, path) = temp_wal("truncate_drain");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         // Write enough small records to fill some of the 64 KiB buffer
         // but stay below the auto-flush threshold.
         for tx in 0..200u64 {
-            writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
+            writer
+                .append(&WalRecord::Begin { tx_id: tx })
+                .expect("append() should succeed");
         }
         // Sanity: bytes are buffered.
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata() should succeed")
+                .len(),
+            8
+        );
 
-        writer.truncate().unwrap();
+        writer.truncate().expect("truncate() should succeed");
         // After truncate the file is just the header again.
-        let on_disk = std::fs::metadata(&path).unwrap().len();
+        let on_disk = std::fs::metadata(&path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(on_disk, 8);
         assert_eq!(writer.current_lsn(), 8);
         assert_eq!(writer.durable_lsn(), 8);
 
         // And we can append again successfully.
-        writer.append(&WalRecord::Begin { tx_id: 99 }).unwrap();
-        writer.sync().unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 + 21);
+        writer
+            .append(&WalRecord::Begin { tx_id: 99 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata() should succeed")
+                .len(),
+            8 + 21
+        );
     }
 
     #[test]
@@ -898,14 +984,18 @@ mod tests {
         let (_guard, path) = temp_wal("reopen_synced_only");
         let synced_lsn;
         {
-            let mut writer = WalWriter::open(&path).unwrap();
-            writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-            writer.sync().unwrap();
+            let mut writer = WalWriter::open(&path).expect("open() should succeed");
+            writer
+                .append(&WalRecord::Begin { tx_id: 1 })
+                .expect("append() should succeed");
+            writer.sync().expect("sync() should succeed");
             synced_lsn = writer.current_lsn();
             // These records are never sync'd before drop. Drop runs
             // BufWriter::flush which DOES write them — see note below.
             for tx in 100..120u64 {
-                writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
+                writer
+                    .append(&WalRecord::Begin { tx_id: tx })
+                    .expect("append() should succeed");
             }
             // Without a sync, the in-buffer bytes are still pending.
             // BufWriter's Drop impl does flush to the file but does
@@ -913,7 +1003,7 @@ mod tests {
             // bytes count regardless of fsync, so the reopened LSN
             // will reflect the dropped writes too.
         }
-        let writer = WalWriter::open(&path).unwrap();
+        let writer = WalWriter::open(&path).expect("open() should succeed");
         // The reopen LSN reflects what's physically on disk after
         // BufWriter::Drop flushes its buffer. That may or may not
         // include the unsync'd records depending on platform; the
@@ -929,8 +1019,8 @@ mod tests {
     /// allocated size (st_blocks × 512), independent of the logical length.
     fn allocated_bytes(path: &std::path::Path) -> u64 {
         use fs2::FileExt;
-        let f = std::fs::File::open(path).unwrap();
-        f.allocated_size().unwrap()
+        let f = std::fs::File::open(path).expect("open() should succeed");
+        f.allocated_size().expect("allocated_size() should succeed")
     }
 
     #[test]
@@ -965,7 +1055,7 @@ mod tests {
         // A freshly opened WAL must reserve a whole segment up front instead
         // of growing incrementally (acceptance #1).
         let (_guard, path) = temp_wal("prealloc_open");
-        let writer = WalWriter::open(&path).unwrap();
+        let writer = WalWriter::open(&path).expect("open() should succeed");
         if !writer.prealloc_supported {
             return; // filesystem without fallocate — feature is a no-op.
         }
@@ -973,7 +1063,12 @@ mod tests {
         // The reservation is real on disk, yet the logical file is still just
         // the 8-byte header.
         assert!(allocated_bytes(&path) >= reddb_file::MAIN_WAL_SEGMENT_BYTES);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata() should succeed")
+                .len(),
+            8
+        );
     }
 
     #[test]
@@ -984,12 +1079,16 @@ mod tests {
         // every filesystem (fallocate keeps i_size pinned; absent fallocate
         // there is no reservation at all).
         let (_guard, path) = temp_wal("prealloc_logical");
-        let mut writer = WalWriter::open(&path).unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
         for tx in 0..50u64 {
-            writer.append(&WalRecord::Begin { tx_id: tx }).unwrap();
+            writer
+                .append(&WalRecord::Begin { tx_id: tx })
+                .expect("append() should succeed");
         }
-        writer.sync().unwrap();
-        let logical = std::fs::metadata(&path).unwrap().len();
+        writer.sync().expect("sync() should succeed");
+        let logical = std::fs::metadata(&path)
+            .expect("metadata() should succeed")
+            .len();
         assert_eq!(logical, 8 + 50 * 21, "preallocation inflated i_size");
         assert_eq!(writer.current_lsn(), logical);
     }
@@ -999,14 +1098,21 @@ mod tests {
         // After checkpoint truncation the WAL must re-extend rather than grow
         // unbounded page-by-page (acceptance #2).
         let (_guard, path) = temp_wal("prealloc_truncate");
-        let mut writer = WalWriter::open(&path).unwrap();
-        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-        writer.sync().unwrap();
+        let mut writer = WalWriter::open(&path).expect("open() should succeed");
+        writer
+            .append(&WalRecord::Begin { tx_id: 1 })
+            .expect("append() should succeed");
+        writer.sync().expect("sync() should succeed");
 
-        writer.truncate().unwrap();
+        writer.truncate().expect("truncate() should succeed");
 
         assert_eq!(writer.current_lsn(), 8);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata() should succeed")
+                .len(),
+            8
+        );
         if writer.prealloc_supported {
             assert_eq!(writer.preallocated_to, reddb_file::MAIN_WAL_SEGMENT_BYTES);
             assert!(allocated_bytes(&path) >= reddb_file::MAIN_WAL_SEGMENT_BYTES);
@@ -1021,20 +1127,24 @@ mod tests {
         use super::super::reader::WalReader;
         let (_guard, path) = temp_wal("prealloc_recover");
         {
-            let mut writer = WalWriter::open(&path).unwrap();
-            writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+            let mut writer = WalWriter::open(&path).expect("open() should succeed");
+            writer
+                .append(&WalRecord::Begin { tx_id: 1 })
+                .expect("append() should succeed");
             writer
                 .append(&WalRecord::PageWrite {
                     tx_id: 1,
                     page_id: 7,
                     data: vec![1, 2, 3, 4],
                 })
-                .unwrap();
-            writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
-            writer.sync().unwrap();
+                .expect("value is present");
+            writer
+                .append(&WalRecord::Commit { tx_id: 1 })
+                .expect("append() should succeed");
+            writer.sync().expect("sync() should succeed");
         }
         let records: Vec<_> = WalReader::open(&path)
-            .unwrap()
+            .expect("value is present")
             .iter()
             .collect::<Result<_, _>>()
             .expect("reader must stop cleanly at real EOF, not in reserved tail");

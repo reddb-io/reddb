@@ -923,13 +923,13 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
         assert!(tree.is_empty());
         assert_eq!(tree.root_page_id(), 0);
-        assert_eq!(tree.get(b"key").unwrap(), None);
-        assert_eq!(tree.count().unwrap(), 0);
+        assert_eq!(tree.get(b"key").expect("get() should succeed"), None);
+        assert_eq!(tree.count().expect("count() should succeed"), 0);
 
         cleanup(&path);
     }
@@ -939,15 +939,19 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
-        tree.insert(b"hello", b"world").unwrap();
+        tree.insert(b"hello", b"world")
+            .expect("insert() should succeed");
 
         assert!(!tree.is_empty());
-        assert_eq!(tree.get(b"hello").unwrap(), Some(b"world".to_vec()));
-        assert_eq!(tree.get(b"other").unwrap(), None);
-        assert_eq!(tree.count().unwrap(), 1);
+        assert_eq!(
+            tree.get(b"hello").expect("get() should succeed"),
+            Some(b"world".to_vec())
+        );
+        assert_eq!(tree.get(b"other").expect("get() should succeed"), None);
+        assert_eq!(tree.count().expect("count() should succeed"), 1);
 
         cleanup(&path);
     }
@@ -957,17 +961,26 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
-        tree.insert(b"c", b"3").unwrap();
-        tree.insert(b"a", b"1").unwrap();
-        tree.insert(b"b", b"2").unwrap();
+        tree.insert(b"c", b"3").expect("insert() should succeed");
+        tree.insert(b"a", b"1").expect("insert() should succeed");
+        tree.insert(b"b", b"2").expect("insert() should succeed");
 
-        assert_eq!(tree.get(b"a").unwrap(), Some(b"1".to_vec()));
-        assert_eq!(tree.get(b"b").unwrap(), Some(b"2".to_vec()));
-        assert_eq!(tree.get(b"c").unwrap(), Some(b"3".to_vec()));
-        assert_eq!(tree.count().unwrap(), 3);
+        assert_eq!(
+            tree.get(b"a").expect("get() should succeed"),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            tree.get(b"b").expect("get() should succeed"),
+            Some(b"2".to_vec())
+        );
+        assert_eq!(
+            tree.get(b"c").expect("get() should succeed"),
+            Some(b"3".to_vec())
+        );
+        assert_eq!(tree.count().expect("count() should succeed"), 3);
 
         cleanup(&path);
     }
@@ -977,14 +990,18 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
-        tree.insert(b"key", b"value1").unwrap();
+        tree.insert(b"key", b"value1")
+            .expect("insert() should succeed");
         let result = tree.insert(b"key", b"value2");
 
         assert!(matches!(result, Err(BTreeError::DuplicateKey)));
-        assert_eq!(tree.get(b"key").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(
+            tree.get(b"key").expect("get() should succeed"),
+            Some(b"value1".to_vec())
+        );
 
         cleanup(&path);
     }
@@ -994,20 +1011,26 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
-        tree.insert(b"a", b"1").unwrap();
-        tree.insert(b"b", b"2").unwrap();
-        tree.insert(b"c", b"3").unwrap();
+        tree.insert(b"a", b"1").expect("insert() should succeed");
+        tree.insert(b"b", b"2").expect("insert() should succeed");
+        tree.insert(b"c", b"3").expect("insert() should succeed");
 
-        assert!(tree.delete(b"b").unwrap());
-        assert!(!tree.delete(b"d").unwrap());
+        assert!(tree.delete(b"b").expect("delete() should succeed"));
+        assert!(!tree.delete(b"d").expect("delete() should succeed"));
 
-        assert_eq!(tree.get(b"a").unwrap(), Some(b"1".to_vec()));
-        assert_eq!(tree.get(b"b").unwrap(), None);
-        assert_eq!(tree.get(b"c").unwrap(), Some(b"3".to_vec()));
-        assert_eq!(tree.count().unwrap(), 2);
+        assert_eq!(
+            tree.get(b"a").expect("get() should succeed"),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(tree.get(b"b").expect("get() should succeed"), None);
+        assert_eq!(
+            tree.get(b"c").expect("get() should succeed"),
+            Some(b"3".to_vec())
+        );
+        assert_eq!(tree.count().expect("count() should succeed"), 2);
 
         cleanup(&path);
     }
@@ -1017,22 +1040,27 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager.clone());
 
         let value = vec![b'v'; 200];
         for i in 0..300u32 {
             let key = format!("key{:03}", i);
-            tree.insert(key.as_bytes(), &value).unwrap();
+            tree.insert(key.as_bytes(), &value)
+                .expect("insert() should succeed");
         }
 
         let root_id = tree.root_page_id();
-        let first_leaf = tree.find_first_leaf(root_id).unwrap();
+        let first_leaf = tree
+            .find_first_leaf(root_id)
+            .expect("find_first_leaf() should succeed");
         let mut leaf_ids = Vec::new();
         let mut current = first_leaf;
         loop {
             leaf_ids.push(current);
-            let page = pager.read_page(current).unwrap();
+            let page = pager
+                .read_page(current)
+                .expect("read_page() should succeed");
             let next = read_next_leaf(&page);
             if next == 0 {
                 break;
@@ -1043,24 +1071,26 @@ mod tests {
         assert!(leaf_ids.len() >= 3);
 
         let target_leaf = leaf_ids[1];
-        let page = pager.read_page(target_leaf).unwrap();
+        let page = pager
+            .read_page(target_leaf)
+            .expect("read_page() should succeed");
         let cell_count = page.cell_count() as usize;
         let mut keys = Vec::with_capacity(cell_count);
         for i in 0..cell_count {
-            let (key, _) = read_leaf_cell(&page, i).unwrap();
+            let (key, _) = read_leaf_cell(&page, i).expect("read_leaf_cell() should succeed");
             keys.push(key);
         }
 
         for key in &keys {
-            tree.delete(key).unwrap();
+            tree.delete(key).expect("delete() should succeed");
         }
 
         let expected = 300 - keys.len();
-        assert_eq!(tree.count().unwrap(), expected);
+        assert_eq!(tree.count().expect("count() should succeed"), expected);
 
-        let mut cursor = tree.cursor_first().unwrap();
+        let mut cursor = tree.cursor_first().expect("cursor_first() should succeed");
         let mut results = Vec::new();
-        while let Some((key, _)) = cursor.next().unwrap() {
+        while let Some((key, _)) = cursor.next().expect("next() should succeed") {
             results.push(key);
         }
 
@@ -1076,17 +1106,17 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
-        tree.insert(b"c", b"3").unwrap();
-        tree.insert(b"a", b"1").unwrap();
-        tree.insert(b"b", b"2").unwrap();
+        tree.insert(b"c", b"3").expect("insert() should succeed");
+        tree.insert(b"a", b"1").expect("insert() should succeed");
+        tree.insert(b"b", b"2").expect("insert() should succeed");
 
-        let mut cursor = tree.cursor_first().unwrap();
+        let mut cursor = tree.cursor_first().expect("cursor_first() should succeed");
         let mut results: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
-        while let Some(entry) = cursor.next().unwrap() {
+        while let Some(entry) = cursor.next().expect("next() should succeed") {
             results.push(entry);
         }
 
@@ -1103,16 +1133,19 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
         for i in 0..10u8 {
             let key = format!("key{:02}", i);
             let value = format!("val{:02}", i);
-            tree.insert(key.as_bytes(), value.as_bytes()).unwrap();
+            tree.insert(key.as_bytes(), value.as_bytes())
+                .expect("insert() should succeed");
         }
 
-        let results = tree.range(b"key03", b"key06").unwrap();
+        let results = tree
+            .range(b"key03", b"key06")
+            .expect("range() should succeed");
 
         assert_eq!(results.len(), 4);
         assert_eq!(results[0].0, b"key03".to_vec());
@@ -1126,14 +1159,14 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
         let key = vec![b'x'; 500];
         let value = vec![b'y'; 500];
 
-        tree.insert(&key, &value).unwrap();
-        assert_eq!(tree.get(&key).unwrap(), Some(value));
+        tree.insert(&key, &value).expect("insert() should succeed");
+        assert_eq!(tree.get(&key).expect("get() should succeed"), Some(value));
 
         cleanup(&path);
     }
@@ -1143,7 +1176,7 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
         let key = vec![b'x'; MAX_KEY_SIZE + 1];
@@ -1159,14 +1192,15 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
         // Insert enough entries to force splits
         for i in 0..100u32 {
             let key = format!("key{:08}", i);
             let value = format!("value{:08}", i);
-            tree.insert(key.as_bytes(), value.as_bytes()).unwrap();
+            tree.insert(key.as_bytes(), value.as_bytes())
+                .expect("insert() should succeed");
         }
 
         // Verify all entries
@@ -1174,12 +1208,12 @@ mod tests {
             let key = format!("key{:08}", i);
             let expected = format!("value{:08}", i);
             assert_eq!(
-                tree.get(key.as_bytes()).unwrap(),
+                tree.get(key.as_bytes()).expect("get() should succeed"),
                 Some(expected.into_bytes())
             );
         }
 
-        assert_eq!(tree.count().unwrap(), 100);
+        assert_eq!(tree.count().expect("count() should succeed"), 100);
 
         cleanup(&path);
     }
@@ -1189,7 +1223,7 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
         let items: Vec<(Vec<u8>, Vec<u8>)> = (0..240u32)
@@ -1201,12 +1235,16 @@ mod tests {
             })
             .collect();
 
-        tree.bulk_insert_sorted(&items).unwrap();
+        tree.bulk_insert_sorted(&items)
+            .expect("bulk_insert_sorted() should succeed");
 
-        assert_eq!(tree.count().unwrap(), items.len());
+        assert_eq!(tree.count().expect("count() should succeed"), items.len());
 
         for (key, value) in &items {
-            assert_eq!(tree.get(key).unwrap(), Some(value.clone()));
+            assert_eq!(
+                tree.get(key).expect("get() should succeed"),
+                Some(value.clone())
+            );
         }
 
         cleanup(&path);
@@ -1231,10 +1269,11 @@ mod tests {
         fn populate_tree(seed: &[(Vec<u8>, Vec<u8>)]) -> (BTree, PathBuf, Arc<Pager>) {
             let path = temp_db_path();
             cleanup(&path);
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(Arc::clone(&pager));
             for (k, v) in seed {
-                tree.upsert(k, v).unwrap();
+                tree.upsert(k, v).expect("upsert() should succeed");
             }
             (tree, path, pager)
         }
@@ -1279,7 +1318,7 @@ mod tests {
                 // Baseline: loop-of-upsert.
                 let (baseline, baseline_path, _baseline_pager) = populate_tree(&seed);
                 for (k, v) in &batch {
-                    baseline.upsert(k, v).unwrap();
+                    baseline.upsert(k, v).expect("upsert() should succeed");
                 }
 
                 // Candidate: upsert_batch_sorted after caller-side sort
@@ -1287,7 +1326,7 @@ mod tests {
                 let (candidate, candidate_path, _candidate_pager) = populate_tree(&seed);
                 let mut sorted = batch.clone();
                 sorted.sort_by(|a, b| a.0.cmp(&b.0));
-                candidate.upsert_batch_sorted(&sorted).unwrap();
+                candidate.upsert_batch_sorted(&sorted).expect("upsert_batch_sorted() should succeed");
 
                 // Compute the expected end state from BTreeMap (last
                 // write wins), independent of insertion order.
@@ -1301,8 +1340,8 @@ mod tests {
 
                 // Per-key get matches expected on both trees.
                 for (k, v) in &expected {
-                    let baseline_got = baseline.get(k).unwrap();
-                    let candidate_got = candidate.get(k).unwrap();
+                    let baseline_got = baseline.get(k).expect("get() should succeed");
+                    let candidate_got = candidate.get(k).expect("get() should succeed");
                     prop_assert_eq!(baseline_got.as_ref(), Some(v));
                     prop_assert_eq!(candidate_got.as_ref(), Some(v));
                 }
@@ -1310,8 +1349,8 @@ mod tests {
                 // Full cursor scan yields identical sorted contents.
                 let collect = |t: &BTree| -> Vec<(Vec<u8>, Vec<u8>)> {
                     let mut out = Vec::new();
-                    let mut cur = t.cursor_first().unwrap();
-                    while let Some(entry) = cur.next().unwrap() {
+                    let mut cur = t.cursor_first().expect("cursor_first() should succeed");
+                    while let Some(entry) = cur.next().expect("next() should succeed") {
                         out.push(entry);
                     }
                     out
@@ -1336,21 +1375,22 @@ mod tests {
         let path = temp_db_path();
         cleanup(&path);
 
-        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
         let tree = BTree::new(pager);
 
         // Insert in random order
         let keys = vec![50, 25, 75, 10, 30, 60, 80, 5, 15, 27, 35, 55, 65, 77, 90];
         for k in &keys {
             let key = format!("{:03}", k);
-            tree.insert(key.as_bytes(), key.as_bytes()).unwrap();
+            tree.insert(key.as_bytes(), key.as_bytes())
+                .expect("insert() should succeed");
         }
 
         // Should iterate in sorted order
-        let mut cursor = tree.cursor_first().unwrap();
+        let mut cursor = tree.cursor_first().expect("cursor_first() should succeed");
         let mut prev: Option<Vec<u8>> = None;
 
-        while let Some((key, _)) = cursor.next().unwrap() {
+        while let Some((key, _)) = cursor.next().expect("next() should succeed") {
             if let Some(p) = &prev {
                 assert!(p < &key, "Keys not in sorted order");
             }
@@ -1401,14 +1441,15 @@ mod overflow_pipeline_tests {
         let path = temp_db_path("inline_no_overflow");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
-            let before = pager.page_count().unwrap();
+            let before = pager.page_count().expect("page_count() should succeed");
 
             let value = vec![0x5Au8; OVERFLOW_THRESHOLD - 1];
-            tree.insert(b"k", &value).unwrap();
+            tree.insert(b"k", &value).expect("insert() should succeed");
 
-            let after = pager.page_count().unwrap();
+            let after = pager.page_count().expect("page_count() should succeed");
             // Exactly one new page (the root leaf). An overflow path
             // would have allocated ≥ 2 pages (leaf + chain head).
             assert_eq!(
@@ -1416,7 +1457,7 @@ mod overflow_pipeline_tests {
                 1,
                 "inline value must allocate only the root leaf"
             );
-            assert_eq!(tree.get(b"k").unwrap(), Some(value));
+            assert_eq!(tree.get(b"k").expect("get() should succeed"), Some(value));
         }
         cleanup(&path);
     }
@@ -1429,7 +1470,8 @@ mod overflow_pipeline_tests {
         let path = temp_db_path("compressible_44kb");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager);
 
             // Repeating markdown chunk — compresses far below threshold.
@@ -1440,8 +1482,9 @@ mod overflow_pipeline_tests {
             }
             assert!(value.len() > OVERFLOW_THRESHOLD);
 
-            tree.insert(b"doc", &value).unwrap();
-            assert_eq!(tree.get(b"doc").unwrap(), Some(value));
+            tree.insert(b"doc", &value)
+                .expect("insert() should succeed");
+            assert_eq!(tree.get(b"doc").expect("get() should succeed"), Some(value));
         }
         cleanup(&path);
     }
@@ -1453,7 +1496,8 @@ mod overflow_pipeline_tests {
         let path = temp_db_path("incompressible_5mb");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
 
             // xorshift produces incompressible bytes deterministically
@@ -1468,9 +1512,10 @@ mod overflow_pipeline_tests {
                 })
                 .collect();
 
-            let before = pager.page_count().unwrap();
-            tree.insert(b"blob", &value).unwrap();
-            let after = pager.page_count().unwrap();
+            let before = pager.page_count().expect("page_count() should succeed");
+            tree.insert(b"blob", &value)
+                .expect("insert() should succeed");
+            let after = pager.page_count().expect("page_count() should succeed");
             // 5 MB / overflow-page payload ≈ many pages — the leaf
             // alone could not absorb this.
             assert!(
@@ -1480,7 +1525,7 @@ mod overflow_pipeline_tests {
             );
 
             assert_eq!(
-                tree.get(b"blob").unwrap().as_deref(),
+                tree.get(b"blob").expect("get() should succeed").as_deref(),
                 Some(value.as_slice())
             );
         }
@@ -1495,16 +1540,17 @@ mod overflow_pipeline_tests {
         let path = temp_db_path("ceiling_reject");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
-            let before = pager.page_count().unwrap();
+            let before = pager.page_count().expect("page_count() should succeed");
 
             let value = vec![0u8; MAX_VALUE_SIZE + 1];
             let err = tree.insert(b"too_big", &value).unwrap_err();
             assert!(matches!(err, BTreeError::ValueTooLarge(_)));
 
             assert_eq!(
-                pager.page_count().unwrap(),
+                pager.page_count().expect("page_count() should succeed"),
                 before,
                 "rejected value must not allocate pages"
             );
@@ -1523,7 +1569,8 @@ mod overflow_pipeline_tests {
         let path = temp_db_path("bulk_mixed");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager);
 
             let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -1544,14 +1591,14 @@ mod overflow_pipeline_tests {
             // All valid rows persisted.
             for (k, v) in items.iter().filter(|(_, v)| v.len() <= MAX_VALUE_SIZE) {
                 assert_eq!(
-                    tree.get(k).unwrap().as_deref(),
+                    tree.get(k).expect("get() should succeed").as_deref(),
                     Some(v.as_slice()),
                     "valid row {:?} must land",
                     k
                 );
             }
             // The oversize row did not land.
-            assert_eq!(tree.get(b"k0005_huge").unwrap(), None);
+            assert_eq!(tree.get(b"k0005_huge").expect("get() should succeed"), None);
         }
         cleanup(&path);
     }
@@ -1564,7 +1611,8 @@ mod overflow_pipeline_tests {
         let path = temp_db_path("large_transparent");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager);
 
             // Sizes hit: just over threshold, well over threshold,
@@ -1582,9 +1630,9 @@ mod overflow_pipeline_tests {
             {
                 let value: Vec<u8> = (0..*size).map(|n| ((n + i) & 0xff) as u8).collect();
                 let key = format!("size{:08}", size).into_bytes();
-                tree.insert(&key, &value).unwrap();
+                tree.insert(&key, &value).expect("insert() should succeed");
                 assert_eq!(
-                    tree.get(&key).unwrap().as_deref(),
+                    tree.get(&key).expect("get() should succeed").as_deref(),
                     Some(value.as_slice()),
                     "size {} must round-trip",
                     size
@@ -1646,28 +1694,32 @@ mod overflow_free_tests {
         let path = temp_db_path("delete_frees");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
 
             // First spilled insert grows the file.
             let v1 = incompressible(0xA11CE, 2 * 1024 * 1024);
-            tree.insert(b"k", &v1).unwrap();
-            let after_first = pager.page_count().unwrap();
+            tree.insert(b"k", &v1).expect("insert() should succeed");
+            let after_first = pager.page_count().expect("page_count() should succeed");
 
             // Delete: every overflow page returned to the free list.
-            assert!(tree.delete(b"k").unwrap());
+            assert!(tree.delete(b"k").expect("delete() should succeed"));
 
             // Re-insert the same size. With a working free list, the
             // pager reuses the freed pages and the file does not grow.
             let v2 = incompressible(0xB0B, 2 * 1024 * 1024);
-            tree.insert(b"k", &v2).unwrap();
-            let after_second = pager.page_count().unwrap();
+            tree.insert(b"k", &v2).expect("insert() should succeed");
+            let after_second = pager.page_count().expect("page_count() should succeed");
 
             assert_eq!(
                 after_second, after_first,
                 "second spill must reuse freed pages, not grow the file"
             );
-            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(v2.as_slice()));
+            assert_eq!(
+                tree.get(b"k").expect("get() should succeed").as_deref(),
+                Some(v2.as_slice())
+            );
         }
         cleanup(&path);
     }
@@ -1681,29 +1733,36 @@ mod overflow_free_tests {
         let path = temp_db_path("shrink_to_inline");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
 
             let big = incompressible(0xDEAD, 2 * 1024 * 1024);
-            tree.insert(b"k", &big).unwrap();
-            let hwm = pager.page_count().unwrap();
+            tree.insert(b"k", &big).expect("insert() should succeed");
+            let hwm = pager.page_count().expect("page_count() should succeed");
 
             // Shrink to inline raw (fits well under the threshold).
             let small = b"tiny".to_vec();
-            tree.upsert(b"k", &small).unwrap();
-            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(small.as_slice()));
+            tree.upsert(b"k", &small).expect("upsert() should succeed");
+            assert_eq!(
+                tree.get(b"k").expect("get() should succeed").as_deref(),
+                Some(small.as_slice())
+            );
 
             // If the chain was not freed, this insert would push the
             // page count past `hwm`. If it was, the pager reuses freed
             // pages and we stay at the high-water mark.
             let big2 = incompressible(0xBEEF, 2 * 1024 * 1024);
-            tree.insert(b"k2", &big2).unwrap();
+            tree.insert(b"k2", &big2).expect("insert() should succeed");
             assert_eq!(
-                pager.page_count().unwrap(),
+                pager.page_count().expect("page_count() should succeed"),
                 hwm,
                 "shrinking update must free the chain — replacement spill should reuse"
             );
-            assert_eq!(tree.get(b"k2").unwrap().as_deref(), Some(big2.as_slice()));
+            assert_eq!(
+                tree.get(b"k2").expect("get() should succeed").as_deref(),
+                Some(big2.as_slice())
+            );
         }
         cleanup(&path);
     }
@@ -1717,15 +1776,16 @@ mod overflow_free_tests {
         let path = temp_db_path("shrink_spill_to_spill");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
 
             // Two spilled values, the second clearly shorter than the
             // first. Both encode through the pointer path because the
             // bytes are incompressible.
             let big = incompressible(0xF00D, 3 * 1024 * 1024);
-            tree.insert(b"k", &big).unwrap();
-            let hwm_after_big = pager.page_count().unwrap();
+            tree.insert(b"k", &big).expect("insert() should succeed");
+            let hwm_after_big = pager.page_count().expect("page_count() should succeed");
 
             // Per slice F's acceptance the new chain is *independent*
             // of the old — i.e. no in-place page reuse — so the
@@ -1738,24 +1798,31 @@ mod overflow_free_tests {
             // freed, the pager reuses freed pages and we do not exceed
             // the high-water mark observed during the transient.
             let smaller = incompressible(0xCAFE, 1 * 1024 * 1024);
-            tree.upsert(b"k", &smaller).unwrap();
-            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(smaller.as_slice()));
-            let hwm_after_upsert = pager.page_count().unwrap();
+            tree.upsert(b"k", &smaller)
+                .expect("upsert() should succeed");
+            assert_eq!(
+                tree.get(b"k").expect("get() should succeed").as_deref(),
+                Some(smaller.as_slice())
+            );
+            let hwm_after_upsert = pager.page_count().expect("page_count() should succeed");
 
-            assert!(tree.delete(b"k").unwrap());
+            assert!(tree.delete(b"k").expect("delete() should succeed"));
 
             let again = incompressible(0x1234, 3 * 1024 * 1024);
-            tree.insert(b"k", &again).unwrap();
+            tree.insert(b"k", &again).expect("insert() should succeed");
             assert!(
-                pager.page_count().unwrap() <= hwm_after_upsert,
+                pager.page_count().expect("page_count() should succeed") <= hwm_after_upsert,
                 "after delete+insert of original size, file must not grow past the upsert transient \
                  (page_count = {}, transient high-water = {}, original = {}) — the upsert must have \
                  freed the old chain so the re-insert reuses freed pages",
-                pager.page_count().unwrap(),
+                pager.page_count().expect("page_count() should succeed"),
                 hwm_after_upsert,
                 hwm_after_big,
             );
-            assert_eq!(tree.get(b"k").unwrap().as_deref(), Some(again.as_slice()));
+            assert_eq!(
+                tree.get(b"k").expect("get() should succeed").as_deref(),
+                Some(again.as_slice())
+            );
         }
         cleanup(&path);
     }
@@ -1767,24 +1834,28 @@ mod overflow_free_tests {
         let path = temp_db_path("reinsert_no_grow");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
 
             let v1 = incompressible(0x5EED, 4 * 1024 * 1024);
-            tree.insert(b"row", &v1).unwrap();
-            let pages_after_first = pager.page_count().unwrap();
+            tree.insert(b"row", &v1).expect("insert() should succeed");
+            let pages_after_first = pager.page_count().expect("page_count() should succeed");
 
-            assert!(tree.delete(b"row").unwrap());
+            assert!(tree.delete(b"row").expect("delete() should succeed"));
 
             let v2 = incompressible(0xACE, 4 * 1024 * 1024);
-            tree.insert(b"row", &v2).unwrap();
-            let pages_after_second = pager.page_count().unwrap();
+            tree.insert(b"row", &v2).expect("insert() should succeed");
+            let pages_after_second = pager.page_count().expect("page_count() should succeed");
 
             assert_eq!(
                 pages_after_second, pages_after_first,
                 "re-inserting at the same size must reuse the freed chain"
             );
-            assert_eq!(tree.get(b"row").unwrap().as_deref(), Some(v2.as_slice()));
+            assert_eq!(
+                tree.get(b"row").expect("get() should succeed").as_deref(),
+                Some(v2.as_slice())
+            );
         }
         cleanup(&path);
     }
@@ -1798,28 +1869,30 @@ mod overflow_free_tests {
         let path = temp_db_path("batch_shrink");
         cleanup(&path);
         {
-            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let pager =
+                Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
             let tree = BTree::new(pager.clone());
 
             // Seed two spilled rows so the batch update lands in-place
             // on the same leaf.
             let big_a = incompressible(0x1111, 2 * 1024 * 1024);
             let big_b = incompressible(0x2222, 2 * 1024 * 1024);
-            tree.insert(b"a", &big_a).unwrap();
-            tree.insert(b"b", &big_b).unwrap();
-            let hwm = pager.page_count().unwrap();
+            tree.insert(b"a", &big_a).expect("insert() should succeed");
+            tree.insert(b"b", &big_b).expect("insert() should succeed");
+            let hwm = pager.page_count().expect("page_count() should succeed");
 
             let updates = vec![
                 (b"a".to_vec(), b"shrunk-a".to_vec()),
                 (b"b".to_vec(), b"shrunk-b".to_vec()),
             ];
-            tree.upsert_batch_sorted(&updates).unwrap();
+            tree.upsert_batch_sorted(&updates)
+                .expect("upsert_batch_sorted() should succeed");
             assert_eq!(
-                tree.get(b"a").unwrap().as_deref(),
+                tree.get(b"a").expect("get() should succeed").as_deref(),
                 Some(b"shrunk-a".as_slice())
             );
             assert_eq!(
-                tree.get(b"b").unwrap().as_deref(),
+                tree.get(b"b").expect("get() should succeed").as_deref(),
                 Some(b"shrunk-b".as_slice())
             );
 
@@ -1827,10 +1900,12 @@ mod overflow_free_tests {
             // inserts re-uses them instead of growing the file.
             let again_a = incompressible(0xAAAA, 2 * 1024 * 1024);
             let again_b = incompressible(0xBBBB, 2 * 1024 * 1024);
-            tree.insert(b"c", &again_a).unwrap();
-            tree.insert(b"d", &again_b).unwrap();
+            tree.insert(b"c", &again_a)
+                .expect("insert() should succeed");
+            tree.insert(b"d", &again_b)
+                .expect("insert() should succeed");
             assert!(
-                pager.page_count().unwrap() <= hwm,
+                pager.page_count().expect("page_count() should succeed") <= hwm,
                 "batch in-place shrink must free chains — replacement spills should reuse"
             );
         }
