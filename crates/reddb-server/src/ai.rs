@@ -1549,6 +1549,7 @@ pub enum AiProvider {
     Venice,
     Ollama,
     DeepSeek,
+    MiniMax,
     HuggingFace,
     Local,
     Custom(String),
@@ -1565,6 +1566,7 @@ impl AiProvider {
             Self::Venice => "venice",
             Self::Ollama => "ollama",
             Self::DeepSeek => "deepseek",
+            Self::MiniMax => "minimax",
             Self::HuggingFace => "huggingface",
             Self::Local => "local",
             Self::Custom(name) => name.as_str(),
@@ -1581,6 +1583,7 @@ impl AiProvider {
             Self::Venice => "llama-3.3-70b",
             Self::Ollama => "llama3",
             Self::DeepSeek => "deepseek-chat",
+            Self::MiniMax => "abab6.5s-chat",
             Self::HuggingFace => "mistralai/Mistral-7B-Instruct-v0.3",
             Self::Local => "sentence-transformers/all-MiniLM-L6-v2",
             Self::Custom(_) => DEFAULT_OPENAI_PROMPT_MODEL,
@@ -1594,6 +1597,7 @@ impl AiProvider {
     pub fn default_embedding_model(&self) -> &str {
         match self {
             Self::Ollama => "nomic-embed-text",
+            Self::MiniMax => "embo-01",
             Self::HuggingFace | Self::Local => "sentence-transformers/all-MiniLM-L6-v2",
             _ => DEFAULT_OPENAI_EMBEDDING_MODEL,
         }
@@ -1609,6 +1613,7 @@ impl AiProvider {
             Self::Venice => "https://api.venice.ai/api/v1",
             Self::Ollama => "http://localhost:11434/v1",
             Self::DeepSeek => "https://api.deepseek.com/v1",
+            Self::MiniMax => "https://api.minimax.chat/v1",
             Self::HuggingFace => "https://api-inference.huggingface.co",
             Self::Local => "local",
             Self::Custom(base) => base.as_str(),
@@ -1675,6 +1680,7 @@ impl AiProvider {
                 | Self::Venice
                 | Self::Ollama
                 | Self::DeepSeek
+                | Self::MiniMax
                 | Self::Custom(_)
         )
     }
@@ -1696,6 +1702,7 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
         "venice" => Ok(AiProvider::Venice),
         "ollama" => Ok(AiProvider::Ollama),
         "deepseek" | "deep_seek" => Ok(AiProvider::DeepSeek),
+        "minimax" | "mini_max" => Ok(AiProvider::MiniMax),
         "huggingface" | "hf" => Ok(AiProvider::HuggingFace),
         "local" => Ok(AiProvider::Local),
         other => {
@@ -1705,7 +1712,7 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
             } else {
                 Err(crate::RedDBError::Query(format!(
                     "unsupported AI provider '{other}'; expected: openai, anthropic, groq, \
-                     openrouter, together, venice, ollama, deepseek, huggingface, local"
+                     openrouter, together, venice, ollama, deepseek, minimax, huggingface, local"
                 )))
             }
         }
