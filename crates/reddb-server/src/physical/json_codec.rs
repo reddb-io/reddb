@@ -254,6 +254,7 @@ fn collection_contract_to_persisted(
             .analytical_storage
             .as_ref()
             .map(analytical_storage_to_persisted),
+        ai_policy: contract.ai_policy.as_ref().map(ai_policy_to_persisted),
     }
 }
 
@@ -321,6 +322,7 @@ fn collection_contract_from_persisted(
         analytical_storage: contract
             .analytical_storage
             .map(analytical_storage_from_persisted),
+        ai_policy: contract.ai_policy.map(ai_policy_from_persisted),
     })
 }
 
@@ -356,6 +358,68 @@ fn analytical_storage_from_persisted(
         columnar: cfg.columnar,
         time_key: cfg.time_key,
         order_by_key: cfg.order_by_key,
+    }
+}
+
+fn ai_policy_to_persisted(policy: &crate::catalog::AiPolicy) -> reddb_file::PhysicalAiPolicy {
+    reddb_file::PhysicalAiPolicy {
+        embed: policy
+            .embed
+            .as_ref()
+            .map(|embed| reddb_file::PhysicalAiEmbedPolicy {
+                fields: embed.fields.clone(),
+                provider: embed.provider.clone(),
+                model: embed.model.clone(),
+            }),
+        moderate: policy
+            .moderate
+            .as_ref()
+            .map(|moderate| reddb_file::PhysicalAiModeratePolicy {
+                fields: moderate.fields.clone(),
+                provider: moderate.provider.clone(),
+                model: moderate.model.clone(),
+                sync_gate: moderate.sync_gate,
+                degraded_mode: moderate.degraded_mode.as_str().to_string(),
+                reject_action: moderate.reject_action.as_str().to_string(),
+            }),
+        vision: policy
+            .vision
+            .as_ref()
+            .map(|vision| reddb_file::PhysicalAiVisionPolicy {
+                image_field: vision.image_field.clone(),
+                output_kinds: vision.output_kinds.clone(),
+                provider: vision.provider.clone(),
+                model: vision.model.clone(),
+            }),
+    }
+}
+
+fn ai_policy_from_persisted(policy: reddb_file::PhysicalAiPolicy) -> crate::catalog::AiPolicy {
+    use crate::catalog::{ModerateDegradedMode, ModerateRejectAction};
+    crate::catalog::AiPolicy {
+        embed: policy.embed.map(|embed| crate::catalog::EmbedPolicy {
+            fields: embed.fields,
+            provider: embed.provider,
+            model: embed.model,
+        }),
+        moderate: policy
+            .moderate
+            .map(|moderate| crate::catalog::ModeratePolicy {
+                fields: moderate.fields,
+                provider: moderate.provider,
+                model: moderate.model,
+                sync_gate: moderate.sync_gate,
+                degraded_mode: ModerateDegradedMode::from_str(&moderate.degraded_mode)
+                    .unwrap_or_default(),
+                reject_action: ModerateRejectAction::from_str(&moderate.reject_action)
+                    .unwrap_or_default(),
+            }),
+        vision: policy.vision.map(|vision| crate::catalog::VisionPolicy {
+            image_field: vision.image_field,
+            output_kinds: vision.output_kinds,
+            provider: vision.provider,
+            model: vision.model,
+        }),
     }
 }
 
@@ -1101,5 +1165,41 @@ mod tests {
         assert!(cfg.columnar);
         assert_eq!(cfg.time_key, "ts");
         assert_eq!(cfg.order_by_key.as_deref(), Some("host"));
+    }
+
+    #[test]
+    fn ai_policy_round_trips_and_defaults_none() {
+        // Legacy sidecar lacking the key (issue #1271) → None, migration-safe.
+        let contract = collection_contract_from_json(&minimal_contract_object(None)).expect("dec");
+        assert!(contract.ai_policy.is_none());
+
+        // A full policy survives encode → decode identical.
+        let mut contract =
+            collection_contract_from_json(&minimal_contract_object(None)).expect("dec");
+        contract.ai_policy = Some(crate::catalog::AiPolicy {
+            embed: Some(crate::catalog::EmbedPolicy {
+                fields: vec!["title".to_string(), "body".to_string()],
+                provider: "openai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            }),
+            moderate: Some(crate::catalog::ModeratePolicy {
+                fields: vec!["body".to_string()],
+                provider: "openai".to_string(),
+                model: "omni-moderation-latest".to_string(),
+                sync_gate: true,
+                degraded_mode: crate::catalog::ModerateDegradedMode::Closed,
+                reject_action: crate::catalog::ModerateRejectAction::Redact,
+            }),
+            vision: Some(crate::catalog::VisionPolicy {
+                image_field: "photo".to_string(),
+                output_kinds: vec!["caption".to_string()],
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+            }),
+        });
+
+        let encoded = collection_contract_to_json(&contract);
+        let decoded = collection_contract_from_json(&encoded).expect("decode round-trip");
+        assert_eq!(decoded.ai_policy, contract.ai_policy);
     }
 }
