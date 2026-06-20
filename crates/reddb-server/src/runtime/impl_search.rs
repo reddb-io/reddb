@@ -1706,12 +1706,80 @@ impl RedDBRuntime {
             ));
         }
         let candidates = crate::runtime::ask_pipeline::match_schema(self, &scope, &tokens)?;
-        let plan = crate::runtime::ai::ask_rql_planner::plan(
-            &ask.question,
-            &tokens,
-            &candidates,
-            ask.collection.as_deref(),
-        )?;
+
+        // Inference path (#1273): when `ai.ask_rql.backend = "llm"` and a
+        // generate provider is available, the model proposes the RQL
+        // candidate; otherwise fall back to the deterministic planner. Both
+        // candidates are re-validated through the parser via the same seam.
+        let candidate;
+        let engine;
+        let field;
+        let value;
+        let candidate_fields;
+        let candidate_collections;
+        let mut warnings;
+        let used_inference;
+        match self.ask_rql_inference(ask, &candidates)? {
+            Some(inference) => {
+                candidate = inference.candidate;
+                engine = "runtime-ai-rql-inference";
+                field = None;
+                value = None;
+                candidate_fields = Vec::new();
+                candidate_collections = candidates.collections.clone();
+                warnings = inference.warnings;
+                used_inference = true;
+            }
+            None => {
+                let plan = crate::runtime::ai::ask_rql_planner::plan(
+                    &ask.question,
+                    &tokens,
+                    &candidates,
+                    ask.collection.as_deref(),
+                )?;
+                // Re-validate the deterministic candidate through the same
+                // parser seam so the disposition / EXECUTE gating is shared.
+                candidate = crate::runtime::ai::ask_rql_planner::validate_candidate(&plan.rql)?;
+                engine = "runtime-ai-rql-planner";
+                field = Some(plan.field);
+                value = Some(plan.value);
+                candidate_fields = plan.candidate_fields;
+                candidate_collections = plan.candidate_collections;
+                warnings = plan.warnings;
+                used_inference = false;
+            }
+        }
+
+        // EXECUTE policy: auto-run read-only candidates only; a mutating
+        // candidate is refused for auto-execution regardless of EXECUTE.
+        if ask.execute {
+            if candidate.is_read_only() {
+                let mut executed = self.execute_query(&candidate.rql)?;
+                executed.query = raw_query.to_string();
+                return Ok(executed);
+            }
+            return Err(RedDBError::Query(format!(
+                "ASK ... EXECUTE refused: generated `{}` candidate is mutating and is never \
+                 auto-executed",
+                candidate.statement_type
+            )));
+        }
+
+        // The inference path already records the not-executed / mutating
+        // advisory inside `infer`; only the deterministic path needs it here.
+        if !used_inference {
+            if candidate.is_read_only() {
+                warnings.push(
+                    "candidate not executed; add EXECUTE to auto-run read-only candidates"
+                        .to_string(),
+                );
+            } else {
+                warnings.push(format!(
+                    "candidate is a mutating `{}` statement and is never auto-executed",
+                    candidate.statement_type
+                ));
+            }
+        }
 
         let mut result = UnifiedResult::with_columns(vec![
             "rql".into(),
@@ -1724,39 +1792,98 @@ impl RedDBRuntime {
             "warnings".into(),
         ]);
         let mut record = UnifiedRecord::new();
-        record.set("rql", Value::text(plan.rql));
-        record.set("statement_type", Value::text("select"));
-        record.set("field", Value::text(plan.field));
-        record.set("value", Value::text(plan.value));
-        if let Some(collection) = plan.collection {
-            record.set("collection", Value::text(collection));
-        } else {
-            record.set("collection", Value::Null);
+        record.set("rql", Value::text(candidate.rql));
+        record.set("statement_type", Value::text(candidate.statement_type));
+        match field {
+            Some(field) => record.set("field", Value::text(field)),
+            None => record.set("field", Value::Null),
+        }
+        match value {
+            Some(value) => record.set("value", Value::text(value)),
+            None => record.set("value", Value::Null),
+        }
+        match ask.collection.clone() {
+            Some(collection) => record.set("collection", Value::text(collection)),
+            None => record.set("collection", Value::Null),
         }
         record.set(
             "candidate_fields",
-            Value::Json(json_string_array_bytes(&plan.candidate_fields)),
+            Value::Json(json_string_array_bytes(&candidate_fields)),
         );
         record.set(
             "candidate_collections",
-            Value::Json(json_string_array_bytes(&plan.candidate_collections)),
+            Value::Json(json_string_array_bytes(&candidate_collections)),
         );
-        record.set(
-            "warnings",
-            Value::Json(json_string_array_bytes(&plan.warnings)),
-        );
+        record.set("warnings", Value::Json(json_string_array_bytes(&warnings)));
         result.push(record);
 
         Ok(RuntimeQueryResult {
             query: raw_query.to_string(),
             mode: QueryMode::Sql,
             statement: "ask_as_rql",
-            engine: "runtime-ai-rql-planner",
+            engine,
             result,
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
         })
+    }
+
+    /// Inference backend (#1273): when `ai.ask_rql.backend = "llm"`,
+    /// translate the question into an RQL candidate via the configured
+    /// generate provider. Returns `None` when the backend is disabled or no
+    /// provider / API key is available, so the caller falls back to the
+    /// deterministic planner. The model output is always re-validated
+    /// through the parser inside `ask_rql_planner::infer`.
+    fn ask_rql_inference(
+        &self,
+        ask: &crate::storage::query::ast::AskQuery,
+        candidates: &crate::runtime::ask_pipeline::CandidateCollections,
+    ) -> RedDBResult<Option<crate::runtime::ai::ask_rql_planner::AskRqlInference>> {
+        if self.config_string("ai.ask_rql.backend", "deterministic") != "llm" {
+            return Ok(None);
+        }
+
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let provider = match ask.provider.as_deref() {
+            Some(name) => crate::ai::parse_provider(name)?,
+            None => default_provider,
+        };
+        crate::runtime::ai::provider_gate::enforce(self, &provider)?;
+        let api_key = match crate::ai::resolve_api_key_from_runtime(&provider, None, self) {
+            Ok(key) => key,
+            Err(_) => return Ok(None),
+        };
+        let api_base = provider.resolve_api_base();
+        let model = ask.model.clone().unwrap_or(default_model);
+        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
+        let max_tokens = self.config_f64("ai.ask_rql.max_tokens", 256.0).max(1.0) as usize;
+
+        let generate = move |prompt: &str| -> RedDBResult<String> {
+            let response = call_ask_llm(
+                &provider,
+                transport.clone(),
+                api_key.clone(),
+                model.clone(),
+                prompt.to_string(),
+                api_base.clone(),
+                max_tokens,
+                Some(0.0),
+                None,
+                false,
+                None,
+            )?;
+            Ok(response.output_text)
+        };
+
+        let inference = crate::runtime::ai::ask_rql_planner::infer(
+            &ask.question,
+            candidates,
+            ask.collection.as_deref(),
+            ask.execute,
+            &generate,
+        )?;
+        Ok(Some(inference))
     }
 
     fn execute_explain_ask(
@@ -4181,6 +4308,32 @@ mod citation_wedge_tests {
         assert_eq!(selected.result.records.len(), 1);
         assert_eq!(
             selected.result.records[0].get("name"),
+            Some(&Value::text("Ada".to_string()))
+        );
+    }
+
+    #[test]
+    fn ask_as_rql_execute_runs_read_only_candidate_and_returns_rows() {
+        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        rt.execute_query("CREATE TABLE travelers (passport TEXT, name TEXT)")
+            .expect("create table");
+        rt.execute_query("INSERT INTO travelers (passport, name) VALUES ('FDD-12313', 'Ada')")
+            .expect("insert row");
+
+        // Default (no EXECUTE) returns the validated candidate, no rows.
+        let planned = rt
+            .execute_query("ASK 'who owns passport FDD-12313?' AS RQL")
+            .expect("ASK AS RQL candidate");
+        assert_eq!(planned.engine, "runtime-ai-rql-planner");
+
+        // EXECUTE auto-runs the read-only candidate and returns the rows.
+        let executed = rt
+            .execute_query("ASK 'who owns passport FDD-12313?' AS RQL EXECUTE")
+            .expect("ASK AS RQL EXECUTE should run the read-only candidate");
+        assert_eq!(executed.engine, "runtime-table");
+        assert_eq!(executed.result.records.len(), 1);
+        assert_eq!(
+            executed.result.records[0].get("name"),
             Some(&Value::text("Ada".to_string()))
         );
     }
