@@ -10,6 +10,11 @@
 // pre-existing functions over the 120-line threshold. The lint bites on
 // new/changed code; remove this once the existing functions are split up.
 #![allow(clippy::too_many_lines)]
+// Legacy allow for the cast_possible_truncation ratchet (PRD #1252): this
+// crate has pre-existing truncating `as` casts on lengths/offsets. The lint
+// bites on new/changed code; remove this once those casts become explicit
+// checked conversions.
+#![allow(clippy::cast_possible_truncation)]
 
 pub mod ai_model_cache;
 pub mod audit_log;
