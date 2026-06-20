@@ -45,6 +45,7 @@
 //! [`RedDBClient`] and [`repl`] for back-compat with the previous
 //! `reddb-client-internal` crate.
 
+#![allow(clippy::unwrap_used)]
 #![deny(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
