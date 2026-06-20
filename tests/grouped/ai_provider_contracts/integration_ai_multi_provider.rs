@@ -14,9 +14,10 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::ai::{grpc_embeddings, parse_provider};
+use reddb::ai::{grpc_embeddings, parse_provider, AiProvider};
 use reddb::application::{ExecuteQueryInput, QueryUseCases, SearchSimilarInput};
 use reddb::json::{Map, Value as JsonValue};
+use reddb::runtime::ai::provider_capabilities::{Modality, Registry};
 use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
 use std::io::{Read, Write};
@@ -93,12 +94,94 @@ fn parse_provider_accepts_all_readme_keywords() {
         "together",
         "venice",
         "deepseek",
+        "minimax",
         "huggingface",
         "ollama",
         "local",
     ] {
         parse_provider(name).unwrap_or_else(|e| panic!("parse_provider({name}) failed: {e}"));
     }
+}
+
+#[test]
+fn parse_provider_accepts_minimax_and_resolves_openai_compatible_base() {
+    // MiniMax is OpenAI-compatible transport: parse must succeed, the
+    // provider must report itself as compatible, and resolve a v1 base.
+    let provider = parse_provider("minimax").expect("minimax should parse");
+    assert_eq!(provider, AiProvider::MiniMax);
+    assert_eq!(provider.token(), "minimax");
+    assert!(
+        provider.is_openai_compatible(),
+        "minimax uses the OpenAI-compatible transport"
+    );
+    let base = provider.default_api_base();
+    assert!(base.starts_with("https://"), "{base}");
+    assert!(base.ends_with("/v1"), "{base}");
+    // Snake-case alias also resolves.
+    assert_eq!(
+        parse_provider("mini_max").expect("mini_max alias"),
+        AiProvider::MiniMax
+    );
+}
+
+#[test]
+fn ddl_modality_gate_rejects_incapable_and_accepts_capable() {
+    // The DDL-time validation entry point: a policy that wires an
+    // embeddings-only `local` backend to a generation job is rejected
+    // with a clear, operator-actionable message; a capable pairing is
+    // admitted. Mirrors the provider-gate style of the other contracts.
+    let registry = Registry::new();
+
+    let err = registry
+        .validate_policy_modality("local", "all-MiniLM-L6-v2", Modality::Generate)
+        .expect_err("local cannot generate");
+    let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
+    assert!(
+        lower.contains("local"),
+        "error must name the provider: {msg}"
+    );
+    assert!(
+        lower.contains("generate"),
+        "error must name the modality: {msg}"
+    );
+    assert!(
+        lower.contains("cannot serve") || lower.contains("invalid"),
+        "error must explain the rejection: {msg}"
+    );
+
+    // MiniMax can serve embeddings, generation, and vision.
+    registry
+        .validate_policy_modality("minimax", "abab6.5s-chat", Modality::Vision)
+        .expect("minimax serves vision");
+    registry
+        .validate_policy_modality("minimax", "embo-01", Modality::Embed)
+        .expect("minimax serves embeddings");
+}
+
+#[test]
+fn ddl_modality_gate_honours_override_and_unknown_conservative_default() {
+    // Unknown provider falls back to conservative defaults: the two
+    // universal text modalities are allowed, specialised ones denied.
+    let registry = Registry::new();
+    assert!(registry.can_serve("brand-new-llm", "m", Modality::Generate));
+    assert!(registry.can_serve("brand-new-llm", "m", Modality::Embed));
+    assert!(!registry.can_serve("brand-new-llm", "m", Modality::Vision));
+
+    // A per-deployment override is honoured by the gate.
+    let upgraded = reddb::runtime::ai::provider_capabilities::Modalities {
+        embed: false,
+        generate: true,
+        vision: true,
+        moderate: false,
+    };
+    let registry = registry.with_modality_override("brand-new-llm", upgraded);
+    registry
+        .validate_policy_modality("brand-new-llm", "m", Modality::Vision)
+        .expect("override grants vision");
+    assert!(registry
+        .validate_policy_modality("brand-new-llm", "m", Modality::Embed)
+        .is_err());
 }
 
 #[test]
