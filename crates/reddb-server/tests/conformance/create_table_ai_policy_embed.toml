@@ -1,0 +1,4 @@
+input = "CREATE TABLE posts (id INT, body TEXT) WITH (EMBED (fields = ('body'), provider = 'openai', model = 'text-embedding-3-small'))"
+expected_kind = "CreateTable"
+source = "crates/reddb-rql/src/parser/ddl.rs:160"
+kind = "positive"

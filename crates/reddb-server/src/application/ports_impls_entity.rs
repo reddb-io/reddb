@@ -129,6 +129,8 @@ fn ensure_collection_model_contract(
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+
+        ai_policy: None,
     })
     .map(|_| ())
     .map_err(|err| crate::RedDBError::Internal(err.to_string()))

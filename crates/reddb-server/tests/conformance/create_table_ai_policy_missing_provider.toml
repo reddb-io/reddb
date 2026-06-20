@@ -1,0 +1,4 @@
+input = "CREATE TABLE posts (id INT, body TEXT) WITH (EMBED (fields = ('body'), model = 'text-embedding-3-small'))"
+expected_error_substring = "EMBED policy requires provider"
+source = "crates/reddb-rql/src/parser/ddl.rs:160"
+kind = "negative"

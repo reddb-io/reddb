@@ -85,6 +85,7 @@ impl<'a> Parser<'a> {
             subscriptions,
             analytics_config: Vec::new(),
             vault_own_master_key: false,
+            ai_policy: None,
         }))
     }
 
@@ -118,6 +119,7 @@ impl<'a> Parser<'a> {
         let mut tenant_by: Option<String> = None;
         let mut append_only = false;
         let mut subscriptions = Vec::new();
+        let mut ai_policy = reddb_types::catalog::AiPolicy::default();
 
         while self.consume(&Token::With)? {
             if self.consume_ident_ci("EVENTS")? {
@@ -155,6 +157,30 @@ impl<'a> Parser<'a> {
                     context_index_enabled = true;
                 } else if self.consume_ident_ci("TIMESTAMPS")? {
                     timestamps = self.parse_bool_assign()?;
+                } else if self.consume_ident_ci("EMBED")? {
+                    if ai_policy.embed.is_some() {
+                        return Err(ParseError::new(
+                            "duplicate EMBED clause in AI policy".to_string(),
+                            self.position(),
+                        ));
+                    }
+                    ai_policy.embed = Some(self.parse_ai_embed_policy()?);
+                } else if self.consume_ident_ci("MODERATE")? {
+                    if ai_policy.moderate.is_some() {
+                        return Err(ParseError::new(
+                            "duplicate MODERATE clause in AI policy".to_string(),
+                            self.position(),
+                        ));
+                    }
+                    ai_policy.moderate = Some(self.parse_ai_moderate_policy()?);
+                } else if self.consume_ident_ci("VISION")? {
+                    if ai_policy.vision.is_some() {
+                        return Err(ParseError::new(
+                            "duplicate VISION clause in AI policy".to_string(),
+                            self.position(),
+                        ));
+                    }
+                    ai_policy.vision = Some(self.parse_ai_vision_policy()?);
                 } else if self.consume_ident_ci("APPEND_ONLY")? {
                     append_only = self.parse_bool_assign()?;
                 } else if self.consume_ident_ci("TENANT_BY")? {
@@ -264,6 +290,7 @@ impl<'a> Parser<'a> {
             subscriptions,
             analytics_config: Vec::new(),
             vault_own_master_key: false,
+            ai_policy: (!ai_policy.is_empty()).then_some(ai_policy),
         }))
     }
 
@@ -405,6 +432,7 @@ impl<'a> Parser<'a> {
             subscriptions: Vec::new(),
             analytics_config,
             vault_own_master_key,
+            ai_policy: None,
         }))
     }
 
@@ -1263,6 +1291,248 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a parenthesised list of string literals: `('a', 'b', ...)`.
+    /// Used for the `fields` / `outputs` AI-policy options. Requires at
+    /// least one entry.
+    fn parse_ai_string_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(Token::LParen)?;
+        let mut out = Vec::new();
+        loop {
+            out.push(self.parse_string()?);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok(out)
+    }
+
+    /// Parse a bare `true` / `false` token (after the `=` is consumed).
+    fn parse_ai_bool(&mut self) -> Result<bool, ParseError> {
+        match self.peek() {
+            Token::True => {
+                self.advance()?;
+                Ok(true)
+            }
+            Token::False => {
+                self.advance()?;
+                Ok(false)
+            }
+            other => Err(ParseError::expected(
+                vec!["true", "false"],
+                other,
+                self.position(),
+            )),
+        }
+    }
+
+    /// Parse a single enum-ish word — either a quoted string or a bare
+    /// identifier/keyword. Used for `degraded` / `on_reject` values.
+    fn parse_ai_word(&mut self) -> Result<String, ParseError> {
+        if matches!(self.peek(), Token::String(_)) {
+            self.parse_string()
+        } else {
+            self.expect_ident_or_keyword()
+        }
+    }
+
+    /// `EMBED (fields = (...), provider = '..', model = '..')`.
+    fn parse_ai_embed_policy(&mut self) -> Result<reddb_types::catalog::EmbedPolicy, ParseError> {
+        self.expect(Token::LParen)?;
+        let mut fields: Vec<String> = Vec::new();
+        let mut provider: Option<String> = None;
+        let mut model: Option<String> = None;
+        loop {
+            let key = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            self.expect(Token::Eq)?;
+            match key.as_str() {
+                "fields" => fields = self.parse_ai_string_list()?,
+                "provider" => provider = Some(self.parse_string()?),
+                "model" => model = Some(self.parse_string()?),
+                other => {
+                    return Err(ParseError::new(
+                        format!(
+                            "unsupported EMBED policy option {other:?}; supported: fields, provider, model"
+                        ),
+                        self.position(),
+                    ));
+                }
+            }
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        if fields.is_empty() {
+            return Err(ParseError::new(
+                "EMBED policy requires fields = ('<col>', ...)".to_string(),
+                self.position(),
+            ));
+        }
+        let provider = provider.ok_or_else(|| {
+            ParseError::new(
+                "EMBED policy requires provider = '<token>'".to_string(),
+                self.position(),
+            )
+        })?;
+        let model = model.ok_or_else(|| {
+            ParseError::new(
+                "EMBED policy requires model = '<name>'".to_string(),
+                self.position(),
+            )
+        })?;
+        Ok(reddb_types::catalog::EmbedPolicy {
+            fields,
+            provider,
+            model,
+        })
+    }
+
+    /// `MODERATE (fields = (...), provider, model, sync, degraded, on_reject)`.
+    fn parse_ai_moderate_policy(
+        &mut self,
+    ) -> Result<reddb_types::catalog::ModeratePolicy, ParseError> {
+        use reddb_types::catalog::{ModerateDegradedMode, ModerateRejectAction};
+        self.expect(Token::LParen)?;
+        let mut fields: Vec<String> = Vec::new();
+        let mut provider: Option<String> = None;
+        let mut model: Option<String> = None;
+        let mut sync_gate = false;
+        let mut degraded_mode = ModerateDegradedMode::default();
+        let mut reject_action = ModerateRejectAction::default();
+        loop {
+            let key = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            self.expect(Token::Eq)?;
+            match key.as_str() {
+                "fields" => fields = self.parse_ai_string_list()?,
+                "provider" => provider = Some(self.parse_string()?),
+                "model" => model = Some(self.parse_string()?),
+                "sync" | "sync_gate" => sync_gate = self.parse_ai_bool()?,
+                "degraded" | "degraded_mode" => {
+                    let word = self.parse_ai_word()?;
+                    degraded_mode = ModerateDegradedMode::from_str(&word).ok_or_else(|| {
+                        ParseError::new(
+                            format!(
+                                "unsupported MODERATE degraded mode {word:?}; supported: open, closed"
+                            ),
+                            self.position(),
+                        )
+                    })?;
+                }
+                "on_reject" | "reject_action" => {
+                    let word = self.parse_ai_word()?;
+                    reject_action = ModerateRejectAction::from_str(&word).ok_or_else(|| {
+                        ParseError::new(
+                            format!(
+                                "unsupported MODERATE reject action {word:?}; supported: reject, flag, redact"
+                            ),
+                            self.position(),
+                        )
+                    })?;
+                }
+                other => {
+                    return Err(ParseError::new(
+                        format!(
+                            "unsupported MODERATE policy option {other:?}; supported: fields, provider, model, sync, degraded, on_reject"
+                        ),
+                        self.position(),
+                    ));
+                }
+            }
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        if fields.is_empty() {
+            return Err(ParseError::new(
+                "MODERATE policy requires fields = ('<col>', ...)".to_string(),
+                self.position(),
+            ));
+        }
+        let provider = provider.ok_or_else(|| {
+            ParseError::new(
+                "MODERATE policy requires provider = '<token>'".to_string(),
+                self.position(),
+            )
+        })?;
+        let model = model.ok_or_else(|| {
+            ParseError::new(
+                "MODERATE policy requires model = '<name>'".to_string(),
+                self.position(),
+            )
+        })?;
+        Ok(reddb_types::catalog::ModeratePolicy {
+            fields,
+            provider,
+            model,
+            sync_gate,
+            degraded_mode,
+            reject_action,
+        })
+    }
+
+    /// `VISION (image_field = '..', outputs = (...), provider, model)`.
+    fn parse_ai_vision_policy(&mut self) -> Result<reddb_types::catalog::VisionPolicy, ParseError> {
+        self.expect(Token::LParen)?;
+        let mut image_field: Option<String> = None;
+        let mut output_kinds: Vec<String> = Vec::new();
+        let mut provider: Option<String> = None;
+        let mut model: Option<String> = None;
+        loop {
+            let key = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            self.expect(Token::Eq)?;
+            match key.as_str() {
+                "image_field" => image_field = Some(self.parse_string()?),
+                "outputs" | "output_kinds" => output_kinds = self.parse_ai_string_list()?,
+                "provider" => provider = Some(self.parse_string()?),
+                "model" => model = Some(self.parse_string()?),
+                other => {
+                    return Err(ParseError::new(
+                        format!(
+                            "unsupported VISION policy option {other:?}; supported: image_field, outputs, provider, model"
+                        ),
+                        self.position(),
+                    ));
+                }
+            }
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        let image_field = image_field.ok_or_else(|| {
+            ParseError::new(
+                "VISION policy requires image_field = '<col>'".to_string(),
+                self.position(),
+            )
+        })?;
+        if output_kinds.is_empty() {
+            return Err(ParseError::new(
+                "VISION policy requires outputs = ('<kind>', ...)".to_string(),
+                self.position(),
+            ));
+        }
+        let provider = provider.ok_or_else(|| {
+            ParseError::new(
+                "VISION policy requires provider = '<token>'".to_string(),
+                self.position(),
+            )
+        })?;
+        let model = model.ok_or_else(|| {
+            ParseError::new(
+                "VISION policy requires model = '<name>'".to_string(),
+                self.position(),
+            )
+        })?;
+        Ok(reddb_types::catalog::VisionPolicy {
+            image_field,
+            output_kinds,
+            provider,
+            model,
+        })
+    }
+
     fn expect_ident_ci_ddl(&mut self, expected: &str) -> Result<(), ParseError> {
         if self.consume_ident_ci(expected)? {
             Ok(())
@@ -1470,6 +1740,118 @@ mod tests {
                 .contains("WITH tenant_by expects a text literal"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parse_create_table_ai_policy_round_trips_all_modalities() {
+        use reddb_types::catalog::{ModerateDegradedMode, ModerateRejectAction};
+        let QueryExpr::CreateTable(table) = parser(
+            "posts (id INT, title TEXT, body TEXT, photo TEXT) WITH ( \
+               EMBED (fields = ('title', 'body'), provider = 'openai', model = 'text-embedding-3-small'), \
+               MODERATE (fields = ('body'), provider = 'openai', model = 'omni-moderation-latest', sync = true, degraded = closed, on_reject = flag), \
+               VISION (image_field = 'photo', outputs = ('caption', 'tags'), provider = 'openai', model = 'gpt-4o') \
+             )",
+        )
+        .parse_create_table_body()
+        .expect("create table body with ai policy") else {
+            panic!("Expected CreateTableQuery");
+        };
+
+        let policy = table.ai_policy.expect("ai policy present");
+
+        let embed = policy.embed.expect("embed block");
+        assert_eq!(embed.fields, vec!["title".to_string(), "body".to_string()]);
+        assert_eq!(embed.provider, "openai");
+        assert_eq!(embed.model, "text-embedding-3-small");
+
+        let moderate = policy.moderate.expect("moderate block");
+        assert_eq!(moderate.fields, vec!["body".to_string()]);
+        assert!(moderate.sync_gate);
+        assert_eq!(moderate.degraded_mode, ModerateDegradedMode::Closed);
+        assert_eq!(moderate.reject_action, ModerateRejectAction::Flag);
+
+        let vision = policy.vision.expect("vision block");
+        assert_eq!(vision.image_field, "photo");
+        assert_eq!(
+            vision.output_kinds,
+            vec!["caption".to_string(), "tags".to_string()]
+        );
+        assert_eq!(vision.model, "gpt-4o");
+    }
+
+    #[test]
+    fn parse_create_table_ai_policy_defaults_and_no_clause() {
+        use reddb_types::catalog::{ModerateDegradedMode, ModerateRejectAction};
+        // MODERATE with no sync/degraded/on_reject falls back to defaults.
+        let QueryExpr::CreateTable(table) = parser(
+            "msgs (id INT, body TEXT) WITH ( \
+               MODERATE (fields = ('body'), provider = 'openai', model = 'omni-moderation-latest') \
+             )",
+        )
+        .parse_create_table_body()
+        .expect("create table body") else {
+            panic!("Expected CreateTableQuery");
+        };
+        let moderate = table
+            .ai_policy
+            .expect("policy")
+            .moderate
+            .expect("moderate block");
+        assert!(!moderate.sync_gate);
+        assert_eq!(moderate.degraded_mode, ModerateDegradedMode::Open);
+        assert_eq!(moderate.reject_action, ModerateRejectAction::Reject);
+
+        // No AI clause leaves the policy entirely absent.
+        let QueryExpr::CreateTable(plain) = parser("plain (id INT)")
+            .parse_create_table_body()
+            .expect("create table body")
+        else {
+            panic!("Expected CreateTableQuery");
+        };
+        assert!(plain.ai_policy.is_none());
+    }
+
+    #[test]
+    fn parse_create_table_ai_policy_rejects_malformed_clauses() {
+        // Missing provider.
+        let err = parser("t (id INT) WITH (EMBED (fields = ('body'), model = 'm'))")
+            .parse_create_table_body()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("EMBED policy requires provider"),
+            "{err}"
+        );
+
+        // Unknown option key inside a clause.
+        let err = parser(
+            "t (id INT) WITH (VISION (image_field = 'p', outputs = ('caption'), provider = 'openai', model = 'm', bogus = 1))",
+        )
+        .parse_create_table_body()
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported VISION policy option"),
+            "{err}"
+        );
+
+        // Invalid moderation degraded mode.
+        let err = parser(
+            "t (id INT) WITH (MODERATE (fields = ('body'), provider = 'openai', model = 'm', degraded = maybe))",
+        )
+        .parse_create_table_body()
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported MODERATE degraded mode"),
+            "{err}"
+        );
+
+        // Duplicate EMBED clause.
+        let err = parser(
+            "t (id INT) WITH (EMBED (fields = ('a'), provider = 'openai', model = 'm'), EMBED (fields = ('b'), provider = 'openai', model = 'm'))",
+        )
+        .parse_create_table_body()
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate EMBED clause"), "{err}");
     }
 
     #[test]

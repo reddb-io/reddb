@@ -3063,6 +3063,8 @@ fn queue_collection_contract(
         session_gap_ms: None,
         retention_duration_ms: None,
         analytical_storage: None,
+
+        ai_policy: None,
     }
 }
 

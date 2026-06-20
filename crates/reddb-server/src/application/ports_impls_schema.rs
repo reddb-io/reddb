@@ -74,6 +74,7 @@ impl RuntimeSchemaPort for RedDBRuntime {
             subscriptions: Vec::new(),
             analytics_config: Vec::new(),
             vault_own_master_key: false,
+            ai_policy: None,
         };
         RedDBRuntime::execute_create_table(self, &raw_query, &query)
     }

@@ -292,6 +292,46 @@ pub struct PhysicalDeclaredColumnContract {
     pub decimal_precision: Option<u8>,
 }
 
+/// Persisted form of an `EMBED (...)` AI-policy block (issue #1271).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalAiEmbedPolicy {
+    pub fields: Vec<String>,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Persisted form of a `MODERATE (...)` AI-policy block (issue #1271).
+/// `degraded_mode` / `reject_action` are stored as their canonical
+/// lower-case tokens (`open`/`closed`, `reject`/`flag`/`redact`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalAiModeratePolicy {
+    pub fields: Vec<String>,
+    pub provider: String,
+    pub model: String,
+    pub sync_gate: bool,
+    pub degraded_mode: String,
+    pub reject_action: String,
+}
+
+/// Persisted form of a `VISION (...)` AI-policy block (issue #1271).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalAiVisionPolicy {
+    pub image_field: String,
+    pub output_kinds: Vec<String>,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Persisted per-collection AI policy (issue #1271). Each block is
+/// optional; the whole policy is `None` on sidecars written before the
+/// feature, so reopen is migration-safe.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalAiPolicy {
+    pub embed: Option<PhysicalAiEmbedPolicy>,
+    pub moderate: Option<PhysicalAiModeratePolicy>,
+    pub vision: Option<PhysicalAiVisionPolicy>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PhysicalCollectionContract {
     pub name: String,
@@ -320,6 +360,10 @@ pub struct PhysicalCollectionContract {
     pub session_gap_ms: Option<u64>,
     pub retention_duration_ms: Option<u64>,
     pub analytical_storage: Option<PhysicalAnalyticalStorageConfig>,
+    /// Per-collection AI policy (issue #1271). `None` on sidecars written
+    /// before the feature — decode defaults to `None` for migration
+    /// safety.
+    pub ai_policy: Option<PhysicalAiPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
