@@ -630,6 +630,17 @@ A RedDB database may have these companion files:
 | `.rdb-dwb` | Double-write buffer (empty when idle) |
 | `.wal` | Write-ahead log |
 
+> [!NOTE]
+> **Target evolution.** The companion-file model above is the current shipped
+> format. The proposed embedded profile (ADR 0038) folds the WAL, manifest, and
+> page-0/page-1 shadows into a single internally *zoned* `.rdb` with ping-pong
+> superblocks, so those sidecars are no longer required for normal operation. The
+> serverless profile (ADR 0039) adds a derived *segment pack* — manifest plus
+> immutable parts and delta WAL segments — that round-trips back to `.rdb`.
+> Primary-replica production and cluster deployments move to an operational
+> directory layout instead of a single file. None of these layouts ship yet; see
+> [Operational Storage Profiles](operational-storage-profiles.md).
+
 ### Durability Summary
 
 1. **WAL-first**: All changes written to WAL before modifying database pages

@@ -40,23 +40,51 @@ Do not introduce public Rust packages named `reddb-*` or short package names
 such as `red-rql`; they break the registry naming pattern and make the crate
 graph harder to scan.
 
-## Contract Modules
+## Authority Crates
 
-Contract modules are the authority for formats shared across runtimes or
-languages:
+Authority crates are the single home for formats, vocabularies, and contracts
+shared across runtimes or languages. Each owns a correctness-critical surface so
+that surface is declared once, never redeclared opportunistically inside
+`reddb-server`. They form an acyclic layer *below* the server: every authority
+crate may depend on the keystone, but nothing depends back on `reddb-server`.
 
-- `crates/reddb-wire` owns communication contracts: RedWire frames, payloads,
-  topology advertisements, connection strings, sanitizers, and replication wire
-  messages.
-- `crates/reddb-file` owns persistence contracts: file names, layouts,
-  manifests, WAL envelopes, snapshots, checkpoints, and recovery metadata.
-- `crates/reddb-rql` owns the RQL front-end and conformance corpus.
-- `crates/reddb-types` owns neutral logical values and type vocabulary.
-- `crates/reddb-grpc-proto` owns generated gRPC stubs while reusing canonical
-  wire/topology types where applicable.
+- `crates/reddb-types` (`reddb-io-types`) is the **neutral keystone** at the
+  bottom of the graph. It owns the logical type vocabulary — `Value`,
+  `DataType`, `SqlTypeName`, `TypeModifier`, `TypeCategory`, `ValueError`, `Row`
+  — plus the `value_codec` serialization those types delegate to. It depends on
+  no other workspace crate; every other authority crate depends on it. See
+  ADR 0052.
+- `crates/reddb-rql` (`reddb-io-rql`) owns the **RQL language front-end** and the
+  **conformance corpus**: lexer, parser, AST, the mode translators (SQL,
+  Gremlin, Cypher, SPARQL, Path, Natural, vector extensions), analyzer,
+  expression typing, and the storage-agnostic optimizer — text in, typed logical
+  plan out. The physical executors stay in `reddb-server`; this crate does not
+  execute queries. Its sqllogictest-format conformance suite (truth from the
+  public SQLite corpus plus RedDB-authored goldens) is the correctness
+  specification CI runs against the server engine. Depends only on
+  `reddb-io-types`. See ADR 0053.
+- `crates/reddb-crypto` (`reddb-io-crypto`) owns the **per-page
+  encryption-at-rest envelope**: the canonical `encrypt_page` / `decrypt_page`
+  byte-format (AES-256-GCM), the fixed `params` (key/nonce/tag sizes, overhead,
+  AEAD name), and key parsing (`parse_key`, hex or base64). The page-0
+  "is-this-database-encrypted" header (`RDBE` marker, salt, key-check) stays in
+  `reddb-file`. See ADR 0054.
+- `crates/reddb-wire` (`reddb-io-wire`) owns **communication contracts**: RedWire
+  frames, payloads, topology advertisements, connection strings, sanitizers, and
+  replication wire messages.
+- `crates/reddb-file` (`reddb-io-file`) owns **persistence contracts**: file
+  names, layouts, manifests, WAL envelopes, snapshots, checkpoints, the page-0
+  paged-encryption header, and recovery metadata.
+- `crates/reddb-grpc-proto` (`reddb-io-grpc-proto`) owns the **generated gRPC
+  stubs** (tonic server + client), reusing canonical wire/topology types where
+  applicable.
 
-Runtime code may adapt these contracts, but should not redeclare protocol or
-file shapes locally. See ADR 0046 for the wire/file authority rule.
+Runtime code may adapt these contracts, but should not redeclare protocol, file,
+type, query, or crypto shapes locally. `reddb-server` keeps thin delegating
+facades over each authority crate (for example `crypto::page_encryption`, which
+re-exports the envelope and adds the server-only `key_from_env`); per ADR 0046 a
+facade carries no second format. See ADR 0046 for the umbrella authority rule and
+ADRs 0052–0054 for the type, query, and crypto crates respectively.
 
 ## Adapters
 

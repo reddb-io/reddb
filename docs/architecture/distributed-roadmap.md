@@ -19,12 +19,21 @@ is documented in
   collection sharding modes, owner epochs, stale-version rejection, any-node
   routing decisions, and cross-range guardrails. See
   [Cluster Sharding](./cluster-sharding.md).
+* **Fixed hash-slot primitive** — `slot.rs` ships the production 16,384-slot
+  map and the stable `shard_key -> hash -> slot -> range-key` function, so
+  hash-mode ranges are slot spans rather than `hash(key) % node_count`. The
+  primitive is consumed by the ownership/topology models but not yet wired into
+  a serving path, and there is no public `SHARD BY` DDL yet.
 * **Serialisable batches** — the `ColumnBatch` format introduced in
   B1 is explicitly laid out so a future network layer can ship
   batches between nodes without re-serialising.
 * **Cluster control-plane model** — ADR 0037 defines versioned
   shard/range ownership, ADR 0045 defines range-oriented cluster file
-  layout, and ADR 0052 defines control-plane consensus boundaries.
+  layout, and ADR 0052 (accepted) fixes the control-plane consensus
+  boundaries: a Raft-equivalent log governs membership, leader election,
+  and ownership-catalog transitions *only*, while user-data writes stay
+  out of that log. The decision is accepted; the durable replicated
+  control-plane log itself is a named follow-up slice, not yet built.
 * **Range-authority substrate** — logical replication records can
   carry range identity and ownership epoch, and the control-plane
   seam accepts membership changes and ownership transitions without
@@ -118,7 +127,7 @@ Write flow:
 | D2 | Wire cluster routing/fencing into the serving request paths | In progress |
 | D3 | Distributed scan: ship sub-plan, collect batches, local merge | Roadmap |
 | D4 | Distributed aggregate: ship partial state, merge at coordinator | Roadmap |
-| D5 | Raft catalog for globally consistent schema/control-plane changes | Roadmap |
+| D5 | Raft catalog for globally consistent schema/control-plane changes | Boundary accepted (ADR 0052); replicated log slice roadmap |
 | D6 | Auto-failover runtime wiring: leader lease + replica promotion | In progress |
 
 Total: ~1 trimester of focused work **after** the TS/CH parity
