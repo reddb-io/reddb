@@ -279,6 +279,16 @@ impl<'a> DmlTargetScan<'a> {
     }
 
     fn visible_candidate(&self, entity: &crate::storage::UnifiedEntity) -> bool {
+        // Moderation visibility gate (#1274): quarantine-pending and
+        // rejected-tombstone rows are excluded from DML targeting too, so
+        // an UPDATE/DELETE without an explicit moderation override never
+        // re-touches a hidden row. The resolver path below routes through
+        // `entity_visible_under_current_snapshot`, which already applies
+        // the same check; the `live_table_rows` fast path bypasses that
+        // helper, so it must apply the marker check here.
+        if crate::runtime::ai::moderation::entity_moderation_hidden(entity) {
+            return false;
+        }
         if matches!(entity.kind, EntityKind::TableRow { .. }) {
             if self.live_table_rows {
                 return entity.xmax == 0;
