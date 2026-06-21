@@ -19,8 +19,8 @@ pub mod supervisor;
 pub mod topology;
 
 pub use bootstrap_authority::{
-    authorize as authorize_cluster_bootstrap, is_cluster_shaped, AuthBootstrapInput,
-    BootstrapDisposition,
+    authorize as authorize_cluster_bootstrap, authorize_vault_bootstrap, is_cluster_shaped,
+    plan_vault_bootstrap, AuthBootstrapInput, BootstrapDisposition, VaultBootstrapPlan,
 };
 pub use commit_resolution::{
     is_local_ack, resolve_commit_policy, CollectionDataModel, CommitPolicyResolution,
