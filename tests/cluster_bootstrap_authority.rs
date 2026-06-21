@@ -143,8 +143,7 @@ fn duplicate_bootstrap_after_completion_is_idempotent_across_shapes() {
             AuthBootstrapInput::Env,
             AuthBootstrapInput::Manifest,
         ] {
-            let disposition =
-                authorize_cluster_bootstrap(profile, false, input, true).unwrap();
+            let disposition = authorize_cluster_bootstrap(profile, false, input, true).unwrap();
             assert_eq!(
                 disposition,
                 BootstrapDisposition::AlreadyComplete,
