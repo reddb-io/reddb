@@ -290,9 +290,13 @@ impl Modalities {
                 // (#1275) alongside embeddings: an installed
                 // `LocalVisionBackend` runs detection/image-embedding over
                 // a collection's declared image-reference field via the CDC
-                // enrichment lane. Generation/moderation stay out of scope.
+                // enrichment lane. It also serves content moderation
+                // (#1274): an installed `LocalModerationBackend` screens a
+                // collection's declared text fields via the synchronous
+                // pre-commit gate and the async re-moderation lane.
+                // Generation stays out of scope.
                 vision: true,
-                moderate: false,
+                moderate: true,
             },
             "custom" => Self::conservative(),
             _ => Self::conservative(),
@@ -848,13 +852,15 @@ mod tests {
     }
 
     #[test]
-    fn local_serves_embed_and_vision() {
+    fn local_serves_embed_vision_and_moderate() {
         let c = Modalities::for_provider("local");
         assert!(c.supports(Modality::Embed));
         assert!(c.supports(Modality::Vision));
-        // Generation and moderation stay out of scope for the local backend.
+        // Content moderation (#1274) rides the in-process local backend
+        // alongside vision (#1275).
+        assert!(c.supports(Modality::Moderate));
+        // Generation stays out of scope for the local backend.
         assert!(!c.supports(Modality::Generate));
-        assert!(!c.supports(Modality::Moderate));
     }
 
     #[test]

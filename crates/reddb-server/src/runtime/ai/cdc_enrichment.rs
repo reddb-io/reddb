@@ -24,10 +24,15 @@
 //! and a production scheduler can drive it from a background thread without
 //! changing the semantics.
 
-use crate::application::entity::{CreateVectorInput, PatchEntityInput};
+use crate::application::entity::{CreateVectorInput, DeleteEntityInput, PatchEntityInput};
 use crate::application::ports::RuntimeEntityPort;
-use crate::catalog::{EmbedPolicy, VisionPolicy};
+use crate::catalog::{EmbedPolicy, ModerateDegradedMode, ModeratePolicy, VisionPolicy};
 use crate::replication::cdc::ChangeOperation;
+use crate::runtime::ai::moderation::{
+    ModerationOutcome, MODERATION_STATUS_FIELD, MODERATION_STATUS_PENDING,
+    MODERATION_STATUS_REJECTED,
+};
+use crate::runtime::mutation::MutationRow;
 use crate::storage::schema::Value;
 use crate::storage::{EntityData, EntityId};
 use crate::{RedDBError, RedDBResult, RedDBRuntime};
@@ -47,6 +52,10 @@ pub enum EnrichmentKind {
     Embed,
     /// Run computer vision over the declared image-reference field (#1275).
     Vision,
+    /// Re-moderate a quarantine-pending row's declared text fields (#1274).
+    /// A pass clears the row's quarantine (it becomes visible); a reject
+    /// tombstones it (hidden, retained for audit) or hard-deletes it.
+    Moderate,
 }
 
 /// Tunables for the enrichment consumer.
@@ -213,6 +222,23 @@ impl CdcEnrichmentConsumer {
                     stats.ingested += 1;
                 }
             }
+            // Re-moderation rides the same lane, but only quarantine-pending
+            // rows are eligible: the synchronous gate already screened
+            // everything that committed clean, so a normal insert/update
+            // must NOT be re-screened here. We gate on the row actually
+            // carrying the pending marker (see `row_is_moderation_pending`).
+            if let Some(policy) = rt.collection_moderate_policy(&event.collection) {
+                if change_touches_moderate_fields(event, &policy)
+                    && rt.row_is_moderation_pending(&event.collection, event.entity_id)
+                    && self.enqueue(
+                        event.collection.clone(),
+                        event.entity_id,
+                        EnrichmentKind::Moderate,
+                    )
+                {
+                    stats.ingested += 1;
+                }
+            }
         }
 
         // 2. Attempt every ready pending item.
@@ -234,6 +260,12 @@ impl CdcEnrichmentConsumer {
                 },
                 EnrichmentKind::Vision => match rt.collection_vision_policy(&work.collection) {
                     Some(policy) => rt.enrich_row_vision(&work.collection, work.entity_id, &policy),
+                    None => continue,
+                },
+                EnrichmentKind::Moderate => match rt.collection_moderate_policy(&work.collection) {
+                    Some(policy) => {
+                        rt.remoderate_pending_row(&work.collection, work.entity_id, &policy)
+                    }
                     None => continue,
                 },
             };
@@ -332,6 +364,30 @@ fn change_touches_vision_field(
     }
 }
 
+/// Whether a change event should (re)moderate the row under `policy`.
+///
+/// Inserts always qualify; updates qualify when a declared moderated field
+/// changed (or no damage vector is available, so we screen conservatively).
+/// Crucially the consumer's own write-backs — clearing the pending marker
+/// or stamping a reject — touch only [`MODERATION_STATUS_FIELD`], never a
+/// declared field, so re-moderation never re-triggers itself into a loop.
+/// Deletes/refreshes never qualify.
+fn change_touches_moderate_fields(
+    event: &crate::replication::cdc::ChangeEvent,
+    policy: &ModeratePolicy,
+) -> bool {
+    match event.operation {
+        ChangeOperation::Insert => true,
+        ChangeOperation::Update => match &event.changed_columns {
+            Some(columns) => columns
+                .iter()
+                .any(|column| policy.fields.iter().any(|field| field == column)),
+            None => true,
+        },
+        ChangeOperation::Delete | ChangeOperation::Refresh => false,
+    }
+}
+
 /// Whether the policy's output kinds request structured component
 /// detections. Several spellings are accepted so DDL authors are not
 /// boxed into one keyword.
@@ -367,6 +423,187 @@ impl RedDBRuntime {
         self.db()
             .collection_contract_arc(collection)
             .and_then(|contract| contract.ai_policy.as_ref().and_then(|p| p.vision.clone()))
+    }
+
+    /// The declared moderation policy for `collection`, if any.
+    pub fn collection_moderate_policy(&self, collection: &str) -> Option<ModeratePolicy> {
+        self.db()
+            .collection_contract_arc(collection)
+            .and_then(|contract| contract.ai_policy.as_ref().and_then(|p| p.moderate.clone()))
+    }
+
+    /// True when the live row carries the quarantine-pending moderation
+    /// marker. Resolves the row through its stable logical id (the same
+    /// path the enrichment methods use), so a superseded MVCC version
+    /// never reports a stale state.
+    pub(crate) fn row_is_moderation_pending(&self, collection: &str, entity_id: u64) -> bool {
+        self.db()
+            .store()
+            .get_table_row_by_logical_id(collection, EntityId::new(entity_id))
+            .map(|entity| {
+                matches!(
+                    row_text_field(&entity.data, MODERATION_STATUS_FIELD).as_deref(),
+                    Some(MODERATION_STATUS_PENDING)
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Synchronous pre-commit moderation gate (#1274, ADR 0057).
+    ///
+    /// Runs only when `collection` declares a `MODERATE (... sync = true)`
+    /// policy. For every queued row it screens the concatenated text of the
+    /// declared moderated fields BEFORE the durable commit:
+    ///   * **Allow** — the row commits unchanged.
+    ///   * **Reject** — the whole write is refused (`Err`); no row persists.
+    ///   * **ProviderDown** + degraded `Open` (default) — the row is
+    ///     quarantined: the reserved [`MODERATION_STATUS_FIELD`] is set to
+    ///     `pending`, so it commits but is hidden from normal reads and is
+    ///     re-moderated asynchronously by the CDC consumer.
+    ///   * **ProviderDown** + degraded `Closed` — the write is refused.
+    ///
+    /// A row whose declared fields are all empty has nothing to screen and
+    /// is allowed unchanged.
+    pub(crate) fn apply_sync_moderation_gate(
+        &self,
+        collection: &str,
+        rows: &mut [MutationRow],
+    ) -> RedDBResult<()> {
+        let Some(policy) = self.collection_moderate_policy(collection) else {
+            return Ok(());
+        };
+        if !policy.sync_gate || rows.is_empty() {
+            return Ok(());
+        }
+
+        for row in rows.iter_mut() {
+            let text = combine_moderate_text(&row.fields, &policy.fields);
+            if text.is_empty() {
+                continue;
+            }
+            let outcome =
+                crate::runtime::ai::moderation::moderate_local(&policy.model, text.clone())?;
+            match outcome {
+                ModerationOutcome::Allow => {}
+                ModerationOutcome::Reject { categories } => {
+                    // Reject fails the write — the row never persists.
+                    return Err(RedDBError::Query(format!(
+                        "write rejected by moderation gate on collection '{collection}': \
+                         flagged categories [{}]",
+                        categories.join(", ")
+                    )));
+                }
+                ModerationOutcome::ProviderDown { reason } => match policy.degraded_mode {
+                    // Fail-closed: provider-down blocks the write.
+                    ModerateDegradedMode::Closed => {
+                        return Err(RedDBError::Query(format!(
+                            "write blocked: moderation provider unavailable for collection \
+                             '{collection}' (degraded = closed): {reason}"
+                        )));
+                    }
+                    // Fail-open default: quarantine the row. It commits but
+                    // is hidden from normal reads and re-moderated async.
+                    ModerateDegradedMode::Open => {
+                        set_row_moderation_marker(row, MODERATION_STATUS_PENDING);
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-moderate one quarantine-pending row (CDC lane). A pass clears the
+    /// pending marker (the row becomes visible); a reject either tombstones
+    /// the row (default — hidden, retained for audit/appeal) or hard-deletes
+    /// it when the policy opts in via `hard_delete`. Provider-down here is a
+    /// retryable failure: the row stays pending and the consumer's
+    /// retry/dead-letter machinery handles it like any other failure.
+    pub(crate) fn remoderate_pending_row(
+        &self,
+        collection: &str,
+        entity_id: u64,
+        policy: &ModeratePolicy,
+    ) -> RedDBResult<()> {
+        let db = self.db();
+        let Some(entity) = db
+            .store()
+            .get_table_row_by_logical_id(collection, EntityId::new(entity_id))
+        else {
+            return Ok(());
+        };
+
+        // Only act on rows still in the pending state. A row that was
+        // already cleared or tombstoned between enqueue and drain needs no
+        // further work.
+        if !matches!(
+            row_text_field(&entity.data, MODERATION_STATUS_FIELD).as_deref(),
+            Some(MODERATION_STATUS_PENDING)
+        ) {
+            return Ok(());
+        }
+
+        let text = combine_moderate_text_named(&entity.data, &policy.fields);
+        if text.is_empty() {
+            // Nothing to screen — clear the quarantine so the row surfaces.
+            return self.clear_row_moderation_marker(collection, entity.id);
+        }
+
+        let outcome = crate::runtime::ai::moderation::moderate_local(&policy.model, text)?;
+        match outcome {
+            ModerationOutcome::Allow => self.clear_row_moderation_marker(collection, entity.id),
+            ModerationOutcome::Reject { .. } => {
+                if policy.hard_delete_on_reject {
+                    self.delete_entity(DeleteEntityInput {
+                        collection: collection.to_string(),
+                        id: entity.id,
+                    })?;
+                    Ok(())
+                } else {
+                    self.set_row_moderation_status(
+                        collection,
+                        entity.id,
+                        MODERATION_STATUS_REJECTED,
+                    )
+                }
+            }
+            // Provider still down — surface as a retryable error so the
+            // row stays pending and is retried/dead-lettered.
+            ModerationOutcome::ProviderDown { reason } => Err(RedDBError::Query(format!(
+                "re-moderation provider unavailable for collection '{collection}': {reason}"
+            ))),
+        }
+    }
+
+    /// Clear the moderation marker so a previously-quarantined row becomes
+    /// visible to normal reads. Patches the field to an empty string and
+    /// relies on the visibility helper treating only a present text marker
+    /// as hidden — so an empty marker is, by design, still hidden. To make
+    /// the row visible we instead remove the field via a `fields` patch
+    /// that sets it to JSON null, which the storage merge drops.
+    fn clear_row_moderation_marker(&self, collection: &str, id: EntityId) -> RedDBResult<()> {
+        self.patch_entity(PatchEntityInput {
+            collection: collection.to_string(),
+            id,
+            payload: moderation_marker_clear_payload(),
+            operations: Vec::new(),
+        })?;
+        Ok(())
+    }
+
+    /// Stamp the row with a moderation status (`pending`/`rejected`).
+    fn set_row_moderation_status(
+        &self,
+        collection: &str,
+        id: EntityId,
+        status: &str,
+    ) -> RedDBResult<()> {
+        self.patch_entity(PatchEntityInput {
+            collection: collection.to_string(),
+            id,
+            payload: moderation_marker_set_payload(status),
+            operations: Vec::new(),
+        })?;
+        Ok(())
     }
 
     /// Compute the embedding for one committed row and attach it as a vector
@@ -555,6 +792,77 @@ fn vision_detections_payload(
     let mut root = Map::new();
     root.insert("fields".to_string(), Sj::Object(fields));
     Sj::Object(root)
+}
+
+/// Concatenate the declared moderated fields' text from a pre-commit
+/// `MutationRow`'s field list. Only text-valued declared fields contribute;
+/// the result is empty when there is nothing to screen.
+fn combine_moderate_text(fields: &[(String, Value)], declared: &[String]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for field in declared {
+        for (name, value) in fields {
+            if name == field {
+                if let Value::Text(text) = value {
+                    if !text.is_empty() {
+                        parts.push(text);
+                    }
+                }
+            }
+        }
+    }
+    parts.join(" ")
+}
+
+/// Concatenate the declared moderated fields' text from a committed row's
+/// `EntityData`. Empty when the entity is not a row or no declared field
+/// holds non-empty text.
+fn combine_moderate_text_named(data: &EntityData, declared: &[String]) -> String {
+    let EntityData::Row(row) = data else {
+        return String::new();
+    };
+    let Some(named) = row.named.as_ref() else {
+        return String::new();
+    };
+    let parts: Vec<String> = declared
+        .iter()
+        .filter_map(|field| match named.get(field) {
+            Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
+            _ => None,
+        })
+        .collect();
+    parts.join(" ")
+}
+
+/// Stamp the reserved moderation marker onto a pre-commit row's field list,
+/// replacing any prior value for the field.
+fn set_row_moderation_marker(row: &mut MutationRow, status: &str) {
+    row.fields
+        .retain(|(name, _)| name != MODERATION_STATUS_FIELD);
+    row.fields.push((
+        MODERATION_STATUS_FIELD.to_string(),
+        Value::Text(std::sync::Arc::from(status)),
+    ));
+}
+
+/// `fields`-merge patch payload that sets the moderation marker to `status`.
+fn moderation_marker_set_payload(status: &str) -> crate::serde_json::Value {
+    use crate::serde_json::{Map, Value as Sj};
+    let mut fields = Map::new();
+    fields.insert(
+        MODERATION_STATUS_FIELD.to_string(),
+        Sj::String(status.to_string()),
+    );
+    let mut root = Map::new();
+    root.insert("fields".to_string(), Sj::Object(fields));
+    Sj::Object(root)
+}
+
+/// `fields`-merge patch payload that clears the moderation marker (sets it
+/// to the empty string). The storage merge has no field-removal form, so
+/// the cleared row keeps an empty marker — which the visibility helper
+/// treats as visible, exactly like an absent marker.
+fn moderation_marker_clear_payload() -> crate::serde_json::Value {
+    moderation_marker_set_payload("")
 }
 
 /// Join the declared embed fields' text values, mirroring the manual

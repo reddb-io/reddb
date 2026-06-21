@@ -27,6 +27,7 @@ pub mod grpc_ask_message;
 pub mod local_embedding;
 pub mod mcp_ask_tool;
 pub mod metrics;
+pub mod moderation;
 pub mod ner;
 pub mod pg_wire_ask_row_encoder;
 pub mod prompt_assembler;
