@@ -311,6 +311,11 @@ pub struct PhysicalAiModeratePolicy {
     pub sync_gate: bool,
     pub degraded_mode: String,
     pub reject_action: String,
+    /// When true, a quarantined row that re-moderates to a reject is
+    /// hard-deleted rather than tombstoned-and-retained. Defaults to
+    /// false (audit-retaining tombstone) on sidecars written before this
+    /// field existed.
+    pub hard_delete_on_reject: bool,
 }
 
 /// Persisted form of a `VISION (...)` AI-policy block (issue #1271).

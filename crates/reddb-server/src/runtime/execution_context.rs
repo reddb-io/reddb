@@ -574,6 +574,15 @@ impl Drop for CurrentSnapshotGuard {
 pub fn entity_visible_under_current_snapshot(
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
+    // Moderation visibility gate (#1274, ADR 0057). A row carrying the
+    // moderation status marker — quarantine-pending or rejected-tombstone
+    // — is hidden from every normal read, on top of MVCC visibility. The
+    // marker lives on the row itself, so the check is a single field probe
+    // and rides the existing per-row visibility chokepoint rather than
+    // adding a separate filter pass to each scan call-site.
+    if crate::runtime::ai::moderation::entity_moderation_hidden(entity) {
+        return false;
+    }
     // Fast path — one `Cell<bool>` read, no RefCell borrow. Autocommit
     // reads (no active MVCC transaction) still hide superseded physical
     // versions while avoiding a full snapshot-context lookup.
@@ -715,6 +724,12 @@ pub fn entity_visible_with_context(
     ctx: Option<&SnapshotContext>,
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
+    // Same moderation visibility gate as the thread-local path (#1274):
+    // parallel scan workers capture the snapshot context but must apply
+    // the moderation marker check identically.
+    if crate::runtime::ai::moderation::entity_moderation_hidden(entity) {
+        return false;
+    }
     match ctx {
         Some(ctx) => visibility_check(ctx, entity.xmin, entity.xmax),
         None => true,

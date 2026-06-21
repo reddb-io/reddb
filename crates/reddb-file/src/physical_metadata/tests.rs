@@ -306,6 +306,7 @@ fn physical_collection_contract_round_trips() {
             time_key: "ts".to_string(),
             order_by_key: Some("id".to_string()),
         }),
+        ai_policy: None,
     };
 
     let json = encode_physical_collection_contract_json(&contract).unwrap();
@@ -313,6 +314,82 @@ fn physical_collection_contract_round_trips() {
     assert_eq!(
         decode_physical_collection_contract_json(&json).unwrap(),
         contract
+    );
+}
+
+#[test]
+fn physical_collection_contract_with_ai_policy_round_trips() {
+    let contract = PhysicalCollectionContract {
+        name: "posts".to_string(),
+        declared_model: "table".to_string(),
+        schema_mode: "strict".to_string(),
+        origin: "explicit".to_string(),
+        version: 1,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        default_ttl_ms: None,
+        vector_dimension: None,
+        vector_metric: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def_hex: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_rollup_policies: Vec::new(),
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
+        append_only: false,
+        subscriptions: Vec::new(),
+        analytics_config: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
+        retention_duration_ms: None,
+        analytical_storage: None,
+        ai_policy: Some(PhysicalAiPolicy {
+            embed: Some(PhysicalAiEmbedPolicy {
+                fields: vec!["title".to_string(), "body".to_string()],
+                provider: "openai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            }),
+            moderate: Some(PhysicalAiModeratePolicy {
+                fields: vec!["body".to_string()],
+                provider: "openai".to_string(),
+                model: "omni-moderation-latest".to_string(),
+                sync_gate: true,
+                degraded_mode: "closed".to_string(),
+                reject_action: "flag".to_string(),
+                hard_delete_on_reject: true,
+            }),
+            vision: Some(PhysicalAiVisionPolicy {
+                image_field: "photo".to_string(),
+                output_kinds: vec!["caption".to_string(), "tags".to_string()],
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+            }),
+        }),
+    };
+
+    let json = encode_physical_collection_contract_json(&contract).expect("encode ai policy");
+    assert!(json.contains("\"hard_delete_on_reject\""));
+    assert_eq!(
+        decode_physical_collection_contract_json(&json).expect("decode ai policy"),
+        contract
+    );
+
+    // A present-but-empty policy round-trips through the Null modality arms.
+    let bare = PhysicalCollectionContract {
+        ai_policy: Some(PhysicalAiPolicy {
+            embed: None,
+            moderate: None,
+            vision: None,
+        }),
+        ..contract
+    };
+    let json = encode_physical_collection_contract_json(&bare).expect("encode bare policy");
+    assert_eq!(
+        decode_physical_collection_contract_json(&json).expect("decode bare policy"),
+        bare
     );
 }
 
