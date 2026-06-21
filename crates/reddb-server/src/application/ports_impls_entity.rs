@@ -90,16 +90,17 @@ fn ensure_collection_model_contract(
         if collection_model_allows(contract.declared_model, requested_model) {
             return Ok(());
         }
-        // A collection that declares an EMBED policy (#1271/#1272) holds its
+        // A collection that declares an EMBED policy (#1271/#1272) — or a
+        // VISION policy with an image-embedding output (#1275) — holds its
         // rows' enrichment vectors in place: the CDC enrichment consumer
         // attaches vectors into the same collection so `VECTOR SEARCH` over
-        // it surfaces the embedded rows. Permit vector writes on such a
+        // it surfaces the enriched rows. Permit vector writes on such a
         // collection even when it is otherwise a strict table.
         if requested_model == crate::catalog::CollectionModel::Vector
             && contract
                 .ai_policy
                 .as_ref()
-                .is_some_and(|policy| policy.embed.is_some())
+                .is_some_and(|policy| policy.embed.is_some() || policy.vision.is_some())
         {
             return Ok(());
         }
