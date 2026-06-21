@@ -207,7 +207,12 @@ the columns it reads. The whole-block CRC is still verified regardless.
 The chunk-level reader transposes the two column streams back into
 `(timestamp_ns, value)` rows:
 
-- `points_from_column_block(bytes)` — full decode, every row.
+- `points_from_column_block(bytes)` — full row decode, every row.
+- `column_batch_from_block(bytes, projection)` — typed zero-copy batch decode
+  into a [`ColumnBatch`](columnar-execution.md#columnar-read-decode). Numeric
+  columns decode straight into an aligned word buffer that is reinterpreted in
+  place as `i64` / `f64` without a copy (committed in #962). This is the path a
+  vectorized scan consumes.
 - `query_column_block_range(bytes, start_ns, end_ns)` — range scan that
   prunes via the timestamp column's granule index.
 - `query_column_block_value_eq(bytes, target)` — point query that prunes via
@@ -216,6 +221,11 @@ The chunk-level reader transposes the two column streams back into
 The range and value-eq scans return a `PrunedColumnScan` carrying
 `granules_total` and `granules_scanned`, which is how pruning is made
 measurable end to end.
+
+Activation note: this read path is live for the time-series / hypertable read
+bridge on `COLUMNAR` collections. Routing general `SELECT` execution through the
+batch decode is not wired yet — see
+[Columnar Batch Execution](columnar-execution.md#columnar-read-decode).
 
 ## See also
 

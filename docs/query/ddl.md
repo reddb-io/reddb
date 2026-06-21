@@ -74,6 +74,29 @@ TRUNCATE COLLECTION IF EXISTS embeddings
 Use polymorphic DDL for admin tools, migrations, and cleanup jobs that operate
 over catalog rows rather than hard-coded models.
 
+## AI policy options
+
+`CREATE TABLE ... WITH (...)` accepts per-collection AI policy clauses next to
+`tenant_by` and `append_only`:
+
+```sql
+CREATE TABLE articles (id INT, title TEXT, body TEXT)
+WITH (
+  EMBED (fields = ('title', 'body'), provider = 'openai', model = 'text-embedding-3-small')
+)
+```
+
+| Clause | Purpose | Status |
+|---|---|---|
+| `EMBED (...)` | Auto-embed declared fields over CDC | Available |
+| `MODERATE (...)` | Content-moderation gate | Parses + persists; enforcement planned |
+| `VISION (...)` | Image understanding from a reference field | Parses + persists; enforcement planned |
+
+Each clause is validated against the provider modality matrix at `CREATE TABLE`
+time, so a provider that cannot serve the requested modality is rejected up
+front. See [Per-collection AI policy](ai-policy.md) for full grammar and
+semantics.
+
 ## DROP Forms
 
 ```sql

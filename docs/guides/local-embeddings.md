@@ -375,6 +375,12 @@ untouched** — no partial rows, no rollback dance. The integration
 suite in `tests/integration_auto_embed_local.rs` pins each of these
 behaviours.
 
+> [!TIP]
+> A collection can also declare an [`EMBED` policy](../query/ai-policy.md) so
+> that **every** write is embedded automatically, asynchronously over CDC,
+> without restating `WITH AUTO EMBED`. The end-to-end enrichment path currently
+> drives this `local` embedding backend.
+
 ---
 
 ## No silent fallback

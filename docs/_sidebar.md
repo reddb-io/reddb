@@ -16,6 +16,7 @@
   - [Local HuggingFace Embeddings](/guides/local-embeddings.md)
   - [Multi-Model Queries](/guides/multi-model-queries.md)
   - [AI Provider Modes](/api/ai-provider-modes.md)
+  - [AI Policy (per-collection)](/query/ai-policy.md)
 
 - **Query Language (RQL)**
   - [SELECT](/query/select.md)
@@ -90,6 +91,7 @@
   - [Bloom Filter](/engine/bloom-filter.md)
   - [Memtable & Skip List](/engine/memtable.md)
   - [File Format Anatomy](/engine/file-format.md)
+  - [Operational Storage Profiles](/engine/operational-storage-profiles.md)
   - [WAL & Recovery](/engine/wal.md)
   - [SIEVE Cache](/engine/cache.md)
   - [Columnar Batch Execution](/engine/columnar-execution.md)
@@ -198,6 +200,7 @@
 
 - **Guides**
   - [Monorepo Structure](/dev/monorepo-structure.md)
+  - [House Style (TigerStyle)](/dev/house-style.md)
   - [Permission Recipes](/guides/permissions-cookbook.md)
   - [Builds, Targets, and CI Speed](/guides/builds-and-ci-speed.md)
   - [JavaScript and TypeScript Driver](/guides/javascript-typescript-driver.md)
@@ -229,6 +232,7 @@
   - [Limitations](/reference/limitations.md)
 
 - **Release Notes**
+  - [2026-06-20 (AI Multimodality + TigerStyle + Crate Split)](/release-notes-2026-06-20.md)
   - [2026-04-26 (RedWire + Auth)](/release-notes-2026-04-26.md)
   - [2026-04-17 (Multi-tenancy + Perf)](/release-notes-2026-04-17.md)
   - [v1.0 Migration Guide](/release/v1.0-migration.md)

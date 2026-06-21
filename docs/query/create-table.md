@@ -84,6 +84,25 @@ CREATE TABLE sessions (
 > [!NOTE]
 > Context-indexed fields are not unique constraints. They tell RedDB which fields carry identifying information so that `SEARCH CONTEXT` can link entities across different tables automatically.
 
+## AI policy
+
+The `WITH (...)` option list also accepts per-collection AI policy clauses,
+alongside `tenant_by` and `append_only`. The `EMBED` clause auto-embeds the
+declared text fields on every write, asynchronously over CDC:
+
+```sql
+CREATE TABLE articles (id INT, title TEXT, body TEXT)
+WITH (
+  EMBED (fields = ('title', 'body'), provider = 'openai', model = 'text-embedding-3-small')
+)
+```
+
+`MODERATE (...)` and `VISION (...)` clauses parse and persist today but are not
+yet enforced (in progress). Each clause is validated against the
+[provider modality matrix](../api/ai-provider-modes.md#modality-matrix) at
+`CREATE TABLE` time. See [Per-collection AI policy](ai-policy.md) for the full
+grammar and behaviour.
+
 ## DROP TABLE
 
 Remove a table and all its data:

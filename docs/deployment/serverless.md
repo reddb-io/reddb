@@ -185,9 +185,19 @@ deployments use S3-compatible storage so the writer lease has a
 home. See [Remote Backends](backends.md) for the full matrix and
 the conditional-write contract.
 
+## Storage profile
+
+The serverless artifact remains a single canonical `.rdb`. The target serverless
+profile additionally lets a runtime export and hydrate a derived *segment pack* —
+a manifest plus immutable parts and delta WAL segments — to support object-storage
+caching, multipart copy, and faster cold boot, while round-tripping back to the
+same `.rdb` logical state. That packaging is proposed, not shipped; see
+[Operational Storage Profiles](/engine/operational-storage-profiles.md).
+
 ## See also
 
 - [Backends](backends.md) — `RED_BACKEND` matrix, CAS contract
+- [Operational Storage Profiles](/engine/operational-storage-profiles.md) — target storage layouts
 - [Replication](replication.md) — commit policy, writer lease
 - [Operator Runbook](../operations/runbook.md) — full deploy / DR playbook
 - [Metrics Spec](../spec/metrics.md) — every gauge / counter named above

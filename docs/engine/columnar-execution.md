@@ -104,15 +104,40 @@ The picker, planned for the B5/B6 sprint:
 | Aggregate that can read from a matching projection    | Projection → Batch |
 | Hypertable scan filtered by time column               | Pruned Batch |
 
+## Columnar read decode
+
+Reading a sealed columnar (RDCC) chunk back is now done through a typed,
+zero-copy batch decode (committed in #962, lineage PRD #850). The decoder
+(`column_batch_from_block`) decodes each numeric column straight into an
+aligned `Vec<u64>` in one pass, then reinterprets that allocation in place as
+`Vec<i64>` / `Vec<f64>` without copying. A row-shaped decode
+(`points_from_column_block`) is also available for callers that want
+`TimeSeriesPoint`s rather than a `ColumnBatch`.
+
+Inside the runtime, the time-series read bridge dispatches on chunk format:
+columnar-sealed chunks decode through the column-block range scan (granule
+pruned), and row-sealed chunks fall back to the row materializer, so a
+collection can mix both chunk formats and still read back correctly.
+
+> **Activation status.** The typed columnar read-back is live for the
+> time-series / hypertable read path on collections sealed with `COLUMNAR`. The
+> general SQL planner does **not** yet route arbitrary `SELECT` execution
+> through the batch path — the batch-vs-row picker (table below) is still
+> planned. Columnar storage is opt-in per collection and off by default; see
+> [When to use columnar vs row](../data-models/timeseries.md#when-to-use-columnar-vs-row).
+
 ## Benchmarks
 
-Published in [`docs/perf/olap-benchmarks.md`](../perf/olap-benchmarks.md)
-as each sprint lands. Rough current state (micro-benchmarks on
-synthetic data):
+The committed columnar-vs-row read benchmark lives in
+[`docs/perf/2026-06-03-columnar-read.md`](../perf/2026-06-03-columnar-read.md)
+(harness: `crates/reddb-server/benches/columnar_read_bench.rs`). After the #962
+optimization the batch decode path matches or beats the row path at every
+measured chunk size (1 K / 10 K / 50 K rows): batch p50 and p99 are both ≤ the
+row path, with the batch path ~2–3% faster at 10 K and 50 K rows.
 
-* `sum_f64` — SIMD/scalar ratio ~4× on AVX2 hardware for 10k f64s.
-* `batch_aggregate` on 1M rows grouped by a single TEXT column:
-  150ms single-thread, 45ms with 4 rayon workers.
+> The absolute timings in that doc are only comparable **within a single bench
+> run** — the batch/row *ratio* is the load-invariant signal, not the raw µs.
 
-Keep in mind these are unit-level measurements; end-to-end figures
-require the planner to choose the batch path — tracked in B5 + B6.
+Other figures on this page (`sum_f64` SIMD ratios, `batch_aggregate`
+throughput) are unit-level micro-benchmarks on synthetic data; treat them as
+illustrative until end-to-end SQL routes through the batch path.
