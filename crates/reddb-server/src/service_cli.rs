@@ -485,6 +485,32 @@ impl BootstrapConfig {
         })
     }
 
+    /// Classify the auth bootstrap this config would perform, for the
+    /// cluster bootstrap authority seam (ADR 0058). A manifest wins over
+    /// preset/credential env because it is the broadest authority input.
+    fn auth_bootstrap_input(&self) -> crate::cluster::AuthBootstrapInput {
+        use crate::cluster::AuthBootstrapInput;
+        if self.selected_manifest().is_some() {
+            return AuthBootstrapInput::Manifest;
+        }
+        let preset = self.resolved_preset();
+        let preset_creates_auth = matches!(
+            preset.as_str(),
+            PRESET_PRODUCTION | PRESET_CLOUD | PRESET_REGULATED
+        );
+        // Even the `simple` preset auto-creates an admin when
+        // `REDDB_USERNAME` + `REDDB_PASSWORD` are present (see
+        // `AuthStore::bootstrap_from_env`), so treat credential env as
+        // auth bootstrap input too.
+        let credentials_present =
+            self.production_username().is_some() && self.production_password().is_some();
+        if preset_creates_auth || credentials_present {
+            AuthBootstrapInput::Env
+        } else {
+            AuthBootstrapInput::None
+        }
+    }
+
     fn explicit_value(value: &Option<String>) -> Option<String> {
         value
             .as_deref()
@@ -2110,16 +2136,28 @@ fn build_runtime_with_bootstrap(
         runtime.control_event_ledger(),
         runtime.control_event_config(),
     );
-    // Issue #663 — when `--no-auth` is active, deliberately skip the
-    // preset machinery. Otherwise a stray `REDDB_USERNAME`+`REDDB_PASSWORD`
-    // pair in the operator's environment would silently create an admin
-    // user, defeating the whole point of opting into anonymous mode.
-    if no_auth {
-        eprintln!("{NO_AUTH_WARNING}");
-        tracing::warn!("{NO_AUTH_WARNING}");
-    } else {
-        apply_preset_from_config(&runtime, &auth_store, bootstrap)?;
-        maybe_apply_policy_break_glass(&auth_store);
+    // ADR 0058 — cluster bootstrap authority fail-closed seam. A
+    // cluster-shaped boot may only run auth bootstrap when a concrete
+    // reserved-range owner can be proven; none is implemented yet, so the
+    // seam rejects credentialled cluster boots and allows only the explicit
+    // `--no-auth` / `--dev` development carveout. Issue #663 — when
+    // `--no-auth` is active, deliberately skip the preset machinery so a
+    // stray `REDDB_USERNAME`+`REDDB_PASSWORD` pair cannot silently create an
+    // admin, defeating the point of anonymous mode.
+    let disposition = crate::cluster::authorize_cluster_bootstrap(
+        db_options.storage_profile.deploy_profile,
+        no_auth,
+        bootstrap.auth_bootstrap_input(),
+    )?;
+    match disposition {
+        crate::cluster::BootstrapDisposition::SkipDevBypass => {
+            eprintln!("{NO_AUTH_WARNING}");
+            tracing::warn!("{NO_AUTH_WARNING}");
+        }
+        crate::cluster::BootstrapDisposition::ProceedLocal => {
+            apply_preset_from_config(&runtime, &auth_store, bootstrap)?;
+            maybe_apply_policy_break_glass(&auth_store);
+        }
     }
 
     // Background session purge (every 5 minutes)
