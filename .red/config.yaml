@@ -11,7 +11,8 @@
 #       gradle: true              # ship gradle isolation when GRADLE_USER_HOME_BASE is set
 
 dev:
-  lock-primary-branch: true
+  lock:
+    primary-branch: true
 
 plugins:
   dev:
