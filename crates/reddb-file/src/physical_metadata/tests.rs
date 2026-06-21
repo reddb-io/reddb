@@ -306,6 +306,7 @@ fn physical_collection_contract_round_trips() {
             time_key: "ts".to_string(),
             order_by_key: Some("id".to_string()),
         }),
+        ai_policy: None,
     };
 
     let json = encode_physical_collection_contract_json(&contract).unwrap();
