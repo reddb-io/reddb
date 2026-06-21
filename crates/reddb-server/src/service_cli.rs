@@ -2144,15 +2144,38 @@ fn build_runtime_with_bootstrap(
     // `--no-auth` is active, deliberately skip the preset machinery so a
     // stray `REDDB_USERNAME`+`REDDB_PASSWORD` pair cannot silently create an
     // admin, defeating the point of anonymous mode.
+    //
+    // Issue #1230 — the durable bootstrap completion marker
+    // (`system.bootstrap.completed`) is the authority path's record that
+    // first boot already produced global auth state. Observing it makes a
+    // restart or duplicate bootstrap attempt idempotent: the seam returns
+    // `AlreadyComplete` and the caller rehydrates read-only state only,
+    // recreating no users, reissuing no vault certificate, and reapplying no
+    // mutable config over operator changes.
+    let bootstrap_already_completed = runtime
+        .db()
+        .store()
+        .get_config(BOOTSTRAP_COMPLETED_KEY)
+        .is_some();
     let disposition = crate::cluster::authorize_cluster_bootstrap(
         db_options.storage_profile.deploy_profile,
         no_auth,
         bootstrap.auth_bootstrap_input(),
+        bootstrap_already_completed,
     )?;
     match disposition {
         crate::cluster::BootstrapDisposition::SkipDevBypass => {
             eprintln!("{NO_AUTH_WARNING}");
             tracing::warn!("{NO_AUTH_WARNING}");
+        }
+        crate::cluster::BootstrapDisposition::AlreadyComplete => {
+            // First boot is over. Rehydrate the read-only manifest registry
+            // so config-derived state is observable, but create no users,
+            // reissue no vault material, and reapply no mutable config
+            // (issue #1230). `apply_preset_from_config` does exactly this
+            // when the completion marker is present.
+            apply_preset_from_config(&runtime, &auth_store, bootstrap)?;
+            tracing::info!("bootstrap already completed, reporting existing state");
         }
         crate::cluster::BootstrapDisposition::ProceedLocal => {
             apply_preset_from_config(&runtime, &auth_store, bootstrap)?;
