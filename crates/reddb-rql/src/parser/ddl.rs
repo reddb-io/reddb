@@ -1786,6 +1786,57 @@ mod tests {
     }
 
     #[test]
+    fn parse_moderate_policy_aliases_and_error_branches() {
+        use reddb_types::catalog::{ModerateDegradedMode, ModerateRejectAction};
+        // Alias spellings hit the same match arms as the short forms.
+        let QueryExpr::CreateTable(table) = parser(
+            "t (id INT, body TEXT) WITH ( \
+               MODERATE (fields = ('body'), provider = 'openai', model = 'm', \
+                 sync_gate = true, degraded_mode = open, reject_action = redact, \
+                 hard_delete_on_reject = true) \
+             )",
+        )
+        .parse_create_table_body()
+        .expect("alias spellings parse") else {
+            panic!("Expected CreateTableQuery");
+        };
+        let moderate = table
+            .ai_policy
+            .expect("policy")
+            .moderate
+            .expect("moderate block");
+        assert!(moderate.sync_gate);
+        assert_eq!(moderate.degraded_mode, ModerateDegradedMode::Open);
+        assert_eq!(moderate.reject_action, ModerateRejectAction::Redact);
+        assert!(moderate.hard_delete_on_reject);
+
+        // Each invalid MODERATE option surfaces a descriptive parse error.
+        for (sql, needle) in [
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'o', model = 'm', bogus = 1))",
+                "unsupported MODERATE policy option",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'o', model = 'm', degraded = sideways))",
+                "unsupported MODERATE degraded mode",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'o', model = 'm', on_reject = explode))",
+                "unsupported MODERATE reject action",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (provider = 'o', model = 'm'))",
+                "MODERATE policy requires fields",
+            ),
+        ] {
+            let err = parser(sql)
+                .parse_create_table_body()
+                .expect_err("moderate policy error");
+            assert!(format!("{err}").contains(needle), "got: {err}");
+        }
+    }
+
+    #[test]
     fn parse_create_table_ai_policy_defaults_and_no_clause() {
         use reddb_types::catalog::{ModerateDegradedMode, ModerateRejectAction};
         // MODERATE with no sync/degraded/on_reject falls back to defaults.
