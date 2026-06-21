@@ -262,6 +262,42 @@ WITH AUTO EMBED (title, body) USING openai MODEL 'text-embedding-3-small'
 
 For bulk inserts, RedDB batches all non-empty embedding texts through `AiBatchClient`, applies provider retry/timeout handling, and then stores one vector per embedded row. The SQL and HTTP request shape did not change; batching is transparent to clients.
 
+## Auto-embed over CDC
+
+Instead of repeating `WITH AUTO EMBED` on every insert, a collection can declare
+an `EMBED` policy once in its DDL. Then **every** write to that collection is
+embedded automatically, asynchronously, off the write path:
+
+```sql
+CREATE TABLE articles (id INT, title TEXT, body TEXT)
+WITH (
+  EMBED (fields = ('title', 'body'), provider = 'openai', model = 'text-embedding-3-small')
+)
+```
+
+With an `EMBED` policy in place:
+
+- An `INSERT`/`UPDATE` commits and returns immediately — it emits its usual CDC
+  change event and does **no** provider work, so write latency stays independent
+  of the embedding provider.
+- A CDC enrichment consumer later drains the change stream, embeds the declared
+  fields, and attaches the vector — exactly as a manual `WITH AUTO EMBED` insert
+  would have.
+- Until the vector is attached, the row is **`pending`** and is naturally
+  excluded from `VECTOR SEARCH` (it has no vector yet), so a search never returns
+  a half-enriched set. Failed enrichment retries with backoff and then
+  dead-letters, with an operator re-drive path.
+
+> [!TIP]
+> Inline `WITH AUTO EMBED` (above) and the declarative `EMBED` policy attach
+> vectors the same way and are searchable identically. Use inline `AUTO EMBED`
+> for one-off control per insert; use the `EMBED` policy when you want every
+> write to a collection embedded without restating it.
+
+See [Per-collection AI policy](../query/ai-policy.md) for the full `EMBED`
+grammar, the retry/dead-letter/re-drive states, and DDL-time provider
+validation.
+
 ## Distance Metrics
 
 | Metric | Description |

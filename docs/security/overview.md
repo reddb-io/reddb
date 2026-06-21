@@ -42,6 +42,14 @@ which enables them unless `--no-auth` is set.
 red server --http --path ./data/reddb.rdb --auth --require-auth --vault --bind 0.0.0.0:8080
 ```
 
+The first-boot presets are `simple` (default, creates nothing), `production`
+(one policy-governed admin with an allow-all policy), `cloud` (a head admin
+plus a customer admin), and `regulated` (no admin; installs audit/evidence
+guardrails and enables query-audit infrastructure). `production` and `cloud`
+auto-enable auth and the vault. Every preset is policy-first — see
+[First Boot Contract](../deployment/first-boot.md#bootstrap-presets) for the
+per-preset behavior and credential flags.
+
 ## Bootstrap
 
 When no users exist, bootstrap the first admin:

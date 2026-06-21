@@ -63,7 +63,10 @@ The physical layer manages durable file I/O:
 - **WAL**: Write-ahead log for crash recovery
 - **SIEVE Cache**: Adaptive page cache (SIEVE eviction algorithm)
 - **Memory Map**: Optional mmap for read-heavy workloads
-- **Encryption**: AES-256-GCM encryption at the page level
+- **Encryption**: AES-256-GCM per-page envelope (foundation code; not yet
+  written by the live pager — see [Storage Engine Encryption](encryption.md)).
+  The canonical envelope is owned by the `reddb-io-crypto` authority crate
+  (ADR 0054); the page-0 encrypted-database header lives in `reddb-io-file`.
 
 ## Logical Catalog
 

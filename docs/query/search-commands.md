@@ -236,9 +236,11 @@ stable URNs for UI deep-links. See
 
 > [!IMPORTANT]
 > Plain `ASK` is retrieval-grounded answer synthesis. It does not convert the
-> question into a `SELECT`, and LLM output is never parsed or executed as RQL.
-> Use `ASK ... AS RQL` when you want RedDB to return a validated read-only RQL
-> candidate for caller approval/execution.
+> question into a `SELECT`, and its LLM answer is never parsed or executed as
+> RQL. Use `ASK ... AS RQL` when you want RedDB to return a parser-validated RQL
+> candidate for caller approval; add `EXECUTE` to auto-run a read-only
+> candidate. Even on the inference backend, a candidate is always re-validated
+> through the parser and a mutating candidate is never auto-executed.
 
 ```sql
 ASK 'what happened on host 10.0.0.1?' USING groq
@@ -261,7 +263,8 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 | `STREAM` | No | HTTP/SSE token stream; transports without SSE return non-streaming rows |
 | `CACHE TTL '5m'` | No | Cache this answer for the supplied TTL |
 | `NOCACHE` | No | Bypass the global ASK cache default |
-| `AS RQL` | No | Return a deterministic, parser-validated RQL candidate instead of calling an AI provider |
+| `AS RQL` | No | Return a parser-validated RQL candidate instead of synthesizing a natural-language answer |
+| `EXECUTE` | No | Auto-run the candidate produced by `AS RQL` — read-only candidates only (see [`AS RQL` and `EXECUTE`](#ask--as-rql-and-execute)) |
 
 ### Examples
 
@@ -312,12 +315,45 @@ candidate explicitly:
 ASK 'passport FDD-12313' AS RQL
 ```
 
-`ASK ... AS RQL` uses schema vocabulary and literal extraction to produce a
-read-only `SELECT`, validates the generated text through the parser, and
-returns it in the `rql` column. Missing `FROM` means the universal source
+`ASK ... AS RQL` returns a candidate RQL statement in the `rql` column. The
+candidate is **always re-validated through the production parser** before it is
+returned, and it is **not executed** unless you add `EXECUTE` (see below).
+
+### `ASK ... AS RQL` and `EXECUTE`
+
+`AS RQL` has two backends, selected by the `ai.ask_rql.backend` config key:
+
+| Backend | `ai.ask_rql.backend` | How the candidate is built |
+|:--------|:---------------------|:---------------------------|
+| Deterministic | `deterministic` (default) | Schema vocabulary + literal extraction — **no AI provider call** |
+| Inference | `llm` | The configured `generate` provider translates the question into RQL |
+
+Both backends produce a candidate and then **re-validate it through the same
+parser seam**, so a model is never trusted to emit safe RQL — the parser is the
+gate. When `ai.ask_rql.backend = "llm"` but no generate provider/API key is
+available, RedDB falls back to the deterministic planner.
+
+With the deterministic backend, a missing `FROM` means the universal source
 `any`, so the eventual query searches eligible collections and applies the
-`WHERE` filter itself. This path does not call an AI provider and does not
-execute the generated RQL for you.
+`WHERE` filter itself.
+
+**`EXECUTE` is an explicit opt-in to run the candidate.** By default `AS RQL`
+returns the candidate only:
+
+```sql
+-- default: returns the candidate, does NOT run it
+ASK 'who owns passport FDD-12313?' AS RQL
+
+-- opt in to auto-run the candidate
+ASK 'who owns passport FDD-12313?' AS RQL EXECUTE
+```
+
+`EXECUTE` auto-runs **read-only** candidates only (`SELECT`, `MATCH`/graph,
+vector, search, …). A candidate the parser classifies as **mutating** (`INSERT`,
+`UPDATE`, `DELETE`, `TRUNCATE`, DDL, …) is **refused** for auto-execution — even
+with `EXECUTE` — and returns an error rather than running. Without `EXECUTE`, the
+result includes a warning telling you to add `EXECUTE` to run a read-only
+candidate.
 
 If no provider is configured, ASK returns an error. Configure one with:
 

@@ -1,10 +1,10 @@
 # AI providers — what works where
 
-RedDB speaks to 11 AI providers for the `ASK`, `WITH AUTO EMBED`, and
-`SEARCH SIMILAR ... USING` flows. This page documents which provider
-supports which capability, the wire shape RedDB uses for each, and
-how RedDB behaves when a provider does not offer a capability the
-operator asked for.
+RedDB speaks to a roster of AI providers for the `ASK`, `WITH AUTO EMBED`, and
+`SEARCH SIMILAR ... USING` flows, plus the per-collection
+[AI policy](../query/ai-policy.md). This page documents which provider supports
+which capability, the wire shape RedDB uses for each, and how RedDB behaves when
+a provider does not offer a capability the operator asked for.
 
 If you came here because `ASK 'something' USING anthropic` for an
 embeddings step failed unexpectedly — read the [Anthropic
@@ -14,19 +14,34 @@ embeddings](#anthropic-embeddings-policy) section first.
 
 ## Capability matrix
 
-| Provider    | Token         | API key | Prompt / `ASK` | Embeddings           | Wire shape            |
-|:------------|:--------------|:-------:|:--------------:|:---------------------|:----------------------|
-| OpenAI      | `openai`      | yes     | ✅            | ✅                  | OpenAI-compat         |
-| Anthropic   | `anthropic`   | yes     | ✅            | **rejected** (see below) | Anthropic Messages    |
-| Groq        | `groq`        | yes     | ✅            | ✅                  | OpenAI-compat         |
-| OpenRouter  | `openrouter`  | yes     | ✅            | ✅                  | OpenAI-compat         |
-| Together    | `together`    | yes     | ✅            | ✅                  | OpenAI-compat         |
-| Venice      | `venice`      | yes     | ✅            | ✅                  | OpenAI-compat         |
-| DeepSeek    | `deepseek`    | yes     | ✅            | ✅                  | OpenAI-compat         |
-| HuggingFace | `huggingface` | yes     | ✅            | ✅                  | HF feature-extraction |
-| Ollama      | `ollama`      | no      | ✅            | ✅                  | OpenAI-compat         |
-| Local       | `local`       | no      | feature-gated  | feature-gated        | candle in-process     |
-| Custom URL  | `https://...` | depends | ✅            | ✅                  | OpenAI-compat         |
+| Provider    | Token         | API key | Generate / `ASK` | Embed                    | Vision | Moderate | Wire shape            |
+|:------------|:--------------|:-------:|:----------------:|:-------------------------|:------:|:--------:|:----------------------|
+| OpenAI      | `openai`      | yes     | ✅              | ✅                      | ✅    | ✅      | OpenAI-compat         |
+| Anthropic   | `anthropic`   | yes     | ✅              | **rejected** (see below) | ✅    | —       | Anthropic Messages    |
+| MiniMax     | `minimax`     | yes     | ✅              | ✅                      | ✅    | —       | OpenAI-compat         |
+| Groq        | `groq`        | yes     | ✅              | —                       | ✅    | —       | OpenAI-compat         |
+| OpenRouter  | `openrouter`  | yes     | ✅              | —                       | ✅    | —       | OpenAI-compat         |
+| Together    | `together`    | yes     | ✅              | ✅                      | ✅    | —       | OpenAI-compat         |
+| Venice      | `venice`      | yes     | ✅              | —                       | ✅    | —       | OpenAI-compat         |
+| DeepSeek    | `deepseek`    | yes     | ✅              | —                       | —     | —       | OpenAI-compat         |
+| HuggingFace | `huggingface` | yes     | ✅              | ✅                      | —     | —       | HF feature-extraction |
+| Ollama      | `ollama`      | no      | ✅              | ✅                      | ✅    | —       | OpenAI-compat         |
+| Local       | `local`       | no      | —               | feature-gated            | —     | —       | in-process backend    |
+| Custom URL  | `https://...` | depends | ✅              | ✅                      | —     | —       | OpenAI-compat         |
+
+The **Generate / Embed / Vision / Moderate** columns are the provider's
+[modality capabilities](../api/ai-provider-modes.md#modality-matrix). They gate a
+per-collection [AI policy](../query/ai-policy.md) at `CREATE TABLE` time — a
+policy that asks a provider for a modality it does not serve is rejected up
+front. A `—` in the **Embed** column means RedDB does not route embeddings to
+that provider; name an embed-capable provider for the embedding step instead.
+
+> [!NOTE]
+> The **Vision** and **Moderate** columns describe declared provider capability.
+> The collection-level `VISION` and `MODERATE` policy clauses that consume them
+> are still in progress — see [AI policy](../query/ai-policy.md). The `embed`
+> and `generate` modalities are live today via `AUTO EMBED`, `ASK`, and the
+> `EMBED` policy clause.
 
 `OpenAI-compat` means the provider exposes `POST {base}/embeddings`
 and `POST {base}/chat/completions` with the OpenAI shape, so RedDB
@@ -130,8 +145,12 @@ Default provider can be overridden per-call with `USING <provider>`.
 
 Every provider in the matrix above (except `local` and `ollama`, which
 do not require an API key) resolves its key through the same lookup
-chain. Storing the key in the vault is the production path; env vars
-are useful for dev.
+chain. As of issue #1270, resolution **prefers the encrypted vault over
+environment variables**: the env vars are a zero-config bootstrap fallback so a
+fresh deployment can talk to a provider before any key is written to the vault.
+Vault-stored keys are encrypted at rest and rotatable through the vault KV path;
+env vars carry no such guarantees, which is why they are the fallback rather than
+the primary source.
 
 **Canonical vault path:**
 
@@ -155,12 +174,17 @@ reddb-cli vault set red.secret.ai.openai.prod.api_key "sk-prod-..."
 
 Vault setup itself is covered in [Security → Vault](/security/vault.md).
 
-**Resolution order** (first non-empty wins, per request):
+**Resolution order** (first non-empty wins, per request — vault first, env as a
+bootstrap fallback):
 
-1. Env var `REDDB_<PROVIDER>_API_KEY_<ALIAS>` (or `REDDB_<PROVIDER>_API_KEY` for the default alias)
-2. Vault: `red.secret.ai.<provider>.<alias>.api_key`
-3. Config indirection: `red.config.ai.<provider>.<alias>.secret_ref` points at another KV/vault path
+1. Vault secret: `red.secret.ai.<provider>.<alias>.api_key`
+2. Vault indirection: `red.config.ai.<provider>.<alias>.secret_ref` points at another vault path
+3. Env var `REDDB_<PROVIDER>_API_KEY_<ALIAS>` (or `REDDB_<PROVIDER>_API_KEY` for the default alias)
 4. Legacy plaintext config: `red.config.ai.<provider>.<alias>.key` (deprecated — do not use for new deployments)
+
+For the **default** alias (no `"credential"` in the request), the vault path is
+`red.secret.ai.<provider>.default.api_key` and the env fallback is
+`REDDB_<PROVIDER>_API_KEY`.
 
 A missing key surfaces as a `400` with the exact path the operator
 should populate. There is no silent fallback to a different alias or
