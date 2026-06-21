@@ -466,11 +466,12 @@ pub fn backup_temp_json_path(
     prefix: &str,
     process_id: u32,
     nanos: u128,
+    unique: u64,
     start_lsn: Option<u64>,
     end_lsn: Option<u64>,
 ) -> PathBuf {
     temp_dir.join(backup_temp_json_file_name(
-        prefix, process_id, nanos, start_lsn, end_lsn,
+        prefix, process_id, nanos, unique, start_lsn, end_lsn,
     ))
 }
 
@@ -478,14 +479,18 @@ pub fn backup_temp_json_file_name(
     prefix: &str,
     process_id: u32,
     nanos: u128,
+    unique: u64,
     start_lsn: Option<u64>,
     end_lsn: Option<u64>,
 ) -> String {
+    // `unique` is a process-global monotonic counter so two stagings can
+    // never share a path even when `nanos` collides under coarse clock
+    // resolution or when concurrent archives stage the same LSN range.
     match (start_lsn, end_lsn) {
         (Some(start_lsn), Some(end_lsn)) => {
-            format!("{prefix}-{process_id}-{start_lsn}-{end_lsn}-{nanos}.json")
+            format!("{prefix}-{process_id}-{start_lsn}-{end_lsn}-{nanos}-{unique}.json")
         }
-        _ => format!("{prefix}-{process_id}-{nanos}.json"),
+        _ => format!("{prefix}-{process_id}-{nanos}-{unique}.json"),
     }
 }
 
@@ -820,14 +825,15 @@ mod tests {
                 "reddb-archived-change-records",
                 7,
                 99,
+                3,
                 Some(10),
                 Some(20)
             ),
-            PathBuf::from("/tmp/reddb-archived-change-records-7-10-20-99.json")
+            PathBuf::from("/tmp/reddb-archived-change-records-7-10-20-99-3.json")
         );
         assert_eq!(
-            backup_temp_json_path(Path::new("/tmp"), "reddb-json-object", 7, 99, None, None),
-            PathBuf::from("/tmp/reddb-json-object-7-99.json")
+            backup_temp_json_path(Path::new("/tmp"), "reddb-json-object", 7, 99, 3, None, None),
+            PathBuf::from("/tmp/reddb-json-object-7-99-3.json")
         );
         assert_eq!(
             logical_wal_path(path),
