@@ -48,11 +48,20 @@ configurable, per-collection, multi-modal model surface (ADR 0057).
 - **Vault-backed provider credentials (shipped).** Provider API keys
   resolve from the encrypted vault first, falling back to environment
   variables.
-- **Content moderation and computer-vision detections (planned).** The
-  `MODERATE` and `VISION` policy clauses **parse, validate, and persist**,
-  but enforcement (the moderation write-path gate; vision detection
-  ingestion + filtering) is still in progress and is **not active**. Do
-  not rely on them yet.
+- **Computer-vision detections over CDC (shipped — local backend, #1275).**
+  A `VISION` policy fetches the referenced image (`http(s)`/`file`/bare
+  path), analyzes it, and attaches a structured detections array to the
+  derived `vision_detections` field, with the same retry/dead-letter
+  behaviour as `EMBED`. **Caveat:** analysis runs the in-process `local`
+  backend only — a remote `provider` (e.g. `openai`) validates at DDL time
+  but is rejected at enrichment time, so end-to-end against a hosted vision
+  model is not yet wired.
+- **`CONTAINS` descends into JSON objects/arrays (shipped, #1275).** The
+  live query path now supports `WHERE CONTAINS(vision_detections, 'person')`
+  and JSON-object containment generally.
+- **Content moderation gate (planned, #1274).** The `MODERATE` policy clause
+  **parses, validates, and persists**, but the write-path moderation gate
+  is still in progress and **not active**. Do not rely on it yet.
 
 ## House style & correctness (TigerStyle)
 

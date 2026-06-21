@@ -13,17 +13,19 @@ options:
 |:-------|:---------|:-------|
 | `EMBED (...)` | Auto-embed declared fields over CDC | **Available** |
 | `MODERATE (...)` | Pre-commit content moderation gate | Parses today; enforcement **planned** |
-| `VISION (...)` | Image understanding from a reference field | Parses today; enforcement **planned** |
+| `VISION (...)` | Image detections from a reference field | **Pipeline shipped** (local backend; remote providers pending) |
 
 The architectural rationale (hybrid write-path coupling, moderation quarantine,
 the provider modality matrix) is recorded in **ADR 0057**.
 
 > [!IMPORTANT]
-> Only the `EMBED` clause is wired end-to-end today (auto-embed over CDC). The
-> `MODERATE` and `VISION` clauses **parse, validate, and persist** in the
-> collection contract, but the moderation gate (content-moderation, in progress)
-> and vision detections (computer vision, in progress) are not yet enforced.
-> Declaring them is forward-compatible, not active.
+> `EMBED` and `VISION` run over CDC today. `EMBED` is wired end-to-end;
+> `VISION` ships its full pipeline but only against the in-process `local`
+> backend (remote vision providers validate at DDL time but are rejected at
+> enrichment time — see below). The `MODERATE` clause **parses, validates, and
+> persists** in the collection contract, but the moderation gate is **in
+> progress and not yet enforced** — declaring it is forward-compatible, not
+> active.
 
 ---
 
@@ -131,14 +133,20 @@ the moderation pipeline, not with this DDL surface.
 
 ---
 
-## VISION — image understanding (planned)
+## VISION — image understanding
 
-> [!WARNING]
-> The `VISION` clause parses, validates against the provider matrix, and
-> persists today, but vision detections are **in progress and not yet active**.
-> No vision output is attached to rows yet, and there is **no query predicate
-> for filtering on vision output**. Declaring `VISION` is forward-compatible
-> only.
+> [!NOTE]
+> The vision **pipeline shipped** in #1275: with a `VISION` policy, the CDC
+> enrichment consumer fetches the referenced image (`http(s)://`, `file://`,
+> or a bare path), analyzes it, and attaches a structured detections array to
+> the derived `vision_detections` field — which is filterable from RQL with
+> `CONTAINS` (see below). Retry / dead-letter behaves like the `EMBED` path.
+>
+> **Caveat — local backend only.** The analysis currently runs an in-process
+> deterministic backend (the `local` provider). A remote `provider` such as
+> `openai` **validates at `CREATE TABLE` time** (it supports the `vision`
+> modality) but is **rejected at enrichment time** — only `local` actually
+> runs today. End-to-end vision against a hosted model is not yet wired.
 
 ```sql
 CREATE TABLE photos (id INT, image_url TEXT)
@@ -158,12 +166,23 @@ WITH (
 |:-------|:---------|:------------|
 | `image_field` | Yes | Column holding the image **reference** (a URL/URI — reddb stores the reference, not the image bytes) |
 | `outputs` | Yes | Output kinds to request, e.g. `('caption', 'tags', 'objects')` |
-| `provider` | Yes | Must support the `vision` modality |
+| `provider` | Yes | Must support the `vision` modality (validated at DDL time; only `local` runs at enrichment time today) |
 | `model` | Yes | Vision-capable model name |
 
-Like embedding, vision is designed as an **asynchronous enrichment** over CDC.
-The image is referenced by URL; reddb does not introduce a binary/blob type for
-image bytes.
+Like embedding, vision is an **asynchronous enrichment** over CDC. The image is
+referenced by URL/URI; reddb does not introduce a binary/blob type for image
+bytes. Detections land in the `vision_detections` field as
+`[{label, confidence, bbox:[x,y,w,h]}]`; an optional image-embedding output
+reuses the vector pipeline for image similarity.
+
+### Filtering on detections
+
+`CONTAINS` descends into JSON object/array values in the live query path
+(#1275), so you can filter rows by detected label:
+
+```sql
+SELECT * FROM photos WHERE CONTAINS(vision_detections, 'person')
+```
 
 ---
 
