@@ -1,0 +1,38 @@
+# cargo-nextest configuration for the RedDB workspace (issue #973).
+#
+# Why nextest: every test runs in its own process and is held to a hard
+# per-test timeout. A hung test is killed and reported as a timeout instead of
+# stalling the whole run — the same stall class that wedged AFK workers.
+#
+# Test lanes (run separately; see docs/testing/nextest-lanes.md and the
+# `test-nextest-lib` / `test-nextest-e2e` Makefile targets):
+#   * lib lane — fast in-crate unit tests:
+#       cargo nextest run --workspace --lib
+#   * e2e lane — top-level integration-test binaries:
+#       cargo nextest run --workspace -E 'kind(test)'
+#     The e2e lane is shardable across runners with
+#       --partition count:<index>/<total>
+#     (e.g. --partition count:1/4 ... count:4/4 across four runners).
+
+# Recommend a recent nextest so filtersets and `--partition` behave as
+# documented above. Recommendations warn rather than hard-fail older toolchains.
+[nextest-version]
+recommended = "0.9.78"
+
+[profile.default]
+# A test exceeding `period` is flagged slow; after `terminate-after` such
+# periods (2 * 60s = 120s) nextest terminates the test process and reports it
+# as a timeout failure rather than letting it stall the whole run. This is the
+# per-test timeout that turns a hung test into a killed, reported failure.
+slow-timeout = { period = "60s", terminate-after = 2 }
+# Surface the slowest tests so the e2e shards can be rebalanced over time.
+final-status-level = "slow"
+
+# CI profile: same hard per-test timeout, plus a single retry to absorb
+# genuinely flaky integration tests, and a JUnit report the runner can ingest.
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 2 }
+retries = 1
+
+[profile.ci.junit]
+path = "junit.xml"
