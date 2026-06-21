@@ -1656,10 +1656,18 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
         crate::serde_json::Value::Array(values) => values
             .iter()
             .any(|value| json_value_contains(value, needle)),
+        // Recurse into object *values* so a needle nested inside a JSON
+        // object matches — e.g. `CONTAINS(vision_detections, 'person')`
+        // over a derived `[{"label":"person",...}]` array (#1275). Keys
+        // are deliberately not matched: containment is about the data, not
+        // the field names. Mirrors the same rule in the scalar evaluator.
+        crate::serde_json::Value::Object(map) => {
+            map.values().any(|value| json_value_contains(value, needle))
+        }
         crate::serde_json::Value::String(value) => value == needle,
         crate::serde_json::Value::Number(value) => value.to_string() == needle,
         crate::serde_json::Value::Bool(value) => value.to_string() == needle,
-        crate::serde_json::Value::Null | crate::serde_json::Value::Object(_) => false,
+        crate::serde_json::Value::Null => false,
     }
 }
 
