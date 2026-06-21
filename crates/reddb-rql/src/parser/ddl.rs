@@ -1400,6 +1400,7 @@ impl<'a> Parser<'a> {
         let mut sync_gate = false;
         let mut degraded_mode = ModerateDegradedMode::default();
         let mut reject_action = ModerateRejectAction::default();
+        let mut hard_delete_on_reject = false;
         loop {
             let key = self.expect_ident_or_keyword()?.to_ascii_lowercase();
             self.expect(Token::Eq)?;
@@ -1408,6 +1409,9 @@ impl<'a> Parser<'a> {
                 "provider" => provider = Some(self.parse_string()?),
                 "model" => model = Some(self.parse_string()?),
                 "sync" | "sync_gate" => sync_gate = self.parse_ai_bool()?,
+                "hard_delete" | "hard_delete_on_reject" => {
+                    hard_delete_on_reject = self.parse_ai_bool()?
+                }
                 "degraded" | "degraded_mode" => {
                     let word = self.parse_ai_word()?;
                     degraded_mode = ModerateDegradedMode::from_str(&word).ok_or_else(|| {
@@ -1433,7 +1437,7 @@ impl<'a> Parser<'a> {
                 other => {
                     return Err(ParseError::new(
                         format!(
-                            "unsupported MODERATE policy option {other:?}; supported: fields, provider, model, sync, degraded, on_reject"
+                            "unsupported MODERATE policy option {other:?}; supported: fields, provider, model, sync, degraded, on_reject, hard_delete"
                         ),
                         self.position(),
                     ));
@@ -1469,6 +1473,7 @@ impl<'a> Parser<'a> {
             sync_gate,
             degraded_mode,
             reject_action,
+            hard_delete_on_reject,
         })
     }
 
@@ -1748,7 +1753,7 @@ mod tests {
         let QueryExpr::CreateTable(table) = parser(
             "posts (id INT, title TEXT, body TEXT, photo TEXT) WITH ( \
                EMBED (fields = ('title', 'body'), provider = 'openai', model = 'text-embedding-3-small'), \
-               MODERATE (fields = ('body'), provider = 'openai', model = 'omni-moderation-latest', sync = true, degraded = closed, on_reject = flag), \
+               MODERATE (fields = ('body'), provider = 'openai', model = 'omni-moderation-latest', sync = true, degraded = closed, on_reject = flag, hard_delete = true), \
                VISION (image_field = 'photo', outputs = ('caption', 'tags'), provider = 'openai', model = 'gpt-4o') \
              )",
         )
@@ -1769,6 +1774,7 @@ mod tests {
         assert!(moderate.sync_gate);
         assert_eq!(moderate.degraded_mode, ModerateDegradedMode::Closed);
         assert_eq!(moderate.reject_action, ModerateRejectAction::Flag);
+        assert!(moderate.hard_delete_on_reject);
 
         let vision = policy.vision.expect("vision block");
         assert_eq!(vision.image_field, "photo");
@@ -1777,6 +1783,110 @@ mod tests {
             vec!["caption".to_string(), "tags".to_string()]
         );
         assert_eq!(vision.model, "gpt-4o");
+    }
+
+    #[test]
+    fn parse_moderate_policy_aliases_and_error_branches() {
+        use reddb_types::catalog::{ModerateDegradedMode, ModerateRejectAction};
+        // Alias spellings hit the same match arms as the short forms.
+        let QueryExpr::CreateTable(table) = parser(
+            "t (id INT, body TEXT) WITH ( \
+               MODERATE (fields = ('body'), provider = 'openai', model = 'm', \
+                 sync_gate = true, degraded_mode = open, reject_action = redact, \
+                 hard_delete_on_reject = true) \
+             )",
+        )
+        .parse_create_table_body()
+        .expect("alias spellings parse") else {
+            panic!("Expected CreateTableQuery");
+        };
+        let moderate = table
+            .ai_policy
+            .expect("policy")
+            .moderate
+            .expect("moderate block");
+        assert!(moderate.sync_gate);
+        assert_eq!(moderate.degraded_mode, ModerateDegradedMode::Open);
+        assert_eq!(moderate.reject_action, ModerateRejectAction::Redact);
+        assert!(moderate.hard_delete_on_reject);
+
+        // Each invalid MODERATE option surfaces a descriptive parse error.
+        for (sql, needle) in [
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'o', model = 'm', bogus = 1))",
+                "unsupported MODERATE policy option",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'o', model = 'm', degraded = sideways))",
+                "unsupported MODERATE degraded mode",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'o', model = 'm', on_reject = explode))",
+                "unsupported MODERATE reject action",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (provider = 'o', model = 'm'))",
+                "MODERATE policy requires fields",
+            ),
+        ] {
+            let err = parser(sql)
+                .parse_create_table_body()
+                .expect_err("moderate policy error");
+            assert!(format!("{err}").contains(needle), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_embed_and_vision_policy_error_branches() {
+        // EMBED + VISION unknown-option and missing-required-field arms each
+        // surface a descriptive parse error.
+        for (sql, needle) in [
+            (
+                "t (id INT, body TEXT) WITH (EMBED (fields = ('body'), provider = 'o', model = 'm', bogus = 1))",
+                "unsupported EMBED policy option",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (EMBED (provider = 'o', model = 'm'))",
+                "EMBED policy requires fields",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (EMBED (fields = ('body'), model = 'm'))",
+                "EMBED policy requires provider",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (EMBED (fields = ('body'), provider = 'o'))",
+                "EMBED policy requires model",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (image_field = 'photo', provider = 'o', model = 'm', bogus = 1))",
+                "unsupported VISION policy option",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (provider = 'o', model = 'm'))",
+                "VISION policy requires image_field",
+            ),
+        ] {
+            let err = parser(sql)
+                .parse_create_table_body()
+                .expect_err("ai policy error");
+            assert!(format!("{err}").contains(needle), "got: {err}");
+        }
+
+        // The `output_kinds` alias for VISION parses like `outputs`.
+        let QueryExpr::CreateTable(table) = parser(
+            "t (id INT, photo TEXT) WITH (VISION (image_field = 'photo', \
+               output_kinds = ('caption'), provider = 'o', model = 'm'))",
+        )
+        .parse_create_table_body()
+        .expect("vision output_kinds alias") else {
+            panic!("Expected CreateTableQuery");
+        };
+        let vision = table
+            .ai_policy
+            .expect("policy")
+            .vision
+            .expect("vision block");
+        assert_eq!(vision.output_kinds, vec!["caption".to_string()]);
     }
 
     #[test]
@@ -1800,6 +1910,7 @@ mod tests {
         assert!(!moderate.sync_gate);
         assert_eq!(moderate.degraded_mode, ModerateDegradedMode::Open);
         assert_eq!(moderate.reject_action, ModerateRejectAction::Reject);
+        assert!(!moderate.hard_delete_on_reject);
 
         // No AI clause leaves the policy entirely absent.
         let QueryExpr::CreateTable(plain) = parser("plain (id INT)")

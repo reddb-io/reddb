@@ -180,7 +180,8 @@ pub struct EmbedPolicy {
     pub model: String,
 }
 
-/// `MODERATE (fields = (...), provider, model, sync, degraded, on_reject)`.
+/// `MODERATE (fields = (...), provider, model, sync, degraded, on_reject,
+/// hard_delete)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeratePolicy {
     /// Source fields screened by the moderation provider.
@@ -194,6 +195,11 @@ pub struct ModeratePolicy {
     pub degraded_mode: ModerateDegradedMode,
     /// What happens to content that fails moderation.
     pub reject_action: ModerateRejectAction,
+    /// When true (`hard_delete = true`), a quarantined row that
+    /// re-moderates to a reject is hard-deleted instead of being
+    /// tombstoned-and-retained for audit/appeal (the default). Opt-in
+    /// per-collection because hard-delete forfeits the audit trail.
+    pub hard_delete_on_reject: bool,
 }
 
 /// Behaviour when the moderation provider can't be reached.

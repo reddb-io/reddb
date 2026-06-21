@@ -89,6 +89,19 @@ impl<'rt> MutationEngine<'rt> {
         // method, so legitimate replica catch-up is unaffected.
         self.runtime
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+
+        // Synchronous content-moderation gate (#1274, ADR 0057). For a
+        // collection that declares a `MODERATE (... sync = true)` policy,
+        // every declared text field of every row is screened BEFORE the
+        // durable commit below. A reject refuses the whole write (no row
+        // persists); a provider-down outcome either quarantines the row
+        // (fail-open default — commit hidden, re-moderate async) or blocks
+        // the write (fail-closed opt-in). The gate may inject the reserved
+        // moderation marker field into a row's `fields`, so it runs before
+        // the entity build in the kernels.
+        self.runtime
+            .apply_sync_moderation_gate(&collection, &mut rows)?;
+
         match rows.len() {
             0 => Ok(MutationResult::empty()),
             1 => self.append_one(collection, rows.remove(0)),
