@@ -10,7 +10,10 @@
 //!   * the explicit `--no-auth` / `--dev` development carveout stays
 //!     allowed and resolves to the skip-all disposition.
 
-use reddb::cluster::{authorize_cluster_bootstrap, AuthBootstrapInput, BootstrapDisposition};
+use reddb::cluster::{
+    authorize_cluster_bootstrap, authorize_vault_bootstrap, AuthBootstrapInput,
+    BootstrapDisposition, VaultBootstrapPlan,
+};
 use reddb::operational_bootstrap::{resolve_operational_bootstrap, OperationalBootstrapInput};
 use reddb::storage::{DeployProfile, StorageDeployPreset};
 
@@ -170,4 +173,92 @@ fn non_cluster_restart_after_completion_is_idempotent() {
     )
     .unwrap();
     assert_eq!(disposition, BootstrapDisposition::AlreadyComplete);
+}
+
+// ----- Issue #1231: cluster vault first boot wired to the real auth store ---
+
+#[test]
+fn cluster_first_boot_vault_plan_fails_closed_for_every_input() {
+    // Acceptance: a cluster-shaped first boot with no proven owner is rejected
+    // before any vault plan is produced, so neither a scratch nor a
+    // per-member-only vault is minted and no secret input is consumed by a
+    // non-owner. Holds for both cluster-shaped paths and every input.
+    for profile in [
+        cluster_topology_profile(),
+        StorageDeployPreset::Cluster.selection().deploy_profile,
+    ] {
+        for input in [
+            AuthBootstrapInput::None,
+            AuthBootstrapInput::Env,
+            AuthBootstrapInput::Manifest,
+        ] {
+            let err = authorize_vault_bootstrap(profile, false, input, false).unwrap_err();
+            assert!(
+                err.contains("no concrete authority owner"),
+                "cluster first-boot vault must fail closed, got: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn completed_cluster_restart_unseals_real_store_without_secrets() {
+    // Acceptance: once first boot has completed, a cluster restart is
+    // authorized through the completion marker and lands on the unseal-only
+    // plan against the real cluster-global auth store — no secret input is
+    // consumed, so the vault is never re-minted or rotated.
+    for profile in [
+        cluster_topology_profile(),
+        StorageDeployPreset::Cluster.selection().deploy_profile,
+    ] {
+        let plan =
+            authorize_vault_bootstrap(profile, false, AuthBootstrapInput::Manifest, true).unwrap();
+        assert_eq!(
+            plan,
+            VaultBootstrapPlan::OpenClusterGlobalStore {
+                consume_secret_inputs: false,
+            },
+            "completed cluster restart must unseal the real store without secrets"
+        );
+    }
+}
+
+#[test]
+fn non_cluster_owner_first_boot_opens_real_store_and_consumes_secrets() {
+    // Acceptance: the owner path (here a non-cluster single authority, the
+    // only shape that can prove ownership today) opens the vault against the
+    // real store and consumes the env/`_FILE` secret inputs to mint the
+    // certificate.
+    let plan = resolve_operational_bootstrap(OperationalBootstrapInput {
+        topology: Some("standalone".to_string()),
+        ..Default::default()
+    })
+    .expect("standalone topology resolves");
+    let vault_plan = authorize_vault_bootstrap(
+        plan.storage_profile.deploy_profile,
+        false,
+        AuthBootstrapInput::Env,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        vault_plan,
+        VaultBootstrapPlan::OpenClusterGlobalStore {
+            consume_secret_inputs: true,
+        }
+    );
+}
+
+#[test]
+fn dev_bypass_cluster_boot_skips_the_vault() {
+    // Acceptance: `--no-auth` / `--dev` cluster-shaped boot skips the vault
+    // entirely — no certificate is minted and no store is opened.
+    for profile in [
+        cluster_topology_profile(),
+        StorageDeployPreset::Cluster.selection().deploy_profile,
+    ] {
+        let plan =
+            authorize_vault_bootstrap(profile, true, AuthBootstrapInput::None, false).unwrap();
+        assert_eq!(plan, VaultBootstrapPlan::SkipNoVault);
+    }
 }
