@@ -14,14 +14,44 @@ Every `red server` boot follows this order:
 3. Build the auth store. If `--vault` is active, open the encrypted vault from
    `REDDB_CERTIFICATE` or `REDDB_VAULT_KEY` and their `_FILE` companions.
 4. If `--no-auth` or `--dev` is active, skip every auth bootstrap path.
-5. Otherwise apply `REDDB_BOOTSTRAP_MANIFEST` when set, or `REDDB_PRESET`
-   (`simple`, `production`, `regulated`).
+5. Otherwise apply `REDDB_BOOTSTRAP_MANIFEST` when set, or the configured
+   bootstrap preset.
 
-`REDDB_PRESET=production` creates the first platform admin, installs an
-allow-all policy, attaches it to that admin, and persists
-`system.bootstrap.completed`. When vault-backed, the preset prints the newly
-issued certificate to stderr; save it and update the runtime secret before any
-restart.
+The bootstrap preset is selected by `--bootstrap-preset` /
+`REDDB_BOOTSTRAP_PRESET` (with `REDDB_PRESET` accepted as a legacy alias). The
+accepted values are `simple`, `production`, `regulated`, and `cloud`; the
+default is `simple`. The `production` and `cloud` presets auto-enable `--auth`,
+`--require-auth`, and `--vault` unless `--no-auth` wins.
+
+`--bootstrap-preset production` creates the first platform admin, installs an
+allow-all policy, attaches it to that admin, and persists the bootstrap-complete
+marker. When vault-backed, the preset prints the newly issued certificate to
+stderr; save it and update the runtime secret before any restart.
+
+## Bootstrap Presets
+
+Presets are policy-first: every user a preset creates is an ordinary,
+policy-governed platform user. There is no `system_owned` shortcut — protection
+comes from explicit allow/deny statements (see [policy-first bootstrap](#policy-first-bootstrap)).
+
+| Preset | Users created at first boot | Allow-all policy | Auth/vault auto-enabled | Managed guardrails installed |
+|---|---|---|---|---|
+| `simple` (default) | None | — | No (auth knobs stay as configured) | None |
+| `production` | One first admin from `--bootstrap-admin` / `REDDB_USERNAME` (+ password) | Yes, attached to the admin | Yes | `system.bootstrap.first-admin-allow-all` |
+| `cloud` | Two: a head/platform admin (`--cloud-head-admin`) and a customer admin (`--customer-admin`) | Yes, attached to both | Yes | `system.cloud.protect-managed`; `red.config.cloud.*` registered managed |
+| `regulated` | None | — | Yes | `system.regulated.protect-managed`; audit / evidence / query-audit config registered managed; query-audit infrastructure enabled |
+
+Admin credentials are supplied per preset:
+
+- `production` reads `--bootstrap-admin` / `REDDB_USERNAME` and
+  `--bootstrap-admin-password` / `REDDB_PASSWORD` (or the `*-password-file`
+  variant).
+- `cloud` reads `--cloud-head-admin` / `REDDB_CLOUD_HEAD_ADMIN` and
+  `--customer-admin` / `REDDB_CUSTOMER_ADMIN` (each with matching password and
+  `-password-file` flags). The two usernames must differ.
+
+The bootstrap-complete marker makes presets idempotent: a preset applies once
+and is skipped on every later boot of the same database.
 
 For the standalone `red bootstrap` command, always run it against the same
 database file/volume that will be served. A certificate minted from a scratch
@@ -31,8 +61,8 @@ database does not unseal another database.
 
 | Delivery shape | No-auth first boot | Auth/vault first boot | Current status |
 |---|---|---|---|
-| Standalone / embedded file | Supported with `--no-auth` or `--dev`; this disables vault and skips presets. | Supported through `red bootstrap --vault` on the real file/volume, or `red server --vault` plus `REDDB_PRESET=production` and admin env. | Supported. |
-| Serverless writer | Same as standalone; serverless is a standalone process role with serverless storage/remote backend contract. | Supported on the single writer. Bootstrap the local writer volume before remote backup/restore, or use first-start `REDDB_PRESET=production` and capture the emitted certificate. | Supported for one writer. |
+| Standalone / embedded file | Supported with `--no-auth` or `--dev`; this disables vault and skips presets. | Supported through `red bootstrap --vault` on the real file/volume, or `red server --vault` plus `REDDB_BOOTSTRAP_PRESET=production` and admin env. | Supported. |
+| Serverless writer | Same as standalone; serverless is a standalone process role with serverless storage/remote backend contract. | Supported on the single writer. Bootstrap the local writer volume before remote backup/restore, or use first-start `REDDB_BOOTSTRAP_PRESET=production` and capture the emitted certificate. | Supported for one writer. |
 | Primary-replica | Supported on the primary; replicas should not create local admins. | Supported on the primary only. Replicas must receive replicated auth state from the primary and must not receive bootstrap env. | Supported for the primary-replica writer path. |
 | Cluster | Supported only as today's cluster-shaped storage/discovery contract with standalone process roles. | Not supported yet. Symmetric members cannot safely pick a first writer, so `mode=cluster` rejects `auth.enabled=true`, and `red server` rejects bootstrap env when the resolved shape is cluster. | Incomplete until cluster writer election/range ownership defines a single auth bootstrap owner; tracked by [PRD #1227](https://github.com/reddb-io/reddb/issues/1227). |
 
@@ -47,6 +77,24 @@ Initial config comes from three layers:
 
 This means an operator can ship initial config with the container without
 overwriting later `SET CONFIG` changes.
+
+## Policy-First Bootstrap
+
+Bootstrap and manifest users are ordinary policy-governed principals. There is
+no special operator-owned class:
+
+- The engine rejects `users[].system_owned` in bootstrap manifests and rejects
+  `condition.system_owned` in policies. Ownership must be modeled as explicit
+  `user:*` / `policy:*` allow and deny statements.
+- User-lifecycle mutations authorize against `user:*` actions
+  (`user:create`, `user:update`, `user:disable`, `user:delete`,
+  `user:password:change`, `user:role:update`) on `user:<username>` resources.
+  Public HTTP and gRPC user-delete / password-change paths call that gate.
+- Managed policies are protected by policy, not by a structural flag: once IAM
+  is active, `policy:put` / `policy:drop` / `policy:attach` / `policy:detach`
+  on a managed policy resource must be explicitly allowed, and an explicit Deny
+  always wins. The `production`, `cloud`, and `regulated` presets install their
+  guardrails as managed policies governed this way.
 
 ## RedDB Cloud Admin Model
 
@@ -124,14 +172,17 @@ user and policy resources.
 
 - `service_cli::to_db_options` makes `--no-auth` the final word and disables
   vault/presets for that boot.
-- `service_cli::apply_preset` applies manifests or presets idempotently via
-  `system.bootstrap.completed`.
+- `service_cli` resolves the bootstrap preset from `--bootstrap-preset`,
+  `REDDB_BOOTSTRAP_PRESET`, then the legacy `REDDB_PRESET`, defaulting to
+  `simple`, and applies manifests or presets idempotently via the
+  bootstrap-complete marker.
 - `AuthStore::bootstrap` creates the first admin, API key, vault keypair, and
   certificate when a pager-backed vault exists.
 - Helm renders auth bootstrap env only into the writer StatefulSet and rejects
   `mode=cluster` with `auth.enabled=true`. The `red server` CLI also rejects
-  `REDDB_PRESET`, `REDDB_BOOTSTRAP_MANIFEST`, and admin username/password env
-  in cluster-shaped boots unless `--no-auth` or `--dev` is explicit.
+  `REDDB_BOOTSTRAP_PRESET` / `REDDB_PRESET`, `REDDB_BOOTSTRAP_MANIFEST`, and
+  admin username/password env in cluster-shaped boots unless `--no-auth` or
+  `--dev` is explicit.
 - User lifecycle policy gates cover `user:create`, `user:delete`,
   `user:disable`, `user:password:change`, and `user:role:update`; public HTTP
   and gRPC user-delete/password-change paths call that gate.

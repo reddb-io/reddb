@@ -79,6 +79,21 @@ Response:
 }
 ```
 
+`/stats` reports instance-wide totals. For **per-collection** storage telemetry
+— including `on_disk_bytes` (reachable primary B-tree bytes) alongside
+`in_memory_bytes`, `entities`, and `segments` — query the `red.collections`
+virtual table:
+
+```sql
+SELECT name, model, entities, in_memory_bytes, on_disk_bytes FROM red.collections;
+```
+
+`on_disk_bytes` is a conservative estimate (reachable B-tree pages × the 4 KiB
+page size); it is `NULL` when the local page store cannot expose a root page,
+and excludes shared header/freelist/WAL bytes and unreachable artifacts. See
+[`red.collections`](red-schema.md#redcollections) for the full column set and
+caveats.
+
 ## Catalog Readiness
 
 Get a comprehensive readiness view:

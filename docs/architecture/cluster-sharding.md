@@ -10,6 +10,8 @@ The implementation lives under `crates/reddb-server/src/cluster/`, especially:
 
 - `ownership.rs` for collection range ownership, epochs, catalog versions, and
   the per-range public write gate.
+- `slot.rs` for the hash-slot primitive: the fixed slot count, the
+  `shard_key -> hash -> slot` function, and the slot-to-range-key encoding.
 - `routing.rs` for any-node routing, forwarding, and redirect hints.
 - `cross_range.rs` for first-cut cross-range transaction and read behavior.
 - `placement.rs` and `move_range.rs` for planning rebalancing, hotspot relief,
@@ -21,6 +23,7 @@ The implementation lives under `crates/reddb-server/src/cluster/`, especially:
 |---|---|
 | Range ownership catalog | Landed as a pure control-plane model |
 | Hash and ordered collection sharding modes | Landed in the catalog model |
+| Fixed hash-slot primitive (16,384 slots) | Landed in `slot.rs` |
 | Any-node routing decisions | Landed as pure routing decisions |
 | Public write fencing by owner epoch | Landed in the catalog model |
 | Cross-range write transaction guardrails | Landed as pure planning decisions |
@@ -88,6 +91,39 @@ A collection cannot mix the two modes. The first range, or an explicit
 collection declaration, fixes the collection's `ShardKeyMode`. Later catalog
 updates that try to add a range of the other mode are rejected with
 `ShardKeyModeMismatch`.
+
+### Hash Slots
+
+In `Hash` mode the indirection above is concrete: a shard key is first mapped to
+a fixed *hash slot*, and slots are what the catalog ranges actually cover.
+
+- The slot count is a cluster-format constant — `PRODUCTION_HASH_SLOT_COUNT =
+  16_384` — not `node_count`. Adding or removing members does not remap the
+  keyspace; it only moves which member owns a slot span.
+- `hash_shard_key_to_slot` hashes the shard-key bytes with BLAKE3, takes the
+  first 8 bytes big-endian, and reduces modulo the slot count. The mapping is
+  stable and deterministic for a given key.
+- Each slot encodes a big-endian `range_key`, so a contiguous slot span folds
+  directly into the catalog's existing half-open `[lower, upper)` `RangeBounds`.
+  A `RangeOwnership` entry in hash mode therefore represents a contiguous span
+  of slots, and the catalog records which owner holds that span.
+
+So a slot is the *logical* hash bucket and a range is still the *cataloged*
+ownership unit. Point routing is formulaic — `shard key -> hash -> slot -> range
+-> owner` — while ownership remains versioned catalog state that the supervisor
+splits and moves. The user-facing routing example reads, in full hash mode:
+
+```text
+tenant_id='acme' -> hash -> slot 9381 -> range [8192, 12288) -> shard group -> owner
+```
+
+This slot layer is shipped as a pure primitive in `slot.rs` and consumed by the
+ownership and topology models. It is not yet wired into a finished cluster
+serving path, and there is still no public `SHARD BY` DDL that lets a user
+declare the shard key — see [Not Yet Promised](#not-yet-promised). The full
+slot-map and cross-shard contract is specified in
+[ADR 0055](../../.red/adr/0055-cluster-slot-map-and-cross-shard-operations.md)
+(status: proposed).
 
 ## Who Chooses The Mode
 
@@ -239,6 +275,8 @@ The cluster sharding model is designed around these properties:
 
 Do not claim these as production behavior until the runtime work lands:
 
+- A public `SHARD BY` DDL surface for declaring the shard key. The hash-slot and
+  ownership primitives exist, but parsing/wiring `SHARD BY` is not implemented.
 - Full multi-writer serving in the container/Helm `cluster` profile.
 - Distributed SQL planning with shard-local subplans and coordinator merge.
 - Automatic cluster-wide result cache invalidation.

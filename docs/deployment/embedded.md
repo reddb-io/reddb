@@ -60,3 +60,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 For the full API surface, see [Embedded (Rust)](/api/embedded.md).
+
+## Storage profile
+
+Embedded mode today opens a single `.rdb` file plus the sidecar shadows
+documented in [`.rdb` File Format](/engine/file-format.md). The target embedded
+profile keeps the one-file ergonomics but moves that state into a single
+internally *zoned* `.rdb` with an in-file manifest, WAL region, and ping-pong
+superblocks, so no sidecars are required for normal operation. That design is
+proposed, not shipped — see
+[Operational Storage Profiles](/engine/operational-storage-profiles.md) for the
+full profile matrix and how embedded relates to serverless, primary-replica, and
+cluster packaging.

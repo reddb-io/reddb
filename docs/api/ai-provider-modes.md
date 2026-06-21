@@ -64,6 +64,45 @@ Non-2xx responses are surfaced as `RedDBError::Query` carrying the
 status code and the provider's parsed `error.message` (or the raw
 body when the provider doesn't return JSON).
 
+## Modality matrix
+
+Separately from the *wire-protocol* mode above, every provider carries a
+**modality capability** — which AI jobs it can serve. The four modalities are:
+
+| Modality | Token | What it does |
+|:---------|:------|:-------------|
+| Embed | `embed` (`embedding`, `embeddings`) | Produce embedding vectors for text |
+| Generate | `generate` (`generation`, `chat`, `completion`) | Generate free-form text from a prompt |
+| Vision | `vision` (`image`, `multimodal`) | Accept image input alongside text |
+| Moderate | `moderate` (`moderation`) | Classify content against a safety taxonomy |
+
+The built-in provider × modality matrix:
+
+| Provider | `embed` | `generate` | `vision` | `moderate` |
+|:---------|:-------:|:----------:|:--------:|:----------:|
+| `openai` | ✅ | ✅ | ✅ | ✅ |
+| `anthropic` | — | ✅ | ✅ | — |
+| `minimax` | ✅ | ✅ | ✅ | — |
+| `together` | ✅ | ✅ | ✅ | — |
+| `ollama` | ✅ | ✅ | ✅ | — |
+| `groq` | — | ✅ | ✅ | — |
+| `openrouter` | — | ✅ | ✅ | — |
+| `venice` | — | ✅ | ✅ | — |
+| `deepseek` | — | ✅ | — | — |
+| `huggingface` | ✅ | ✅ | — | — |
+| `local` | ✅ | — | — | — |
+| unknown / `custom` | ✅ | ✅ | — | — |
+
+An **unknown** provider token is treated conservatively: only the universal
+text modalities (`embed`, `generate`) are assumed, and `vision`/`moderate`
+requests against it are rejected rather than guessed.
+
+The matrix gates a [per-collection AI policy](../query/ai-policy.md) at
+**`CREATE TABLE` time**: a policy that wires a provider to a modality it cannot
+serve is rejected immediately, not on the first write. Per-deployment overrides
+can layer onto the built-in rows when a deployment runs a provider with a
+different capability set.
+
 ## Relationship to `red.config.ai.default.provider`
 
 * `red.config.ai.default.provider` → names a vendor (`openai`,

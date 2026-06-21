@@ -73,6 +73,11 @@ curl -X POST http://127.0.0.1:8080/ai/credentials \
 
 The `"default": true` flag tells RedDB to use Groq whenever you omit `USING` from a query.
 
+> [!NOTE]
+> When both are set, the **vault wins**: key resolution prefers the encrypted
+> vault and treats the `REDDB_{PROVIDER}_API_KEY` env vars as a bootstrap
+> fallback. See [AI providers → Vault credentials](ai-providers.md#vault-credentials).
+
 ### Verify configuration
 
 ```bash
@@ -235,6 +240,12 @@ This single command does three things:
 3. Stores the resulting vector in the `incidents` vector index
 
 > **Tip**: You can use `WITH AUTO EMBED` on every insert. For bulk historical data, the `/ai/embeddings` endpoint with `source_query` mode is more efficient. See the [HTTP API docs](/api/http.md#embeddings).
+
+> [!TIP]
+> To embed **every** write to a collection without restating `WITH AUTO EMBED`,
+> declare an [`EMBED` policy](../query/ai-policy.md) on the collection. Writes
+> then commit immediately and are embedded asynchronously over CDC; rows are
+> `pending` (excluded from vector search) until their vector is attached.
 
 ---
 
@@ -589,9 +600,31 @@ explicitly:
 ASK 'host 10.0.0.5' AS RQL
 ```
 
-The `AS RQL` path does not call the LLM. It uses schema vocabulary and literal
-extraction, validates the generated read-only query through the parser, and
-returns the candidate in the `rql` column for the caller to execute or approve.
+`AS RQL` returns a candidate query in the `rql` column instead of synthesizing a
+natural-language answer. It has two backends, selected by the
+`ai.ask_rql.backend` config key:
+
+- **`deterministic` (default)** — no AI call. Schema vocabulary + literal
+  extraction build the candidate.
+- **`llm`** — the configured `generate` provider translates the question into
+  RQL (parser-validated inference). Falls back to the deterministic planner when
+  no provider/API key is available.
+
+Either way the candidate is **always re-validated through the production parser**
+before it is returned, and it is **not executed** by default. Add `EXECUTE` to
+auto-run a candidate — but only **read-only** candidates run; a mutating
+candidate (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/DDL) is refused even with
+`EXECUTE`:
+
+```sql
+-- returns the candidate only
+ASK 'host 10.0.0.5' AS RQL
+
+-- opts in to running a read-only candidate
+ASK 'host 10.0.0.5' AS RQL EXECUTE
+```
+
+See [Search commands → `AS RQL` and `EXECUTE`](../query/search-commands.md#ask--as-rql-and-execute).
 
 ### SEARCH CONTEXT = 3-Tier Strategy
 
@@ -629,7 +662,7 @@ paths. The provider boundary is enforced as follows:
 | `SELECT … COUNT/SUM/AVG/MIN/MAX(…)` | SQL planner + executor | Exact, reproducible, no network call. |
 | `SEARCH CONTEXT 'term'` | Multi-tier index (field → token → scan) | Returns table rows, documents, KV entries, graph nodes/edges, and vectors when each backing collection exists. Empty result set when nothing matches &mdash; the contract is "ground or fall silent". |
 | `ASK '…'` | `AskPipeline` funnel + LLM synthesis | Pipeline grounds first (Stage 4 literal filter / Stage 3 BM25 + vector / Stage 3c graph), then the LLM rewrites the grounded rows into a citation-bearing sentence. |
-| `ASK '…' AS RQL` | Deterministic RQL planner | Uses schema vocabulary + literal extraction to return a parser-validated read-only query candidate. It does not call the LLM and does not execute the generated RQL. |
+| `ASK '…' AS RQL` | RQL planner (`deterministic`) or inference (`llm`), per `ai.ask_rql.backend` | Returns a parser-validated query candidate. The candidate is re-validated through the parser regardless of backend, and is not executed unless `EXECUTE` is given — and then only when read-only. |
 | Missing or unsupported analytics inside an `ASK` question | Pipeline short-circuits with a structured error OR returns an answer that openly cites "no matching sources" | The LLM never invents a number; it can only quote what `sources_flat` contains. |
 
 A practical rule: if the question is a calculation (`how many incidents are
