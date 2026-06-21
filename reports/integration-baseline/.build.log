@@ -3,3 +3,24 @@ warning: ignoring --test-threads because --no-run is specified
    Compiling reddb-io-server v1.11.0 (/home/cyber/Work/reddb.io/reddb/.red/tmp/workers/w198C/974-a1/.sandcastle/worktrees/afk-w198C-974-measure-publish-the-integration-test-bas/crates/reddb-server)
    Compiling similar v2.7.0
    Compiling toml v1.1.2+spec-1.1.0
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling anstream v1.0.0
+   Compiling clap_lex v1.1.0
+   Compiling clap_builder v4.6.0
+   Compiling clap_derive v4.6.1
+   Compiling clap v4.6.1
+   Compiling itertools v0.13.0
+   Compiling target-triple v1.0.0
+   Compiling glob v0.3.3
+   Compiling termcolor v1.4.1
+   Compiling trybuild v1.0.116
+   Compiling vte v0.14.1
+   Compiling strip-ansi-escapes v0.2.1
+   Compiling console v0.16.3
+   Compiling insta v1.48.0
+Terminated
