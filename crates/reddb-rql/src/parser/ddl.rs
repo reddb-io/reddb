@@ -1837,6 +1837,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_embed_and_vision_policy_error_branches() {
+        // EMBED + VISION unknown-option and missing-required-field arms each
+        // surface a descriptive parse error.
+        for (sql, needle) in [
+            (
+                "t (id INT, body TEXT) WITH (EMBED (fields = ('body'), provider = 'o', model = 'm', bogus = 1))",
+                "unsupported EMBED policy option",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (EMBED (provider = 'o', model = 'm'))",
+                "EMBED policy requires fields",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (EMBED (fields = ('body'), model = 'm'))",
+                "EMBED policy requires provider",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (EMBED (fields = ('body'), provider = 'o'))",
+                "EMBED policy requires model",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (image_field = 'photo', provider = 'o', model = 'm', bogus = 1))",
+                "unsupported VISION policy option",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (provider = 'o', model = 'm'))",
+                "VISION policy requires image_field",
+            ),
+        ] {
+            let err = parser(sql)
+                .parse_create_table_body()
+                .expect_err("ai policy error");
+            assert!(format!("{err}").contains(needle), "got: {err}");
+        }
+
+        // The `output_kinds` alias for VISION parses like `outputs`.
+        let QueryExpr::CreateTable(table) = parser(
+            "t (id INT, photo TEXT) WITH (VISION (image_field = 'photo', \
+               output_kinds = ('caption'), provider = 'o', model = 'm'))",
+        )
+        .parse_create_table_body()
+        .expect("vision output_kinds alias") else {
+            panic!("Expected CreateTableQuery");
+        };
+        let vision = table
+            .ai_policy
+            .expect("policy")
+            .vision
+            .expect("vision block");
+        assert_eq!(vision.output_kinds, vec!["caption".to_string()]);
+    }
+
+    #[test]
     fn parse_create_table_ai_policy_defaults_and_no_clause() {
         use reddb_types::catalog::{ModerateDegradedMode, ModerateRejectAction};
         // MODERATE with no sync/degraded/on_reject falls back to defaults.
