@@ -1,5 +1,6 @@
 //! Shared cluster identity and membership model.
 
+pub mod bootstrap_authority;
 pub mod commit_resolution;
 pub mod cross_range;
 pub mod drain;
@@ -17,6 +18,10 @@ pub mod slot;
 pub mod supervisor;
 pub mod topology;
 
+pub use bootstrap_authority::{
+    authorize as authorize_cluster_bootstrap, is_cluster_shaped, AuthBootstrapInput,
+    BootstrapDisposition,
+};
 pub use commit_resolution::{
     is_local_ack, resolve_commit_policy, CollectionDataModel, CommitPolicyResolution,
     CommitPolicyViolation, FailoverEligibility, GuardrailDisposition, HaIntent, ResolutionSource,
