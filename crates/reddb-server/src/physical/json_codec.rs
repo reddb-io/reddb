@@ -381,6 +381,7 @@ fn ai_policy_to_persisted(policy: &crate::catalog::AiPolicy) -> reddb_file::Phys
                 sync_gate: moderate.sync_gate,
                 degraded_mode: moderate.degraded_mode.as_str().to_string(),
                 reject_action: moderate.reject_action.as_str().to_string(),
+                hard_delete_on_reject: moderate.hard_delete_on_reject,
             }),
         vision: policy
             .vision
@@ -413,6 +414,7 @@ fn ai_policy_from_persisted(policy: reddb_file::PhysicalAiPolicy) -> crate::cata
                     .unwrap_or_default(),
                 reject_action: ModerateRejectAction::from_str(&moderate.reject_action)
                     .unwrap_or_default(),
+                hard_delete_on_reject: moderate.hard_delete_on_reject,
             }),
         vision: policy.vision.map(|vision| crate::catalog::VisionPolicy {
             image_field: vision.image_field,
@@ -1189,6 +1191,7 @@ mod tests {
                 sync_gate: true,
                 degraded_mode: crate::catalog::ModerateDegradedMode::Closed,
                 reject_action: crate::catalog::ModerateRejectAction::Redact,
+                hard_delete_on_reject: true,
             }),
             vision: Some(crate::catalog::VisionPolicy {
                 image_field: "photo".to_string(),
