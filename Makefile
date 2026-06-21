@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-full test-persistent test-persistent-grimms drill-nightly clean run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
+.PHONY: help build build-fast release warm test test-fast test-full test-nextest test-nextest-lib test-nextest-e2e test-persistent test-persistent-grimms drill-nightly clean run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -17,6 +17,9 @@ help:
 	@echo "  make test          - Run the fast local test layer"
 	@echo "  make test-fast     - Run unit/bin tests plus curated smoke/regression integration targets"
 	@echo "  make test-full     - Run all non-ignored Rust tests"
+	@echo "  make test-nextest  - Run the whole suite under cargo-nextest (per-test timeout)"
+	@echo "  make test-nextest-lib - Run the fast lib (unit) lane under cargo-nextest"
+	@echo "  make test-nextest-e2e - Run the e2e (integration) lane under cargo-nextest"
 	@echo "  make test-persistent - Run the persistent multimodel integration layer"
 	@echo "  make test-persistent-grimms - Run the Grimms-scale persistent storage fixture"
 	@echo "  make drill-nightly - Run backup/restore drill tests and append drill history"
@@ -75,6 +78,21 @@ test-fast:
 
 test-full:
 	./scripts/cargo-fast.sh test --locked
+
+# cargo-nextest lanes (issue #973). nextest enforces per-test process isolation
+# and a hard per-test timeout (see .config/nextest.toml) so a hung test is
+# killed and reported instead of stalling the run. See docs/testing/nextest-lanes.md.
+test-nextest:
+	cargo nextest run --workspace --locked
+
+# Lib lane: fast in-crate unit tests only.
+test-nextest-lib:
+	cargo nextest run --workspace --locked --lib
+
+# e2e lane: the top-level integration-test binaries. Shard across N runners with
+# `scripts/nextest-e2e-shard.sh <index> <total>`.
+test-nextest-e2e:
+	cargo nextest run --workspace --locked -E 'kind(test)'
 
 test-persistent:
 	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test grouped_runtime_persistence integration_persistent_multimodel -- --ignored
