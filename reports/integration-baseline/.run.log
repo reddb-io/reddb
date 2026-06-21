@@ -1,3 +1,4 @@
-=== integration (e2e) lane run START 2026-06-21T13:03:37Z ===
+=== integration (e2e) lane run START 2026-06-21T13:21:14Z ===
 cmd: cargo nextest run --workspace --locked -E 'kind(test)' --no-fail-fast
-   Compiling reddb-io-server v1.11.0 (/home/cyber/Work/reddb.io/reddb/.red/tmp/workers/w198C/974-a1/.sandcastle/worktrees/afk-w198C-974-measure-publish-the-integration-test-bas/crates/reddb-server)
+   Compiling reddb-io-types v1.11.0 (/home/cyber/Work/reddb.io/reddb/.red/tmp/workers/w198C/974-a1/.sandcastle/worktrees/afk-w198C-974-measure-publish-the-integration-test-bas/crates/reddb-types)
+   Compiling aho-corasick v1.1.4
