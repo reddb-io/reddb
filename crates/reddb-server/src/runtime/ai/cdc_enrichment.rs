@@ -24,13 +24,30 @@
 //! and a production scheduler can drive it from a background thread without
 //! changing the semantics.
 
-use crate::application::entity::CreateVectorInput;
+use crate::application::entity::{CreateVectorInput, PatchEntityInput};
 use crate::application::ports::RuntimeEntityPort;
-use crate::catalog::EmbedPolicy;
+use crate::catalog::{EmbedPolicy, VisionPolicy};
 use crate::replication::cdc::ChangeOperation;
 use crate::storage::schema::Value;
 use crate::storage::{EntityData, EntityId};
 use crate::{RedDBError, RedDBResult, RedDBRuntime};
+
+/// Derived field that receives the structured component-detections array
+/// (`[{label, confidence, bbox:[x,y,w,h]}]`). It is a normal row field, so
+/// RQL filters (e.g. `CONTAINS(vision_detections, 'person')`) work over it
+/// once the consumer attaches it.
+pub const VISION_DETECTIONS_FIELD: &str = "vision_detections";
+
+/// Which async enrichment a pending work item carries. A single committed
+/// row can require both (a collection may declare EMBED and VISION); each
+/// is tracked and retried independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrichmentKind {
+    /// Auto-embed the declared text fields (#1272).
+    Embed,
+    /// Run computer vision over the declared image-reference field (#1275).
+    Vision,
+}
 
 /// Tunables for the enrichment consumer.
 #[derive(Debug, Clone)]
@@ -60,6 +77,7 @@ impl Default for EnrichmentConfig {
 struct PendingWork {
     collection: String,
     entity_id: u64,
+    kind: EnrichmentKind,
     attempts: u32,
     /// Earliest wall-clock (unix ms) at which the next attempt may run.
     not_before_ms: u64,
@@ -71,6 +89,7 @@ struct PendingWork {
 pub struct DeadLetter {
     pub collection: String,
     pub entity_id: u64,
+    pub kind: EnrichmentKind,
     pub attempts: u32,
     pub last_error: String,
 }
@@ -126,11 +145,20 @@ impl CdcEnrichmentConsumer {
         self.pending.len()
     }
 
-    /// True while `(collection, entity_id)` is still awaiting enrichment.
+    /// True while `(collection, entity_id)` is still awaiting any kind of
+    /// enrichment.
     pub fn is_pending(&self, collection: &str, entity_id: u64) -> bool {
         self.pending
             .iter()
             .any(|w| w.collection == collection && w.entity_id == entity_id)
+    }
+
+    /// True while `(collection, entity_id)` is awaiting the given kind of
+    /// enrichment specifically.
+    pub fn is_pending_kind(&self, collection: &str, entity_id: u64, kind: EnrichmentKind) -> bool {
+        self.pending
+            .iter()
+            .any(|w| w.collection == collection && w.entity_id == entity_id && w.kind == kind)
     }
 
     /// Dead-lettered work items (enrichment failed past the retry budget).
@@ -144,7 +172,7 @@ impl CdcEnrichmentConsumer {
         let drained: Vec<DeadLetter> = self.dead_letters.drain(..).collect();
         let count = drained.len();
         for dl in drained {
-            self.enqueue(dl.collection, dl.entity_id);
+            self.enqueue(dl.collection, dl.entity_id, dl.kind);
         }
         count
     }
@@ -155,20 +183,35 @@ impl CdcEnrichmentConsumer {
     pub fn tick(&mut self, rt: &RedDBRuntime, now_ms: u64) -> RedDBResult<TickStats> {
         let mut stats = TickStats::default();
 
-        // 1. Ingest committed change events for embed-policy collections.
+        // 1. Ingest committed change events for embed- and vision-policy
+        //    collections. A row can require both; each modality is queued
+        //    and retried independently.
         let events = rt.cdc_poll(self.cursor, self.config.poll_max);
         for event in &events {
             if event.lsn > self.cursor {
                 self.cursor = event.lsn;
             }
-            let Some(policy) = rt.collection_embed_policy(&event.collection) else {
-                continue;
-            };
-            if !change_touches_embed_fields(event, &policy) {
-                continue;
+            if let Some(policy) = rt.collection_embed_policy(&event.collection) {
+                if change_touches_embed_fields(event, &policy)
+                    && self.enqueue(
+                        event.collection.clone(),
+                        event.entity_id,
+                        EnrichmentKind::Embed,
+                    )
+                {
+                    stats.ingested += 1;
+                }
             }
-            if self.enqueue(event.collection.clone(), event.entity_id) {
-                stats.ingested += 1;
+            if let Some(policy) = rt.collection_vision_policy(&event.collection) {
+                if change_touches_vision_field(event, &policy)
+                    && self.enqueue(
+                        event.collection.clone(),
+                        event.entity_id,
+                        EnrichmentKind::Vision,
+                    )
+                {
+                    stats.ingested += 1;
+                }
             }
         }
 
@@ -182,10 +225,19 @@ impl CdcEnrichmentConsumer {
             }
             // The policy can disappear if the collection was dropped/altered
             // between enqueue and drain — quietly forget such work.
-            let Some(policy) = rt.collection_embed_policy(&work.collection) else {
-                continue;
+            let attempt = match work.kind {
+                EnrichmentKind::Embed => match rt.collection_embed_policy(&work.collection) {
+                    Some(policy) => {
+                        rt.enrich_row_embedding(&work.collection, work.entity_id, &policy)
+                    }
+                    None => continue,
+                },
+                EnrichmentKind::Vision => match rt.collection_vision_policy(&work.collection) {
+                    Some(policy) => rt.enrich_row_vision(&work.collection, work.entity_id, &policy),
+                    None => continue,
+                },
             };
-            match rt.enrich_row_embedding(&work.collection, work.entity_id, &policy) {
+            match attempt {
                 Ok(()) => stats.attached += 1,
                 Err(err) => {
                     work.attempts += 1;
@@ -193,6 +245,7 @@ impl CdcEnrichmentConsumer {
                         self.dead_letters.push(DeadLetter {
                             collection: work.collection,
                             entity_id: work.entity_id,
+                            kind: work.kind,
                             attempts: work.attempts,
                             last_error: format!("{err:?}"),
                         });
@@ -215,19 +268,20 @@ impl CdcEnrichmentConsumer {
         Ok(stats)
     }
 
-    /// Add a row to the pending set unless it is already queued. Returns
-    /// true when a new item was enqueued.
-    fn enqueue(&mut self, collection: String, entity_id: u64) -> bool {
+    /// Add a row to the pending set unless this `(collection, entity, kind)`
+    /// is already queued. Returns true when a new item was enqueued.
+    fn enqueue(&mut self, collection: String, entity_id: u64, kind: EnrichmentKind) -> bool {
         if self
             .pending
             .iter()
-            .any(|w| w.entity_id == entity_id && w.collection == collection)
+            .any(|w| w.entity_id == entity_id && w.kind == kind && w.collection == collection)
         {
             return false;
         }
         self.pending.push(PendingWork {
             collection,
             entity_id,
+            kind,
             attempts: 0,
             not_before_ms: 0,
         });
@@ -257,12 +311,62 @@ fn change_touches_embed_fields(
     }
 }
 
+/// Whether a change event should (re)run vision over the row under
+/// `policy`. Inserts always run. Updates run only when the declared
+/// image-reference field changed (or no damage vector is available, so we
+/// run conservatively). Crucially, an update that only touched the derived
+/// detections field — the consumer's own write-back — does NOT match,
+/// because that field is not the image-reference field, so vision never
+/// re-triggers itself into a loop. Deletes/refreshes never run.
+fn change_touches_vision_field(
+    event: &crate::replication::cdc::ChangeEvent,
+    policy: &VisionPolicy,
+) -> bool {
+    match event.operation {
+        ChangeOperation::Insert => true,
+        ChangeOperation::Update => match &event.changed_columns {
+            Some(columns) => columns.iter().any(|column| column == &policy.image_field),
+            None => true,
+        },
+        ChangeOperation::Delete | ChangeOperation::Refresh => false,
+    }
+}
+
+/// Whether the policy's output kinds request structured component
+/// detections. Several spellings are accepted so DDL authors are not
+/// boxed into one keyword.
+fn vision_wants_detections(policy: &VisionPolicy) -> bool {
+    policy.output_kinds.iter().any(|kind| {
+        matches!(
+            kind.trim().to_ascii_lowercase().as_str(),
+            "detections" | "objects" | "components" | "detection"
+        )
+    })
+}
+
+/// Whether the policy's output kinds request an image-embedding output.
+fn vision_wants_embedding(policy: &VisionPolicy) -> bool {
+    policy.output_kinds.iter().any(|kind| {
+        matches!(
+            kind.trim().to_ascii_lowercase().as_str(),
+            "embedding" | "image_embedding" | "image-embedding"
+        )
+    })
+}
+
 impl RedDBRuntime {
     /// The declared embed policy for `collection`, if any.
     pub fn collection_embed_policy(&self, collection: &str) -> Option<EmbedPolicy> {
         self.db()
             .collection_contract_arc(collection)
             .and_then(|contract| contract.ai_policy.as_ref().and_then(|p| p.embed.clone()))
+    }
+
+    /// The declared vision policy for `collection`, if any.
+    pub fn collection_vision_policy(&self, collection: &str) -> Option<VisionPolicy> {
+        self.db()
+            .collection_contract_arc(collection)
+            .and_then(|contract| contract.ai_policy.as_ref().and_then(|p| p.vision.clone()))
     }
 
     /// Compute the embedding for one committed row and attach it as a vector
@@ -310,6 +414,147 @@ impl RedDBRuntime {
         })?;
         Ok(())
     }
+
+    /// Run computer vision over one committed row: fetch the image
+    /// referenced by the policy's `image_field`, call the vision provider,
+    /// write the structured component-detections to the derived
+    /// [`VISION_DETECTIONS_FIELD`] (RQL-filterable), and — when the policy
+    /// requests it — attach an image-embedding vector reusing the existing
+    /// vector pipeline.
+    ///
+    /// A row whose image reference is absent/empty is treated as complete
+    /// (nothing to analyze) rather than failed.
+    pub(crate) fn enrich_row_vision(
+        &self,
+        collection: &str,
+        entity_id: u64,
+        policy: &VisionPolicy,
+    ) -> RedDBResult<()> {
+        // This slice drives the in-process `local` provider (the path the
+        // mock vision backend exercises); other providers are rejected with
+        // a deterministic error that the retry/dead-letter machinery
+        // handles like any failure.
+        match crate::ai::parse_provider(&policy.provider)? {
+            crate::ai::AiProvider::Local => {}
+            other => {
+                return Err(RedDBError::Query(format!(
+                    "CDC vision enrichment currently drives the 'local' provider; \
+                     collection policy declares '{other:?}'"
+                )));
+            }
+        }
+
+        let db = self.db();
+        // Resolve the live row through its stable logical id (see
+        // `enrich_row_embedding`). `None` means the event was not a live
+        // table row — nothing to enrich.
+        let Some(entity) = db
+            .store()
+            .get_table_row_by_logical_id(collection, EntityId::new(entity_id))
+        else {
+            return Ok(());
+        };
+
+        let Some(reference) = row_text_field(&entity.data, &policy.image_field) else {
+            return Ok(());
+        };
+        if reference.is_empty() {
+            return Ok(());
+        }
+
+        let want_detections = vision_wants_detections(policy);
+        let want_embedding = vision_wants_embedding(policy);
+        if !want_detections && !want_embedding {
+            return Ok(());
+        }
+
+        let image_bytes = crate::runtime::ai::vision::fetch_image_bytes(&reference)?;
+        let result = crate::runtime::ai::vision::analyze_local(
+            &policy.model,
+            image_bytes,
+            want_detections,
+            want_embedding,
+        )?;
+
+        if want_detections {
+            // Write the canonical detections array as a JSON row field. The
+            // damage vector for this update covers only the derived field,
+            // never `image_field`, so it cannot re-trigger vision.
+            let detections_json = detections_to_json(&result.detections);
+            self.patch_entity(PatchEntityInput {
+                collection: collection.to_string(),
+                id: entity.id,
+                payload: vision_detections_payload(detections_json),
+                operations: Vec::new(),
+            })?;
+        }
+
+        if want_embedding {
+            if let Some(embedding) = result.embedding {
+                if !embedding.is_empty() {
+                    self.create_vector(CreateVectorInput {
+                        collection: collection.to_string(),
+                        dense: embedding,
+                        content: Some(reference),
+                        metadata: Vec::new(),
+                        link_row: None,
+                        link_node: None,
+                    })?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Read a row's text-valued field as an owned string. Returns `None` when
+/// the entity is not a row, the field is absent, or it is not text.
+fn row_text_field(data: &EntityData, field: &str) -> Option<String> {
+    let EntityData::Row(row) = data else {
+        return None;
+    };
+    let named = row.named.as_ref()?;
+    match named.get(field) {
+        Some(Value::Text(text)) => Some(text.to_string()),
+        Some(Value::Url(url)) => Some(url.clone()),
+        _ => None,
+    }
+}
+
+/// Encode the detections as a JSON array value
+/// (`[{label, confidence, bbox:[x,y,w,h]}]`).
+fn detections_to_json(
+    detections: &[crate::runtime::ai::vision::VisionDetection],
+) -> crate::serde_json::Value {
+    use crate::serde_json::{Map, Value as Sj};
+    let items = detections
+        .iter()
+        .map(|d| {
+            let mut obj = Map::new();
+            obj.insert("label".to_string(), Sj::String(d.label.clone()));
+            obj.insert("confidence".to_string(), Sj::Number(d.confidence as f64));
+            obj.insert(
+                "bbox".to_string(),
+                Sj::Array(d.bbox.iter().map(|v| Sj::Number(*v as f64)).collect()),
+            );
+            Sj::Object(obj)
+        })
+        .collect();
+    Sj::Array(items)
+}
+
+/// Build the JSON-patch payload that sets the derived detections field via
+/// `patch_entity`'s `fields` merge form.
+fn vision_detections_payload(
+    detections_json: crate::serde_json::Value,
+) -> crate::serde_json::Value {
+    use crate::serde_json::{Map, Value as Sj};
+    let mut fields = Map::new();
+    fields.insert(VISION_DETECTIONS_FIELD.to_string(), detections_json);
+    let mut root = Map::new();
+    root.insert("fields".to_string(), Sj::Object(fields));
+    Sj::Object(root)
 }
 
 /// Join the declared embed fields' text values, mirroring the manual
