@@ -1,8 +1,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{layout, RdbFileResult};
+
+/// Process-global monotonic counter that makes every temp-file name unique
+/// even when `now_nanos()` collides (coarse clock resolution) or when
+/// concurrent archives stage the same LSN range. Without it, two threads in
+/// the same process could write distinct payloads to the same staging path,
+/// uploading one body under the other's manifest digest and failing the WAL
+/// segment integrity check on restore.
+static BACKUP_TEMP_JSON_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub const BACKUP_JSON_OBJECT_TEMP_PREFIX: &str = "reddb-json-object";
 pub const BACKUP_JSON_OBJECT_READ_TEMP_PREFIX: &str = "reddb-json-object-read";
@@ -26,6 +35,7 @@ impl BackupTempJsonFile {
             prefix,
             std::process::id(),
             now_nanos(),
+            BACKUP_TEMP_JSON_COUNTER.fetch_add(1, Ordering::Relaxed),
             start_lsn,
             end_lsn,
         )
@@ -51,17 +61,19 @@ impl BackupTempJsonFile {
         Self::new(ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_clock(
         temp_dir: &Path,
         prefix: &str,
         process_id: u32,
         nanos: u128,
+        unique: u64,
         start_lsn: Option<u64>,
         end_lsn: Option<u64>,
     ) -> Self {
         Self {
             path: layout::backup_temp_json_path(
-                temp_dir, prefix, process_id, nanos, start_lsn, end_lsn,
+                temp_dir, prefix, process_id, nanos, unique, start_lsn, end_lsn,
             ),
         }
     }
@@ -117,13 +129,14 @@ mod tests {
             BACKUP_JSON_OBJECT_TEMP_PREFIX,
             7,
             99,
+            3,
             Some(10),
             Some(20),
         );
 
         assert_eq!(
             temp.path(),
-            root.join("reddb-json-object-7-10-20-99.json").as_path()
+            root.join("reddb-json-object-7-10-20-99-3.json").as_path()
         );
         assert_eq!(temp.write_bytes(b"{\"ok\":true}").expect("write"), 11);
         assert_eq!(temp.read_bytes().expect("read"), b"{\"ok\":true}");
@@ -147,6 +160,7 @@ mod tests {
             BACKUP_JSON_OBJECT_TEMP_PREFIX,
             7,
             99,
+            3,
             None,
             None,
         );
@@ -193,5 +207,15 @@ mod tests {
         let path = object.path().to_path_buf();
         drop(object);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn same_lsn_range_stagings_get_distinct_paths() {
+        // Two stagings of the identical LSN range within one process must
+        // never share a path, otherwise concurrent archives could overwrite
+        // each other's payload and break WAL segment integrity on restore.
+        let a = BackupTempJsonFile::archived_change_records(1, 5);
+        let b = BackupTempJsonFile::archived_change_records(1, 5);
+        assert_ne!(a.path(), b.path());
     }
 }
