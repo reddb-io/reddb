@@ -1037,6 +1037,133 @@ mod tests {
     }
 
     #[test]
+    fn cloud_policy_first_bootstrap_protects_cloud_admin_lifecycle() {
+        // Issue #1233: prove the RedDB Cloud first-boot model on the bootstrap
+        // manifest path. The cloud/head admin and the customer admin are
+        // ordinary policy-governed users — broad admin authority is allowed,
+        // but an explicit deny fences the customer admin out of the protected
+        // cloud admin lifecycle operations.
+        use crate::auth::{Role, UserId};
+
+        let (runtime, auth, path) = manifest_test_env();
+        write_manifest(
+            &path,
+            r#"{
+                "actor": "cloud-admin",
+                "users": [
+                    {"username":"cloud-admin","password":"head-secret","role":"admin"},
+                    {"username":"customer-admin","password":"tenant-secret","role":"admin"}
+                ],
+                "policies": [
+                    {
+                        "id": "customer-admin-allow-all",
+                        "version": 1,
+                        "statements": [
+                            {"effect":"allow","actions":["*"],"resources":["*"]}
+                        ]
+                    },
+                    {
+                        "id": "cloud-admin-protection",
+                        "version": 1,
+                        "statements": [
+                            {
+                                "effect":"deny",
+                                "actions":[
+                                    "user:delete",
+                                    "user:disable",
+                                    "user:password:change",
+                                    "user:role:update"
+                                ],
+                                "resources":["user:cloud-admin"]
+                            }
+                        ]
+                    }
+                ],
+                "attachments": [
+                    {"user":"customer-admin","policy":"customer-admin-allow-all"},
+                    {"user":"customer-admin","policy":"cloud-admin-protection"}
+                ]
+            }"#,
+        );
+
+        let actor =
+            apply_manifest_file(&runtime, &auth, &runtime.config_registry(), &path).expect("apply");
+        assert_eq!(actor, "cloud-admin");
+
+        // Acceptance #1: both admins exist as ordinary, policy-governed users.
+        assert!(
+            auth.get_user(None, "cloud-admin").is_some(),
+            "cloud/head admin must be created"
+        );
+        assert!(
+            auth.get_user(None, "customer-admin").is_some(),
+            "customer admin must be created"
+        );
+
+        let customer = UserId::platform("customer-admin");
+        let cloud_admin = UserId::platform("cloud-admin");
+
+        // Acceptance #3: the customer admin is denied the protected lifecycle
+        // operations on the cloud admin resource.
+        for action in [
+            "user:delete",
+            "user:disable",
+            "user:password:change",
+            "user:role:update",
+        ] {
+            assert!(
+                !auth.check_user_lifecycle_authz(&customer, Role::Admin, action, &cloud_admin),
+                "customer admin must be denied {action} on the cloud admin"
+            );
+        }
+
+        // Acceptance #2: the customer admin keeps broad admin authority outside
+        // the protected cloud admin lifecycle — the same operations succeed
+        // against any other user.
+        let other = UserId::platform("some-tenant-user");
+        for action in [
+            "user:delete",
+            "user:disable",
+            "user:password:change",
+            "user:role:update",
+        ] {
+            assert!(
+                auth.check_user_lifecycle_authz(&customer, Role::Admin, action, &other),
+                "customer admin must retain {action} on non-protected users"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_policy_condition_system_owned() {
+        // Acceptance #4: policies in a manifest still reject the retired
+        // `condition.system_owned` key — protection is expressed with explicit
+        // resource-scoped deny policies, not a magic system-owned flag.
+        let result = BootstrapManifest::parse(
+            r#"{
+                "users": [{"username":"cloud-admin","password":"head","role":"admin"}],
+                "policies": [{
+                    "id": "p-sys",
+                    "version": 1,
+                    "statements": [{
+                        "effect": "allow",
+                        "actions": ["admin:reload"],
+                        "resources": ["*"],
+                        "condition": { "system_owned": true }
+                    }]
+                }]
+            }"#,
+        );
+
+        match result {
+            Ok(_) => panic!("manifest accepted policy condition.system_owned"),
+            Err(err) => assert!(err.contains("system_owned"), "got: {err}"),
+        }
+    }
+
+    #[test]
     fn rejects_system_owned_user_field() {
         let result = BootstrapManifest::parse(
             r#"{
