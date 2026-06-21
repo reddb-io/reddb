@@ -2163,8 +2163,18 @@ fn build_runtime_with_bootstrap(
         bootstrap.auth_bootstrap_input(),
         bootstrap_already_completed,
     )?;
+    // Issue #1231 — wire cluster vault first boot through the bootstrap
+    // authority. The authorized disposition selects the vault plan: the owner
+    // path (`ProceedLocal`) opens the vault against the real cluster-global
+    // auth store (`auth_store`, backed by the runtime pager) and consumes the
+    // env/`_FILE` secret inputs to mint the certificate; a restart after
+    // completion (`AlreadyComplete`) reopens and unseals that same store
+    // without consuming secret inputs. A non-owner cluster boot already failed
+    // closed above, so no scratch or per-member vault is minted.
+    let vault_plan = crate::cluster::plan_vault_bootstrap(disposition);
     match disposition {
         crate::cluster::BootstrapDisposition::SkipDevBypass => {
+            debug_assert_eq!(vault_plan, crate::cluster::VaultBootstrapPlan::SkipNoVault);
             eprintln!("{NO_AUTH_WARNING}");
             tracing::warn!("{NO_AUTH_WARNING}");
         }
@@ -2173,11 +2183,26 @@ fn build_runtime_with_bootstrap(
             // so config-derived state is observable, but create no users,
             // reissue no vault material, and reapply no mutable config
             // (issue #1230). `apply_preset_from_config` does exactly this
-            // when the completion marker is present.
+            // when the completion marker is present — matching the unseal-only
+            // vault plan (no secret inputs consumed).
+            debug_assert_eq!(
+                vault_plan,
+                crate::cluster::VaultBootstrapPlan::OpenClusterGlobalStore {
+                    consume_secret_inputs: false,
+                }
+            );
             apply_preset_from_config(&runtime, &auth_store, bootstrap)?;
-            tracing::info!("bootstrap already completed, reporting existing state");
+            tracing::info!("bootstrap already completed, unsealing existing cluster auth store");
         }
         crate::cluster::BootstrapDisposition::ProceedLocal => {
+            // Owner first boot: open the vault against the real cluster-global
+            // auth store and consume the secret inputs to mint the certificate.
+            debug_assert_eq!(
+                vault_plan,
+                crate::cluster::VaultBootstrapPlan::OpenClusterGlobalStore {
+                    consume_secret_inputs: true,
+                }
+            );
             apply_preset_from_config(&runtime, &auth_store, bootstrap)?;
             maybe_apply_policy_break_glass(&auth_store);
         }

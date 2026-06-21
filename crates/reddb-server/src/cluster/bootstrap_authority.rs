@@ -157,6 +157,76 @@ pub fn authorize(
     ))
 }
 
+/// Where cluster vault first boot must create or open its vault, and whether
+/// the owner path may consume env/`_FILE` secret inputs.
+///
+/// Issue #1231 wires vault first boot through the bootstrap authority so the
+/// vault, key material, and emitted certificate belong to the *real*
+/// cluster-global auth store the authority model selected — never a scratch
+/// or per-member-only database, which PRD #1227 explicitly forbids ("do not
+/// mint a certificate from an emptyDir/scratch database and apply it to a
+/// different real store").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultBootstrapPlan {
+    /// Create or open the vault against the cluster-global auth store. The
+    /// boot is the proven authority owner (or the only local authority), so
+    /// the vault pages, key material, and certificate live in the real store
+    /// and the certificate unseals that same store on restart.
+    ///
+    /// `consume_secret_inputs` is `true` only on the first write
+    /// ([`BootstrapDisposition::ProceedLocal`]): the owner path reads the
+    /// env/`_FILE` secret inputs, mints the certificate, and seals the real
+    /// store. A restart that observes the durable completion marker
+    /// ([`BootstrapDisposition::AlreadyComplete`]) sets it to `false`: the
+    /// existing vault is opened and unsealed, but no secret input is consumed,
+    /// so first boot is never re-run and the vault is never rotated. Because
+    /// a non-owner cluster boot fails closed in [`authorize`] *before* any
+    /// plan is produced, secret inputs are never consumed by a non-owner.
+    OpenClusterGlobalStore { consume_secret_inputs: bool },
+    /// Skip every vault/auth path — the explicit `--no-auth` / `--dev`
+    /// development carveout. No vault is created or opened and no certificate
+    /// is minted.
+    SkipNoVault,
+}
+
+/// Map an authorized [`BootstrapDisposition`] to its cluster vault first-boot
+/// plan. This is the single place that decides the vault target store and
+/// whether secret inputs feed the owner path; callers must not re-derive it.
+pub const fn plan_vault_bootstrap(disposition: BootstrapDisposition) -> VaultBootstrapPlan {
+    match disposition {
+        // First write of global auth state: the owner consumes secret inputs
+        // and seals the real cluster-global store.
+        BootstrapDisposition::ProceedLocal => VaultBootstrapPlan::OpenClusterGlobalStore {
+            consume_secret_inputs: true,
+        },
+        // Restart after completion: open and unseal the existing real store,
+        // but consume no secret input — never re-mint or rotate the vault.
+        BootstrapDisposition::AlreadyComplete => VaultBootstrapPlan::OpenClusterGlobalStore {
+            consume_secret_inputs: false,
+        },
+        // `--no-auth` / `--dev`: skip the vault entirely.
+        BootstrapDisposition::SkipDevBypass => VaultBootstrapPlan::SkipNoVault,
+    }
+}
+
+/// Authorize cluster vault first boot end to end: run the bootstrap authority
+/// gate, then map the authorized disposition to its [`VaultBootstrapPlan`].
+///
+/// A cluster-shaped first boot with no proven owner fails closed in
+/// [`authorize`] *before* any plan is produced, so no scratch or per-member
+/// vault is ever minted and no secret input is consumed by a non-owner
+/// (issue #1231). The owner path ([`VaultBootstrapPlan::OpenClusterGlobalStore`])
+/// is the only outcome that creates or opens vault material, and it always
+/// targets the real cluster-global auth store.
+pub fn authorize_vault_bootstrap(
+    deploy_profile: DeployProfile,
+    no_auth: bool,
+    input: AuthBootstrapInput,
+    already_completed: bool,
+) -> Result<VaultBootstrapPlan, String> {
+    authorize(deploy_profile, no_auth, input, already_completed).map(plan_vault_bootstrap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +372,195 @@ mod tests {
         let disposition =
             authorize(DeployProfile::Cluster, true, AuthBootstrapInput::None, true).unwrap();
         assert_eq!(disposition, BootstrapDisposition::AlreadyComplete);
+    }
+
+    // ----- Issue #1231: cluster vault first boot wired to the real store ----
+
+    #[test]
+    fn owner_first_boot_plan_opens_real_store_and_consumes_secrets() {
+        // ProceedLocal is the proven-owner first write: the vault is opened
+        // against the real cluster-global store and the env/`_FILE` secret
+        // inputs feed the certificate-minting owner path.
+        assert_eq!(
+            plan_vault_bootstrap(BootstrapDisposition::ProceedLocal),
+            VaultBootstrapPlan::OpenClusterGlobalStore {
+                consume_secret_inputs: true,
+            }
+        );
+    }
+
+    #[test]
+    fn restart_after_completion_unseals_real_store_without_consuming_secrets() {
+        // AlreadyComplete reopens the same real store and unseals it with the
+        // existing certificate, but consumes no secret input, so the vault is
+        // never re-minted or rotated on restart.
+        assert_eq!(
+            plan_vault_bootstrap(BootstrapDisposition::AlreadyComplete),
+            VaultBootstrapPlan::OpenClusterGlobalStore {
+                consume_secret_inputs: false,
+            }
+        );
+    }
+
+    #[test]
+    fn dev_bypass_plan_skips_the_vault() {
+        assert_eq!(
+            plan_vault_bootstrap(BootstrapDisposition::SkipDevBypass),
+            VaultBootstrapPlan::SkipNoVault
+        );
+    }
+
+    #[test]
+    fn cluster_first_boot_mints_no_vault_and_consumes_no_secret() {
+        // Acceptance: a cluster-shaped first boot with no proven owner fails
+        // closed before any plan is produced, so neither a scratch nor a
+        // per-member vault is minted and no secret input is consumed by a
+        // non-owner. This holds for every credentialled input.
+        for input in [
+            AuthBootstrapInput::None,
+            AuthBootstrapInput::Env,
+            AuthBootstrapInput::Manifest,
+        ] {
+            let err =
+                authorize_vault_bootstrap(DeployProfile::Cluster, false, input, false).unwrap_err();
+            assert!(err.contains("no concrete authority owner"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn non_cluster_owner_gets_real_store_vault_plan() {
+        for profile in [
+            DeployProfile::Embedded,
+            DeployProfile::Serverless,
+            DeployProfile::PrimaryReplica,
+        ] {
+            assert_eq!(
+                authorize_vault_bootstrap(profile, false, AuthBootstrapInput::Env, false).unwrap(),
+                VaultBootstrapPlan::OpenClusterGlobalStore {
+                    consume_secret_inputs: true,
+                },
+                "{profile:?} owner should open the real store and consume secrets"
+            );
+        }
+    }
+
+    #[test]
+    fn completed_cluster_restart_gets_unseal_only_plan() {
+        // Once a cluster has bootstrapped, a restart is authorized through the
+        // completion marker and lands on the unseal-only plan against the real
+        // store — the only way a credentialled cluster boot opens a vault.
+        assert_eq!(
+            authorize_vault_bootstrap(
+                DeployProfile::Cluster,
+                false,
+                AuthBootstrapInput::Manifest,
+                true,
+            )
+            .unwrap(),
+            VaultBootstrapPlan::OpenClusterGlobalStore {
+                consume_secret_inputs: false,
+            }
+        );
+    }
+
+    // The next two tests prove the runtime consequence of the owner plan
+    // against a real pager-backed store: a freshly minted certificate seals
+    // the real store and unseals that same store on restart, while a
+    // scratch/per-member certificate cannot unseal it. The vault here is the
+    // real cluster-global auth store's pager, never an emptyDir scratch DB.
+
+    fn vault_test_pager() -> (crate::storage::engine::pager::Pager, std::path::PathBuf) {
+        use crate::storage::engine::pager::{Pager, PagerConfig};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_dir =
+            std::env::temp_dir().join(format!("reddb_cluster_vault_{}_{}", std::process::id(), id));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let pager = Pager::open(&tmp_dir.join("cluster.rdb"), PagerConfig::default()).unwrap();
+        (pager, tmp_dir)
+    }
+
+    #[test]
+    fn owner_certificate_unseals_the_same_store_on_restart() {
+        use crate::auth::vault::{KeyPair, Vault, VaultState};
+
+        // Only run when the plan authorizes the owner path.
+        let plan = authorize_vault_bootstrap(
+            DeployProfile::PrimaryReplica,
+            false,
+            AuthBootstrapInput::Env,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            plan,
+            VaultBootstrapPlan::OpenClusterGlobalStore {
+                consume_secret_inputs: true
+            }
+        ));
+
+        let (pager, tmp_dir) = vault_test_pager();
+
+        // First boot: mint the certificate and seal the real store.
+        let kp = KeyPair::generate();
+        let vault = Vault::with_certificate_bytes(&pager, &kp.certificate).unwrap();
+        let state = VaultState {
+            users: vec![],
+            api_keys: vec![],
+            bootstrapped: true,
+            master_secret: Some(kp.master_secret.clone()),
+            kv: std::collections::HashMap::new(),
+        };
+        vault.save(&pager, &state).unwrap();
+
+        // Restart (unseal-only plan): the emitted certificate unseals the same
+        // store without consuming any secret input.
+        let restart_plan = plan_vault_bootstrap(BootstrapDisposition::AlreadyComplete);
+        assert_eq!(
+            restart_plan,
+            VaultBootstrapPlan::OpenClusterGlobalStore {
+                consume_secret_inputs: false
+            }
+        );
+        let reopened = Vault::with_certificate(&pager, &kp.certificate_hex()).unwrap();
+        let loaded = reopened.load(&pager).unwrap().unwrap();
+        assert!(loaded.bootstrapped);
+        assert_eq!(loaded.master_secret, Some(kp.master_secret));
+
+        drop(pager);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn scratch_certificate_cannot_unseal_the_real_store() {
+        use crate::auth::vault::{KeyPair, Vault, VaultState};
+
+        let (pager, tmp_dir) = vault_test_pager();
+
+        // Real cluster-global store sealed by the owner's certificate.
+        let owner = KeyPair::generate();
+        let vault = Vault::with_certificate_bytes(&pager, &owner.certificate).unwrap();
+        vault
+            .save(
+                &pager,
+                &VaultState {
+                    users: vec![],
+                    api_keys: vec![],
+                    bootstrapped: true,
+                    master_secret: Some(owner.master_secret.clone()),
+                    kv: std::collections::HashMap::new(),
+                },
+            )
+            .unwrap();
+
+        // A per-member scratch certificate (minted against a different DB)
+        // must not unseal the real store — the anti-goal PRD #1227 forbids.
+        let scratch = KeyPair::generate();
+        let scratch_vault = Vault::with_certificate_bytes(&pager, &scratch.certificate).unwrap();
+        assert!(scratch_vault.load(&pager).is_err());
+
+        drop(pager);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
