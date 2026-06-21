@@ -1,5 +1,3 @@
-measure run start 2026-06-21T12:33:10Z
-step: building integration test binaries (--no-run)
-=== build START 2026-06-21T12:55:25Z ===
+=== integration lane run START 2026-06-21T13:01:32Z ===
+cmd: cargo nextest run --workspace --locked -E 'kind(test)' --no-fail-fast
    Compiling reddb-io-server v1.11.0 (/home/cyber/Work/reddb.io/reddb/.red/tmp/workers/w198C/974-a1/.sandcastle/worktrees/afk-w198C-974-measure-publish-the-integration-test-bas/crates/reddb-server)
-Terminated
