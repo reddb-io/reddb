@@ -64,7 +64,22 @@ database does not unseal another database.
 | Standalone / embedded file | Supported with `--no-auth` or `--dev`; this disables vault and skips presets. | Supported through `red bootstrap --vault` on the real file/volume, or `red server --vault` plus `REDDB_BOOTSTRAP_PRESET=production` and admin env. | Supported. |
 | Serverless writer | Same as standalone; serverless is a standalone process role with serverless storage/remote backend contract. | Supported on the single writer. Bootstrap the local writer volume before remote backup/restore, or use first-start `REDDB_BOOTSTRAP_PRESET=production` and capture the emitted certificate. | Supported for one writer. |
 | Primary-replica | Supported on the primary; replicas should not create local admins. | Supported on the primary only. Replicas must receive replicated auth state from the primary and must not receive bootstrap env. | Supported for the primary-replica writer path. |
-| Cluster | Supported only as today's cluster-shaped storage/discovery contract with standalone process roles. | Not supported yet. Symmetric members cannot safely pick a first writer, so `mode=cluster` rejects `auth.enabled=true`, and `red server` rejects bootstrap env when the resolved shape is cluster. | Incomplete until cluster writer election/range ownership defines a single auth bootstrap owner; tracked by [PRD #1227](https://github.com/reddb-io/reddb/issues/1227). |
+| Cluster | Supported only as today's cluster-shaped storage/discovery contract with standalone process roles. | Authority model selected: cluster auth/vault/config/policy first boot uses the reserved global system range owner. Runtime support is still incomplete, so `mode=cluster` continues to reject `auth.enabled=true`, and `red server` continues to reject bootstrap env when the resolved shape is cluster unless `--no-auth` or `--dev` is explicit. | Design accepted in [ADR 0058](../../.red/adr/0058-cluster-bootstrap-authority.md); implementation remains tracked by [PRD #1227](https://github.com/reddb-io/reddb/issues/1227). |
+
+## Cluster Bootstrap Authority
+
+Cluster auth/vault/config/policy first boot uses the reserved global system range owner. The reserved range stores global auth, vault, config, policy state, and `system.bootstrap.completed`; no per-node marker or router cache is authoritative for clustered bootstrap completion.
+
+Only the current lease/term owner of that reserved range may run the first
+preset, create initial admins, initialize vault material, apply the first
+operator/cloud policy manifest, or publish the bootstrap-complete marker. Those
+writes must be compare-and-set guarded and idempotent: a restart retries from
+durable reserved-range state, rolls matching partial state forward, or rejects a
+conflict rather than creating a second global auth state.
+
+Non-owner members must not run presets, create initial admins, or initialize vault material. When bootstrap credentials or a manifest are present, they wait, forward/redirect to the current reserved-range owner, or observe `system.bootstrap.completed` after it commits.
+
+Anonymous `--no-auth` / `--dev` cluster-shaped boot remains an explicit development carveout, not a production bootstrap path. RedDB Cloud keeps the policy-first manifest model: the reserved range owner applies the cloud/operator manifest as the initial global policy source.
 
 ## Config First Boot
 
