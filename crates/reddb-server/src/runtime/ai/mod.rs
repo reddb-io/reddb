@@ -41,6 +41,7 @@ pub mod strict_validator;
 pub mod text_chunker;
 pub mod transport;
 pub mod urn_codec;
+pub mod vision;
 
 pub(crate) fn block_on_ai<F, T>(future: F) -> crate::RedDBResult<T>
 where
