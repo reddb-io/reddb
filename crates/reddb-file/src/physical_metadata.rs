@@ -971,6 +971,10 @@ fn ai_moderate_policy_json_value(policy: &PhysicalAiModeratePolicy) -> serde_jso
         "reject_action".to_string(),
         serde_json::Value::String(policy.reject_action.clone()),
     );
+    object.insert(
+        "hard_delete_on_reject".to_string(),
+        serde_json::Value::Bool(policy.hard_delete_on_reject),
+    );
     serde_json::Value::Object(object)
 }
 
@@ -1046,6 +1050,10 @@ fn ai_moderate_policy_from_json_value(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("reject")
             .to_string(),
+        hard_delete_on_reject: object
+            .get("hard_delete_on_reject")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
