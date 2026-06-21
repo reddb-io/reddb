@@ -276,7 +276,7 @@ impl BootstrapManifest {
         }
 
         for config in &self.config {
-            insert_config_value(runtime, &config.key, config.value.clone())?;
+            insert_config_value_if_absent(runtime, &config.key, config.value.clone())?;
         }
         if !registered.is_empty() {
             persist_registry_state(runtime, &registered)?;
@@ -704,6 +704,28 @@ fn registry_entry_from_json(value: &JsonValue, idx: usize) -> Result<ConfigRegis
     })
 }
 
+/// Write an initial config value only when the key is absent (issue #1232,
+/// acceptance #3). The fenced bootstrap owner applies the manifest exactly
+/// once, but initial config must use first-boot/write-if-absent semantics so
+/// a value an operator has already set for the same key is never overwritten.
+/// Internal bootstrap bookkeeping (e.g. the registry snapshot) keeps using
+/// [`insert_config_value`] directly, because that state is owned by the
+/// bootstrap path itself, not by the operator.
+fn insert_config_value_if_absent(
+    runtime: &RedDBRuntime,
+    key: &str,
+    value: Value,
+) -> Result<(), String> {
+    if runtime.db().store().get_config(key).is_some() {
+        tracing::info!(
+            key,
+            "bootstrap manifest config key already present; preserving operator value"
+        );
+        return Ok(());
+    }
+    insert_config_value(runtime, key, value)
+}
+
 fn insert_config_value(runtime: &RedDBRuntime, key: &str, value: Value) -> Result<(), String> {
     let store = runtime.db().store();
     let _ = store.get_or_create_collection("red_config");
@@ -910,7 +932,109 @@ fn secret_ref_storage_value(value: &JsonValue, idx: usize) -> Result<Value, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::BootstrapManifest;
+    use super::{apply_manifest_file, BootstrapManifest};
+    use crate::auth::store::AuthStore;
+    use crate::auth::AuthConfig;
+    use crate::storage::schema::Value;
+    use crate::RedDBRuntime;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    fn manifest_test_env() -> (RedDBRuntime, Arc<AuthStore>, std::path::PathBuf) {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        let auth = Arc::new(AuthStore::new(AuthConfig::default()));
+        let tmp =
+            std::env::temp_dir().join(format!("reddb_manifest_{}_{}.json", std::process::id(), id));
+        (runtime, auth, tmp)
+    }
+
+    fn write_manifest(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).expect("write manifest");
+    }
+
+    #[test]
+    fn owner_apply_creates_user_and_initial_config() {
+        // Acceptance #1/#4: the fenced owner applies the manifest, creating the
+        // initial admin and writing initial config.
+        let (runtime, auth, path) = manifest_test_env();
+        write_manifest(
+            &path,
+            r#"{
+                "users": [{"username":"ops","password":"hunter2","role":"admin"}],
+                "config": [{"key":"app.feature.x","value":"on"}]
+            }"#,
+        );
+
+        let actor =
+            apply_manifest_file(&runtime, &auth, &runtime.config_registry(), &path).expect("apply");
+        assert_eq!(actor, "ops");
+        assert!(
+            auth.get_user(None, "ops").is_some(),
+            "admin must be created"
+        );
+        assert_eq!(
+            runtime.db().store().get_config("app.feature.x"),
+            Some(Value::text("on".to_string())),
+            "initial config must be written on owner apply"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn initial_config_is_write_if_absent_and_keeps_operator_value() {
+        // Acceptance #3: initial config uses write-if-absent semantics — a value
+        // an operator has already set for the same key survives manifest apply.
+        let (runtime, auth, path) = manifest_test_env();
+        super::insert_config_value(
+            &runtime,
+            "app.feature.x",
+            Value::text("operator".to_string()),
+        )
+        .expect("seed operator config");
+
+        write_manifest(
+            &path,
+            r#"{
+                "users": [{"username":"ops","password":"hunter2","role":"admin"}],
+                "config": [{"key":"app.feature.x","value":"manifest"}]
+            }"#,
+        );
+        apply_manifest_file(&runtime, &auth, &runtime.config_registry(), &path).expect("apply");
+
+        assert_eq!(
+            runtime.db().store().get_config("app.feature.x"),
+            Some(Value::text("operator".to_string())),
+            "manifest must not overwrite a later operator change"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn duplicate_manifest_apply_is_rejected_idempotently() {
+        // Acceptance #4: a duplicate apply (e.g. a restart that re-runs the
+        // manifest) refuses to recreate existing global auth state instead of
+        // silently mutating it.
+        let (runtime, auth, path) = manifest_test_env();
+        write_manifest(
+            &path,
+            r#"{
+                "users": [{"username":"ops","password":"hunter2","role":"admin"}],
+                "config": [{"key":"app.feature.x","value":"on"}]
+            }"#,
+        );
+        apply_manifest_file(&runtime, &auth, &runtime.config_registry(), &path).expect("first");
+
+        let err = apply_manifest_file(&runtime, &auth, &runtime.config_registry(), &path)
+            .expect_err("duplicate apply must be rejected");
+        assert!(err.contains("already exists"), "got: {err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn rejects_system_owned_user_field() {
