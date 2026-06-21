@@ -936,10 +936,18 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
         crate::serde_json::Value::Array(values) => values
             .iter()
             .any(|value| json_value_contains(value, needle)),
+        // Recurse into object *values* so a needle nested inside a JSON
+        // object matches — e.g. `CONTAINS(vision_detections, 'person')`
+        // over a derived `[{"label":"person",...}]` array (#1275). Keys
+        // are deliberately not matched: containment is about the data, not
+        // the field names.
+        crate::serde_json::Value::Object(map) => {
+            map.values().any(|value| json_value_contains(value, needle))
+        }
         crate::serde_json::Value::String(value) => value == needle,
         crate::serde_json::Value::Number(value) => value.to_string() == needle,
         crate::serde_json::Value::Bool(value) => value.to_string() == needle,
-        crate::serde_json::Value::Null | crate::serde_json::Value::Object(_) => false,
+        crate::serde_json::Value::Null => false,
     }
 }
 
@@ -1119,6 +1127,21 @@ mod tests {
 
     fn empty_row() -> impl Row {
         |_field: &FieldRef| -> Option<Value> { None }
+    }
+
+    #[test]
+    fn contains_descends_into_json_object_values() {
+        // A derived component-detections array (#1275): CONTAINS must find
+        // a label nested inside the object elements, not just top-level
+        // array strings.
+        let detections = br#"[{"label":"person","confidence":0.9,"bbox":[0,0,1,1]},
+                              {"label":"car","confidence":0.7,"bbox":[1,1,2,2]}]"#;
+        let json = Value::Json(detections.to_vec());
+        assert!(value_contains(&json, "person"));
+        assert!(value_contains(&json, "car"));
+        assert!(!value_contains(&json, "bicycle"));
+        // Keys are not matched — only the data.
+        assert!(!value_contains(&json, "label"));
     }
 
     #[test]

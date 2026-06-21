@@ -286,7 +286,12 @@ impl Modalities {
             "local" => Self {
                 embed: true,
                 generate: false,
-                vision: false,
+                // The in-process local backend now serves computer vision
+                // (#1275) alongside embeddings: an installed
+                // `LocalVisionBackend` runs detection/image-embedding over
+                // a collection's declared image-reference field via the CDC
+                // enrichment lane. Generation/moderation stay out of scope.
+                vision: true,
                 moderate: false,
             },
             "custom" => Self::conservative(),
@@ -843,11 +848,12 @@ mod tests {
     }
 
     #[test]
-    fn local_is_embeddings_only() {
+    fn local_serves_embed_and_vision() {
         let c = Modalities::for_provider("local");
         assert!(c.supports(Modality::Embed));
+        assert!(c.supports(Modality::Vision));
+        // Generation and moderation stay out of scope for the local backend.
         assert!(!c.supports(Modality::Generate));
-        assert!(!c.supports(Modality::Vision));
         assert!(!c.supports(Modality::Moderate));
     }
 
