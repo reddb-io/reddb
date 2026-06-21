@@ -1,1 +1,5 @@
-=== build START (low-mem: jobs=1, debuginfo=0) 2026-06-21T13:08:18Z ===
+=== e2e build START (no-run, jobs=1, debuginfo=0) 2026-06-21T13:27:02Z ===
+warning: ignoring --test-threads because --no-run is specified
+   Compiling reddb-io-server v1.11.0 (/home/cyber/Work/reddb.io/reddb/.red/tmp/workers/w198C/974-a1/.sandcastle/worktrees/afk-w198C-974-measure-publish-the-integration-test-bas/crates/reddb-server)
+   Compiling similar v2.7.0
+   Compiling toml v1.1.2+spec-1.1.0
