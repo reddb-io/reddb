@@ -5,6 +5,11 @@ pub(crate) const RESERVED_PUBLIC_ITEM_FIELDS: &[&str] = &[
     "tenant",
     "created_at",
     "updated_at",
+    // Moderation visibility marker (#1274, ADR 0057). The moderation gate
+    // and re-moderation lane set this to hide quarantine-pending and
+    // rejected-tombstone rows from normal reads; users cannot declare or
+    // set it as a top-level field.
+    crate::runtime::ai::moderation::MODERATION_STATUS_FIELD,
 ];
 
 pub(crate) fn is_reserved_public_item_field(field: &str) -> bool {
