@@ -150,6 +150,44 @@ pods run `red server --role standalone` with `REDDB_STORAGE_PRESET=cluster` and
 `RED_CLUSTER_HA_INTENT=declared`. Treat this as the Kubernetes contract for the
 cluster supervisor and range ownership runtime as those pieces mature.
 
+### Cluster bootstrap contract
+
+Cluster members are symmetric and *non-owner*: no member can prove it — and not
+a peer — is the single writer of global auth/vault/config/policy state. The
+chart and the runtime therefore share one fail-closed contract (ADR 0058,
+[`docs/deployment/first-boot.md`](../../docs/deployment/first-boot.md)):
+
+- **Cluster no-auth (supported today).** The default cluster values render no
+  bootstrap credentials at all. Members boot anonymously and create no admin,
+  vault, or `system.bootstrap.completed` marker. This is the documented
+  development/no-auth carveout, not a credentialled production bootstrap.
+- **Cluster auth/vault (gated).** `auth.enabled=true` is rejected fail-closed in
+  `mode=cluster`: `helm template`/`helm install` fail with a message that points
+  here. The gate stays closed in lockstep with the runtime, which rejects a
+  cluster-shaped credentialled boot until the reserved global system range owner
+  path lands (PRD #1227). When that owner path ships, only the proven reserved
+  range owner runs the first preset, mints the vault, applies the first policy
+  manifest, and publishes the completion marker.
+- **Certificate handling.** A cluster member may still receive the vault
+  certificate (`auth.vault.certificate.value` / `existingSecret`, or the
+  `fileMount` path) so it can *unseal* an already-bootstrapped store. Receiving a
+  certificate never bootstraps auth — it only opens an existing vault. Capture
+  the certificate the owner mints once and preserve it offline; losing it means
+  the encrypted store cannot be unsealed.
+- **Restart idempotency.** Once `system.bootstrap.completed` is durable, a
+  restart observes the marker and rehydrates read-only state: it recreates no
+  admin, reissues no certificate, and reapplies no mutable config over operator
+  changes. Re-running `helm upgrade` is safe for the same reason.
+- **Non-owner behavior.** Because members never receive bootstrap credentials,
+  the bootstrap env (`REDDB_PRESET`, `REDDB_USERNAME`, `REDDB_PASSWORD`,
+  `REDDB_BOOTSTRAP_MANIFEST`) is never rendered into a cluster pod. A non-owner
+  that did observe credentials must wait for / redirect to the owner rather than
+  mutate global auth state.
+
+`scripts/verify-helm-chart.sh` asserts this contract on every render: cluster
+pods carry no bootstrap credentials, `auth.enabled=true` fails closed, and a
+vault certificate is still injectable for unseal.
+
 ## Security
 
 - Non-root UID/GID `10001` by chart default.
@@ -159,7 +197,8 @@ cluster supervisor and range ownership runtime as those pieces mature.
   `auth.enabled=true`, `REDDB_PRESET=production`, `REDDB_USERNAME`, and
   `REDDB_PASSWORD` are rendered only into the writer pod: serverless or primary.
   Replica pods never receive bootstrap credentials, and `mode=cluster` rejects
-  chart-managed auth bootstrap until a concrete writer bootstrap path exists.
+  chart-managed auth bootstrap fail-closed until the reserved global system
+  range owner path lands (see [Cluster bootstrap contract](#cluster-bootstrap-contract)).
 - Vault certificates can be injected through env or mounted file using the
   existing `auth.vault.certificate.fileMount` path.
 - `auth.vault.bootstrapJob.enabled` is disabled fail-closed. The legacy hook
