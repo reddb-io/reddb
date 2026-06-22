@@ -53,6 +53,8 @@ pub mod turboquant_snapshot;
 pub mod ui_bundle_cache;
 pub mod vault_export_envelope;
 pub mod vector_btree_page_format;
+pub mod vector_hnsw_index;
+pub mod vector_ivf_index;
 pub mod vector_value_codec;
 pub mod wal_header;
 pub mod wal_record;

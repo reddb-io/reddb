@@ -400,7 +400,7 @@ impl RedDB {
             }
         }
         Ok((
-            doc_count,
+            frame.docs.len() as u64,
             paths.len() as u64,
             total_entries,
             values.len() as u64,
