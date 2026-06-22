@@ -63,8 +63,8 @@ pub use failover::{
     FailoverRequest, FailoverTransport, NodeRole, RoleAssignment,
 };
 pub use fence::{
-    FenceBoundary, FenceVerdict, FileTermStore, MemoryTermStore, StaleTermFenced, TermFence,
-    TermStore, TermStoreError,
+    term_is_stale, FenceBoundary, FenceVerdict, FileTermStore, MemoryTermStore, StaleTermFenced,
+    StaleTermRejection, StreamHandshake, TermFence, TermStore, TermStoreError,
 };
 pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
