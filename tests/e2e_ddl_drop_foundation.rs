@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::application::ExecuteQueryInput;
 use reddb::auth::{AuthConfig, AuthStore};
+use reddb::catalog::{CollectionModel, SchemaMode};
+use reddb::physical::{CollectionContract, ContractOrigin};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{
@@ -78,6 +80,43 @@ fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
         Ok(_) => panic!("expected error for {sql}"),
         Err(err) => err.to_string(),
     }
+}
+
+fn register_collection(rt: &RedDBRuntime, name: &str, model: CollectionModel) {
+    rt.db()
+        .store()
+        .create_collection(name)
+        .unwrap_or_else(|err| panic!("create {name}: {err}"));
+    rt.db()
+        .save_collection_contract(CollectionContract {
+            name: name.to_string(),
+            declared_model: model,
+            schema_mode: SchemaMode::Dynamic,
+            origin: ContractOrigin::Explicit,
+            version: 1,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+            default_ttl_ms: None,
+            vector_dimension: None,
+            vector_metric: None,
+            context_index_fields: Vec::new(),
+            declared_columns: Vec::new(),
+            table_def: None,
+            timestamps_enabled: false,
+            context_index_enabled: false,
+            metrics_raw_retention_ms: None,
+            metrics_rollup_policies: Vec::new(),
+            metrics_tenant_identity: None,
+            metrics_namespace: None,
+            analytics_config: Vec::new(),
+            append_only: false,
+            subscriptions: Vec::new(),
+            session_key: None,
+            session_gap_ms: None,
+            retention_duration_ms: None,
+            analytical_storage: None,
+        })
+        .unwrap_or_else(|err| panic!("contract {name}: {err}"));
 }
 
 #[test]
