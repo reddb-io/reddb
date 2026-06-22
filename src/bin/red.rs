@@ -1012,10 +1012,6 @@ fn main() {
             run_inspect_command(&result.flags, remaining);
         }
 
-        "ui" => {
-            std::process::exit(run_ui_command(&result, remaining));
-        }
-
         "mcp" => {
             let path = result
                 .flags
@@ -3190,22 +3186,6 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Password for login"),
             ]);
         }
-        Some("ui") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::boolean("server").with_description(
-                    "Force the browser-served path: stand up a local bridge and open the browser",
-                ),
-                cli::types::FlagSchema::boolean("desktop")
-                    .with_description("Reserved: open in the desktop app (deep-link slice)"),
-                cli::types::FlagSchema::new("ui-dir")
-                    .with_description("Directory holding the UI bundle to serve"),
-                cli::types::FlagSchema::new("port")
-                    .with_description("Local bridge port (default: ephemeral on 127.0.0.1)")
-                    .with_default("0"),
-                cli::types::FlagSchema::boolean("no-browser")
-                    .with_description("Do not launch a browser; print the URL and keep serving"),
-            ]);
-        }
         Some("bootstrap") => {
             flags.extend(vec![
                 cli::types::FlagSchema::new("path")
@@ -3926,175 +3906,6 @@ fn env_truthy(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
-}
-
-/// `red ui <uri>` — open the graphical UI against `<uri>` over a local
-/// bridge (issue #1042, ADR 0047/0049). This tracer-bullet slice handles
-/// the `file://` target: canonicalize the URI to an absolute `file:///…`,
-/// open the embedded engine, stand up a local RedWire-over-WebSocket
-/// bridge that also serves the UI bundle, open the browser at it, and
-/// keep the bridge alive until interrupted (then shut down cleanly).
-fn run_ui_command(result: &reddb::cli::schema::SchemaResult, remaining: &[String]) -> i32 {
-    let json_mode = wants_json(&result.flags);
-    let flags = &result.flags;
-
-    let uri = match remaining.first() {
-        Some(u) if !u.is_empty() => u.clone(),
-        _ => {
-            if json_mode {
-                json_error("ui", "Usage: red ui [--server] [--ui-dir DIR] <uri>");
-            }
-            eprintln!("Usage: red ui [--server] [--ui-dir DIR] <uri>");
-            eprintln!("Example: red ui --server file://./data/reddb.rdb");
-            return 1;
-        }
-    };
-
-    if flag_bool(flags, "desktop") {
-        // Reserved: the deep-link desktop dispatch lands in a later slice.
-        eprintln!("red ui: --desktop is reserved; full behaviour lands in the deep-link slice");
-        return 2;
-    }
-
-    // This slice supports `file://` (embedded engine over a local bridge).
-    if !uri.trim_start().to_ascii_lowercase().starts_with("file://") {
-        let msg =
-            format!("red ui currently supports only file:// targets in this slice (got '{uri}')");
-        if json_mode {
-            json_error("ui", &msg);
-        }
-        eprintln!("{msg}");
-        return 1;
-    }
-
-    let canonical = match reddb::server::ui_bridge::canonicalize_file_uri(&uri) {
-        Ok(c) => c,
-        Err(err) => {
-            if json_mode {
-                json_error("ui", &err);
-            }
-            eprintln!("red ui: {err}");
-            return 1;
-        }
-    };
-    // Strip the scheme to reach the on-disk path the embedded engine opens.
-    let db_path = canonical.trim_start_matches("file://").to_string();
-
-    let runtime =
-        match reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&db_path)) {
-            Ok(rt) => rt,
-            Err(err) => {
-                let msg = format!("open {db_path}: {err}");
-                if json_mode {
-                    json_error("ui", &msg);
-                }
-                eprintln!("red ui: {msg}");
-                return 1;
-            }
-        };
-
-    let port: u16 = flag_string(flags, "port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let ui_dir = flag_string(flags, "ui-dir")
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from);
-    let no_browser = flag_bool(flags, "no-browser") || env_truthy("RED_UI_NO_BROWSER");
-
-    let checkpoint_rt = runtime.clone();
-    let server = reddb::server::RedDBServer::new(runtime);
-    let config = reddb::server::ui_bridge::UiBridgeConfig {
-        bind: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        ui_dir,
-        extra_allowed_origins: Vec::new(),
-    };
-
-    let tokio_runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(err) => {
-            eprintln!("red ui: failed to start async runtime: {err}");
-            return 1;
-        }
-    };
-
-    let code = tokio_runtime.block_on(async move {
-        let bridge = match reddb::server::ui_bridge::spawn_ui_bridge(server, config).await {
-            Ok(b) => b,
-            Err(err) => {
-                eprintln!("red ui: failed to bind local bridge: {err}");
-                return 1;
-            }
-        };
-
-        let ui_url = bridge.ui_url();
-        let ws_url = bridge.ws_url();
-        if json_mode {
-            json_ok(
-                "ui",
-                &format!(
-                    "{{\"target\":{:?},\"ui_url\":{:?},\"ws_url\":{:?}}}",
-                    canonical, ui_url, ws_url
-                ),
-            );
-        } else {
-            println!("red ui: serving {canonical}");
-            println!("  UI:       {ui_url}");
-            println!("  RedWire:  {ws_url}");
-        }
-
-        if no_browser {
-            if !json_mode {
-                println!("  (browser launch suppressed; press Ctrl-C to stop)");
-            }
-        } else {
-            if let Err(err) = open_in_browser(&ui_url) {
-                eprintln!("red ui: could not open browser ({err}); open {ui_url} manually");
-            }
-            if !json_mode {
-                println!("  (press Ctrl-C to stop)");
-            }
-        }
-
-        // Session-scoped: stay alive until interrupted, then tear the
-        // bridge down cleanly (ADR 0047 — no orphaned process).
-        let _ = tokio::signal::ctrl_c().await;
-        bridge.shutdown().await;
-        0
-    });
-
-    let _ = checkpoint_rt.checkpoint();
-    code
-}
-
-/// Open the default browser at `url`. Best-effort, platform-specific; a
-/// failure is non-fatal (the caller prints the URL to open manually).
-fn open_in_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg(url);
-        c
-    };
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", "", url]);
-        c
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(url);
-        c
-    };
-
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
 }
 
 fn resolve_server_path(flags: &HashMap<String, FlagValue>) -> Option<String> {

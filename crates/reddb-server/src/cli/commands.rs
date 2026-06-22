@@ -195,12 +195,6 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: bootstrap_flags(),
     },
     CommandDef {
-      name: "ui",
-      summary: "Open the graphical UI against a database over a local bridge",
-      usage: "red ui [--server] [--desktop] [--ui-dir DIR] [--port PORT] <uri>",
-      flags: ui_flags(),
-    },
-    CommandDef {
       name: "version",
       summary: "Show RedDB version information",
       usage: "red version",
