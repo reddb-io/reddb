@@ -493,6 +493,24 @@ fn ui_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn ui_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::boolean("server")
+            .with_description("Force the browser-served bridge path (default for file:// targets)"),
+        FlagSchema::boolean("desktop").with_description(
+            "Reserved: open the native desktop UI (lands in the deep-link slice)",
+        ),
+        FlagSchema::new("ui-dir").with_description(
+            "Directory to serve the UI bundle from (defaults to the built-in fixture)",
+        ),
+        FlagSchema::new("port")
+            .with_description("Loopback port for the bridge (0 / omit picks an ephemeral port)"),
+        FlagSchema::boolean("no-browser").with_description(
+            "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",
+        ),
+    ]
+}
+
 fn vcs_flags() -> Vec<FlagSchema> {
     vec![
         FlagSchema::new("path")
