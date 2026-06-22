@@ -145,8 +145,12 @@ fn execute_runtime_table_query_materialized(
         });
     }
 
-    // ── AGGREGATE PATH: COUNT, AVG, SUM, MIN, MAX, GROUP BY ──
-    if has_aggregate_projections(&effective_projections) || !effective_group_by.is_empty() {
+    // ── AGGREGATE PATH: COUNT, AVG, SUM, MIN, MAX, GROUP BY, HAVING ──
+    // GROUP BY without aggregates in SELECT still requires grouping collapse.
+    if has_aggregate_projections(&effective_projections)
+        || !effective_group_by.is_empty()
+        || effective_having.is_some()
+    {
         return execute_aggregate_query(db, query);
     }
 
