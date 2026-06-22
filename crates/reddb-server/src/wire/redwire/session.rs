@@ -1527,6 +1527,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redwire_query_with_params_preserves_json_columns() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT proj.a.b.c.d = 12")
+            .expect("put nested number");
+        runtime
+            .execute_query("KV PUT proj.a.b.e = 'x'")
+            .expect("put nested string");
+
+        let payload =
+            reddb_wire::query_with_params::encode_query_with_params("LIST KV proj AS JSON", &[])
+                .expect("encode query with params");
+        let frame = reddb_wire::redwire::build_query_with_params_frame(99, payload)
+            .expect("query-with-params frame");
+        let reply = run_query_with_params(&runtime, &frame);
+
+        assert_eq!(
+            reply.kind,
+            MessageKind::Result,
+            "body={}",
+            String::from_utf8_lossy(&reply.payload)
+        );
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("result json");
+        let value = body
+            .get("result")
+            .and_then(|result| result.get("records"))
+            .and_then(JsonValue::as_array)
+            .and_then(|records| records.first())
+            .and_then(|record| record.get("values"))
+            .and_then(|values| values.get("value"))
+            .expect("json value column");
+
+        assert_eq!(
+            value
+                .get("a")
+                .and_then(|a| a.get("b"))
+                .and_then(|b| b.get("c"))
+                .and_then(|c| c.get("d"))
+                .and_then(JsonValue::as_f64),
+            Some(12.0)
+        );
+        assert_eq!(
+            value
+                .get("a")
+                .and_then(|a| a.get("b"))
+                .and_then(|b| b.get("e"))
+                .and_then(JsonValue::as_str),
+            Some("x")
+        );
+    }
+
     // ── Issue #587 — BatchInsertEndpoint RedWire mirror ──────────────
     //
     // The brief carries the rows + idempotency key in the existing
