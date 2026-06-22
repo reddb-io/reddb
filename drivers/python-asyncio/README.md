@@ -23,7 +23,7 @@ import asyncio
 from reddb_asyncio import connect
 
 async def main():
-    async with await connect("http://localhost:8080") as db:
+    async with await connect("http://localhost:5000") as db:
         print(await db.query("SELECT * FROM users WHERE name = $1", ["alice"]))
         await db.insert("users", {"name": "alice", "age": 30})
         row = await db.get("users", "alice")
@@ -39,8 +39,8 @@ asyncio.run(main())
 | ----------------------------------------- | --------------------- | ------------ |
 | `red://host[:port]`                       | RedWire (plain TCP)   | 5050         |
 | `reds://host[:port]`                      | RedWire over TLS      | 5050         |
-| `http://host[:port]`                      | REST                  | 8080         |
-| `https://host[:port]`                     | REST over TLS         | 8443         |
+| `http://host[:port]`                      | REST                  | 5000         |
+| `https://host[:port]`                     | REST over TLS         | 55555         |
 | `red://user:pass@host`                    | RedWire + SCRAM/login | 5050         |
 | `red://host?token=sk-abc`                 | RedWire + bearer      | 5050         |
 | `reds://host?ca=/etc/ca.pem&cert=...`     | RedWire + mTLS        | 5050         |
@@ -102,7 +102,7 @@ from reddb_asyncio import (
 The driver implements the [SDK Helper Spec v0.1](../../docs/clients/sdk-helper-spec.md):
 
 ```python
-async with await connect("http://localhost:8080") as db:
+async with await connect("http://localhost:5000") as db:
     # Documents
     inserted = await db.documents.insert("people", {"name": "alice", "age": 30})
     doc = await db.documents.get("people", inserted["rid"])

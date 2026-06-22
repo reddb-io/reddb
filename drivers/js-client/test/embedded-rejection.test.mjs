@@ -74,12 +74,12 @@ for (const uri of EMBEDDED_URIS) {
 const REMOTE_URIS = [
   'red://localhost:5050',
   'reds://reddb.example.com:5050',
-  'grpc://host:5055',
-  'grpcs://host:5056',
-  'http://localhost:8080',
+  'grpc://host:55055',
+  'grpcs://host:55555',
+  'http://localhost:5000',
   'https://reddb.example.com',
   'red://user:pass@host:5050',
-  'grpc://host:5055?token=sk-abc',
+  'grpc://host:55055?token=sk-abc',
 ]
 
 for (const uri of REMOTE_URIS) {

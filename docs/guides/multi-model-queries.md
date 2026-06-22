@@ -19,27 +19,27 @@ By the end of this guide you will insert employees as rows, link them with graph
 Create a `company` collection and add six employees:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/company/rows \
+curl -X POST http://127.0.0.1:5000/collections/company/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"name":"Alice Chen","email":"alice@co.com","department":"Engineering","title":"VP of Engineering"}}'
 
-curl -X POST http://127.0.0.1:8080/collections/company/rows \
+curl -X POST http://127.0.0.1:5000/collections/company/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"name":"Bob Park","email":"bob@co.com","department":"Engineering","title":"Senior ML Engineer"}}'
 
-curl -X POST http://127.0.0.1:8080/collections/company/rows \
+curl -X POST http://127.0.0.1:5000/collections/company/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"name":"Carol Reyes","email":"carol@co.com","department":"Engineering","title":"Backend Engineer"}}'
 
-curl -X POST http://127.0.0.1:8080/collections/company/rows \
+curl -X POST http://127.0.0.1:5000/collections/company/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"name":"Dan Okafor","email":"dan@co.com","department":"Product","title":"Product Manager"}}'
 
-curl -X POST http://127.0.0.1:8080/collections/company/rows \
+curl -X POST http://127.0.0.1:5000/collections/company/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"name":"Eva Lund","email":"eva@co.com","department":"Engineering","title":"ML Engineer"}}'
 
-curl -X POST http://127.0.0.1:8080/collections/company/rows \
+curl -X POST http://127.0.0.1:5000/collections/company/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"name":"Frank Yao","email":"frank@co.com","department":"Engineering","title":"Staff Engineer"}}'
 ```
@@ -64,27 +64,27 @@ Dan (Product Manager) ── reports to Alice
 
 ```bash
 # Bob reports to Alice
-curl -X POST http://127.0.0.1:8080/collections/company/edges \
+curl -X POST http://127.0.0.1:5000/collections/company/edges \
   -H 'content-type: application/json' \
   -d '{"label":"REPORTS_TO","from_rid":103,"to_rid":102,"properties":{"since":"2024-01"}}'
 
 # Carol reports to Alice
-curl -X POST http://127.0.0.1:8080/collections/company/edges \
+curl -X POST http://127.0.0.1:5000/collections/company/edges \
   -H 'content-type: application/json' \
   -d '{"label":"REPORTS_TO","from_rid":104,"to_rid":102,"properties":{"since":"2024-03"}}'
 
 # Dan reports to Alice
-curl -X POST http://127.0.0.1:8080/collections/company/edges \
+curl -X POST http://127.0.0.1:5000/collections/company/edges \
   -H 'content-type: application/json' \
   -d '{"label":"REPORTS_TO","from_rid":105,"to_rid":102,"properties":{"since":"2024-06"}}'
 
 # Eva reports to Bob
-curl -X POST http://127.0.0.1:8080/collections/company/edges \
+curl -X POST http://127.0.0.1:5000/collections/company/edges \
   -H 'content-type: application/json' \
   -d '{"label":"REPORTS_TO","from_rid":106,"to_rid":103,"properties":{"since":"2024-09"}}'
 
 # Frank reports to Alice
-curl -X POST http://127.0.0.1:8080/collections/company/edges \
+curl -X POST http://127.0.0.1:5000/collections/company/edges \
   -H 'content-type: application/json' \
   -d '{"label":"REPORTS_TO","from_rid":107,"to_rid":102,"properties":{"since":"2024-02"}}'
 ```
@@ -116,7 +116,7 @@ INSERT INTO skills (employee_id, description) VALUES (6, 'System design, Kuberne
 > [!TIP]
 > `WITH AUTO EMBED` requires a configured AI provider. Set one up before running these inserts:
 > ```bash
-> curl -X POST http://127.0.0.1:8080/ai/credentials \
+> curl -X POST http://127.0.0.1:5000/ai/credentials \
 >   -d '{"provider":"groq","api_key":"gsk_xxx","default":true}'
 > ```
 

@@ -190,7 +190,7 @@ user exists yet. Useful for managed-service deployments where you can't
 run a one-off container.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/auth/bootstrap \
+curl -X POST http://127.0.0.1:5000/auth/bootstrap \
   -H 'content-type: application/json' \
   -d '{"username": "admin", "password": "change-me-now"}'
 ```
@@ -284,17 +284,17 @@ encrypted store rather than the plaintext `red_config` collection.
 
 ```bash
 # Set a secret (over HTTP — same auth rules as any admin call)
-curl -X POST http://127.0.0.1:8080/secrets/red.secret.stripe.api_key \
+curl -X POST http://127.0.0.1:5000/secrets/red.secret.stripe.api_key \
   -H 'Authorization: Bearer rdb_k_xxxx' \
   -H 'content-type: application/json' \
   -d '{"value": "sk_live_..."}'
 
 # Read it back
-curl http://127.0.0.1:8080/secrets/red.secret.stripe.api_key \
+curl http://127.0.0.1:5000/secrets/red.secret.stripe.api_key \
   -H 'Authorization: Bearer rdb_k_xxxx'
 
 # Delete it
-curl -X DELETE http://127.0.0.1:8080/secrets/red.secret.stripe.api_key \
+curl -X DELETE http://127.0.0.1:5000/secrets/red.secret.stripe.api_key \
   -H 'Authorization: Bearer rdb_k_xxxx'
 ```
 
@@ -427,7 +427,7 @@ services:
   reddb:
     image: ghcr.io/reddb-io/reddb:latest
     ports:
-      - "8080:8080"
+      - "5000:5000"
       - "5050:5050"
     volumes:
       - reddb-data:/data
@@ -442,11 +442,11 @@ services:
       - server
       - --path=/data/data.rdb
       - --vault
-      - --http-bind=0.0.0.0:8080
+      - --http-bind=0.0.0.0:5000
       - --wire-bind=0.0.0.0:5050
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "red", "doctor", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "red", "doctor", "--bind", "127.0.0.1:5000"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -564,12 +564,12 @@ spec:
           - server
           - --path=/data/data.rdb
           - --vault
-          - --http-bind=0.0.0.0:8080
+          - --http-bind=0.0.0.0:5000
         envFrom:
           - secretRef:
               name: reddb-vault
         ports:
-          - { name: http, containerPort: 8080 }
+          - { name: http, containerPort: 5000 }
           - { name: wire, containerPort: 5050 }
         volumeMounts:
           - { name: data, mountPath: /data }
@@ -705,7 +705,7 @@ support SIGHUP rotation.
     "name": "reddb",
     "image": "ghcr.io/reddb-io/reddb:latest",
     "portMappings": [
-      { "containerPort": 8080, "protocol": "tcp" }
+      { "containerPort": 5000, "protocol": "tcp" }
     ],
     "secrets": [
       {
@@ -719,7 +719,7 @@ support SIGHUP rotation.
     ],
     "command": [
       "server", "--path=/data/data.rdb", "--vault",
-      "--http-bind=0.0.0.0:8080"
+      "--http-bind=0.0.0.0:5000"
     ]
   }]
 }
@@ -739,9 +739,9 @@ build:
   build: []
   post-build: []
 run:
-  command: server --path /data/data.rdb --vault --http-bind 0.0.0.0:8080
+  command: server --path /data/data.rdb --vault --http-bind 0.0.0.0:5000
   network:
-    port: 8080
+    port: 5000
   env:
     - name: REDDB_CERTIFICATE
       value-from: "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/reddb/certificate"
@@ -779,11 +779,11 @@ gcloud secrets create reddb-certificate \
 
 gcloud run deploy reddb \
   --image=ghcr.io/reddb-io/reddb:latest \
-  --port=8080 \
+  --port=5000 \
   --service-account=reddb-runtime@PROJECT.iam.gserviceaccount.com \
   --update-secrets=REDDB_CERTIFICATE=reddb-certificate:latest \
   --command=server \
-  --args=--path=/data/data.rdb,--vault,--http-bind=0.0.0.0:8080
+  --args=--path=/data/data.rdb,--vault,--http-bind=0.0.0.0:5000
 ```
 
 The runtime service account needs `roles/secretmanager.secretAccessor`.
@@ -916,7 +916,7 @@ job "reddb" {
       config {
         image = "ghcr.io/reddb-io/reddb:latest"
         args  = ["server", "--path", "/data/data.rdb", "--vault",
-                 "--http-bind", "0.0.0.0:8080"]
+                 "--http-bind", "0.0.0.0:5000"]
       }
       template {
         data        = "{{ with secret \"secret/data/reddb/certificate\" }}{{ .Data.data.value }}{{ end }}"
@@ -940,7 +940,7 @@ fly secrets set REDDB_CERTIFICATE=4b7d1e2c... -a my-reddb
 
 # fly.toml
 [env]
-  RED_HTTP_BIND_ADDR = "0.0.0.0:8080"
+  RED_HTTP_BIND_ADDR = "0.0.0.0:5000"
 
 [[mounts]]
   source = "reddb_data"
@@ -958,7 +958,7 @@ doppler secrets set REDDB_CERTIFICATE="4b7d1e2c..." \
 
 # In your container's entrypoint:
 doppler run -- red server --path /data/data.rdb --vault \
-                          --http-bind 0.0.0.0:8080
+                          --http-bind 0.0.0.0:5000
 ```
 
 ### 1Password Connect
@@ -1012,7 +1012,7 @@ re-bootstrap from a logical backup, not an in-place key rotation.
 
 ```bash
 # 1. Take a logical backup of the running primary
-curl -X POST http://primary:8080/admin/backup \
+curl -X POST http://primary:5000/admin/backup \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN"
 
 # 2. Bring up a fresh staging instance with a NEW certificate
@@ -1024,7 +1024,7 @@ docker run --rm -v staging-data:/data ghcr.io/reddb-io/reddb:latest \
 # capture the new cert
 
 # 3. Restore the logical backup into staging
-curl -X POST http://staging:8080/admin/restore \
+curl -X POST http://staging:5000/admin/restore \
   -H "Authorization: Bearer $STAGING_ADMIN_TOKEN" \
   -d '{"snapshot_id":"<from step 1>"}'
 
@@ -1071,7 +1071,7 @@ A practical pattern:
 
 ```bash
 # RedDB ships every /admin/* call to the audit log
-curl 'http://reddb:8080/admin/audit?since=24h' \
+curl 'http://reddb:5000/admin/audit?since=24h' \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN"
 ```
 
@@ -1109,7 +1109,7 @@ docker run --rm -v reddb-new:/data ghcr.io/reddb-io/reddb:latest \
   bootstrap --path /data/data.rdb --print-certificate
 
 # 2. Restore user collections only (skip auth state)
-curl -X POST http://new:8080/admin/restore \
+curl -X POST http://new:5000/admin/restore \
   -d '{"snapshot_id":"...","skip_vault":true}' \
   -H "Authorization: Bearer $NEW_ADMIN_TOKEN"
 

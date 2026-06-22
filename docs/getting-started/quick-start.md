@@ -15,8 +15,8 @@ Start RedDB with both remote APIs in one process:
 mkdir -p ./data
 red server \
   --path ./data/reddb.rdb \
-  --grpc-bind 127.0.0.1:50051 \
-  --http-bind 127.0.0.1:8080
+  --grpc-bind 127.0.0.1:55055 \
+  --http-bind 127.0.0.1:5000
 ```
 
 If you want an ephemeral database for testing, omit `--path`.
@@ -24,7 +24,7 @@ If you want an ephemeral database for testing, omit `--path`.
 ## 2. Write a row
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
+curl -X POST http://127.0.0.1:5000/collections/hosts/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -38,7 +38,7 @@ curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
 ## 3. Write a graph node
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/network/nodes \
+curl -X POST http://127.0.0.1:5000/collections/network/nodes \
   -H 'content-type: application/json' \
   -d '{
     "label": "host-10.0.0.1",
@@ -53,7 +53,7 @@ curl -X POST http://127.0.0.1:8080/collections/network/nodes \
 ## 4. Write a vector
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
+curl -X POST http://127.0.0.1:5000/collections/embeddings/vectors \
   -H 'content-type: application/json' \
   -d '{
     "dense": [0.12, 0.91, 0.44],
@@ -67,7 +67,7 @@ curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
 ## 5. Query with SQL-style syntax
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{
     "query": "SELECT * FROM hosts WHERE critical = $1",
@@ -81,7 +81,7 @@ tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 ## 6. Query across models
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{
     "query": "FROM ANY ORDER BY _score DESC LIMIT $1",
@@ -100,7 +100,7 @@ confirms every marker points at a real source. The contract is documented in
 [#392](https://github.com/reddb-io/reddb/issues/392).
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{
     "query": "ASK '\''which critical hosts need investigation?'\'' USING openai STRICT ON CACHE TTL '\''5m'\'' LIMIT 5"
@@ -126,9 +126,9 @@ Expected row shape:
 ## 8. Check health
 
 ```bash
-curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8080/ready
-curl -s http://127.0.0.1:8080/stats
+curl -s http://127.0.0.1:5000/health
+curl -s http://127.0.0.1:5000/ready
+curl -s http://127.0.0.1:5000/stats
 ```
 
 ## 9. Optional: connect over gRPC
@@ -136,7 +136,7 @@ curl -s http://127.0.0.1:8080/stats
 Then connect with the CLI:
 
 ```bash
-red connect 127.0.0.1:50051
+red connect 127.0.0.1:55055
 ```
 
 ## 10. Optional: use it embedded instead

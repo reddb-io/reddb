@@ -118,7 +118,7 @@ pub struct CascadeUpstream {
     /// Stable node identity of the intermediate (matches its replica id).
     pub node_id: String,
     /// Address the sub-replica connects to in order to stream from the
-    /// intermediate (e.g. `"http://replica-a:50051"`).
+    /// intermediate (e.g. `"http://replica-a:55055"`).
     pub addr: String,
 }
 
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn async_read_replica_cascades_from_intermediate() {
-        let up = CascadeUpstream::new("inter", "http://inter:50051");
+        let up = CascadeUpstream::new("inter", "http://inter:55055");
         let (choice, refusal) = plan_upstream("leaf", ReplicaClass::AsyncReadReplica, Some(&up));
         assert!(choice.is_cascade());
         assert_eq!(choice, UpstreamChoice::Intermediate(up));
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn voting_member_refuses_cascade_and_falls_back_to_primary() {
-        let up = CascadeUpstream::new("inter", "http://inter:50051");
+        let up = CascadeUpstream::new("inter", "http://inter:55055");
         let (choice, refusal) = plan_upstream("voter", ReplicaClass::Voting, Some(&up));
         assert_eq!(choice, UpstreamChoice::Primary);
         assert_eq!(refusal, Some(CascadeRefusal::VotingMemberDirectOnly));
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn node_refuses_to_cascade_from_itself() {
-        let up = CascadeUpstream::new("self", "http://self:50051");
+        let up = CascadeUpstream::new("self", "http://self:55055");
         let (choice, refusal) = plan_upstream("self", ReplicaClass::AsyncReadReplica, Some(&up));
         assert_eq!(choice, UpstreamChoice::Primary);
         assert_eq!(refusal, Some(CascadeRefusal::SelfReference));

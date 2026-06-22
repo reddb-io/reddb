@@ -31,7 +31,7 @@ ASK 'list users with admin access and their login history' USING ollama MODEL 'l
 | You need time-series + SQL joins + graph traversal on the same data | **Strong** — multi-model is the whole point | TimescaleDB + Neo4j bridge |
 | You want ML inline in SQL (`ML_CLASSIFY`, `SEMANTIC_CACHE_*`, `EMBED`) | **Strong** — [AI-first surface](/guides/ask-your-database.md) | Python side-car |
 | You need an OLAP engine pushing 100M+ rows through GROUP BY in sub-second on a single box | **Partial** — we're 2–5× behind ClickHouse on heavy OLAP | ClickHouse |
-| You need distributed sharding across regions today | **Not yet** — single-node; [distributed roadmap](/architecture/distributed-roadmap.md) | CockroachDB, YugabyteDB |
+| You need distributed sharding across regions today | **Not yet** — primary-replica exists, sharded cluster is still roadmap; [distributed roadmap](/architecture/distributed-roadmap.md) | CockroachDB, YugabyteDB |
 | You depend on the Postgres extension ecosystem (PostGIS, etc.) | **No** — we speak the Postgres wire protocol but aren't a Postgres fork | Postgres proper |
 
 For the full engine-by-engine breakdown see [Competitive Positioning](/architecture/competitive-positioning.md).
@@ -56,7 +56,7 @@ Set an API key and go. Every provider that exposes an OpenAI-compatible API work
 
 ```bash
 export REDDB_GROQ_API_KEY=gsk_xxx
-red server --path ./data/reddb.rdb --http-bind 127.0.0.1:5055
+red server --path ./data/reddb.rdb --http-bind 127.0.0.1:5000
 ```
 
 ## Semantic search built in
@@ -251,7 +251,7 @@ curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | ba
 ### npx
 
 ```bash
-npx @reddb-io/cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:5055
+npx @reddb-io/cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:5000
 ```
 
 ### JavaScript / TypeScript driver
@@ -273,19 +273,19 @@ await db.close()
 Start the server:
 
 ```bash
-red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:5555 --http-bind 127.0.0.1:5055
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000
 ```
 
 Check health:
 
 ```bash
-curl -s http://127.0.0.1:5055/health
+curl -s http://127.0.0.1:5000/health
 ```
 
 Run a query:
 
 ```bash
-curl -X POST http://127.0.0.1:5055/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
@@ -293,7 +293,7 @@ curl -X POST http://127.0.0.1:5055/query \
 Ask a question:
 
 ```bash
-curl -X POST http://127.0.0.1:5055/ai/ask \
+curl -X POST http://127.0.0.1:5000/ai/ask \
   -H 'content-type: application/json' \
   -d '{"question":"what happened on host 10.0.0.1?","provider":"groq","model":"llama-3.3-70b-versatile"}'
 ```
@@ -301,7 +301,7 @@ curl -X POST http://127.0.0.1:5055/ai/ask \
 Connect via gRPC REPL:
 
 ```bash
-red connect 127.0.0.1:5555
+red connect 127.0.0.1:55055
 ```
 
 ## Start here

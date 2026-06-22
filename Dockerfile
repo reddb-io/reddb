@@ -47,13 +47,14 @@ WORKDIR /data
 VOLUME /data
 VOLUME /etc/reddb
 
-# Wire (5050), gRPC (5055) and HTTP (8080) ports
-EXPOSE 5050 5055 8080
+# Wire (5050), gRPC/control-plane (55055), HTTP/Web (5000), optional TLS/extra (55555)
+EXPOSE 5050 55055 5000 55555
 
 ENV REDDB_DATA_PATH=/data/data.rdb
-ENV REDDB_BIND_ADDR=0.0.0.0:5050
-ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:5055
-ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:8080
+ENV REDDB_WIRE_BIND_ADDR=0.0.0.0:5050
+ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:55055
+ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:5000
+ENV REDDB_VAULT=false
 ENV RUST_MIN_STACK=8388608
 
 # Perf-parity config overlay — see docs/engine/perf-bench.md.
@@ -75,7 +76,7 @@ ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
 
 # Topology is intentionally not baked into the image. Use the same image for
 # serverless, primary-replica, and cluster-shaped deployments; select the mode at
-# runtime with args plus REDDB_STORAGE_PRESET / REDDB_STORAGE_PROFILE.
+# runtime with REDDB_TOPOLOGY / REDDB_NODE_ROLE plus the REDDB_STORAGE_* envs.
 
 # === Secrets via file mounts ====================================================
 # DO NOT bake REDDB_CERTIFICATE / REDDB_VAULT_KEY / REDDB_PASSWORD into this image.
@@ -97,7 +98,7 @@ USER nonroot:nonroot
 # returns 200 while the process is responsive, 503 only after
 # Stopped. Cheap — no I/O.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+    CMD ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
 
 ENTRYPOINT ["/usr/local/bin/red"]
-CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--wire-bind", "0.0.0.0:5050", "--grpc-bind", "0.0.0.0:5055"]
+CMD ["server"]

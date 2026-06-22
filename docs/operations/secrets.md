@@ -131,7 +131,7 @@ as a P1 incident.
    old:
 
    ```bash
-   curl http://primary:8080/admin/backups \
+   curl http://primary:5000/admin/backups \
      -H "Authorization: Bearer $RED_ADMIN_TOKEN" | jq '.[] | {id, taken_at}'
    ```
 
@@ -146,7 +146,7 @@ as a P1 incident.
 5. **Restore user data** from the logical backup:
 
    ```bash
-   curl -X POST http://new:8080/admin/restore \
+   curl -X POST http://new:5000/admin/restore \
      -H "Authorization: Bearer $NEW_ADMIN_TOKEN" \
      -d '{"snapshot_id":"<latest>","skip_vault":true}'
    ```

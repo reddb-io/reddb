@@ -8,7 +8,7 @@
 //! Schemes accepted:
 //!   - `red://host[:port]`   → RedWire / gRPC default port 5050
 //!   - `reds://host[:port]`  → RedWire-over-TLS (same default port)
-//!   - `grpc://host[:port]`  → gRPC plain   default port 5055
+//!   - `grpc://host[:port]`  → gRPC plain   default port 55055
 //!   - `grpcs://host[:port]` → gRPC + TLS
 //!   - `http://host[:port]`  → REST plain
 //!     (not yet wired through red_client; surfaces as a clear
@@ -314,7 +314,7 @@ USAGE:
 EXAMPLES:
     red_client red://reddb.example.com:5050 --token sk-abc
     red_client reds://reddb.example.com:5050 --token sk-abc -c \"SELECT 1\"
-    red_client grpcs://reddb.example.com:50052 --token sk-abc
+    red_client grpcs://reddb.example.com:55555 --token sk-abc
 
 ACCEPTED SCHEMES:
     red://, reds://, grpc://, grpcs://

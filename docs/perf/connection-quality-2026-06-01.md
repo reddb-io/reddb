@@ -97,9 +97,9 @@ async-edge build whose TLS edge mounts the `/redwire` WebSocket route (i.e.
 ```
 # after the migration: keep-alive is free, and the browser speaks RedWire-over-WSS
 node scripts/connection-quality.mjs \
-     --http  127.0.0.1:8080 \
+     --http  127.0.0.1:5000 \
      --wire  127.0.0.1:5050 \
-     --ws    wss://127.0.0.1:8443/redwire --ws-insecure \
+     --ws    wss://127.0.0.1:55555/redwire --ws-insecure \
      --requests 1500 --concurrency 64
 ```
 

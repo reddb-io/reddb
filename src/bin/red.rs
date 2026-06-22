@@ -581,7 +581,7 @@ fn main() {
                     }
                 }
                 _ => {
-                    let help = "Usage: red service <install|print-unit> [flags]\n\nExamples:\n  sudo red service install --binary /usr/local/bin/red --bind 0.0.0.0:5050 --path /var/lib/reddb/data.rdb\n  red service print-unit --http --path /var/lib/reddb/data.rdb --bind 127.0.0.1:8080\n";
+                    let help = "Usage: red service <install|print-unit> [flags]\n\nExamples:\n  sudo red service install --binary /usr/local/bin/red --bind 0.0.0.0:5050 --path /var/lib/reddb/data.rdb\n  red service print-unit --http --path /var/lib/reddb/data.rdb --bind 127.0.0.1:5000\n";
                     if json_mode {
                         json_ok("service", "{\"subcommands\":[\"install\",\"print-unit\"]}");
                     } else {
@@ -917,7 +917,7 @@ fn main() {
         "tick" => {
             let json_mode = wants_json(&result.flags);
             let bind_addr =
-                flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
+                flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:5000".to_string());
             let operations = flag_string(&result.flags, "operations");
             let dry_run = flag_bool(&result.flags, "dry-run");
 
@@ -2973,7 +2973,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
                     .with_description("Server HTTP address")
-                    .with_default("127.0.0.1:8080"),
+                    .with_default("127.0.0.1:5000"),
                 cli::types::FlagSchema::new("token")
                     .with_short('t')
                     .with_description("Admin bearer token (env: RED_ADMIN_TOKEN)"),
@@ -3082,7 +3082,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
                     .with_description("Server HTTP bind address")
-                    .with_default("127.0.0.1:8080"),
+                    .with_default("127.0.0.1:5000"),
                 cli::types::FlagSchema::new("operations").with_description(
                     "Comma-separated operations: maintenance,retention,checkpoint",
                 ),
@@ -3117,7 +3117,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Persistent database file path (omit for in-memory)"),
                 cli::types::FlagSchema::new("connect")
                     .with_short('c')
-                    .with_description("Proxy to a remote gRPC server (e.g. grpc://host:5055)"),
+                    .with_description("Proxy to a remote gRPC server (e.g. grpc://host:55055)"),
                 cli::types::FlagSchema::new("token")
                     .with_short('t')
                     .with_description("Auth token forwarded to the remote server"),
@@ -3262,7 +3262,12 @@ fn build_server_config(
                 None
             }
         });
-    let wire_bind_addr = flag_string(flags, "wire-bind").filter(|v| !v.is_empty());
+    let explicit_wire_bind_from_flag =
+        flag_string(flags, "wire-bind").filter(|value| !value.is_empty());
+    let explicit_wire_bind_from_env = env_string("REDDB_WIRE_BIND_ADDR");
+    let wire_bind_addr = explicit_wire_bind_from_flag
+        .clone()
+        .or(explicit_wire_bind_from_env.clone());
     let wire_tls_bind_addr = flag_string(flags, "wire-tls-bind").filter(|v| !v.is_empty());
     let pg_bind_addr = flag_string(flags, "pg-bind").filter(|v| !v.is_empty());
     let router_bind_addr = if explicit_grpc_bind.is_none()
@@ -3393,9 +3398,8 @@ fn build_server_config(
         http_tls_key,
         http_tls_client_ca,
         wire_bind_addr,
-        wire_bind_explicit: flag_string(flags, "wire-bind")
-            .filter(|value| !value.is_empty())
-            .is_some(),
+        wire_bind_explicit: explicit_wire_bind_from_flag.is_some()
+            || explicit_wire_bind_from_env.is_some(),
         wire_tls_bind_addr,
         wire_tls_cert,
         wire_tls_key,
@@ -3403,9 +3407,11 @@ fn build_server_config(
         create_if_missing: !flag_bool(flags, "no-create-if-missing"),
         read_only: flag_bool(flags, "read-only"),
         role,
-        primary_addr: flag_string(flags, "primary-addr").filter(|value| !value.is_empty()),
+        primary_addr: flag_string(flags, "primary-addr")
+            .filter(|value| !value.is_empty())
+            .or_else(|| env_string("REDDB_PRIMARY_ADDR")),
         storage_profile,
-        vault: flag_bool(flags, "vault"),
+        vault: flag_bool(flags, "vault") || env_truthy("REDDB_VAULT"),
         no_auth: flag_bool(flags, "no-auth") || flag_bool(flags, "dev"),
         workers,
         telemetry: Some(telemetry),
@@ -3924,7 +3930,7 @@ fn run_inspect_command(flags: &HashMap<String, FlagValue>, remaining: &[String])
 
 fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     let json_mode = wants_json(flags);
-    let bind = flag_string(flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    let bind = flag_string(flags, "bind").unwrap_or_else(|| "127.0.0.1:5000".to_string());
     let token = flag_string(flags, "token")
         .or_else(|| std::env::var("RED_ADMIN_TOKEN").ok())
         .filter(|t| !t.trim().is_empty());
@@ -3957,7 +3963,7 @@ fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                 println!("  query        Run a native SQL catalog query via /query");
                 println!();
                 println!("Flags:");
-                println!("  --bind <addr>   Server HTTP address (default: 127.0.0.1:8080, env: REDDB_BIND_ADDR)");
+                println!("  --bind <addr>   Server HTTP address (default: 127.0.0.1:5000, env: REDDB_BIND_ADDR)");
                 println!("  --token <tok>   Admin bearer token (env: RED_ADMIN_TOKEN)");
                 println!("  --json          JSON output");
                 println!("  --csv           CSV output for tabular commands");
@@ -5213,7 +5219,7 @@ fn run_bootstrap_command(flags: &HashMap<String, FlagValue>) -> i32 {
 
 fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     let json_mode = wants_json(&result.flags);
-    let bind = flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    let bind = flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:5000".to_string());
     let token = flag_string(&result.flags, "token")
         .or_else(|| std::env::var("RED_ADMIN_TOKEN").ok())
         .filter(|t| !t.trim().is_empty());
@@ -5605,6 +5611,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
+            "REDDB_VAULT",
         ]);
         let flags = HashMap::new();
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
@@ -5622,6 +5630,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
+            "REDDB_VAULT",
         ]);
         let flags = HashMap::from([
             ("grpc".to_string(), bool_flag(true)),
@@ -5645,6 +5655,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
+            "REDDB_VAULT",
         ]);
         let flags = HashMap::from([
             ("grpc".to_string(), bool_flag(true)),
@@ -5658,12 +5670,12 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     #[test]
     fn resolve_server_binds_accepts_explicit_dual_addresses() {
         let flags = HashMap::from([
-            ("grpc-bind".to_string(), str_flag("0.0.0.0:50051")),
-            ("http-bind".to_string(), str_flag("0.0.0.0:8080")),
+            ("grpc-bind".to_string(), str_flag("0.0.0.0:55055")),
+            ("http-bind".to_string(), str_flag("0.0.0.0:5000")),
         ]);
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
-        assert_eq!(grpc_bind.as_deref(), Some("0.0.0.0:50051"));
-        assert_eq!(http_bind.as_deref(), Some("0.0.0.0:8080"));
+        assert_eq!(grpc_bind.as_deref(), Some("0.0.0.0:55055"));
+        assert_eq!(http_bind.as_deref(), Some("0.0.0.0:5000"));
     }
 
     #[test]
@@ -5733,6 +5745,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
+            "REDDB_VAULT",
         ]);
         let flags = HashMap::new();
         let config = build_server_config(&flags, None).unwrap();
@@ -5752,6 +5766,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
         ]);
         let config = build_server_config(&HashMap::new(), None).unwrap();
         assert!(!config.ui, "--ui is off by default");
@@ -5768,6 +5783,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
         ]);
         let flags = HashMap::from([
             ("ui".to_string(), bool_flag(true)),
@@ -5788,6 +5804,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
         ]);
         let flags = HashMap::from([("bind".to_string(), str_flag("0.0.0.0:5050"))]);
         let config = build_server_config(&flags, None).unwrap();
@@ -5801,9 +5818,10 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[
             ("REDDB_DATA_PATH", "/data/data.rdb"),
-            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:50051"),
-            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:8080"),
-            ("REDDB_BIND_ADDR", "0.0.0.0:50051"),
+            ("REDDB_WIRE_BIND_ADDR", "0.0.0.0:5050"),
+            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:55055"),
+            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:5000"),
+            ("REDDB_VAULT", "true"),
         ]);
 
         let flags = HashMap::from([("path".to_string(), str_flag("./data/reddb.rdb"))]);
@@ -5814,8 +5832,10 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             Some(std::path::Path::new("/data/data.rdb"))
         );
         assert_eq!(config.router_bind_addr, None);
-        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
-        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
+        assert_eq!(config.wire_bind_addr.as_deref(), Some("0.0.0.0:5050"));
+        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:55055"));
+        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:5000"));
+        assert!(config.vault);
     }
 
     #[test]
@@ -5823,8 +5843,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[
             ("REDDB_DATA_PATH", "/data/data.rdb"),
-            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:50051"),
-            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:8080"),
+            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:55055"),
+            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:5000"),
         ]);
 
         let flags = HashMap::from([
@@ -5837,7 +5857,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             config.path.as_deref(),
             Some(std::path::Path::new("/tmp/override.rdb"))
         );
-        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
+        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:55055"));
         assert_eq!(config.http_bind_addr.as_deref(), Some("127.0.0.1:18080"));
     }
 
@@ -5854,6 +5874,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_WAL_RETENTION",
             "REDDB_TOPOLOGY",
             "REDDB_NODE_ROLE",
+            "REDDB_PRIMARY_ADDR",
         ]);
         let flags = HashMap::from([("role".to_string(), str_flag("primary"))]);
         let config = build_server_config(&flags, None).unwrap();
@@ -5882,6 +5903,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_PRIMARY_ADDR",
         ]);
 
         let config = build_server_config(&HashMap::new(), None).unwrap();
@@ -5929,15 +5951,41 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_PRIMARY_ADDR",
         ]);
 
         let config = build_server_config(&HashMap::new(), None).unwrap();
 
         assert_eq!(config.role, "replica");
+        assert_eq!(config.primary_addr.as_deref(), None);
         assert_eq!(
             config.storage_profile.deploy_profile,
             reddb::storage::DeployProfile::PrimaryReplica
         );
+    }
+
+    #[test]
+    fn build_server_config_reads_primary_addr_env_for_replica() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_TOPOLOGY", "primary-replica"),
+            ("REDDB_NODE_ROLE", "replica"),
+            ("REDDB_PRIMARY_ADDR", "http://primary:55055"),
+        ]);
+        let _clear = EnvGuard::clear(&[
+            "REDDB_STORAGE_PRESET",
+            "REDDB_STORAGE_PROFILE",
+            "REDDB_DEPLOY_PROFILE",
+            "REDDB_STORAGE_PACKAGING",
+            "REDDB_REPLICA_COUNT",
+            "REDDB_MANAGED_BACKUP",
+            "REDDB_WAL_RETENTION",
+        ]);
+
+        let config = build_server_config(&HashMap::new(), None).unwrap();
+
+        assert_eq!(config.role, "replica");
+        assert_eq!(config.primary_addr.as_deref(), Some("http://primary:55055"));
     }
 
     #[test]
@@ -5955,6 +6003,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_REPLICA_COUNT",
             "REDDB_MANAGED_BACKUP",
             "REDDB_WAL_RETENTION",
+            "REDDB_PRIMARY_ADDR",
         ]);
 
         let config = build_server_config(&HashMap::new(), None).unwrap();
@@ -5979,6 +6028,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_WAL_RETENTION",
             "REDDB_TOPOLOGY",
             "REDDB_NODE_ROLE",
+            "REDDB_PRIMARY_ADDR",
         ]);
         let flags = HashMap::from([(
             "storage-preset".to_string(),
@@ -6048,9 +6098,9 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[
             ("REDDB_DATA_PATH", "/data/data.rdb"),
-            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:50051"),
-            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:8080"),
-            ("REDDB_BIND_ADDR", "0.0.0.0:50051"),
+            ("REDDB_WIRE_BIND_ADDR", "0.0.0.0:5050"),
+            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:55055"),
+            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:5000"),
         ]);
 
         let args = vec!["server".to_string()];
@@ -6064,8 +6114,9 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             config.path.as_deref(),
             Some(std::path::Path::new("/data/data.rdb"))
         );
-        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
-        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
+        assert_eq!(config.wire_bind_addr.as_deref(), Some("0.0.0.0:5050"));
+        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:55055"));
+        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:5000"));
     }
 
     #[test]
@@ -6075,6 +6126,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
         ]);
 
         let args = vec![
@@ -6109,6 +6161,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
         ]);
         let flags = HashMap::new();
         let config = build_systemd_service_config(&flags).unwrap();
@@ -6127,12 +6180,13 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "REDDB_BIND_ADDR",
             "REDDB_GRPC_BIND_ADDR",
             "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
         ]);
-        let flags = HashMap::from([("http-bind".to_string(), str_flag("0.0.0.0:8080"))]);
+        let flags = HashMap::from([("http-bind".to_string(), str_flag("0.0.0.0:5000"))]);
         let config = build_systemd_service_config(&flags).unwrap();
         assert_eq!(config.router_bind_addr, None);
         assert_eq!(config.grpc_bind_addr, None);
-        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
+        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:5000"));
     }
 
     // --- admin cache output format ---

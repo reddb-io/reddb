@@ -173,9 +173,11 @@ invalidation to the writer; the per-key `DEL` storm goes away.
 ## Cluster-mode
 
 Redis Cluster shards the keyspace by hash slot across many nodes,
-with client-side or proxy-side routing. RedDB does not have a
-hash-slot model. ADR 0008 describes the topology as **single-primary
-plus read replicas**, with cache state replicated **per-node**.
+with client-side or proxy-side routing. RedDB's future productive
+cluster model uses hash slots for user-data sharding, but Blob Cache
+MVP does not expose Redis-compatible cluster-mode cache slots. The
+shipping topology for this guide is **single-primary plus read
+replicas**, with cache state replicated **per-node**.
 
 Concretely:
 

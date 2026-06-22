@@ -10,12 +10,12 @@ Prerequisite: `cargo build --release --bin red` and the server
 started with HTTP enabled:
 
 ```bash
-./target/release/red server --http --http-bind 127.0.0.1:8080 \
+./target/release/red server --http --http-bind 127.0.0.1:5000 \
   --path /tmp/git-for-data.rdb
 ```
 
 All subsequent commands assume `alias red=./target/release/red`
-and `alias reddb='curl -s http://127.0.0.1:8080'`.
+and `alias reddb='curl -s http://127.0.0.1:5000'`.
 
 ---
 

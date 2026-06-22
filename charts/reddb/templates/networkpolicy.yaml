@@ -16,9 +16,11 @@ spec:
     - Ingress
   ingress:
     - ports:
-        - port: 50051
+        - port: 5050
           protocol: TCP
-        - port: 8080
+        - port: 55055
+          protocol: TCP
+        - port: 5000
           protocol: TCP
       {{- if or (and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0)) .Values.networkPolicy.ingressFrom }}
       from:
@@ -49,9 +51,11 @@ spec:
     - Ingress
   ingress:
     - ports:
-        - port: 50051
+        - port: 5050
           protocol: TCP
-        - port: 8080
+        - port: 55055
+          protocol: TCP
+        - port: 5000
           protocol: TCP
       {{- with .Values.networkPolicy.ingressFrom }}
       from:
@@ -76,9 +80,11 @@ spec:
     - Ingress
   ingress:
     - ports:
-        - port: 50051
+        - port: 5050
           protocol: TCP
-        - port: 8080
+        - port: 55055
+          protocol: TCP
+        - port: 5000
           protocol: TCP
       from:
         - podSelector:

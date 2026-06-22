@@ -1,7 +1,6 @@
-# Symmetric cluster-shape demo. Current `red` boots each member with
-# `red server --role standalone` plus the cluster storage preset; the
-# cluster supervisor consumes the stable identity/discovery contract as it
-# matures.
+# Symmetric cluster-shape demo. The same image command (`red server`) is used
+# for every member; env supplies the cluster storage preset and stable
+# identity/discovery contract.
 
 x-reddb-cluster-env: &reddb-cluster-env
   RUST_LOG: info
@@ -10,20 +9,10 @@ x-reddb-cluster-env: &reddb-cluster-env
   REDDB_STORAGE_PROFILE: cluster
   REDDB_STORAGE_PACKAGING: operational-directory
   REDDB_REPLICA_COUNT: "3"
+  REDDB_VAULT: "false"
   RED_CLUSTER_HA_INTENT: declared
-  REDDB_CLUSTER_PEERS: cluster-0:50051,cluster-1:50051,cluster-2:50051
+  REDDB_CLUSTER_PEERS: cluster-0:55055,cluster-1:55055,cluster-2:55055
   REDDB_CONFIG_FILE: /etc/reddb/config.json
-
-x-reddb-cluster-command: &reddb-cluster-command
-  - "server"
-  - "--path"
-  - "/data/data.rdb"
-  - "--role"
-  - "standalone"
-  - "--grpc-bind"
-  - "0.0.0.0:50051"
-  - "--http-bind"
-  - "0.0.0.0:8080"
 
 services:
   cluster-0:
@@ -33,18 +22,18 @@ services:
     container_name: reddb-cluster-0
     hostname: cluster-0
     ports:
-      - "50100:50051"
-      - "8100:8080"
+      - "5100:5050"
+      - "55150:55055"
+      - "5020:5000"
     volumes:
       - cluster-0-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro
-    command: *reddb-cluster-command
     environment:
       <<: *reddb-cluster-env
       REDDB_NODE_ROLE: cluster-member
       REDDB_CLUSTER_NODE_ID: cluster-0
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -57,12 +46,12 @@ services:
     container_name: reddb-cluster-1
     hostname: cluster-1
     ports:
-      - "50101:50051"
-      - "8101:8080"
+      - "5101:5050"
+      - "55151:55055"
+      - "5021:5000"
     volumes:
       - cluster-1-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro
-    command: *reddb-cluster-command
     environment:
       <<: *reddb-cluster-env
       REDDB_NODE_ROLE: cluster-member
@@ -71,7 +60,7 @@ services:
       cluster-0:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -84,12 +73,12 @@ services:
     container_name: reddb-cluster-2
     hostname: cluster-2
     ports:
-      - "50102:50051"
-      - "8102:8080"
+      - "5102:5050"
+      - "55152:55055"
+      - "5022:5000"
     volumes:
       - cluster-2-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro
-    command: *reddb-cluster-command
     environment:
       <<: *reddb-cluster-env
       REDDB_NODE_ROLE: cluster-member
@@ -98,7 +87,7 @@ services:
       cluster-0:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10

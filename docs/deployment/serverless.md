@@ -35,7 +35,7 @@ can see exactly where the boot budget was spent.
 | `RED_AUTO_RESTORE` | `true` to rebuild the local data file from the latest manifest on cold boot. |
 | `RED_BACKUP_ON_SHUTDOWN` | `true` to take a final backup on SIGTERM before exit. |
 | `RED_LEASE_REQUIRED` | `true` to demand a CAS-backed writer lease. Multi-replica deployments must set this. |
-| `RED_HTTP_BIND_ADDR` | data-plane bind, e.g. `0.0.0.0:8080`. |
+| `RED_HTTP_BIND_ADDR` | data-plane bind, e.g. `0.0.0.0:5000`. |
 | `RED_ADMIN_BIND` (opt) | dedicated `/admin/*` listener; pairs with `RED_METRICS_BIND` for split surfaces. |
 
 Sensitive values support the `_FILE` companion convention (e.g.
@@ -73,8 +73,8 @@ pin each to its own listener:
   scrape + readiness probes.
 
 ```bash
-export RED_HTTP_BIND_ADDR=0.0.0.0:8080      # public
-export RED_ADMIN_BIND=127.0.0.1:18080       # admin (loopback, behind ingress)
+export RED_HTTP_BIND_ADDR=0.0.0.0:5000      # public
+export RED_ADMIN_BIND=127.0.0.1:55555        # admin (loopback, behind ingress)
 export RED_METRICS_BIND=0.0.0.0:9090         # scrape target
 ```
 
@@ -91,7 +91,7 @@ Connect a serverless instance to its storage:
 ```bash
 grpcurl -plaintext \
   -d '{"payloadJson": "{\"path\":\"/data/reddb.rdb\"}"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/ServerlessAttach
+  127.0.0.1:55055 reddb.v1.RedDb/ServerlessAttach
 ```
 
 ### Warmup
@@ -101,7 +101,7 @@ Pre-load indexes and hot data:
 ```bash
 grpcurl -plaintext \
   -d '{"payloadJson": "{}"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/ServerlessWarmup
+  127.0.0.1:55055 reddb.v1.RedDb/ServerlessWarmup
 ```
 
 ### Reclaim
@@ -111,13 +111,13 @@ Release resources when the instance is no longer needed:
 ```bash
 grpcurl -plaintext \
   -d '{"payloadJson": "{}"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/ServerlessReclaim
+  127.0.0.1:55055 reddb.v1.RedDb/ServerlessReclaim
 ```
 
 When you need platform-level hooks (or external workflows), call:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/tick \
+curl -X POST http://127.0.0.1:5000/tick \
   -H 'content-type: application/json' \
   -d '{"operations":["maintenance","retention","checkpoint"],"dry_run":false}'
 ```
@@ -130,7 +130,7 @@ semantics.
 Flip the writer gate without restarting:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/admin/readonly \
+curl -X POST http://127.0.0.1:5000/admin/readonly \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
   -d '{"enabled": true}'
 ```
@@ -141,7 +141,7 @@ or blue/green flips.
 ## Readiness
 
 ```bash
-curl http://127.0.0.1:8080/ready/serverless
+curl http://127.0.0.1:5000/ready/serverless
 ```
 
 This checks query, write, and repair readiness gates specific to the

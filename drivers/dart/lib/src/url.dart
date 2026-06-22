@@ -7,8 +7,8 @@ const Map<String, int> _defaultPorts = {
   'reds': 5050,
   'redwire': 5050,
   'redwire-tls': 5050,
-  'http': 8080,
-  'https': 8443,
+  'http': 5000,
+  'https': 55555,
 };
 
 /// Default port for a transport kind. Returns `5050` for unknown kinds

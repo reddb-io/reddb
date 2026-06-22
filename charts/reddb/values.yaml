@@ -162,7 +162,7 @@ extraSecretMounts: []
 # When grpc.tls.enabled is true, the reddb pod also serves a TLS-terminated
 # gRPC listener on the address `grpc.tls.bindAddr`. The plaintext gRPC
 # listener can still be advertised on a separate port — operators commonly
-# pin 50051 plaintext + 50052 TLS during a rollout.
+# pin 55055 plaintext + 55555 TLS during a rollout.
 #
 # Optional mTLS: when grpc.tls.clientCa.secretName is set, the gRPC server
 # requires every client to present a certificate that chains to a CA
@@ -173,7 +173,7 @@ grpc:
     enabled: false
     # In-pod bind address for the TLS gRPC listener. Plaintext gRPC
     # continues to listen on `service.grpcPort` unless disabled.
-    bindAddr: "0.0.0.0:50052"
+    bindAddr: "0.0.0.0:55555"
     # Source of the server cert + key. Both keys are read from this secret.
     secretName: ""
     certKey: "tls.crt"
@@ -203,7 +203,7 @@ http:
   tls:
     enabled: false
     # In-pod bind address for the HTTPS listener.
-    bindAddr: "0.0.0.0:8443"
+    bindAddr: "0.0.0.0:55555"
     # Source of the server cert + key. Both keys are read from this secret.
     secretName: ""
     certKey: "tls.crt"
@@ -305,13 +305,15 @@ primary:
   service:
     type: ClusterIP
     annotations: {}
-    grpcPort: 50051
+    wirePort: 5050
+    grpcPort: 55055
     # gRPC TLS port — only exposed when grpc.tls.enabled is true.
-    grpcTlsPort: 50052
-    httpPort: 8080
+    grpcTlsPort: 55555
+    httpPort: 5000
     # HTTP TLS (HTTPS) port — only exposed when http.tls.enabled is true.
-    httpTlsPort: 8443
+    httpTlsPort: 55555
     # Optional fixed nodePort values (only when type=NodePort)
+    wireNodePort: ""
     grpcNodePort: ""
     grpcTlsNodePort: ""
     httpNodePort: ""
@@ -351,10 +353,11 @@ replica:
   service:
     type: ClusterIP
     annotations: {}
-    grpcPort: 50051
-    grpcTlsPort: 50052
-    httpPort: 8080
-    httpTlsPort: 8443
+    wirePort: 5050
+    grpcPort: 55055
+    grpcTlsPort: 55555
+    httpPort: 5000
+    httpTlsPort: 55555
 
   nodeSelector: {}
   tolerations: []
@@ -393,14 +396,15 @@ cluster:
   service:
     type: ClusterIP
     annotations: {}
-    grpcPort: 50051
-    grpcTlsPort: 50052
-    httpPort: 8080
-    httpTlsPort: 8443
+    wirePort: 5050
+    grpcPort: 55055
+    grpcTlsPort: 55555
+    httpPort: 5000
+    httpTlsPort: 55555
 
   discovery:
     # Optional static peer list. Empty means the chart generates StatefulSet DNS
-    # names: <release>-cluster-0.<headless>.<namespace>.svc.cluster.local:50051
+    # names: <release>-cluster-0.<headless>.<namespace>.svc.cluster.local:55055
     staticPeers: []
 
   nodeSelector: {}

@@ -26,8 +26,9 @@ mkdir -p ./data
 red server \
   --path ./data/primary.rdb \
   --role primary \
-  --grpc-bind 127.0.0.1:50051 \
-  --http-bind 127.0.0.1:8080
+  --wire-bind 127.0.0.1:5050 \
+  --grpc-bind 127.0.0.1:55055 \
+  --http-bind 127.0.0.1:5000
 ```
 
 The primary should always expose gRPC because replica streaming depends on it.
@@ -38,33 +39,34 @@ In another terminal:
 
 ```bash
 red replica \
-  --primary-addr http://127.0.0.1:50051 \
+  --primary-addr http://127.0.0.1:55055 \
   --path ./data/replica.rdb \
-  --grpc-bind 127.0.0.1:50052 \
-  --http-bind 127.0.0.1:8081
+  --wire-bind 127.0.0.1:5051 \
+  --grpc-bind 127.0.0.1:55056 \
+  --http-bind 127.0.0.1:5001
 ```
 
 Now you have:
 
-- primary HTTP `8080`, gRPC `50051`
-- replica HTTP `8081`, gRPC `50052`
+- primary RedWire `5050`, gRPC `55055`, HTTP `5000`
+- replica RedWire `5051`, gRPC `55056`, HTTP `5001`
 
 ## 3. Verify both nodes
 
 ```bash
-curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8081/health
+curl -s http://127.0.0.1:5000/health
+curl -s http://127.0.0.1:5001/health
 ```
 
 ```bash
-red health --grpc --bind 127.0.0.1:50051
-red health --grpc --bind 127.0.0.1:50052
+red health --grpc --bind 127.0.0.1:55055
+red health --grpc --bind 127.0.0.1:55056
 ```
 
 ## 4. Create data on the primary
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/orders/rows \
+curl -X POST http://127.0.0.1:5000/collections/orders/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -79,7 +81,7 @@ curl -X POST http://127.0.0.1:8080/collections/orders/rows \
 ## 5. Query the primary
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM orders"}'
 ```
@@ -89,7 +91,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Wait a moment for WAL shipping, then:
 
 ```bash
-curl -X POST http://127.0.0.1:8081/query \
+curl -X POST http://127.0.0.1:5001/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM orders"}'
 ```
@@ -122,8 +124,8 @@ docker compose up -d --build
 
 Then use:
 
-- primary HTTP `127.0.0.1:8080`
-- replica HTTP `127.0.0.1:8081`
+- primary HTTP `127.0.0.1:5000`
+- replica HTTP `127.0.0.1:5001`
 
 See also:
 

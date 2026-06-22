@@ -48,10 +48,10 @@ jobs:
       - name: Start RedDB
         run: |
           rm -f /tmp/reddb-kv-bench.rdb
-          target/release-fast/red server --path /tmp/reddb-kv-bench.rdb --http-bind 127.0.0.1:8080 > /tmp/reddb-kv-bench.log 2>&1 &
+          target/release-fast/red server --path /tmp/reddb-kv-bench.rdb --http-bind 127.0.0.1:5000 > /tmp/reddb-kv-bench.log 2>&1 &
           echo $! > /tmp/reddb-kv-bench.pid
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/health/ready >/dev/null; then
+            if curl -fsS http://127.0.0.1:5000/health/ready >/dev/null; then
               exit 0
             fi
             sleep 1
@@ -60,7 +60,7 @@ jobs:
           exit 1
       - name: Run KV benchmark
         env:
-          REDDB_URL: http://127.0.0.1:8080
+          REDDB_URL: http://127.0.0.1:5000
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: "6379"
           KV_BENCH_OPS: "1000"

@@ -6,7 +6,7 @@ BINARY_PATH="${BINARY_PATH:-/usr/local/bin/red}"
 RUN_USER="${RUN_USER:-reddb}"
 RUN_GROUP="${RUN_GROUP:-reddb}"
 DATA_PATH="${DATA_PATH:-/var/lib/reddb/data.rdb}"
-BIND_ADDR="${BIND_ADDR:-0.0.0.0:50051}"
+BIND_ADDR="${BIND_ADDR:-0.0.0.0:55055}"
 TRANSPORT="${TRANSPORT:-grpc}"
 
 usage() {
@@ -22,7 +22,7 @@ Options:
   --user <name>           Service user (default: reddb)
   --group <name>          Service group (default: reddb)
   --path <file>           Persistent database file (default: /var/lib/reddb/data.rdb)
-  --bind <addr>           Listen address (default: 0.0.0.0:50051)
+  --bind <addr>           Listen address (default: 0.0.0.0:55055)
   --grpc                  Run the gRPC server (default)
   --http                  Run the HTTP server
   -h, --help              Show this help

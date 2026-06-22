@@ -212,7 +212,7 @@ export async function connect(addr: string): Promise<RedDBConnection> {
 
 /**
  * Connect via TLS-encrypted wire protocol.
- * @param addr - Host:port (e.g. "127.0.0.1:50053")
+ * @param addr - Host:port (e.g. "127.0.0.1:55555")
  * @param opts - TLS options
  */
 export async function connectTls(

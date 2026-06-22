@@ -434,8 +434,8 @@ mod tests {
 
     fn request(mode: FailoverMode, hint: u64) -> FailoverRequest {
         FailoverRequest {
-            old_primary: FailoverNode::new("n1", "http://n1:50051", "us-east"),
-            target: FailoverNode::new("n2", "http://n2:50051", "us-west"),
+            old_primary: FailoverNode::new("n1", "http://n1:55055", "us-east"),
+            target: FailoverNode::new("n2", "http://n2:55055", "us-west"),
             current_term: 4,
             target_frontier_hint: hint,
             timeline_history: reddb_file::TimelineHistory::new(10),
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(
             outcome.roles.old_primary,
             NodeRole::Replica {
-                primary_addr: "http://n2:50051".to_string(),
+                primary_addr: "http://n2:55055".to_string(),
                 term: 5,
             },
             "old primary streams as a replica of the new primary",

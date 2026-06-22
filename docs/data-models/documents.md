@@ -49,7 +49,7 @@ LIMIT 20
 #### **HTTP**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/events/documents \
+curl -X POST http://127.0.0.1:5000/collections/events/documents \
   -H 'content-type: application/json' \
   -d '{
     "body": {
@@ -77,7 +77,7 @@ grpcurl -plaintext \
     "collection": "events",
     "payloadJson": "{\"body\":{\"event_type\":\"login\",\"user_id\":\"u_abc123\"},\"metadata\":{\"source\":\"auth-service\"}}"
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/CreateRow
+  127.0.0.1:55055 reddb.v1.RedDb/CreateRow
 ```
 
 #### **MCP (AI Agent)**
@@ -158,7 +158,7 @@ This works best when the fields you need are at the top level of the document bo
 Via HTTP:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT event_type, user_id, body FROM events WHERE event_type = '\''login'\'' LIMIT 20"}'
 ```
@@ -168,7 +168,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Patch specific nested fields in a document with JSON-pointer-style paths under `body`:
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/events/entities/102 \
+curl -X PATCH http://127.0.0.1:5000/collections/events/entities/102 \
   -H 'content-type: application/json' \
   -d '{
     "operations": [
@@ -219,7 +219,7 @@ arithmetic errors abort the whole statement.
 Full document body replacement remains available through `body` without `operations`:
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/events/entities/102 \
+curl -X PATCH http://127.0.0.1:5000/collections/events/entities/102 \
   -H 'content-type: application/json' \
   -d '{
     "body": {
@@ -235,7 +235,7 @@ curl -X PATCH http://127.0.0.1:8080/collections/events/entities/102 \
 ## Deleting Documents
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/events/entities/102
+curl -X DELETE http://127.0.0.1:5000/collections/events/entities/102
 ```
 
 ## Use Cases

@@ -60,8 +60,8 @@ func main() {
 | `red://host[:5050]`                  | RedWire (default port 5050)            |
 | `reds://host[:5050]`                 | RedWire over TLS (`redwire/1` ALPN)    |
 | `red://host?proto=https`             | RedWire URI, routed over HTTPS         |
-| `http://host[:8080]`                 | HTTP REST                              |
-| `https://host[:8443]`                | HTTPS REST                             |
+| `http://host[:5000]`                 | HTTP REST                              |
+| `https://host[:55555]`                | HTTPS REST                             |
 | `red:///path/file.rdb` *(unsupported)* | Embedded — pure-Go can't embed       |
 | `red://memory` *(unsupported)*       | Embedded in-memory — same              |
 

@@ -80,8 +80,8 @@ servers raise `ParamsUnsupported`. HTTP sends typed params through `/query`.
 ```
 red://host:5050               # RedWire plain TCP, port 5050 default
 reds://host                   # RedWire over TLS, ALPN redwire/1
-red://host?proto=https        # HTTP transport (auto port 8443)
-http://host:8080              # HTTP transport
+red://host?proto=https        # HTTP transport (auto port 55555)
+http://host:5000              # HTTP transport
 red://user:pass@host          # auto /auth/login → bearer token
 red://host?token=sk-...       # static bearer token
 ```

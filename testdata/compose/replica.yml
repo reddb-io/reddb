@@ -9,36 +9,27 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-primary
     ports:
-      - "50051:50051"
-      - "8080:8080"
-      - "8443:8443"
+      - "5050:5050"
+      - "55055:55055"
+      - "5000:5000"
+      - "55555:55555"
     volumes:
       - primary-data:/data
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--role"
-      - "primary"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     environment:
       - RUST_LOG=info
-      - RED_HTTP_TLS_DEV=1
+      - REDDB_TOPOLOGY=primary-replica
+      - REDDB_NODE_ROLE=primary
       - REDDB_STORAGE_PRESET=primary-replica-production-ha
       - REDDB_STORAGE_PROFILE=primary-replica
       - REDDB_STORAGE_PACKAGING=operational-directory
       - REDDB_REPLICA_COUNT=1
+      - REDDB_VAULT=false
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -50,36 +41,30 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-replica
     ports:
-      - "50052:50051"
-      - "8081:8080"
+      - "5051:5050"
+      - "55056:55055"
+      - "5001:5000"
     volumes:
       - replica-data:/data
-    command:
-      - "replica"
-      - "--primary-addr"
-      - "http://primary:50051"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     environment:
       - RUST_LOG=info
+      - REDDB_TOPOLOGY=primary-replica
+      - REDDB_NODE_ROLE=replica
       - REDDB_STORAGE_PRESET=primary-replica-production-ha
       - REDDB_STORAGE_PROFILE=primary-replica
       - REDDB_STORAGE_PACKAGING=operational-directory
       - REDDB_REPLICA_COUNT=1
-      - REDDB_PRIMARY_ADDR=http://primary:50051
+      - REDDB_PRIMARY_ADDR=http://primary:55055
+      - REDDB_VAULT=false
     depends_on:
       primary:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 5

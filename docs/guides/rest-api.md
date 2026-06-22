@@ -7,18 +7,18 @@ This guide shows how to build a REST API backed by RedDB.
 Start the RedDB HTTP server:
 
 ```bash
-red server --http --path ./data/app.rdb --bind 127.0.0.1:8080
+red server --http --path ./data/app.rdb --bind 127.0.0.1:5000
 ```
 
 ## Create Your Data Model
 
 ```bash
 # Create a users collection with some initial data
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{"fields": {"name": "Alice", "email": "alice@example.com", "role": "admin"}}'
 
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{"fields": {"name": "Bob", "email": "bob@example.com", "role": "user"}}'
 ```
@@ -28,13 +28,13 @@ curl -X POST http://127.0.0.1:8080/collections/users/rows \
 ### List (with pagination)
 
 ```bash
-curl "http://127.0.0.1:8080/collections/users/scan?offset=0&limit=20"
+curl "http://127.0.0.1:5000/collections/users/scan?offset=0&limit=20"
 ```
 
 ### Search (with filters)
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT * FROM users WHERE role = '\''admin'\'' ORDER BY name LIMIT 20"}'
 ```
@@ -42,7 +42,7 @@ curl -X POST http://127.0.0.1:8080/query \
 ### Get by RedDB ID
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT * FROM users WHERE rid = 102"}'
 ```
@@ -50,7 +50,7 @@ curl -X POST http://127.0.0.1:8080/query \
 ### Create
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{"fields": {"name": "Charlie", "email": "charlie@example.com", "role": "user"}}'
 ```
@@ -58,7 +58,7 @@ curl -X POST http://127.0.0.1:8080/collections/users/rows \
 ### Update
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
+curl -X PATCH http://127.0.0.1:5000/collections/users/entities/102 \
   -H 'content-type: application/json' \
   -d '{"fields": {"role": "superadmin"}}'
 ```
@@ -66,7 +66,7 @@ curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
 ### Delete
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/users/entities/104
+curl -X DELETE http://127.0.0.1:5000/collections/users/entities/104
 ```
 
 ## Adding Related Data
@@ -75,12 +75,12 @@ Link users to projects using graph edges:
 
 ```bash
 # Create a project node
-curl -X POST http://127.0.0.1:8080/collections/projects/nodes \
+curl -X POST http://127.0.0.1:5000/collections/projects/nodes \
   -H 'content-type: application/json' \
   -d '{"label": "reddb", "node_type": "project", "properties": {"name": "RedDB", "status": "active"}}'
 
 # Link user to project
-curl -X POST http://127.0.0.1:8080/collections/projects/edges \
+curl -X POST http://127.0.0.1:5000/collections/projects/edges \
   -H 'content-type: application/json' \
   -d '{"label": "MEMBER_OF", "from_rid": 102, "to_rid": 104, "properties": {"role": "maintainer"}}'
 ```
@@ -88,7 +88,7 @@ curl -X POST http://127.0.0.1:8080/collections/projects/edges \
 ## Query Across Models
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "FROM ANY WHERE collection = '\''users'\'' OR collection = '\''projects'\'' ORDER BY rid DESC LIMIT 50"}'
 ```
@@ -98,7 +98,7 @@ curl -X POST http://127.0.0.1:8080/query \
 For production, enable authentication:
 
 ```bash
-red server --http --path ./data/app.rdb --vault --bind 0.0.0.0:8080
+red server --http --path ./data/app.rdb --vault --bind 0.0.0.0:5000
 ```
 
 Then bootstrap and create API keys for your services. See [Auth & Security](/security/overview.md).

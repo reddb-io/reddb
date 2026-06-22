@@ -14,16 +14,17 @@
 #
 # Tail audit log + metrics:
 #     docker exec -it reddb cat /data/.audit.log
-#     curl http://localhost:8080/metrics
-#     curl http://localhost:8080/admin/status | jq
+#     curl http://localhost:5000/metrics
+#     curl http://localhost:5000/admin/status | jq
 
 services:
   reddb:
     image: reddb-benchmark/reddb:latest   # replace with your registry
     container_name: reddb
     ports:
-      - "8080:8080"
-      - "50051:50051"
+      - "5050:5050"
+      - "5000:5000"
+      - "55055:55055"
     environment:
       REDDB_STORAGE_PRESET: embedded
       REDDB_STORAGE_PROFILE: embedded
@@ -40,18 +41,14 @@ services:
       RED_LOG_FORMAT: "json"
       RED_LOG_LEVEL: "info"
       RED_SHUTDOWN_TIMEOUT_SECS: "60"
-      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
-    secrets:
-      - source: reddb_certificate
-        target: reddb_certificate
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
+      REDDB_TOPOLOGY: standalone
+      REDDB_NODE_ROLE: standalone
+      REDDB_VAULT: "false"
     volumes:
       - reddb-data:/data
       - reddb-backups:/backups
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "--max-time", "2", "http://127.0.0.1:8080/health/live"]
+      test: ["CMD", "curl", "-fsS", "--max-time", "2", "http://127.0.0.1:5000/health/live"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -66,10 +63,6 @@ services:
           memory: 512M
           cpus: "0.5"
     restart: unless-stopped
-
-secrets:
-  reddb_certificate:
-    external: true
 
 volumes:
   reddb-data:

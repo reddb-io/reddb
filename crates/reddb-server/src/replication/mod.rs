@@ -17,7 +17,7 @@
 //!
 //! // Replica
 //! let options = RedDBOptions::persistent("./replica-data")
-//!     .with_replication(ReplicationConfig::replica("http://primary:50051"));
+//!     .with_replication(ReplicationConfig::replica("http://primary:55055"));
 //! ```
 
 pub mod bookmark;
@@ -94,7 +94,7 @@ pub enum ReplicationRole {
     Primary,
     /// Replica: read-only, receives WAL from primary.
     Replica {
-        /// gRPC address of the primary (e.g., "http://primary:50051")
+        /// gRPC address of the primary (e.g., "http://primary:55055")
         primary_addr: String,
     },
 }

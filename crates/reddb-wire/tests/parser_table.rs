@@ -69,17 +69,17 @@ fn ok_cases() -> Vec<OkCase> {
             },
         },
         OkCase {
-            name: "grpc:// default port 5055",
+            name: "grpc:// default port 55055",
             input: "grpc://primary",
             expect: ConnectionTarget::Grpc {
-                endpoint: "http://primary:5055".into(),
+                endpoint: "http://primary:55055".into(),
             },
         },
         OkCase {
-            name: "grpcs:// default port 5055",
+            name: "grpcs:// default port 55555",
             input: "grpcs://primary",
             expect: ConnectionTarget::Grpc {
-                endpoint: "http://primary:5055".into(),
+                endpoint: "http://primary:55555".into(),
             },
         },
         OkCase {
@@ -105,24 +105,27 @@ fn ok_cases() -> Vec<OkCase> {
         },
         OkCase {
             name: "http:// explicit port",
-            input: "http://h:8080",
+            input: "http://h:5000",
             expect: ConnectionTarget::Http {
-                base_url: "http://h:8080".into(),
+                base_url: "http://h:5000".into(),
             },
         },
         OkCase {
             name: "https:// explicit port",
-            input: "https://h:8443",
+            input: "https://h:55555",
             expect: ConnectionTarget::Http {
-                base_url: "https://h:8443".into(),
+                base_url: "https://h:55555".into(),
             },
         },
         OkCase {
             name: "grpc cluster explicit ports",
-            input: "grpc://primary:5055,replica1:5055,replica2:5055",
+            input: "grpc://primary:55055,replica1:55055,replica2:55055",
             expect: ConnectionTarget::GrpcCluster {
-                primary: "http://primary:5055".into(),
-                replicas: vec!["http://replica1:5055".into(), "http://replica2:5055".into()],
+                primary: "http://primary:55055".into(),
+                replicas: vec![
+                    "http://replica1:55055".into(),
+                    "http://replica2:55055".into(),
+                ],
                 force_primary: false,
             },
         },
@@ -130,8 +133,8 @@ fn ok_cases() -> Vec<OkCase> {
             name: "grpc cluster inherits scheme default port",
             input: "grpc://a,b",
             expect: ConnectionTarget::GrpcCluster {
-                primary: "http://a:5055".into(),
-                replicas: vec!["http://b:5055".into()],
+                primary: "http://a:55055".into(),
+                replicas: vec!["http://b:55055".into()],
                 force_primary: false,
             },
         },
@@ -158,7 +161,7 @@ fn ok_cases() -> Vec<OkCase> {
             input: "grpc://a:7000,b:7001,c",
             expect: ConnectionTarget::GrpcCluster {
                 primary: "http://a:7000".into(),
-                replicas: vec!["http://b:7001".into(), "http://c:5055".into()],
+                replicas: vec!["http://b:7001".into(), "http://c:55055".into()],
                 force_primary: false,
             },
         },
@@ -166,16 +169,16 @@ fn ok_cases() -> Vec<OkCase> {
             name: "?route=primary forces primary",
             input: "grpc://primary,replica?route=primary",
             expect: ConnectionTarget::GrpcCluster {
-                primary: "http://primary:5055".into(),
-                replicas: vec!["http://replica:5055".into()],
+                primary: "http://primary:55055".into(),
+                replicas: vec!["http://replica:55055".into()],
                 force_primary: true,
             },
         },
         OkCase {
             name: "single-host grpc with explicit port routes Grpc not cluster",
-            input: "grpc://primary:5055",
+            input: "grpc://primary:55055",
             expect: ConnectionTarget::Grpc {
-                endpoint: "http://primary:5055".into(),
+                endpoint: "http://primary:55055".into(),
             },
         },
         OkCase {
@@ -198,10 +201,10 @@ fn ok_cases() -> Vec<OkCase> {
         },
         OkCase {
             name: "red+wss:// explicit port",
-            input: "red+wss://host:5055",
+            input: "red+wss://host:55055",
             expect: ConnectionTarget::WsNative {
                 host: "host".into(),
-                port: 5055,
+                port: 55055,
                 tls: true,
             },
         },
@@ -237,7 +240,7 @@ fn err_cases() -> Vec<ErrCase> {
         },
         ErrCase {
             name: "cluster with non-numeric port",
-            input: "grpc://a:nope,b:5055",
+            input: "grpc://a:nope,b:55055",
             kind: ParseErrorKind::InvalidUri,
         },
     ]
@@ -284,5 +287,5 @@ fn embedded_red_uri_aliases_are_centralized() {
     }
     assert!(is_embedded_connection_uri(" red:///tmp/demo.rdb "));
     assert!(!is_embedded_connection_uri("red://primary:5050"));
-    assert!(!is_embedded_connection_uri("grpc://primary:5055"));
+    assert!(!is_embedded_connection_uri("grpc://primary:55055"));
 }

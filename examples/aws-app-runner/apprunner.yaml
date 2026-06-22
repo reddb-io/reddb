@@ -11,9 +11,9 @@ SourceConfiguration:
     ImageIdentifier: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/reddb:latest
     ImageRepositoryType: ECR
     ImageConfiguration:
-      Port: "8080"
+      Port: "5000"
       RuntimeEnvironmentVariables:
-        REDDB_HTTP_BIND_ADDR: "0.0.0.0:8080"
+        REDDB_HTTP_BIND_ADDR: "0.0.0.0:5000"
         RED_BACKEND: "s3"
         RED_S3_REGION: "us-east-1"
         RED_S3_BUCKET: "reddb-prod"

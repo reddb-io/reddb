@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn unsupported_scheme_is_rejected() {
         // gRPC / http / a cluster URI are not single RedWire endpoints.
-        assert!(classify_ui_target("grpc://host:5055").is_err());
+        assert!(classify_ui_target("grpc://host:55055").is_err());
         assert!(classify_ui_target("http://host").is_err());
         assert!(classify_ui_target("red://a,b").is_err());
     }
@@ -776,9 +776,9 @@ mod tests {
     #[test]
     fn red_plus_wss_with_explicit_port_classifies_as_direct() {
         assert_eq!(
-            classify_ui_target("red+wss://host:5055").unwrap(),
+            classify_ui_target("red+wss://host:55055").unwrap(),
             UiTarget::Direct {
-                ws_url: "wss://host:5055/redwire".to_string(),
+                ws_url: "wss://host:55055/redwire".to_string(),
             }
         );
     }
@@ -786,9 +786,9 @@ mod tests {
     #[test]
     fn red_plus_ws_classifies_as_direct_plaintext() {
         assert_eq!(
-            classify_ui_target("red+ws://host:8080").unwrap(),
+            classify_ui_target("red+ws://host:5000").unwrap(),
             UiTarget::Direct {
-                ws_url: "ws://host:8080/redwire".to_string(),
+                ws_url: "ws://host:5000/redwire".to_string(),
             }
         );
     }

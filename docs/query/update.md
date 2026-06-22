@@ -149,7 +149,7 @@ Immutable public identity/topology fields cannot be mutated. `rid`, graph node
 ### PATCH (by RedDB ID)
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
+curl -X PATCH http://127.0.0.1:5000/collections/users/entities/102 \
   -H 'content-type: application/json' \
   -d '{"fields": {"age": 31, "active": true}}'
 ```
@@ -157,7 +157,7 @@ curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
 ### SQL UPDATE via Query
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "UPDATE users ROWS SET age = $1 WHERE rid = $2 RETURNING rid, age", "params": [31, 102]}'
 ```
@@ -171,7 +171,7 @@ grpcurl -plaintext \
     "id": 102,
     "payloadJson": "{\"fields\":{\"age\":31}}"
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/PatchEntity
+  127.0.0.1:55055 reddb.v1.RedDb/PatchEntity
 ```
 
 `UpdateEntityRequest.id` is the retained protobuf field name. Treat its value

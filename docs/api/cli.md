@@ -47,7 +47,7 @@ Start the database server.
 By default, `red server` without explicit transport flags starts the routed front-door on `127.0.0.1:5050`, which accepts HTTP, gRPC, and wire traffic on one address.
 
 ```bash
-red server [--grpc] [--http] [--grpc-bind 127.0.0.1:5055] [--http-bind 127.0.0.1:8080] [--wire-bind 127.0.0.1:5050] [--path ./data/reddb.rdb]
+red server [--grpc] [--http] [--grpc-bind 127.0.0.1:55055] [--http-bind 127.0.0.1:5000] [--wire-bind 127.0.0.1:5050] [--path ./data/reddb.rdb]
 ```
 
 | Flag | Short | Default | Description |
@@ -75,16 +75,16 @@ Examples:
 red server --path ./data/reddb.rdb
 
 # Local dev with both APIs
-red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000
 
 # Wire-only server
 red server --path ./data/reddb.rdb --wire-bind 127.0.0.1:5050
 
 # HTTP-only server
-red server --http --bind 0.0.0.0:8080
+red server --http --bind 0.0.0.0:5000
 
 # Primary mode with vault
-red server --path ./data/primary.rdb --role primary --vault --grpc-bind 0.0.0.0:5055 --http-bind 0.0.0.0:8080
+red server --path ./data/primary.rdb --role primary --vault --grpc-bind 0.0.0.0:55055 --http-bind 0.0.0.0:5000
 ```
 
 ## red service
@@ -92,7 +92,7 @@ red server --path ./data/primary.rdb --role primary --vault --grpc-bind 0.0.0.0:
 Install or inspect a systemd unit.
 
 ```bash
-red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc-bind 0.0.0.0:5055] [--http-bind 0.0.0.0:8080] [--path /var/lib/reddb/data.rdb]
+red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc-bind 0.0.0.0:55055] [--http-bind 0.0.0.0:5000] [--path /var/lib/reddb/data.rdb]
 ```
 
 | Flag | Short | Default | Description |
@@ -118,8 +118,8 @@ sudo red service install \
 
 red service print-unit \
   --path /var/lib/reddb/data.rdb \
-  --grpc-bind 0.0.0.0:5055 \
-  --http-bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:55055 \
+  --http-bind 0.0.0.0:5000
 ```
 
 ## red query
@@ -190,8 +190,8 @@ use, so semantics are identical across surfaces.
 Examples:
 
 ```bash
-red connect --query "SELECT * FROM users" 127.0.0.1:5055
-curl -X POST http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{"query":"FROM ANY LIMIT 10"}'
+red connect --query "SELECT * FROM users" 127.0.0.1:55055
+curl -X POST http://127.0.0.1:5000/query -H 'content-type: application/json' -d '{"query":"FROM ANY LIMIT 10"}'
 ```
 
 ## red insert
@@ -212,7 +212,7 @@ red insert <collection> '<json>'
 Example:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"name":"Alice","age":30}}'
 ```
@@ -262,7 +262,7 @@ red doctor --bind <host>:<port> [--token <admin-token>] [--json] \
 
 | Flag | Default | Description |
 |:-----|:--------|:------------|
-| `--bind` | `127.0.0.1:8080` | Server address (HTTP). |
+| `--bind` | `127.0.0.1:5000` | Server address (HTTP). |
 | `--token` | `$RED_ADMIN_TOKEN` | Admin bearer token. |
 | `--json` | off | Emit a structured report instead of human-readable text. |
 | `--backup-age-warn-secs` | `600` | Warn when `reddb_backup_age_seconds` exceeds this. |
@@ -284,13 +284,13 @@ Examples:
 
 ```bash
 # Quick local probe
-red doctor --bind 127.0.0.1:8080
+red doctor --bind 127.0.0.1:5000
 
 # Kubernetes liveness probe
-red doctor --bind 127.0.0.1:8080 --json | jq -e '.status == "ok"'
+red doctor --bind 127.0.0.1:5000 --json | jq -e '.status == "ok"'
 
 # Tighter backup SLA
-red doctor --bind 127.0.0.1:8080 \
+red doctor --bind 127.0.0.1:5000 \
   --backup-age-warn-secs 120 --backup-age-crit-secs 600
 ```
 
@@ -299,12 +299,12 @@ red doctor --bind 127.0.0.1:8080 \
 Run maintenance operations on a running server.
 
 ```bash
-red tick [--bind 127.0.0.1:8080] [--operations maintenance,retention,checkpoint] [--dry-run]
+red tick [--bind 127.0.0.1:5000] [--operations maintenance,retention,checkpoint] [--dry-run]
 ```
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
-| `--bind` | `-b` | `127.0.0.1:8080` | HTTP server address |
+| `--bind` | `-b` | `127.0.0.1:5000` | HTTP server address |
 | `--operations` | | `maintenance,retention,checkpoint` | Comma-separated operations |
 | `--dry-run` | | `false` | Validate operation plan without applying |
 
@@ -313,14 +313,14 @@ red tick [--bind 127.0.0.1:8080] [--operations maintenance,retention,checkpoint]
 Start as a read replica.
 
 ```bash
-red replica --primary-addr http://primary:5055 [--grpc-bind 127.0.0.1:5055] [--http-bind 127.0.0.1:8080] [--wire-bind 127.0.0.1:5050] [--path ./data/replica.rdb]
+red replica --primary-addr http://primary:55055 [--grpc-bind 127.0.0.1:55055] [--http-bind 127.0.0.1:5000] [--wire-bind 127.0.0.1:5050] [--path ./data/replica.rdb]
 ```
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
 | `--primary-addr` | `-p` | | Primary gRPC address |
 | `--path` | `-d` | `./data/reddb.rdb` | Local replica path |
-| `--bind` | `-b` | gRPC `127.0.0.1:5055` | Legacy single-transport bind address |
+| `--bind` | `-b` | gRPC `127.0.0.1:55055` | Legacy single-transport bind address |
 | `--grpc` | | | Enable gRPC |
 | `--http` | | | Enable HTTP |
 | `--grpc-bind` | | | Explicit gRPC bind address |
@@ -387,19 +387,19 @@ Examples:
 
 ```bash
 # Interactive REPL
-red connect 127.0.0.1:5055
+red connect 127.0.0.1:55055
 
 # One-shot query
-red connect --query "SELECT * FROM users" 127.0.0.1:5055
+red connect --query "SELECT * FROM users" 127.0.0.1:55055
 ```
 
 ## Examples
 
 ```bash
 # Start server, insert data, and query
-red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080 &
-curl -X POST http://127.0.0.1:8080/collections/users/rows -H 'content-type: application/json' -d '{"fields":{"name":"Alice","age":30}}'
-red connect --query "SELECT * FROM users" 127.0.0.1:5055
-red health --http --bind 127.0.0.1:8080
-red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000 &
+curl -X POST http://127.0.0.1:5000/collections/users/rows -H 'content-type: application/json' -d '{"fields":{"name":"Alice","age":30}}'
+red connect --query "SELECT * FROM users" 127.0.0.1:55055
+red health --http --bind 127.0.0.1:5000
+red tick --bind 127.0.0.1:5000 --operations maintenance,retention,checkpoint
 ```

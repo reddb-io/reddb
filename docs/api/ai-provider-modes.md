@@ -24,7 +24,7 @@ Hyphen and underscore spellings are both accepted (e.g.
 Set the mode via the HTTP config endpoint:
 
 ```bash
-curl -X PUT http://127.0.0.1:8080/config/red.config.ai.provider \
+curl -X PUT http://127.0.0.1:5000/config/red.config.ai.provider \
   -H 'Content-Type: application/json' \
   -d '{"value":"openai-compat"}'
 ```

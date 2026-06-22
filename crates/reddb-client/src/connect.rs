@@ -133,7 +133,18 @@ mod tests {
         let target = parse("grpc://primary.svc.cluster.local").unwrap();
         match target {
             Target::Grpc { endpoint } => {
-                assert_eq!(endpoint, "http://primary.svc.cluster.local:5055")
+                assert_eq!(endpoint, "http://primary.svc.cluster.local:55055")
+            }
+            _ => panic!("expected Grpc"),
+        }
+    }
+
+    #[test]
+    fn parses_grpcs_with_default_tls_port() {
+        let target = parse("grpcs://primary.svc.cluster.local").unwrap();
+        match target {
+            Target::Grpc { endpoint } => {
+                assert_eq!(endpoint, "http://primary.svc.cluster.local:55555")
             }
             _ => panic!("expected Grpc"),
         }
@@ -177,17 +188,17 @@ mod tests {
 
     #[test]
     fn parses_grpc_cluster_with_explicit_ports() {
-        let target = parse("grpc://primary:5055,replica1:5055,replica2:5055").unwrap();
+        let target = parse("grpc://primary:55055,replica1:55055,replica2:55055").unwrap();
         match target {
             Target::GrpcCluster {
                 primary,
                 replicas,
                 force_primary,
             } => {
-                assert_eq!(primary, "http://primary:5055");
+                assert_eq!(primary, "http://primary:55055");
                 assert_eq!(
                     replicas,
-                    vec!["http://replica1:5055", "http://replica2:5055"]
+                    vec!["http://replica1:55055", "http://replica2:55055"]
                 );
                 assert!(!force_primary);
             }
@@ -201,8 +212,8 @@ mod tests {
             Target::GrpcCluster {
                 primary, replicas, ..
             } => {
-                assert_eq!(primary, "http://a:5055");
-                assert_eq!(replicas, vec!["http://b:5055"]);
+                assert_eq!(primary, "http://a:55055");
+                assert_eq!(replicas, vec!["http://b:55055"]);
             }
             other => panic!("expected GrpcCluster, got {other:?}"),
         }
@@ -224,7 +235,7 @@ mod tests {
                 primary, replicas, ..
             } => {
                 assert_eq!(primary, "http://a:7000");
-                assert_eq!(replicas, vec!["http://b:7001", "http://c:5055"]);
+                assert_eq!(replicas, vec!["http://b:7001", "http://c:55055"]);
             }
             other => panic!("expected GrpcCluster, got {other:?}"),
         }
@@ -238,8 +249,8 @@ mod tests {
                 replicas,
                 force_primary,
             } => {
-                assert_eq!(primary, "http://primary:5055");
-                assert_eq!(replicas, vec!["http://replica:5055"]);
+                assert_eq!(primary, "http://primary:55055");
+                assert_eq!(replicas, vec!["http://replica:55055"]);
                 assert!(force_primary, "?route=primary must set force_primary");
             }
             other => panic!("expected GrpcCluster, got {other:?}"),
@@ -258,15 +269,15 @@ mod tests {
     #[test]
     fn cluster_rejects_invalid_port() {
         assert_eq!(
-            parse("grpc://a:nope,b:5055").unwrap_err().code,
+            parse("grpc://a:nope,b:55055").unwrap_err().code,
             ErrorCode::InvalidUri
         );
     }
 
     #[test]
     fn single_host_grpc_still_routes_to_grpc_target_not_cluster() {
-        match parse("grpc://primary:5055").unwrap() {
-            Target::Grpc { endpoint } => assert_eq!(endpoint, "http://primary:5055"),
+        match parse("grpc://primary:55055").unwrap() {
+            Target::Grpc { endpoint } => assert_eq!(endpoint, "http://primary:55055"),
             other => panic!("expected Grpc (single host), got {other:?}"),
         }
     }

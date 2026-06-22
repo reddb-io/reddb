@@ -46,7 +46,7 @@ LIMIT 50
 #### **HTTP**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/config/kv \
+curl -X POST http://127.0.0.1:5000/collections/config/kv \
   -H 'content-type: application/json' \
   -d '{
     "key": "max_retries",
@@ -80,7 +80,7 @@ curl -X POST http://127.0.0.1:8080/collections/config/kv \
 #### **HTTP**
 
 ```bash
-curl "http://127.0.0.1:8080/collections/config/kv/max_retries"
+curl "http://127.0.0.1:5000/collections/config/kv/max_retries"
 ```
 
 Response:
@@ -180,7 +180,7 @@ in place — `set` and `unset` on nested paths — without rewriting the
 whole value:
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/sessions/kvs/session:42 \
+curl -X PATCH http://127.0.0.1:5000/collections/sessions/kvs/session:42 \
   -H 'content-type: application/json' \
   -d '{
     "operations": [
@@ -199,7 +199,7 @@ for the full error envelope.
 ## Deleting a Key
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/config/kv/max_retries
+curl -X DELETE http://127.0.0.1:5000/collections/config/kv/max_retries
 ```
 
 Delete through the query engine:

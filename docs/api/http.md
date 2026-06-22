@@ -3,7 +3,7 @@
 RedDB exposes a comprehensive HTTP/REST API. Start the HTTP server with:
 
 ```bash
-red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
+red server --http --path ./data/reddb.rdb --bind 0.0.0.0:5000
 ```
 
 ## Concurrency Model
@@ -140,7 +140,7 @@ For zero-overhead ingestion at the highest throughput (241K ops/sec), use the gR
 Add an `auto_embed` object to the request body to generate embeddings for all rows through the AI batching path before inserting. RedDB collects text across the request, sends provider-sized batches with retry/timeout handling, then links the returned vectors to the inserted rows. If the embedding provider fails after retries, no rows are inserted (502 is returned).
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/articles/bulk/rows \
+curl -X POST http://127.0.0.1:5000/collections/articles/bulk/rows \
   -H 'content-type: application/json' \
   -d '{
     "items": [
@@ -172,7 +172,7 @@ Omitting `auto_embed` preserves the legacy behavior (`{"ok": true, "count": N}`)
 Create a document entity with an arbitrary JSON body:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/logs/documents \
+curl -X POST http://127.0.0.1:5000/collections/logs/documents \
   -H 'content-type: application/json' \
   -d '{"body": {"level": "info", "message": "test"}}'
 ```
@@ -180,7 +180,7 @@ curl -X POST http://127.0.0.1:8080/collections/logs/documents \
 Bulk create multiple documents in one request:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/logs/bulk/documents \
+curl -X POST http://127.0.0.1:5000/collections/logs/bulk/documents \
   -H 'content-type: application/json' \
   -d '{"items": [
     {"body": {"level": "info", "message": "first"}},
@@ -193,13 +193,13 @@ curl -X POST http://127.0.0.1:8080/collections/logs/bulk/documents \
 Read a key-value pair by key:
 
 ```bash
-curl -s http://127.0.0.1:8080/collections/settings/kvs/theme
+curl -s http://127.0.0.1:5000/collections/settings/kvs/theme
 ```
 
 Create or update a key-value pair:
 
 ```bash
-curl -X PUT http://127.0.0.1:8080/collections/settings/kvs/theme \
+curl -X PUT http://127.0.0.1:5000/collections/settings/kvs/theme \
   -H 'content-type: application/json' \
   -d '{"value": "dark"}'
 ```
@@ -207,7 +207,7 @@ curl -X PUT http://127.0.0.1:8080/collections/settings/kvs/theme \
 Delete a key-value pair by key:
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/settings/kvs/theme
+curl -X DELETE http://127.0.0.1:5000/collections/settings/kvs/theme
 ```
 
 ### JSON Patch & path helpers
@@ -284,15 +284,15 @@ For entity writes, use top-level control fields:
 Examples:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/sessions/rows \
+curl -X POST http://127.0.0.1:5000/collections/sessions/rows \
   -H 'content-type: application/json' \
   -d '{"fields":{"token":"t-1","user_id":"u-1"},"ttl":"15m"}'
 
-curl -X PATCH http://127.0.0.1:8080/collections/sessions/entities/1 \
+curl -X PATCH http://127.0.0.1:5000/collections/sessions/entities/1 \
   -H 'content-type: application/json' \
   -d '{"ttl":"30m"}'
 
-curl -X PATCH http://127.0.0.1:8080/collections/sessions/entities/1 \
+curl -X PATCH http://127.0.0.1:5000/collections/sessions/entities/1 \
   -H 'content-type: application/json' \
   -d '{"operations":[{"op":"set","path":"ttl","value":"0s"}]}'
 ```
@@ -318,7 +318,7 @@ strings in the client. The cross-driver contract is tracked in
 [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{
     "query": "SELECT * FROM hosts WHERE critical = $1 LIMIT $2",
@@ -329,7 +329,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Vector parameters use a JSON number array:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{
     "query": "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2",
@@ -364,7 +364,7 @@ Treat `token` as opaque — it encodes nothing the client should parse.
 field is needed — the pinned query and snapshot live server-side:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query/stream \
+curl -X POST http://127.0.0.1:5000/query/stream \
   -H 'content-type: application/json' \
   -H 'x-reddb-tenant: acme' \
   -H 'authorization: Bearer <principal-token>' \
@@ -396,7 +396,7 @@ the executor to stop producing rows and tombstone the cursor.
 - *Explicit cancel.* POST the cursor token to `POST /query/stream/cancel`:
 
   ```bash
-  curl -X POST http://127.0.0.1:8080/query/stream/cancel \
+  curl -X POST http://127.0.0.1:5000/query/stream/cancel \
     -H 'content-type: application/json' \
     -H 'x-reddb-tenant: acme' \
     -H 'authorization: Bearer <principal-token>' \
@@ -434,7 +434,7 @@ start over.
 Only the `query` field is required. All other fields are optional and control how deep and wide the search reaches.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/context \
+curl -X POST http://127.0.0.1:5000/context \
   -H 'content-type: application/json' \
   -d '{
     "query": "AB1234567",
@@ -499,7 +499,7 @@ Configuration is stored as dot-notation key-value pairs in the `red_config` coll
 `GET /config` returns the full configuration tree as nested JSON:
 
 ```bash
-curl http://127.0.0.1:8080/config
+curl http://127.0.0.1:5000/config
 ```
 
 Response:
@@ -528,7 +528,7 @@ Response:
 `POST /config` accepts a JSON tree and flattens it into dot-notation KV pairs:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/config \
+curl -X POST http://127.0.0.1:5000/config \
   -H 'content-type: application/json' \
   -d '{
     "red": {
@@ -550,7 +550,7 @@ Response:
 Read a single key or a subtree by path:
 
 ```bash
-curl http://127.0.0.1:8080/config/red.ai.default.provider
+curl http://127.0.0.1:5000/config/red.ai.default.provider
 ```
 
 If the key is an exact match, the response returns that value. If the key is a prefix, the response returns the nested subtree.
@@ -558,7 +558,7 @@ If the key is an exact match, the response returns that value. If the key is a p
 Set a single scalar value:
 
 ```bash
-curl -X PUT http://127.0.0.1:8080/config/red.ai.default.provider \
+curl -X PUT http://127.0.0.1:5000/config/red.ai.default.provider \
   -H 'content-type: application/json' \
   -d '{"value": "groq"}'
 ```
@@ -566,7 +566,7 @@ curl -X PUT http://127.0.0.1:8080/config/red.ai.default.provider \
 Set a subtree (the server flattens it into individual keys):
 
 ```bash
-curl -X PUT http://127.0.0.1:8080/config/red.storage.hnsw \
+curl -X PUT http://127.0.0.1:5000/config/red.storage.hnsw \
   -H 'content-type: application/json' \
   -d '{"value": {"m": 32, "ef_search": 100}}'
 ```
@@ -574,7 +574,7 @@ curl -X PUT http://127.0.0.1:8080/config/red.storage.hnsw \
 Delete a config key:
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/config/red.ai.default.model
+curl -X DELETE http://127.0.0.1:5000/config/red.ai.default.model
 ```
 
 ### Configuration via SQL
@@ -583,17 +583,17 @@ You can also manage configuration through the query engine:
 
 ```bash
 # SET CONFIG via SQL
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SET CONFIG red.ai.default.provider = '\''groq'\''"}'
 
 # SHOW CONFIG via SQL
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SHOW CONFIG"}'
 
 # SHOW CONFIG subtree via SQL
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SHOW CONFIG red.ai"}'
 ```
@@ -641,7 +641,7 @@ Credentials are persisted as dot-notation keys in the `red_config` collection:
 Store an API key:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -H 'content-type: application/json' \
   -d '{"provider": "groq", "api_key": "gsk_xxx"}'
 ```
@@ -649,7 +649,7 @@ curl -X POST http://127.0.0.1:8080/ai/credentials \
 Store with a custom base URL:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -H 'content-type: application/json' \
   -d '{"provider": "custom", "api_key": "sk-xxx", "api_base": "https://my-proxy.com/v1"}'
 ```
@@ -657,7 +657,7 @@ curl -X POST http://127.0.0.1:8080/ai/credentials \
 Store with an alias:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -H 'content-type: application/json' \
   -d '{
     "provider": "openai",
@@ -670,7 +670,7 @@ curl -X POST http://127.0.0.1:8080/ai/credentials \
 Set a provider as the default (so you can omit `USING` in queries):
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -H 'content-type: application/json' \
   -d '{"provider": "groq", "api_key": "gsk_xxx", "default": true}'
 ```
@@ -708,7 +708,7 @@ Optional persistence:
 Direct input example:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/embeddings \
+curl -X POST http://127.0.0.1:5000/ai/embeddings \
   -H 'content-type: application/json' \
   -d '{
     "provider": "openai",
@@ -726,7 +726,7 @@ curl -X POST http://127.0.0.1:8080/ai/embeddings \
 Per-row example from query output:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/embeddings \
+curl -X POST http://127.0.0.1:5000/ai/embeddings \
   -H 'content-type: application/json' \
   -d '{
     "provider": "together",
@@ -743,7 +743,7 @@ curl -X POST http://127.0.0.1:8080/ai/embeddings \
 Per-result example (single embedding for the whole result):
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/embeddings \
+curl -X POST http://127.0.0.1:5000/ai/embeddings \
   -H 'content-type: application/json' \
   -d '{
     "provider": "openai",
@@ -772,7 +772,7 @@ Optional persistence for prompt outputs:
 Groq prompt from query rows:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/prompt \
+curl -X POST http://127.0.0.1:5000/ai/prompt \
   -H 'content-type: application/json' \
   -d '{
     "provider": "groq",
@@ -788,7 +788,7 @@ curl -X POST http://127.0.0.1:8080/ai/prompt \
 Anthropic prompt over full query result:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/prompt \
+curl -X POST http://127.0.0.1:5000/ai/prompt \
   -H 'content-type: application/json' \
   -d '{
     "provider": "anthropic",
@@ -803,7 +803,7 @@ curl -X POST http://127.0.0.1:8080/ai/prompt \
 OpenAI prompt (direct):
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/prompt \
+curl -X POST http://127.0.0.1:5000/ai/prompt \
   -H 'content-type: application/json' \
   -d '{
     "provider": "openai",
@@ -815,7 +815,7 @@ curl -X POST http://127.0.0.1:8080/ai/prompt \
 Ollama prompt (local, no API key required):
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/prompt \
+curl -X POST http://127.0.0.1:5000/ai/prompt \
   -H 'content-type: application/json' \
   -d '{
     "provider": "ollama",
@@ -834,7 +834,7 @@ should consume `sources_flat`, `citations`, and `validation`; `[^N]` markers in
 [#392](https://github.com/reddb-io/reddb/issues/392).
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/ask \
+curl -X POST http://127.0.0.1:5000/ai/ask \
   -H 'content-type: application/json' \
   -d '{
     "question": "What happened with the last deployment?",
@@ -846,7 +846,7 @@ curl -X POST http://127.0.0.1:8080/ai/ask \
 Using Ollama (no credentials needed):
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/ask \
+curl -X POST http://127.0.0.1:5000/ai/ask \
   -H 'content-type: application/json' \
   -d '{
     "question": "Summarize the incidents from last week",
@@ -858,7 +858,7 @@ curl -X POST http://127.0.0.1:8080/ai/ask \
 Using OpenRouter:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/ask \
+curl -X POST http://127.0.0.1:5000/ai/ask \
   -H 'content-type: application/json' \
   -d '{
     "question": "Which hosts have the highest risk score?",
@@ -900,7 +900,7 @@ For SQL-style controls such as `STRICT`, `USING`, `CACHE TTL`, `NOCACHE`,
 `TEMPERATURE`, `SEED`, `LIMIT`, `MIN_SCORE`, and `DEPTH`, use `/query`:
 
 ```bash
-curl -N -X POST http://127.0.0.1:8080/query \
+curl -N -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "ASK '\''why did deploy fail?'\'' USING '\''groq,openai'\'' STRICT ON STREAM CACHE TTL '\''5m'\'' LIMIT 5"}'
 ```
@@ -962,13 +962,13 @@ RedDB ID `rid`, source `collection`, and item `kind`. Use `next_lsn` as the
 Check backup status:
 
 ```bash
-curl http://127.0.0.1:8080/backup/status
+curl http://127.0.0.1:5000/backup/status
 ```
 
 Trigger a manual backup:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/backup/trigger
+curl -X POST http://127.0.0.1:5000/backup/trigger
 ```
 
 ### Recovery
@@ -980,7 +980,7 @@ curl -X POST http://127.0.0.1:8080/backup/trigger
 List restore points:
 
 ```bash
-curl http://127.0.0.1:8080/recovery/restore-points
+curl http://127.0.0.1:5000/recovery/restore-points
 ```
 
 ### Backup & Recovery Configuration
@@ -989,14 +989,14 @@ You can enable and tune backup, WAL archiving, and CDC through the runtime confi
 
 ```bash
 # Enable scheduled backups
-curl -X PUT localhost:8080/config/red.backup.enabled -d '{"value": true}'
-curl -X PUT localhost:8080/config/red.backup.interval_secs -d '{"value": 3600}'
+curl -X PUT localhost:5000/config/red.backup.enabled -d '{"value": true}'
+curl -X PUT localhost:5000/config/red.backup.interval_secs -d '{"value": 3600}'
 
 # Enable WAL archiving
-curl -X PUT localhost:8080/config/red.wal.archive.enabled -d '{"value": true}'
+curl -X PUT localhost:5000/config/red.wal.archive.enabled -d '{"value": true}'
 
 # CDC is enabled by default
-curl localhost:8080/config/red.cdc
+curl localhost:5000/config/red.cdc
 ```
 
 See [Configuration -- Backup & Recovery](/getting-started/configuration.md#backup--recovery-redbackup) for the full list of keys.
@@ -1108,7 +1108,7 @@ SELECT * FROM users AS OF COMMIT '7a1a...' WHERE age > 21;
 Collection creation accepts `ttl` or `ttl_ms` as the default retention policy:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections \
+curl -X POST http://127.0.0.1:5000/collections \
   -H 'content-type: application/json' \
   -d '{"name":"sessions","ttl":"60m"}'
 ```
@@ -1119,23 +1119,23 @@ curl -X POST http://127.0.0.1:8080/collections \
 
 ```bash
 # 1. Check health
-curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:5000/health
 
 # 2. Insert a row
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{"fields": {"name": "Alice", "age": 30}}'
 
 # 3. Query
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT * FROM users"}'
 
 # 4. Create snapshot
-curl -X POST http://127.0.0.1:8080/snapshot
+curl -X POST http://127.0.0.1:5000/snapshot
 
 # 5. Check stats
-curl -s http://127.0.0.1:8080/stats
+curl -s http://127.0.0.1:5000/stats
 ```
 
 > [!NOTE]

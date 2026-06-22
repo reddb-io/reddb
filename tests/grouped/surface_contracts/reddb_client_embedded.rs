@@ -76,7 +76,7 @@ async fn bad_sql_returns_query_error() {
 async fn grpc_uri_returns_feature_disabled_when_grpc_off() {
     // The default feature set is `embedded` only, so grpc:// should
     // give a clean FEATURE_DISABLED error instead of panicking.
-    let result = Reddb::connect("grpc://localhost:50051").await;
+    let result = Reddb::connect("grpc://localhost:55055").await;
     let err = result.unwrap_err();
     assert_eq!(err.code, ErrorCode::FeatureDisabled);
 }

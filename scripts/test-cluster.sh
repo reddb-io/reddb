@@ -3,12 +3,12 @@ set -euo pipefail
 
 # =============================================================================
 # RedDB Cluster Test Script
-# Tests a primary (50051) + 2 replicas (50052, 50053)
+# Tests a primary (55055) + 2 replicas (55056, 55057)
 # =============================================================================
 
-PRIMARY="127.0.0.1:50051"
-REPLICA1="127.0.0.1:50052"
-REPLICA2="127.0.0.1:50053"
+PRIMARY="127.0.0.1:55055"
+REPLICA1="127.0.0.1:55056"
+REPLICA2="127.0.0.1:55057"
 
 PASS=0
 FAIL=0
@@ -37,10 +37,10 @@ echo ""
 # -------------------------------------------------------------------
 echo "--- 1. Health Checks ---"
 
-for port in 50051 50052 50053; do
+for port in 55055 55056 55057; do
     name="primary"
-    [ "$port" = "50052" ] && name="replica-1"
-    [ "$port" = "50053" ] && name="replica-2"
+    [ "$port" = "55056" ] && name="replica-1"
+    [ "$port" = "55057" ] && name="replica-2"
 
     grpcurl -plaintext "127.0.0.1:$port" reddb.v1.RedDb/Health >/dev/null 2>&1
     check "$name ($port) is healthy" "$?"

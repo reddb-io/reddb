@@ -48,7 +48,7 @@ automation workload.
 red auth create-user alice --password secret --role read
 
 # Via HTTP
-curl -X POST http://127.0.0.1:8080/auth/users \
+curl -X POST http://127.0.0.1:5000/auth/users \
   -H 'content-type: application/json' \
   -H 'Authorization: Bearer <admin-token>' \
   -d '{"username": "alice", "password": "secret", "role": "read"}'
@@ -158,7 +158,7 @@ named group and add users deliberately.
 red auth list-users
 
 # Via HTTP
-curl http://127.0.0.1:8080/auth/users \
+curl http://127.0.0.1:5000/auth/users \
   -H 'Authorization: Bearer <admin-token>'
 ```
 
@@ -183,7 +183,7 @@ POST /admin/policies/simulate
 ## Changing Passwords
 
 ```bash
-curl -X POST http://127.0.0.1:8080/auth/change-password \
+curl -X POST http://127.0.0.1:5000/auth/change-password \
   -H 'content-type: application/json' \
   -H 'Authorization: Bearer <token>' \
   -d '{"username": "alice", "password": "new-secret"}'
@@ -195,7 +195,7 @@ curl -X POST http://127.0.0.1:8080/auth/change-password \
 grpcurl -plaintext \
   -H 'Authorization: Bearer <admin-token>' \
   -d '{"payloadJson": "{\"username\":\"alice\"}"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/AuthDeleteUser
+  127.0.0.1:55055 reddb.v1.RedDb/AuthDeleteUser
 ```
 
 ## Who Am I
@@ -203,7 +203,7 @@ grpcurl -plaintext \
 Check the current authenticated user:
 
 ```bash
-curl http://127.0.0.1:8080/auth/whoami \
+curl http://127.0.0.1:5000/auth/whoami \
   -H 'Authorization: Bearer <token>'
 ```
 

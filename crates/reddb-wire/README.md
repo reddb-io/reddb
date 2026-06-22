@@ -46,7 +46,7 @@ published [`reddb-client`](../reddb-client) driver. It depends on
   in `reddb-server` / `reddb-file`.
 - `topology` — the binary topology advertisement shared by RedWire and
   gRPC.
-- Constants: `DEFAULT_PORT_RED`, `DEFAULT_PORT_GRPC`,
+- Constants: `DEFAULT_PORT_RED`, `DEFAULT_PORT_GRPC`, `DEFAULT_PORT_GRPCS`,
   `REDWIRE_MAGIC`, `MAX_KNOWN_MINOR_VERSION`,
   `DEFAULT_REDWIRE_PORT`.
 

@@ -108,8 +108,8 @@ RedWire TLS is configured by CLI flags today:
 
 ```bash
 red server \
-  --http-bind     0.0.0.0:8080 \
-  --http-tls-bind 0.0.0.0:8443 \
+  --http-bind     0.0.0.0:5000 \
+  --http-tls-bind 0.0.0.0:55555 \
   --http-tls-cert /run/secrets/http.crt \
   --http-tls-key  /run/secrets/http.key
 ```
@@ -118,7 +118,7 @@ With mTLS:
 
 ```bash
 red server \
-  --http-tls-bind      0.0.0.0:8443 \
+  --http-tls-bind      0.0.0.0:55555 \
   --http-tls-cert      /run/secrets/http.crt \
   --http-tls-key       /run/secrets/http.key \
   --http-tls-client-ca /run/secrets/clients-ca.pem
@@ -137,20 +137,20 @@ Flags and env companions:
 ### gRPC
 
 ```bash
-REDDB_GRPC_TLS_BIND=0.0.0.0:50052 \
+REDDB_GRPC_TLS_BIND=0.0.0.0:55555 \
 REDDB_GRPC_TLS_CERT=/run/secrets/grpc.crt \
 REDDB_GRPC_TLS_KEY=/run/secrets/grpc.key \
-red server --grpc --grpc-bind 0.0.0.0:50051
+red server --grpc --grpc-bind 0.0.0.0:55055
 ```
 
 With mTLS:
 
 ```bash
-REDDB_GRPC_TLS_BIND=0.0.0.0:50052 \
+REDDB_GRPC_TLS_BIND=0.0.0.0:55555 \
 REDDB_GRPC_TLS_CERT=/run/secrets/grpc.crt \
 REDDB_GRPC_TLS_KEY=/run/secrets/grpc.key \
 REDDB_GRPC_TLS_CLIENT_CA=/run/secrets/clients-ca.pem \
-red server --grpc --grpc-bind 0.0.0.0:50051
+red server --grpc --grpc-bind 0.0.0.0:55055
 ```
 
 Env settings:
@@ -169,14 +169,14 @@ Env settings:
 red server \
   --vault \
   --path /var/lib/reddb/data.rdb \
-  --http-tls-bind 0.0.0.0:8443 --http-tls-cert /etc/reddb/http.crt --http-tls-key /etc/reddb/http.key \
+  --http-tls-bind 0.0.0.0:55555 --http-tls-cert /etc/reddb/http.crt --http-tls-key /etc/reddb/http.key \
   --wire-tls-bind 0.0.0.0:5443  --wire-tls-cert /etc/reddb/wire.crt --wire-tls-key /etc/reddb/wire.key
 ```
 
 Set gRPC TLS env vars alongside that command when exposing gRPCS:
 
 ```bash
-export REDDB_GRPC_TLS_BIND=0.0.0.0:50052
+export REDDB_GRPC_TLS_BIND=0.0.0.0:55555
 export REDDB_GRPC_TLS_CERT=/etc/reddb/grpc.crt
 export REDDB_GRPC_TLS_KEY=/etc/reddb/grpc.key
 ```
@@ -533,7 +533,7 @@ server {
 
   # HTTP REST API
   location / {
-    proxy_pass         http://127.0.0.1:8080;
+    proxy_pass         http://127.0.0.1:5000;
     proxy_http_version 1.1;
     proxy_set_header   Host              $host;
     proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -542,7 +542,7 @@ server {
 
   # gRPC
   location /reddb.v1. {
-    grpc_pass          grpc://127.0.0.1:50051;
+    grpc_pass          grpc://127.0.0.1:55055;
     grpc_set_header    Host $host;
   }
 }
@@ -562,12 +562,12 @@ spec:
       kind: Rule
       services:
         - name: reddb-http
-          port: 8080
+          port: 5000
     - match: Host(`reddb.example.com`) && PathPrefix(`/reddb.v1.`)
       kind: Rule
       services:
         - name: reddb-grpc
-          port: 50051
+          port: 55055
           scheme: h2c            # gRPC needs HTTP/2 cleartext to upstream
   tls:
     secretName: reddb-tls
@@ -676,7 +676,7 @@ mkcert -install
 mkcert reddb.local localhost 127.0.0.1 ::1
 # produces reddb.local.pem and reddb.local-key.pem
 red server \
-  --http-tls-bind 0.0.0.0:8443 \
+  --http-tls-bind 0.0.0.0:55555 \
   --http-tls-cert ./reddb.local.pem \
   --http-tls-key  ./reddb.local-key.pem
 ```

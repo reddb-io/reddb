@@ -26,7 +26,7 @@ Add RedDB as a remote-write target:
 
 ```yaml
 remote_write:
-  - url: http://reddb.example.com:8080/api/v1/write?collection=sre
+  - url: http://reddb.example.com:5000/api/v1/write?collection=sre
     headers:
       X-RedDB-Tenant: acme
       X-RedDB-Namespace: prod
@@ -42,7 +42,7 @@ Grafana Alloy can scrape and forward Prometheus samples:
 ```hcl
 prometheus.remote_write "reddb" {
   endpoint {
-    url = "http://reddb.example.com:8080/api/v1/write?collection=sre"
+    url = "http://reddb.example.com:5000/api/v1/write?collection=sre"
     headers = {
       "X-RedDB-Tenant" = "acme"
       "X-RedDB-Namespace" = "prod"
@@ -71,7 +71,7 @@ receivers:
 
 exporters:
   prometheusremotewrite:
-    endpoint: http://reddb.example.com:8080/api/v1/write?collection=sre
+    endpoint: http://reddb.example.com:5000/api/v1/write?collection=sre
     headers:
       X-RedDB-Tenant: acme
       X-RedDB-Namespace: prod
@@ -88,7 +88,7 @@ service:
 Configure Grafana's Prometheus datasource URL as the RedDB HTTP base URL:
 
 ```yaml
-url: http://reddb.example.com:8080
+url: http://reddb.example.com:5000
 type: prometheus
 access: proxy
 ```

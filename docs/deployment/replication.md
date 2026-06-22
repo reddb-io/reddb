@@ -28,18 +28,18 @@ flowchart LR
 red server \
   --path ./data/primary.rdb \
   --role primary \
-  --grpc-bind 0.0.0.0:5555 \
-  --http-bind 0.0.0.0:5055
+  --grpc-bind 0.0.0.0:55055 \
+  --http-bind 0.0.0.0:5000
 ```
 
 ### Replica
 
 ```bash
 red replica \
-  --primary-addr http://primary-host:5555 \
+  --primary-addr http://primary-host:55055 \
   --path ./data/replica.rdb \
-  --grpc-bind 0.0.0.0:5555 \
-  --http-bind 0.0.0.0:5055
+  --grpc-bind 0.0.0.0:55055 \
+  --http-bind 0.0.0.0:5000
 ```
 
 Recommended topology:
@@ -76,10 +76,10 @@ uses remote storage for snapshot/WAL persistence and replay.
 
 ```bash
 # From primary
-curl http://primary:8080/replication/status
+curl http://primary:5000/replication/status
 
 # Via CLI
-red status --bind primary:50051
+red status --bind primary:5000
 ```
 
 Replica status includes operational fields beyond role and LSN:
@@ -93,7 +93,7 @@ Replica status includes operational fields beyond role and LSN:
 Get a full snapshot for bootstrapping a new replica:
 
 ```bash
-grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/ReplicationSnapshot
+grpcurl -plaintext 127.0.0.1:55055 reddb.v1.RedDb/ReplicationSnapshot
 ```
 
 ## Commit Policy

@@ -322,7 +322,7 @@ execute the generated RQL for you.
 If no provider is configured, ASK returns an error. Configure one with:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -H 'content-type: application/json' \
   -d '{"provider":"groq","api_key":"gsk_xxx","default":true}'
 ```
@@ -376,7 +376,7 @@ SHOW CONFIG red.backup
 ### Similarity Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/docs/similar \
+curl -X POST http://127.0.0.1:5000/collections/docs/similar \
   -H 'content-type: application/json' \
   -d '{
     "vector": [0.12, 0.91, 0.44],
@@ -388,7 +388,7 @@ curl -X POST http://127.0.0.1:8080/collections/docs/similar \
 ### Text Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/text/search \
+curl -X POST http://127.0.0.1:5000/text/search \
   -H 'content-type: application/json' \
   -d '{
     "query": "machine learning",
@@ -401,7 +401,7 @@ curl -X POST http://127.0.0.1:8080/text/search \
 ### Hybrid Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/hybrid/search \
+curl -X POST http://127.0.0.1:5000/hybrid/search \
   -H 'content-type: application/json' \
   -d '{
     "collections": ["docs"],
@@ -414,7 +414,7 @@ curl -X POST http://127.0.0.1:8080/hybrid/search \
 ### Multimodal Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/multimodal/search \
+curl -X POST http://127.0.0.1:5000/multimodal/search \
   -H 'content-type: application/json' \
   -d '{
     "query": "passport: AB1234567",
@@ -428,7 +428,7 @@ You can also send `"key"` instead of `"query"` in the payload.
 ### Unified Search (single box)
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search \
+curl -X POST http://127.0.0.1:5000/search \
   -H 'content-type: application/json' \
   -d '{
     "mode": "index",
@@ -446,7 +446,7 @@ curl -X POST http://127.0.0.1:8080/search \
 ### Context Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/context \
+curl -X POST http://127.0.0.1:5000/context \
   -H 'content-type: application/json' \
   -d '{
     "query": "AB1234567",

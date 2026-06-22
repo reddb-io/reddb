@@ -392,7 +392,7 @@ QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s
 
 ```bash
 # HTTP
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s"}'
 ```
@@ -401,7 +401,7 @@ curl -X POST http://127.0.0.1:8080/query \
 # gRPC (grpcurl)
 grpcurl -plaintext \
   -d '{"query":"QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s"}' \
-  127.0.0.1:5055 reddb.v1.RedDb/Query
+  127.0.0.1:55055 reddb.v1.RedDb/Query
 ```
 
 ```sql

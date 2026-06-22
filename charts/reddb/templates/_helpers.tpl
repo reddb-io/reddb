@@ -163,6 +163,9 @@ Validate the deployment mode.
 {{- if and .Values.config.file.enabled (not .Values.config.file.existingConfigMap) (empty .Values.config.file.inline) -}}
 {{- fail "config.file.enabled=true requires config.file.existingConfigMap or non-empty config.file.inline" -}}
 {{- end -}}
+{{- if and .Values.grpc.tls.enabled .Values.http.tls.enabled (eq .Values.grpc.tls.bindAddr .Values.http.tls.bindAddr) -}}
+{{- fail "grpc.tls.bindAddr and http.tls.bindAddr cannot use the same address when both TLS listeners are enabled" -}}
+{{- end -}}
 {{- $preset := default "" .Values.storage.preset -}}
 {{- if and $preset (not (has $preset (list "embedded" "serverless" "primary-replica-dev" "primary-replica-small" "primary-replica-production-ha" "primary-replica-backup" "primary-replica-wal-retention" "cluster"))) -}}
 {{- fail (printf "values.storage.preset is not supported (got %q)" $preset) -}}
@@ -416,6 +419,8 @@ Common environment variables for both primary and replica pods.
   value: {{ .Values.config.logLevel | quote }}
 - name: REDDB_DATA_PATH
   value: /data/data.rdb
+- name: REDDB_VAULT
+  value: {{ .Values.config.vault | quote }}
 - name: POD_NAME
   valueFrom:
     fieldRef:
@@ -542,7 +547,7 @@ Usage: {{ include "reddb.probes" . | nindent 10 }}
 {{- if .Values.probes.startup.enabled }}
 startupProbe:
   exec:
-    command: ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+    command: ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
   periodSeconds: {{ .Values.probes.startup.periodSeconds }}
   failureThreshold: {{ .Values.probes.startup.failureThreshold }}
   timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
@@ -550,7 +555,7 @@ startupProbe:
 {{- if .Values.probes.liveness.enabled }}
 livenessProbe:
   exec:
-    command: ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+    command: ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
   initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
   periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
   timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
@@ -559,7 +564,7 @@ livenessProbe:
 {{- if .Values.probes.readiness.enabled }}
 readinessProbe:
   exec:
-    command: ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+    command: ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
   initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
   periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
   timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}

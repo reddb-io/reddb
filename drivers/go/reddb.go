@@ -155,10 +155,10 @@ func WithTLSConfig(rootCAs *x509.CertPool, certs []tls.Certificate, serverName s
 //
 //	red://host:5050              RedWire (default port 5050)
 //	reds://host:5050             RedWire over TLS
-//	grpc://host:5055             gRPC
-//	grpcs://host:5055            gRPC over TLS
-//	http://host:8080             HTTP
-//	https://host:8443            HTTPS
+//	grpc://host:55055             gRPC
+//	grpcs://host:55555            gRPC over TLS
+//	http://host:5000             HTTP
+//	https://host:55555            HTTPS
 //
 // Embedded URIs (`red:///path` or `red://memory`) are not supported by the
 // pure-Go driver; ParseURI returns CodeEmbeddedUnsupported for those.

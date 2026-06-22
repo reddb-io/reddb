@@ -36,7 +36,7 @@ info:
     name: Apache-2.0
 
 servers:
-  - url: http://127.0.0.1:8080
+  - url: http://127.0.0.1:5000
     description: Default single-listener bind.
   - url: http://127.0.0.1:7778
     description: Dedicated admin-only listener (RED_ADMIN_BIND).

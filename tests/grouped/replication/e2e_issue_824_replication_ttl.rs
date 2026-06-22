@@ -127,7 +127,7 @@ fn lagging_replica_filters_expired_row_before_delete_arrives() {
 
     let replica = RedDBRuntime::with_options(
         RedDBOptions::persistent(&replica_path)
-            .with_replication(ReplicationConfig::replica("http://primary:50051")),
+            .with_replication(ReplicationConfig::replica("http://primary:55055")),
     )
     .expect("open replica runtime");
 
@@ -165,7 +165,7 @@ fn replica_hypertable_expiry_sweep_is_read_only_noop() {
 
     let replica = RedDBRuntime::with_options(
         RedDBOptions::persistent(&path)
-            .with_replication(ReplicationConfig::replica("http://primary:50051")),
+            .with_replication(ReplicationConfig::replica("http://primary:55055")),
     )
     .expect("open replica");
     let replica_db = replica.db();

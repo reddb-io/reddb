@@ -27,7 +27,7 @@ Required env minimum:
 
 | Variable | Purpose |
 |----------|---------|
-| `RED_HTTP_BIND_ADDR` | data-plane bind, e.g. `0.0.0.0:8080` |
+| `RED_HTTP_BIND_ADDR` | data-plane bind, e.g. `0.0.0.0:5000` |
 | `RED_BACKEND` | `s3`, `fs`, `http`, or `none` |
 | `RED_BACKEND` keys | `RED_S3_*` / `RED_FS_PATH` / `RED_HTTP_BACKEND_URL` per backend |
 | `RED_AUTO_RESTORE` | `true` to rebuild from remote on empty volume |
@@ -122,7 +122,7 @@ RedDB v1 ships **manual** promotion. Auto-promotion lives in a future release af
 ```bash
 for HOST in replica-1 replica-2 replica-3; do
   echo -n "$HOST: "
-  curl -sf "http://$HOST:8080/admin/status" \
+  curl -sf "http://$HOST:5000/admin/status" \
     -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
     | jq '.wal.current_lsn // 0'
 done
@@ -133,7 +133,7 @@ Pick the host with the highest `current_lsn`.
 ### Promote
 
 ```bash
-curl -X POST http://<chosen>:8080/admin/failover/promote \
+curl -X POST http://<chosen>:5000/admin/failover/promote \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
   -d '{"holder_id": "promoter-runbook", "ttl_ms": 60000}'
 ```

@@ -107,7 +107,7 @@ Every item returned by a universal query includes standard fields:
 This is the power of universal queries. In a single request, you can retrieve a host row, its graph node representation, and its vector embedding:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "FROM ANY ORDER BY _score DESC LIMIT $1", "params": [20]}'
 ```
@@ -157,7 +157,7 @@ grpcurl -plaintext \
     "entity_types": ["row", "node"],
     "capabilities": ["read"]
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/Query
+  127.0.0.1:55055 reddb.v1.RedDb/Query
 ```
 
 ## Query Flow

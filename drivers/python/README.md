@@ -266,7 +266,7 @@ The original gRPC and raw-wire clients are still exported for power users:
 import reddb
 
 # gRPC against a remote server (returns reddb.Connection)
-conn = reddb.legacy_grpc_connect("127.0.0.1:50051")
+conn = reddb.legacy_grpc_connect("127.0.0.1:55055")
 conn.query("SELECT * FROM users")
 conn.close()
 

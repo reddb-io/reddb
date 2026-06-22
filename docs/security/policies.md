@@ -33,7 +33,7 @@ attach it, then simulate both the table allow and a PII column deny.
 
 ```bash
 # 1. bootstrap
-curl -sX POST http://127.0.0.1:8080/auth/bootstrap \
+curl -sX POST http://127.0.0.1:5000/auth/bootstrap \
   -H 'content-type: application/json' \
   -d '{"username":"admin","password":"changeme"}'
 # => {"user":"admin","api_key":"red_ak_..."}
@@ -41,13 +41,13 @@ curl -sX POST http://127.0.0.1:8080/auth/bootstrap \
 export ADMIN_TOKEN=red_ak_...
 
 # 2. create alice (no role flags needed — policies will gate her)
-curl -sX POST http://127.0.0.1:8080/auth/users \
+curl -sX POST http://127.0.0.1:5000/auth/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"username":"alice","password":"hunter2"}'
 
 # 3. write a policy
-curl -sX PUT http://127.0.0.1:8080/admin/policies/analyst \
+curl -sX PUT http://127.0.0.1:5000/admin/policies/analyst \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' \
   -d '{
@@ -66,18 +66,18 @@ curl -sX PUT http://127.0.0.1:8080/admin/policies/analyst \
   }'
 
 # 4. attach to alice
-curl -sX PUT http://127.0.0.1:8080/admin/users/alice/policies/analyst \
+curl -sX PUT http://127.0.0.1:5000/admin/users/alice/policies/analyst \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 
 # 5. simulate a table allow
-curl -sX POST http://127.0.0.1:8080/admin/policies/simulate \
+curl -sX POST http://127.0.0.1:5000/admin/policies/simulate \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"principal":"alice","action":"select","resource":"table:public.orders"}'
 # => {"decision":"allow","matched_policy_id":"analyst","matched_sid":"read-public",...}
 
 # 6. simulate a column deny
-curl -sX POST http://127.0.0.1:8080/admin/policies/simulate \
+curl -sX POST http://127.0.0.1:5000/admin/policies/simulate \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"principal":"alice","action":"select","resource":"column:users.email"}'
@@ -462,7 +462,7 @@ DELETE /admin/policies/{id}
 ```
 
 ```bash
-curl -sX PUT http://localhost:8080/admin/policies/analyst \
+curl -sX PUT http://localhost:5000/admin/policies/analyst \
   -H "Authorization: Bearer $T" \
   -H 'content-type: application/json' \
   --data-binary @analyst.json
@@ -481,7 +481,7 @@ DELETE /admin/users/{username}/groups/{group}
 ```
 
 ```bash
-curl -sX PUT http://localhost:8080/admin/users/alice/policies/analyst \
+curl -sX PUT http://localhost:5000/admin/users/alice/policies/analyst \
   -H "Authorization: Bearer $T"
 # 200 -> { "ok": true }
 ```
@@ -493,7 +493,7 @@ GET /admin/users/{username}/effective-permissions?resource=table:public.orders
 ```
 
 ```bash
-curl -s "http://localhost:8080/admin/users/alice/effective-permissions?resource=table:public.orders" \
+curl -s "http://localhost:5000/admin/users/alice/effective-permissions?resource=table:public.orders" \
   -H "Authorization: Bearer $T"
 ```
 
@@ -516,7 +516,7 @@ POST /admin/policies/simulate
 ```
 
 ```bash
-curl -sX POST http://localhost:8080/admin/policies/simulate \
+curl -sX POST http://localhost:5000/admin/policies/simulate \
   -H "Authorization: Bearer $T" \
   -H 'content-type: application/json' \
   -d '{

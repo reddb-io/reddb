@@ -41,7 +41,7 @@ flowchart LR
 Cache performance is visible in the runtime stats:
 
 ```bash
-curl -s http://127.0.0.1:8080/stats
+curl -s http://127.0.0.1:5000/stats
 ```
 
 ## Relation to Page-Based Storage

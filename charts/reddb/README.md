@@ -42,6 +42,20 @@ Set `storage.preset` to override the mode-derived preset. Use
 `storage.profile`, `storage.packaging`, `storage.managedBackup`, and
 `storage.walRetention` only when you intentionally need lower-level overrides.
 
+## Ports
+
+The chart follows the same listener contract as the Docker image:
+
+| Port | Name | Purpose |
+|---|---|---|
+| `5050` | `wire` | RedWire binary protocol |
+| `55055` | `grpc` | gRPC API and replica control plane |
+| `5000` | `http` | HTTP API, Web/admin surface, health |
+| `55555` | extra/TLS | Optional TLS or extra listener when enabled |
+
+Product-facing ports stay in the `50xx` range. Infrastructure/control-plane
+ports, including gRPC and TLS/extra listeners, stay in the `55xxx` range.
+
 ## Rendered Resources
 
 | Mode | StatefulSets | Services | Optional |
@@ -140,7 +154,7 @@ pdb:
 ```
 
 Replicas wait for the primary HTTP health endpoint before starting
-`red replica --primary-addr http://<primary>:50051`.
+`red replica --primary-addr http://<primary>:55055`.
 
 ## Cluster
 

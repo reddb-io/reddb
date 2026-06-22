@@ -76,7 +76,8 @@ impl std::error::Error for ParseError {}
 /// Default port per documented scheme. Centralised so other crates
 /// (the connector, server-side dispatch) can stay consistent.
 pub const DEFAULT_PORT_RED: u16 = 5050;
-pub const DEFAULT_PORT_GRPC: u16 = 5055;
+pub const DEFAULT_PORT_GRPC: u16 = 55055;
+pub const DEFAULT_PORT_GRPCS: u16 = 55555;
 /// Default ports for `red+ws://` and `red+wss://` — align with the
 /// standard WS / WSS browser defaults (80 and 443) so a hosted endpoint
 /// like `*.db.reddb.io` works without an explicit port.
@@ -267,7 +268,13 @@ pub fn parse_with_limits(
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(ParseErrorKind::InvalidUri, "grpc:// URI is missing a host")
             })?;
-            let port = parsed.port().unwrap_or(DEFAULT_PORT_GRPC);
+            let port = parsed.port().unwrap_or_else(|| {
+                if parsed.scheme() == "grpcs" {
+                    DEFAULT_PORT_GRPCS
+                } else {
+                    DEFAULT_PORT_GRPC
+                }
+            });
             Ok(ConnectionTarget::Grpc {
                 endpoint: format!("http://{host}:{port}"),
             })
@@ -352,7 +359,7 @@ fn try_parse_grpc_cluster(
     let (rest, default_port) = if let Some(r) = uri.strip_prefix("grpc://") {
         (r, DEFAULT_PORT_GRPC)
     } else if let Some(r) = uri.strip_prefix("grpcs://") {
-        (r, DEFAULT_PORT_GRPC)
+        (r, DEFAULT_PORT_GRPCS)
     } else if let Some(r) = uri
         .strip_prefix("red://")
         .or_else(|| uri.strip_prefix("reds://"))

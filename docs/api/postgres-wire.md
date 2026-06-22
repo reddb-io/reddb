@@ -14,8 +14,8 @@ Or bind alongside gRPC / HTTP:
 
 ```bash
 red server \
-  --bind       127.0.0.1:8080 \
-  --grpc-bind  127.0.0.1:5055 \
+  --bind       127.0.0.1:5000 \
+  --grpc-bind  127.0.0.1:55055 \
   --pg-bind    127.0.0.1:5432
 ```
 

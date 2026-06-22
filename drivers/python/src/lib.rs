@@ -141,7 +141,7 @@ impl Connection {
 ///
 /// Usage:
 ///   import reddb_python
-///   conn = reddb_python.connect("127.0.0.1:50051")
+///   conn = reddb_python.connect("127.0.0.1:55055")
 ///   result = conn.query("SELECT * FROM users WHERE rid = 1")
 ///   conn.bulk_insert("users", ['{"fields":{"name":"Alice"}}'])
 #[pyfunction]
@@ -511,8 +511,8 @@ fn wire_connect(addr: &str) -> PyResult<WireConnection> {
 /// Connect to RedDB wire protocol with TLS encryption.
 ///
 /// Usage:
-///   conn = reddb_python.wire_connect_tls("127.0.0.1:50053")
-///   conn = reddb_python.wire_connect_tls("127.0.0.1:50053", ca_cert="/path/to/cert.pem")
+///   conn = reddb_python.wire_connect_tls("127.0.0.1:55555")
+///   conn = reddb_python.wire_connect_tls("127.0.0.1:55555", ca_cert="/path/to/cert.pem")
 #[pyfunction]
 #[pyo3(signature = (addr, ca_cert=None, accept_invalid_certs=false))]
 fn wire_connect_tls(
@@ -628,7 +628,7 @@ impl rustls::client::danger::ServerCertVerifier for DangerousVerifier {
 ///     db.close()
 ///
 /// Low-level API (kept for power users):
-///     reddb.legacy_grpc_connect("127.0.0.1:50051")  -> Connection
+///     reddb.legacy_grpc_connect("127.0.0.1:55055")  -> Connection
 ///     reddb.wire_connect("127.0.0.1:5050")          -> WireConnection
 #[pymodule]
 fn reddb(m: &Bound<'_, PyModule>) -> PyResult<()> {

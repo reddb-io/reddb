@@ -35,8 +35,8 @@ kill_timeout = "60s"
   image = "reddb-benchmark/reddb:latest"
 
 [env]
-  REDDB_HTTP_BIND_ADDR = "0.0.0.0:8080"
-  REDDB_GRPC_BIND_ADDR = "0.0.0.0:50051"
+  REDDB_HTTP_BIND_ADDR = "0.0.0.0:5000"
+  REDDB_GRPC_BIND_ADDR = "0.0.0.0:55055"
 
   RED_BACKEND = "s3"
   RED_S3_ENDPOINT = "https://fly.storage.tigris.dev"
@@ -61,7 +61,7 @@ kill_timeout = "60s"
 
 [[services]]
   protocol = "tcp"
-  internal_port = 8080
+  internal_port = 5000
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
@@ -98,15 +98,15 @@ kill_timeout = "60s"
 
 [[services]]
   protocol = "tcp"
-  internal_port = 50051
+  internal_port = 55055
   auto_stop_machines = "stop"
   auto_start_machines = true
 
   [[services.ports]]
-    port = 50051
+    port = 55055
 
 [metrics]
-  port = 8080
+  port = 5000
   path = "/metrics"
 
 [[vm]]

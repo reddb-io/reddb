@@ -59,7 +59,7 @@ lands.
 Use the typed HTTP endpoint when you need explicit IVF probe tuning:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/large_embeddings/ivf/search \
+curl -X POST http://127.0.0.1:5000/collections/large_embeddings/ivf/search \
   -H 'content-type: application/json' \
   -d '{
     "vector": [0.12, 0.91, 0.44, 0.33, 0.67],
@@ -77,5 +77,5 @@ For large datasets, you can trigger training explicitly via the index management
 ```bash
 grpcurl -plaintext \
   -d '{"collection": "large_embeddings"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/RebuildIndexes
+  127.0.0.1:55055 reddb.v1.RedDb/RebuildIndexes
 ```

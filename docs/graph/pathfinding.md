@@ -9,7 +9,7 @@ Use `POST /graph/shortest-path` or `GRAPH SHORTEST_PATH` when you need the minim
 HTTP example:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+curl -X POST http://127.0.0.1:5000/graph/shortest-path \
   -H 'content-type: application/json' \
   -d '{
     "source": "alice",
@@ -48,7 +48,7 @@ GRAPH SHORTEST_PATH FROM 'alice' TO 'diana' ALGORITHM dijkstra
 Example:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+curl -X POST http://127.0.0.1:5000/graph/shortest-path \
   -H 'content-type: application/json' \
   -d '{
     "source": "A",
@@ -76,7 +76,7 @@ Use `POST /graph/traverse` to explore the graph from a seed node.
 ### BFS Traversal
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/traverse \
+curl -X POST http://127.0.0.1:5000/graph/traverse \
   -H 'content-type: application/json' \
   -d '{
     "source": "alice",
@@ -89,7 +89,7 @@ curl -X POST http://127.0.0.1:8080/graph/traverse \
 ### DFS Traversal
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/traverse \
+curl -X POST http://127.0.0.1:5000/graph/traverse \
   -H 'content-type: application/json' \
   -d '{
     "source": "alice",
@@ -104,7 +104,7 @@ curl -X POST http://127.0.0.1:8080/graph/traverse \
 Use `POST /graph/neighborhood` when you want local expansion rather than a full traversal:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/neighborhood \
+curl -X POST http://127.0.0.1:5000/graph/neighborhood \
   -H 'content-type: application/json' \
   -d '{
     "node": "alice",

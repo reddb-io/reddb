@@ -177,7 +177,7 @@ fn deposed_primary_auto_rolls_back_divergent_tail_and_rejoins() {
         local_frontier: node.frontier(),
         common_point: 200,
         commit_watermark: 200,
-        new_primary_addr: "http://node-b:50051".to_string(),
+        new_primary_addr: "http://node-b:55055".to_string(),
         new_term: 8,
     };
 
@@ -189,7 +189,7 @@ fn deposed_primary_auto_rolls_back_divergent_tail_and_rejoins() {
     assert_eq!(
         node.role,
         Some(NodeRole::Replica {
-            primary_addr: "http://node-b:50051".to_string(),
+            primary_addr: "http://node-b:55055".to_string(),
             term: 8,
         }),
     );
@@ -253,7 +253,7 @@ fn rollback_refuses_to_cross_the_commit_watermark() {
         local_frontier: 250,
         common_point: 150, // below the watermark!
         commit_watermark: 200,
-        new_primary_addr: "http://node-b:50051".to_string(),
+        new_primary_addr: "http://node-b:55055".to_string(),
         new_term: 8,
     };
 
@@ -285,7 +285,7 @@ fn caught_up_ex_primary_rejoins_without_a_rollback() {
         local_frontier: 200,
         common_point: 200,
         commit_watermark: 200,
-        new_primary_addr: "http://node-b:50051".to_string(),
+        new_primary_addr: "http://node-b:55055".to_string(),
         new_term: 8,
     };
 

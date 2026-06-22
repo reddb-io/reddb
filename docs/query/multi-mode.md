@@ -26,7 +26,7 @@ g.V('alice').outE('REPORTS_TO').inV().values('name')
 ### Examples
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "g.V().hasLabel('\''person'\'').out('\''FOLLOWS'\'').values('\''name'\'')"}'
 ```
@@ -67,7 +67,7 @@ SELECT ?name ?dept WHERE {
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT ?name WHERE { ?p rdf:type :Person . ?p :name ?name . }"}'
 ```
@@ -96,7 +96,7 @@ which users have the most connections
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "find all critical hosts running linux"}'
 ```

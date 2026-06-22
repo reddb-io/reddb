@@ -41,7 +41,7 @@ $conn->query(
 $conn->close();
 
 // HTTPS with auto-login
-$conn = Reddb::connect('https://reddb.example.com:8443', [
+$conn = Reddb::connect('https://reddb.example.com:55555', [
     'username' => 'alice',
     'password' => 's3cret',
 ]);
@@ -53,8 +53,8 @@ $conn = Reddb::connect('https://reddb.example.com:8443', [
 | --- | --- | --- |
 | `red://host:5050` | TCP redwire | Default port `5050`. |
 | `reds://host:5050` | TLS redwire | ALPN `redwire/1` injected automatically. |
-| `http://host:8080` | HTTP REST | |
-| `https://host:8443` | HTTPS REST | |
+| `http://host:5000` | HTTP REST | |
+| `https://host:55555` | HTTPS REST | |
 | `red://`, `red://memory`, `red:///path` | embedded | Throws `EmbeddedUnsupported`. |
 
 Username, password, token, and apiKey may be carried in the URL or

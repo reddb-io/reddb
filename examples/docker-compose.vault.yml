@@ -37,7 +37,7 @@
 
 services:
   reddb:
-    image: reddb-benchmark/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
     container_name: reddb-vault
     user: "10001:10001"
     read_only: true
@@ -48,8 +48,9 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "8080:8080"
-      - "50051:50051"
+      - "5050:5050"
+      - "5000:5000"
+      - "55055:55055"
     volumes:
       - reddb-data:/data
     environment:
@@ -58,8 +59,11 @@ services:
       REDDB_STORAGE_PROFILE: embedded
       REDDB_STORAGE_PACKAGING: single-file
       REDDB_REPLICA_COUNT: "0"
-      # The entrypoint shim AND the binary both honour these *_FILE vars.
-      # The cert never appears as a process env variable — only the path does.
+      REDDB_TOPOLOGY: standalone
+      REDDB_NODE_ROLE: standalone
+      REDDB_VAULT: "true"
+      # The binary honours these *_FILE vars during boot.
+      # The cert never gets baked into the image — only the path is configured.
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
       # Optional: bootstrap an admin on first start. Mount these as secrets
       # too if you uncomment them.
@@ -81,17 +85,8 @@ services:
       #   uid: "10001"
       #   gid: "10001"
       #   mode: 0400
-    command:
-      - "server"
-      - "--vault"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "--max-time", "2", "http://127.0.0.1:8080/health/live"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
       timeout: 3s
       retries: 3

@@ -24,24 +24,18 @@ services:
       REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
+      REDDB_TOPOLOGY: primary-replica
+      REDDB_NODE_ROLE: primary
       REDDB_STORAGE_PRESET: primary-replica-production-ha
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "2"
+      REDDB_VAULT: "false"
     ports:
-      - "50051:50051"
-      - "8080:8080"
-      - "8443:8443"
-    command:
-      - "server"
-      - "--role"
-      - "primary"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
+      - "5050:5050"
+      - "55055:55055"
+      - "5000:5000"
+      - "55555:55555"
     depends_on:
       - mock-ai
 
@@ -55,24 +49,19 @@ services:
       REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
+      REDDB_TOPOLOGY: primary-replica
+      REDDB_NODE_ROLE: replica
       REDDB_STORAGE_PRESET: primary-replica-production-ha
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "2"
+      REDDB_PRIMARY_ADDR: http://primary:55055
+      REDDB_VAULT: "false"
     ports:
-      - "50052:50051"
-      - "8081:8080"
-      - "8444:8443"
-    command:
-      - "replica"
-      - "--primary-addr"
-      - "http://primary:50051"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
+      - "5051:5050"
+      - "55056:55055"
+      - "5001:5000"
+      - "55556:55555"
     depends_on:
       - primary
       - mock-ai
@@ -87,24 +76,19 @@ services:
       REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
       REDDB_OPENAI_API_KEY: test-key
       REDDB_OPENAI_PROMPT_MODEL: mock-chat
+      REDDB_TOPOLOGY: primary-replica
+      REDDB_NODE_ROLE: replica
       REDDB_STORAGE_PRESET: primary-replica-production-ha
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "2"
+      REDDB_PRIMARY_ADDR: http://primary:55055
+      REDDB_VAULT: "false"
     ports:
-      - "50053:50051"
-      - "8082:8080"
-      - "8445:8443"
-    command:
-      - "replica"
-      - "--primary-addr"
-      - "http://primary:50051"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
+      - "5052:5050"
+      - "55057:55055"
+      - "5002:5000"
+      - "55557:55555"
     depends_on:
       - primary
       - mock-ai

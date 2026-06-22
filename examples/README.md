@@ -9,16 +9,24 @@ Available profiles:
 - `min`: one local server only
 - `replica`: primary + one replica
 - `full`: primary + two replicas
-- `remote`: primary + replica + MinIO for remote snapshot/WAL tests
-- `backup`: single remote-backed server + MinIO for backup flows
-- `pitr`: single remote-backed primary + MinIO for restore-point flows
-- `serverless`: single remote-backed node + MinIO for serverless-style readiness/warmup flows
+- `remote`: primary + replica + Floci S3 emulator for remote snapshot/WAL tests
+- `backup`: single remote-backed server + Floci for backup flows
+- `pitr`: single remote-backed primary + Floci for restore-point flows
+- `serverless`: single remote-backed node + Floci for serverless-style readiness/warmup flows
 - `cluster`: three symmetric cluster-shape members with stable identity/discovery env
 
 Each Compose profile sets the same storage contract consumed by the CLI:
 `REDDB_STORAGE_PRESET`, `REDDB_STORAGE_PROFILE`, `REDDB_STORAGE_PACKAGING`, and
-`REDDB_REPLICA_COUNT`. There is no `cluster` Compose profile yet; cluster should
-only be added here once the symmetric pod/node discovery topology is implemented.
+`REDDB_REPLICA_COUNT`. The `cluster` profile is a declarative symmetric
+container shape with stable identity/discovery env; today each member still runs
+the standalone process role with `REDDB_STORAGE_PRESET=cluster` until the
+cluster supervisor and range ownership runtime mature.
+
+Port convention:
+
+- `5000` and nearby `50xx` host ports are product-facing HTTP/RedWire surfaces.
+- `55055` and nearby `55xxx` host ports are infrastructure/control-plane
+  surfaces such as gRPC, TLS/extra listeners, and local Floci endpoints.
 
 Quick commands:
 

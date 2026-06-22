@@ -4,9 +4,10 @@ This guide gets a full RedDB dev environment running with one command.
 
 Use it when you want:
 
-- HTTP on `127.0.0.1:8080`
-- gRPC on `127.0.0.1:50051`
-- one read replica on `127.0.0.1:8081` and `127.0.0.1:50052`
+- HTTP on `127.0.0.1:5000`
+- RedWire on `127.0.0.1:5050`
+- gRPC on `127.0.0.1:55055`
+- one read replica on `127.0.0.1:5001`, `127.0.0.1:5051`, and `127.0.0.1:55056`
 - persistent Docker volumes instead of local binaries
 
 ## 1. Start the stack
@@ -29,27 +30,27 @@ This uses
 
 The topology is:
 
-- `primary`: HTTP `8080`, gRPC `50051`
-- `replica`: HTTP `8081`, gRPC `50052`
+- `primary`: RedWire `5050`, gRPC `55055`, HTTP `5000`
+- `replica`: RedWire `5051`, gRPC `55056`, HTTP `5001`
 
 ## 2. Check health
 
 ```bash
-curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8081/health
+curl -s http://127.0.0.1:5000/health
+curl -s http://127.0.0.1:5001/health
 ```
 
 For gRPC:
 
 ```bash
-docker compose -f examples/docker-compose.replica.yml exec -T primary /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
-docker compose -f examples/docker-compose.replica.yml exec -T replica /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
+docker compose -f examples/docker-compose.replica.yml exec -T primary /usr/local/bin/red health --grpc --bind 127.0.0.1:55055
+docker compose -f examples/docker-compose.replica.yml exec -T replica /usr/local/bin/red health --grpc --bind 127.0.0.1:55055
 ```
 
 ## 3. Write to the primary
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
+curl -X POST http://127.0.0.1:5000/collections/hosts/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -63,7 +64,7 @@ curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
 Query it back:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM hosts ORDER BY ip"}'
 ```
@@ -73,28 +74,28 @@ curl -X POST http://127.0.0.1:8080/query \
 Give replication a moment, then query the replica HTTP port:
 
 ```bash
-curl -X POST http://127.0.0.1:8081/query \
+curl -X POST http://127.0.0.1:5001/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM hosts ORDER BY ip"}'
 ```
 
 This is the simplest way to test read scaling locally:
 
-- writes against `8080`
-- reads against `8081`
+- writes against `5000`
+- reads against `5001`
 
 ## 5. Connect over gRPC
 
 Primary:
 
 ```bash
-red connect 127.0.0.1:50051
+red connect 127.0.0.1:55055
 ```
 
 Replica:
 
 ```bash
-red connect 127.0.0.1:50052
+red connect 127.0.0.1:55056
 ```
 
 ## 6. Watch the stack
@@ -136,9 +137,9 @@ docker compose -f examples/docker-compose.full.yml up -d --build
 
 That stack exposes:
 
-- primary HTTP `8080`, gRPC `50051`
-- replica-1 HTTP `8081`, gRPC `50052`
-- replica-2 HTTP `8082`, gRPC `50053`
+- primary RedWire `5050`, gRPC `55055`, HTTP `5000`
+- replica-1 RedWire `5051`, gRPC `55056`, HTTP `5001`
+- replica-2 RedWire `5052`, gRPC `55057`, HTTP `5002`
 
 See also:
 

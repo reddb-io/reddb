@@ -25,13 +25,13 @@
 Create a fresh database for this tutorial. The `--http-bind` flag starts the HTTP server on the given address.
 
 ```bash
-red server --path ./data/incidents.rdb --http-bind 127.0.0.1:8080
+red server --path ./data/incidents.rdb --http-bind 127.0.0.1:5000
 ```
 
 Verify the server is running:
 
 ```bash
-curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:5000/health
 ```
 
 You should see:
@@ -61,7 +61,7 @@ Then restart the server so it picks up the variable. If you prefer a different p
 Store the key inside RedDB itself. The key is saved to the `red_config` collection and survives restarts.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -H 'content-type: application/json' \
   -d '{
     "provider": "groq",
@@ -76,7 +76,7 @@ The `"default": true` flag tells RedDB to use Groq whenever you omit `USING` fro
 ### Verify configuration
 
 ```bash
-curl -s http://127.0.0.1:8080/config/red.ai.default
+curl -s http://127.0.0.1:5000/config/red.ai.default
 ```
 
 Expected response:
@@ -99,7 +99,7 @@ Expected response:
 Create a table with a context index on `host` and `severity`. The context index lets RedDB find related data across all data models when you search by those fields.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "CREATE TABLE incidents (title TEXT, severity TEXT, host TEXT, description TEXT) WITH TTL 90 d WITH CONTEXT INDEX ON (host, severity)"}'
 ```
@@ -119,7 +119,7 @@ Populate the table with realistic security incidents. Each `curl` command is sel
 **Incident 1 — SSH Brute Force**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
+curl -X POST http://127.0.0.1:5000/collections/incidents/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -134,7 +134,7 @@ curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
 **Incident 2 — Malware Detected**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
+curl -X POST http://127.0.0.1:5000/collections/incidents/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -149,7 +149,7 @@ curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
 **Incident 3 — Privilege Escalation**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
+curl -X POST http://127.0.0.1:5000/collections/incidents/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -164,7 +164,7 @@ curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
 **Incident 4 — Port Scan Detected**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
+curl -X POST http://127.0.0.1:5000/collections/incidents/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -179,7 +179,7 @@ curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
 **Incident 5 — Data Exfiltration Attempt**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
+curl -X POST http://127.0.0.1:5000/collections/incidents/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -194,7 +194,7 @@ curl -X POST http://127.0.0.1:8080/collections/incidents/rows \
 Verify the data is in:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT title, severity, host FROM incidents"}'
 ```
@@ -223,7 +223,7 @@ Expected output (5 rows):
 Use `WITH AUTO EMBED` to insert a record and simultaneously generate a vector embedding for the `description` field. RedDB calls your AI provider, stores the embedding, and links it to the row automatically.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "INSERT INTO incidents (title, severity, host, description) VALUES ('\''Ransomware Encryption'\'', '\''critical'\'', '\''10.0.0.12'\'', '\''BitLocker encryption triggered on all NTFS volumes. Ransom note dropped at C:\\README_DECRYPT.txt. Kill chain matches LockBit 3.0 playbook.'\'') WITH AUTO EMBED (description) USING groq"}'
 ```
@@ -245,7 +245,7 @@ Context search finds everything related to a value across all data models &mdash
 Find all incidents related to host `10.0.0.5`:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/context \
+curl -X POST http://127.0.0.1:5000/context \
   -H 'content-type: application/json' \
   -d '{
     "query": "10.0.0.5",
@@ -319,7 +319,7 @@ SEARCH CONTEXT '10.0.0.5' FIELD host DEPTH 2 LIMIT 50
 Semantic search finds records by meaning, not exact keywords. Search for "unauthorized access attempt" &mdash; even though no record contains that exact phrase.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SEARCH SIMILAR TEXT '\''unauthorized access attempt'\'' COLLECTION incidents LIMIT 5 USING groq"}'
 ```
@@ -359,7 +359,7 @@ This is the headline feature. `ASK` combines context retrieval with LLM synthesi
 ### Via HTTP
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/ask \
+curl -X POST http://127.0.0.1:5000/ai/ask \
   -H 'content-type: application/json' \
   -d '{
     "question": "What happened on host 10.0.0.5 and how severe is it?",
@@ -501,7 +501,7 @@ single-row result.
 Run it through the query endpoint:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "ASK '\''which hosts had critical incidents and what should we investigate first?'\'' USING groq"}'
 ```
@@ -513,7 +513,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Every insert, update, and delete emits a change event. Poll the CDC endpoint to track what happened since your last checkpoint.
 
 ```bash
-curl -s 'http://127.0.0.1:8080/changes?since_lsn=0&limit=10'
+curl -s 'http://127.0.0.1:5000/changes?since_lsn=0&limit=10'
 ```
 
 Expected response:
@@ -546,7 +546,7 @@ Expected response:
 Use `next_lsn` as your cursor for the next poll:
 
 ```bash
-curl -s 'http://127.0.0.1:8080/changes?since_lsn=7&limit=10'
+curl -s 'http://127.0.0.1:5000/changes?since_lsn=7&limit=10'
 ```
 
 This gives you a real-time audit trail. Build alerting pipelines, sync to external systems, or trigger automated analysis on every new incident.

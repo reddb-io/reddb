@@ -39,8 +39,8 @@ red server --path ./data/reddb.rdb
 # Explicit HTTP + gRPC listeners
 red server \
   --path ./data/reddb.rdb \
-  --grpc-bind 127.0.0.1:50051 \
-  --http-bind 127.0.0.1:8080
+  --grpc-bind 127.0.0.1:55055 \
+  --http-bind 127.0.0.1:5000
 ```
 
 ```bash
@@ -142,7 +142,7 @@ returned guard alive for the process lifetime.
 Omit `--path` to run entirely in RAM. Useful for development and testing:
 
 ```bash
-red server --http --bind 127.0.0.1:8080
+red server --http --bind 127.0.0.1:5000
 ```
 
 ### Persistent (File-Backed)
@@ -150,7 +150,7 @@ red server --http --bind 127.0.0.1:8080
 Specify `--path` to persist data to disk with WAL-based durability:
 
 ```bash
-red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000
 ```
 
 ### Read-Only
@@ -158,7 +158,7 @@ red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0
 Open an existing database without writes:
 
 ```bash
-red server --http --path ./data/reddb.rdb --read-only --bind 127.0.0.1:8080
+red server --http --path ./data/reddb.rdb --read-only --bind 127.0.0.1:5000
 ```
 
 ## Deployment Profiles
@@ -174,7 +174,7 @@ RedDB supports three deployment profiles, each with different operational charac
 Query the active profile:
 
 ```bash
-curl http://127.0.0.1:8080/deployment/profiles?profile=server
+curl http://127.0.0.1:5000/deployment/profiles?profile=server
 ```
 
 ## Replication
@@ -185,24 +185,24 @@ curl http://127.0.0.1:8080/deployment/profiles?profile=server
 red server \
   --path ./data/primary.rdb \
   --role primary \
-  --grpc-bind 0.0.0.0:50051 \
-  --http-bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:55055 \
+  --http-bind 0.0.0.0:5000
 ```
 
 ### Replica Mode
 
 ```bash
 red replica \
-  --primary-addr http://primary-host:50051 \
+  --primary-addr http://primary-host:55055 \
   --path ./data/replica.rdb \
-  --grpc-bind 0.0.0.0:50051 \
-  --http-bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:55055 \
+  --http-bind 0.0.0.0:5000
 ```
 
 Check replication status:
 
 ```bash
-red status --bind primary-host:50051
+red status --bind primary-host:55055
 ```
 
 ## Global CLI Flags
@@ -226,13 +226,13 @@ RedDB stores runtime settings in the `red_config` collection using dot-notation 
 
 ```bash
 # Export all config as nested JSON
-curl http://127.0.0.1:8080/config
+curl http://127.0.0.1:5000/config
 
 # Import from JSON file
-curl -X POST http://127.0.0.1:8080/config -d @examples/config.json
+curl -X POST http://127.0.0.1:5000/config -d @examples/config.json
 
 # Override specific values
-curl -X POST http://127.0.0.1:8080/config \
+curl -X POST http://127.0.0.1:5000/config \
   -d '{"red":{"ai":{"default":{"provider":"ollama","model":"llama3"}}}}'
 ```
 
@@ -261,15 +261,15 @@ Read, write, or delete a single config key via HTTP:
 
 ```bash
 # Read a key or subtree
-curl http://127.0.0.1:8080/config/red.ai.default.provider
+curl http://127.0.0.1:5000/config/red.ai.default.provider
 
 # Set a key
-curl -X PUT http://127.0.0.1:8080/config/red.ai.default.provider \
+curl -X PUT http://127.0.0.1:5000/config/red.ai.default.provider \
   -H 'content-type: application/json' \
   -d '{"value": "groq"}'
 
 # Delete a key
-curl -X DELETE http://127.0.0.1:8080/config/red.ai.default.model
+curl -X DELETE http://127.0.0.1:5000/config/red.ai.default.model
 ```
 
 ### Resolution Order

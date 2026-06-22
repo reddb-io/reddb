@@ -143,10 +143,10 @@ The client follows the SDK Helper Spec for the shared JS/TS surface:
 | -------------- | ----------------------------- | ------------ |
 | `red://`       | RedWire (TCP)                 | 5050         |
 | `reds://`      | RedWire over TLS              | 5050         |
-| `grpc://`      | gRPC                          | 5055         |
-| `grpcs://`     | gRPC over TLS                 | 5056         |
-| `http://`      | HTTP JSON                     | 8080         |
-| `https://`     | HTTPS JSON                    | 8443         |
+| `grpc://`      | gRPC                          | 55055         |
+| `grpcs://`     | gRPC over TLS                 | 55555         |
+| `http://`      | HTTP JSON                     | 5000         |
+| `https://`     | HTTPS JSON                    | 55555         |
 
 ## Rejected URI schemes
 

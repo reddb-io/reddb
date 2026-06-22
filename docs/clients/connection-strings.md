@@ -11,10 +11,10 @@ the URL or via the `options.tls` object.
 | `red://`                                                                | embedded           | spawn → stdio JSON-RPC      | n/a (process privileges) |
 | `red://:memory` / `red://:memory:`                                      | embedded           | spawn → stdio JSON-RPC      | n/a                      |
 | `red:///path/to/data.rdb`                                               | embedded persistent| spawn → stdio JSON-RPC      | n/a                      |
-| `red://host:8080?proto=http` / `http://host:8080`                       | HTTP/1.1           | fetch() → REST              | bearer / basic / login   |
-| `red://host:8443?proto=https` / `https://host:8443`                     | HTTPS              | fetch() → REST + TLS        | bearer / basic / login / OAuth-JWT |
-| `red://host:50051?proto=grpc` / `grpc://host:50051`                     | gRPC plain         | HTTP/2 framed protobuf      | bearer / OAuth-JWT       |
-| `red://host:50052?proto=grpcs` / `grpcs://host:50052`                   | gRPC + TLS         | HTTP/2 + TLS                | bearer / mTLS / OAuth-JWT |
+| `red://host:5000?proto=http` / `http://host:5000`                       | HTTP/1.1           | fetch() → REST              | bearer / basic / login   |
+| `red://host:55555?proto=https` / `https://host:55555`                     | HTTPS              | fetch() → REST + TLS        | bearer / basic / login / OAuth-JWT |
+| `red://host:55055?proto=grpc` / `grpc://host:55055`                     | gRPC plain         | HTTP/2 framed protobuf      | bearer / OAuth-JWT       |
+| `red://host:55555?proto=grpcs` / `grpcs://host:55555`                   | gRPC + TLS         | HTTP/2 + TLS                | bearer / mTLS / OAuth-JWT |
 | `red://host:5050` / `red://host:5050` / `grpc://host:5050`          | RedWire plain      | TCP framed binary           | bearer / anonymous       |
 | `reds://host:5443` / `red://host:5443?proto=redwires`                | RedWire + TLS      | TLS-wrapped framed binary   | bearer / mTLS            |
 | `red://host:5443?tls=true&cert=/c.pem&key=/k.pem&ca=/ca.pem`             | RedWire + mTLS     | TLS + client cert           | mTLS (CN→user) + bearer  |
@@ -34,11 +34,11 @@ const c = await connect('red:///var/lib/db.rdb')       // persistent
 ### HTTP / HTTPS
 
 ```js
-const db = await connect('https://reddb.example.com:8443', {
+const db = await connect('https://reddb.example.com:55555', {
   auth: { username: 'admin', password: 'secret' },     // → /auth/login
 })
 // Or bearer:
-const db = await connect('https://reddb.example.com:8443', {
+const db = await connect('https://reddb.example.com:55555', {
   auth: { token: 'sk-abc' },
 })
 ```
@@ -81,7 +81,7 @@ const db = await connect('reds://reddb.example.com:5050', {
 ### gRPC + TLS (`grpcs://`)
 
 ```js
-const db = await connect('grpcs://reddb.example.com:50052', {
+const db = await connect('grpcs://reddb.example.com:55555', {
   auth: { token: 'sk-abc' },
   tls: {
     ca: fs.readFileSync('/etc/reddb/ca.pem'),       // pinned internal CA
@@ -94,7 +94,7 @@ const db = await connect('grpcs://reddb.example.com:50052', {
 Add `cert` / `key` for mTLS:
 
 ```js
-const db = await connect('grpcs://reddb.example.com:50052', {
+const db = await connect('grpcs://reddb.example.com:55555', {
   tls: {
     ca:   fs.readFileSync('/etc/reddb/ca.pem'),
     cert: fs.readFileSync('/etc/reddb/client.pem'),
@@ -107,7 +107,7 @@ Server side (Agent B in this round):
 
 ```bash
 red server \
-  --grpc-tls-bind      0.0.0.0:50052 \
+  --grpc-tls-bind      0.0.0.0:55555 \
   --grpc-tls-cert      /run/secrets/grpc.crt \
   --grpc-tls-key       /run/secrets/grpc.key \
   --grpc-tls-client-ca /run/secrets/clients-ca.pem    # optional, enables mTLS
@@ -126,7 +126,7 @@ round-robin across the replicas.
 ```rust
 // Rust — built into `reddb_client::Reddb::connect` under `--features grpc`.
 let db = Reddb::connect(
-    "grpc://primary.svc:5055,replica1.svc:5055,replica2.svc:5055",
+    "grpc://primary.svc:55055,replica1.svc:55055,replica2.svc:55055",
 ).await?;
 
 db.insert("users", &payload).await?;   // → primary
@@ -134,7 +134,7 @@ db.query("SELECT * FROM users").await?; // → round-robin replica
 ```
 
 Each entry can carry its own `:port`. Entries without a port inherit
-the scheme default (`grpc://` → 5055, `red://` → 5050). At least one
+the scheme default (`grpc://` → 55055, `red://` → 5050). At least one
 host is required.
 
 To force every operation back onto the primary (debugging, strict

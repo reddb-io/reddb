@@ -70,14 +70,14 @@ mod tests {
         options.transport_readiness = TransportReadiness {
             active: vec![TransportListenerState {
                 transport: "grpc".to_string(),
-                bind_addr: "127.0.0.1:50051".to_string(),
+                bind_addr: "127.0.0.1:5000".to_string(),
                 explicit: true,
             }],
             failed: vec![TransportListenerFailure {
                 transport: "http".to_string(),
-                bind_addr: "127.0.0.1:5055".to_string(),
+                bind_addr: "127.0.0.1:5000".to_string(),
                 explicit: false,
-                reason: "http listener bind 127.0.0.1:5055: address in use".to_string(),
+                reason: "http listener bind 127.0.0.1:5000: address in use".to_string(),
             }],
         };
         let server = RedDBServer::with_options(runtime, options);
@@ -248,7 +248,7 @@ pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:5055".to_string(),
+            bind_addr: "127.0.0.1:5000".to_string(),
             max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
             read_timeout_ms: 5_000,
             write_timeout_ms: 5_000,
@@ -720,21 +720,21 @@ impl RedDBServer {
         examples.insert(
             "query".to_string(),
             JsonValue::String(
-                "grpcurl -plaintext -d '{\"query\":\"SELECT 1\"}' 127.0.0.1:50051 reddb.v1.RedDB/Query"
+                "grpcurl -plaintext -d '{\"query\":\"SELECT 1\"}' 127.0.0.1:5000 reddb.v1.RedDB/Query"
                     .to_string(),
             ),
         );
         examples.insert(
             "query_with_params".to_string(),
             JsonValue::String(
-                "grpcurl -plaintext -d '{\"query\":\"SELECT $1 AS value\",\"params\":[{\"intValue\":42}]}' 127.0.0.1:50051 reddb.v1.RedDB/Query"
+                "grpcurl -plaintext -d '{\"query\":\"SELECT $1 AS value\",\"params\":[{\"intValue\":42}]}' 127.0.0.1:5000 reddb.v1.RedDB/Query"
                     .to_string(),
             ),
         );
         examples.insert(
             "health".to_string(),
             JsonValue::String(
-                "grpcurl -plaintext -d '{}' 127.0.0.1:50051 reddb.v1.RedDB/Health".to_string(),
+                "grpcurl -plaintext -d '{}' 127.0.0.1:5000 reddb.v1.RedDB/Health".to_string(),
             ),
         );
 
@@ -772,19 +772,19 @@ impl RedDBServer {
         let mut examples = Map::new();
         examples.insert(
             "raw_sql".to_string(),
-            JsonValue::String("curl -sS http://127.0.0.1:8080/query -d 'SELECT 1'".to_string()),
+            JsonValue::String("curl -sS http://127.0.0.1:5000/query -d 'SELECT 1'".to_string()),
         );
         examples.insert(
             "json_query".to_string(),
             JsonValue::String(
-                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT 1\"}'"
+                "curl -sS http://127.0.0.1:5000/query -H 'content-type: application/json' -d '{\"query\":\"SELECT 1\"}'"
                     .to_string(),
             ),
         );
         examples.insert(
             "json_query_with_params".to_string(),
             JsonValue::String(
-                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT $1 AS value\",\"params\":[42]}'"
+                "curl -sS http://127.0.0.1:5000/query -H 'content-type: application/json' -d '{\"query\":\"SELECT $1 AS value\",\"params\":[42]}'"
                     .to_string(),
             ),
         );
@@ -876,19 +876,19 @@ impl RedDBServer {
         let mut examples = Map::new();
         examples.insert(
             "http_raw_sql".to_string(),
-            JsonValue::String("curl -sS http://127.0.0.1:8080/query -d 'SELECT 1'".to_string()),
+            JsonValue::String("curl -sS http://127.0.0.1:5000/query -d 'SELECT 1'".to_string()),
         );
         examples.insert(
             "http_json_query".to_string(),
             JsonValue::String(
-                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT 1\"}'"
+                "curl -sS http://127.0.0.1:5000/query -H 'content-type: application/json' -d '{\"query\":\"SELECT 1\"}'"
                     .to_string(),
             ),
         );
         examples.insert(
             "http_json_query_with_params".to_string(),
             JsonValue::String(
-                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT $1 AS value\",\"params\":[42]}'"
+                "curl -sS http://127.0.0.1:5000/query -H 'content-type: application/json' -d '{\"query\":\"SELECT $1 AS value\",\"params\":[42]}'"
                     .to_string(),
             ),
         );
