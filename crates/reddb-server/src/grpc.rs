@@ -884,6 +884,52 @@ mod grpc_ask_query_reply_tests {
             "non-ASK must not use ASK envelope"
         );
     }
+
+    #[test]
+    fn query_reply_non_ask_json_column_preserves_object() {
+        let mut result = UnifiedResult::with_columns(vec!["value".into()]);
+        let mut record = UnifiedRecord::new();
+        record.set(
+            "value",
+            SchemaValue::Json(br#"{"alpha":"A","nested":{"leaf":12}}"#.to_vec()),
+        );
+        result.push(record);
+
+        let reply = query_reply(
+            RuntimeQueryResult {
+                query: "LIST KV proj AS JSON".to_string(),
+                mode: QueryMode::Sql,
+                statement: "kv_list_json",
+                engine: "kv",
+                result,
+                affected_rows: 0,
+                statement_type: "select",
+                bookmark: None,
+            },
+            &None,
+            &None,
+        );
+        let json: crate::json::Value =
+            crate::json::from_str(&reply.result_json).expect("valid query json");
+        let value = json
+            .get("records")
+            .and_then(crate::json::Value::as_array)
+            .and_then(|records| records.first())
+            .and_then(|record| record.get("value"))
+            .expect("value column");
+
+        assert_eq!(
+            value.get("alpha").and_then(crate::json::Value::as_str),
+            Some("A")
+        );
+        assert_eq!(
+            value
+                .get("nested")
+                .and_then(|nested| nested.get("leaf"))
+                .and_then(crate::json::Value::as_f64),
+            Some(12.0)
+        );
+    }
 }
 
 /// Emit a single info-level event with the SHA-256 fingerprint of the

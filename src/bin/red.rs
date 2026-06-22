@@ -274,6 +274,10 @@ fn value_to_json_fragment(value: &reddb::storage::schema::Value) -> String {
             n.to_string()
         }
         Value::Password(_) | Value::Secret(_) => "\"***\"".to_string(),
+        Value::Json(bytes) => reddb::json::from_slice::<reddb::json::Value>(bytes)
+            .ok()
+            .and_then(|json| reddb::json::to_string(&json).ok())
+            .unwrap_or_else(|| "null".to_string()),
         Value::Text(s) => format!("\"{}\"", json_escape(s.as_ref())),
         Value::Email(s) | Value::Url(s) | Value::NodeRef(s) | Value::EdgeRef(s) => {
             format!("\"{}\"", json_escape(s))
@@ -6470,6 +6474,38 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         assert_eq!(config.router_bind_addr, None);
         assert_eq!(config.grpc_bind_addr, None);
         assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn format_result_json_emits_json_values_as_json() {
+        let mut result =
+            reddb::storage::query::UnifiedResult::with_columns(vec!["value".to_string()]);
+        let mut record = reddb::storage::query::UnifiedRecord::new();
+        record.set(
+            "value",
+            reddb::storage::schema::Value::Json(br#"{"alpha":"A","nested":{"leaf":12}}"#.to_vec()),
+        );
+        result.push(record);
+        let query = reddb::runtime::RuntimeQueryResult {
+            query: "KV LIST settings PREFIX 'feature.' AS JSON".to_string(),
+            mode: reddb::storage::query::modes::QueryMode::Sql,
+            statement: "kv_list_json",
+            engine: "kv",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        };
+
+        let out = format_result_json(&query);
+        let parsed: reddb::json::Value = reddb::json::from_str(&out).expect("valid json output");
+        let row = parsed["rows"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .expect("one output row");
+        let value = &row["value"];
+        assert_eq!(value["alpha"].as_str(), Some("A"));
+        assert_eq!(value["nested"]["leaf"].as_f64(), Some(12.0));
     }
 
     // --- admin cache output format ---
