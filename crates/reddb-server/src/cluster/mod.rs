@@ -2,6 +2,7 @@
 
 pub mod bootstrap_authority;
 pub mod commit_resolution;
+pub mod control_plane;
 pub mod cross_range;
 pub mod drain;
 pub mod identity;
@@ -25,6 +26,11 @@ pub use bootstrap_authority::{
 pub use commit_resolution::{
     is_local_ack, resolve_commit_policy, CollectionDataModel, CommitPolicyResolution,
     CommitPolicyViolation, FailoverEligibility, GuardrailDisposition, HaIntent, ResolutionSource,
+};
+pub use control_plane::{
+    ControlPlaneConsensus, ControlPlaneEntry, ControlPlaneError, ControlPlaneIndex,
+    ControlPlaneTerm, DurableVoteState, MembershipChange, OwnershipTransition,
+    SingleNodeControlPlane,
 };
 pub use cross_range::{
     ConsistentReadLeg, ConsistentReadPlan, ConsistentReadReject, GlobalReadWatermark, KeyTarget,
