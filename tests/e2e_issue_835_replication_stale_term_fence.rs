@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reddb::api::REDDB_FORMAT_VERSION;
-use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
+use reddb::replication::cdc::{change_record_from_entity, ChangeOperation, ChangeRecord};
 use reddb::replication::failover::{
     FailoverCoordinator, FailoverMode, FailoverNode, FailoverRequest, FailoverTransport,
 };
@@ -70,10 +70,11 @@ fn induce_failover_to_new_term(current_term: u64, frontier: u64) -> u64 {
         committed_term: None,
     };
     let req = FailoverRequest {
-        old_primary: FailoverNode::new("old", "http://old:50051", "us-east"),
-        target: FailoverNode::new("new", "http://new:50051", "us-west"),
+        old_primary: FailoverNode::new("old", "http://old:55055", "us-east"),
+        target: FailoverNode::new("new", "http://new:55055", "us-west"),
         current_term,
         target_frontier_hint: frontier, // already caught up
+        timeline_history: reddb::TimelineHistory::new(10),
         mode: FailoverMode::Coordinated {
             catch_up_deadline: Duration::from_secs(1),
         },
@@ -103,7 +104,7 @@ fn change_record(lsn: u64, term: u64, payload: &[u8]) -> ChangeRecord {
     entity.created_at = timestamp;
     entity.updated_at = timestamp;
     entity.sequence_id = lsn;
-    ChangeRecord::from_entity(
+    change_record_from_entity(
         lsn,
         timestamp,
         ChangeOperation::Insert,

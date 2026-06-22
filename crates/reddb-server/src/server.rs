@@ -132,10 +132,6 @@ mod handlers_ops_policy;
 /// ADR 0047/0049). Public so the `red ui` CLI command can drive it.
 pub mod ui_bridge;
 mod ws_edge;
-// Local `red ui` bridge (issue #1042, PRD #1041): a loopback server that
-// serves the UI bundle and mounts RedWire-over-WS over the embedded
-// engine, reusing the ADR 0036 async-transport ↔ sync-engine seam.
-pub mod ui_bridge;
 // `red ui` bundle resolver (issue #1043, ADR 0050): pin→URL resolution,
 // HTTPS download, SHA-256 verification, tgz extraction, and local cache
 // management for the pinned red-ui release asset.
