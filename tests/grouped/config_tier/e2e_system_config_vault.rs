@@ -9,6 +9,8 @@ use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identit
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 fn runtime(name: &str) -> (support::TempDbFile, RedDBRuntime) {
     let path = support::temp_db_file(name);
     let rt = crate::config_tier_shared::open_runtime_with_options(
@@ -18,10 +20,7 @@ fn runtime(name: &str) -> (support::TempDbFile, RedDBRuntime) {
     (path, rt)
 }
 
-fn runtime_with_vault(
-    name: &str,
-    passphrase: &str,
-) -> (support::TempDbFile, RedDBRuntime, Arc<AuthStore>) {
+fn runtime_with_vault(name: &str) -> (support::TempDbFile, RedDBRuntime, Arc<AuthStore>) {
     let path = support::temp_db_file(name);
     let options = RedDBOptions::persistent(path.path())
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
@@ -34,7 +33,7 @@ fn runtime_with_vault(
             .expect("persistent runtime should expose pager"),
     );
     let auth = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some(passphrase))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, TEST_CERTIFICATE)
             .expect("vault should open"),
     );
     auth.ensure_vault_secret_key();
@@ -195,7 +194,7 @@ fn system_config_reads_and_writes_require_normalized_system_capabilities() {
 
 #[test]
 fn system_vault_reads_and_writes_require_normalized_system_capabilities() {
-    let (_path, rt, auth) = runtime_with_vault("system_vault_capabilities", "system-vault-pass");
+    let (_path, rt, auth) = runtime_with_vault("system_vault_capabilities");
     auth.create_user("alice", "p", Role::Write).unwrap();
 
     rt.execute_query("VAULT PUT red.vault.api_key = 'first'")

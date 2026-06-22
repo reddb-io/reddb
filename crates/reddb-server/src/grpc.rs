@@ -161,7 +161,7 @@ impl RedDBGrpcServer {
                     "vault requires a paged database (persistent mode)".into(),
                 )
             })?;
-            let store = AuthStore::with_vault(db_options.auth.clone(), pager, None)
+            let store = AuthStore::with_vault(db_options.auth.clone(), pager)
                 .map_err(|e| crate::api::RedDBError::Internal(e.to_string()))?;
             Arc::new(store)
         } else {

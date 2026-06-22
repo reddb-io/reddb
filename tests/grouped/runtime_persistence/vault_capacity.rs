@@ -25,6 +25,8 @@ use reddb::auth::vault::{Vault, VaultState};
 use reddb::auth::{ApiKey, Role, User, UserId};
 use reddb::storage::engine::pager::{Pager, PagerConfig};
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 /// Shared scratch dir per test invocation. Bytes don't survive
 /// across runs but the directory is unique per (pid, counter).
 fn scratch_path(label: &str) -> (support::TempDataDir, std::path::PathBuf) {
@@ -126,7 +128,7 @@ fn vault_round_trip_5000_users() {
     let state = synth_state(5_000);
     let serialized_len = state.serialize().len();
 
-    let vault = Vault::open(&pager, Some("vault-capacity-passphrase")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     let pages_before = pager.page_count().unwrap();
     let save_t = Instant::now();
@@ -148,7 +150,7 @@ fn vault_round_trip_5000_users() {
     drop(vault);
     drop(pager);
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("vault-capacity-passphrase")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     let load_t = Instant::now();
     let loaded = vault.load(&pager).unwrap().expect("vault must load");
@@ -170,7 +172,7 @@ fn vault_round_trip_5000_users() {
 fn vault_grows_and_shrinks_monotonically() {
     let (_dir, db_path) = scratch_path("growshrink");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("vault-grow-shrink")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     // 1) small — fits comfortably
     let small = synth_state(10);
@@ -220,7 +222,7 @@ fn vault_grows_and_shrinks_monotonically() {
 fn vault_single_user_fits_in_header_page() {
     let (_dir, db_path) = scratch_path("single");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("vault-single-user")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     let state = synth_state(1);
     vault.save(&pager, &state).unwrap();

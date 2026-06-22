@@ -16,8 +16,9 @@
 //!
 //! Key derivation, AES-256-GCM encrypt/decrypt, and the `Vault`/`VaultState`
 //! types stay in `reddb-server`: this crate never sees the wrapping key or the
-//! plaintext. The salt and nonce are embedded so a passphrase-based import can
-//! re-derive the same wrapping key without access to the source `.rdb` pages.
+//! plaintext. The salt and nonce remain embedded as part of the frozen v1
+//! envelope; certificate-based restore derives the wrapping key in
+//! `reddb-server`.
 //!
 //! The AAD string is exported here because it is part of the on-the-wire
 //! contract — the server passes it to `aes256_gcm_encrypt`/`decrypt`. Changing

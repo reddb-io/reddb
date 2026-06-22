@@ -11,6 +11,9 @@ use reddb::{RedDBOptions, RedDBRuntime};
 
 use support::TempDbFile;
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const CLI_CERTIFICATE: &str = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
+
 fn pager_backed_options(path: &std::path::Path) -> RedDBOptions {
     RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
@@ -31,14 +34,14 @@ fn open_runtime_with_vault(name: &str) -> (TempDbFile, RedDBRuntime, Arc<AuthSto
             .expect("persistent runtime should expose pager"),
     );
     let auth = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some("test-pass"))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, TEST_CERTIFICATE)
             .expect("vault should open"),
     );
     rt.set_auth_store(Arc::clone(&auth));
     (path, rt, auth)
 }
 
-fn attach_vault(rt: &RedDBRuntime, passphrase: &str) -> Arc<AuthStore> {
+fn attach_vault(rt: &RedDBRuntime, certificate_hex: &str) -> Arc<AuthStore> {
     let db = rt.db();
     let store = db.store();
     let pager = Arc::clone(
@@ -47,7 +50,7 @@ fn attach_vault(rt: &RedDBRuntime, passphrase: &str) -> Arc<AuthStore> {
             .expect("persistent runtime should expose pager"),
     );
     let auth = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some(passphrase))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, certificate_hex)
             .expect("vault should open"),
     );
     rt.set_auth_store(Arc::clone(&auth));
@@ -101,8 +104,8 @@ fn vault_kv_logical_export_is_encrypted_and_roundtrips() {
         "logical export blob must not expose plaintext"
     );
 
-    let state = Vault::unseal_logical_export_with_passphrase(&blob, "test-pass")
-        .expect("export should decrypt with source vault passphrase");
+    let state = Vault::unseal_logical_export_with_certificate(&blob, TEST_CERTIFICATE)
+        .expect("export should decrypt with source vault certificate");
     assert_eq!(
         state.kv.get("mycompany.stripe.key").map(String::as_str),
         Some("sk_live_export")
@@ -157,7 +160,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
             pager_backed_options(source_path),
             "source runtime should open",
         );
-        let _auth = attach_vault(&rt, "cli-pass");
+        let _auth = attach_vault(&rt, CLI_CERTIFICATE);
         rt.execute_query("SET CONFIG red.config.demo.enabled = true")
             .expect("SET CONFIG should succeed");
         rt.execute_query("SET SECRET mycompany.payments.key = 'sk_cli_secret'")
@@ -169,7 +172,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
             pager_backed_options(source_path),
             "source runtime should reopen",
         );
-        let auth = attach_vault(&rt, "cli-pass");
+        let auth = attach_vault(&rt, CLI_CERTIFICATE);
         assert_eq!(
             auth.vault_kv_get("mycompany.payments.key").as_deref(),
             Some("sk_cli_secret")
@@ -178,7 +181,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
 
     let red_bin = env!("CARGO_BIN_EXE_red");
     let dump = std::process::Command::new(red_bin)
-        .env("REDDB_VAULT_KEY", "cli-pass")
+        .env("REDDB_CERTIFICATE", CLI_CERTIFICATE)
         .arg("dump")
         .arg("--path")
         .arg(&source_path)
@@ -204,7 +207,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
     );
 
     let restore = std::process::Command::new(red_bin)
-        .env("REDDB_VAULT_KEY", "cli-pass")
+        .env("REDDB_CERTIFICATE", CLI_CERTIFICATE)
         .arg("restore")
         .arg("--path")
         .arg(&dest_path)
@@ -224,7 +227,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         pager_backed_options(dest_path),
         "dest runtime should open",
     );
-    let auth = attach_vault(&rt, "cli-pass");
+    let auth = attach_vault(&rt, CLI_CERTIFICATE);
     assert_eq!(
         auth.vault_kv_get("mycompany.payments.key").as_deref(),
         Some("sk_cli_secret")

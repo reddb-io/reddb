@@ -3,9 +3,9 @@
 # =============================================================================
 # This is the canonical "do it right" example. RedDB persists auth state in
 # encrypted reserved pages of the main `.rdb` file; the encryption key is
-# derived from REDDB_CERTIFICATE (64-char hex) or REDDB_VAULT_KEY (passphrase
-# fallback). Neither value is ever baked into the image — they are mounted
-# at runtime via Docker secrets and consumed via the *_FILE convention.
+# derived from REDDB_CERTIFICATE (64-char hex). The certificate can be passed
+# directly as REDDB_CERTIFICATE, but the production path is to mount it at
+# runtime via Docker secrets and consume it via REDDB_CERTIFICATE_FILE.
 #
 # -----------------------------------------------------------------------------
 # Bootstrap flow (one-time, per cluster):

@@ -315,9 +315,10 @@ record for the full KV snapshot:
 
 The `keys` list is a plaintext manifest so restore can create placeholders if
 the encrypted blob cannot be decrypted. Secret values only exist inside `blob`.
-The blob uses AES-256-GCM with AAD `reddb-vault-logical-export-v1` and includes
-the source vault salt so passphrase-based exports can be imported into a fresh
-database with the same `REDDB_VAULT_KEY`.
+The blob uses AES-256-GCM with AAD `reddb-vault-logical-export-v1` and the
+certificate-derived vault export key. The source vault salt remains in the v1
+envelope for framing compatibility; restore decrypts with `REDDB_CERTIFICATE`
+or `REDDB_CERTIFICATE_FILE`.
 
 Restore imports configs and secrets. If secret envelope decryption fails, the
 restore should still restore data and configs. The failed secret becomes an

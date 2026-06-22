@@ -12,6 +12,8 @@ use reddb::{RedDBOptions, RedDBRuntime};
 #[path = "../../support/mod.rs"]
 mod support;
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 fn unique_ident(prefix: &str) -> String {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -20,7 +22,7 @@ fn unique_ident(prefix: &str) -> String {
     format!("{prefix}_{unique}")
 }
 
-fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
+fn open_runtime_with_vault(path: &Path) -> (RedDBRuntime, Arc<AuthStore>) {
     let options = RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
         .expect("serverless storage profile should expose pager");
@@ -32,7 +34,7 @@ fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<
             .expect("persistent runtime should expose pager"),
     );
     let auth = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some(passphrase))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, TEST_CERTIFICATE)
             .expect("vault should open"),
     );
     rt.set_auth_store(Arc::clone(&auth));
@@ -79,7 +81,7 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
     let path = support::temp_db_file("config-secret-ref-326");
 
     let secret = "vault_plaintext_probe_326";
-    let (rt, auth) = open_runtime_with_vault(path.path(), "vault-pass-326");
+    let (rt, auth) = open_runtime_with_vault(path.path());
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
     let alice = unique_ident("alice");
@@ -212,7 +214,7 @@ fn secret_ref_guard_rejects_depth_two_chain_at_write() {
     let _guard = secret_ref_test_lock().lock().unwrap();
     let path = support::temp_db_file("secret-ref-guard-708-depth2");
 
-    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-d2");
+    let (rt, _auth) = open_runtime_with_vault(path.path());
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 
@@ -255,7 +257,7 @@ fn secret_ref_guard_rejects_cycle_at_write() {
     let _guard = secret_ref_test_lock().lock().unwrap();
     let path = support::temp_db_file("secret-ref-guard-708-cycle");
 
-    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-cyc");
+    let (rt, _auth) = open_runtime_with_vault(path.path());
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 
@@ -297,7 +299,7 @@ fn secret_ref_guard_read_backstop_when_store_contains_chain() {
     let _guard = secret_ref_test_lock().lock().unwrap();
     let path = support::temp_db_file("secret-ref-guard-708-read");
 
-    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-r");
+    let (rt, _auth) = open_runtime_with_vault(path.path());
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 
@@ -346,7 +348,7 @@ fn secret_ref_guard_allows_depth_one_reference() {
     let _guard = secret_ref_test_lock().lock().unwrap();
     let path = support::temp_db_file("secret-ref-guard-708-ok");
 
-    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-pass-708-ok");
+    let (rt, _auth) = open_runtime_with_vault(path.path());
     let app = unique_ident("app");
     let secrets = unique_ident("secrets");
 

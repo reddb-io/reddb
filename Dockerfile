@@ -82,7 +82,7 @@ ENV RUST_MIN_STACK=8388608
 # runtime with args plus REDDB_STORAGE_PRESET / REDDB_STORAGE_PROFILE.
 
 # === Secrets via file mounts ====================================================
-# DO NOT bake REDDB_CERTIFICATE / REDDB_VAULT_KEY / REDDB_PASSWORD into this image.
+# DO NOT bake REDDB_CERTIFICATE / REDDB_PASSWORD into this image.
 # Mount them at runtime via Docker/Swarm secrets, K8s Secret volumes, or any
 # orchestrator-native secret store. The binary honours the *_FILE convention:
 #

@@ -12,13 +12,15 @@ use reddb::storage::schema::Value;
 use reddb::storage::{EntityData, StorageDeployPreset};
 use reddb::{RedDBOptions, RedDBRuntime};
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 fn pager_backed_options(path: &Path) -> RedDBOptions {
     RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
         .expect("serverless storage profile should expose pager")
 }
 
-fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
+fn open_runtime_with_vault(path: &Path) -> (RedDBRuntime, Arc<AuthStore>) {
     let rt = RedDBRuntime::with_options(pager_backed_options(path)).expect("runtime should open");
     let pager = Arc::clone(
         rt.db()
@@ -27,7 +29,7 @@ fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<
             .expect("persistent runtime should expose pager"),
     );
     let auth = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some(passphrase))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, TEST_CERTIFICATE)
             .expect("vault should open"),
     );
     rt.set_auth_store(Arc::clone(&auth));
@@ -137,7 +139,7 @@ fn vault_put_seals_payload_before_persistence() {
 
     let secret = "vault_plaintext_probe_324";
     {
-        let (rt, auth) = open_runtime_with_vault(path, "vault-pass");
+        let (rt, auth) = open_runtime_with_vault(path);
         rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
             .expect("create vault");
         assert!(
@@ -225,7 +227,7 @@ fn vault_metadata_and_unseal_control_events_minimize_evidence() {
     let path = guard.path();
 
     let secret = "tok_live_653_probe BEGIN_PRIVATE_KEY_653 BEGIN_CERTIFICATE_653";
-    let (rt, auth) = open_runtime_with_vault(path, "vault-pass-653");
+    let (rt, auth) = open_runtime_with_vault(path);
     auth.create_user("alice", "p", Role::Write).unwrap();
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
         .expect("create vault");
@@ -342,7 +344,7 @@ fn vault_rotation_and_purge_control_events_minimize_evidence() {
 
     let secret_v1 = "rotate_tok_live_653 BEGIN_PRIVATE_KEY_ROTATE_653";
     let secret_v2 = "purge_certificate_probe_653 BEGIN_CERTIFICATE_PURGE_653";
-    let (rt, auth) = open_runtime_with_vault(path, "vault-pass-lifecycle-653");
+    let (rt, auth) = open_runtime_with_vault(path);
     auth.create_user("alice", "p", Role::Write).unwrap();
 
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
@@ -424,7 +426,7 @@ fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited() {
     let rt;
     let auth;
     {
-        let opened = open_runtime_with_vault(path, "vault-pass-330");
+        let opened = open_runtime_with_vault(path);
         rt = opened.0;
         auth = opened.1;
     }
@@ -535,7 +537,7 @@ fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited() {
 
     let secret_v1 = "vault_plaintext_probe_325_v1";
     let secret_v2 = "vault_plaintext_probe_325_v2";
-    let (rt, auth) = open_runtime_with_vault(path, "vault-pass-325");
+    let (rt, auth) = open_runtime_with_vault(path);
     auth.create_user("alice", "p", Role::Write).unwrap();
 
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")

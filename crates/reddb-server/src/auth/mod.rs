@@ -242,8 +242,8 @@ pub struct AuthConfig {
     pub auto_encrypt_storage: bool,
     /// When `true`, auth state (users, api keys, bootstrap flag) is persisted
     /// to reserved vault pages inside the main `.rdb` database file using
-    /// AES-256-GCM encryption.  The encryption key is read from
-    /// `REDDB_VAULT_KEY` env var or a passphrase.
+    /// AES-256-GCM encryption.  The encryption key is derived from the
+    /// certificate supplied by `REDDB_CERTIFICATE` / `REDDB_CERTIFICATE_FILE`.
     pub vault_enabled: bool,
     /// Optional mTLS client-certificate auth policy (Phase 3.4 PG parity).
     /// Disabled by default; TLS listeners opt-in per config.

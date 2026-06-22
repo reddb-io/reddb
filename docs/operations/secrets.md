@@ -18,8 +18,7 @@ Pair this with:
 
 | Secret                       | Lives in                              | Consumed by                                  | Rotation cost            | Blast radius if leaked |
 |:-----------------------------|:--------------------------------------|:---------------------------------------------|:-------------------------|:-----------------------|
-| `REDDB_CERTIFICATE`          | Cloud secret manager + offline copy   | RedDB process at boot (derives `vault_key`)  | High (re-bootstrap)      | Full read of vault: users, SCRAM, API keys, `red.secret.*`, `Value::Secret` columns |
-| `REDDB_VAULT_KEY` (legacy)   | Same                                  | Same — fallback when no certificate          | High (re-bootstrap)      | Same as above          |
+| `REDDB_CERTIFICATE` / `_FILE` | Cloud secret manager + offline copy  | RedDB process at boot (derives `vault_key`)  | High (re-bootstrap)      | Full read of vault: users, SCRAM, API keys, `red.secret.*`, `Value::Secret` columns |
 | `REDDB_USERNAME` / `_PASSWORD` | Cloud secret manager (bootstrap only) | Auto-bootstrap path on a fresh DB            | Low — bootstrap is one-time | Initial admin account  |
 | `RED_ADMIN_TOKEN`            | Cloud secret manager                  | Operators + automation calling `/admin/*`    | Low (revoke + re-issue)  | Full admin access to one DB |
 | API keys (`rdb_k_*`)         | Application secret stores             | Application code calling RedDB               | Low (revoke + re-issue)  | Scoped to the user/role on the key |

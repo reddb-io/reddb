@@ -100,7 +100,6 @@ pub fn expand_file_env(name: &str) -> std::io::Result<()> {
 pub fn expand_all_reddb_secrets() -> Vec<(String, std::io::Error)> {
     const VARS: &[&str] = &[
         "REDDB_CERTIFICATE",
-        "REDDB_VAULT_KEY",
         "REDDB_USERNAME",
         "REDDB_PASSWORD",
         "REDDB_ROOT_TOKEN",
