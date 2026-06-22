@@ -164,7 +164,7 @@ Validate the deployment mode.
 {{- fail "config.file.enabled=true requires config.file.existingConfigMap or non-empty config.file.inline" -}}
 {{- end -}}
 {{- if and (eq .Values.mode "cluster") .Values.auth.enabled -}}
-{{- fail "auth.enabled bootstrap env is not supported in mode=cluster; bootstrap cluster admins only after a concrete writer/volume bootstrap path exists" -}}
+{{- fail "auth.enabled chart-managed bootstrap is not supported in mode=cluster: a symmetric member cannot prove it is the reserved global system range owner (ADR 0058), so the runtime fails closed on a cluster-shaped credentialled boot. This gate keeps the chart fail-closed in lockstep with the runtime until the reserved-range owner path lands (PRD #1227). Run a no-auth/dev cluster, or bootstrap auth on a non-cluster topology. See charts/reddb/README.md (Cluster) and docs/deployment/first-boot.md (Cluster Bootstrap Authority)." -}}
 {{- end -}}
 {{- if .Values.auth.vault.bootstrapJob.enabled -}}
 {{- fail "auth.vault.bootstrapJob.enabled is disabled: the legacy hook bootstraps an emptyDir DB, not the StatefulSet PVC. Run red bootstrap against the real volume or use HTTP bootstrap after the writer starts." -}}
