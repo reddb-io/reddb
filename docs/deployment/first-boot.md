@@ -81,6 +81,34 @@ Non-owner members must not run presets, create initial admins, or initialize vau
 
 Anonymous `--no-auth` / `--dev` cluster-shaped boot remains an explicit development carveout, not a production bootstrap path. RedDB Cloud keeps the policy-first manifest model: the reserved range owner applies the cloud/operator manifest as the initial global policy source.
 
+### Helm and Compose Cluster Delivery
+
+The Helm chart (`charts/reddb`) and the Compose example
+(`examples/docker-compose.cluster.yml`) render this contract directly, and
+`scripts/verify-helm-chart.sh` asserts it on every render:
+
+- **No-auth cluster (supported today).** Both deliveries render cluster members
+  as symmetric non-owners with *no* bootstrap credentials
+  (`REDDB_PRESET` / `REDDB_USERNAME` / `REDDB_PASSWORD` /
+  `REDDB_BOOTSTRAP_MANIFEST` are never emitted into a cluster pod). Members boot
+  anonymously and write no admin, vault, or completion marker.
+- **Auth/vault cluster (gated).** `auth.enabled=true` is rejected fail-closed in
+  `mode=cluster` (`helm template` fails with an authority-aware message), in
+  lockstep with the runtime seam, until the reserved-range owner path lands
+  (PRD #1227). For a credentialled deploy today, bootstrap auth on a single-owner
+  topology (standalone/serverless/primary) — e.g. `red bootstrap --vault`
+  against the real volume as in `examples/docker-compose.vault.yml`.
+- **Certificate handling.** A cluster member may still receive the vault
+  certificate (env or `fileMount`) to *unseal* an already-bootstrapped store on
+  restart; receiving a certificate never bootstraps auth. Operators capture the
+  certificate the owner mints once and preserve it offline.
+- **Restart idempotency.** A restart that observes `system.bootstrap.completed`
+  rehydrates read-only state only, so re-running `helm upgrade` or
+  `docker compose up` recreates no admin and reissues no certificate.
+- **Non-owner behavior.** Because members never receive credentials, no member
+  can mutate global auth state; the owner is the only writer once the runtime
+  owner path exists.
+
 ## Config First Boot
 
 Initial config comes from three layers:
