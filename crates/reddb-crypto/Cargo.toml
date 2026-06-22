@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-crypto"
-version = "1.11.0"
+version = "1.12.0"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB cryptographic authority: the canonical per-page encryption-at-rest envelope (AES-256-GCM), mandatory encrypt parameters, and key parsing."
