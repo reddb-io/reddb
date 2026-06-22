@@ -148,7 +148,7 @@ fn sum_avg_min_max_basic() {
     ];
     let stream = AggregateQueryPlanner::plan(&plan, VecScan::new(rows)).unwrap();
     let row = stream.into_vec().pop().unwrap();
-    assert_eq!(row.aggregate_values[0], Value::Float(12.0));
+    assert_eq!(row.aggregate_values[0], Value::Integer(12));
     assert_eq!(row.aggregate_values[1], Value::Float(4.0));
     assert_eq!(row.aggregate_values[2], Value::Integer(2));
     assert_eq!(row.aggregate_values[3], Value::Integer(6));
@@ -193,7 +193,7 @@ fn single_row_group() {
     let stream = AggregateQueryPlanner::plan(&plan, VecScan::new(rows)).unwrap();
     let row = stream.into_vec().pop().unwrap();
     assert_eq!(row.group_key, Value::Boolean(true));
-    assert_eq!(row.aggregate_values[0], Value::Float(42.0));
+    assert_eq!(row.aggregate_values[0], Value::Integer(42));
 }
 
 #[test]
@@ -286,6 +286,7 @@ fn materializes_one_row_per_group_not_per_input() {
     let mut by_group: Vec<(i64, i64, f64)> = stream
         .into_iter()
         .map(|r| match (r.group_key, &r.aggregate_values[..]) {
+            (Value::Integer(k), [Value::Integer(n), Value::Integer(s)]) => (k, *n, *s as f64),
             (Value::Integer(k), [Value::Integer(n), Value::Float(s)]) => (k, *n, *s),
             other => panic!("unexpected planner row: {other:?}"),
         })

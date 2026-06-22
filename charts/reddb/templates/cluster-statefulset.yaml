@@ -69,37 +69,32 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           args:
             - server
-            - --path
-            - /data/data.rdb
-            - --role
-            - standalone
-            - --grpc-bind
-            - 0.0.0.0:50051
-            - --http-bind
-            - 0.0.0.0:8080
-            {{- if .Values.http.tls.enabled }}
-            - --http-tls-bind
-            - {{ .Values.http.tls.bindAddr | quote }}
-            - --http-tls-cert
-            - {{ printf "%s/%s" .Values.http.tls.mountPath .Values.http.tls.certKey | quote }}
-            - --http-tls-key
-            - {{ printf "%s/%s" .Values.http.tls.mountPath .Values.http.tls.keyKey | quote }}
-            {{- if .Values.http.tls.clientCa.secretName }}
-            - --http-tls-client-ca
-            - {{ printf "%s/%s" .Values.http.tls.clientCa.mountPath .Values.http.tls.clientCa.key | quote }}
-            {{- end }}
-            {{- end }}
-            {{- if .Values.config.vault }}
-            - --vault
-            {{- end }}
             {{- with .Values.config.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
             {{- include "reddb.commonEnv" . | nindent 12 }}
+            - name: REDDB_WIRE_BIND_ADDR
+              value: 0.0.0.0:{{ .Values.cluster.service.wirePort }}
+            - name: REDDB_GRPC_BIND_ADDR
+              value: 0.0.0.0:{{ .Values.cluster.service.grpcPort }}
+            - name: REDDB_HTTP_BIND_ADDR
+              value: 0.0.0.0:{{ .Values.cluster.service.httpPort }}
             - name: REDDB_NODE_ROLE
               value: "cluster-member"
             {{- include "reddb.clusterEnv" . | nindent 12 }}
+            {{- if .Values.http.tls.enabled }}
+            - name: REDDB_HTTP_TLS_BIND
+              value: {{ .Values.http.tls.bindAddr | quote }}
+            - name: REDDB_HTTP_TLS_CERT
+              value: {{ printf "%s/%s" .Values.http.tls.mountPath .Values.http.tls.certKey | quote }}
+            - name: REDDB_HTTP_TLS_KEY
+              value: {{ printf "%s/%s" .Values.http.tls.mountPath .Values.http.tls.keyKey | quote }}
+            {{- if .Values.http.tls.clientCa.secretName }}
+            - name: REDDB_HTTP_TLS_CLIENT_CA
+              value: {{ printf "%s/%s" .Values.http.tls.clientCa.mountPath .Values.http.tls.clientCa.key | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.grpc.tls.enabled }}
             - name: REDDB_GRPC_TLS_BIND
               value: {{ .Values.grpc.tls.bindAddr | quote }}
@@ -114,20 +109,23 @@ spec:
             {{- end }}
           {{- include "reddb.extraEnvFrom" . | nindent 10 }}
           ports:
+            - name: wire
+              containerPort: {{ .Values.cluster.service.wirePort }}
+              protocol: TCP
             - name: grpc
-              containerPort: 50051
+              containerPort: {{ .Values.cluster.service.grpcPort }}
               protocol: TCP
             {{- if .Values.grpc.tls.enabled }}
             - name: grpc-tls
-              containerPort: {{ .Values.cluster.service.grpcTlsPort | default 50052 }}
+              containerPort: {{ .Values.cluster.service.grpcTlsPort | default 55555 }}
               protocol: TCP
             {{- end }}
             - name: http
-              containerPort: 8080
+              containerPort: {{ .Values.cluster.service.httpPort }}
               protocol: TCP
             {{- if .Values.http.tls.enabled }}
             - name: https
-              containerPort: {{ .Values.cluster.service.httpTlsPort | default 8443 }}
+              containerPort: {{ .Values.cluster.service.httpTlsPort | default 55555 }}
               protocol: TCP
             {{- end }}
           {{- include "reddb.probes" . | nindent 10 }}

@@ -25,7 +25,7 @@ otherwise the first non-whitespace byte decides:
 ### JSON array — simplest
 
 ```bash
-curl -X POST http://localhost:8080/ingest/access_log \
+curl -X POST http://localhost:5000/ingest/access_log \
   -H 'Content-Type: application/json' \
   -d '[
     {"ts": 1721347200000000000, "service": "api", "status": 200, "latency_ms": 12},
@@ -37,7 +37,7 @@ curl -X POST http://localhost:8080/ingest/access_log \
 ### NDJSON — pipeable, streaming-friendly
 
 ```bash
-cat events.ndjson | curl -X POST http://localhost:8080/ingest/events \
+cat events.ndjson | curl -X POST http://localhost:5000/ingest/events \
   -H 'Content-Type: application/x-ndjson' \
   --data-binary @-
 ```
@@ -50,7 +50,7 @@ memory server-side).
 ### Envelope object — self-describing metadata
 
 ```bash
-curl -X POST http://localhost:8080/ingest/access_log \
+curl -X POST http://localhost:5000/ingest/access_log \
   -H 'Content-Type: application/json' \
   -d '{
     "ts_field": "received_at",
@@ -67,7 +67,7 @@ without changing the collection schema.
 ### Single object — convenience
 
 ```bash
-curl -X POST http://localhost:8080/ingest/access_log \
+curl -X POST http://localhost:5000/ingest/access_log \
   -H 'Content-Type: application/json' \
   -d '{"ts": 1721347200000000000, "service": "api", "status": 200}'
 ```
@@ -126,7 +126,7 @@ Example with `curl --no-buffer`:
 } | curl -X POST --no-buffer \
        -H 'Content-Type: application/x-ndjson' \
        --data-binary @- \
-       http://localhost:8080/ingest/events
+       http://localhost:5000/ingest/events
 ```
 
 Server-side, the parser buffers across chunk boundaries — a row
@@ -141,7 +141,7 @@ order.
 [sinks.reddb]
 type = "http"
 inputs = ["my_source"]
-uri = "http://reddb:8080/ingest/app_log"
+uri = "http://reddb:5000/ingest/app_log"
 encoding.codec = "ndjson"
 method = "post"
 batch.max_events = 1000
@@ -154,7 +154,7 @@ batch.max_events = 1000
     Name         http
     Match        *
     Host         reddb
-    Port         8080
+    Port         5000
     URI          /ingest/app_log
     Format       json_lines
     Header       Content-Type application/x-ndjson
@@ -171,7 +171,7 @@ client frame is either a single object, an array, or an NDJSON
 batch; the server replies with one ack frame per batch.
 
 ```js
-const ws = new WebSocket('ws://localhost:8080/ws/ingest/access_log');
+const ws = new WebSocket('ws://localhost:5000/ws/ingest/access_log');
 
 ws.onopen = () => {
   ws.send(JSON.stringify([

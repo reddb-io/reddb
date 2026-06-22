@@ -211,12 +211,12 @@ uses the standard `{ ok, result }` / `{ ok, error }` envelope.
 
 ```bash
 # 1. Opt the users collection into VCS (collection-centric)
-curl -X PUT http://localhost:8080/collections/users/vcs \
+curl -X PUT http://localhost:5000/collections/users/vcs \
   -H 'content-type: application/json' \
   -d '{"versioned": true}'
 
 # 2. Create a commit from connection 1's workset
-curl -X POST http://localhost:8080/repo/commits \
+curl -X POST http://localhost:5000/repo/commits \
   -H 'content-type: application/json' \
   -d '{
     "connection_id": 1,
@@ -227,24 +227,24 @@ curl -X POST http://localhost:8080/repo/commits \
 # 201 { ok, result: { hash, parents, height, ... } }
 
 # 3. Branch, switch, make more commits
-curl -X POST http://localhost:8080/repo/refs/heads \
+curl -X POST http://localhost:5000/repo/refs/heads \
   -d '{"name":"feature","connection_id":1}'
-curl -X POST http://localhost:8080/repo/sessions/1/checkout \
+curl -X POST http://localhost:5000/repo/sessions/1/checkout \
   -d '{"kind":"branch","target":"feature"}'
-curl -X POST http://localhost:8080/repo/commits \
+curl -X POST http://localhost:5000/repo/commits \
   -d '{"connection_id":1,"message":"feat 1","author":{...},"allow_empty":true}'
 
 # 4. Merge back into main
-curl -X POST http://localhost:8080/repo/sessions/1/checkout \
+curl -X POST http://localhost:5000/repo/sessions/1/checkout \
   -d '{"kind":"branch","target":"main"}'
-curl -X POST http://localhost:8080/repo/sessions/1/merge \
+curl -X POST http://localhost:5000/repo/sessions/1/merge \
   -d '{"from":"feature","author":{"name":"alice","email":"alice@example.com"}}'
 # 200 { ok, result: { fast_forward: true, conflicts: [], merge_commit: {...} } }
 
 # 5. Inspect history
-curl 'http://localhost:8080/repo/commits?branch=main&limit=5'
-curl http://localhost:8080/repo/commits/<hash>/diff/<other-hash>
-curl 'http://localhost:8080/repo/commits/<hash>/lca/<other-hash>'
+curl 'http://localhost:5000/repo/commits?branch=main&limit=5'
+curl http://localhost:5000/repo/commits/<hash>/diff/<other-hash>
+curl 'http://localhost:5000/repo/commits/<hash>/lca/<other-hash>'
 ```
 
 ### Status codes

@@ -15,6 +15,9 @@
 //!   declares the term it is streaming under. [`TermFence::admit_handshake`]
 //!   refuses a handshake whose declared term is behind the current term, so a
 //!   stale ex-primary cannot even establish the stream.
+//! * **Lease boundary** — a serverless writer lease is stamped with the term
+//!   it was taken under; a holder whose term is behind the current term fails
+//!   closed before mutating remote artifacts.
 //!
 //! The decision is deliberately the data-path twin of the election-side
 //! [`super::RefusalReason::StaleTerm`]:
@@ -41,6 +44,8 @@ pub enum FenceBoundary {
     Apply,
     /// A replication stream handshake declaring the streamer's term.
     Handshake,
+    /// A serverless writer lease attempting to mutate under its lease term.
+    Lease,
 }
 
 impl FenceBoundary {
@@ -48,6 +53,30 @@ impl FenceBoundary {
         match self {
             Self::Apply => "apply",
             Self::Handshake => "handshake",
+            Self::Lease => "lease",
+        }
+    }
+}
+
+/// The one shared stale-term predicate: only a strictly older incoming term is
+/// stale. Equal terms are retries; newer terms are adoption candidates.
+#[inline]
+pub fn term_is_stale(incoming_term: u64, current_term: u64) -> bool {
+    incoming_term < current_term
+}
+
+/// A replication-stream handshake as seen by the admitting replica.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamHandshake {
+    pub peer_id: String,
+    pub term: u64,
+}
+
+impl StreamHandshake {
+    pub fn new(peer_id: impl Into<String>, term: u64) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            term,
         }
     }
 }
@@ -74,6 +103,8 @@ impl std::fmt::Display for StaleTermFenced {
 }
 
 impl std::error::Error for StaleTermFenced {}
+
+pub type StaleTermRejection = StaleTermFenced;
 
 /// The verdict of the term fence for one incoming term-stamped message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +241,7 @@ impl<S: TermStore> TermFence<S> {
         incoming_term: u64,
     ) -> Result<FenceVerdict, TermStoreError> {
         let current = self.store.load()?;
-        Ok(if incoming_term < current {
+        Ok(if term_is_stale(incoming_term, current) {
             FenceVerdict::Fenced(StaleTermFenced {
                 boundary,
                 incoming_term,
@@ -235,6 +266,20 @@ impl<S: TermStore> TermFence<S> {
     /// newer term the fence adopts it durably before returning `Adopt`.
     pub fn admit_handshake(&self, incoming_term: u64) -> Result<FenceVerdict, TermStoreError> {
         self.admit(FenceBoundary::Handshake, incoming_term)
+    }
+
+    /// Admit (or fence) a stream handshake carrying peer metadata.
+    pub fn admit_stream_handshake(
+        &self,
+        handshake: &StreamHandshake,
+    ) -> Result<FenceVerdict, TermStoreError> {
+        self.admit_handshake(handshake.term)
+    }
+
+    /// Admit (or fence) a lease-backed write whose lease was taken under
+    /// `lease_term`.
+    pub fn admit_lease_write(&self, lease_term: u64) -> Result<FenceVerdict, TermStoreError> {
+        self.admit(FenceBoundary::Lease, lease_term)
     }
 
     fn admit(

@@ -6,7 +6,7 @@ RedDB `WATCH` delivery lag.
 
 ## Prerequisites
 
-- a RedDB server listening at `REDDB_URL` (default `http://127.0.0.1:8080`)
+- a RedDB server listening at `REDDB_URL` (default `http://127.0.0.1:5000`)
 - a local Redis server at `REDIS_HOST:REDIS_PORT` (default `127.0.0.1:6379`)
 - Python 3.10+
 
@@ -24,7 +24,7 @@ Useful knobs:
 ```bash
 KV_BENCH_OPS=10000 \
 KV_BENCH_WATCH_EVENTS=100000 \
-REDDB_URL=http://127.0.0.1:8080 \
+REDDB_URL=http://127.0.0.1:5000 \
 REDIS_HOST=127.0.0.1 \
 REDIS_PORT=6379 \
 bench/kv/run.sh

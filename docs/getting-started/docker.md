@@ -28,7 +28,10 @@ and the secret-management patterns in
 Using the prebuilt GHCR image:
 
 ```bash
-docker run --rm -p 55880:8080 \
+docker run --rm \
+  -p 5050:5050 \
+  -p 55055:55055 \
+  -p 5000:5000 \
   ghcr.io/reddb-io/reddb:latest
 ```
 
@@ -36,39 +39,42 @@ If you do not have GHCR access, build locally instead:
 
 ```bash
 docker build -t reddb .
-docker run --rm -p 55880:8080 reddb
+docker run --rm -p 5050:5050 -p 55055:55055 -p 5000:5000 reddb
 ```
 
-That's it. RedDB binds HTTP on `0.0.0.0:8080`, gRPC on `0.0.0.0:50051`,
-and starts an in-container ephemeral database.
+That's it. RedDB binds RedWire on `0.0.0.0:5050`, gRPC on
+`0.0.0.0:55055`, HTTP/Web/health on `0.0.0.0:5000`, and starts an
+in-container ephemeral database.
 
 Open the admin health endpoint:
 
 ```bash
-curl http://127.0.0.1:55880/admin/health
+curl http://127.0.0.1:5000/admin/health
 # {"ok":true,"version":"x.y.z"}
 ```
 
 Run a query:
 
 ```bash
-curl -X POST http://127.0.0.1:55880/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT 1"}'
 ```
 
 > [!WARNING]
 > This container runs without authentication. Anyone who can reach the
-> port can read, write, and delete data. Do **not** expose port 8080
-> to anything beyond your laptop.
+> exposed ports can read, write, and delete data. Do **not** expose
+> ports 5050, 55055, or 5000 to anything beyond your laptop.
 
 To persist data across container restarts, mount a volume:
 
 ```bash
-docker run --rm -p 55880:8080 \
+docker run --rm \
+  -p 5050:5050 \
+  -p 55055:55055 \
+  -p 5000:5000 \
   -v reddb-dev-data:/data \
-  ghcr.io/reddb-io/reddb:latest \
-  server --path /data/data.rdb --http-bind 0.0.0.0:8080
+  ghcr.io/reddb-io/reddb:latest
 ```
 
 ---
@@ -136,25 +142,25 @@ services:
   reddb:
     image: ghcr.io/reddb-io/reddb:latest
     ports:
-      - "55880:8080"
-      - "55050:5050"
+      - "5050:5050"
+      - "55055:55055"
+      - "5000:5000"
     volumes:
       - reddb-data:/data
     environment:
+      REDDB_TOPOLOGY: standalone
+      REDDB_NODE_ROLE: standalone
+      REDDB_STORAGE_PRESET: embedded
+      REDDB_STORAGE_PROFILE: embedded
+      REDDB_STORAGE_PACKAGING: single-file
+      REDDB_REPLICA_COUNT: "0"
+      REDDB_VAULT: "true"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     secrets:
       - reddb_certificate
-    command:
-      - server
-      - --path=/data/data.rdb
-      - --auth
-      - --require-auth
-      - --vault
-      - --http-bind=0.0.0.0:8080
-      - --wire-bind=0.0.0.0:5050
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "red", "doctor", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -180,7 +186,7 @@ appears in `docker inspect`, and never gets baked into the image.
 Verify the vault is unsealed:
 
 ```bash
-curl -s http://127.0.0.1:55880/admin/status \
+curl -s http://127.0.0.1:5000/admin/status \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN" | jq '.vault'
 # {"state":"unsealed","backend":"page-2-3","cipher":"aes-256-gcm"}
 ```
@@ -202,12 +208,14 @@ production rather than `:latest`.
 
 ```yaml
     ports:
-      - "55880:8080"   # HTTP / admin / metrics
-      - "55050:5050"   # RedWire binary protocol
+      - "5000:5000"     # HTTP / admin / metrics
+      - "5050:5050"     # RedWire binary protocol
+      - "55055:55055"     # gRPC API / replica control plane
 ```
 
-Two transports. PG wire (`--pg-bind`) and a separate admin port (via
-`RED_ADMIN_BIND`) are off by default; turn them on if you need them.
+Three standard container transports. PG wire (`--pg-bind`) and a separate
+admin port (via `RED_ADMIN_BIND`) are off by default; turn them on if you need
+them.
 
 ```yaml
     volumes:
@@ -219,12 +227,14 @@ volume = total data loss unless you have backups configured.
 
 ```yaml
     environment:
+      REDDB_VAULT: "true"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
 ```
 
 The `*_FILE` form (preferred over inline `REDDB_CERTIFICATE=...`)
-points at the secret mount. The binary reads supported `*_FILE` variables
-without requiring the secret value to appear in container env.
+points at the secret mount. The binary expands supported `*_FILE` env vars
+during boot, so the secret value is read from the mounted file instead of
+being baked into the image.
 
 ```yaml
     secrets:
@@ -235,32 +245,25 @@ Names the secret bindings. Each named secret in this list is mounted at
 `/run/secrets/<name>`.
 
 ```yaml
-    command:
-      - server
-      - --path=/data/data.rdb
-      - --auth
-      - --require-auth
-      - --vault
-      - --http-bind=0.0.0.0:8080
-      - --wire-bind=0.0.0.0:5050
+    environment:
+      REDDB_VAULT: "true"
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
 ```
 
-`--auth` enables authentication, `--require-auth` rejects anonymous
-requests, and `--vault` enables encrypted auth/secret storage. The
-`production` and `cloud` bootstrap presets set all three automatically
-unless `--no-auth` / `REDDB_NO_AUTH=true` is present.
+`REDDB_VAULT=true` enables the encrypted auth vault. Without it, the default
+container runs in local unauthenticated mode.
 
 ```yaml
     healthcheck:
-      test: ["CMD", "red", "doctor", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
       timeout: 5s
       retries: 3
 ```
 
-`red doctor` exits `0|1|2` for healthy / warn / critical. Compose marks
-the container `unhealthy` after three consecutive failures. Adjust
-`interval` based on your platform's pull-image latency.
+`red health` exits non-zero when the HTTP health endpoint is unhealthy.
+Compose marks the container `unhealthy` after three consecutive failures.
+Adjust `interval` based on your platform's pull-image latency.
 
 ```yaml
 secrets:
@@ -300,7 +303,7 @@ The container logs report:
 ```text
 vault: opening with REDDB_CERTIFICATE
 vault: unsealed (page=2, salt=..., kdf=argon2id m=16384 t=3 p=1)
-http: listening on 0.0.0.0:8080
+http: listening on 0.0.0.0:5000
 ```
 
 ### Upgrade to a new RedDB version
@@ -315,7 +318,7 @@ http: listening on 0.0.0.0:8080
 2. (Optional) take a backup first:
 
    ```bash
-   curl -X POST http://127.0.0.1:55880/admin/backup \
+   curl -X POST http://127.0.0.1:5000/admin/backup \
      -H "Authorization: Bearer $RED_ADMIN_TOKEN"
    ```
 
@@ -329,7 +332,7 @@ http: listening on 0.0.0.0:8080
 
    ```bash
    docker compose -f examples/docker-compose.vault.yml exec reddb \
-     red doctor --bind 127.0.0.1:8080
+     red doctor --bind 127.0.0.1:5000
    ```
 
 The data file format is forward- and backward-compatible across patch
@@ -340,7 +343,7 @@ migration note in the release notes.
 
 ```bash
 # Mint a new token
-NEW_TOKEN=$(curl -X POST http://127.0.0.1:55880/auth/api-keys \
+NEW_TOKEN=$(curl -X POST http://127.0.0.1:5000/auth/api-keys \
   -H "Authorization: Bearer $OLD_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"username":"admin","name":"rotated","role":"admin"}' \
@@ -365,38 +368,36 @@ vault, just on a different volume populated by snapshot restore.
 services:
   primary:
     image: ghcr.io/reddb-io/reddb:latest
-    ports: [ "55880:8080", "55050:5050" ]
+    ports: [ "5050:5050", "55055:55055", "5000:5000" ]
     volumes: [ primary-data:/data ]
     environment:
+      REDDB_TOPOLOGY: primary-replica
+      REDDB_NODE_ROLE: primary
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "1"
+      REDDB_VAULT: "true"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     secrets: [ reddb_certificate ]
-    command:
-      - server
-      - --path=/data/data.rdb
-      - --auth
-      - --require-auth
-      - --vault
-      - --role=primary
-      - --http-bind=0.0.0.0:8080
-      - --wire-bind=0.0.0.0:5050
 
   replica:
     image: ghcr.io/reddb-io/reddb:latest
-    ports: [ "55881:8080", "55051:5050" ]
+    ports: [ "5051:5050", "55056:55055", "5001:5000" ]
     volumes: [ replica-data:/data ]
     environment:
+      REDDB_TOPOLOGY: primary-replica
+      REDDB_NODE_ROLE: replica
+      REDDB_STORAGE_PRESET: primary-replica-production-ha
+      REDDB_STORAGE_PROFILE: primary-replica
+      REDDB_STORAGE_PACKAGING: operational-directory
+      REDDB_REPLICA_COUNT: "1"
+      REDDB_PRIMARY_ADDR: http://primary:55055
+      REDDB_VAULT: "true"
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     secrets: [ reddb_certificate ]
     depends_on:
       primary: { condition: service_healthy }
-    command:
-      - replica
-      - --primary-addr=http://primary:50051
-      - --path=/data/data.rdb
-      - --auth
-      - --require-auth
-      - --vault
-      - --http-bind=0.0.0.0:8080
 
 secrets:
   reddb_certificate:
@@ -415,31 +416,34 @@ with the shared cert.
 
 ## 6. Local dev shortcut
 
-For development on your laptop, `--no-vault` is fine and saves you
-from managing certs. Use this only when:
+For development on your laptop, the image default keeps `REDDB_VAULT=false`
+and saves you from managing certs. Use this only when:
 
 - You're running on `127.0.0.1` only.
 - The data has no privacy implications.
 - You're OK with anonymous read/write to your local DB.
 
 ```bash
-docker run --rm -p 55880:8080 \
-  ghcr.io/reddb-io/reddb:latest \
-  server --http-bind 0.0.0.0:8080
+docker run --rm \
+  -p 5050:5050 \
+  -p 55055:55055 \
+  -p 5000:5000 \
+  ghcr.io/reddb-io/reddb:latest
 ```
 
 Or, to keep data across restarts:
 
 ```bash
-docker run --rm -p 55880:8080 \
+docker run --rm \
+  -p 5050:5050 \
+  -p 55055:55055 \
+  -p 5000:5000 \
   -v reddb-dev:/data \
-  ghcr.io/reddb-io/reddb:latest \
-  server --path /data/data.rdb --http-bind 0.0.0.0:8080
+  ghcr.io/reddb-io/reddb:latest
 ```
 
-Production mode requires auth plus a vault: use `--auth --require-auth
---vault`, or a `production`/`cloud` bootstrap preset. The vault gates
-`red.secret.*`; auth is controlled separately.
+The image sets `REDDB_VAULT=false` by default for local bootability. Set
+`-e REDDB_VAULT=true` and provide `REDDB_CERTIFICATE_FILE` for vault mode.
 
 ---
 
@@ -466,12 +470,12 @@ The default image declares:
 
 ```dockerfile
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
-  CMD red doctor --bind 127.0.0.1:8080 || exit 1
+  CMD red health --http --bind 127.0.0.1:5000 || exit 1
 ```
 
-`red doctor` probes `/admin/status` and `/metrics`, applies operator-tunable
-thresholds, and exits `0|1|2`. Override the thresholds with env vars
-(`RED_DOCTOR_LAG_BUDGET_S`, `RED_DOCTOR_DIRTY_RATIO_MAX`, …) — see
+`red health` probes the HTTP health endpoint. Use `red doctor` when you want
+the heavier operator check against `/admin/status` and `/metrics`; it applies
+operator-tunable thresholds and exits `0|1|2`. See
 [`docs/api/cli.md#red-doctor`](../api/cli.md#red-doctor).
 
 ### Signal handling

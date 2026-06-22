@@ -10,7 +10,7 @@ cargo test --test e2e_metrics_grafana_compat_smoke -- --nocapture
 ## 1. Start RedDB
 
 ```bash
-make run ARGS='--path ./data/metrics-smoke.db --bind 127.0.0.1:8080'
+make run ARGS='--path ./data/metrics-smoke.db --bind 127.0.0.1:5000'
 ```
 
 Create the metrics collection:
@@ -47,7 +47,7 @@ datasources:
   - name: RedDB Metrics
     type: prometheus
     access: proxy
-    url: http://host.docker.internal:8080
+    url: http://host.docker.internal:5000
     isDefault: true
     jsonData:
       httpMethod: GET

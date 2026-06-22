@@ -23,10 +23,11 @@ import java.util.Map;
  *   red://memory  red://:memory  red://:memory:  embedded in-memory (out of scope)
  * </pre>
  *
- * Default port is 5050 for all schemes (matches RedWire listener default).
+ * Default ports follow the RedDB listener contract: RedWire 5050,
+ * HTTP 5000, HTTPS 55555.
  */
 public final class Url {
-    /** Default port used for every transport. Matches `DEFAULT_REDWIRE_PORT`. */
+    /** Default RedWire port. */
     public static final int DEFAULT_PORT = 5050;
 
     public enum Kind { REDWIRE, REDWIRE_TLS, HTTP, HTTPS, EMBEDDED_FILE, EMBEDDED_MEMORY }
@@ -110,7 +111,7 @@ public final class Url {
                 "URI is missing a host: '" + uri + "'");
         }
         int port = parsed.getPort();
-        if (port < 0) port = DEFAULT_PORT;
+        if (port < 0) port = defaultPortFor(kind);
 
         String userInfo = parsed.getRawUserInfo();
         String username = null;
@@ -156,6 +157,14 @@ public final class Url {
             case "http": return Kind.HTTP;
             case "https": return Kind.HTTPS;
             default: return null;
+        }
+    }
+
+    private static int defaultPortFor(Kind kind) {
+        switch (kind) {
+            case HTTP: return 5000;
+            case HTTPS: return 55555;
+            default: return DEFAULT_PORT;
         }
     }
 

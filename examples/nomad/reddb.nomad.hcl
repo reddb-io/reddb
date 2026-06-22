@@ -33,8 +33,8 @@ job "reddb" {
     }
 
     network {
-      port "http"  { to = 8080 }
-      port "grpc"  { to = 50051 }
+      port "http"  { to = 5000 }
+      port "grpc"  { to = 55055 }
     }
 
     volume "data" {
@@ -57,8 +57,8 @@ job "reddb" {
       }
 
       env {
-        REDDB_HTTP_BIND_ADDR     = "0.0.0.0:8080"
-        REDDB_GRPC_BIND_ADDR     = "0.0.0.0:50051"
+        REDDB_HTTP_BIND_ADDR     = "0.0.0.0:5000"
+        REDDB_GRPC_BIND_ADDR     = "0.0.0.0:55055"
         RED_BACKEND              = "s3"
         RED_S3_BUCKET            = "reddb-prod"
         RED_S3_REGION            = "auto"

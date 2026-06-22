@@ -88,7 +88,7 @@ as bytes; it encodes nothing a client should parse. A cursor is:
   documented status (see below).
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query/stream \
+curl -X POST http://127.0.0.1:5000/query/stream \
   -H 'content-type: application/json' \
   -H 'x-reddb-tenant: acme' \
   -H 'authorization: Bearer <principal-token>' \
@@ -134,7 +134,7 @@ stop producing rows and **tombstone** the cursor.
 - **Explicit cancel** — POST the token to `POST /query/stream/cancel`:
 
   ```bash
-  curl -X POST http://127.0.0.1:8080/query/stream/cancel \
+  curl -X POST http://127.0.0.1:5000/query/stream/cancel \
     -H 'content-type: application/json' \
     -H 'x-reddb-tenant: acme' \
     -H 'authorization: Bearer <principal-token>' \

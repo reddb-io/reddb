@@ -71,7 +71,7 @@ with `REDDB_HUGGINGFACE_EMBEDDING_MODEL` or per-request `model:`
 field.
 
 ```bash
-curl -X POST localhost:8080/ai/embeddings \
+curl -X POST localhost:5000/ai/embeddings \
   -H 'content-type: application/json' \
   -d '{
     "provider": "huggingface",
@@ -128,7 +128,7 @@ compiled in: fail fast rather than silently demote.
 
 ```bash
 # Set default provider — drops `USING` from every query
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -d '{"provider":"groq","api_key":"gsk_xxx","default":true}'
 ```
 
@@ -202,7 +202,7 @@ ASK 'summarise yesterday' USING openai;
 
 ```bash
 # pick a non-default alias by naming it in the request body
-curl -X POST localhost:8080/ai/embeddings \
+curl -X POST localhost:5000/ai/embeddings \
   -H 'content-type: application/json' \
   -d '{"provider":"openai","inputs":["hi"],"credential":"prod"}'
 ```

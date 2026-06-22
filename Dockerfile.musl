@@ -11,7 +11,7 @@
 # resolves *_FILE env vars; see src/auth/vault.rs and Agent #2's
 # REDDB_CERTIFICATE_FILE wiring):
 #
-#   docker run --rm -p 8080:8080 -v reddb-data:/data \
+#   docker run --rm -p 5000:5000 -v reddb-data:/data \
 #     -v ./cert.txt:/run/secrets/reddb_certificate:ro \
 #     -e REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate \
 #     -e RED_BACKEND=fs -e RED_FS_PATH=/backups \
@@ -45,6 +45,7 @@ RUN apk add --no-cache ca-certificates tini \
     && addgroup -S -g 10001 reddb \
     && adduser -S -u 10001 -G reddb -H -s /sbin/nologin reddb \
     && install -d -o 10001 -g 10001 -m 0750 /data \
+    && install -d -o 10001 -g 10001 -m 0750 /etc/reddb \
     && install -d -o 10001 -g 10001 -m 0750 /run/secrets
 
 COPY --from=build --chown=10001:10001 /src/target/x86_64-unknown-linux-musl/release-static/red /usr/local/bin/red
@@ -52,20 +53,27 @@ COPY --from=build --chown=10001:10001 /src/target/x86_64-unknown-linux-musl/rele
 USER 10001:10001
 WORKDIR /data
 VOLUME /data
-EXPOSE 8080 50051
+EXPOSE 5050 55055 5000 55555
+
+ENV REDDB_DATA_PATH=/data/data.rdb
+ENV REDDB_WIRE_BIND_ADDR=0.0.0.0:5050
+ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:55055
+ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:5000
+ENV REDDB_VAULT=false
+ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
 
 # === Secrets via file mounts ====================================================
 # This image has NO shell. Agent #2's binary-side *_FILE env-var expansion
-# (REDDB_CERTIFICATE_FILE, REDDB_VAULT_KEY_FILE, REDDB_PASSWORD_FILE,
-# REDDB_ROOT_TOKEN_FILE) is the only path. Mount the secret as a file
-# and pass *_FILE pointing at it. NEVER bake the cert into the image.
+# (REDDB_CERTIFICATE_FILE, REDDB_PASSWORD_FILE, REDDB_ROOT_TOKEN_FILE) is
+# the only path. Mount the secret as a file and pass *_FILE pointing at
+# it. NEVER bake the cert into the image.
 # See examples/docker-compose.vault.yml.
 # ===============================================================================
 
 HEALTHCHECK --interval=10s --timeout=2s --start-period=5s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8080/health/live >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://127.0.0.1:5000/health/live >/dev/null 2>&1 || exit 1
 
 # tini reaps zombies and forwards SIGTERM cleanly to the engine. The binary's
 # own signal handler runs graceful shutdown (flush + checkpoint + final backup).
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/red"]
-CMD ["server", "--http", "--grpc", "--vault", "--path", "/data/data.rdb"]
+CMD ["server"]

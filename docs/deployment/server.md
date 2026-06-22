@@ -11,14 +11,14 @@ red server --path ./data/reddb.rdb
 # Explicit HTTP + gRPC
 red server \
   --path ./data/reddb.rdb \
-  --grpc-bind 0.0.0.0:50051 \
-  --http-bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:55055 \
+  --http-bind 0.0.0.0:5000
 
 # HTTP only
-red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
+red server --http --path ./data/reddb.rdb --bind 0.0.0.0:5000
 
 # gRPC only
-red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:50051
+red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:55055
 
 # wire only
 red server --path ./data/reddb.rdb --wire-bind 0.0.0.0:5051
@@ -108,21 +108,21 @@ Install as a system service:
 sudo red service install \
   --binary /usr/local/bin/red \
   --path /var/lib/reddb/data.rdb \
-  --grpc-bind 0.0.0.0:50051 \
-  --http-bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:55055 \
+  --http-bind 0.0.0.0:5000
 ```
 
 ## Health Monitoring
 
 ```bash
 # Liveness
-curl http://localhost:8080/health
+curl http://localhost:5000/health
 
 # Readiness
-curl http://localhost:8080/ready
+curl http://localhost:5000/ready
 
 # Statistics
-curl http://localhost:8080/stats
+curl http://localhost:5000/stats
 ```
 
 ## Maintenance Scheduling
@@ -131,7 +131,7 @@ Use an OS-level scheduler to call maintenance on a fixed interval:
 
 ```bash
 # every 5 minutes
-*/5 * * * * /usr/local/bin/red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint
+*/5 * * * * /usr/local/bin/red tick --bind 127.0.0.1:5000 --operations maintenance,retention,checkpoint
 ```
 
 For production services, prefer a dedicated service/timer so you can observe failures:
@@ -143,7 +143,7 @@ Description=RedDB periodic maintenance tick
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint
+ExecStart=/usr/local/bin/red tick --bind 127.0.0.1:5000 --operations maintenance,retention,checkpoint
 ```
 
 ```ini

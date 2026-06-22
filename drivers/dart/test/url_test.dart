@@ -23,16 +23,16 @@ void main() {
       expect(p.port, 5050);
     });
 
-    test('http:// default port 8080', () {
+    test('http:// default port 5000', () {
       final p = parseUri('http://api.example.com');
       expect(p.kind, 'http');
-      expect(p.port, 8080);
+      expect(p.port, 5000);
     });
 
-    test('https:// default port 8443', () {
+    test('https:// default port 55555', () {
       final p = parseUri('https://api.example.com');
       expect(p.kind, 'https');
-      expect(p.port, 8443);
+      expect(p.port, 55555);
     });
 
     test('user:pass percent-decoded', () {
@@ -124,8 +124,8 @@ void main() {
 
     test('defaultPortFor aliases', () {
       expect(defaultPortFor('redwire'), 5050);
-      expect(defaultPortFor('http'), 8080);
-      expect(defaultPortFor('https'), 8443);
+      expect(defaultPortFor('http'), 5000);
+      expect(defaultPortFor('https'), 55555);
       expect(defaultPortFor('nonsense'), 5050);
     });
 

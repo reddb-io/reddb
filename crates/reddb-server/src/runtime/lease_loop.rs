@@ -75,11 +75,14 @@ pub fn start_lease_loop_if_required(runtime: &RedDBRuntime) -> RedDBResult<()> {
     let mark_draining: MarkDraining = Arc::new(move || {
         runtime_for_drain.lifecycle().mark_draining();
     });
+    let runtime_for_term = runtime.clone();
+    let current_term = Arc::new(move || runtime_for_term.current_replication_term());
     let lifecycle = Arc::new(LeaseLifecycle::new(
         store,
         runtime.write_gate_arc(),
         runtime.audit_log_arc(),
         mark_draining,
+        current_term,
         holder_id,
         database_key,
         ttl_ms,

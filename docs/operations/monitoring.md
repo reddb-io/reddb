@@ -68,7 +68,7 @@ scrape_configs:
   - job_name: reddb
     metrics_path: /metrics
     static_configs:
-      - targets: ['127.0.0.1:8080']
+      - targets: ['127.0.0.1:5000']
 ```
 
 Useful alerts:

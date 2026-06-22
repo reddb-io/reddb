@@ -35,14 +35,15 @@ test('reds:// carries token and loginUrl query params', () => {
 })
 
 test('grpc:// and grpcs:// keep legacy host/port behaviour', () => {
-  const g = parseUri('grpc://localhost:5555')
+  const g = parseUri('grpc://localhost:55055')
   assert.equal(g.kind, 'grpc')
   assert.equal(g.host, 'localhost')
-  assert.equal(g.port, 5555)
+  assert.equal(g.port, 55055)
 
   const gs = parseUri('grpcs://remote.example')
   assert.equal(gs.kind, 'grpcs')
   assert.equal(gs.host, 'remote.example')
+  assert.equal(gs.port, 55555)
 })
 
 test('reds:// with empty host throws', () => {

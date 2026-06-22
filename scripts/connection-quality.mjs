@@ -19,8 +19,8 @@
 //     native drivers, measured the same way.
 //
 // Usage:
-//   node scripts/connection-quality.mjs --http 127.0.0.1:8080 \
-//        [--wire 127.0.0.1:5050] [--ws wss://127.0.0.1:8443/redwire] \
+//   node scripts/connection-quality.mjs --http 127.0.0.1:5000 \
+//        [--wire 127.0.0.1:5050] [--ws wss://127.0.0.1:55555/redwire] \
 //        [--token <bearer>] [--requests 2000] [--concurrency 64] [--sql "SELECT 1"]
 //
 // WSS notes: the browser endpoint is WSS-only and Origin-gated (ADR 0036), so
@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url'
 
 export function parseArgs(argv) {
   const out = {
-    http: '127.0.0.1:8080',
+    http: '127.0.0.1:5000',
     wire: null,
     ws: null,
     wsInsecure: false,

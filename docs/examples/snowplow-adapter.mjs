@@ -5,7 +5,7 @@
 // (the batch insert endpoint). Referenced from
 // docs/migrating-from-snowplow.md.
 
-const REDDB_URL = process.env.REDDB_URL ?? 'http://127.0.0.1:8080';
+const REDDB_URL = process.env.REDDB_URL ?? 'http://127.0.0.1:5000';
 const FLUSH_EVERY = Number(process.env.FLUSH_EVERY ?? 100);
 const FLUSH_INTERVAL_MS = Number(process.env.FLUSH_INTERVAL_MS ?? 5_000);
 

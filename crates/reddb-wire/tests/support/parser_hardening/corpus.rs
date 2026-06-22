@@ -91,7 +91,7 @@ pub fn adversarial_inputs() -> Vec<(&'static str, String)> {
             format!(
                 "grpc://{}",
                 (0..256)
-                    .map(|i| format!("h{i}:5055"))
+                    .map(|i| format!("h{i}:55055"))
                     .collect::<Vec<_>>()
                     .join(","),
             ),

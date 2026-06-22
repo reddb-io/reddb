@@ -190,8 +190,8 @@ deferred — see the spec for one-line rationale per item.
 |-----------|-------------------|--------------|-----|
 | `red://`  | RedWire (TCP)     | 5050         | no  |
 | `reds://` | RedWire (TLS)     | 5050         | yes |
-| `http://` | HTTP REST         | 5050         | no  |
-| `https://`| HTTPS REST        | 5050         | yes |
+| `http://` | HTTP REST         | 5000         | no  |
+| `https://`| HTTPS REST        | 55555        | yes |
 
 `red://`, `red://memory`, `red:///path/file.rdb` are reserved for the
 embedded engine — they currently throw

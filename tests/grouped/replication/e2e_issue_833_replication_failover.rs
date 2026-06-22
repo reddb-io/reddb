@@ -44,7 +44,7 @@ impl ClusterModel {
             primary_frontier,
             primary_role: NodeRole::Primary { term },
             target_role: NodeRole::Replica {
-                primary_addr: "http://node-a:50051".to_string(),
+                primary_addr: "http://node-a:55055".to_string(),
                 term,
             },
             writes_paused: false,
@@ -57,8 +57,8 @@ impl ClusterModel {
 
     fn request(&self, mode: FailoverMode, current_term: u64, hint: u64) -> FailoverRequest {
         FailoverRequest {
-            old_primary: FailoverNode::new(&self.primary_id, "http://node-a:50051", "us-east"),
-            target: FailoverNode::new(&self.target_id, "http://node-b:50051", "us-west"),
+            old_primary: FailoverNode::new(&self.primary_id, "http://node-a:55055", "us-east"),
+            target: FailoverNode::new(&self.target_id, "http://node-b:55055", "us-west"),
             current_term,
             target_frontier_hint: hint,
             timeline_history: reddb::TimelineHistory::new(10),
@@ -91,7 +91,7 @@ impl FailoverTransport for ClusterModel {
         // replica streaming from the new primary, both under the new term.
         self.target_role = NodeRole::Primary { term: new_term };
         self.primary_role = NodeRole::Replica {
-            primary_addr: "http://node-b:50051".to_string(),
+            primary_addr: "http://node-b:55055".to_string(),
             term: new_term,
         };
     }
@@ -132,7 +132,7 @@ fn clean_handover_swaps_roles_with_no_lost_write() {
     assert_eq!(
         cluster.primary_role,
         NodeRole::Replica {
-            primary_addr: "http://node-b:50051".to_string(),
+            primary_addr: "http://node-b:55055".to_string(),
             term: 8,
         },
     );
@@ -212,7 +212,7 @@ fn forced_handover_completes_within_timeout_surfacing_skipped_catch_up() {
     assert_eq!(
         cluster.primary_role,
         NodeRole::Replica {
-            primary_addr: "http://node-b:50051".to_string(),
+            primary_addr: "http://node-b:55055".to_string(),
             term: 8,
         },
     );

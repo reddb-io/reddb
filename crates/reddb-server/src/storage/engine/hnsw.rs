@@ -648,7 +648,7 @@ impl HnswIndex {
     /// Serialize the index to bytes for storage.
     ///
     /// The `HNSW` payload byte layout is owned by `reddb-file` (ADR 0046); this
-    /// only projects the engine state into [`reddb_file::HnswIndexLayout`] and
+    /// only projects the engine state into [`reddb_file::HnswIndexFrame`] and
     /// maps the distance metric to its on-disk discriminant.
     pub fn to_bytes(&self) -> Vec<u8> {
         let metric = match self.config.metric {
@@ -659,33 +659,33 @@ impl HnswIndex {
         let nodes = self
             .nodes
             .values()
-            .map(|node| reddb_file::HnswNodeLayout {
+            .map(|node| reddb_file::HnswNodeFrame {
                 id: node.id,
-                max_layer: node.max_layer,
+                max_layer: node.max_layer as u32,
                 vector: node.vector.clone(),
                 connections: node.connections.clone(),
             })
             .collect();
-        let layout = reddb_file::HnswIndexLayout {
-            dimension: self.dimension,
-            m: self.config.m,
-            m_max0: self.config.m_max0,
-            ef_construction: self.config.ef_construction,
-            ef_search: self.config.ef_search,
+        let frame = reddb_file::HnswIndexFrame {
+            dimension: self.dimension as u32,
+            m: self.config.m as u32,
+            m_max0: self.config.m_max0 as u32,
+            ef_construction: self.config.ef_construction as u32,
+            ef_search: self.config.ef_search as u32,
             ml: self.config.ml,
             metric,
-            max_layer: self.max_layer,
+            max_layer: self.max_layer as u32,
             entry_point: self.entry_point,
             nodes,
         };
-        reddb_file::encode_hnsw_index(&layout)
+        reddb_file::encode_hnsw_index_frame(&frame)
     }
 
     /// Deserialize index from bytes via the `reddb-file` codec.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let layout = reddb_file::decode_hnsw_index(bytes).map_err(|e| e.to_string())?;
+        let frame = reddb_file::decode_hnsw_index_frame(bytes).map_err(|e| e.to_string())?;
 
-        let metric = match layout.metric {
+        let metric = match frame.metric {
             0 => DistanceMetric::L2,
             1 => DistanceMetric::Cosine,
             2 => DistanceMetric::InnerProduct,
@@ -693,23 +693,23 @@ impl HnswIndex {
         };
 
         let config = HnswConfig {
-            m: layout.m,
-            m_max0: layout.m_max0,
-            ef_construction: layout.ef_construction,
-            ef_search: layout.ef_search,
-            ml: layout.ml,
+            m: frame.m as usize,
+            m_max0: frame.m_max0 as usize,
+            ef_construction: frame.ef_construction as usize,
+            ef_search: frame.ef_search as usize,
+            ml: frame.ml,
             metric,
         };
 
         let mut nodes = HashMap::new();
         let mut max_id = 0u64;
-        for node in layout.nodes {
+        for node in frame.nodes {
             max_id = max_id.max(node.id);
             nodes.insert(
                 node.id,
                 HnswNode {
                     id: node.id,
-                    max_layer: node.max_layer,
+                    max_layer: node.max_layer as usize,
                     vector: node.vector,
                     connections: node.connections,
                 },
@@ -719,9 +719,9 @@ impl HnswIndex {
         Ok(Self {
             config,
             nodes,
-            entry_point: layout.entry_point,
-            max_layer: layout.max_layer,
-            dimension: layout.dimension,
+            entry_point: frame.entry_point,
+            max_layer: frame.max_layer as usize,
+            dimension: frame.dimension as usize,
             next_id: AtomicU64::new(max_id + 1),
             rng_state: 12345, // Reset RNG
         })

@@ -50,8 +50,8 @@ export RED_S3_ACCESS_KEY_ID=AKIA...
 export RED_S3_SECRET_KEY_FILE=/run/secrets/s3-secret
 # Floci / R2: set the endpoint
 export RED_S3_ENDPOINT=https://abc.r2.cloudflarestorage.com
-export RED_S3_PATH_STYLE=true                  # Floci and a few R2 setups need this
-red server --path /var/lib/reddb/data.rdb --http-bind 0.0.0.0:8080
+export RED_S3_PATH_STYLE=true                  # MinIO and a few R2 setups need this
+red server --path /var/lib/reddb/data.rdb --http-bind 0.0.0.0:5000
 ```
 
 Compatible with AWS S3, Cloudflare R2, Floci for local AWS-compatible
@@ -67,7 +67,7 @@ so the writer-lease contract still works without an external service.
 ```bash
 export RED_BACKEND=fs
 export RED_FS_PATH=/var/lib/reddb/backend
-red server --path /var/lib/reddb/data.rdb --http-bind 0.0.0.0:8080
+red server --path /var/lib/reddb/data.rdb --http-bind 0.0.0.0:5000
 ```
 
 The directory needs to be writable by the RedDB process and durable

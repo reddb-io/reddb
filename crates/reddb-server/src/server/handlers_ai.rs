@@ -2389,14 +2389,22 @@ mod tests {
             nanos
         ));
 
-        let rt =
-            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime opens");
+        let options = RedDBOptions::persistent(&path)
+            .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+            .expect("serverless storage profile should expose pager");
+        let rt = RedDBRuntime::with_options(options).expect("runtime opens");
         let db = rt.db();
         let store = db.store();
         let pager = store.pager().expect("persistent runtime has pager");
+        const TEST_CERTIFICATE: &str =
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         let auth = Arc::new(
-            AuthStore::with_vault(AuthConfig::default(), Arc::clone(pager), Some("test-pass"))
-                .expect("vault opens"),
+            AuthStore::with_vault_certificate(
+                AuthConfig::default(),
+                Arc::clone(pager),
+                TEST_CERTIFICATE,
+            )
+            .expect("vault opens"),
         );
         let server = RedDBServer::new(rt).with_auth(Arc::clone(&auth));
 

@@ -176,12 +176,12 @@ fn health_endpoint_enumerates_active_and_failed_listeners() {
         active: vec![
             TransportListenerState {
                 transport: "http".to_string(),
-                bind_addr: "127.0.0.1:5055".to_string(),
+                bind_addr: "127.0.0.1:55055".to_string(),
                 explicit: true,
             },
             TransportListenerState {
                 transport: "grpc".to_string(),
-                bind_addr: "127.0.0.1:50051".to_string(),
+                bind_addr: "127.0.0.1:55055".to_string(),
                 explicit: false,
             },
         ],
@@ -232,7 +232,7 @@ fn health_endpoint_enumerates_active_and_failed_listeners() {
         .expect("http listener should appear under active");
     assert_eq!(
         http_entry.get("bind_addr").and_then(JsonValue::as_str),
-        Some("127.0.0.1:5055")
+        Some("127.0.0.1:55055")
     );
     assert_eq!(
         http_entry.get("explicit").and_then(JsonValue::as_bool),

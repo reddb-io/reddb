@@ -31,12 +31,10 @@ pub mod graph_label_registry;
 pub mod graph_record;
 pub mod graph_store;
 pub mod graph_table_index;
-pub mod hnsw_index_codec;
-pub mod ivf_index_codec;
 pub mod layout;
 pub mod local_backend;
 pub mod logical_wal;
-pub mod native_artifact_codec;
+pub mod native_index_artifact;
 pub mod native_store;
 pub mod operational_manifest;
 pub mod physical_metadata;
@@ -47,12 +45,14 @@ pub mod serverless;
 pub mod shm;
 pub mod spill;
 pub mod store_wal;
-pub mod table_def_codec;
+pub mod table_def;
 pub mod transaction_wal;
 pub mod turboquant_snapshot;
 pub mod ui_bundle_cache;
 pub mod vault_export_envelope;
 pub mod vector_btree_page_format;
+pub mod vector_hnsw_index;
+pub mod vector_ivf_index;
 pub mod vector_value_codec;
 pub mod wal_header;
 pub mod wal_record;
@@ -172,14 +172,6 @@ pub use graph_table_index::{
     GraphTableIndexFrameError, GRAPH_TABLE_INDEX_ENTRY_HEADER_LEN, GRAPH_TABLE_INDEX_HEADER_LEN,
     GRAPH_TABLE_INDEX_MAX_NODE_ID_LEN,
 };
-pub use hnsw_index_codec::{
-    decode_hnsw_index, encode_hnsw_index, HnswCodecError, HnswIndexLayout, HnswNodeLayout,
-    HNSW_INDEX_MAGIC, HNSW_INDEX_VERSION,
-};
-pub use ivf_index_codec::{
-    decode_ivf_index, encode_ivf_index, IvfCodecError, IvfIndexLayout, IvfListLayout,
-    IVF_INDEX_MAGIC,
-};
 pub use layout::{
     audit_log_rotated_compressed_path, audit_log_rotated_plain_path, data_file_name,
     default_database_path, default_service_database_path, engine_wal_path, legacy_audit_log_path,
@@ -207,11 +199,13 @@ pub use logical_wal::{
     LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2, LOGICAL_WAL_SPOOL_VERSION_V3,
     LOGICAL_WAL_V3_HEADER_LEN,
 };
-pub use native_artifact_codec::{
-    decode_document_pathvalue, decode_fulltext_index, decode_graph_adjacency,
-    encode_document_pathvalue, encode_fulltext_index, encode_graph_adjacency, DocPathValueIndex,
-    DocPathValueRecord, FulltextIndex, GraphAdjacencyEdge, NativeArtifactError,
-    DOC_PATHVALUE_MAGIC, FULLTEXT_INDEX_MAGIC, GRAPH_ADJACENCY_MAGIC,
+pub use native_index_artifact::{
+    decode_native_doc_pathvalue_frame, decode_native_fulltext_frame,
+    decode_native_graph_adjacency_frame, encode_native_doc_pathvalue_frame,
+    encode_native_fulltext_frame, encode_native_graph_adjacency_frame, NativeArtifactFrameError,
+    NativeDocPathValue, NativeDocPathValueEntry, NativeDocPathValueFrame, NativeFulltextFrame,
+    NativeFulltextPosting, NativeFulltextTerm, NativeGraphAdjacencyFrame, NativeGraphEdge,
+    NATIVE_DOC_PATHVALUE_MAGIC, NATIVE_FULLTEXT_MAGIC, NATIVE_GRAPH_ADJACENCY_MAGIC,
 };
 pub use native_store::{
     append_native_store_crc32_footer, decode_native_blob_page, decode_native_catalog_summary_page,
@@ -306,6 +300,15 @@ pub use ui_bundle_cache::{
     ui_bundle_version_dir, write_ui_bundle_manifest, UiBundleManifest, UI_BUNDLE_CACHE_DIR_NAME,
     UI_BUNDLE_MANIFEST_FILE, UI_BUNDLE_PURGE_DIR_NAME, UI_BUNDLE_STAGING_DIR_NAME,
 };
+pub use vector_hnsw_index::{
+    decode_hnsw_index_frame, encode_hnsw_index_frame, HnswIndexFrame, HnswIndexFrameError,
+    HnswNodeFrame, HNSW_INDEX_HEADER_LEN, HNSW_INDEX_MAGIC, HNSW_INDEX_NO_ENTRY_POINT,
+    HNSW_INDEX_VERSION_V1,
+};
+pub use vector_ivf_index::{
+    decode_ivf_index_frame, encode_ivf_index_frame, IvfIndexFrame, IvfIndexFrameError,
+    IvfListFrame, IVF_INDEX_HEADER_LEN, IVF_INDEX_MAGIC,
+};
 
 pub use primary_replica::{
     cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,
@@ -344,9 +347,9 @@ pub use store_wal::{
     decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
     STORE_WAL_ACTION_VERSION,
 };
-pub use table_def_codec::{
-    decode_table_def, encode_table_def, ColumnLayout, ConstraintLayout, IndexLayout,
-    TableDefCodecError, TableDefLayout, TABLE_DEF_MAGIC,
+pub use table_def::{
+    decode_table_def_frame, encode_table_def_frame, ColumnDefFrame, ConstraintFrame, IndexDefFrame,
+    TableDefFrame, TableDefFrameError, TABLE_DEF_MAGIC,
 };
 pub use transaction_wal::{
     decode_transaction_wal_entry_payload, decode_transaction_wal_record_frame,

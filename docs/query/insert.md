@@ -62,7 +62,7 @@ Exactly one timestamp alias may be provided per row.
 ### Row
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{"fields": {"name": "Alice", "email": "alice@example.com", "age": 30}}'
 ```
@@ -70,7 +70,7 @@ curl -X POST http://127.0.0.1:8080/collections/users/rows \
 ### Node
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/graph/nodes \
+curl -X POST http://127.0.0.1:5000/collections/graph/nodes \
   -H 'content-type: application/json' \
   -d '{
     "label": "alice",
@@ -82,7 +82,7 @@ curl -X POST http://127.0.0.1:8080/collections/graph/nodes \
 ### Edge
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/graph/edges \
+curl -X POST http://127.0.0.1:5000/collections/graph/edges \
   -H 'content-type: application/json' \
   -d '{
     "label": "FOLLOWS",
@@ -95,7 +95,7 @@ curl -X POST http://127.0.0.1:8080/collections/graph/edges \
 ### Vector
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
+curl -X POST http://127.0.0.1:5000/collections/embeddings/vectors \
   -H 'content-type: application/json' \
   -d '{
     "dense": [0.12, 0.91, 0.44],
@@ -107,7 +107,7 @@ curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
 ### Document
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/logs/documents \
+curl -X POST http://127.0.0.1:5000/collections/logs/documents \
   -H 'content-type: application/json' \
   -d '{
     "body": {"event": "login", "user_id": "u123"},
@@ -121,7 +121,7 @@ For high-throughput ingestion, use the bulk endpoints:
 
 ```bash
 # Bulk rows
-curl -X POST http://127.0.0.1:8080/collections/users/bulk/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/bulk/rows \
   -H 'content-type: application/json' \
   -d '[
     {"fields": {"name": "Alice", "age": 30}},
@@ -129,7 +129,7 @@ curl -X POST http://127.0.0.1:8080/collections/users/bulk/rows \
   ]'
 
 # Bulk nodes
-curl -X POST http://127.0.0.1:8080/collections/graph/bulk/nodes \
+curl -X POST http://127.0.0.1:5000/collections/graph/bulk/nodes \
   -H 'content-type: application/json' \
   -d '[
     {"label": "alice", "node_type": "person"},
@@ -137,7 +137,7 @@ curl -X POST http://127.0.0.1:8080/collections/graph/bulk/nodes \
   ]'
 
 # Bulk vectors
-curl -X POST http://127.0.0.1:8080/collections/embeddings/bulk/vectors \
+curl -X POST http://127.0.0.1:5000/collections/embeddings/bulk/vectors \
   -H 'content-type: application/json' \
   -d '[
     {"dense": [0.1, 0.2, 0.3], "content": "Doc A"},
@@ -150,7 +150,7 @@ curl -X POST http://127.0.0.1:8080/collections/embeddings/bulk/vectors \
 Add `auto_embed` to the bulk rows body to generate embeddings for all rows in one provider batch call. The engine embeds before inserting, so a provider failure leaves the collection untouched.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/articles/bulk/rows \
+curl -X POST http://127.0.0.1:5000/collections/articles/bulk/rows \
   -H 'content-type: application/json' \
   -d '{
     "items": [
@@ -178,7 +178,7 @@ grpcurl -plaintext \
       "{\"fields\":{\"name\":\"Bob\",\"age\":25}}"
     ]
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/BulkCreateRows
+  127.0.0.1:55055 reddb.v1.RedDb/BulkCreateRows
 ```
 
 ## WITH Clauses

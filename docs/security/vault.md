@@ -45,9 +45,9 @@ open to take a few hundred milliseconds, not seconds, on a cold start.
 When the server boots:
 
 1. The pager loads pages 2 and 3 (still ciphertext at this stage).
-2. The boot sequence reads `REDDB_CERTIFICATE` (or, in legacy mode,
-   `REDDB_VAULT_KEY`) and runs Argon2id over it with the salt found in
-   the page header.
+2. The boot sequence reads `REDDB_CERTIFICATE` directly, or reads
+   `REDDB_CERTIFICATE_FILE` and expands its file contents into
+   `REDDB_CERTIFICATE`, then derives the vault key from that certificate.
 3. The derived 32-byte key opens the AES-GCM payload. A wrong key fails
    the GCM auth tag check — the vault refuses to open and the server
    exits with a typed error.
@@ -116,17 +116,10 @@ flowchart TD
 | `vault_key`      | Every server start, derived from `certificate` + page salt | In RAM only, zeroed on shutdown | The running process       |
 | `red.secret.aes_key` | First boot after bootstrap | Inside the vault payload                      | The running process       |
 
-The certificate is the **only** durable secret an operator must protect.
-Lose it and you cannot derive `vault_key`, so you cannot decrypt the
-vault payload, so you cannot recover `master_secret`, so the chain is
+The certificate is the **only** durable vault secret an operator must
+protect. Lose it and you cannot derive `vault_key`, so you cannot decrypt
+the vault payload, so you cannot recover `master_secret`, so the chain is
 broken.
-
-> [!NOTE]
-> The legacy `REDDB_VAULT_KEY` passphrase mode predates the certificate
-> chain. It still works (Argon2id directly over the user-supplied
-> passphrase, same salt, same AEAD parameters), but new deployments
-> should use the certificate flow because passphrases are weaker and
-> harder to rotate cleanly. See [Restart / unseal](#5-restart--unseal-precedence-and-_file-vars).
 
 ---
 
@@ -197,7 +190,7 @@ user exists yet. Useful for managed-service deployments where you can't
 run a one-off container.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/auth/bootstrap \
+curl -X POST http://127.0.0.1:5000/auth/bootstrap \
   -H 'content-type: application/json' \
   -d '{"username": "admin", "password": "change-me-now"}'
 ```
@@ -227,27 +220,35 @@ re-initialized from scratch.
 
 ---
 
-## 5. Restart / unseal (precedence and `*_FILE` vars)
+## 5. Restart / unseal (`REDDB_CERTIFICATE` and `*_FILE` vars)
 
 On every restart the server needs to re-derive `vault_key`. It looks for
-the cert (or legacy passphrase) in this exact precedence:
+the certificate in exactly one of these forms:
 
 ```text
-REDDB_CERTIFICATE         > REDDB_VAULT_KEY
-REDDB_CERTIFICATE_FILE    > REDDB_VAULT_KEY_FILE
+REDDB_CERTIFICATE
+REDDB_CERTIFICATE_FILE
 ```
 
-The `*_FILE` form reads the contents of the file (trimmed of trailing
-whitespace) and uses that as the secret. This is the **production**
-form: the file lives on a tmpfs mount populated by Docker secrets,
-Kubernetes Secrets, systemd `LoadCredential`, etc.
+`REDDB_CERTIFICATE` may contain the 64-hex certificate directly. This is
+supported and useful for local development, simple service managers, and
+controlled CI jobs.
+
+`REDDB_CERTIFICATE_FILE` reads the contents of the file (trimmed of
+trailing whitespace), expands it into `REDDB_CERTIFICATE`, and unsets the
+`_FILE` variable before the vault opens. This is the **recommended
+production** form: the file lives on a tmpfs mount populated by Docker
+secrets, Kubernetes Secrets, systemd `LoadCredential`, etc.
+
+Setting both `REDDB_CERTIFICATE` and `REDDB_CERTIFICATE_FILE` is an
+operator error. RedDB refuses to boot instead of guessing which copy is
+current.
 
 ### Supported `*_FILE` companion variables
 
 | Inline variable       | `*_FILE` companion          | What it carries                                    |
 |:----------------------|:----------------------------|:---------------------------------------------------|
 | `REDDB_CERTIFICATE`   | `REDDB_CERTIFICATE_FILE`    | 64-hex certificate produced by bootstrap           |
-| `REDDB_VAULT_KEY`     | `REDDB_VAULT_KEY_FILE`      | Legacy passphrase (Argon2id input, not preferred)  |
 | `REDDB_USERNAME`      | `REDDB_USERNAME_FILE`       | Auto-bootstrap admin username (fresh DB only)      |
 | `REDDB_PASSWORD`      | `REDDB_PASSWORD_FILE`       | Auto-bootstrap admin password (fresh DB only)      |
 | `REDDB_CLOUD_HEAD_ADMIN_PASSWORD` | `REDDB_CLOUD_HEAD_ADMIN_PASSWORD_FILE` | Cloud preset head admin password |
@@ -259,9 +260,8 @@ Kubernetes Secrets, systemd `LoadCredential`, etc.
 | `RED_D1_TOKEN`        | `RED_D1_TOKEN_FILE`         | Cloudflare D1 backend token                        |
 | `RED_BACKEND_HTTP_AUTH` | `RED_BACKEND_HTTP_AUTH_FILE` | Generic HTTP backend bearer                     |
 
-The `*_FILE` value **wins** when both are set — this lets you override
-inline defaults from a Compose file with a real secret mounted into
-`/run/secrets/`. The boot sequence reads the file once, places the
+Setting an inline variable and its `*_FILE` companion at the same time is
+invalid. Pick one form per secret. The boot sequence reads the file once, places the
 contents in the corresponding inline env var, then **strips** the
 `_FILE` companion from the process environment so child processes don't
 see the file path.
@@ -299,17 +299,17 @@ encrypted store rather than the plaintext `red_config` collection.
 
 ```bash
 # Set a secret (over HTTP — same auth rules as any admin call)
-curl -X POST http://127.0.0.1:8080/secrets/red.secret.stripe.api_key \
+curl -X POST http://127.0.0.1:5000/secrets/red.secret.stripe.api_key \
   -H 'Authorization: Bearer rdb_k_xxxx' \
   -H 'content-type: application/json' \
   -d '{"value": "sk_live_..."}'
 
 # Read it back
-curl http://127.0.0.1:8080/secrets/red.secret.stripe.api_key \
+curl http://127.0.0.1:5000/secrets/red.secret.stripe.api_key \
   -H 'Authorization: Bearer rdb_k_xxxx'
 
 # Delete it
-curl -X DELETE http://127.0.0.1:8080/secrets/red.secret.stripe.api_key \
+curl -X DELETE http://127.0.0.1:5000/secrets/red.secret.stripe.api_key \
   -H 'Authorization: Bearer rdb_k_xxxx'
 ```
 
@@ -443,8 +443,8 @@ services:
   reddb:
     image: ghcr.io/reddb-io/reddb:latest
     ports:
-      - "55880:8080"
-      - "55050:5050"
+      - "5000:5000"
+      - "5050:5050"
     volumes:
       - reddb-data:/data
     environment:
@@ -460,11 +460,11 @@ services:
       - --auth
       - --require-auth
       - --vault
-      - --http-bind=0.0.0.0:8080
+      - --http-bind=0.0.0.0:5000
       - --wire-bind=0.0.0.0:5050
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "red", "doctor", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "red", "doctor", "--bind", "127.0.0.1:5000"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -584,12 +584,12 @@ spec:
           - --auth
           - --require-auth
           - --vault
-          - --http-bind=0.0.0.0:8080
+          - --http-bind=0.0.0.0:5000
         envFrom:
           - secretRef:
               name: reddb-vault
         ports:
-          - { name: http, containerPort: 8080 }
+          - { name: http, containerPort: 5000 }
           - { name: wire, containerPort: 5050 }
         volumeMounts:
           - { name: data, mountPath: /data }
@@ -727,7 +727,7 @@ support SIGHUP rotation.
     "name": "reddb",
     "image": "ghcr.io/reddb-io/reddb:latest",
     "portMappings": [
-      { "containerPort": 8080, "protocol": "tcp" }
+      { "containerPort": 5000, "protocol": "tcp" }
     ],
     "secrets": [
       {
@@ -740,8 +740,8 @@ support SIGHUP rotation.
       }
     ],
     "command": [
-      "server", "--path=/data/data.rdb", "--auth", "--require-auth", "--vault",
-      "--http-bind=0.0.0.0:8080"
+      "server", "--path=/data/data.rdb", "--vault",
+      "--http-bind=0.0.0.0:5000"
     ]
   }]
 }
@@ -761,9 +761,9 @@ build:
   build: []
   post-build: []
 run:
-  command: server --path /data/data.rdb --auth --require-auth --vault --http-bind 0.0.0.0:8080
+  command: server --path /data/data.rdb --vault --http-bind 0.0.0.0:5000
   network:
-    port: 8080
+    port: 5000
   env:
     - name: REDDB_CERTIFICATE
       value-from: "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/reddb/certificate"
@@ -801,11 +801,11 @@ gcloud secrets create reddb-certificate \
 
 gcloud run deploy reddb \
   --image=ghcr.io/reddb-io/reddb:latest \
-  --port=8080 \
+  --port=5000 \
   --service-account=reddb-runtime@PROJECT.iam.gserviceaccount.com \
   --update-secrets=REDDB_CERTIFICATE=reddb-certificate:latest \
   --command=server \
-  --args=--path=/data/data.rdb,--auth,--require-auth,--vault,--http-bind=0.0.0.0:8080
+  --args=--path=/data/data.rdb,--vault,--http-bind=0.0.0.0:5000
 ```
 
 The runtime service account needs `roles/secretmanager.secretAccessor`.
@@ -937,8 +937,8 @@ job "reddb" {
       driver = "docker"
       config {
         image = "ghcr.io/reddb-io/reddb:latest"
-        args  = ["server", "--path", "/data/data.rdb", "--auth", "--require-auth", "--vault",
-                 "--http-bind", "0.0.0.0:8080"]
+        args  = ["server", "--path", "/data/data.rdb", "--vault",
+                 "--http-bind", "0.0.0.0:5000"]
       }
       template {
         data        = "{{ with secret \"secret/data/reddb/certificate\" }}{{ .Data.data.value }}{{ end }}"
@@ -962,7 +962,7 @@ fly secrets set REDDB_CERTIFICATE=4b7d1e2c... -a my-reddb
 
 # fly.toml
 [env]
-  RED_HTTP_BIND_ADDR = "0.0.0.0:8080"
+  RED_HTTP_BIND_ADDR = "0.0.0.0:5000"
 
 [[mounts]]
   source = "reddb_data"
@@ -979,8 +979,8 @@ doppler secrets set REDDB_CERTIFICATE="4b7d1e2c..." \
   --project reddb --config prd
 
 # In your container's entrypoint:
-doppler run -- red server --path /data/data.rdb --auth --require-auth --vault \
-                          --http-bind 0.0.0.0:8080
+doppler run -- red server --path /data/data.rdb --vault \
+                          --http-bind 0.0.0.0:5000
 ```
 
 ### 1Password Connect
@@ -1034,7 +1034,7 @@ re-bootstrap from a logical backup, not an in-place key rotation.
 
 ```bash
 # 1. Take a logical backup of the running primary
-curl -X POST http://primary:8080/admin/backup \
+curl -X POST http://primary:5000/admin/backup \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN"
 
 # 2. Bring up a fresh staging instance with a NEW certificate
@@ -1047,7 +1047,7 @@ docker run --rm -v staging-data:/data ghcr.io/reddb-io/reddb:latest \
 # capture the new cert
 
 # 3. Restore the logical backup into staging
-curl -X POST http://staging:8080/admin/restore \
+curl -X POST http://staging:5000/admin/restore \
   -H "Authorization: Bearer $STAGING_ADMIN_TOKEN" \
   -d '{"snapshot_id":"<from step 1>"}'
 
@@ -1094,7 +1094,7 @@ A practical pattern:
 
 ```bash
 # RedDB ships every /admin/* call to the audit log
-curl 'http://reddb:8080/admin/audit?since=24h' \
+curl 'http://reddb:5000/admin/audit?since=24h' \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN"
 ```
 
@@ -1132,7 +1132,7 @@ docker run --rm -v reddb-new:/data ghcr.io/reddb-io/reddb:latest \
   bootstrap --path /data/data.rdb --vault --print-certificate
 
 # 2. Restore user collections only (skip auth state)
-curl -X POST http://new:8080/admin/restore \
+curl -X POST http://new:5000/admin/restore \
   -d '{"snapshot_id":"...","skip_vault":true}' \
   -H "Authorization: Bearer $NEW_ADMIN_TOKEN"
 

@@ -386,7 +386,7 @@ mod tests {
         let g = gate(
             true,
             ReplicationRole::Replica {
-                primary_addr: "http://primary:50051".into(),
+                primary_addr: "http://primary:55055".into(),
             },
         );
         for kind in [
@@ -665,7 +665,7 @@ mod tests {
         let g = gate(
             false,
             ReplicationRole::Replica {
-                primary_addr: "http://primary:50051".into(),
+                primary_addr: "http://primary:55055".into(),
             },
         );
         let err = g.check(WriteKind::Dml).unwrap_err();

@@ -7,33 +7,33 @@ This guide shows how to use RedDB's graph analytics for network analysis, social
 ```bash
 # Create people
 for name in alice bob charlie diana eve frank; do
-  curl -X POST http://127.0.0.1:8080/collections/social/nodes \
+  curl -X POST http://127.0.0.1:5000/collections/social/nodes \
     -H 'content-type: application/json' \
     -d "{\"label\": \"$name\", \"node_type\": \"person\"}"
 done
 
 # Create relationships
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{"label": "FOLLOWS", "from": 1, "to": 2}'
 
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{"label": "FOLLOWS", "from": 1, "to": 3}'
 
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{"label": "FOLLOWS", "from": 2, "to": 3}'
 
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{"label": "FOLLOWS", "from": 3, "to": 4}'
 
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{"label": "FOLLOWS", "from": 4, "to": 5}'
 
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{"label": "FOLLOWS", "from": 5, "to": 6}'
 ```
@@ -42,12 +42,12 @@ curl -X POST http://127.0.0.1:8080/collections/social/edges \
 
 ```bash
 # PageRank
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "pagerank"}'
 
 # Degree centrality (most connected)
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "degree"}'
 ```
@@ -55,7 +55,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
 ## 3. Detect Communities
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/community \
+curl -X POST http://127.0.0.1:5000/graph/analytics/community \
   -H 'content-type: application/json' \
   -d '{"algorithm": "louvain"}'
 ```
@@ -64,22 +64,22 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/community \
 
 ```bash
 # Shortest path between two people
-curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+curl -X POST http://127.0.0.1:5000/graph/shortest-path \
   -H 'content-type: application/json' \
   -d '{"source": "alice", "target": "frank", "algorithm": "bfs"}'
 
 # Weighted shortest path
-curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+curl -X POST http://127.0.0.1:5000/graph/shortest-path \
   -H 'content-type: application/json' \
   -d '{"source": "alice", "target": "frank", "algorithm": "dijkstra"}'
 
 # Negative-weight shortest path
-curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+curl -X POST http://127.0.0.1:5000/graph/shortest-path \
   -H 'content-type: application/json' \
   -d '{"source": "alice", "target": "frank", "algorithm": "bellman_ford"}'
 
 # Explore alice's network
-curl -X POST http://127.0.0.1:8080/graph/traverse \
+curl -X POST http://127.0.0.1:5000/graph/traverse \
   -H 'content-type: application/json' \
   -d '{"source": "alice", "strategy": "bfs", "max_depth": 3}'
 ```
@@ -87,7 +87,7 @@ curl -X POST http://127.0.0.1:8080/graph/traverse \
 ## 5. Inspect Graph Structure
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/properties \
+curl -X POST http://127.0.0.1:5000/graph/analytics/properties \
   -H 'content-type: application/json' \
   -d '{}'
 ```
@@ -104,7 +104,7 @@ Useful fields in the response:
 ## 6. Check for Cycles
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
+curl -X POST http://127.0.0.1:5000/graph/analytics/cycles \
   -H 'content-type: application/json' \
   -d '{"max_length": 5}'
 ```
@@ -114,7 +114,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
 Find nodes that bridge different communities:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "betweenness"}'
 ```

@@ -3,10 +3,12 @@ services:
     image: floci/floci:latest
     container_name: reddb-floci-backup
     ports:
-      - "55467:4566"
+      - "55476:4566"
+    environment:
+      FLOCI_HOSTNAME: floci
 
   floci-init:
-    image: amazon/aws-cli:2
+    image: amazon/aws-cli:latest
     container_name: reddb-floci-backup-init
     depends_on:
       - floci
@@ -35,23 +37,16 @@ services:
       floci-init:
         condition: service_completed_successfully
     ports:
-      - "55561:50051"
-      - "55890:8080"
-      - "55893:8443"
+      - "5060:5050"
+      - "55061:55055"
+      - "5010:5000"
+      - "55561:55555"
     volumes:
       - backup-server-data:/data
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
     environment:
       RUST_LOG: info
+      REDDB_TOPOLOGY: primary-replica
+      REDDB_NODE_ROLE: primary
       REDDB_STORAGE_PRESET: primary-replica-backup
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
@@ -64,8 +59,9 @@ services:
       RED_S3_ACCESS_KEY: test
       RED_S3_SECRET_KEY: test
       RED_S3_PATH_STYLE: "true"
+      REDDB_VAULT: "false"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10

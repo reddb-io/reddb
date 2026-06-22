@@ -14,13 +14,11 @@ fn red_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
 }
 
-/// Run `red bootstrap ...` with a short-lived REDDB_VAULT_KEY env var
-/// (the cheapest seal the vault accepts) and the password fed via
-/// stdin. Returns the (status, stdout, stderr) triple.
-fn run_bootstrap(args: &[&str], password: Option<&str>, vault_key: &str) -> (i32, String, String) {
+/// Run `red bootstrap ...` with the password fed via stdin. Returns the
+/// (status, stdout, stderr) triple.
+fn run_bootstrap(args: &[&str], password: Option<&str>) -> (i32, String, String) {
     let mut cmd = Command::new(red_binary());
     cmd.args(args)
-        .env("REDDB_VAULT_KEY", vault_key)
         // Strip any inherited values so the run is hermetic.
         .env_remove("REDDB_CERTIFICATE")
         .env_remove("REDDB_USERNAME")
@@ -28,7 +26,6 @@ fn run_bootstrap(args: &[&str], password: Option<&str>, vault_key: &str) -> (i32
         .env_remove("REDDB_USERNAME_FILE")
         .env_remove("REDDB_PASSWORD_FILE")
         .env_remove("REDDB_CERTIFICATE_FILE")
-        .env_remove("REDDB_VAULT_KEY_FILE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -64,7 +61,6 @@ fn bootstrap_succeeds_and_prints_certificate() {
             "--print-certificate",
         ],
         Some("hunter2"),
-        "test-vault-key-1",
     );
 
     assert_eq!(code, 0, "exit code != 0; stderr: {stderr}");
@@ -100,7 +96,6 @@ fn bootstrap_fails_when_already_bootstrapped() {
             "--print-certificate",
         ],
         Some("hunter2"),
-        "test-vault-key-2",
     );
     assert_eq!(code1, 0);
 
@@ -117,7 +112,6 @@ fn bootstrap_fails_when_already_bootstrapped() {
             "--print-certificate",
         ],
         Some("hunter2"),
-        "test-vault-key-2",
     );
     assert_ne!(code2, 0, "expected non-zero exit on re-bootstrap");
     assert!(
@@ -144,7 +138,6 @@ fn bootstrap_json_output_has_required_keys() {
             "--json",
         ],
         Some("p4ssw0rd"),
-        "test-vault-key-3",
     );
     assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
     let line = stdout
@@ -174,7 +167,6 @@ fn bootstrap_requires_vault_flag() {
             "--password-stdin",
         ],
         Some("hunter2"),
-        "test-vault-key-4",
     );
     assert_ne!(code, 0);
     assert!(
@@ -206,14 +198,12 @@ fn password_file_env_expanded_into_password_var() {
         "admin",
         "--print-certificate",
     ])
-    .env("REDDB_VAULT_KEY", "test-vault-key-5")
     .env("REDDB_PASSWORD_FILE", &pwfile)
     .env_remove("REDDB_CERTIFICATE")
     .env_remove("REDDB_USERNAME")
     .env_remove("REDDB_PASSWORD")
     .env_remove("REDDB_USERNAME_FILE")
     .env_remove("REDDB_CERTIFICATE_FILE")
-    .env_remove("REDDB_VAULT_KEY_FILE")
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
@@ -245,8 +235,6 @@ fn password_file_and_password_var_conflict_fails_boot() {
         .env_remove("REDDB_CERTIFICATE")
         .env_remove("REDDB_USERNAME")
         .env_remove("REDDB_USERNAME_FILE")
-        .env_remove("REDDB_VAULT_KEY")
-        .env_remove("REDDB_VAULT_KEY_FILE")
         .env_remove("REDDB_CERTIFICATE_FILE")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

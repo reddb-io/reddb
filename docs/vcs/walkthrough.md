@@ -28,7 +28,7 @@ red vcs versioned on users                -- CLI
 ```
 
 ```bash
-curl -X PUT http://localhost:8080/collections/users/vcs \
+curl -X PUT http://localhost:5000/collections/users/vcs \
   -H 'content-type: application/json' \
   -d '{"versioned": true}'
 ```
@@ -178,7 +178,7 @@ $ red vcs resolve pick-src              # show the head of pick-src
 HTTP equivalent (session-scoped):
 
 ```bash
-curl -X POST http://localhost:8080/repo/sessions/1/cherry-pick \
+curl -X POST http://localhost:5000/repo/sessions/1/cherry-pick \
   -H 'content-type: application/json' \
   -d '{"commit":"<pick-src-head-hash>",
        "author":{"name":"alice","email":"alice@example.com"}}'
@@ -223,7 +223,7 @@ entities on both sides:
 $ red vcs log --limit 1 --json | jq '.data[0]'
 {"hash":"<merge-hash>", ...}
 
-$ curl -s http://localhost:8080/repo/merges/ms:<id>/conflicts | jq
+$ curl -s http://localhost:5000/repo/merges/ms:<id>/conflicts | jq
 [
   {
     "id": "ms:<id>:users/42",
@@ -286,7 +286,7 @@ red vcs commit "refactor: module B"
 
 # review what moved
 red vcs log --branch refactor --limit 10
-curl "http://localhost:8080/repo/commits/main/diff/refactor" | jq
+curl "http://localhost:5000/repo/commits/main/diff/refactor" | jq
 
 # merge back
 red vcs checkout main

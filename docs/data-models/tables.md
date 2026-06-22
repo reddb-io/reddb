@@ -40,7 +40,7 @@ WHERE active = false
 #### **HTTP**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -60,7 +60,7 @@ grpcurl -plaintext \
     "collection": "users",
     "payloadJson": "{\"fields\":{\"name\":\"Alice\",\"email\":\"alice@example.com\",\"age\":30,\"active\":true}}"
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/CreateRow
+  127.0.0.1:55055 reddb.v1.RedDb/CreateRow
 ```
 
 #### **Rust (Embedded)**
@@ -105,7 +105,7 @@ SELECT * FROM users WHERE age BETWEEN 18 AND 65
 Via HTTP:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT name, email FROM users WHERE age > 21 ORDER BY name"}'
 ```
@@ -113,7 +113,7 @@ curl -X POST http://127.0.0.1:8080/query \
 ## Updating Rows
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
+curl -X PATCH http://127.0.0.1:5000/collections/users/entities/102 \
   -H 'content-type: application/json' \
   -d '{"fields": {"age": 31}}'
 ```
@@ -155,7 +155,7 @@ existing, non-null numeric field.
 ## Deleting Rows
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/users/entities/102
+curl -X DELETE http://127.0.0.1:5000/collections/users/entities/102
 ```
 
 Or via SQL:
@@ -210,7 +210,7 @@ vs Log Collections vs Time-Series.
 Insert many rows in a single request for better throughput:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/users/bulk/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/bulk/rows \
   -H 'content-type: application/json' \
   -d '[
     {"fields": {"name": "Bob", "email": "bob@example.com", "age": 25}},
@@ -224,7 +224,7 @@ curl -X POST http://127.0.0.1:8080/collections/users/bulk/rows \
 Paginate through all rows in a collection:
 
 ```bash
-curl "http://127.0.0.1:8080/collections/users/scan?offset=0&limit=50"
+curl "http://127.0.0.1:5000/collections/users/scan?offset=0&limit=50"
 ```
 
 If you prefer staying in SQL:

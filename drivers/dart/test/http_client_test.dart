@@ -11,7 +11,7 @@ void main() {
     test('query without params keeps legacy body shape', () async {
       late Map<String, Object?> body;
       final conn = HttpConn(
-        baseUrl: 'http://127.0.0.1:8080',
+        baseUrl: 'http://127.0.0.1:5000',
         client: MockClient((request) async {
           body = jsonDecode(request.body) as Map<String, Object?>;
           return http.Response.bytes(utf8.encode('{}'), 200);
@@ -25,7 +25,7 @@ void main() {
     test('query with params sends typed HTTP params', () async {
       late Map<String, Object?> body;
       final conn = HttpConn(
-        baseUrl: 'http://127.0.0.1:8080',
+        baseUrl: 'http://127.0.0.1:5000',
         client: MockClient((request) async {
           body = jsonDecode(request.body) as Map<String, Object?>;
           return http.Response.bytes(utf8.encode('{}'), 200);

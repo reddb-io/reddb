@@ -3,9 +3,9 @@
 # =============================================================================
 # This is the canonical "do it right" example. RedDB persists auth state in
 # encrypted reserved pages of the main `.rdb` file; the encryption key is
-# derived from REDDB_CERTIFICATE (64-char hex) or REDDB_VAULT_KEY (passphrase
-# fallback). Neither value is ever baked into the image — they are mounted
-# at runtime via Docker secrets and consumed via the *_FILE convention.
+# derived from REDDB_CERTIFICATE (64-char hex). The certificate can be passed
+# directly as REDDB_CERTIFICATE, but the production path is to mount it at
+# runtime via Docker secrets and consume it via REDDB_CERTIFICATE_FILE.
 #
 # -----------------------------------------------------------------------------
 # Bootstrap flow (one-time, per cluster):
@@ -41,7 +41,7 @@
 
 services:
   reddb:
-    image: reddb-benchmark/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
     container_name: reddb-vault
     user: "10001:10001"
     read_only: true
@@ -52,8 +52,9 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "55880:8080"
-      - "55551:50051"
+      - "5050:5050"
+      - "5000:5000"
+      - "55055:55055"
     volumes:
       - reddb-data:/data
     environment:
@@ -62,8 +63,11 @@ services:
       REDDB_STORAGE_PROFILE: embedded
       REDDB_STORAGE_PACKAGING: single-file
       REDDB_REPLICA_COUNT: "0"
-      # The entrypoint shim AND the binary both honour these *_FILE vars.
-      # The cert never appears as a process env variable — only the path does.
+      REDDB_TOPOLOGY: standalone
+      REDDB_NODE_ROLE: standalone
+      REDDB_VAULT: "true"
+      # The binary honours these *_FILE vars during boot.
+      # The cert never gets baked into the image — only the path is configured.
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
       # Optional first-start bootstrap. If you uncomment these, also set
       # REDDB_PRESET=production and capture the newly-issued certificate
@@ -88,17 +92,8 @@ services:
       #   uid: "10001"
       #   gid: "10001"
       #   mode: 0400
-    command:
-      - "server"
-      - "--vault"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "--max-time", "2", "http://127.0.0.1:8080/health/live"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
       timeout: 3s
       retries: 3

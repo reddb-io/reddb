@@ -22,7 +22,7 @@ import reddb
 
 db = reddb.connect("memory://")
 # or:  reddb.connect("file:///var/lib/reddb/data.rdb")
-# or:  reddb.connect("grpc://localhost:50051")
+# or:  reddb.connect("grpc://localhost:55055")
 
 db.insert("users", {"name": "Alice", "age": 30})
 db.bulk_insert("users", [{"name": "Bob"}, {"name": "Carol"}])

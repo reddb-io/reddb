@@ -6,10 +6,12 @@ services:
     image: floci/floci:latest
     container_name: reddb-floci-pitr
     ports:
-      - "55468:4566"
+      - "55486:4566"
+    environment:
+      FLOCI_HOSTNAME: floci
 
   floci-init:
-    image: amazon/aws-cli:2
+    image: amazon/aws-cli:latest
     container_name: reddb-floci-pitr-init
     depends_on:
       - floci
@@ -38,22 +40,15 @@ services:
       floci-init:
         condition: service_completed_successfully
     ports:
-      - "55571:50051"
-      - "55900:8080"
+      - "5070:5050"
+      - "55071:55055"
+      - "5020:5000"
     volumes:
       - pitr-primary-data:/data
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--role"
-      - "primary"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     environment:
       RUST_LOG: info
+      REDDB_TOPOLOGY: primary-replica
+      REDDB_NODE_ROLE: primary
       REDDB_STORAGE_PRESET: primary-replica-wal-retention
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
@@ -66,23 +61,13 @@ services:
       RED_S3_ACCESS_KEY: test
       RED_S3_SECRET_KEY: test
       RED_S3_PATH_STYLE: "true"
-      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
-    secrets:
-      - source: reddb_certificate
-        target: reddb_certificate
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
+      REDDB_VAULT: "false"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 10s
-
-secrets:
-  reddb_certificate:
-    external: true
 
 volumes:
   pitr-primary-data:

@@ -37,7 +37,7 @@ resolution.
 Counts the number of connections for each node.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "degree"}'
 ```
@@ -49,7 +49,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
 Measures how close a node is to all other nodes (inverse of average shortest path).
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "closeness"}'
 ```
@@ -61,7 +61,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
 Measures how often a node lies on the shortest path between other pairs of nodes.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "betweenness"}'
 ```
@@ -73,7 +73,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
 Measures influence based on the importance of a node's neighbors (a node is important if its neighbors are important).
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "eigenvector"}'
 ```
@@ -85,7 +85,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
 Google's PageRank algorithm. Similar to eigenvector centrality but with damping factor.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "pagerank"}'
 ```
@@ -97,7 +97,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
 Run PageRank biased toward a specific source node:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/pagerank/personalized \
+curl -X POST http://127.0.0.1:5000/graph/analytics/pagerank/personalized \
   -H 'content-type: application/json' \
   -d '{"source": "alice"}'
 ```
@@ -107,7 +107,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/pagerank/personalized \
 Computes hub and authority scores:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/hits \
+curl -X POST http://127.0.0.1:5000/graph/analytics/hits \
   -H 'content-type: application/json' \
   -d '{}'
 ```

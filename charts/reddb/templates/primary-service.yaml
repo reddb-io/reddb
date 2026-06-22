@@ -15,6 +15,14 @@ metadata:
 spec:
   type: {{ .Values.primary.service.type }}
   ports:
+    - name: wire
+      port: {{ .Values.primary.service.wirePort }}
+      targetPort: wire
+      protocol: TCP
+      appProtocol: tcp
+      {{- if and (eq .Values.primary.service.type "NodePort") (.Values.primary.service.wireNodePort) }}
+      nodePort: {{ .Values.primary.service.wireNodePort }}
+      {{- end }}
     - name: grpc
       port: {{ .Values.primary.service.grpcPort }}
       targetPort: grpc
@@ -67,23 +75,27 @@ spec:
   clusterIP: None
   publishNotReadyAddresses: true
   ports:
+    - name: wire
+      port: {{ .Values.primary.service.wirePort }}
+      targetPort: wire
+      protocol: TCP
     - name: grpc
-      port: 50051
+      port: {{ .Values.primary.service.grpcPort }}
       targetPort: grpc
       protocol: TCP
     {{- if .Values.grpc.tls.enabled }}
     - name: grpc-tls
-      port: 50052
+      port: {{ .Values.primary.service.grpcTlsPort }}
       targetPort: grpc-tls
       protocol: TCP
     {{- end }}
     - name: http
-      port: 8080
+      port: {{ .Values.primary.service.httpPort }}
       targetPort: http
       protocol: TCP
     {{- if .Values.http.tls.enabled }}
     - name: https
-      port: 8443
+      port: {{ .Values.primary.service.httpTlsPort }}
       targetPort: https
       protocol: TCP
     {{- end }}

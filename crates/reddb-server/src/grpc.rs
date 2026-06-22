@@ -119,7 +119,7 @@ impl GrpcTlsOptions {
 impl Default for GrpcServerOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:5555".to_string(),
+            bind_addr: "127.0.0.1:55055".to_string(),
             tls: None,
         }
     }
@@ -161,7 +161,7 @@ impl RedDBGrpcServer {
                     "vault requires a paged database (persistent mode)".into(),
                 )
             })?;
-            let store = AuthStore::with_vault(db_options.auth.clone(), pager, None)
+            let store = AuthStore::with_vault(db_options.auth.clone(), pager)
                 .map_err(|e| crate::api::RedDBError::Internal(e.to_string()))?;
             Arc::new(store)
         } else {
@@ -659,6 +659,78 @@ mod grpc_query_value_tests {
         assert!(!reply.result_json.contains("Bob"), "{}", reply.result_json);
     }
 
+    #[tokio::test]
+    async fn pull_wal_records_rejects_stale_term_on_grpc_path() {
+        let runtime = RedDBRuntime::with_options(
+            crate::api::RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary().with_term(6)),
+        )
+        .expect("runtime");
+        let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..crate::auth::AuthConfig::default()
+        }));
+        let bootstrap = auth_store
+            .bootstrap("replica", "secret")
+            .expect("bootstrap");
+        let policy = crate::auth::policies::Policy::from_json_str(
+            r#"{
+                "id": "replication-stream",
+                "version": 1,
+                "statements": [{
+                    "effect": "allow",
+                    "actions": ["cluster:replication:stream"],
+                    "resources": ["cluster:replication"]
+                }]
+            }"#,
+        )
+        .expect("policy");
+        auth_store.put_policy(policy).expect("install policy");
+        auth_store
+            .attach_policy(
+                crate::auth::store::PrincipalRef::User(crate::auth::UserId::platform("replica")),
+                "replication-stream",
+            )
+            .expect("attach policy");
+        let service = GrpcRuntime {
+            runtime,
+            auth_store,
+            prepared_registry: PreparedStatementRegistry::new(),
+            oauth_validator: None,
+        };
+
+        let open = reddb_wire::replication::WalStreamOpen {
+            since_lsn: 0,
+            max_count: 1,
+            replica_id: Some("replica-a".to_string()),
+            term: 5,
+            await_data: false,
+            await_timeout_ms: 1,
+        };
+        let mut request = Request::new(JsonPayloadRequest {
+            payload_json: String::from_utf8(open.encode_json()).expect("json"),
+        });
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", bootstrap.api_key.key)
+                .parse()
+                .expect("metadata"),
+        );
+
+        let err = RedDb::pull_wal_records(&service, request)
+            .await
+            .expect_err("stale term should be fenced");
+
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message().contains("stale")
+                || err.message().contains("fenced")
+                || err.message().contains("current term"),
+            "unexpected stale-term error: {err:?}"
+        );
+    }
+
     fn seed_grpc_param_table(runtime: &RedDBRuntime) {
         runtime
             .execute_query("CREATE TABLE p (id INTEGER, name TEXT)")
@@ -882,6 +954,52 @@ mod grpc_ask_query_reply_tests {
         assert!(
             json.get("answer").is_none(),
             "non-ASK must not use ASK envelope"
+        );
+    }
+
+    #[test]
+    fn query_reply_non_ask_json_column_preserves_object() {
+        let mut result = UnifiedResult::with_columns(vec!["value".into()]);
+        let mut record = UnifiedRecord::new();
+        record.set(
+            "value",
+            SchemaValue::Json(br#"{"alpha":"A","nested":{"leaf":12}}"#.to_vec()),
+        );
+        result.push(record);
+
+        let reply = query_reply(
+            RuntimeQueryResult {
+                query: "LIST KV proj AS JSON".to_string(),
+                mode: QueryMode::Sql,
+                statement: "kv_list_json",
+                engine: "kv",
+                result,
+                affected_rows: 0,
+                statement_type: "select",
+                bookmark: None,
+            },
+            &None,
+            &None,
+        );
+        let json: crate::json::Value =
+            crate::json::from_str(&reply.result_json).expect("valid query json");
+        let value = json
+            .get("records")
+            .and_then(crate::json::Value::as_array)
+            .and_then(|records| records.first())
+            .and_then(|record| record.get("value"))
+            .expect("value column");
+
+        assert_eq!(
+            value.get("alpha").and_then(crate::json::Value::as_str),
+            Some("A")
+        );
+        assert_eq!(
+            value
+                .get("nested")
+                .and_then(|nested| nested.get("leaf"))
+                .and_then(crate::json::Value::as_f64),
+            Some(12.0)
         );
     }
 }

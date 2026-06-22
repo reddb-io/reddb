@@ -72,7 +72,7 @@ test "red:// proto=pg picks default port 5432" {
     try t.expectEqual(url.Kind.pg, p.kind);
 }
 
-test "red:// proto=grpcs uses 5056 default" {
+test "red:// proto=grpcs uses 55555 default" {
     var p = try url.parse(t.allocator, "red://h?proto=grpcs");
     defer p.deinit(t.allocator);
     try t.expectEqual(url.Kind.grpcs, p.kind);
@@ -125,21 +125,21 @@ test "grpcs:// legacy parses" {
     var p = try url.parse(t.allocator, "grpcs://h");
     defer p.deinit(t.allocator);
     try t.expectEqual(url.Kind.grpcs, p.kind);
-    try t.expectEqual(@as(u16, 5056), p.port.?);
+    try t.expectEqual(@as(u16, 55555), p.port.?);
 }
 
 test "http:// parses host and port" {
-    var p = try url.parse(t.allocator, "http://h:8080");
+    var p = try url.parse(t.allocator, "http://h:5000");
     defer p.deinit(t.allocator);
     try t.expectEqual(url.Kind.http, p.kind);
-    try t.expectEqual(@as(u16, 8080), p.port.?);
+    try t.expectEqual(@as(u16, 5000), p.port.?);
 }
 
-test "https:// default port 8443" {
+test "https:// default port 55555" {
     var p = try url.parse(t.allocator, "https://h");
     defer p.deinit(t.allocator);
     try t.expectEqual(url.Kind.https, p.kind);
-    try t.expectEqual(@as(u16, 8443), p.port.?);
+    try t.expectEqual(@as(u16, 55555), p.port.?);
 }
 
 test "unknown scheme errors" {

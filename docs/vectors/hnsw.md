@@ -72,7 +72,7 @@ lands.
 HTTP clients can use the typed JSON endpoint instead of SQL text:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/embeddings/similar \
+curl -X POST http://127.0.0.1:5000/collections/embeddings/similar \
   -H 'content-type: application/json' \
   -d '{
     "vector": [0.12, 0.91, 0.44],

@@ -72,7 +72,7 @@ await test('uriToArgs file:///abs', async () => {
 
 await test('uriToArgs grpc:// rejects with EMBEDDED_ONLY', async () => {
   try {
-    uriToArgs('grpc://localhost:50051')
+    uriToArgs('grpc://localhost:55055')
     throw new Error('expected throw')
   } catch (err) {
     assert(err instanceof RedDBError, 'expected RedDBError')

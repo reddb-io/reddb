@@ -16,7 +16,7 @@ REPLICA_HTTP_URL="${REDDB_TEST_REPLICA_HTTP_URL:-}"
 REPLICA_GRPC_ADDR="${REDDB_TEST_REPLICA_GRPC_ADDR:-}"
 SECONDARY_REPLICA_HTTP_URL="${REDDB_TEST_SECONDARY_REPLICA_HTTP_URL:-}"
 SECONDARY_REPLICA_GRPC_ADDR="${REDDB_TEST_SECONDARY_REPLICA_GRPC_ADDR:-}"
-MINIO_URL="${REDDB_TEST_MINIO_URL:-}"
+FLOCI_URL="${REDDB_TEST_FLOCI_URL:-}"
 HEALTH_URLS=()
 
 usage() {
@@ -105,56 +105,56 @@ configure_profile() {
     case "${PROFILE}" in
         min)
             COMPOSE_FILE="${TEST_COMPOSE_DIR}/min.yml"
-            PRIMARY_HTTP_URL="http://127.0.0.1:8080"
-            PRIMARY_GRPC_ADDR="127.0.0.1:50051"
+            PRIMARY_HTTP_URL="http://127.0.0.1:5000"
+            PRIMARY_GRPC_ADDR="127.0.0.1:55055"
             HEALTH_URLS=("server|${PRIMARY_HTTP_URL}/health")
             ;;
         replica)
             COMPOSE_FILE="${TEST_COMPOSE_DIR}/replica.yml"
-            PRIMARY_HTTP_URL="http://127.0.0.1:8080"
-            PRIMARY_GRPC_ADDR="127.0.0.1:50051"
-            REPLICA_HTTP_URL="http://127.0.0.1:8081"
-            REPLICA_GRPC_ADDR="127.0.0.1:50052"
+            PRIMARY_HTTP_URL="http://127.0.0.1:5000"
+            PRIMARY_GRPC_ADDR="127.0.0.1:55055"
+            REPLICA_HTTP_URL="http://127.0.0.1:5001"
+            REPLICA_GRPC_ADDR="127.0.0.1:55056"
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health" "replica|${REPLICA_HTTP_URL}/health")
             ;;
         full)
             COMPOSE_FILE="${TEST_COMPOSE_DIR}/full.yml"
-            PRIMARY_HTTP_URL="http://127.0.0.1:8080"
-            PRIMARY_GRPC_ADDR="127.0.0.1:50051"
-            REPLICA_HTTP_URL="http://127.0.0.1:8081"
-            REPLICA_GRPC_ADDR="127.0.0.1:50052"
-            SECONDARY_REPLICA_HTTP_URL="http://127.0.0.1:8082"
-            SECONDARY_REPLICA_GRPC_ADDR="127.0.0.1:50053"
+            PRIMARY_HTTP_URL="http://127.0.0.1:5000"
+            PRIMARY_GRPC_ADDR="127.0.0.1:55055"
+            REPLICA_HTTP_URL="http://127.0.0.1:5001"
+            REPLICA_GRPC_ADDR="127.0.0.1:55056"
+            SECONDARY_REPLICA_HTTP_URL="http://127.0.0.1:5002"
+            SECONDARY_REPLICA_GRPC_ADDR="127.0.0.1:55057"
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health" "replica-1|${REPLICA_HTTP_URL}/health" "replica-2|${SECONDARY_REPLICA_HTTP_URL}/health")
             ;;
         remote)
             COMPOSE_FILE="${TEST_COMPOSE_DIR}/remote.yml"
-            PRIMARY_HTTP_URL="http://127.0.0.1:8080"
-            PRIMARY_GRPC_ADDR="127.0.0.1:50051"
-            REPLICA_HTTP_URL="http://127.0.0.1:8081"
-            REPLICA_GRPC_ADDR="127.0.0.1:50052"
-            MINIO_URL="http://127.0.0.1:9000"
+            PRIMARY_HTTP_URL="http://127.0.0.1:5000"
+            PRIMARY_GRPC_ADDR="127.0.0.1:55055"
+            REPLICA_HTTP_URL="http://127.0.0.1:5001"
+            REPLICA_GRPC_ADDR="127.0.0.1:55056"
+            FLOCI_URL="http://127.0.0.1:55466"
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health" "replica|${REPLICA_HTTP_URL}/health")
             ;;
         backup)
             COMPOSE_FILE="${TEST_COMPOSE_DIR}/backup.yml"
-            PRIMARY_HTTP_URL="http://127.0.0.1:8090"
-            PRIMARY_GRPC_ADDR="127.0.0.1:50061"
-            MINIO_URL="http://127.0.0.1:9010"
+            PRIMARY_HTTP_URL="http://127.0.0.1:5010"
+            PRIMARY_GRPC_ADDR="127.0.0.1:55061"
+            FLOCI_URL="http://127.0.0.1:55476"
             HEALTH_URLS=("server|${PRIMARY_HTTP_URL}/health")
             ;;
         pitr)
             COMPOSE_FILE="${TEST_COMPOSE_DIR}/pitr.yml"
-            PRIMARY_HTTP_URL="http://127.0.0.1:8100"
-            PRIMARY_GRPC_ADDR="127.0.0.1:50071"
-            MINIO_URL="http://127.0.0.1:9020"
+            PRIMARY_HTTP_URL="http://127.0.0.1:5020"
+            PRIMARY_GRPC_ADDR="127.0.0.1:55071"
+            FLOCI_URL="http://127.0.0.1:55486"
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health")
             ;;
         serverless)
             COMPOSE_FILE="${TEST_COMPOSE_DIR}/serverless.yml"
-            PRIMARY_HTTP_URL="http://127.0.0.1:8110"
-            PRIMARY_GRPC_ADDR="127.0.0.1:50081"
-            MINIO_URL="http://127.0.0.1:9030"
+            PRIMARY_HTTP_URL="http://127.0.0.1:5030"
+            PRIMARY_GRPC_ADDR="127.0.0.1:55081"
+            FLOCI_URL="http://127.0.0.1:55496"
             HEALTH_URLS=("serverless|${PRIMARY_HTTP_URL}/health")
             ;;
         -h|--help|help)
@@ -201,7 +201,7 @@ export_test_env() {
     export REDDB_TEST_REPLICA_GRPC_ADDR="${REPLICA_GRPC_ADDR}"
     export REDDB_TEST_SECONDARY_REPLICA_HTTP_URL="${SECONDARY_REPLICA_HTTP_URL}"
     export REDDB_TEST_SECONDARY_REPLICA_GRPC_ADDR="${SECONDARY_REPLICA_GRPC_ADDR}"
-    export REDDB_TEST_MINIO_URL="${MINIO_URL}"
+    export REDDB_TEST_FLOCI_URL="${FLOCI_URL}"
 }
 
 run_shell_checks() {
@@ -241,8 +241,8 @@ run_shell_checks() {
             ;;
     esac
 
-    if [ -n "${MINIO_URL}" ]; then
-        assert_http_status_one_of GET "${MINIO_URL}/minio/health/live" "200 403"
+    if [ -n "${FLOCI_URL}" ]; then
+        assert_http_status_one_of GET "${FLOCI_URL}/_localstack/health" "200"
     fi
 }
 

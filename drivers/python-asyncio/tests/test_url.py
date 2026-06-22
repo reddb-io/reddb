@@ -31,13 +31,13 @@ def test_reds_tls_default_port():
 def test_http_default_port():
     p = parse_uri("http://api.example.com")
     assert p.kind == "http"
-    assert p.port == 8080
+    assert p.port == 5000
 
 
 def test_https_default_port():
     p = parse_uri("https://api.example.com")
     assert p.kind == "https"
-    assert p.port == 8443
+    assert p.port == 55555
 
 
 def test_user_pass_decoding():
@@ -124,8 +124,8 @@ def test_empty_uri():
 
 def test_default_port_for_aliases():
     assert default_port_for("redwire") == 5050
-    assert default_port_for("http") == 8080
-    assert default_port_for("https") == 8443
+    assert default_port_for("http") == 5000
+    assert default_port_for("https") == 55555
     assert default_port_for("nonsense") == 5050
 
 

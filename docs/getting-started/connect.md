@@ -46,19 +46,19 @@ Start an HTTP server:
 
 ```bash
 mkdir -p ./data
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+red server --http --path ./data/reddb.rdb --bind 127.0.0.1:5000
 ```
 
 Check health:
 
 ```bash
-curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:5000/health
 ```
 
 Write a row:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
+curl -X POST http://127.0.0.1:5000/collections/hosts/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {
@@ -72,7 +72,7 @@ curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
 Run a query:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
@@ -80,7 +80,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Universal query:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"FROM ANY ORDER BY _score DESC LIMIT 10"}'
 ```
@@ -91,25 +91,25 @@ Start a gRPC server:
 
 ```bash
 mkdir -p ./data
-red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:55055
 ```
 
 Open the REPL:
 
 ```bash
-red connect 127.0.0.1:50051
+red connect 127.0.0.1:55055
 ```
 
 Run a single query and exit:
 
 ```bash
-red connect --query "SELECT * FROM hosts" 127.0.0.1:50051
+red connect --query "SELECT * FROM hosts" 127.0.0.1:55055
 ```
 
 Pass an auth token:
 
 ```bash
-red connect --token "$REDDB_TOKEN" 127.0.0.1:50051
+red connect --token "$REDDB_TOKEN" 127.0.0.1:55055
 ```
 
 ## Connect Over Wire
@@ -136,19 +136,19 @@ You can run the same flows through the npm package.
 Start HTTP:
 
 ```bash
-npx @reddb-io/cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:5000
 ```
 
 Start gRPC:
 
 ```bash
-npx @reddb-io/cli@latest server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+npx @reddb-io/cli@latest server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:55055
 ```
 
 Open the REPL through the wrapper:
 
 ```bash
-npx @reddb-io/cli@latest connect 127.0.0.1:50051
+npx @reddb-io/cli@latest connect 127.0.0.1:55055
 ```
 
 ## Connect Through the Local `red` Binary

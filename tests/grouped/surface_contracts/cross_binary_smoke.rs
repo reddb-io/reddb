@@ -153,7 +153,7 @@ fn boot_red_wire(port: u16, data_path: &Path) -> Result<ServerHandle, String> {
     let bind = format!("127.0.0.1:{port}");
     // The server boots a default-port gRPC listener even when only
     // --wire-bind is requested. Pin it to a free port so parallel
-    // smoke tests don't collide on 5055.
+    // smoke tests don't collide on 55055.
     let grpc_port = pick_port();
     let grpc_bind = format!("127.0.0.1:{grpc_port}");
     let mut cmd = Command::new(red_binary());

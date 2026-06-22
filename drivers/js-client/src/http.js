@@ -42,7 +42,7 @@ import { classifyNdjsonFrame, splitLines } from './core/ndjson.js'
 export class HttpRpcClient {
   /**
    * @param {object} opts
-   * @param {string} opts.baseUrl   Server origin, e.g. 'https://reddb.example.com:8443'
+   * @param {string} opts.baseUrl   Server origin, e.g. 'https://reddb.example.com:55555'
    * @param {string} [opts.token]   Bearer token / API key
    */
   constructor({ baseUrl, token }) {

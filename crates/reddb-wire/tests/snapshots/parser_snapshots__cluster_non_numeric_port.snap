@@ -1,7 +1,7 @@
 ---
 source: crates/reddb-wire/tests/parser_snapshots.rs
-expression: "fmt_parse_error(\"grpc://a:nope,b:5055\")"
+expression: "fmt_parse_error(\"grpc://a:nope,b:55055\")"
 ---
-input: "grpc://a:nope,b:5055"
+input: "grpc://a:nope,b:55055"
 kind:  InvalidUri
 error: INVALID_URI: invalid port in cluster URI: a:nope

@@ -16,7 +16,7 @@ flowchart LR
 ## 1. Start RedDB
 
 ```bash
-red server --http --path ./data/search.rdb --bind 127.0.0.1:8080
+red server --http --path ./data/search.rdb --bind 127.0.0.1:5000
 ```
 
 ## 2. Index Documents
@@ -25,7 +25,7 @@ For each document, generate an embedding (using OpenAI, Cohere, or any embedding
 
 ```bash
 # Document 1
-curl -X POST http://127.0.0.1:8080/collections/articles/vectors \
+curl -X POST http://127.0.0.1:5000/collections/articles/vectors \
   -H 'content-type: application/json' \
   -d '{
     "dense": [0.12, 0.45, 0.78, 0.23, 0.56, 0.89, 0.34, 0.67],
@@ -34,7 +34,7 @@ curl -X POST http://127.0.0.1:8080/collections/articles/vectors \
   }'
 
 # Document 2
-curl -X POST http://127.0.0.1:8080/collections/articles/vectors \
+curl -X POST http://127.0.0.1:5000/collections/articles/vectors \
   -H 'content-type: application/json' \
   -d '{
     "dense": [0.91, 0.23, 0.56, 0.78, 0.12, 0.45, 0.89, 0.34],
@@ -48,7 +48,7 @@ curl -X POST http://127.0.0.1:8080/collections/articles/vectors \
 For production, use bulk insert:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/articles/bulk/vectors \
+curl -X POST http://127.0.0.1:5000/collections/articles/bulk/vectors \
   -H 'content-type: application/json' \
   -d '[
     {"dense": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], "content": "Doc 1", "metadata": {"cat": "a"}},
@@ -61,7 +61,7 @@ curl -X POST http://127.0.0.1:8080/collections/articles/bulk/vectors \
 Generate an embedding for the user's query and search:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/articles/similar \
+curl -X POST http://127.0.0.1:5000/collections/articles/similar \
   -H 'content-type: application/json' \
   -d '{
     "vector": [0.15, 0.42, 0.75, 0.20, 0.58, 0.85, 0.30, 0.65],
@@ -81,7 +81,7 @@ VECTOR SEARCH articles SIMILAR TO 'machine learning and neural networks' LIMIT 5
 Combine vector similarity with text matching:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/hybrid/search \
+curl -X POST http://127.0.0.1:5000/hybrid/search \
   -H 'content-type: application/json' \
   -d '{
     "collections": ["articles"],
@@ -96,7 +96,7 @@ curl -X POST http://127.0.0.1:8080/hybrid/search \
 When you don't have an embedding model available:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/text/search \
+curl -X POST http://127.0.0.1:5000/text/search \
   -H 'content-type: application/json' \
   -d '{
     "query": "database indexing performance",

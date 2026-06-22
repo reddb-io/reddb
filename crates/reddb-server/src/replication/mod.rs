@@ -17,7 +17,7 @@
 //!
 //! // Replica
 //! let options = RedDBOptions::persistent("./replica-data")
-//!     .with_replication(ReplicationConfig::replica("http://primary:50051"));
+//!     .with_replication(ReplicationConfig::replica("http://primary:55055"));
 //! ```
 
 pub mod bookmark;
@@ -63,8 +63,8 @@ pub use failover::{
     FailoverRequest, FailoverTransport, NodeRole, RoleAssignment,
 };
 pub use fence::{
-    FenceBoundary, FenceVerdict, FileTermStore, MemoryTermStore, StaleTermFenced, TermFence,
-    TermStore, TermStoreError,
+    term_is_stale, FenceBoundary, FenceVerdict, FileTermStore, MemoryTermStore, StaleTermFenced,
+    StaleTermRejection, StreamHandshake, TermFence, TermStore, TermStoreError,
 };
 pub use flow_control::{Admission, FlowController};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
@@ -94,7 +94,7 @@ pub enum ReplicationRole {
     Primary,
     /// Replica: read-only, receives WAL from primary.
     Replica {
-        /// gRPC address of the primary (e.g., "http://primary:50051")
+        /// gRPC address of the primary (e.g., "http://primary:55055")
         primary_addr: String,
     },
 }

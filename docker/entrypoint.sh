@@ -4,11 +4,11 @@
 # Why this exists:
 #   RedDB persists auth state in the encrypted vault region of the main
 #   .rdb file. The encryption key is derived from REDDB_CERTIFICATE
-#   (primary) or REDDB_VAULT_KEY (passphrase fallback). NEITHER value
-#   should be baked into the image, the layer cache, or the env of an
-#   audited running process. The recommended pattern is to mount the
-#   secret as a file (Docker/Swarm secret, k8s Secret volume, AWS
-#   Secrets Manager via efs-csi, etc.) and pass its PATH via *_FILE.
+#   (or REDDB_CERTIFICATE_FILE after expansion). It should not be baked
+#   into the image, the layer cache, or audited runtime env dumps. The
+#   recommended pattern is to mount the secret as a file (Docker/Swarm
+#   secret, k8s Secret volume, AWS Secrets Manager via efs-csi, etc.)
+#   and pass its PATH via *_FILE.
 #
 # What this does:
 #   For each known secret env var:
@@ -64,10 +64,8 @@ _load_secret() {
     fi
 }
 
-# Order matters: certificate first (primary path), then passphrase
-# fallback, then admin bootstrap creds, then root token.
+# Order matters: certificate first, then admin bootstrap creds, then root token.
 _load_secret REDDB_CERTIFICATE
-_load_secret REDDB_VAULT_KEY
 _load_secret REDDB_USERNAME
 _load_secret REDDB_PASSWORD
 _load_secret REDDB_ROOT_TOKEN

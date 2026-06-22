@@ -20,7 +20,7 @@ mod support;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reddb::ai::grpc_embeddings;
@@ -37,16 +37,14 @@ use reddb::{RedDBResult, RedDBRuntime};
 /// Shared serial lock for the process-global backend slot — every test
 /// that installs a backend must take this before swapping the slot.
 fn backend_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    super::support::backend_lock()
 }
 
 /// Serial lock for env var mutations — `VECTOR SEARCH SIMILAR TO
 /// '<text>'` resolves the provider from `REDDB_AI_PROVIDER`, so the
 /// test must own those vars exclusively while it runs.
 fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    super::support::env_lock()
 }
 
 struct EnvGuard {

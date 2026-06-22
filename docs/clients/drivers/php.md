@@ -36,7 +36,7 @@ $rows = json_decode(
 $conn->close();
 
 // HTTPS with auto /auth/login
-$conn = Reddb::connect('https://reddb.example.com:8443', [
+$conn = Reddb::connect('https://reddb.example.com:55555', [
     'username' => 'alice',
     'password' => 's3cret',
 ]);
@@ -48,8 +48,8 @@ $conn = Reddb::connect('https://reddb.example.com:8443', [
 |-------------------------------------------|----------------|------------------------------------------------|
 | `red://host:5050`                         | RedWire TCP    | Default port `5050`.                           |
 | `reds://host:5050`                        | RedWire + TLS  | ALPN `redwire/1` injected automatically.       |
-| `http://host:8080`                        | HTTP REST      |                                                |
-| `https://host:8443`                       | HTTPS REST     |                                                |
+| `http://host:5000`                        | HTTP REST      |                                                |
+| `https://host:55555`                       | HTTPS REST     |                                                |
 | `red://`, `red://memory`, `red:///path`   | embedded       | Throws `EmbeddedUnsupported` — remote-only.   |
 
 `username`, `password`, `token`, and `apiKey` may ride in the URI or in the `$opts` array. The array wins on collision.

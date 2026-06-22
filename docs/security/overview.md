@@ -39,7 +39,7 @@ Production-style first boot can use all three explicitly, or use
 which enables them unless `--no-auth` is set.
 
 ```bash
-red server --http --path ./data/reddb.rdb --auth --require-auth --vault --bind 0.0.0.0:8080
+red server --http --path ./data/reddb.rdb --vault --bind 0.0.0.0:5000
 ```
 
 The first-boot presets are `simple` (default, creates nothing), `production`
@@ -55,7 +55,7 @@ per-preset behavior and credential flags.
 When no users exist, bootstrap the first admin:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/auth/bootstrap \
+curl -X POST http://127.0.0.1:5000/auth/bootstrap \
   -H 'content-type: application/json' \
   -d '{"username": "admin", "password": "changeme"}'
 ```

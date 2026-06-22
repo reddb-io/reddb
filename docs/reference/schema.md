@@ -7,7 +7,7 @@ RedDB supports both schema-free and schema-defined collections.
 By default, collections accept any fields on insert. Types are inferred from the JSON input:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/users/rows \
+curl -X POST http://127.0.0.1:5000/collections/users/rows \
   -H 'content-type: application/json' \
   -d '{"fields": {"name": "Alice", "age": 30, "active": true}}'
 ```
@@ -43,7 +43,7 @@ Each column has:
 ```bash
 grpcurl -plaintext \
   -d '{"collection": "users"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/DescribeCollection
+  127.0.0.1:55055 reddb.v1.RedDb/DescribeCollection
 ```
 
 ## Schema Registry

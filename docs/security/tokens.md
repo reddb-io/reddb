@@ -27,7 +27,7 @@ API keys are persistent credentials tied to a user and role. They don't expire u
 red auth create-api-key alice --name "ci-token" --role write
 
 # Via HTTP
-curl -X POST http://127.0.0.1:8080/auth/api-keys \
+curl -X POST http://127.0.0.1:5000/auth/api-keys \
   -H 'content-type: application/json' \
   -H 'Authorization: Bearer <admin-token>' \
   -d '{"username": "alice", "name": "ci-token", "role": "write"}'
@@ -51,7 +51,7 @@ Response:
 ### Using an API Key
 
 ```bash
-curl http://127.0.0.1:8080/collections/users/scan \
+curl http://127.0.0.1:5000/collections/users/scan \
   -H 'Authorization: Bearer rdb_k_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
 ```
 
@@ -61,7 +61,7 @@ curl http://127.0.0.1:8080/collections/users/scan \
 grpcurl -plaintext \
   -H 'Authorization: Bearer <admin-token>' \
   -d '{"payloadJson": "{\"key\":\"rdb_k_xxxx\"}"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/AuthRevokeApiKey
+  127.0.0.1:55055 reddb.v1.RedDb/AuthRevokeApiKey
 ```
 
 ## Session Tokens
@@ -75,7 +75,7 @@ Session tokens are obtained by logging in and expire after the session ends.
 red auth login alice --password secret
 
 # Via HTTP
-curl -X POST http://127.0.0.1:8080/auth/login \
+curl -X POST http://127.0.0.1:5000/auth/login \
   -H 'content-type: application/json' \
   -d '{"username": "alice", "password": "secret"}'
 ```
@@ -94,7 +94,7 @@ Response:
 ### Using a Session Token
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'Authorization: Bearer rdb_s_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT * FROM users"}'
@@ -156,7 +156,7 @@ transport that already understands `Authorization: Bearer …`
 (HTTP, gRPC, RedWire) accepts JWTs without further config.
 
 ```bash
-curl http://reddb:8080/collections/users/scan \
+curl http://reddb:5000/collections/users/scan \
   -H "Authorization: Bearer ${OIDC_JWT}"
 ```
 
@@ -189,7 +189,7 @@ BODY='{"query":"SELECT 1"}'
 BODY_HASH=$(printf '%s' "$BODY" | openssl dgst -sha256 -binary | base64)
 CANONICAL="POST\n/query\n$TS\n$NONCE\n$BODY_HASH"
 SIG=$(printf "$CANONICAL" | openssl dgst -sha256 -hmac "$SECRET" -binary | base64)
-curl -X POST https://reddb:8443/query \
+curl -X POST https://reddb:55555/query \
   -H "X-RedDB-Key-Id: $KEY_ID" \
   -H "X-RedDB-Timestamp: $TS" \
   -H "X-RedDB-Nonce: $NONCE" \

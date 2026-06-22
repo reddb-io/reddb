@@ -144,12 +144,12 @@ Recommended naming:
 Create users through the auth surface, then attach policies:
 
 ```bash
-curl -sX POST http://127.0.0.1:8080/auth/users \
+curl -sX POST http://127.0.0.1:5000/auth/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"username":"svc_ingest","password":"...","role":"write"}'
 
-curl -sX PUT http://127.0.0.1:8080/admin/users/svc_ingest/policies/ingest-orders \
+curl -sX PUT http://127.0.0.1:5000/admin/users/svc_ingest/policies/ingest-orders \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 

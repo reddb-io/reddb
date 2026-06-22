@@ -3094,6 +3094,28 @@ impl RedDb for GrpcRuntime {
             request.into_inner().payload_json.as_bytes(),
         )
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let handshake = crate::replication::StreamHandshake::new(
+            open.replica_id.as_deref().unwrap_or("<anonymous>"),
+            open.term,
+        );
+        let fence = crate::replication::TermFence::new(
+            crate::replication::MemoryTermStore::seeded(self.runtime.current_replication_term()),
+        );
+        match fence
+            .admit_stream_handshake(&handshake)
+            .map_err(|err| Status::internal(err.to_string()))?
+        {
+            crate::replication::FenceVerdict::Fenced(err) => {
+                return Err(Status::failed_precondition(err.to_string()));
+            }
+            crate::replication::FenceVerdict::Adopt { new_term } => {
+                return Err(Status::failed_precondition(format!(
+                    "replication stream term {new_term} is ahead of primary term {}",
+                    self.runtime.current_replication_term()
+                )));
+            }
+            crate::replication::FenceVerdict::Admit { .. } => {}
+        }
         let mut since_lsn = open.since_lsn;
         let max_count = open.max_count;
         let await_data = open.await_data;

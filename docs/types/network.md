@@ -91,7 +91,7 @@ CREATE TABLE network_inventory (
 ```
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/network_inventory/rows \
+curl -X POST http://127.0.0.1:5000/collections/network_inventory/rows \
   -H 'content-type: application/json' \
   -d '{
     "fields": {

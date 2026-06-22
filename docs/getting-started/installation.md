@@ -73,7 +73,7 @@ npx @reddb-io/cli@latest version
 Start an HTTP server through `npx`:
 
 ```bash
-npx @reddb-io/cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:5000
 ```
 
 If you use `pnpm`:
@@ -208,18 +208,18 @@ Run HTTP:
 
 ```bash
 docker run --rm -it \
-  -p 55880:8080 \
+  -p 5000:5000 \
   -v $(pwd)/data:/data \
-  reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
+  reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:5000
 ```
 
 Run gRPC:
 
 ```bash
 docker run --rm -it \
-  -p 55551:50051 \
+  -p 55055:55055 \
   -v $(pwd)/data:/data \
-  reddb red server --grpc --path /data/reddb.rdb --bind 0.0.0.0:50051
+  reddb red server --grpc --path /data/reddb.rdb --bind 0.0.0.0:55055
 ```
 
 ## Linux service install
@@ -229,7 +229,7 @@ sudo ./scripts/install-systemd-service.sh \
   --binary /usr/local/bin/red \
   --grpc \
   --path /var/lib/reddb/data.rdb \
-  --bind 0.0.0.0:50051
+  --bind 0.0.0.0:55055
 ```
 
 ## Next step

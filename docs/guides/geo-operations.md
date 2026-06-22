@@ -111,7 +111,7 @@ All geo endpoints accept JSON bodies and return JSON responses.
 Calculate the distance between two points.
 
 ```bash
-curl -X POST localhost:8080/geo/distance -d '{
+curl -X POST localhost:5000/geo/distance -d '{
   "from": {"lat": -23.55, "lon": -46.63},
   "to": {"lat": -22.91, "lon": -43.17},
   "method": "vincenty"
@@ -135,7 +135,7 @@ The `method` field is optional and defaults to `"haversine"`. Set to `"vincenty"
 Calculate the bearing between two points.
 
 ```bash
-curl -X POST localhost:8080/geo/bearing -d '{
+curl -X POST localhost:5000/geo/bearing -d '{
   "from": {"lat": 0, "lon": 0},
   "to": {"lat": 1, "lon": 1}
 }'
@@ -155,7 +155,7 @@ Response:
 Calculate the geographic midpoint on the great-circle arc.
 
 ```bash
-curl -X POST localhost:8080/geo/midpoint -d '{
+curl -X POST localhost:5000/geo/midpoint -d '{
   "from": {"lat": -23.55, "lon": -46.63},
   "to": {"lat": 40.71, "lon": -74.00}
 }'
@@ -166,7 +166,7 @@ curl -X POST localhost:8080/geo/midpoint -d '{
 Calculate the destination point given a starting point, bearing, and distance.
 
 ```bash
-curl -X POST localhost:8080/geo/destination -d '{
+curl -X POST localhost:5000/geo/destination -d '{
   "lat": -23.55,
   "lon": -46.63,
   "bearing": 0,
@@ -188,7 +188,7 @@ Response:
 Calculate a conservative bounding box around a center point.
 
 ```bash
-curl -X POST localhost:8080/geo/bounding-box -d '{
+curl -X POST localhost:5000/geo/bounding-box -d '{
   "lat": -23.55,
   "lon": -46.63,
   "radius_km": 10

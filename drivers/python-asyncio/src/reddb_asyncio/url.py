@@ -12,7 +12,7 @@ Accepted schemes:
 * ``reds://...`` — RedWire over TLS (default port ``5050``; mirrors
   the JS legacy alias).
 * ``http://host:port`` / ``https://host:port`` — REST/HTTP transport
-  (defaults: 8080 / 8443, same as JS).
+  (defaults: 5000 / 55555, same as JS).
 * ``red:///absolute/path`` — embedded persistent (raise NotImplementedError;
   use the maturin ``reddb`` package).
 * ``red://``, ``red://memory``, ``red://:memory``, ``red://:memory:`` —
@@ -47,8 +47,8 @@ _DEFAULT_PORTS: dict[str, int] = {
     "red": 5050,
     "reds": 5050,
     "redwire": 5050,
-    "http": 8080,
-    "https": 8443,
+    "http": 5000,
+    "https": 55555,
 }
 
 

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use proptest::prelude::*;
 use reddb_wire::{
-    conn_string::{DEFAULT_PORT_GRPC, DEFAULT_PORT_RED},
+    conn_string::{DEFAULT_PORT_GRPC, DEFAULT_PORT_GRPCS, DEFAULT_PORT_RED},
     ConnectionTarget,
 };
 
@@ -59,7 +59,11 @@ pub fn red_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
 pub fn grpc_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
     (any::<bool>(), hostname(), opt_port()).prop_map(|(tls, host, port)| {
         let scheme = if tls { "grpcs" } else { "grpc" };
-        let resolved = port.unwrap_or(DEFAULT_PORT_GRPC);
+        let resolved = port.unwrap_or(if tls {
+            DEFAULT_PORT_GRPCS
+        } else {
+            DEFAULT_PORT_GRPC
+        });
         let uri = match port {
             Some(p) => format!("{scheme}://{host}:{p}"),
             None => format!("{scheme}://{host}"),
@@ -114,7 +118,7 @@ pub fn file_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
 pub fn grpc_cluster_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
     let scheme_strategy = prop_oneof![
         Just(("grpc", DEFAULT_PORT_GRPC)),
-        Just(("grpcs", DEFAULT_PORT_GRPC)),
+        Just(("grpcs", DEFAULT_PORT_GRPCS)),
         Just(("red", DEFAULT_PORT_RED)),
         Just(("reds", DEFAULT_PORT_RED)),
     ];

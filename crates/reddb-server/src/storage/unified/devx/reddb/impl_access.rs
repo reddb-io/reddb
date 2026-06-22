@@ -307,10 +307,10 @@ impl RedDB {
     fn serialize_native_graph_adjacency_artifact(
         edges: &[(EntityId, String, String, String, f32)],
     ) -> Vec<u8> {
-        let edges: Vec<reddb_file::GraphAdjacencyEdge> = edges
+        let edges: Vec<reddb_file::NativeGraphEdge> = edges
             .iter()
             .map(
-                |(edge_id, from_node, to_node, label, weight)| reddb_file::GraphAdjacencyEdge {
+                |(edge_id, from_node, to_node, label, weight)| reddb_file::NativeGraphEdge {
                     edge_id: edge_id.raw(),
                     from_node: from_node.clone(),
                     to_node: to_node.clone(),
@@ -319,17 +319,20 @@ impl RedDB {
                 },
             )
             .collect();
-        reddb_file::encode_graph_adjacency(&edges)
+        reddb_file::encode_native_graph_adjacency_frame(&reddb_file::NativeGraphAdjacencyFrame {
+            edges,
+        })
     }
 
     pub(crate) fn inspect_native_graph_adjacency_artifact(
         bytes: &[u8],
     ) -> Result<(u64, u64, u32), String> {
-        let edges = reddb_file::decode_graph_adjacency(bytes).map_err(|e| e.to_string())?;
-        let edge_count = edges.len() as u64;
+        let frame =
+            reddb_file::decode_native_graph_adjacency_frame(bytes).map_err(|e| e.to_string())?;
+        let edge_count = frame.edges.len() as u64;
         let mut nodes = BTreeSet::new();
         let mut labels = BTreeSet::new();
-        for edge in edges {
+        for edge in frame.edges {
             nodes.insert(edge.from_node);
             nodes.insert(edge.to_node);
             labels.insert(edge.label);
@@ -355,17 +358,40 @@ impl RedDB {
             }
         }
 
-        reddb_file::encode_fulltext_index(collection, documents.len(), &postings)
+        let terms = postings
+            .into_iter()
+            .map(|(term, postings)| reddb_file::NativeFulltextTerm {
+                term,
+                postings: postings
+                    .into_iter()
+                    .map(
+                        |(entity_id, term_count)| reddb_file::NativeFulltextPosting {
+                            entity_id,
+                            term_count,
+                        },
+                    )
+                    .collect(),
+            })
+            .collect();
+        reddb_file::encode_native_fulltext_frame(&reddb_file::NativeFulltextFrame {
+            collection: collection.to_string(),
+            doc_count: documents.len() as u32,
+            terms,
+        })
     }
 
     pub(crate) fn inspect_native_fulltext_artifact(
         bytes: &[u8],
     ) -> Result<(u64, u64, u64), String> {
-        let index = reddb_file::decode_fulltext_index(bytes).map_err(|e| e.to_string())?;
-        let posting_count: u64 = index.postings.values().map(|e| e.len() as u64).sum();
+        let frame = reddb_file::decode_native_fulltext_frame(bytes).map_err(|e| e.to_string())?;
+        let posting_count: u64 = frame
+            .terms
+            .iter()
+            .map(|term| term.postings.len() as u64)
+            .sum();
         Ok((
-            index.doc_count as u64,
-            index.postings.len() as u64,
+            frame.doc_count as u64,
+            frame.terms.len() as u64,
             posting_count,
         ))
     }
@@ -374,28 +400,38 @@ impl RedDB {
         collection: &str,
         documents: &[(EntityId, Vec<(String, String)>)],
     ) -> Vec<u8> {
-        let documents: Vec<reddb_file::DocPathValueRecord> = documents
+        let docs: Vec<reddb_file::NativeDocPathValue> = documents
             .iter()
-            .map(|(entity_id, entries)| reddb_file::DocPathValueRecord {
+            .map(|(entity_id, entries)| reddb_file::NativeDocPathValue {
                 entity_id: entity_id.raw(),
-                entries: entries.clone(),
+                entries: entries
+                    .iter()
+                    .map(|(path, value)| reddb_file::NativeDocPathValueEntry {
+                        path: path.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
             })
             .collect();
-        reddb_file::encode_document_pathvalue(collection, &documents)
+        reddb_file::encode_native_doc_pathvalue_frame(&reddb_file::NativeDocPathValueFrame {
+            collection: collection.to_string(),
+            docs,
+        })
     }
 
     pub(crate) fn inspect_native_document_pathvalue_artifact(
         bytes: &[u8],
     ) -> Result<(u64, u64, u64, u64), String> {
-        let index = reddb_file::decode_document_pathvalue(bytes).map_err(|e| e.to_string())?;
-        let doc_count = index.documents.len() as u64;
+        let frame =
+            reddb_file::decode_native_doc_pathvalue_frame(bytes).map_err(|e| e.to_string())?;
+        let doc_count = frame.docs.len() as u64;
         let mut paths = BTreeSet::new();
         let mut values = BTreeSet::new();
         let mut total_entries = 0u64;
-        for doc in index.documents {
-            for (path, value) in doc.entries {
-                paths.insert(path);
-                values.insert(value);
+        for doc in frame.docs {
+            for entry in doc.entries {
+                paths.insert(entry.path);
+                values.insert(entry.value);
                 total_entries += 1;
             }
         }

@@ -3,10 +3,12 @@ services:
     image: floci/floci:latest
     container_name: reddb-floci-serverless
     ports:
-      - "55466:4566"
+      - "55496:4566"
+    environment:
+      FLOCI_HOSTNAME: floci
 
   floci-init:
-    image: amazon/aws-cli:2
+    image: amazon/aws-cli:latest
     container_name: reddb-floci-serverless-init
     depends_on:
       - floci
@@ -35,27 +37,21 @@ services:
       floci-init:
         condition: service_completed_successfully
     ports:
-      - "55581:50051"
-      - "55810:8080"
-      - "55953:8443"
+      - "5080:5050"
+      - "55081:55055"
+      - "5030:5000"
+      - "55581:55555"
     volumes:
       - serverless-data:/data
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
     environment:
       RUST_LOG: info
+      REDDB_TOPOLOGY: serverless
+      REDDB_NODE_ROLE: serverless
       REDDB_STORAGE_PRESET: serverless
       REDDB_STORAGE_PROFILE: serverless
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "0"
+      REDDB_VAULT: "false"
       RED_BACKEND: s3
       RED_REMOTE_KEY: serverless/demo/data.rdb
       RED_S3_ENDPOINT: http://floci:4566
@@ -65,7 +61,7 @@ services:
       RED_S3_SECRET_KEY: test
       RED_S3_PATH_STYLE: "true"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10

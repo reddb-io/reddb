@@ -14,7 +14,7 @@ Common flags:
 
 | Flag | Description |
 |------|-------------|
-| `--bind <addr>` | HTTP server address. Defaults to `127.0.0.1:8080`. |
+| `--bind <addr>` | HTTP server address. Defaults to `127.0.0.1:5000`. |
 | `--token <tok>` | Bearer token for protected deployments. `$RED_ADMIN_TOKEN` is also honored. |
 | `--json` | Emit JSON arrays for tabular results. |
 | `--csv` | Emit CSV for tabular results. |
@@ -26,7 +26,7 @@ Common flags:
 List user-visible collections:
 
 ```bash
-red admin collections list --bind 127.0.0.1:8080
+red admin collections list --bind 127.0.0.1:5000
 ```
 
 Filter by logical model:

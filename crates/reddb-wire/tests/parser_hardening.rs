@@ -157,7 +157,7 @@ proptest! {
             max_cluster_hosts: 5,
             ..ConnStringLimits::default()
         };
-        let hosts: Vec<String> = (0..n).map(|i| format!("h{i}:5055")).collect();
+        let hosts: Vec<String> = (0..n).map(|i| format!("h{i}:55055")).collect();
         let input = format!("grpc://{}", hosts.join(","));
         let r = parse_with_limits(&input, limits);
         prop_assert!(matches!(
@@ -274,7 +274,7 @@ fn dos_query_params_default_32() {
 #[test]
 fn dos_cluster_hosts_default_64() {
     // 65 cluster hosts trips the default cap.
-    let hosts: Vec<String> = (0..65).map(|i| format!("h{i}:5055")).collect();
+    let hosts: Vec<String> = (0..65).map(|i| format!("h{i}:55055")).collect();
     let uri = format!("grpc://{}", hosts.join(","));
     let err = parse(&uri).expect_err("65 cluster hosts must be refused");
     assert_eq!(err.kind, ParseErrorKind::LimitExceeded);

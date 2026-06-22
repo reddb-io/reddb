@@ -447,6 +447,10 @@ pub fn write_value_json(buf: &mut String, value: &crate::storage::schema::Value)
             buf.push_str(&hex::encode(bytes));
             buf.push('"');
         }
+        Value::Json(bytes) => match crate::json::from_slice::<crate::json::Value>(bytes) {
+            Ok(json) => buf.push_str(&json.to_string_compact()),
+            Err(_) => buf.push_str("null"),
+        },
         _ => buf.push_str("null"),
     }
 }

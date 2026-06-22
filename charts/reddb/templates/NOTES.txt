@@ -9,16 +9,19 @@ Endpoints
 ────────────────────────────────────────────────────────────────────────────
 {{- if eq .Values.mode "cluster" }}
 Cluster members:
+  Wire: red://{{ include "reddb.cluster.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.cluster.service.wirePort }}
   gRPC: {{ include "reddb.cluster.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.cluster.service.grpcPort }}
   HTTP: http://{{ include "reddb.cluster.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.cluster.service.httpPort }}
   Headless: {{ include "reddb.cluster.headless" . }}.{{ .Release.Namespace }}.svc.cluster.local
 {{- else }}
 Primary (writer):
+  Wire: red://{{ include "reddb.primary.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.primary.service.wirePort }}
   gRPC: {{ include "reddb.primary.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.primary.service.grpcPort }}
   HTTP: http://{{ include "reddb.primary.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.primary.service.httpPort }}
 {{- if and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) }}
 
 Replicas (readers, {{ .Values.replica.replicaCount }} pod(s)):
+  Wire: red://{{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.wirePort }}
   gRPC: {{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.grpcPort }}
   HTTP: http://{{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.httpPort }}
 {{- else if eq .Values.mode "primary-replica" }}
@@ -39,7 +42,7 @@ Quick checks
 ────────────────────────────────────────────────────────────────────────────
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
   kubectl -n {{ .Release.Namespace }} exec -it {{ include "reddb.activeHttpServiceName" . }}-0 -- red status
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "reddb.activeHttpServiceName" . }} 8080:{{ include "reddb.activeHttpServicePort" . }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "reddb.activeHttpServiceName" . }} 5000:{{ include "reddb.activeHttpServicePort" . }}
 
 {{- if .Values.auth.enabled }}
 

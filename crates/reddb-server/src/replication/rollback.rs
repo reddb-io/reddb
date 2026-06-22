@@ -454,7 +454,7 @@ mod tests {
             local_frontier,
             common_point,
             commit_watermark: watermark,
-            new_primary_addr: "http://node-b:50051".to_string(),
+            new_primary_addr: "http://node-b:55055".to_string(),
             new_term: 8,
         }
     }
@@ -554,11 +554,11 @@ mod tests {
         assert_eq!(ev.new_term, 8);
 
         // Rejoined as a replica of the new primary under the new term.
-        assert_eq!(tx.rejoined, Some(("http://node-b:50051".to_string(), 8)));
+        assert_eq!(tx.rejoined, Some(("http://node-b:55055".to_string(), 8)));
         assert_eq!(
             outcome.role,
             NodeRole::Replica {
-                primary_addr: "http://node-b:50051".to_string(),
+                primary_addr: "http://node-b:55055".to_string(),
                 term: 8,
             }
         );
@@ -589,7 +589,7 @@ mod tests {
         assert!(tx.persisted.is_none(), "nothing persisted");
         assert!(tx.recovered_to.is_none(), "nothing recovered");
         assert!(tx.emitted.is_none(), "no operator event");
-        assert_eq!(tx.rejoined, Some(("http://node-b:50051".to_string(), 8)));
+        assert_eq!(tx.rejoined, Some(("http://node-b:55055".to_string(), 8)));
         assert_eq!(tx.order, vec!["rejoin"]);
     }
 

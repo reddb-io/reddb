@@ -12,13 +12,13 @@
       "image": "reddb-benchmark/reddb:latest",
       "essential": true,
       "portMappings": [
-        {"containerPort": 8080, "protocol": "tcp"},
-        {"containerPort": 50051, "protocol": "tcp"}
+        {"containerPort": 5000, "protocol": "tcp"},
+        {"containerPort": 55055, "protocol": "tcp"}
       ],
       "stopTimeout": 60,
       "environment": [
-        {"name": "REDDB_HTTP_BIND_ADDR", "value": "0.0.0.0:8080"},
-        {"name": "REDDB_GRPC_BIND_ADDR", "value": "0.0.0.0:50051"},
+        {"name": "REDDB_HTTP_BIND_ADDR", "value": "0.0.0.0:5000"},
+        {"name": "REDDB_GRPC_BIND_ADDR", "value": "0.0.0.0:55055"},
         {"name": "RED_BACKEND", "value": "s3"},
         {"name": "RED_S3_BUCKET", "value": "reddb-prod"},
         {"name": "RED_S3_REGION", "value": "us-east-1"},
@@ -40,7 +40,7 @@
         {"sourceVolume": "data", "containerPath": "/data"}
       ],
       "healthCheck": {
-        "command": ["CMD-SHELL", "curl -fsS --max-time 2 http://127.0.0.1:8080/health/live || exit 1"],
+        "command": ["CMD-SHELL", "curl -fsS --max-time 2 http://127.0.0.1:5000/health/live || exit 1"],
         "interval": 10,
         "timeout": 3,
         "retries": 3,

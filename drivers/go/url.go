@@ -211,11 +211,13 @@ func defaultPortFor(k Kind) int {
 	case KindRedWire, KindRedWires:
 		return 5050
 	case KindHTTP:
-		return 8080
+		return 5000
 	case KindHTTPS:
-		return 8443
-	case KindGRPC, KindGRPCS:
-		return 5055
+		return 55555
+	case KindGRPC:
+		return 55055
+	case KindGRPCS:
+		return 55555
 	}
 	return 0
 }

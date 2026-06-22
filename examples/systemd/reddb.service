@@ -51,14 +51,14 @@ EnvironmentFile=-/etc/reddb/reddb.env
 # PLAN.md spec ports (7777 / 7778 / 9090) override via the env
 # file or systemd drop-ins.
 Environment=RED_DATA_DIR=%S/reddb
-Environment=REDDB_HTTP_BIND_ADDR=127.0.0.1:8080
-Environment=REDDB_GRPC_BIND_ADDR=127.0.0.1:50051
+Environment=REDDB_HTTP_BIND_ADDR=127.0.0.1:5000
+Environment=REDDB_GRPC_BIND_ADDR=127.0.0.1:55055
 Environment=RUST_MIN_STACK=8388608
 
 ExecStart=/usr/local/bin/red server \
     --path %S/reddb/data.rdb \
-    --http-bind 127.0.0.1:8080 \
-    --grpc-bind 127.0.0.1:50051
+    --http-bind 127.0.0.1:5000 \
+    --grpc-bind 127.0.0.1:55055
 
 # Graceful shutdown — SIGTERM hits our signal handler, which
 # runs Engine::graceful_shutdown then exits 0. Bound the grace

@@ -22,7 +22,7 @@ import asyncio
 from reddb_asyncio import connect
 
 async def main():
-    async with await connect("http://localhost:8080") as db:
+    async with await connect("http://localhost:5000") as db:
         rows = await db.query(
             "SELECT * FROM users WHERE name = $1",
             ["alice"],
@@ -41,8 +41,8 @@ asyncio.run(main())
 |---------------------------------------|-----------------------|:------------:|
 | `red://host[:port]`                   | RedWire (plain TCP)   | 5050         |
 | `reds://host[:port]`                  | RedWire over TLS      | 5050         |
-| `http://host[:port]`                  | REST                  | 8080         |
-| `https://host[:port]`                 | REST over TLS         | 8443         |
+| `http://host[:port]`                  | REST                  | 5000         |
+| `https://host[:port]`                 | REST over TLS         | 55555         |
 | `red://user:pass@host`                | RedWire + SCRAM/login | 5050         |
 | `red://host?token=sk-abc`             | RedWire + bearer      | 5050         |
 | `reds://host?ca=…&cert=…&key=…`       | RedWire + mTLS        | 5050         |

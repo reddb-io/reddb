@@ -20,7 +20,8 @@ import java.util.Locale
  *   red://memory  red://:memory  red://:memory: embedded in-memory (out of scope)
  * ```
  *
- * Default port is 5050 for every scheme (matches `DEFAULT_REDWIRE_PORT`).
+ * Default ports follow the RedDB listener contract: RedWire 5050,
+ * HTTP 5000, HTTPS 55555.
  */
 public class Url private constructor(
     public val original: String,
@@ -46,7 +47,7 @@ public class Url private constructor(
     public fun isEmbedded(): Boolean = kind == Kind.EMBEDDED_FILE || kind == Kind.EMBEDDED_MEMORY
 
     public companion object {
-        /** Default port used for every transport. Matches `DEFAULT_REDWIRE_PORT`. */
+        /** Default RedWire port. */
         public const val DEFAULT_PORT: Int = 5050
 
         private val EMBEDDED_MEMORY_ALIASES: Set<String> = setOf(
@@ -87,7 +88,7 @@ public class Url private constructor(
             if (host.isNullOrEmpty()) {
                 throw IllegalArgumentException("URI is missing a host: '$uri'")
             }
-            val port = if (parsed.port < 0) DEFAULT_PORT else parsed.port
+            val port = if (parsed.port < 0) defaultPortFor(kind) else parsed.port
 
             var username: String? = null
             var password: String? = null
@@ -135,6 +136,12 @@ public class Url private constructor(
             "http" -> Kind.HTTP
             "https" -> Kind.HTTPS
             else -> null
+        }
+
+        private fun defaultPortFor(kind: Kind): Int = when (kind) {
+            Kind.HTTP -> 5000
+            Kind.HTTPS -> 55555
+            else -> DEFAULT_PORT
         }
 
         private fun parseAsJavaUri(uri: String): URI = try {

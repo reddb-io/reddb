@@ -1,17 +1,116 @@
 # .red/config.yaml — per-project plugin settings (consumed by /afk and friends)
-# Uncomment any line to override the default.
-
-# afk:
-#   default_runner: claude        # fallback runner when no explicit signal
-#   fleet:
-#     target: 2                   # default supervisor worker target
-#   hooks:
-#     defaults:
-#       cargo: true               # ship cargo isolation on Rust projects
-#       gradle: true              # ship gradle isolation when GRADLE_USER_HOME_BASE is set
+#
+# The `plugins.dev` block controls the AFK dev plugin (red-castle/sandcastle
+# execution substrate + AFK policy layer; split per ADR 0033). The `afk:`
+# sub-block is namespaced under `plugins.dev.afk` and every knob accepts a
+# `RED_AFK_*` env override that wins over the file. See ADR 0062 for the
+# decision record on the protection rails below.
 
 plugins:
   dev:
     enabled: true
     lock:
       primary-branch: true
+
+    afk:
+      # ----------------------------------------------------------------
+      # Backpressure — shell gates that run AFTER the agent's automatic
+      # feedback loop (`pnpm test`/cargo check/etc. on touched packages)
+      # and BEFORE the merge. If any command exits non-zero, the merge
+      # is BLOCKED and the issue goes to `ready-for-human` with
+      # `blocked:validation`; command + output land in the envelope.
+      # This is shift-left: we catch cheap, local failures before
+      # burning a CI round.
+      # ----------------------------------------------------------------
+      backpressure:
+        # 1. Formatting (mirrors `.githooks/pre-push`).
+        - cargo fmt --all -- --check
+
+        # 2. Boundary-discipline lint (ADR 0010). Catches untyped
+        #    serialization in tracing headers, JSON, audit, etc.
+        - scripts/lint-no-untyped-serialization.sh
+
+        # 3. Clippy at warn-as-error (mirrors CI's Quality gate).
+        #    Pulled in here so a red local clippy fails the merge
+        #    before the CI round-trip.
+        - cargo clippy --workspace --locked --all-targets -- -D warnings
+
+      # ----------------------------------------------------------------
+      # Hooks — intercept the AFK loop at named lifecycle points.
+      # Contract (ADR 0062):
+      #   - Input: RED_AFK_* env vars + JSON context on stdin.
+      #   - Output: stdout empty = no-op; JSON on stdout = AFK merges
+      #             the mutable slice back into the loop context.
+      #   - Exit: 0 = continue. `pre_*` non-zero aborts the step
+      #     (use this for gates). `post_*`/`on_*` non-zero only logs
+      #     (use this for notifiers — broken notifiers MUST NOT
+      #     starve the AFK, per ADR 0059 lesson).
+      # Unknown hook names are a HARD ERROR at boot — typo protection.
+      # ----------------------------------------------------------------
+      hooks:
+
+        # --- pre_pick: filter + reorder the issue queue -----------------
+        # Runs once per drain, before any attempt is spent. Drop issues
+        # that the harness shouldn't burn cycles on:
+        #   * `do-not-pick` (manual hold)
+        #   * any `blocked:external` (waiting on a third party)
+        #   * issues missing `size:*` or `priority:*` (un-triaged)
+        # Reorder by `priority:*` ascending (P0 first). Defensive:
+        # a broken pre_pick must NOT starve the AFK, so the script
+        # returns the original queue on parse/gh failure.
+        pre_pick:
+          - scripts/afk-pre-pick.sh
+
+        # --- pre_attempt: inject house-style + boundary reminder -------
+        # Cheaper than `--request -r` on every /afk invocation. Runs
+        # before EACH attempt (so the reminder survives iteration).
+        # `--request -r "..."` is still appended after this, so users
+        # retain per-run overrides.
+        pre_attempt:
+          - scripts/afk-pre-attempt.sh
+
+        # --- pre_merge: drift-guard (HARD GATE) ------------------------
+        # Reject the merge BEFORE CI burns a round on it. Checks:
+        #   1. Scope drift    — > 25 files changed.
+        #   2. Per-file drift — single file +> 600 lines.
+        #   3. Protected paths — docs/conformance, contract matrix,
+        #                        .red/adr/. CODEOWNERS already enforces
+        #                        this; this is the local fast-fail.
+        #   4. New `.unwrap()` in non-allowlisted files (ratchet, ADR 0056).
+        #   5. New Cargo dep without `# track: issue-XXXX` comment.
+        # Thresholds are conservative on purpose — see ADR 0062 for
+        # the rationale and the tuning policy.
+        pre_merge:
+          - scripts/afk-pre-merge.sh
+
+        # --- post_merge: notifier --------------------------------------
+        # Optional Slack-style hook. Disabled by default (no URL set);
+        # uncomment and set REDDB_MERGE_HOOK_URL to enable. A broken
+        # notifier only logs (post_* non-zero is non-fatal by design).
+        # post_merge:
+        #   - 'curl -sS -m 5 -X POST "$REDDB_MERGE_HOOK_URL" -H content-type:application/json -d "{\"sha\":\"$RED_AFK_MERGE_SHA\",\"issue\":$RED_AFK_ISSUE_NUMBER}" || true'
+
+        # --- on_idle: maintenance between drains ------------------------
+        # Prune worktrees that no longer have a branch attached, and
+        # delete orphan afk/* branches. Defaults (cargo/gradle) handle
+        # build-dir cleanup; this is git-state cleanup.
+        on_idle:
+          - git worktree prune
+          - |
+            git branch --list 'afk/*' | while read -r br; do
+              [ -z "$br" ] && continue
+              git worktree list --porcelain \
+                | grep -qF "  $br" \
+                || git branch -D "$br"
+            done
+
+        # --- defaults ---------------------------------------------------
+        # Built-in defaults the harness ships with. Each can be turned
+        # off individually; you cannot reorder them. Keep cargo
+        # isolation on for this repo (Rust workspace).
+        defaults:
+          cargo: true             # isolate CARGO_TARGET_DIR per slot in pre_worktree
+          gradle: true            # ship when GRADLE_USER_HOME_BASE is set (no-op here)
+          heartbeat: true         # post_attempt heartbeat
+          envelope: true          # post_attempt envelope shaping
+          validation: true       # post_merge validation report

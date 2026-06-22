@@ -1,16 +1,17 @@
 use serde_json::Value as JsonValue;
 
-use super::catchup::CatchupModeReply;
 use super::util::{
     get_bool_default, get_opt_string, get_opt_u64, get_string, get_u64, hex_decode, hex_encode,
     object_from_slice, ReplicationPayloadError, Result,
 };
+use super::{catchup::CatchupModeReply, DEFAULT_REPLICATION_TERM};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalStreamOpen {
     pub since_lsn: u64,
     pub max_count: usize,
     pub replica_id: Option<String>,
+    pub term: u64,
     pub await_data: bool,
     pub await_timeout_ms: u64,
 }
@@ -32,6 +33,7 @@ impl WalStreamOpen {
                 JsonValue::String(replica_id.clone()),
             );
         }
+        obj.insert("term".to_string(), JsonValue::Number(self.term.into()));
         obj.insert("await_data".to_string(), JsonValue::Bool(self.await_data));
         obj.insert(
             "await_timeout_ms".to_string(),
@@ -48,6 +50,7 @@ impl WalStreamOpen {
             max_count: usize::try_from(max_count)
                 .map_err(|_| ReplicationPayloadError::InvalidField("max_count"))?,
             replica_id: get_opt_string(&obj, "replica_id"),
+            term: get_opt_u64(&obj, "term").unwrap_or(DEFAULT_REPLICATION_TERM),
             await_data: get_bool_default(&obj, "await_data", false),
             await_timeout_ms: get_opt_u64(&obj, "await_timeout_ms").unwrap_or(30_000),
         })
@@ -283,6 +286,7 @@ mod tests {
             since_lsn: 10,
             max_count: 128,
             replica_id: Some("replica-a".to_string()),
+            term: 7,
             await_data: true,
             await_timeout_ms: 5000,
         };
@@ -290,6 +294,15 @@ mod tests {
             WalStreamOpen::decode_json(&open.encode_json()).unwrap(),
             open
         );
+    }
+
+    #[test]
+    fn wal_stream_open_defaults_missing_term_to_legacy_term() {
+        let open = WalStreamOpen::decode_json(
+            br#"{"since_lsn":10,"max_count":128,"replica_id":"replica-a"}"#,
+        )
+        .unwrap();
+        assert_eq!(open.term, DEFAULT_REPLICATION_TERM);
     }
 
     #[test]

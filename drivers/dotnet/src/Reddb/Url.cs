@@ -12,12 +12,12 @@ namespace Reddb;
 /// <c>http://</c>, <c>https://</c>, plus the embedded shortcuts
 /// (<c>red:</c>, <c>red://</c>, <c>red:///path</c>, <c>red://memory</c>).
 ///
-/// Default port for every scheme is <see cref="DefaultPort"/> (5050) —
-/// matches the engine's <c>DEFAULT_REDWIRE_PORT</c>.
+/// Default ports follow the RedDB listener contract: RedWire 5050,
+/// HTTP 5000, HTTPS 55555.
 /// </summary>
 public sealed class RedUrl
 {
-    /// <summary>Default port used for every transport.</summary>
+    /// <summary>Default RedWire port.</summary>
     public const int DefaultPort = 5050;
 
     public enum Kind { Redwire, RedwireTls, Http, Https, EmbeddedFile, EmbeddedMemory }
@@ -148,8 +148,8 @@ public sealed class RedUrl
                 nameof(uri));
         }
         // System.Uri fills in scheme defaults (80 for http, 443 for https).
-        // We want our own DefaultPort whenever the user didn't write one.
-        int port = HasExplicitPort(uri, host) ? parsed.Port : DefaultPort;
+        // We want RedDB defaults whenever the user didn't write one.
+        int port = HasExplicitPort(uri, host) ? parsed.Port : DefaultPortFor(kind);
 
         string? username = null;
         string? password = null;
@@ -192,6 +192,13 @@ public sealed class RedUrl
 
     private static readonly IReadOnlyDictionary<string, string> EmptyParams =
         new Dictionary<string, string>(0);
+
+    private static int DefaultPortFor(Kind kind) => kind switch
+    {
+        Kind.Http => 5000,
+        Kind.Https => 55555,
+        _ => DefaultPort,
+    };
 
     /// <summary>
     /// Detect whether the original URI string carries an explicit

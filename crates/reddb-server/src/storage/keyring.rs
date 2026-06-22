@@ -69,10 +69,10 @@ pub fn resolve_password(flag_password: Option<&str>) -> PasswordSource {
     }
 
     // Priority 2: Environment variable (try REDDB_KEY first, fall back to REDBLUE_DB_KEY)
-    if let Ok(pwd) = std::env::var("REDDB_KEY").or_else(|_| std::env::var("REDBLUE_DB_KEY")) {
-        if !pwd.is_empty() {
-            return PasswordSource::EnvVar(pwd);
-        }
+    if let Some(pwd) = crate::utils::env_with_file_fallback("REDDB_KEY")
+        .or_else(|| crate::utils::env_with_file_fallback("REDBLUE_DB_KEY"))
+    {
+        return PasswordSource::EnvVar(pwd);
     }
 
     // Priority 3: System keyring

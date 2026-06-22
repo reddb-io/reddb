@@ -5,17 +5,17 @@ RedDB exposes a comprehensive gRPC API via the `reddb.v1.RedDb` service. All RPC
 ## Starting the gRPC Server
 
 ```bash
-red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:5055
+red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:55055
 ```
 
 ## Testing with grpcurl
 
 ```bash
 # Health check
-grpcurl -plaintext 127.0.0.1:5055 reddb.v1.RedDb/Health
+grpcurl -plaintext 127.0.0.1:55055 reddb.v1.RedDb/Health
 
 # List collections
-grpcurl -plaintext 127.0.0.1:5055 reddb.v1.RedDb/Collections
+grpcurl -plaintext 127.0.0.1:55055 reddb.v1.RedDb/Collections
 ```
 
 ## RPC Reference
@@ -69,11 +69,11 @@ Examples:
 ```bash
 grpcurl -plaintext \
   -d '{"collection":"sessions","payloadJson":"{\"fields\":{\"token\":\"t-1\",\"user_id\":\"u-1\"},\"ttl\":\"15m\"}"}' \
-  127.0.0.1:5055 reddb.v1.RedDb/CreateRow
+  127.0.0.1:55055 reddb.v1.RedDb/CreateRow
 
 grpcurl -plaintext \
   -d '{"collection":"sessions","id":102,"payloadJson":"{\"ttl\":\"30m\"}"}' \
-  127.0.0.1:5055 reddb.v1.RedDb/PatchEntity
+  127.0.0.1:55055 reddb.v1.RedDb/PatchEntity
 ```
 
 ### Binary Bulk Insert
@@ -121,7 +121,7 @@ grpcurl -plaintext \
       {"values": [{"textValue":"srv2"}, {"intValue":1}, {"floatValue":0.12}]}
     ]
   }' \
-  127.0.0.1:5055 reddb.v1.RedDb/BulkInsertBinary
+  127.0.0.1:55055 reddb.v1.RedDb/BulkInsertBinary
 ```
 
 The response returns the total inserted count and the ID of the first inserted entity:
@@ -270,7 +270,7 @@ The response returns the total inserted count and the ID of the first inserted e
 ```bash
 grpcurl -plaintext \
   -d '{"payloadJson":"{\"name\":\"sessions\",\"ttl\":\"60m\"}"}' \
-  127.0.0.1:5055 reddb.v1.RedDb/CreateCollection
+  127.0.0.1:55055 reddb.v1.RedDb/CreateCollection
 ```
 
 `DescribeCollection` returns `default_ttl_ms` and `default_ttl` when configured.

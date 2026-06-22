@@ -237,6 +237,118 @@ pub fn decode_bytes(buf: &[u8]) -> CodecResult<Vec<u8>> {
     }
 }
 
+/// Decode a column stream whose innermost codec is a fixed-width 8-byte
+/// numeric codec (`Delta` / `DoubleDelta` / `Xor`) straight into an
+/// 8-byte-aligned `Vec<u64>`, skipping the `Vec<u8>` → typed-`Vec` copy the
+/// columnar batch reader would otherwise pay (#962). The returned `u64` words
+/// carry the same little-endian bit pattern [`decode_bytes`] would produce, so
+/// the caller reinterprets them as `i64`/`f64` for free.
+///
+/// Returns `Ok(None)` when the stream's innermost codec is not one of those
+/// (e.g. a `Generic` LZ4-only or `Dict` column); the caller then falls back to
+/// [`decode_bytes`] plus a copy. Header/codec parsing matches [`decode_bytes`]
+/// byte-for-byte, and the result is bit-identical to running `decode_bytes` and
+/// reinterpreting its bytes as `u64` words.
+pub fn decode_bytes_to_u64(buf: &[u8]) -> CodecResult<Option<Vec<u64>>> {
+    if buf.len() < 2 {
+        return Err(CodecError::Truncated);
+    }
+    let count = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+    let mut cursor = 2;
+    let mut codecs: Vec<ColumnCodec> = Vec::with_capacity(count);
+    for _ in 0..count {
+        if cursor >= buf.len() {
+            return Err(CodecError::Truncated);
+        }
+        let tag = buf[cursor];
+        cursor += 1;
+        let codec = match tag {
+            2 => {
+                if cursor + 4 > buf.len() {
+                    return Err(CodecError::Truncated);
+                }
+                let level = i32::from_le_bytes(buf[cursor..cursor + 4].try_into().unwrap());
+                cursor += 4;
+                ColumnCodec::Zstd { level }
+            }
+            other => ColumnCodec::from_tag(other).ok_or(CodecError::UnknownCodec(other))?,
+        };
+        codecs.push(codec);
+    }
+    // The innermost codec (encoded first, decoded last) is `codecs[0]`; only the
+    // fixed-width numeric codecs can emit u64 words without an extra copy.
+    match codecs.first() {
+        Some(ColumnCodec::Delta | ColumnCodec::DoubleDelta | ColumnCodec::Xor) => {}
+        _ => return Ok(None),
+    }
+    let inner = codecs[0].clone();
+    let start = &buf[cursor..];
+    // Decode every outer codec (`codecs[len-1..=1]`, in decode order) to raw
+    // bytes, leaving the innermost numeric codec to run typed.
+    let decoded_outer;
+    let mid: &[u8] = if codecs.len() == 1 {
+        start
+    } else {
+        let mut payload = apply_decode(&codecs[codecs.len() - 1], start)?;
+        for codec in codecs[1..codecs.len() - 1].iter().rev() {
+            payload = apply_decode(codec, &payload)?;
+        }
+        decoded_outer = payload;
+        &decoded_outer
+    };
+    Ok(Some(decode_numeric_to_u64(&inner, mid)?))
+}
+
+/// Decode a `(count:u32) + 8-byte words` numeric segment — the inner
+/// `Delta`/`DoubleDelta`/`Xor` codec output — into `Vec<u64>`. Mirrors the
+/// `Vec<u8>` arms of [`apply_decode`] exactly, emitting the same little-endian
+/// bit pattern as `u64` words instead of bytes (#962 typed fast path).
+fn decode_numeric_to_u64(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u64>> {
+    if data.len() < 4 {
+        return Err(CodecError::Truncated);
+    }
+    let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let payload = &data[4..];
+    if payload.len() < count * 8 {
+        return Err(CodecError::Truncated);
+    }
+    let mut out = Vec::with_capacity(count);
+    match codec {
+        ColumnCodec::Delta | ColumnCodec::DoubleDelta => {
+            if count > 0 {
+                let mut chunks = payload.chunks_exact(8);
+                let v0 = u64::from_le_bytes(chunks.next().unwrap().try_into().unwrap());
+                out.push(v0);
+                if count >= 2 {
+                    let mut prev_delta =
+                        i64::from_le_bytes(chunks.next().unwrap().try_into().unwrap());
+                    let v1 = (v0 as i64 + prev_delta) as u64;
+                    out.push(v1);
+                    let mut prev_val = v1 as i64;
+                    for chunk in chunks.take(count - 2) {
+                        prev_delta += i64::from_le_bytes(chunk.try_into().unwrap());
+                        prev_val += prev_delta;
+                        out.push(prev_val as u64);
+                    }
+                }
+            }
+        }
+        ColumnCodec::Xor => {
+            if count > 0 {
+                let mut chunks = payload.chunks_exact(8);
+                let mut prev = u64::from_le_bytes(chunks.next().unwrap().try_into().unwrap());
+                out.push(prev);
+                for chunk in chunks.take(count - 1) {
+                    prev ^= u64::from_le_bytes(chunk.try_into().unwrap());
+                    out.push(prev);
+                }
+            }
+        }
+        _ => return Err(CodecError::InvalidPayload("non-numeric inner codec")),
+    }
+    Ok(out)
+}
+
 fn apply_encode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
     match codec {
         ColumnCodec::None => Ok(data.to_vec()),
@@ -688,6 +800,54 @@ mod tests {
             let encoded = encode_bytes(&codecs, raw).unwrap();
             let decoded = decode_bytes(&encoded).unwrap();
             assert_eq!(decoded, *raw, "lossless round-trip failed for {sem:?}");
+        }
+    }
+
+    /// #962: the typed `decode_bytes_to_u64` fast path is bit-identical to
+    /// `decode_bytes` reinterpreted as u64 words for numeric-inner-codec
+    /// columns, and declines (`None`) for non-numeric inner codecs so the
+    /// caller falls back to the byte path.
+    #[test]
+    fn decode_bytes_to_u64_matches_decode_bytes() {
+        let ts = u64_stream(
+            &(0..1000)
+                .map(|i| 1_700_000_000_000 + i * 1_000_000)
+                .collect::<Vec<_>>(),
+        );
+        let gauge = f64_stream(
+            &(0..1000)
+                .map(|i| 95.0 + (i % 7) as f64 * 0.25)
+                .collect::<Vec<_>>(),
+        );
+        let counter = u64_stream(&(0..1000).map(|i| (i * 7) as u64).collect::<Vec<_>>());
+        let strings = str_stream(&["a", "a", "b", "c", "a", "b", "b", "a", "c", "a"]);
+
+        // Numeric inner codec (DoubleDelta / Xor / Delta): typed path matches.
+        for (sem, ty, raw) in [
+            (ColumnSemantics::Timestamp, 2u8, &ts),
+            (ColumnSemantics::Gauge, 3u8, &gauge),
+            (ColumnSemantics::Counter, 2u8, &counter),
+        ] {
+            let encoded = encode_bytes(&select_codecs(ty, sem), raw).unwrap();
+            let bytes = decode_bytes(&encoded).unwrap();
+            let words = decode_bytes_to_u64(&encoded)
+                .unwrap()
+                .expect("numeric inner codec must take the typed path");
+            let from_words: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(from_words, bytes, "typed/byte mismatch for {sem:?}");
+            assert_eq!(words.len() * 8, bytes.len());
+        }
+
+        // Non-numeric inner codec (Dict / Generic LZ4-only): declines.
+        for (sem, ty, raw) in [
+            (ColumnSemantics::LowCardinality, 4u8, &strings),
+            (ColumnSemantics::Generic, 4u8, &strings),
+        ] {
+            let encoded = encode_bytes(&select_codecs(ty, sem), raw).unwrap();
+            assert!(
+                decode_bytes_to_u64(&encoded).unwrap().is_none(),
+                "non-numeric inner codec must decline the typed path for {sem:?}"
+            );
         }
     }
 

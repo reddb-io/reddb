@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 
-REDDB_URL = os.environ.get("REDDB_URL", "http://127.0.0.1:8080").rstrip("/")
+REDDB_URL = os.environ.get("REDDB_URL", "http://127.0.0.1:5000").rstrip("/")
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 OPS = int(os.environ.get("KV_BENCH_OPS", "1000"))

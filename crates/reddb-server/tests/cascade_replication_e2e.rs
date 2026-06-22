@@ -67,8 +67,8 @@ fn fill_wal(primary: &PrimaryReplication, count: u64) {
 fn voting_member_streams_directly_even_when_cascade_source_configured() {
     // A voting member handed a cascade source: class flipped back to Voting
     // models "the operator pointed a quorum member at an intermediate".
-    let cfg = ReplicationConfig::replica("http://primary:50051")
-        .cascading_from("inter-a", "http://inter-a:50051")
+    let cfg = ReplicationConfig::replica("http://primary:55055")
+        .cascading_from("inter-a", "http://inter-a:55055")
         .with_replica_class(ReplicaClass::Voting);
 
     let (choice, refusal) = cfg.resolved_upstream("voter-1");
@@ -87,8 +87,8 @@ fn voting_member_streams_directly_even_when_cascade_source_configured() {
 
 #[test]
 fn async_read_replica_resolves_to_the_intermediate() {
-    let cfg = ReplicationConfig::replica("http://primary:50051")
-        .cascading_from("inter-a", "http://inter-a:50051");
+    let cfg = ReplicationConfig::replica("http://primary:55055")
+        .cascading_from("inter-a", "http://inter-a:55055");
 
     let (choice, refusal) = cfg.resolved_upstream("leaf-1");
 
@@ -96,7 +96,7 @@ fn async_read_replica_resolves_to_the_intermediate() {
     match choice {
         UpstreamChoice::Intermediate(up) => {
             assert_eq!(up.node_id, "inter-a");
-            assert_eq!(up.addr, "http://inter-a:50051");
+            assert_eq!(up.addr, "http://inter-a:55055");
         }
         other => panic!("expected a cascade to the intermediate, got {other:?}"),
     }

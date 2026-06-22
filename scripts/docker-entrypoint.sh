@@ -7,12 +7,14 @@ set -eu
 ulimit -s 16384 2>/dev/null || true
 
 DEFAULT_DATA_PATH="${REDDB_DATA_PATH:-/data/data.rdb}"
-DEFAULT_GRPC_BIND="${REDDB_GRPC_BIND_ADDR:-${REDDB_BIND_ADDR:-0.0.0.0:50051}}"
-DEFAULT_HTTP_BIND="${REDDB_HTTP_BIND_ADDR:-0.0.0.0:8080}"
+DEFAULT_WIRE_BIND="${REDDB_WIRE_BIND_ADDR:-0.0.0.0:5050}"
+DEFAULT_GRPC_BIND="${REDDB_GRPC_BIND_ADDR:-${REDDB_BIND_ADDR:-0.0.0.0:55055}}"
+DEFAULT_HTTP_BIND="${REDDB_HTTP_BIND_ADDR:-0.0.0.0:5000}"
 
 set_default_server_args() {
     set -- /usr/local/bin/red server \
         --path "$DEFAULT_DATA_PATH" \
+        --wire-bind "$DEFAULT_WIRE_BIND" \
         --grpc-bind "$DEFAULT_GRPC_BIND" \
         --http-bind "$DEFAULT_HTTP_BIND"
 }

@@ -13,8 +13,8 @@
  *   red:///abs/path/file.rdb                   embedded persistent  (unsupported here)
  *   red://memory  red://:memory  red://:memory:  embedded aliases   (unsupported here)
  *
- * Default port is 5050 across schemes — matches the engine's
- * RedWire listener default.
+ * Default ports follow the RedDB listener contract: RedWire 5050,
+ * HTTP 5000, HTTPS 55555.
  */
 
 declare(strict_types=1);
@@ -25,7 +25,7 @@ use Reddb\RedDBException\EmbeddedUnsupported;
 
 final class Url
 {
-    /** Default port used for every transport. */
+    /** Default RedWire port. */
     public const DEFAULT_PORT = 5050;
 
     public const KIND_REDWIRE = 'redwire';
@@ -114,7 +114,7 @@ final class Url
         }
 
         $host = $parts['host'];
-        $port = isset($parts['port']) ? (int) $parts['port'] : self::DEFAULT_PORT;
+        $port = isset($parts['port']) ? (int) $parts['port'] : self::defaultPortFor($kind);
         $username = isset($parts['user']) ? rawurldecode($parts['user']) : null;
         $password = isset($parts['pass']) ? rawurldecode($parts['pass']) : null;
 
@@ -172,6 +172,15 @@ final class Url
             'http' => self::KIND_HTTP,
             'https' => self::KIND_HTTPS,
             default => null,
+        };
+    }
+
+    private static function defaultPortFor(string $kind): int
+    {
+        return match ($kind) {
+            self::KIND_HTTP => 5000,
+            self::KIND_HTTPS => 55555,
+            default => self::DEFAULT_PORT,
         };
     }
 

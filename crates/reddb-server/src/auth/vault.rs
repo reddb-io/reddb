@@ -5,8 +5,8 @@
 //! The vault header lives at a fixed page id (`VAULT_HEADER_PAGE = 2`)
 //! using `PageType::Vault` and points to a chain of overflow pages
 //! allocated dynamically as the payload grows. The contents are
-//! encrypted with a SEPARATE key derived from `REDDB_VAULT_KEY`
-//! (or, preferably, a certificate via `REDDB_CERTIFICATE`).
+//! encrypted with a separate key derived from the certificate supplied
+//! through `REDDB_CERTIFICATE`.
 //!
 //! # On-disk format (v2)
 //!
@@ -220,7 +220,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Errors produced by vault operations.
 #[derive(Debug)]
 pub enum VaultError {
-    /// No encryption key available (neither env var nor passphrase).
+    /// No certificate available.
     NoKey,
     /// Encryption failed.
     Encryption,
@@ -239,7 +239,7 @@ impl std::fmt::Display for VaultError {
         match self {
             Self::NoKey => write!(
                 f,
-                "no vault key: set REDDB_CERTIFICATE (or REDDB_VAULT_KEY) or provide a certificate"
+                "no vault certificate: set REDDB_CERTIFICATE or REDDB_CERTIFICATE_FILE"
             ),
             Self::Encryption => write!(f, "vault encryption failed"),
             Self::Decryption => write!(f, "vault decryption failed (wrong key or corrupt data)"),
@@ -256,6 +256,14 @@ impl From<VaultError> for AuthError {
     fn from(err: VaultError) -> Self {
         AuthError::Internal(err.to_string())
     }
+}
+
+fn decode_certificate_hex(certificate_hex: &str) -> Result<Vec<u8>, VaultError> {
+    let certificate = hex::decode(certificate_hex.trim()).map_err(|_| VaultError::NoKey)?;
+    if certificate.len() != 32 {
+        return Err(VaultError::NoKey);
+    }
+    Ok(certificate)
 }
 
 // ---------------------------------------------------------------------------
@@ -497,10 +505,10 @@ impl VaultState {
 
 /// Encrypted vault for persisting auth state inside reserved pager pages.
 ///
-/// The vault key is derived from `REDDB_VAULT_KEY` env var or a provided
-/// passphrase.  A random salt is generated on first write and persisted
-/// inside the vault page so that re-opening with the same passphrase
-/// produces the same derived key.
+/// The vault key is derived from the certificate supplied via
+/// `REDDB_CERTIFICATE` (or its `_FILE` companion, expanded at process
+/// start). A random salt is generated on first write and persisted inside
+/// the vault page for format continuity.
 pub struct Vault {
     key: SecureKey,
     salt: [u8; 16],
@@ -532,27 +540,22 @@ impl Vault {
 
     /// Open or prepare a vault backed by reserved pager pages.
     ///
-    /// Key derivation: `REDDB_VAULT_KEY` env var takes priority, then
-    /// the `passphrase` argument.  If neither is set, returns `NoKey`.
+    /// Key derivation requires `REDDB_CERTIFICATE`. If it is not set,
+    /// returns `NoKey`.
     ///
     /// If vault pages already exist in the pager, the salt is read from
     /// the existing page content.  Otherwise a fresh salt is generated
     /// and will be written on the first `save()` call.
-    pub fn open(pager: &Pager, passphrase: Option<&str>) -> Result<Self, VaultError> {
-        // Try certificate-based opening first (REDDB_CERTIFICATE env var).
-        if let Ok(cert_hex) = std::env::var("REDDB_CERTIFICATE") {
-            return Self::with_certificate(pager, &cert_hex);
-        }
+    pub fn open(pager: &Pager) -> Result<Self, VaultError> {
+        let cert_hex =
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
+        Self::with_certificate(pager, &cert_hex)
+    }
 
-        // Resolve passphrase: env var > argument.
-        let passphrase_str = std::env::var("REDDB_VAULT_KEY")
-            .ok()
-            .or_else(|| passphrase.map(|s| s.to_string()))
-            .ok_or(VaultError::NoKey)?;
-
+    fn salt_for_open(pager: &Pager) -> Result<[u8; 16], VaultError> {
         // Try to read the salt from an existing vault page.
-        let salt = match read_vault_salt_from_pager(pager) {
-            Ok(s) => s,
+        match read_vault_salt_from_pager(pager) {
+            Ok(s) => Ok(s),
             Err(_) => {
                 // No vault pages yet -- generate a fresh salt.
                 let mut salt = [0u8; 16];
@@ -560,14 +563,9 @@ impl Vault {
                 os_random::fill_bytes(&mut buf)
                     .map_err(|e| VaultError::Corrupt(format!("CSPRNG failed: {e}")))?;
                 salt.copy_from_slice(&buf);
-                salt
+                Ok(salt)
             }
-        };
-
-        let key_bytes = derive_key(passphrase_str.as_bytes(), &salt, &vault_argon2_params());
-        let key = SecureKey::new(&key_bytes);
-
-        Ok(Self { key, salt })
+        }
     }
 
     /// Open a vault using a certificate hex string (from bootstrap).
@@ -576,53 +574,20 @@ impl Vault {
     /// Argon2id.  This is the primary unseal mechanism introduced by the
     /// certificate-based seal system.
     pub fn with_certificate(pager: &Pager, certificate_hex: &str) -> Result<Self, VaultError> {
-        let certificate = hex::decode(certificate_hex).map_err(|_| VaultError::NoKey)?;
+        let certificate = decode_certificate_hex(certificate_hex)?;
 
         let key = KeyPair::vault_key_from_certificate(&certificate);
 
-        // Try to read the salt from an existing vault page.
-        let salt = match read_vault_salt_from_pager(pager) {
-            Ok(s) => s,
-            Err(_) => {
-                // No vault pages yet -- generate a fresh salt.
-                let mut s = [0u8; 16];
-                os_random::fill_bytes(&mut s)
-                    .map_err(|e| VaultError::Corrupt(format!("CSPRNG failed: {e}")))?;
-                s
-            }
-        };
+        let salt = Self::salt_for_open(pager)?;
 
         Ok(Self { key, salt })
     }
 
     /// Open a vault from environment variables.
     ///
-    /// Precedence: `REDDB_CERTIFICATE` (primary) > `REDDB_VAULT_KEY` (fallback/deprecated).
+    /// Requires `REDDB_CERTIFICATE`.
     pub fn from_env(pager: &Pager) -> Result<Self, VaultError> {
-        if let Ok(cert_hex) = std::env::var("REDDB_CERTIFICATE") {
-            return Self::with_certificate(pager, &cert_hex);
-        }
-        if let Ok(passphrase) = std::env::var("REDDB_VAULT_KEY") {
-            return Self::open_with_passphrase(pager, &passphrase);
-        }
-        Err(VaultError::NoKey)
-    }
-
-    /// Open a vault with an explicit passphrase string (no env vars).
-    fn open_with_passphrase(pager: &Pager, passphrase: &str) -> Result<Self, VaultError> {
-        let salt = match read_vault_salt_from_pager(pager) {
-            Ok(s) => s,
-            Err(_) => {
-                let mut s = [0u8; 16];
-                os_random::fill_bytes(&mut s)
-                    .map_err(|e| VaultError::Corrupt(format!("CSPRNG failed: {e}")))?;
-                s
-            }
-        };
-
-        let key_bytes = derive_key(passphrase.as_bytes(), &salt, &vault_argon2_params());
-        let key = SecureKey::new(&key_bytes);
-        Ok(Self { key, salt })
+        Self::open(pager)
     }
 
     /// Create a vault keyed by a certificate (raw bytes, not hex).
@@ -630,6 +595,9 @@ impl Vault {
     /// Used during bootstrap when the certificate is freshly generated
     /// and not yet hex-encoded.
     pub fn with_certificate_bytes(pager: &Pager, certificate: &[u8]) -> Result<Self, VaultError> {
+        if certificate.len() != 32 {
+            return Err(VaultError::NoKey);
+        }
         let key = KeyPair::vault_key_from_certificate(certificate);
 
         let salt = match read_vault_salt_from_pager(pager) {
@@ -647,9 +615,9 @@ impl Vault {
 
     /// Encrypt a vault state into a self-contained logical export blob.
     ///
-    /// The source salt is embedded so passphrase-based imports can derive
-    /// the same wrapping key without having access to the source `.rdb`
-    /// pages. The blob is hex-encoded so it can live inside JSONL dumps.
+    /// The source salt is embedded for envelope framing. Certificate-based
+    /// imports derive the same wrapping key from `REDDB_CERTIFICATE`.
+    /// The blob is hex-encoded so it can live inside JSONL dumps.
     pub fn seal_logical_export(&self, state: &VaultState) -> Result<String, VaultError> {
         let plaintext = state.serialize();
         let mut nonce = [0u8; NONCE_SIZE];
@@ -669,38 +637,22 @@ impl Vault {
         ))
     }
 
-    /// Decrypt a logical export blob using the same key precedence as
-    /// normal vault open: REDDB_CERTIFICATE, REDDB_VAULT_KEY, then the
-    /// explicit passphrase argument.
-    pub fn unseal_logical_export(
-        blob_hex: &str,
-        passphrase: Option<&str>,
-    ) -> Result<VaultState, VaultError> {
-        let (salt, nonce, ciphertext) = Self::decode_logical_export(blob_hex)?;
-
-        let key = if let Ok(cert_hex) = std::env::var("REDDB_CERTIFICATE") {
-            let certificate = hex::decode(cert_hex).map_err(|_| VaultError::NoKey)?;
-            KeyPair::vault_key_from_certificate(&certificate)
-        } else {
-            let passphrase_str = std::env::var("REDDB_VAULT_KEY")
-                .ok()
-                .or_else(|| passphrase.map(|s| s.to_string()))
-                .ok_or(VaultError::NoKey)?;
-            let key_bytes = derive_key(passphrase_str.as_bytes(), &salt, &vault_argon2_params());
-            SecureKey::new(&key_bytes)
-        };
-
-        Self::decrypt_logical_export(&key, &nonce, &ciphertext)
+    /// Decrypt a logical export blob using the same certificate env var as
+    /// normal vault open.
+    pub fn unseal_logical_export(blob_hex: &str) -> Result<VaultState, VaultError> {
+        let cert_hex =
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
+        Self::unseal_logical_export_with_certificate(blob_hex, &cert_hex)
     }
 
-    /// Deterministic test/helper path that ignores vault env vars.
-    pub fn unseal_logical_export_with_passphrase(
+    /// Deterministic helper path that ignores vault env vars.
+    pub fn unseal_logical_export_with_certificate(
         blob_hex: &str,
-        passphrase: &str,
+        certificate_hex: &str,
     ) -> Result<VaultState, VaultError> {
-        let (salt, nonce, ciphertext) = Self::decode_logical_export(blob_hex)?;
-        let key_bytes = derive_key(passphrase.as_bytes(), &salt, &vault_argon2_params());
-        let key = SecureKey::new(&key_bytes);
+        let (_salt, nonce, ciphertext) = Self::decode_logical_export(blob_hex)?;
+        let certificate = decode_certificate_hex(certificate_hex)?;
+        let key = KeyPair::vault_key_from_certificate(&certificate);
         Self::decrypt_logical_export(&key, &nonce, &ciphertext)
     }
 
@@ -1296,6 +1248,20 @@ mod tests {
         (pager, tmp_dir)
     }
 
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
     #[test]
     fn test_vault_state_serialize_deserialize_roundtrip() {
         let state = sample_state();
@@ -1384,7 +1350,9 @@ mod tests {
     fn test_vault_pager_save_load_roundtrip() {
         let (pager, tmp_dir) = temp_pager();
 
-        let vault = Vault::open(&pager, Some("test-passphrase-42")).unwrap();
+        let kp = KeyPair::generate();
+        let certificate = kp.certificate_hex();
+        let vault = Vault::with_certificate(&pager, &certificate).unwrap();
 
         // Initially no vault pages.
         let loaded = vault.load(&pager).unwrap();
@@ -1408,8 +1376,8 @@ mod tests {
         assert_eq!(alice.role, Role::Admin);
         assert_eq!(alice.api_keys.len(), 1);
 
-        // Re-open vault with same key and load again (salt read from page).
-        let vault2 = Vault::open(&pager, Some("test-passphrase-42")).unwrap();
+        // Re-open vault with same certificate and load again (salt read from page).
+        let vault2 = Vault::with_certificate(&pager, &certificate).unwrap();
         let restored2 = vault2.load(&pager).unwrap().unwrap();
         assert!(restored2.bootstrapped);
         assert_eq!(restored2.users.len(), 2);
@@ -1423,8 +1391,9 @@ mod tests {
     fn test_vault_wrong_key_fails_decryption() {
         let (pager, tmp_dir) = temp_pager();
 
-        // Save with one key.
-        let vault = Vault::open(&pager, Some("correct-key")).unwrap();
+        // Save with one certificate.
+        let kp = KeyPair::generate();
+        let vault = Vault::with_certificate_bytes(&pager, &kp.certificate).unwrap();
         let state = VaultState {
             users: vec![],
             api_keys: vec![],
@@ -1434,8 +1403,9 @@ mod tests {
         };
         vault.save(&pager, &state).unwrap();
 
-        // Try to load with a different key.
-        let vault2 = Vault::open(&pager, Some("wrong-key")).unwrap();
+        // Try to load with a different certificate.
+        let wrong = KeyPair::generate();
+        let vault2 = Vault::with_certificate_bytes(&pager, &wrong.certificate).unwrap();
         let result = vault2.load(&pager);
 
         assert!(result.is_err());
@@ -1449,21 +1419,17 @@ mod tests {
     fn test_vault_no_key_error() {
         let (pager, tmp_dir) = temp_pager();
 
-        let result = Vault::open(&pager, None);
-        // If REDDB_VAULT_KEY or REDDB_CERTIFICATE happens to be set by another
-        // test, passphrase=None means we rely on env var.  Without either, it
-        // should be NoKey.
-        let has_env_key =
-            std::env::var("REDDB_VAULT_KEY").is_ok() || std::env::var("REDDB_CERTIFICATE").is_ok();
-        match has_env_key {
-            true => {
-                // Env var is set (by another test); open will succeed.
-                assert!(result.is_ok());
-            }
-            false => {
-                assert!(matches!(result, Err(VaultError::NoKey)));
-            }
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os("REDDB_CERTIFICATE");
+        let old_file = std::env::var_os("REDDB_CERTIFICATE_FILE");
+        unsafe {
+            std::env::remove_var("REDDB_CERTIFICATE");
+            std::env::remove_var("REDDB_CERTIFICATE_FILE");
         }
+        let result = Vault::open(&pager);
+        restore_env_var("REDDB_CERTIFICATE", old);
+        restore_env_var("REDDB_CERTIFICATE_FILE", old_file);
+        assert!(matches!(result, Err(VaultError::NoKey)));
 
         // Clean up.
         drop(pager);
@@ -1471,11 +1437,20 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_passphrase_argument() {
+    fn test_vault_open_uses_certificate_env() {
         let (pager, tmp_dir) = temp_pager();
 
-        // Open with passphrase argument.
-        let vault = Vault::open(&pager, Some("my-passphrase")).unwrap();
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os("REDDB_CERTIFICATE");
+        let old_file = std::env::var_os("REDDB_CERTIFICATE_FILE");
+        let kp = KeyPair::generate();
+        unsafe {
+            std::env::set_var("REDDB_CERTIFICATE", kp.certificate_hex());
+            std::env::remove_var("REDDB_CERTIFICATE_FILE");
+        }
+
+        // Open from REDDB_CERTIFICATE.
+        let vault = Vault::open(&pager).unwrap();
         let state = VaultState {
             users: vec![],
             api_keys: vec![],
@@ -1485,11 +1460,48 @@ mod tests {
         };
         vault.save(&pager, &state).unwrap();
 
-        // Re-open with same passphrase.
-        let vault2 = Vault::open(&pager, Some("my-passphrase")).unwrap();
+        // Re-open from the same env certificate.
+        let vault2 = Vault::open(&pager).unwrap();
         let loaded = vault2.load(&pager).unwrap().unwrap();
         assert!(!loaded.bootstrapped);
 
+        restore_env_var("REDDB_CERTIFICATE", old);
+        restore_env_var("REDDB_CERTIFICATE_FILE", old_file);
+        drop(pager);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_vault_open_uses_certificate_file_env() {
+        let (pager, tmp_dir) = temp_pager();
+
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os("REDDB_CERTIFICATE");
+        let old_file = std::env::var_os("REDDB_CERTIFICATE_FILE");
+        let kp = KeyPair::generate();
+        let cert_path = tmp_dir.join("certificate");
+        std::fs::write(&cert_path, format!("{}\n", kp.certificate_hex())).unwrap();
+        unsafe {
+            std::env::remove_var("REDDB_CERTIFICATE");
+            std::env::set_var("REDDB_CERTIFICATE_FILE", &cert_path);
+        }
+
+        let vault = Vault::open(&pager).unwrap();
+        let state = VaultState {
+            users: vec![],
+            api_keys: vec![],
+            bootstrapped: false,
+            master_secret: None,
+            kv: std::collections::HashMap::new(),
+        };
+        vault.save(&pager, &state).unwrap();
+
+        let vault2 = Vault::open(&pager).unwrap();
+        let loaded = vault2.load(&pager).unwrap().unwrap();
+        assert!(!loaded.bootstrapped);
+
+        restore_env_var("REDDB_CERTIFICATE", old);
+        restore_env_var("REDDB_CERTIFICATE_FILE", old_file);
         drop(pager);
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

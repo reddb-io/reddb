@@ -1553,3 +1553,137 @@ fn server_does_not_redeclare_core_file_format_constants() {
         "server should import bloom/vector/physical file contracts from reddb-file"
     );
 }
+
+#[test]
+fn native_artifact_payload_codecs_live_only_in_reddb_file() {
+    let root = repo_root();
+    let file_src = root.join("crates/reddb-file/src");
+
+    // reddb-file owns each payload codec: magic + encode + decode.
+    for (module, magic, fns) in [
+        (
+            "vector_hnsw_index.rs",
+            "HNSW_INDEX_MAGIC: [u8; 4] = *b\"HNSW\"",
+            &[
+                "pub fn encode_hnsw_index_frame",
+                "pub fn decode_hnsw_index_frame",
+            ][..],
+        ),
+        (
+            "vector_ivf_index.rs",
+            "IVF_INDEX_MAGIC: [u8; 4] = *b\"IVF1\"",
+            &[
+                "pub fn encode_ivf_index_frame",
+                "pub fn decode_ivf_index_frame",
+            ][..],
+        ),
+        (
+            "table_def.rs",
+            "TABLE_DEF_MAGIC: [u8; 4] = *b\"RTBL\"",
+            &[
+                "pub fn encode_table_def_frame",
+                "pub fn decode_table_def_frame",
+            ][..],
+        ),
+    ] {
+        let text = read(file_src.join(module));
+        assert!(
+            text.contains(magic),
+            "reddb-file {module} must own magic {magic:?}"
+        );
+        for needed in fns {
+            assert!(
+                text.contains(needed),
+                "reddb-file {module} must define {needed:?}"
+            );
+        }
+    }
+
+    let native = read(file_src.join("native_index_artifact.rs"));
+    for required in [
+        "NATIVE_GRAPH_ADJACENCY_MAGIC: [u8; 4] = *b\"RDGA\"",
+        "NATIVE_FULLTEXT_MAGIC: [u8; 4] = *b\"RDFT\"",
+        "NATIVE_DOC_PATHVALUE_MAGIC: [u8; 4] = *b\"RDDP\"",
+        "pub fn encode_native_graph_adjacency_frame",
+        "pub fn decode_native_graph_adjacency_frame",
+        "pub fn encode_native_fulltext_frame",
+        "pub fn decode_native_fulltext_frame",
+        "pub fn encode_native_doc_pathvalue_frame",
+        "pub fn decode_native_doc_pathvalue_frame",
+    ] {
+        assert!(
+            native.contains(required),
+            "reddb-file native_index_artifact.rs must own {required:?}"
+        );
+    }
+
+    // Server consumes the codecs and no longer defines the byte formats.
+    let server = root.join("crates/reddb-server/src");
+    let hnsw = read(server.join("storage/engine/hnsw.rs"));
+    let ivf = read(server.join("storage/engine/ivf.rs"));
+    let table = read(server.join("storage/schema/table.rs"));
+    let access = read(server.join("storage/unified/devx/reddb/impl_access.rs"));
+
+    for (label, text, calls) in [
+        (
+            "hnsw.rs",
+            &hnsw,
+            &[
+                "reddb_file::encode_hnsw_index_frame",
+                "reddb_file::decode_hnsw_index_frame",
+            ][..],
+        ),
+        (
+            "ivf.rs",
+            &ivf,
+            &[
+                "reddb_file::encode_ivf_index_frame",
+                "reddb_file::decode_ivf_index_frame",
+            ][..],
+        ),
+        (
+            "table.rs",
+            &table,
+            &[
+                "reddb_file::encode_table_def_frame",
+                "reddb_file::decode_table_def_frame",
+            ][..],
+        ),
+        (
+            "impl_access.rs",
+            &access,
+            &[
+                "reddb_file::encode_native_graph_adjacency_frame",
+                "reddb_file::decode_native_graph_adjacency_frame",
+                "reddb_file::encode_native_fulltext_frame",
+                "reddb_file::decode_native_fulltext_frame",
+                "reddb_file::encode_native_doc_pathvalue_frame",
+                "reddb_file::decode_native_doc_pathvalue_frame",
+            ][..],
+        ),
+    ] {
+        for call in calls {
+            assert!(text.contains(call), "server {label} must consume {call:?}");
+        }
+    }
+
+    // No server file may re-declare a relocated payload magic in shipped code.
+    for path in rust_files_under(&server) {
+        let text = read(&path);
+        let shipped = non_test_source(&text);
+        for magic in [
+            "b\"HNSW\"",
+            "b\"IVF1\"",
+            "b\"RDGA\"",
+            "b\"RDFT\"",
+            "b\"RDDP\"",
+            "b\"RTBL\"",
+        ] {
+            assert!(
+                !shipped.contains(magic),
+                "{} must not redefine relocated payload magic {magic} (codec lives in reddb-file)",
+                path.display()
+            );
+        }
+    }
+}

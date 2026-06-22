@@ -151,7 +151,7 @@ Every query returns a standard envelope:
 ## Executing via HTTP
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "SELECT name, email FROM users WHERE age > $1 ORDER BY name LIMIT $2", "params": [21, 10]}'
 ```
@@ -161,7 +161,7 @@ curl -X POST http://127.0.0.1:8080/query \
 ```bash
 grpcurl -plaintext \
   -d '{"query": "SELECT * FROM users WHERE active = $1", "params": [{"boolValue": true}]}' \
-  127.0.0.1:50051 reddb.v1.RedDb/Query
+  127.0.0.1:55055 reddb.v1.RedDb/Query
 ```
 
 ## GROUP BY / HAVING
@@ -250,7 +250,7 @@ Get the execution plan without running the query:
 ```bash
 grpcurl -plaintext \
   -d '{"query": "SELECT * FROM users WHERE age > $1", "params": [{"intValue": 21}]}' \
-  127.0.0.1:50051 reddb.v1.RedDb/ExplainQuery
+  127.0.0.1:55055 reddb.v1.RedDb/ExplainQuery
 ```
 
 > [!NOTE]

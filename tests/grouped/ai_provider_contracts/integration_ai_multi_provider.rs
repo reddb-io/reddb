@@ -17,6 +17,7 @@ mod support;
 use reddb::ai::{grpc_embeddings, parse_provider, AiProvider};
 use reddb::application::{ExecuteQueryInput, QueryUseCases, SearchSimilarInput};
 use reddb::json::{Map, Value as JsonValue};
+use reddb::runtime::ai::local_embedding::clear_local_embedding_backend_for_tests;
 use reddb::runtime::ai::provider_capabilities::{Modality, Registry};
 use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
@@ -254,6 +255,11 @@ fn grpc_embeddings_huggingface_dispatches_to_hf_client() {
 #[test]
 #[cfg(not(feature = "local-models"))]
 fn http_embeddings_rejects_local_when_local_models_feature_is_disabled() {
+    let _bg = super::support::backend_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    clear_local_embedding_backend_for_tests();
+
     let (_db, addr) = spawn_persistent_http_server("ai-multi-local-embeddings-http");
     let (status, body) = post_json(
         &addr,
@@ -263,6 +269,7 @@ fn http_embeddings_rejects_local_when_local_models_feature_is_disabled() {
 
     assert_eq!(status, 501, "unexpected response body: {body}");
     assert_local_models_disabled_error(&body);
+    clear_local_embedding_backend_for_tests();
 }
 
 #[test]
@@ -283,6 +290,11 @@ fn http_prompt_rejects_local_because_generation_is_out_of_scope() {
 #[test]
 #[cfg(not(feature = "local-models"))]
 fn grpc_embeddings_rejects_local_when_local_models_feature_is_disabled() {
+    let _bg = super::support::backend_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    clear_local_embedding_backend_for_tests();
+
     let rt = rt();
     let mut payload = Map::new();
     payload.insert(
@@ -297,6 +309,7 @@ fn grpc_embeddings_rejects_local_when_local_models_feature_is_disabled() {
     let err = grpc_embeddings(&rt, &JsonValue::Object(payload))
         .expect_err("local embeddings should require the local-models feature");
     assert_local_models_disabled_error(&err.to_string());
+    clear_local_embedding_backend_for_tests();
 }
 
 #[test]

@@ -62,7 +62,7 @@ Cluster all vectors in a collection.
 #### K-Means example
 
 ```bash
-curl -X POST localhost:8080/vectors/cluster -d '{
+curl -X POST localhost:5000/vectors/cluster -d '{
   "collection": "products",
   "field": "embedding",
   "algorithm": "kmeans",
@@ -74,7 +74,7 @@ curl -X POST localhost:8080/vectors/cluster -d '{
 #### DBSCAN example
 
 ```bash
-curl -X POST localhost:8080/vectors/cluster -d '{
+curl -X POST localhost:5000/vectors/cluster -d '{
   "collection": "products",
   "field": "embedding",
   "algorithm": "dbscan",
@@ -140,7 +140,7 @@ If you don't know the right K, try the **elbow method**: run K-Means for K = 2, 
 # Try different K values
 for k in 2 3 4 5 6 7 8 9 10; do
   echo "K=$k"
-  curl -s localhost:8080/vectors/cluster \
+  curl -s localhost:5000/vectors/cluster \
     -d "{\"collection\":\"products\",\"algorithm\":\"kmeans\",\"k\":$k}" \
     | jq '.cluster_sizes'
 done
@@ -165,13 +165,13 @@ For unnormalized vectors, eps should reflect the typical intra-cluster distance 
 
 ```bash
 # 1. Insert products with embeddings
-curl localhost:8080/query -d '{
+curl localhost:5000/query -d '{
   "query": "INSERT INTO products (name, category, price) VALUES (\"Widget A\", \"tools\", 29.99) WITH AUTO EMBED"
 }'
 # ... (repeat for many products)
 
 # 2. Cluster into segments
-curl -X POST localhost:8080/vectors/cluster -d '{
+curl -X POST localhost:5000/vectors/cluster -d '{
   "collection": "products",
   "field": "embedding",
   "algorithm": "kmeans",
@@ -187,7 +187,7 @@ curl -X POST localhost:8080/vectors/cluster -d '{
 
 ```bash
 # Use DBSCAN to find anomalous network traffic patterns
-curl -X POST localhost:8080/vectors/cluster -d '{
+curl -X POST localhost:5000/vectors/cluster -d '{
   "collection": "network_flows",
   "field": "feature_vector",
   "algorithm": "dbscan",
