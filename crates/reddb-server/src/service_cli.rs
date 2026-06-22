@@ -3742,7 +3742,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_preset_creates_head_and_customer_admins() {
+    fn cloud_preset_creates_system_head_and_customer_admins() {
         use crate::auth::policies::{EvalContext, ResourceRef};
         use crate::auth::UserId;
 
@@ -3763,10 +3763,12 @@ mod tests {
         let head = auth_store
             .get_user(None, "head")
             .expect("head admin should exist");
+        assert!(head.system_owned);
         assert_eq!(head.tenant_id, None);
         let customer = auth_store
             .get_user(None, "customer")
             .expect("customer admin should exist");
+        assert!(!customer.system_owned);
         assert_eq!(customer.tenant_id, None);
 
         let ctx = EvalContext {
@@ -3776,6 +3778,7 @@ mod tests {
             mfa_present: false,
             now_ms: 1_700_000_000_000,
             principal_is_admin_role: true,
+            principal_is_system_owned: false,
             principal_is_platform_scoped: true,
         };
         assert!(auth_store.check_policy_authz(
@@ -3785,6 +3788,13 @@ mod tests {
             &ctx,
         ));
 
+        let err = auth_store
+            .delete_user("head")
+            .expect_err("ordinary mutation path must not delete system head admin");
+        assert!(
+            err.to_string().contains("system-owned user is immutable"),
+            "got: {err}"
+        );
         assert!(auth_store.get_user(None, "head").is_some());
         assert!(auth_store
             .get_policy(CLOUD_PROTECT_MANAGED_POLICY)
