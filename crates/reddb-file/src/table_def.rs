@@ -235,7 +235,7 @@ pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFram
 
     let (col_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut columns = Vec::with_capacity(col_count as usize);
+    let mut columns = Vec::new();
     for _ in 0..col_count {
         let (col, col_len) = read_column(&data[offset..])?;
         offset += col_len;
@@ -244,7 +244,7 @@ pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFram
 
     let (pk_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut primary_key = Vec::with_capacity(pk_count as usize);
+    let mut primary_key = Vec::new();
     for _ in 0..pk_count {
         let (pk, pk_len) = read_string(&data[offset..])?;
         offset += pk_len;
@@ -253,7 +253,7 @@ pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFram
 
     let (idx_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut indexes = Vec::with_capacity(idx_count as usize);
+    let mut indexes = Vec::new();
     for _ in 0..idx_count {
         let (idx, idx_len) = read_index(&data[offset..])?;
         offset += idx_len;
@@ -262,7 +262,7 @@ pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFram
 
     let (constraint_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut constraints = Vec::with_capacity(constraint_count as usize);
+    let mut constraints = Vec::new();
     for _ in 0..constraint_count {
         let (constraint, constraint_len) = read_constraint(&data[offset..])?;
         offset += constraint_len;
@@ -303,11 +303,15 @@ fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameErro
     let default = if has_default {
         let (len, varint_len) = read_varint(&data[offset..])?;
         offset += varint_len;
-        if data.len() < offset + len as usize {
+        let len = usize::try_from(len).map_err(|_| TableDefFrameError::TruncatedData)?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(TableDefFrameError::TruncatedData)?;
+        if data.len() < end {
             return Err(TableDefFrameError::TruncatedData);
         }
-        let default_data = data[offset..offset + len as usize].to_vec();
-        offset += len as usize;
+        let default_data = data[offset..end].to_vec();
+        offset = end;
         Some(default_data)
     } else {
         None
@@ -337,7 +341,7 @@ fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameErro
 
     let (variant_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut enum_variants = Vec::with_capacity(variant_count as usize);
+    let mut enum_variants = Vec::new();
     for _ in 0..variant_count {
         let (variant, variant_len) = read_string(&data[offset..])?;
         offset += variant_len;
@@ -368,7 +372,7 @@ fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameErro
 
     let (meta_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut metadata = Vec::with_capacity(meta_count as usize);
+    let mut metadata = Vec::new();
     for _ in 0..meta_count {
         let (k, k_len) = read_string(&data[offset..])?;
         offset += k_len;
@@ -410,7 +414,7 @@ fn read_index(data: &[u8]) -> Result<(IndexDefFrame, usize), TableDefFrameError>
 
     let (col_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut columns = Vec::with_capacity(col_count as usize);
+    let mut columns = Vec::new();
     for _ in 0..col_count {
         let (col, col_len) = read_string(&data[offset..])?;
         offset += col_len;
@@ -442,7 +446,7 @@ fn read_constraint(data: &[u8]) -> Result<(ConstraintFrame, usize), TableDefFram
 
     let (col_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut columns = Vec::with_capacity(col_count as usize);
+    let mut columns = Vec::new();
     for _ in 0..col_count {
         let (col, col_len) = read_string(&data[offset..])?;
         offset += col_len;
@@ -461,7 +465,7 @@ fn read_constraint(data: &[u8]) -> Result<(ConstraintFrame, usize), TableDefFram
 
         let (ref_col_count, varint_len) = read_varint(&data[offset..])?;
         offset += varint_len;
-        let mut ref_cols = Vec::with_capacity(ref_col_count as usize);
+        let mut ref_cols = Vec::new();
         for _ in 0..ref_col_count {
             let (col, col_len) = read_string(&data[offset..])?;
             offset += col_len;
@@ -539,12 +543,16 @@ fn write_string(buf: &mut Vec<u8>, s: &str) {
 fn read_string(data: &[u8]) -> Result<(String, usize), TableDefFrameError> {
     let (len, varint_len) = read_varint(data)?;
     let offset = varint_len;
-    if data.len() < offset + len as usize {
+    let len = usize::try_from(len).map_err(|_| TableDefFrameError::TruncatedData)?;
+    let end = offset
+        .checked_add(len)
+        .ok_or(TableDefFrameError::TruncatedData)?;
+    if data.len() < end {
         return Err(TableDefFrameError::TruncatedData);
     }
-    let s = String::from_utf8(data[offset..offset + len as usize].to_vec())
+    let s = String::from_utf8(data[offset..end].to_vec())
         .map_err(|_| TableDefFrameError::TruncatedData)?;
-    Ok((s, offset + len as usize))
+    Ok((s, end))
 }
 
 #[cfg(test)]
@@ -640,6 +648,22 @@ mod tests {
         let encoded = encode_table_def_frame(&sample_frame());
         assert_eq!(
             decode_table_def_frame(&encoded[..encoded.len() - 1]),
+            Err(TableDefFrameError::TruncatedData)
+        );
+    }
+
+    #[test]
+    fn table_def_frame_does_not_preallocate_untrusted_counts() {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&TABLE_DEF_MAGIC);
+        encoded.extend_from_slice(&1u32.to_le_bytes());
+        write_string(&mut encoded, "t");
+        encoded.extend_from_slice(&0u64.to_le_bytes());
+        encoded.extend_from_slice(&0u64.to_le_bytes());
+        write_varint(&mut encoded, u64::MAX);
+
+        assert_eq!(
+            decode_table_def_frame(&encoded),
             Err(TableDefFrameError::TruncatedData)
         );
     }

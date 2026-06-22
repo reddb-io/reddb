@@ -6,6 +6,12 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "ai_search/support.rs"]
+mod support;
+
+#[path = "config_tier/shared.rs"]
+mod config_tier_shared;
+
 #[path = "auth_security/auth_alter_user.rs"]
 mod auth_alter_user;
 

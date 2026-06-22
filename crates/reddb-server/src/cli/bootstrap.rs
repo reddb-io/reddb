@@ -156,10 +156,8 @@ fn resolve_password(args: &BootstrapArgs) -> Result<String, String> {
         );
         return Ok(p.clone());
     }
-    if let Ok(env_pwd) = std::env::var("REDDB_PASSWORD") {
-        if !env_pwd.is_empty() {
-            return Ok(env_pwd);
-        }
+    if let Some(env_pwd) = crate::utils::env_with_file_fallback("REDDB_PASSWORD") {
+        return Ok(env_pwd);
     }
     Ok(String::new())
 }
@@ -211,6 +209,21 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
 
     #[test]
     fn vault_flag_required() {
@@ -225,6 +238,37 @@ mod tests {
         };
         let err = run(args).unwrap_err();
         assert!(err.contains("--vault"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_password_reads_file_env() {
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os("REDDB_PASSWORD");
+        let old_file = std::env::var_os("REDDB_PASSWORD_FILE");
+        let dir =
+            std::env::temp_dir().join(format!("reddb-bootstrap-password-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("password");
+        std::fs::write(&path, "from-file\n").unwrap();
+        unsafe {
+            std::env::remove_var("REDDB_PASSWORD");
+            std::env::set_var("REDDB_PASSWORD_FILE", &path);
+        }
+        let args = BootstrapArgs {
+            path: PathBuf::from("/tmp/reddb-bootstrap-test.rdb"),
+            vault: true,
+            username: "admin".into(),
+            password: None,
+            password_stdin: false,
+            print_certificate: false,
+            json: false,
+        };
+
+        assert_eq!(resolve_password(&args).unwrap(), "from-file");
+
+        restore_env_var("REDDB_PASSWORD", old);
+        restore_env_var("REDDB_PASSWORD_FILE", old_file);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

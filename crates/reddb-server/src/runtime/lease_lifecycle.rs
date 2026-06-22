@@ -31,6 +31,7 @@ use crate::runtime::write_gate::{LeaseGateState, WriteGate};
 /// drain when the lease is lost. Production wires it to
 /// `Lifecycle::mark_draining`. Tests pass a recorder.
 pub type MarkDraining = Arc<dyn Fn() + Send + Sync>;
+pub type CurrentTerm = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// Drives the serverless writer lease for one database key.
 ///
@@ -43,6 +44,7 @@ pub struct LeaseLifecycle {
     write_gate: Arc<WriteGate>,
     audit_log: Arc<AuditLogger>,
     mark_draining: MarkDraining,
+    current_term: CurrentTerm,
     holder_id: String,
     database_key: String,
     ttl_ms: u64,
@@ -55,6 +57,7 @@ impl LeaseLifecycle {
         write_gate: Arc<WriteGate>,
         audit_log: Arc<AuditLogger>,
         mark_draining: MarkDraining,
+        current_term: CurrentTerm,
         holder_id: String,
         database_key: String,
         ttl_ms: u64,
@@ -64,6 +67,7 @@ impl LeaseLifecycle {
             write_gate,
             audit_log,
             mark_draining,
+            current_term,
             holder_id,
             database_key,
             ttl_ms,
@@ -90,10 +94,13 @@ impl LeaseLifecycle {
     /// Acquire the writer lease and flip the gate to `Held`. Audit
     /// line records the outcome (ok / err) either way.
     pub fn try_acquire(&self) -> RedDBResult<()> {
-        match self
-            .store
-            .try_acquire(&self.database_key, &self.holder_id, self.ttl_ms)
-        {
+        let term = (self.current_term)();
+        match self.store.try_acquire_for_term(
+            &self.database_key,
+            &self.holder_id,
+            self.ttl_ms,
+            term,
+        ) {
             Ok(lease) => {
                 *self.current.lock().expect("poisoned lease mutex") = Some(lease.clone());
                 self.write_gate.set_lease_state(LeaseGateState::Held);
@@ -107,6 +114,7 @@ impl LeaseLifecycle {
                             "generation",
                             lease.generation as i64,
                         ))
+                        .field(AuditFieldEscaper::field("term", lease.term as i64))
                         .field(AuditFieldEscaper::field("ttl_ms", self.ttl_ms))
                         .build(),
                 );
@@ -144,7 +152,8 @@ impl LeaseLifecycle {
                 ));
             }
         };
-        match self.store.refresh(&snapshot, self.ttl_ms) {
+        let term = (self.current_term)();
+        match self.store.refresh_for_term(&snapshot, self.ttl_ms, term) {
             Ok(updated) => {
                 *self.current.lock().expect("poisoned lease mutex") = Some(updated);
                 Ok(())
@@ -239,8 +248,9 @@ pub fn admin_promote_lease(
     database_key: &str,
     holder_id: &str,
     ttl_ms: u64,
+    term: u64,
 ) -> Result<WriterLease, LeaseError> {
-    match store.try_acquire(database_key, holder_id, ttl_ms) {
+    match store.try_acquire_for_term(database_key, holder_id, ttl_ms, term) {
         Ok(lease) => {
             audit_log.record_event(
                 AuditEvent::builder("admin/failover/promote")
@@ -256,6 +266,7 @@ pub fn admin_promote_lease(
                         "generation",
                         lease.generation as i64,
                     ))
+                    .field(AuditFieldEscaper::field("term", lease.term as i64))
                     .field(AuditFieldEscaper::field("ttl_ms", ttl_ms))
                     .build(),
             );
@@ -282,7 +293,7 @@ mod tests {
     use crate::api::RedDBOptions;
     use crate::storage::backend::LocalBackend;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     fn temp_prefix(tag: &str) -> PathBuf {
         let mut p = PathBuf::from(std::env::temp_dir());
@@ -304,6 +315,22 @@ mod tests {
         Arc<AtomicUsize>,
         PathBuf,
     ) {
+        let (lifecycle, write_gate, audit_log, drain_counter, _current_term, prefix) =
+            build_lifecycle_with_term(tag, 1);
+        (lifecycle, write_gate, audit_log, drain_counter, prefix)
+    }
+
+    fn build_lifecycle_with_term(
+        tag: &str,
+        initial_term: u64,
+    ) -> (
+        Arc<LeaseLifecycle>,
+        Arc<WriteGate>,
+        Arc<AuditLogger>,
+        Arc<AtomicUsize>,
+        Arc<AtomicU64>,
+        PathBuf,
+    ) {
         let prefix = temp_prefix(tag);
         let store = Arc::new(
             LeaseStore::new(Arc::new(LocalBackend))
@@ -318,16 +345,27 @@ mod tests {
         let mark_draining: MarkDraining = Arc::new(move || {
             drain_counter_clone.fetch_add(1, Ordering::SeqCst);
         });
+        let current_term_value = Arc::new(AtomicU64::new(initial_term));
+        let current_term_clone = Arc::clone(&current_term_value);
+        let current_term: CurrentTerm = Arc::new(move || current_term_clone.load(Ordering::SeqCst));
         let lifecycle = Arc::new(LeaseLifecycle::new(
             store,
             Arc::clone(&write_gate),
             Arc::clone(&audit_log),
             mark_draining,
+            current_term,
             "writer-1".to_string(),
             "main".to_string(),
             60_000,
         ));
-        (lifecycle, write_gate, audit_log, drain_counter, prefix)
+        (
+            lifecycle,
+            write_gate,
+            audit_log,
+            drain_counter,
+            current_term_value,
+            prefix,
+        )
     }
 
     #[test]
@@ -342,6 +380,15 @@ mod tests {
         let body = std::fs::read_to_string(audit.path()).unwrap();
         assert!(body.contains("lease/acquire"));
         assert!(body.contains("\"outcome\":\"success\""));
+        let _ = std::fs::remove_dir_all(&prefix);
+    }
+
+    #[test]
+    fn acquire_stamps_current_replication_term() {
+        let (lifecycle, _gate, _audit, _drain, _term, prefix) =
+            build_lifecycle_with_term("acquire-term", 7);
+        lifecycle.try_acquire().unwrap();
+        assert_eq!(lifecycle.current_lease().unwrap().term, 7);
         let _ = std::fs::remove_dir_all(&prefix);
     }
 
@@ -381,13 +428,33 @@ mod tests {
     }
 
     #[test]
+    fn refresh_fences_when_current_term_advances() {
+        let (lifecycle, gate, _audit, drain, current_term, prefix) =
+            build_lifecycle_with_term("refresh-stale-term", 4);
+        lifecycle.try_acquire().unwrap();
+        current_term.store(5, Ordering::SeqCst);
+
+        let err = lifecycle.refresh().unwrap_err();
+
+        match err {
+            RedDBError::Internal(msg) => assert_eq!(msg, "writer lease lost"),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert_eq!(gate.lease_state(), LeaseGateState::NotHeld);
+        assert_eq!(drain.load(Ordering::SeqCst), 1);
+        assert!(lifecycle.current_lease().is_none());
+        let _ = std::fs::remove_dir_all(&prefix);
+    }
+
+    #[test]
     fn admin_promote_lease_audits_success() {
         let prefix = temp_prefix("admin-ok");
         let store = LeaseStore::new(Arc::new(LocalBackend))
             .with_prefix(prefix.to_string_lossy().to_string());
         let audit = AuditLogger::for_data_path(&prefix.join("data.rdb"));
-        let lease = admin_promote_lease(&store, &audit, "main", "promoter-1", 30_000).unwrap();
+        let lease = admin_promote_lease(&store, &audit, "main", "promoter-1", 30_000, 9).unwrap();
         assert_eq!(lease.holder_id, "promoter-1");
+        assert_eq!(lease.term, 9);
         assert!(audit.wait_idle(std::time::Duration::from_secs(2)));
         let body = std::fs::read_to_string(audit.path()).unwrap();
         assert!(body.contains("admin/failover/promote"));
@@ -409,7 +476,7 @@ mod tests {
         let mut opts = RedDBOptions::default();
         opts.read_only = false;
         let gate = WriteGate::from_options(&opts);
-        let _ = admin_promote_lease(&store, &audit, "main", "promoter-2", 30_000).unwrap();
+        let _ = admin_promote_lease(&store, &audit, "main", "promoter-2", 30_000, 1).unwrap();
         assert_eq!(gate.lease_state(), LeaseGateState::NotRequired);
         let _ = std::fs::remove_dir_all(&prefix);
     }

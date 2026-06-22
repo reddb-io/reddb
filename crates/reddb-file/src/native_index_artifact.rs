@@ -77,18 +77,30 @@ fn read_string(
     pos: &mut usize,
     artifact: &'static str,
 ) -> Result<String, NativeArtifactFrameError> {
-    let len = read_u32(bytes, pos, artifact, "string length")? as usize;
-    if *pos + len > bytes.len() {
+    let len = read_u32(bytes, pos, artifact, "string length")?;
+    let len = usize::try_from(len).map_err(|_| NativeArtifactFrameError::Truncated {
+        artifact,
+        offset: *pos,
+        reason: "string length",
+    })?;
+    let end = (*pos)
+        .checked_add(len)
+        .ok_or(NativeArtifactFrameError::Truncated {
+            artifact,
+            offset: *pos,
+            reason: "string content",
+        })?;
+    if end > bytes.len() {
         return Err(NativeArtifactFrameError::Truncated {
             artifact,
             offset: *pos,
             reason: "string content",
         });
     }
-    let value = std::str::from_utf8(&bytes[*pos..*pos + len])
+    let value = std::str::from_utf8(&bytes[*pos..end])
         .map_err(|_| NativeArtifactFrameError::InvalidUtf8 { offset: *pos })?
         .to_string();
-    *pos += len;
+    *pos = end;
     Ok(value)
 }
 
@@ -206,8 +218,8 @@ pub fn decode_native_graph_adjacency_frame(
         return Err(NativeArtifactFrameError::InvalidMagic { artifact: ARTIFACT });
     }
     let mut pos = 4usize;
-    let edge_count = read_u32(bytes, &mut pos, ARTIFACT, "edge count")? as usize;
-    let mut edges = Vec::with_capacity(edge_count);
+    let edge_count = read_u32(bytes, &mut pos, ARTIFACT, "edge count")?;
+    let mut edges = Vec::new();
     for _ in 0..edge_count {
         let edge_id = read_u64(bytes, &mut pos, ARTIFACT, "edge id")?;
         let from_node = read_string(bytes, &mut pos, ARTIFACT)?;
@@ -285,12 +297,12 @@ pub fn decode_native_fulltext_frame(
     let mut pos = 4usize;
     let collection = read_string(bytes, &mut pos, ARTIFACT)?;
     let doc_count = read_u32(bytes, &mut pos, ARTIFACT, "doc count")?;
-    let term_count = read_u32(bytes, &mut pos, ARTIFACT, "term count")? as usize;
-    let mut terms = Vec::with_capacity(term_count);
+    let term_count = read_u32(bytes, &mut pos, ARTIFACT, "term count")?;
+    let mut terms = Vec::new();
     for _ in 0..term_count {
         let term = read_string(bytes, &mut pos, ARTIFACT)?;
-        let entry_count = read_u32(bytes, &mut pos, ARTIFACT, "posting count")? as usize;
-        let mut postings = Vec::with_capacity(entry_count);
+        let entry_count = read_u32(bytes, &mut pos, ARTIFACT, "posting count")?;
+        let mut postings = Vec::new();
         for _ in 0..entry_count {
             let entity_id = read_u64(bytes, &mut pos, ARTIFACT, "posting entity id")?;
             let term_count = read_u32(bytes, &mut pos, ARTIFACT, "posting term count")?;
@@ -375,14 +387,14 @@ pub fn decode_native_doc_pathvalue_frame(
     }
     let mut pos = 4usize;
     let collection = read_string(bytes, &mut pos, ARTIFACT)?;
-    let doc_count = read_u32(bytes, &mut pos, ARTIFACT, "doc count")? as usize;
+    let doc_count = read_u32(bytes, &mut pos, ARTIFACT, "doc count")?;
     let total_entries = read_u32(bytes, &mut pos, ARTIFACT, "total entries")? as u64;
-    let mut docs = Vec::with_capacity(doc_count);
+    let mut docs = Vec::new();
     let mut seen_entries = 0u64;
     for _ in 0..doc_count {
         let entity_id = read_u64(bytes, &mut pos, ARTIFACT, "document entity id")?;
-        let entry_count = read_u32(bytes, &mut pos, ARTIFACT, "document entry count")? as usize;
-        let mut entries = Vec::with_capacity(entry_count);
+        let entry_count = read_u32(bytes, &mut pos, ARTIFACT, "document entry count")?;
+        let mut entries = Vec::new();
         for _ in 0..entry_count {
             let path = read_string(bytes, &mut pos, ARTIFACT)?;
             let value = read_string(bytes, &mut pos, ARTIFACT)?;
@@ -539,6 +551,18 @@ mod tests {
         assert!(matches!(
             decode_native_doc_pathvalue_frame(&[0u8; 12]),
             Err(NativeArtifactFrameError::InvalidMagic { .. })
+        ));
+    }
+
+    #[test]
+    fn native_artifacts_do_not_preallocate_untrusted_counts() {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&NATIVE_GRAPH_ADJACENCY_MAGIC);
+        encoded.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(matches!(
+            decode_native_graph_adjacency_frame(&encoded),
+            Err(NativeArtifactFrameError::Truncated { .. })
         ));
     }
 

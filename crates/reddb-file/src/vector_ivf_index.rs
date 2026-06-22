@@ -144,27 +144,27 @@ pub fn decode_ivf_index_frame(bytes: &[u8]) -> Result<IvfIndexFrame, IvfIndexFra
     let trained = read_u8(bytes, &mut pos, "trained")? == 1;
     let count = read_u64(bytes, &mut pos, "count")?;
     let next_id = read_u64(bytes, &mut pos, "next_id")?;
-    let list_count = read_u32(bytes, &mut pos, "list_count")? as usize;
+    let list_count = read_u32(bytes, &mut pos, "list_count")?;
 
-    let mut lists = Vec::with_capacity(list_count);
+    let mut lists = Vec::new();
     for _ in 0..list_count {
-        let centroid_len = read_u32(bytes, &mut pos, "centroid_len")? as usize;
-        let mut centroid = Vec::with_capacity(centroid_len);
+        let centroid_len = read_u32(bytes, &mut pos, "centroid_len")?;
+        let mut centroid = Vec::new();
         for _ in 0..centroid_len {
             centroid.push(read_f32(bytes, &mut pos, "centroid")?);
         }
 
-        let id_count = read_u32(bytes, &mut pos, "id_count")? as usize;
-        let mut ids = Vec::with_capacity(id_count);
+        let id_count = read_u32(bytes, &mut pos, "id_count")?;
+        let mut ids = Vec::new();
         for _ in 0..id_count {
             ids.push(read_u64(bytes, &mut pos, "id")?);
         }
 
-        let vector_count = read_u32(bytes, &mut pos, "vector_count")? as usize;
-        let mut vectors = Vec::with_capacity(vector_count);
+        let vector_count = read_u32(bytes, &mut pos, "vector_count")?;
+        let mut vectors = Vec::new();
         for _ in 0..vector_count {
-            let vector_len = read_u32(bytes, &mut pos, "vector_len")? as usize;
-            let mut vector = Vec::with_capacity(vector_len);
+            let vector_len = read_u32(bytes, &mut pos, "vector_len")?;
+            let mut vector = Vec::new();
             for _ in 0..vector_len {
                 vector.push(read_f32(bytes, &mut pos, "vector value")?);
             }
@@ -327,6 +327,20 @@ mod tests {
         let encoded = encode_ivf_index_frame(&sample_frame());
         assert!(matches!(
             decode_ivf_index_frame(&encoded[..encoded.len() - 1]),
+            Err(IvfIndexFrameError::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn ivf_index_frame_does_not_preallocate_untrusted_counts() {
+        let mut frame = sample_frame();
+        frame.lists.clear();
+        let mut encoded = encode_ivf_index_frame(&frame);
+        let list_count_off = IVF_INDEX_HEADER_LEN - 4;
+        encoded[list_count_off..list_count_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(matches!(
+            decode_ivf_index_frame(&encoded),
             Err(IvfIndexFrameError::Truncated { .. })
         ));
     }

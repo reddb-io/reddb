@@ -70,9 +70,7 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
 }
 
 fn has_cli_vault_key() -> bool {
-    std::env::var("REDDB_CERTIFICATE")
-        .map(|value| !value.is_empty())
-        .unwrap_or(false)
+    reddb::utils::env_with_file_fallback("REDDB_CERTIFICATE").is_some()
 }
 
 fn attach_cli_vault(
@@ -3894,6 +3892,12 @@ fn flag_string(flags: &HashMap<String, FlagValue>, name: &str) -> Option<String>
     flags.get(name).map(|value| value.as_str_value())
 }
 
+fn admin_token_from_flags_or_env(flags: &HashMap<String, FlagValue>) -> Option<String> {
+    flag_string(flags, "token")
+        .or_else(|| reddb::utils::env_with_file_fallback("RED_ADMIN_TOKEN"))
+        .filter(|token| !token.trim().is_empty())
+}
+
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
@@ -4075,9 +4079,7 @@ fn run_inspect_command(flags: &HashMap<String, FlagValue>, remaining: &[String])
 fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     let json_mode = wants_json(flags);
     let bind = flag_string(flags, "bind").unwrap_or_else(|| "127.0.0.1:5000".to_string());
-    let token = flag_string(flags, "token")
-        .or_else(|| std::env::var("RED_ADMIN_TOKEN").ok())
-        .filter(|t| !t.trim().is_empty());
+    let token = admin_token_from_flags_or_env(flags);
 
     let subcommand = remaining.first().map(|s| s.as_str()).unwrap_or("help");
     let args: Vec<&str> = remaining.iter().skip(1).map(|s| s.as_str()).collect();
@@ -5364,9 +5366,7 @@ fn run_bootstrap_command(flags: &HashMap<String, FlagValue>) -> i32 {
 fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     let json_mode = wants_json(&result.flags);
     let bind = flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:5000".to_string());
-    let token = flag_string(&result.flags, "token")
-        .or_else(|| std::env::var("RED_ADMIN_TOKEN").ok())
-        .filter(|t| !t.trim().is_empty());
+    let token = admin_token_from_flags_or_env(&result.flags);
 
     let backup_warn: f64 = flag_string(&result.flags, "backup-age-warn-secs")
         .and_then(|s| s.parse().ok())
@@ -5746,6 +5746,33 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
                 }
             }
         }
+    }
+
+    #[test]
+    fn admin_token_reads_file_env_and_flag_wins() {
+        let _lock = env_lock().lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("reddb-admin-token-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        std::fs::write(&path, "file-token\n").unwrap();
+        let _clear = EnvGuard::clear(&["RED_ADMIN_TOKEN", "RED_ADMIN_TOKEN_FILE"]);
+        let path_str = path.to_string_lossy().to_string();
+        let _file = EnvGuard::set(&[("RED_ADMIN_TOKEN_FILE", path_str.as_str())]);
+
+        assert_eq!(
+            admin_token_from_flags_or_env(&HashMap::new()).as_deref(),
+            Some("file-token")
+        );
+
+        let mut flags = HashMap::new();
+        flags.insert("token".to_string(), str_flag("flag-token"));
+        assert_eq!(
+            admin_token_from_flags_or_env(&flags).as_deref(),
+            Some("flag-token")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

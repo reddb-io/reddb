@@ -432,9 +432,7 @@ impl AuthStore {
     /// restored into the in-memory store.  All subsequent mutations are
     /// automatically persisted to the vault pages via the pager.
     pub fn with_vault(config: AuthConfig, pager: Arc<Pager>) -> Result<Self, AuthError> {
-        let certificate = std::env::var("REDDB_CERTIFICATE")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
+        let certificate = crate::utils::env_with_file_fallback("REDDB_CERTIFICATE");
         Self::with_vault_optional_certificate(config, pager, certificate.as_deref())
     }
 
@@ -681,8 +679,8 @@ impl AuthStore {
             return None;
         }
 
-        let username = std::env::var("REDDB_USERNAME").ok()?;
-        let password = std::env::var("REDDB_PASSWORD").ok()?;
+        let username = crate::utils::env_with_file_fallback("REDDB_USERNAME")?;
+        let password = crate::utils::env_with_file_fallback("REDDB_PASSWORD")?;
 
         if username.is_empty() || password.is_empty() {
             return None;

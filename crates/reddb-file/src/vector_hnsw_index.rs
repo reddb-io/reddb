@@ -176,23 +176,31 @@ pub fn decode_hnsw_index_frame(bytes: &[u8]) -> Result<HnswIndexFrame, HnswIndex
         Some(ep_value)
     };
 
-    let node_count = read_u64(bytes, &mut pos, "node_count")? as usize;
-    let dim = dimension as usize;
-    let mut nodes = Vec::with_capacity(node_count);
+    let node_count = read_u64(bytes, &mut pos, "node_count")?;
+    let dim = usize::try_from(dimension).map_err(|_| HnswIndexFrameError::Truncated {
+        offset: pos,
+        reason: "dimension",
+    })?;
+    let mut nodes = Vec::new();
     for _ in 0..node_count {
         let id = read_u64(bytes, &mut pos, "node id")?;
         let node_max_layer = read_u32(bytes, &mut pos, "node max_layer")?;
 
-        let mut vector = Vec::with_capacity(dim);
+        let mut vector = Vec::new();
         for _ in 0..dim {
             vector.push(read_f32(bytes, &mut pos, "node vector")?);
         }
 
-        let layer_count = node_max_layer as usize + 1;
-        let mut connections = Vec::with_capacity(layer_count);
+        let layer_count = node_max_layer
+            .checked_add(1)
+            .ok_or(HnswIndexFrameError::Truncated {
+                offset: pos,
+                reason: "node layer count",
+            })?;
+        let mut connections = Vec::new();
         for _ in 0..layer_count {
-            let conn_count = read_u32(bytes, &mut pos, "connection count")? as usize;
-            let mut conn_list = Vec::with_capacity(conn_count);
+            let conn_count = read_u32(bytes, &mut pos, "connection count")?;
+            let mut conn_list = Vec::new();
             for _ in 0..conn_count {
                 conn_list.push(read_u64(bytes, &mut pos, "connection")?);
             }
@@ -405,6 +413,20 @@ mod tests {
         let encoded = encode_hnsw_index_frame(&sample_frame());
         assert!(matches!(
             decode_hnsw_index_frame(&encoded[..encoded.len() - 1]),
+            Err(HnswIndexFrameError::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn hnsw_index_frame_does_not_preallocate_untrusted_counts() {
+        let mut frame = sample_frame();
+        frame.nodes.clear();
+        let mut encoded = encode_hnsw_index_frame(&frame);
+        let node_count_off = HNSW_INDEX_HEADER_LEN - 8;
+        encoded[node_count_off..node_count_off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+
+        assert!(matches!(
+            decode_hnsw_index_frame(&encoded),
             Err(HnswIndexFrameError::Truncated { .. })
         ));
     }

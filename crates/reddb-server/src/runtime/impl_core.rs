@@ -10376,6 +10376,21 @@ impl RedDBRuntime {
             };
         }
 
+        if resource_kind == "policy"
+            && matches!(
+                action,
+                "policy:put" | "policy:drop" | "policy:attach" | "policy:detach"
+            )
+            && self
+                .inner
+                .config_registry
+                .get_active(resource_name)
+                .map(|entry| entry.managed)
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
         let mut resource = crate::auth::policies::ResourceRef::new(
             resource_kind.to_string(),
             resource_name.to_string(),

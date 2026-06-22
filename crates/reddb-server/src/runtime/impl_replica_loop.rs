@@ -502,6 +502,7 @@ impl RedDBRuntime {
                     since_lsn,
                     max_count,
                     replica_id: Some(replica_id.clone()),
+                    term: self.current_replication_term(),
                     await_data: true,
                     await_timeout_ms: 30_000,
                 };

@@ -143,6 +143,7 @@ impl RedDBServer {
             &database_key,
             &holder_id,
             ttl_ms,
+            self.runtime.current_replication_term(),
         ) {
             Ok(lease) => {
                 let replica_id = self.runtime.resolve_replica_id();

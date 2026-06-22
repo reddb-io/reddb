@@ -2449,6 +2449,12 @@ fn apply_cloud_preset(
             .map_err(|err| format!("attach allow-all policy: {err}"))?;
     }
     install_cloud_guardrails(runtime, auth_store)?;
+    auth_store
+        .attach_policy(
+            PrincipalRef::User(customer_id),
+            CLOUD_PROTECT_MANAGED_POLICY,
+        )
+        .map_err(|err| format!("attach cloud guardrail policy: {err}"))?;
 
     Ok(head_id.to_string())
 }
@@ -2543,6 +2549,7 @@ fn apply_regulated_preset(
 ) -> Result<(), String> {
     use crate::auth::policies::Policy;
     use crate::auth::registry::EvidenceRequirement;
+    use crate::auth::store::{PrincipalRef, PUBLIC_IAM_GROUP};
 
     runtime.query_audit().enable_infrastructure();
 
@@ -2576,6 +2583,12 @@ fn apply_regulated_preset(
     auth_store
         .put_policy(policy)
         .map_err(|err| format!("install regulated guardrail policy: {err}"))?;
+    auth_store
+        .attach_policy(
+            PrincipalRef::Group(PUBLIC_IAM_GROUP.to_string()),
+            REGULATED_PROTECT_MANAGED_POLICY,
+        )
+        .map_err(|err| format!("attach regulated guardrail policy: {err}"))?;
 
     let now_ms = crate::utils::now_unix_millis() as u128;
     let entries = vec![
@@ -3784,6 +3797,33 @@ mod tests {
             &ResourceRef::new("config", "red.config.customer.enabled"),
             &ctx,
         ));
+        assert!(
+            auth_store.check_policy_authz(
+                &UserId::platform("head"),
+                "config:write",
+                &ResourceRef::new("config", "red.config.cloud.enabled"),
+                &ctx,
+            ),
+            "cloud head keeps allow-all authority over managed cloud config"
+        );
+        assert!(
+            !auth_store.check_policy_authz(
+                &UserId::platform("customer"),
+                "config:write",
+                &ResourceRef::new("config", "red.config.cloud.enabled"),
+                &ctx,
+            ),
+            "cloud customer must be denied managed cloud config writes"
+        );
+        assert!(
+            !auth_store.check_policy_authz(
+                &UserId::platform("customer"),
+                "policy:drop",
+                &ResourceRef::new("policy", CLOUD_PROTECT_MANAGED_POLICY),
+                &ctx,
+            ),
+            "cloud customer must be denied mutations of the managed guardrail policy"
+        );
 
         assert!(auth_store.get_user(None, "head").is_some());
         assert!(auth_store
@@ -4022,13 +4062,13 @@ mod tests {
             principal_is_platform_scoped: true,
         };
         assert!(
-            auth_store.check_policy_authz(
+            !auth_store.check_policy_authz(
                 &UserId::platform("alice"),
                 "policy:drop",
                 &ResourceRef::new("policy", REGULATED_PROTECT_MANAGED_POLICY),
                 &ctx,
             ),
-            "ordinary allow-all policy should be broad enough that only the managed guardrail blocks"
+            "managed guardrail deny policy must be effective for ordinary admins"
         );
 
         set_current_auth_identity("alice".to_string(), Role::Admin);

@@ -6,6 +6,9 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "../support/mod.rs"]
+mod support;
+
 #[path = "../cli_bootstrap.rs"]
 mod cli_bootstrap;
 

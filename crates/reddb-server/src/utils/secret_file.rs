@@ -103,6 +103,7 @@ pub fn expand_all_reddb_secrets() -> Vec<(String, std::io::Error)> {
         "REDDB_USERNAME",
         "REDDB_PASSWORD",
         "REDDB_ROOT_TOKEN",
+        "RED_ADMIN_TOKEN",
     ];
     let mut errors = Vec::new();
     for var in VARS {
@@ -264,5 +265,24 @@ mod tests {
         assert!(expand_file_env("REDDB_TEST_EMPTYP").is_ok());
         assert!(std::env::var("REDDB_TEST_EMPTYP").is_err());
         cleanup("REDDB_TEST_EMPTYP");
+    }
+
+    #[test]
+    fn expands_admin_token_file_in_standard_secret_set() {
+        let _g = env_lock().lock();
+        let dir = tmpdir("admin-token");
+        let path = dir.join("secret");
+        std::fs::write(&path, "admin-token\n").unwrap();
+        cleanup("RED_ADMIN_TOKEN");
+        unsafe {
+            std::env::set_var("RED_ADMIN_TOKEN_FILE", &path);
+        }
+
+        assert!(expand_all_reddb_secrets().is_empty());
+        assert_eq!(std::env::var("RED_ADMIN_TOKEN").unwrap(), "admin-token");
+        assert!(std::env::var("RED_ADMIN_TOKEN_FILE").is_err());
+
+        cleanup("RED_ADMIN_TOKEN");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

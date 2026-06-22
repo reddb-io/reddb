@@ -547,10 +547,8 @@ impl Vault {
     /// the existing page content.  Otherwise a fresh salt is generated
     /// and will be written on the first `save()` call.
     pub fn open(pager: &Pager) -> Result<Self, VaultError> {
-        let cert_hex = std::env::var("REDDB_CERTIFICATE")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or(VaultError::NoKey)?;
+        let cert_hex =
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
         Self::with_certificate(pager, &cert_hex)
     }
 
@@ -642,10 +640,8 @@ impl Vault {
     /// Decrypt a logical export blob using the same certificate env var as
     /// normal vault open.
     pub fn unseal_logical_export(blob_hex: &str) -> Result<VaultState, VaultError> {
-        let cert_hex = std::env::var("REDDB_CERTIFICATE")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or(VaultError::NoKey)?;
+        let cert_hex =
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
         Self::unseal_logical_export_with_certificate(blob_hex, &cert_hex)
     }
 
@@ -1425,11 +1421,14 @@ mod tests {
 
         let _guard = env_lock().lock().unwrap();
         let old = std::env::var_os("REDDB_CERTIFICATE");
+        let old_file = std::env::var_os("REDDB_CERTIFICATE_FILE");
         unsafe {
             std::env::remove_var("REDDB_CERTIFICATE");
+            std::env::remove_var("REDDB_CERTIFICATE_FILE");
         }
         let result = Vault::open(&pager);
         restore_env_var("REDDB_CERTIFICATE", old);
+        restore_env_var("REDDB_CERTIFICATE_FILE", old_file);
         assert!(matches!(result, Err(VaultError::NoKey)));
 
         // Clean up.
@@ -1443,9 +1442,11 @@ mod tests {
 
         let _guard = env_lock().lock().unwrap();
         let old = std::env::var_os("REDDB_CERTIFICATE");
+        let old_file = std::env::var_os("REDDB_CERTIFICATE_FILE");
         let kp = KeyPair::generate();
         unsafe {
             std::env::set_var("REDDB_CERTIFICATE", kp.certificate_hex());
+            std::env::remove_var("REDDB_CERTIFICATE_FILE");
         }
 
         // Open from REDDB_CERTIFICATE.
@@ -1465,6 +1466,42 @@ mod tests {
         assert!(!loaded.bootstrapped);
 
         restore_env_var("REDDB_CERTIFICATE", old);
+        restore_env_var("REDDB_CERTIFICATE_FILE", old_file);
+        drop(pager);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_vault_open_uses_certificate_file_env() {
+        let (pager, tmp_dir) = temp_pager();
+
+        let _guard = env_lock().lock().unwrap();
+        let old = std::env::var_os("REDDB_CERTIFICATE");
+        let old_file = std::env::var_os("REDDB_CERTIFICATE_FILE");
+        let kp = KeyPair::generate();
+        let cert_path = tmp_dir.join("certificate");
+        std::fs::write(&cert_path, format!("{}\n", kp.certificate_hex())).unwrap();
+        unsafe {
+            std::env::remove_var("REDDB_CERTIFICATE");
+            std::env::set_var("REDDB_CERTIFICATE_FILE", &cert_path);
+        }
+
+        let vault = Vault::open(&pager).unwrap();
+        let state = VaultState {
+            users: vec![],
+            api_keys: vec![],
+            bootstrapped: false,
+            master_secret: None,
+            kv: std::collections::HashMap::new(),
+        };
+        vault.save(&pager, &state).unwrap();
+
+        let vault2 = Vault::open(&pager).unwrap();
+        let loaded = vault2.load(&pager).unwrap().unwrap();
+        assert!(!loaded.bootstrapped);
+
+        restore_env_var("REDDB_CERTIFICATE", old);
+        restore_env_var("REDDB_CERTIFICATE_FILE", old_file);
         drop(pager);
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
