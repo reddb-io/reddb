@@ -29,7 +29,9 @@ use std::sync::Arc;
 
 use super::column_batch::{ColumnBatch, ColumnKind, ColumnVector, Field, Schema};
 use crate::storage::schema::types::DataType;
-use crate::storage::unified::column_block::{read_column_block_projected, ColumnBlockError};
+use crate::storage::unified::column_block::{
+    read_column_block_projected_typed, ColumnBlockError, ProjectedColumnData,
+};
 
 /// Failures decoding a columnar chunk into a [`ColumnBatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +150,56 @@ fn le_bytes_to_f64_vec(raw: &[u8], n: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Reinterpret an aligned `Vec<u64>` as `Vec<i64>` without copying (#962).
+/// `u64` and `i64` share size (8) and alignment (8), so the allocation's
+/// layout is valid for `i64`; the bit pattern is the same little-endian
+/// representation [`numeric_vector`]'s byte path would have produced.
+fn u64_words_to_i64(v: Vec<u64>) -> Vec<i64> {
+    let mut me = std::mem::ManuallyDrop::new(v);
+    // SAFETY: identical layout (size 8, align 8); ptr/len/cap come from a live
+    // `Vec<u64>` we forget, so no double-free and no realloc-type mismatch.
+    unsafe { Vec::from_raw_parts(me.as_mut_ptr() as *mut i64, me.len(), me.capacity()) }
+}
+
+/// Reinterpret an aligned `Vec<u64>` as `Vec<f64>` without copying (#962).
+/// Every 64-bit pattern is a valid `f64` (incl. NaN / ±inf / ±0), identical to
+/// `f64::from_bits`, and the two types share size and alignment.
+fn u64_words_to_f64(v: Vec<u64>) -> Vec<f64> {
+    let mut me = std::mem::ManuallyDrop::new(v);
+    // SAFETY: identical layout (size 8, align 8); see `u64_words_to_i64`.
+    unsafe { Vec::from_raw_parts(me.as_mut_ptr() as *mut f64, me.len(), me.capacity()) }
+}
+
+/// Build a typed [`ColumnVector`] from a decoded column payload. The numeric
+/// fast path (`Words`) reinterprets the aligned `u64` buffer in place; the
+/// `Bytes` fallback copies through [`numeric_vector`].
+fn vector_for(
+    column_id: u32,
+    kind: &ColumnKind,
+    data: ProjectedColumnData,
+) -> Result<ColumnVector, ColumnarScanError> {
+    match data {
+        ProjectedColumnData::Words(words) => Ok(match kind {
+            ColumnKind::Int64 => ColumnVector::Int64 {
+                data: u64_words_to_i64(words),
+                validity: None,
+            },
+            ColumnKind::Float64 => ColumnVector::Float64 {
+                data: u64_words_to_f64(words),
+                validity: None,
+            },
+            other => {
+                return Err(ColumnarScanError::UnsupportedLogicalType(match other {
+                    ColumnKind::Bool => DataType::Boolean.to_byte(),
+                    ColumnKind::Text => DataType::Text.to_byte(),
+                    _ => unreachable!(),
+                }))
+            }
+        }),
+        ProjectedColumnData::Bytes(raw) => numeric_vector(column_id, kind, &raw),
+    }
+}
+
 /// Decode a sealed columnar chunk (`RDCC` bytes) into a [`ColumnBatch`],
 /// materialising **only** the columns in `projection` (by stable column id,
 /// in the given order). This is the vectorised counterpart to the
@@ -168,23 +220,25 @@ pub fn column_batch_from_block(
     bytes: &[u8],
     projection: &[u32],
 ) -> Result<ColumnBatch, ColumnarScanError> {
-    let block = read_column_block_projected(bytes, projection)?;
+    let mut decoded = read_column_block_projected_typed(bytes, projection)?;
 
     let mut fields = Vec::with_capacity(projection.len());
     let mut columns = Vec::with_capacity(projection.len());
 
     // Honour the caller's projection order (the projected reader returns
     // columns in directory order, which may differ from the query order).
+    // `swap_remove` moves each column out so the typed `Vec<u64>` payload is
+    // reinterpreted in place rather than copied (#962).
     for &id in projection {
-        let col = block
-            .columns
+        let pos = decoded
             .iter()
-            .find(|c| c.column_id == id)
+            .position(|c| c.column_id == id)
             .ok_or(ColumnarScanError::MissingColumn(id))?;
+        let col = decoded.swap_remove(pos);
         let kind = kind_for_logical_type(col.logical_type)
             .ok_or(ColumnarScanError::UnsupportedLogicalType(col.logical_type))?;
         let vector = match kind {
-            ColumnKind::Int64 | ColumnKind::Float64 => numeric_vector(id, &kind, &col.data)?,
+            ColumnKind::Int64 | ColumnKind::Float64 => vector_for(id, &kind, col.data)?,
             ColumnKind::Bool | ColumnKind::Text => {
                 return Err(ColumnarScanError::UnsupportedLogicalType(col.logical_type))
             }
