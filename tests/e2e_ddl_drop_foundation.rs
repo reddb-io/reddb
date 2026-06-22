@@ -14,6 +14,8 @@ use reddb::{
 #[allow(dead_code)]
 mod support;
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
 }
@@ -49,7 +51,7 @@ fn rt_with_vault(path: &Path) -> RedDBRuntime {
             .expect("persistent runtime should expose pager"),
     );
     let auth = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some("ddl-drop-foundation"))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, TEST_CERTIFICATE)
             .expect("vault should open"),
     );
     rt.set_auth_store(auth);

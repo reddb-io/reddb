@@ -348,7 +348,7 @@ impl ServerCommandConfig {
         // Issue #663 — `--no-auth` / `--dev` is the last word on auth
         // for this boot: force every auth knob off, regardless of any
         // env-derived config (`--vault`, `REDDB_USERNAME`/`PASSWORD`,
-        // `REDDB_VAULT_KEY`, OAuth, cert) the operator may also have
+        // OAuth, cert) the operator may also have
         // set. We *also* stamp [`NO_AUTH_META`] so the auth-store
         // builder downstream knows to skip `bootstrap_from_env`
         // (which would otherwise auto-create an admin from
@@ -1961,7 +1961,7 @@ pub(crate) fn build_runtime_with_telemetry(
                 runtime.db().store().pager().cloned().ok_or_else(|| {
                     "vault requires a paged database (persistent mode)".to_string()
                 })?;
-            let store = AuthStore::with_vault(db_options.auth.clone(), pager, None)
+            let store = AuthStore::with_vault(db_options.auth.clone(), pager)
                 .map_err(|err| err.to_string())?;
             Arc::new(store)
         } else {

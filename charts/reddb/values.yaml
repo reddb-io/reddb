@@ -38,7 +38,7 @@ auth:
   existingSecret: ""
 
   # ---------------------------------------------------------------------------
-  # Encrypted vault key (REDDB_CERTIFICATE / REDDB_VAULT_KEY).
+  # Encrypted vault certificate (REDDB_CERTIFICATE / REDDB_CERTIFICATE_FILE).
   # ---------------------------------------------------------------------------
   # Required when config.vault=true. Three mutually-exclusive ways to provide
   # the cert. existingSecret > value (plaintext, dev-only). fileMount is

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 use reddb_server::auth::{store::AuthStore, AuthConfig};
 use reddb_server::storage::schema::Value;
-use reddb_server::{RedDBOptions, RedDBRuntime, RuntimeQueryResult};
+use reddb_server::{RedDBOptions, RedDBRuntime, RuntimeQueryResult, StorageDeployPreset};
 
 fn int_at(result: &RuntimeQueryResult, row: usize, column: &str) -> i64 {
     match result.result.records[row].get(column) {
@@ -666,14 +668,17 @@ fn config_reference_compares_stored_value_without_reparsing_sql() {
 }
 
 #[test]
-fn secret_reference_compares_vault_value_without_reparsing_sql() {
+fn secret_reference_masks_projection_and_updates_vault_value() {
     let dir = tempfile::Builder::new()
         .prefix("reddb-test-runtime-secret-")
         .tempdir()
         .expect("temp dir");
     let path = dir.path().join("runtime-secret-test.rdb");
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime boots");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("serverless storage profile should expose pager");
+    let rt = RedDBRuntime::with_options(options).expect("runtime boots");
     let pager = rt
         .db()
         .store()
@@ -681,10 +686,10 @@ fn secret_reference_compares_vault_value_without_reparsing_sql() {
         .expect("persistent runtime has pager")
         .clone();
     let auth_store = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some("runtime-secret-test"))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, TEST_CERTIFICATE)
             .expect("vault opens"),
     );
-    rt.set_auth_store(auth_store);
+    rt.set_auth_store(Arc::clone(&auth_store));
 
     rt.execute_query("CREATE TABLE tokens (id INT, token TEXT)")
         .expect("create tokens");
@@ -693,22 +698,24 @@ fn secret_reference_compares_vault_value_without_reparsing_sql() {
 
     rt.execute_query("SET SECRET my.attack = '1=1 OR 1=1'")
         .expect("store injection-shaped secret");
-    let blocked = rt
-        .execute_query("SELECT id FROM tokens WHERE token = $secret.my.attack")
-        .expect("secret predicate executes");
+    let projected = rt
+        .execute_query("SELECT $secret.my.attack AS secret_value FROM tokens LIMIT 1")
+        .expect("secret projection executes");
     assert_eq!(
-        blocked.result.len(),
-        0,
-        "stored secret payload must be compared as text, not parsed as SQL"
+        projected.result.records[0].get("secret_value"),
+        Some(&Value::Text("***".into()))
+    );
+    assert_eq!(
+        auth_store.vault_kv_get("my.attack").as_deref(),
+        Some("1=1 OR 1=1")
     );
 
     rt.execute_query("SET SECRET my.attack = 'normal_id'")
         .expect("store matching secret");
-    let matched = rt
-        .execute_query("SELECT id FROM tokens WHERE token = $secret.my.attack")
-        .expect("secret predicate executes");
-    assert_eq!(matched.result.len(), 1);
-    assert_eq!(int_at(&matched, 0, "id"), 1);
+    assert_eq!(
+        auth_store.vault_kv_get("my.attack").as_deref(),
+        Some("normal_id")
+    );
 
     drop(rt);
 }

@@ -434,20 +434,45 @@ impl AuthStore {
     /// If vault pages already exist, their contents are loaded and
     /// restored into the in-memory store.  All subsequent mutations are
     /// automatically persisted to the vault pages via the pager.
-    pub fn with_vault(
+    pub fn with_vault(config: AuthConfig, pager: Arc<Pager>) -> Result<Self, AuthError> {
+        let certificate = std::env::var("REDDB_CERTIFICATE")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        Self::with_vault_optional_certificate(config, pager, certificate.as_deref())
+    }
+
+    pub fn with_vault_certificate(
         config: AuthConfig,
         pager: Arc<Pager>,
-        passphrase: Option<&str>,
+        certificate_hex: &str,
     ) -> Result<Self, AuthError> {
-        let vault = Vault::open(&pager, passphrase)?;
+        Self::with_vault_optional_certificate(config, pager, Some(certificate_hex))
+    }
+
+    fn with_vault_optional_certificate(
+        config: AuthConfig,
+        pager: Arc<Pager>,
+        certificate_hex: Option<&str>,
+    ) -> Result<Self, AuthError> {
         let mut store = Self::new(config);
 
-        // Restore persisted state if vault pages exist.
-        if let Some(state) = vault.load(&pager)? {
-            store.restore_from_vault(state);
+        // Restore persisted state if vault pages exist. A fresh database does
+        // not need a temporary seal: bootstrap generates the certificate and
+        // installs the first real vault atomically.
+        if Vault::has_saved_state(&pager) {
+            let vault = match certificate_hex {
+                Some(certificate) => Vault::with_certificate(&pager, certificate)?,
+                None => Vault::open(&pager)?,
+            };
+            if let Some(state) = vault.load(&pager)? {
+                store.restore_from_vault(state);
+            }
+            *store.vault.write().unwrap_or_else(|e| e.into_inner()) = Some(vault);
+        } else if let Some(certificate) = certificate_hex {
+            let vault = Vault::with_certificate(&pager, certificate)?;
+            *store.vault.write().unwrap_or_else(|e| e.into_inner()) = Some(vault);
         }
 
-        *store.vault.write().unwrap_or_else(|e| e.into_inner()) = Some(vault);
         store.pager = Some(pager);
         Ok(store)
     }

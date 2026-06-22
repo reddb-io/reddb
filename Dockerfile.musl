@@ -56,9 +56,9 @@ EXPOSE 8080 50051
 
 # === Secrets via file mounts ====================================================
 # This image has NO shell. Agent #2's binary-side *_FILE env-var expansion
-# (REDDB_CERTIFICATE_FILE, REDDB_VAULT_KEY_FILE, REDDB_PASSWORD_FILE,
-# REDDB_ROOT_TOKEN_FILE) is the only path. Mount the secret as a file
-# and pass *_FILE pointing at it. NEVER bake the cert into the image.
+# (REDDB_CERTIFICATE_FILE, REDDB_PASSWORD_FILE, REDDB_ROOT_TOKEN_FILE) is
+# the only path. Mount the secret as a file and pass *_FILE pointing at
+# it. NEVER bake the cert into the image.
 # See examples/docker-compose.vault.yml.
 # ===============================================================================
 

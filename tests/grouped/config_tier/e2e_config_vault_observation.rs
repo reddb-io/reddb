@@ -11,11 +11,13 @@ use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 #[path = "../../support/mod.rs"]
 mod support;
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 fn rt() -> RedDBRuntime {
     crate::config_tier_shared::open_in_memory("in-memory runtime")
 }
 
-fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<AuthStore>) {
+fn open_runtime_with_vault(path: &Path) -> (RedDBRuntime, Arc<AuthStore>) {
     let options = RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
         .expect("serverless storage profile should expose pager");
@@ -27,7 +29,7 @@ fn open_runtime_with_vault(path: &Path, passphrase: &str) -> (RedDBRuntime, Arc<
             .expect("persistent runtime should expose pager"),
     );
     let auth = Arc::new(
-        AuthStore::with_vault(AuthConfig::default(), pager, Some(passphrase))
+        AuthStore::with_vault_certificate(AuthConfig::default(), pager, TEST_CERTIFICATE)
             .expect("vault should open"),
     );
     rt.set_auth_store(Arc::clone(&auth));
@@ -186,7 +188,7 @@ fn watch_config_events_include_values_only_when_read_is_allowed() {
 fn list_and_watch_vault_are_metadata_only() {
     let path = support::temp_db_file("config-vault-observation");
     let secret = "vault_plaintext_observation_probe";
-    let (rt, _auth) = open_runtime_with_vault(path.path(), "vault-observation-pass");
+    let (rt, _auth) = open_runtime_with_vault(path.path());
 
     rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
         .expect("create vault");

@@ -3,14 +3,14 @@
 //! Designed for K8s Jobs / CI pipelines that mount a tmpfs secret with
 //! the admin password and need a one-shot binary that:
 //!   1. Opens (or creates) the database file at `--path`.
-//!   2. Opens the encrypted vault (requires `REDDB_CERTIFICATE` or
-//!      `REDDB_VAULT_KEY` — typically via the `_FILE` companion).
+//!   2. Prepares the encrypted vault. A fresh database does not require
+//!      an existing certificate; the bootstrap issues the certificate.
 //!   3. Calls `AuthStore::bootstrap` once.
 //!   4. Prints the freshly-issued certificate so the operator can
 //!      capture it (it is the ONLY way to unseal the vault later).
 //!
 //! Exits non-zero on any failure (already bootstrapped, missing vault
-//! key, file open error, ...).
+//! file open error, ...).
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -56,18 +56,6 @@ pub fn run(args: BootstrapArgs) -> Result<BootstrapOutcome, String> {
         );
     }
 
-    if std::env::var("REDDB_CERTIFICATE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .is_none()
-        && std::env::var("REDDB_VAULT_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .is_none()
-    {
-        return Err("vault requires REDDB_CERTIFICATE or REDDB_VAULT_KEY (use the *_FILE companion to read from a mounted secret)".to_string());
-    }
-
     if args.username.trim().is_empty() {
         return Err(
             "username is required (use --username, or set REDDB_USERNAME / REDDB_USERNAME_FILE)"
@@ -110,8 +98,7 @@ pub fn run(args: BootstrapArgs) -> Result<BootstrapOutcome, String> {
         ..AuthConfig::default()
     };
 
-    let store =
-        AuthStore::with_vault(config, pager, None).map_err(|err| format!("open vault: {err}"))?;
+    let store = AuthStore::with_vault(config, pager).map_err(|err| format!("open vault: {err}"))?;
 
     if !store.needs_bootstrap() {
         // Flush so the freshly-opened pager doesn't leave stray pages

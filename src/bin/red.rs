@@ -63,9 +63,6 @@ fn has_cli_vault_key() -> bool {
     std::env::var("REDDB_CERTIFICATE")
         .map(|value| !value.is_empty())
         .unwrap_or(false)
-        || std::env::var("REDDB_VAULT_KEY")
-            .map(|value| !value.is_empty())
-            .unwrap_or(false)
 }
 
 fn attach_cli_vault(
@@ -85,7 +82,8 @@ fn attach_cli_vault(
     if !has_cli_vault_key() {
         if required || has_saved_vault {
             return Err(
-                "vault export/import requires REDDB_CERTIFICATE or REDDB_VAULT_KEY".to_string(),
+                "vault export/import requires REDDB_CERTIFICATE or REDDB_CERTIFICATE_FILE"
+                    .to_string(),
             );
         }
         return Ok(None);
@@ -95,7 +93,6 @@ fn attach_cli_vault(
         reddb::auth::AuthStore::with_vault(
             reddb::auth::AuthConfig::default(),
             std::sync::Arc::clone(pager),
-            None,
         )
         .map_err(|err| format!("open vault: {err}"))?,
     );
@@ -1423,7 +1420,7 @@ fn main() {
                             eprintln!("line {}: vault is unavailable", line_no + 1);
                             continue;
                         };
-                        match reddb::auth::vault::Vault::unseal_logical_export(blob, None) {
+                        match reddb::auth::vault::Vault::unseal_logical_export(blob) {
                             Ok(state) => match auth.vault_kv_try_import(state.kv) {
                                 Ok(count) => restored_secret_keys += count,
                                 Err(err) => {

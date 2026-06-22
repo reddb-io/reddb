@@ -45,9 +45,9 @@ open to take a few hundred milliseconds, not seconds, on a cold start.
 When the server boots:
 
 1. The pager loads pages 2 and 3 (still ciphertext at this stage).
-2. The boot sequence reads `REDDB_CERTIFICATE` (or, in legacy mode,
-   `REDDB_VAULT_KEY`) and runs Argon2id over it with the salt found in
-   the page header.
+2. The boot sequence reads `REDDB_CERTIFICATE` directly, or reads
+   `REDDB_CERTIFICATE_FILE` and expands its file contents into
+   `REDDB_CERTIFICATE`, then derives the vault key from that certificate.
 3. The derived 32-byte key opens the AES-GCM payload. A wrong key fails
    the GCM auth tag check — the vault refuses to open and the server
    exits with a typed error.
@@ -116,17 +116,10 @@ flowchart TD
 | `vault_key`      | Every server start, derived from `certificate` + page salt | In RAM only, zeroed on shutdown | The running process       |
 | `red.secret.aes_key` | First boot after bootstrap | Inside the vault payload                      | The running process       |
 
-The certificate is the **only** durable secret an operator must protect.
-Lose it and you cannot derive `vault_key`, so you cannot decrypt the
-vault payload, so you cannot recover `master_secret`, so the chain is
+The certificate is the **only** durable vault secret an operator must
+protect. Lose it and you cannot derive `vault_key`, so you cannot decrypt
+the vault payload, so you cannot recover `master_secret`, so the chain is
 broken.
-
-> [!NOTE]
-> The legacy `REDDB_VAULT_KEY` passphrase mode predates the certificate
-> chain. It still works (Argon2id directly over the user-supplied
-> passphrase, same salt, same AEAD parameters), but new deployments
-> should use the certificate flow because passphrases are weaker and
-> harder to rotate cleanly. See [Restart / unseal](#5-restart--unseal-precedence-and-_file-vars).
 
 ---
 
@@ -220,27 +213,35 @@ re-initialized from scratch.
 
 ---
 
-## 5. Restart / unseal (precedence and `*_FILE` vars)
+## 5. Restart / unseal (`REDDB_CERTIFICATE` and `*_FILE` vars)
 
 On every restart the server needs to re-derive `vault_key`. It looks for
-the cert (or legacy passphrase) in this exact precedence:
+the certificate in exactly one of these forms:
 
 ```text
-REDDB_CERTIFICATE         > REDDB_VAULT_KEY
-REDDB_CERTIFICATE_FILE    > REDDB_VAULT_KEY_FILE
+REDDB_CERTIFICATE
+REDDB_CERTIFICATE_FILE
 ```
 
-The `*_FILE` form reads the contents of the file (trimmed of trailing
-whitespace) and uses that as the secret. This is the **production**
-form: the file lives on a tmpfs mount populated by Docker secrets,
-Kubernetes Secrets, systemd `LoadCredential`, etc.
+`REDDB_CERTIFICATE` may contain the 64-hex certificate directly. This is
+supported and useful for local development, simple service managers, and
+controlled CI jobs.
+
+`REDDB_CERTIFICATE_FILE` reads the contents of the file (trimmed of
+trailing whitespace), expands it into `REDDB_CERTIFICATE`, and unsets the
+`_FILE` variable before the vault opens. This is the **recommended
+production** form: the file lives on a tmpfs mount populated by Docker
+secrets, Kubernetes Secrets, systemd `LoadCredential`, etc.
+
+Setting both `REDDB_CERTIFICATE` and `REDDB_CERTIFICATE_FILE` is an
+operator error. RedDB refuses to boot instead of guessing which copy is
+current.
 
 ### Supported `*_FILE` companion variables
 
 | Inline variable       | `*_FILE` companion          | What it carries                                    |
 |:----------------------|:----------------------------|:---------------------------------------------------|
 | `REDDB_CERTIFICATE`   | `REDDB_CERTIFICATE_FILE`    | 64-hex certificate produced by bootstrap           |
-| `REDDB_VAULT_KEY`     | `REDDB_VAULT_KEY_FILE`      | Legacy passphrase (Argon2id input, not preferred)  |
 | `REDDB_USERNAME`      | `REDDB_USERNAME_FILE`       | Auto-bootstrap admin username (fresh DB only)      |
 | `REDDB_PASSWORD`      | `REDDB_PASSWORD_FILE`       | Auto-bootstrap admin password (fresh DB only)      |
 | `RED_ADMIN_TOKEN`     | `RED_ADMIN_TOKEN_FILE`      | Token used by `/admin/*` endpoints                 |
@@ -250,9 +251,8 @@ Kubernetes Secrets, systemd `LoadCredential`, etc.
 | `RED_D1_TOKEN`        | `RED_D1_TOKEN_FILE`         | Cloudflare D1 backend token                        |
 | `RED_BACKEND_HTTP_AUTH` | `RED_BACKEND_HTTP_AUTH_FILE` | Generic HTTP backend bearer                     |
 
-The `*_FILE` value **wins** when both are set — this lets you override
-inline defaults from a Compose file with a real secret mounted into
-`/run/secrets/`. The boot sequence reads the file once, places the
+Setting an inline variable and its `*_FILE` companion at the same time is
+invalid. Pick one form per secret. The boot sequence reads the file once, places the
 contents in the corresponding inline env var, then **strips** the
 `_FILE` companion from the process environment so child processes don't
 see the file path.

@@ -74,7 +74,7 @@ ENV RUST_MIN_STACK=8388608
 ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
 
 # === Secrets via file mounts ====================================================
-# DO NOT bake REDDB_CERTIFICATE / REDDB_VAULT_KEY / REDDB_PASSWORD into this image.
+# DO NOT bake REDDB_CERTIFICATE / REDDB_PASSWORD into this image.
 # Mount them at runtime via Docker/Swarm secrets, K8s Secret volumes, or any
 # orchestrator-native secret store. The binary honours the *_FILE convention:
 #

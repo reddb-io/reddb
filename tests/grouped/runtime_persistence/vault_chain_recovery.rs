@@ -28,6 +28,8 @@ use reddb::auth::{ApiKey, Role, User, UserId};
 use reddb::storage::engine::page::{Page, PageType, HEADER_SIZE};
 use reddb::storage::engine::pager::{Pager, PagerConfig};
 
+const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
 fn scratch_path(label: &str) -> (support::TempDataDir, std::path::PathBuf) {
     let dir = support::temp_data_dir(&format!("vault-chain-{label}"));
     let path = dir.join("vault.rdb");
@@ -119,7 +121,7 @@ fn read_first_data_pointer(pager: &Pager) -> u32 {
 fn header_pointer_to_missing_page_returns_clear_error() {
     let (_dir, db_path) = scratch_path("missing-data");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     vault.save(&pager, &fat_state()).unwrap();
 
@@ -136,7 +138,7 @@ fn header_pointer_to_missing_page_returns_clear_error() {
     drop(vault);
     drop(pager);
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     let err = vault.load(&pager).unwrap_err();
     match err {
@@ -149,7 +151,7 @@ fn header_pointer_to_missing_page_returns_clear_error() {
 fn data_page_magic_corruption_returns_clear_error() {
     let (_dir, db_path) = scratch_path("bad-magic");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     vault.save(&pager, &fat_state()).unwrap();
     let first_data = read_first_data_pointer(&pager);
@@ -165,7 +167,7 @@ fn data_page_magic_corruption_returns_clear_error() {
     drop(vault);
     drop(pager);
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     let err = vault.load(&pager).unwrap_err();
     match err {
@@ -186,7 +188,7 @@ fn premature_terminator_with_outstanding_payload_fails() {
     // page) and instead produces a clean error.
     let (_dir, db_path) = scratch_path("premature-end");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     vault.save(&pager, &fat_state()).unwrap();
     corrupt_first_data_pointer(&pager, 0);
@@ -194,7 +196,7 @@ fn premature_terminator_with_outstanding_payload_fails() {
     drop(vault);
     drop(pager);
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
-    let vault = Vault::open(&pager, Some("recovery-pass")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
 
     let err = vault.load(&pager).unwrap_err();
     match err {
@@ -230,7 +232,7 @@ fn legacy_v1_vault_refuses_to_load() {
     pager.write_page_no_checksum(2, page).unwrap();
     pager.flush().unwrap();
 
-    let vault = Vault::open(&pager, Some("does-not-matter")).unwrap();
+    let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
     let err = vault.load(&pager).unwrap_err();
     match err {
         VaultError::Corrupt(msg) => {
