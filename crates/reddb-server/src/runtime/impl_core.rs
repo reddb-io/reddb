@@ -3723,9 +3723,7 @@ impl RedDBRuntime {
     /// Returns a reference to the bounded ring store so HTTP handlers and
     /// the red-ui read model can call `store.read(filter)` without
     /// touching `red-slow.log` directly.
-    pub fn slow_query_store(
-        &self,
-    ) -> &Arc<crate::telemetry::slow_query_store::SlowQueryStore> {
+    pub fn slow_query_store(&self) -> &Arc<crate::telemetry::slow_query_store::SlowQueryStore> {
         &self.inner.slow_query_store
     }
 

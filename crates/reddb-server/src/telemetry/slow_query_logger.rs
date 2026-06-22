@@ -137,10 +137,7 @@ impl SlowQueryLogger {
     /// Called once at runtime startup. Above-threshold, sampled events will
     /// be written to both the file sink and the ring store. A second call
     /// is a no-op (first registration wins).
-    pub fn attach_store(
-        &self,
-        store: std::sync::Arc<super::slow_query_store::SlowQueryStore>,
-    ) {
+    pub fn attach_store(&self, store: std::sync::Arc<super::slow_query_store::SlowQueryStore>) {
         let _ = self.store.set(store);
     }
 

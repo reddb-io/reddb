@@ -1209,8 +1209,7 @@ struct RuntimeInner {
     /// (ADR 0060, §2). Bounded ring buffer that the slow-query logger dual-
     /// writes into alongside `red-slow.log`. Exposed to read-model consumers
     /// via `slow_query_store()`.
-    slow_query_store:
-        Arc<crate::telemetry::slow_query_store::SlowQueryStore>,
+    slow_query_store: Arc<crate::telemetry::slow_query_store::SlowQueryStore>,
     /// Process-local normal-KV operation counters. These are intentionally
     /// runtime-local; persistent accounting belongs in catalog stats.
     kv_stats: KvStatsCounters,

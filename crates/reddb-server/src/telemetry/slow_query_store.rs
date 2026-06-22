@@ -211,7 +211,11 @@ mod tests {
 
     #[test]
     fn results_most_recent_first() {
-        let store = filled(&[(1000, "select", 100), (2000, "select", 100), (3000, "select", 100)]);
+        let store = filled(&[
+            (1000, "select", 100),
+            (2000, "select", 100),
+            (3000, "select", 100),
+        ]);
         let result = store.read(&SlowQueryFilter::default());
         assert_eq!(result.len(), 3);
         assert!(result[0].ts_ms >= result[1].ts_ms);
@@ -227,7 +231,10 @@ mod tests {
             (4000, "select", 100),
             (5000, "select", 100),
         ]);
-        let result = store.read(&SlowQueryFilter { limit: Some(2), ..Default::default() });
+        let result = store.read(&SlowQueryFilter {
+            limit: Some(2),
+            ..Default::default()
+        });
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].ts_ms, 5000);
         assert_eq!(result[1].ts_ms, 4000);
@@ -235,8 +242,15 @@ mod tests {
 
     #[test]
     fn since_ms_excludes_older_events() {
-        let store = filled(&[(1000, "select", 100), (2000, "select", 100), (3000, "select", 100)]);
-        let result = store.read(&SlowQueryFilter { since_ms: Some(2000), ..Default::default() });
+        let store = filled(&[
+            (1000, "select", 100),
+            (2000, "select", 100),
+            (3000, "select", 100),
+        ]);
+        let result = store.read(&SlowQueryFilter {
+            since_ms: Some(2000),
+            ..Default::default()
+        });
         assert_eq!(result.len(), 2);
         for e in &result {
             assert!(e.ts_ms >= 2000, "ts_ms {} below since_ms", e.ts_ms);
@@ -250,8 +264,10 @@ mod tests {
             (2000, "select", 200),
             (3000, "select", 500),
         ]);
-        let result =
-            store.read(&SlowQueryFilter { min_duration_ms: Some(200), ..Default::default() });
+        let result = store.read(&SlowQueryFilter {
+            min_duration_ms: Some(200),
+            ..Default::default()
+        });
         assert_eq!(result.len(), 2);
         for e in &result {
             assert!(e.duration_ms >= 200, "duration {} below min", e.duration_ms);
@@ -266,7 +282,10 @@ mod tests {
             (3000, "select", 100),
             (4000, "delete", 100),
         ]);
-        let result = store.read(&SlowQueryFilter { kind: Some("select"), ..Default::default() });
+        let result = store.read(&SlowQueryFilter {
+            kind: Some("select"),
+            ..Default::default()
+        });
         assert_eq!(result.len(), 2);
         for e in &result {
             assert_eq!(e.kind, "select");
@@ -315,7 +334,10 @@ mod tests {
         for i in 0..(DEFAULT_READ_LIMIT + 50) as u64 {
             store.push(event(i * 1000, "select", 100));
         }
-        assert_eq!(store.read(&SlowQueryFilter::default()).len(), DEFAULT_READ_LIMIT);
+        assert_eq!(
+            store.read(&SlowQueryFilter::default()).len(),
+            DEFAULT_READ_LIMIT
+        );
     }
 
     #[test]
