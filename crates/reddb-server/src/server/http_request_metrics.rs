@@ -120,7 +120,7 @@ impl HttpRequestMetrics {
     pub fn snapshot(&self) -> Vec<(HttpRequestLabels, u64)> {
         let guard = self.counters.lock().unwrap_or_else(|e| e.into_inner());
         let mut rows: Vec<(HttpRequestLabels, u64)> = guard.iter().map(|(k, v)| (*k, *v)).collect();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.sort_by_key(|a| a.0);
         rows
     }
 
