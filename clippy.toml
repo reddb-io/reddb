@@ -1,13 +1,17 @@
-# Function-length nudge for the TigerStyle-derived house style (PRD #1252).
+# Function-length nudge for the TigerStyle-derived house style (PRD #1252,
+# ADR 0062).
 #
-# `clippy::too_many_lines` fires when a function's *code* lines (blank and
-# comment-only lines excluded) exceed this threshold. We pick 120 — the
-# lenient end of the ~100–120 window — so the lint captures TigerStyle's
-# "doesn't fit on a screen" discontinuity without raining false positives on
-# idiomatic `match`/builder code (a hard 70-line TigerStyle limit would).
+# House limit: 200 lines per function (file-shape limit lives at 2000/file,
+# enforced by `scripts/afk-pre-merge.sh`). `clippy::too_many_lines` fires
+# when a function's *code* lines (blank and comment-only lines excluded)
+# exceed this threshold. We pick 200 — generous enough for idiomatic Rust
+# `match`/builder code, tight enough that anything over it is a real
+# signal that the function is doing more than one thing.
 #
 # The lint is wired as a warn-level ratchet in [workspace.lints.clippy].
-# Legacy crates whose existing tree (incl. generated gRPC stubs) already
-# exceeds the threshold carry a crate-level `#![allow(clippy::too_many_lines)]`
-# so the gate bites on new/changed code rather than the pre-existing tree.
-too-many-lines-threshold = 120
+# Backpressure runs `cargo clippy --locked -- -D warnings`, which promotes
+# the warning to a hard error at the merge gate. Legacy crates whose
+# existing tree (incl. generated gRPC stubs) already exceeds the threshold
+# carry a crate-level `#![allow(clippy::too_many_lines)]` so the gate bites
+# on new/changed code rather than the pre-existing tree.
+too-many-lines-threshold = 200
