@@ -23,4 +23,4 @@ maintainers:
     url: https://github.com/reddb-io/reddb
 annotations:
   category: Database
-  licenses: MIT
+  licenses: BUSL-1.1

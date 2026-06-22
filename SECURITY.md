@@ -37,7 +37,7 @@ We follow coordinated disclosure: we ask reporters to keep findings private unti
 
 ## Security audit
 
-The engine is AGPL-3.0. To audit:
+The engine is source-available under the Business Source License 1.1. To audit:
 
 ```sh
 git clone https://github.com/reddb-io/reddb.git

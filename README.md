@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/reddb-io/reddb/releases"><img src="https://img.shields.io/github/v/release/reddb-io/reddb?style=flat-square" alt="Release"></a>
-  <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-BSL%201.1-blue?style=flat-square" alt="License"></a>
   <a href="https://www.npmjs.com/package/@reddb-io/cli"><img src="https://img.shields.io/npm/v/@reddb-io/cli?style=flat-square&label=npm" alt="npm"></a>
 </p>
 
@@ -617,10 +617,7 @@ and [`docs/security/vault.md`](./docs/security/vault.md).
 
 RedDB ships as a Cargo workspace. The `reddb` crate is the
 umbrella that hosts the `red` binary; the engine, thin client,
-gRPC stubs, and wire vocabulary live in sibling crates. See the
-[workspace migration guide](./docs/migration/workspace-split.md)
-for what moved where and which crate to pick when depending on
-RedDB from another Rust project.
+gRPC stubs, and wire vocabulary live in sibling crates.
 
 ## Links
 
@@ -629,12 +626,11 @@ RedDB from another Rust project.
 - [npm driver package](https://www.npmjs.com/package/reddb)
 - [npm CLI launcher](https://www.npmjs.com/package/@reddb-io/cli)
 - [Releases](https://github.com/reddb-io/reddb/releases)
-- [Workspace migration guide](./docs/migration/workspace-split.md)
 - [Public Contract Matrix](./docs/reference/contract-matrix.md) — every doc'd promise mapped to a test or a planned-status note
 
 ---
 
-**AGPL-3.0 License** -- Built by [RedDB.io](https://github.com/reddb-io)
+**Business Source License 1.1** -- source-available; free for self-hosted, internal, and non-production use. Offering RedDB as a managed/hosted database service to third parties requires a commercial license. Converts to AGPL-3.0 on 2030-06-22. See [LICENSE](./LICENSE). Built by [RedDB.io](https://github.com/reddb-io)
 
 <!-- contract-matrix:begin -->
 ## Public-surface support
