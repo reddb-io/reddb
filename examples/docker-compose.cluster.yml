@@ -2,6 +2,26 @@
 # `red server --role standalone` plus the cluster storage preset; the
 # cluster supervisor consumes the stable identity/discovery contract as it
 # matures.
+#
+# Cluster bootstrap contract (issue #1234, ADR 0058, docs/deployment/first-boot.md):
+#   * No-auth (this file): members are symmetric NON-OWNERS, so they carry NO
+#     bootstrap credentials (no REDDB_USERNAME / REDDB_PASSWORD / REDDB_PRESET /
+#     REDDB_BOOTSTRAP_MANIFEST). They boot anonymously and create no admin,
+#     vault, or `system.bootstrap.completed` marker. This is the documented
+#     development/no-auth carveout, not a credentialled production bootstrap.
+#   * Auth/vault (gated): compose/chart-managed cluster auth bootstrap stays
+#     fail-closed until the reserved global system range owner path lands
+#     (PRD #1227) — a symmetric member cannot prove it is the single writer of
+#     global auth state, and the runtime rejects a cluster-shaped credentialled
+#     boot. For a credentialled deploy today, bootstrap auth on a single-owner
+#     topology (see docker-compose.vault.yml) instead of these members.
+#   * Certificate handling: when the owner path ships, only the proven owner
+#     mints the vault certificate. Capture it once and preserve it offline; a
+#     member may then mount it (REDDB_CERTIFICATE / _FILE) to UNSEAL the existing
+#     store on restart — mounting a certificate never bootstraps auth.
+#   * Restart idempotency: once `system.bootstrap.completed` is durable, restarts
+#     observe the marker and recreate no admin, reissue no certificate, and
+#     reapply no mutable config.
 
 x-reddb-cluster-env: &reddb-cluster-env
   RUST_LOG: info

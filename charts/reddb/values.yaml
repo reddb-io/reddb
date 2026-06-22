@@ -108,8 +108,10 @@ replication:
 # When enabled, the writer pod receives REDDB_PRESET=production plus
 # REDDB_USERNAME / REDDB_PASSWORD so first boot creates the initial admin
 # through the policy-first bootstrap preset. Replica pods never receive
-# these bootstrap env vars. Cluster mode rejects auth.enabled because the
-# current chart renders symmetric members and cannot safely pick one writer.
+# these bootstrap env vars. Cluster mode rejects auth.enabled fail-closed: a
+# symmetric member cannot prove it is the reserved global system range owner
+# (ADR 0058), so the gate stays closed in lockstep with the runtime until the
+# owner path lands (PRD #1227). See README.md "Cluster bootstrap contract".
 auth:
   enabled: false
   username: admin
