@@ -6,59 +6,59 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
-#[path = "../compile_fail.rs"]
+#[path = "surface_contracts/compile_fail.rs"]
 mod compile_fail;
 
-#[path = "../e2e_ask_search_conformance.rs"]
+#[path = "ai_search/e2e_ask_search_conformance.rs"]
 mod e2e_ask_search_conformance;
 
-#[path = "../e2e_comment_clustering.rs"]
+#[path = "ai_search/e2e_comment_clustering.rs"]
 mod e2e_comment_clustering;
 
-#[path = "../e2e_explain.rs"]
+#[path = "sql_window/e2e_explain.rs"]
 mod e2e_explain;
 
-#[path = "../e2e_issue_557_ask_context_retrieval.rs"]
+#[path = "ai_search/e2e_issue_557_ask_context_retrieval.rs"]
 mod e2e_issue_557_ask_context_retrieval;
 
-#[path = "../e2e_issue_746_red_typed_vector_graph_relations.rs"]
+#[path = "graph_analytics/e2e_issue_746_red_typed_vector_graph_relations.rs"]
 mod e2e_issue_746_red_typed_vector_graph_relations;
 
-#[path = "../e2e_issue_756_vector_policy_aware.rs"]
+#[path = "tenancy_policy/e2e_issue_756_vector_policy_aware.rs"]
 mod e2e_issue_756_vector_policy_aware;
 
-#[path = "../e2e_issue_796_louvain_tvf.rs"]
+#[path = "graph_analytics/e2e_issue_796_louvain_tvf.rs"]
 mod e2e_issue_796_louvain_tvf;
 
-#[path = "../e2e_ml_classify.rs"]
+#[path = "ai_search/e2e_ml_classify.rs"]
 mod e2e_ml_classify;
 
-#[path = "../integration_ai_live_comment_clustering.rs"]
+#[path = "ai_local_vector/integration_ai_live_comment_clustering.rs"]
 mod integration_ai_live_comment_clustering;
 
-#[path = "../integration_ai_local_models_cache.rs"]
+#[path = "ai_local_vector/integration_ai_local_models_cache.rs"]
 mod integration_ai_local_models_cache;
 
-#[path = "../integration_ai_local_models_registry.rs"]
+#[path = "ai_provider_contracts/integration_ai_local_models_registry.rs"]
 mod integration_ai_local_models_registry;
 
-#[path = "../integration_ai_multi_provider.rs"]
+#[path = "ai_provider_contracts/integration_ai_multi_provider.rs"]
 mod integration_ai_multi_provider;
 
-#[path = "../integration_auto_embed_local.rs"]
+#[path = "ai_local_vector/integration_auto_embed_local.rs"]
 mod integration_auto_embed_local;
 
-#[path = "../integration_local_embedding_conformance.rs"]
+#[path = "runtime_persistence/integration_local_embedding_conformance.rs"]
 mod integration_local_embedding_conformance;
 
-#[path = "../integration_vector_query_text.rs"]
+#[path = "ai_local_vector/integration_vector_query_text.rs"]
 mod integration_vector_query_text;
 
-#[path = "../integration_vector_query_text_local.rs"]
+#[path = "ai_local_vector/integration_vector_query_text_local.rs"]
 mod integration_vector_query_text_local;
 
-#[path = "../mock_ai_provider.rs"]
+#[path = "ai_search/mock_ai_provider.rs"]
 mod mock_ai_provider;
 
-#[path = "../smoke_embedded.rs"]
+#[path = "surface_contracts/smoke_embedded.rs"]
 mod smoke_embedded;

@@ -6,82 +6,82 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
-#[path = "../e2e_advisory_locks.rs"]
+#[path = "locking_concurrency/e2e_advisory_locks.rs"]
 mod e2e_advisory_locks;
 
-#[path = "../e2e_composite_index.rs"]
+#[path = "schema_query_core/e2e_composite_index.rs"]
 mod e2e_composite_index;
 
-#[path = "../e2e_cross_model_tx.rs"]
+#[path = "mvcc_transactions/e2e_cross_model_tx.rs"]
 mod e2e_cross_model_tx;
 
-#[path = "../e2e_ddl_concurrency.rs"]
+#[path = "locking_concurrency/e2e_ddl_concurrency.rs"]
 mod e2e_ddl_concurrency;
 
 #[path = "../e2e_ddl_drop_foundation.rs"]
 mod e2e_ddl_drop_foundation;
 
-#[path = "../e2e_index_replay.rs"]
+#[path = "schema_query_core/e2e_index_replay.rs"]
 mod e2e_index_replay;
 
-#[path = "../e2e_issue_753_ddl_policy_aware.rs"]
+#[path = "tenancy_policy/e2e_issue_753_ddl_policy_aware.rs"]
 mod e2e_issue_753_ddl_policy_aware;
 
-#[path = "../e2e_locking_reads.rs"]
+#[path = "locking_concurrency/e2e_locking_reads.rs"]
 mod e2e_locking_reads;
 
-#[path = "../e2e_mvcc_delete_tombstones.rs"]
+#[path = "mvcc_transactions/e2e_mvcc_delete_tombstones.rs"]
 mod e2e_mvcc_delete_tombstones;
 
-#[path = "../e2e_mvcc_dml_target_scans.rs"]
+#[path = "mvcc_transactions/e2e_mvcc_dml_target_scans.rs"]
 mod e2e_mvcc_dml_target_scans;
 
-#[path = "../e2e_mvcc_first_committer_wins.rs"]
+#[path = "mvcc_transactions/e2e_mvcc_first_committer_wins.rs"]
 mod e2e_mvcc_first_committer_wins;
 
-#[path = "../e2e_mvcc_index_recheck.rs"]
+#[path = "mvcc_transactions/e2e_mvcc_index_recheck.rs"]
 mod e2e_mvcc_index_recheck;
 
-#[path = "../e2e_mvcc_logical_lookup.rs"]
+#[path = "mvcc_transactions/e2e_mvcc_logical_lookup.rs"]
 mod e2e_mvcc_logical_lookup;
 
-#[path = "../e2e_mvcc_read_resolver_conformance.rs"]
+#[path = "mvcc_transactions/e2e_mvcc_read_resolver_conformance.rs"]
 mod e2e_mvcc_read_resolver_conformance;
 
-#[path = "../e2e_mvcc_vacuum.rs"]
+#[path = "mvcc_transactions/e2e_mvcc_vacuum.rs"]
 mod e2e_mvcc_vacuum;
 
-#[path = "../e2e_ordered_row_update_batches.rs"]
+#[path = "dml_updates/e2e_ordered_row_update_batches.rs"]
 mod e2e_ordered_row_update_batches;
 
-#[path = "../e2e_red_collections_acceptance.rs"]
+#[path = "schema_query_core/e2e_red_collections_acceptance.rs"]
 mod e2e_red_collections_acceptance;
 
-#[path = "../e2e_red_schema.rs"]
+#[path = "schema_query_core/e2e_red_schema.rs"]
 mod e2e_red_schema;
 
-#[path = "../e2e_repro_stale_index_post_insert.rs"]
+#[path = "schema_query_core/e2e_repro_stale_index_post_insert.rs"]
 mod e2e_repro_stale_index_post_insert;
 
-#[path = "../e2e_returning.rs"]
+#[path = "dml_updates/e2e_returning.rs"]
 mod e2e_returning;
 
-#[path = "../e2e_rid_row_envelope.rs"]
+#[path = "schema_query_core/e2e_rid_row_envelope.rs"]
 mod e2e_rid_row_envelope;
 
-#[path = "../e2e_savepoint_update_reversal.rs"]
+#[path = "mvcc_transactions/e2e_savepoint_update_reversal.rs"]
 mod e2e_savepoint_update_reversal;
 
-#[path = "../e2e_savepoints.rs"]
+#[path = "mvcc_transactions/e2e_savepoints.rs"]
 mod e2e_savepoints;
 
-#[path = "../e2e_select_range_after_index.rs"]
+#[path = "schema_query_core/e2e_select_range_after_index.rs"]
 mod e2e_select_range_after_index;
 
-#[path = "../e2e_sql_cte.rs"]
+#[path = "sql_window/e2e_sql_cte.rs"]
 mod e2e_sql_cte;
 
-#[path = "../e2e_statement_execution_contract.rs"]
+#[path = "schema_query_core/e2e_statement_execution_contract.rs"]
 mod e2e_statement_execution_contract;
 
 #[path = "../e2e_txcommitbatch_explicit_tx.rs"]
@@ -90,11 +90,11 @@ mod e2e_txcommitbatch_explicit_tx;
 #[path = "../e2e_update_conformance_pack.rs"]
 mod e2e_update_conformance_pack;
 
-#[path = "../integration_create_table_partition.rs"]
+#[path = "multimodel_query/integration_create_table_partition.rs"]
 mod integration_create_table_partition;
 
-#[path = "../integration_entity_query.rs"]
+#[path = "multimodel_query/integration_entity_query.rs"]
 mod integration_entity_query;
 
-#[path = "../unit_locking.rs"]
+#[path = "locking_concurrency/unit_locking.rs"]
 mod unit_locking;

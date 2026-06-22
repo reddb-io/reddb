@@ -9,46 +9,46 @@
 #[path = "../audit_query_endpoint.rs"]
 mod audit_query_endpoint;
 
-#[path = "../audit_rotation.rs"]
+#[path = "audit/audit_rotation.rs"]
 mod audit_rotation;
 
-#[path = "../audit_structured.rs"]
+#[path = "audit/audit_structured.rs"]
 mod audit_structured;
 
-#[path = "../control_evidence_matrix_docs.rs"]
+#[path = "control_feedback/control_evidence_matrix_docs.rs"]
 mod control_evidence_matrix_docs;
 
-#[path = "../docs_transaction_guarantees.rs"]
+#[path = "mvcc_transactions/docs_transaction_guarantees.rs"]
 mod docs_transaction_guarantees;
 
-#[path = "../e2e_audit_slow_routing.rs"]
+#[path = "audit/e2e_audit_slow_routing.rs"]
 mod e2e_audit_slow_routing;
 
-#[path = "../e2e_config_crud.rs"]
+#[path = "config_tier/e2e_config_crud.rs"]
 mod e2e_config_crud;
 
-#[path = "../e2e_config_matrix.rs"]
+#[path = "config_tier/e2e_config_matrix.rs"]
 mod e2e_config_matrix;
 
-#[path = "../e2e_control_events_operational.rs"]
+#[path = "control_feedback/e2e_control_events_operational.rs"]
 mod e2e_control_events_operational;
 
-#[path = "../e2e_events_backfill.rs"]
+#[path = "events_retention/e2e_events_backfill.rs"]
 mod e2e_events_backfill;
 
-#[path = "../e2e_events_cdc_rid.rs"]
+#[path = "events_retention/e2e_events_cdc_rid.rs"]
 mod e2e_events_cdc_rid;
 
-#[path = "../e2e_events_foundation.rs"]
+#[path = "events_retention/e2e_events_foundation.rs"]
 mod e2e_events_foundation;
 
-#[path = "../e2e_evidence_export.rs"]
+#[path = "control_feedback/e2e_evidence_export.rs"]
 mod e2e_evidence_export;
 
-#[path = "../e2e_feedback_regression_pack.rs"]
+#[path = "control_feedback/e2e_feedback_regression_pack.rs"]
 mod e2e_feedback_regression_pack;
 
-#[path = "../e2e_issue_548_error_message_audit.rs"]
+#[path = "control_feedback/e2e_issue_548_error_message_audit.rs"]
 mod e2e_issue_548_error_message_audit;
 
 #[path = "../e2e_issue_593_materialized_view_persistence.rs"]
@@ -60,20 +60,20 @@ mod e2e_issue_594_materialized_view_backing;
 #[path = "../e2e_issue_595_materialized_view_atomic_refresh.rs"]
 mod e2e_issue_595_materialized_view_atomic_refresh;
 
-#[path = "../e2e_materialized_view_refresh_every.rs"]
+#[path = "runtime_persistence/e2e_materialized_view_refresh_every.rs"]
 mod e2e_materialized_view_refresh_every;
 
-#[path = "../e2e_query_audit.rs"]
+#[path = "runtime_persistence/e2e_query_audit.rs"]
 mod e2e_query_audit;
 
-#[path = "../e2e_views.rs"]
+#[path = "sql_window/e2e_views.rs"]
 mod e2e_views;
 
-#[path = "../feedback_regression.rs"]
+#[path = "control_feedback/feedback_regression.rs"]
 mod feedback_regression;
 
-#[path = "../public_surface_contract_matrix.rs"]
+#[path = "surface_contracts/public_surface_contract_matrix.rs"]
 mod public_surface_contract_matrix;
 
-#[path = "../regress.rs"]
+#[path = "surface_contracts/regress.rs"]
 mod regress;
