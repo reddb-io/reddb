@@ -441,46 +441,46 @@ impl IvfIndex {
     /// Serialize the index to bytes for storage.
     ///
     /// The `IVF1` payload byte layout is owned by `reddb-file` (ADR 0046); this
-    /// only projects the engine state into [`reddb_file::IvfIndexLayout`].
+    /// only projects the engine state into [`reddb_file::IvfIndexFrame`].
     pub fn to_bytes(&self) -> Vec<u8> {
         let lists = self
             .lists
             .iter()
-            .map(|list| reddb_file::IvfListLayout {
+            .map(|list| reddb_file::IvfListFrame {
                 centroid: list.centroid.clone(),
                 ids: list.ids.clone(),
                 vectors: list.vectors.clone(),
             })
             .collect();
-        let layout = reddb_file::IvfIndexLayout {
-            n_lists: self.config.n_lists,
-            n_probes: self.config.n_probes,
-            dimension: self.config.dimension,
-            max_iterations: self.config.max_iterations,
+        let frame = reddb_file::IvfIndexFrame {
+            n_lists: self.config.n_lists as u32,
+            n_probes: self.config.n_probes as u32,
+            dimension: self.config.dimension as u32,
+            max_iterations: self.config.max_iterations as u32,
             convergence_threshold: self.config.convergence_threshold,
             trained: self.trained,
-            count: self.count,
+            count: self.count as u64,
             next_id: self.next_id,
             lists,
         };
-        reddb_file::encode_ivf_index(&layout)
+        reddb_file::encode_ivf_index_frame(&frame)
     }
 
     /// Deserialize an index from bytes via the `reddb-file` codec.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let layout = reddb_file::decode_ivf_index(bytes).map_err(|e| e.to_string())?;
+        let frame = reddb_file::decode_ivf_index_frame(bytes).map_err(|e| e.to_string())?;
 
         let config = IvfConfig {
-            n_lists: layout.n_lists,
-            n_probes: layout.n_probes,
-            dimension: layout.dimension,
-            max_iterations: layout.max_iterations,
-            convergence_threshold: layout.convergence_threshold,
+            n_lists: frame.n_lists as usize,
+            n_probes: frame.n_probes as usize,
+            dimension: frame.dimension as usize,
+            max_iterations: frame.max_iterations as usize,
+            convergence_threshold: frame.convergence_threshold,
         };
 
-        let mut lists = Vec::with_capacity(layout.lists.len());
+        let mut lists = Vec::with_capacity(frame.lists.len());
         let mut id_to_list = HashMap::new();
-        for (list_idx, list) in layout.lists.into_iter().enumerate() {
+        for (list_idx, list) in frame.lists.into_iter().enumerate() {
             for &id in &list.ids {
                 id_to_list.insert(id, list_idx);
             }
@@ -495,9 +495,9 @@ impl IvfIndex {
             config,
             lists,
             id_to_list,
-            trained: layout.trained,
-            count: layout.count,
-            next_id: layout.next_id,
+            trained: frame.trained,
+            count: frame.count as usize,
+            next_id: frame.next_id,
         })
     }
 }

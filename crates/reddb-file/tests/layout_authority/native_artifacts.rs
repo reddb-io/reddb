@@ -13,14 +13,14 @@ use crate::common::*;
 fn reddb_file_owns_native_artifact_codecs() {
     let root = repo_root();
 
-    let hnsw = read(root.join("crates/reddb-file/src/hnsw_index_codec.rs"));
+    let hnsw = read(root.join("crates/reddb-file/src/vector_hnsw_index.rs"));
     for required in [
         "pub const HNSW_INDEX_MAGIC",
-        "pub const HNSW_INDEX_VERSION",
-        "pub struct HnswIndexLayout",
-        "pub struct HnswNodeLayout",
-        "pub fn encode_hnsw_index",
-        "pub fn decode_hnsw_index",
+        "pub const HNSW_INDEX_VERSION_V1",
+        "pub struct HnswIndexFrame",
+        "pub struct HnswNodeFrame",
+        "pub fn encode_hnsw_index_frame",
+        "pub fn decode_hnsw_index_frame",
         "b\"HNSW\"",
     ] {
         assert!(
@@ -29,13 +29,13 @@ fn reddb_file_owns_native_artifact_codecs() {
         );
     }
 
-    let ivf = read(root.join("crates/reddb-file/src/ivf_index_codec.rs"));
+    let ivf = read(root.join("crates/reddb-file/src/vector_ivf_index.rs"));
     for required in [
         "pub const IVF_INDEX_MAGIC",
-        "pub struct IvfIndexLayout",
-        "pub struct IvfListLayout",
-        "pub fn encode_ivf_index",
-        "pub fn decode_ivf_index",
+        "pub struct IvfIndexFrame",
+        "pub struct IvfListFrame",
+        "pub fn encode_ivf_index_frame",
+        "pub fn decode_ivf_index_frame",
         "b\"IVF1\"",
     ] {
         assert!(
@@ -44,17 +44,17 @@ fn reddb_file_owns_native_artifact_codecs() {
         );
     }
 
-    let native = read(root.join("crates/reddb-file/src/native_artifact_codec.rs"));
+    let native = read(root.join("crates/reddb-file/src/native_index_artifact.rs"));
     for required in [
-        "pub const GRAPH_ADJACENCY_MAGIC",
-        "pub const FULLTEXT_INDEX_MAGIC",
-        "pub const DOC_PATHVALUE_MAGIC",
-        "pub fn encode_graph_adjacency",
-        "pub fn decode_graph_adjacency",
-        "pub fn encode_fulltext_index",
-        "pub fn decode_fulltext_index",
-        "pub fn encode_document_pathvalue",
-        "pub fn decode_document_pathvalue",
+        "pub const NATIVE_GRAPH_ADJACENCY_MAGIC",
+        "pub const NATIVE_FULLTEXT_MAGIC",
+        "pub const NATIVE_DOC_PATHVALUE_MAGIC",
+        "pub fn encode_native_graph_adjacency_frame",
+        "pub fn decode_native_graph_adjacency_frame",
+        "pub fn encode_native_fulltext_frame",
+        "pub fn decode_native_fulltext_frame",
+        "pub fn encode_native_doc_pathvalue_frame",
+        "pub fn decode_native_doc_pathvalue_frame",
         "b\"RDGA\"",
         "b\"RDFT\"",
         "b\"RDDP\"",
@@ -67,15 +67,15 @@ fn reddb_file_owns_native_artifact_codecs() {
         );
     }
 
-    let table = read(root.join("crates/reddb-file/src/table_def_codec.rs"));
+    let table = read(root.join("crates/reddb-file/src/table_def.rs"));
     for required in [
         "pub const TABLE_DEF_MAGIC",
-        "pub struct TableDefLayout",
-        "pub struct ColumnLayout",
-        "pub struct IndexLayout",
-        "pub struct ConstraintLayout",
-        "pub fn encode_table_def",
-        "pub fn decode_table_def",
+        "pub struct TableDefFrame",
+        "pub struct ColumnDefFrame",
+        "pub struct IndexDefFrame",
+        "pub struct ConstraintFrame",
+        "pub fn encode_table_def_frame",
+        "pub fn decode_table_def_frame",
         "b\"RTBL\"",
     ] {
         assert!(
@@ -137,27 +137,27 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
 
     // Positive: the server now calls into the codec.
     assert!(
-        hnsw_src.contains("reddb_file::encode_hnsw_index")
-            && hnsw_src.contains("reddb_file::decode_hnsw_index"),
+        hnsw_src.contains("reddb_file::encode_hnsw_index_frame")
+            && hnsw_src.contains("reddb_file::decode_hnsw_index_frame"),
         "hnsw.rs must call the reddb-file HNSW codec"
     );
     assert!(
-        ivf_src.contains("reddb_file::encode_ivf_index")
-            && ivf_src.contains("reddb_file::decode_ivf_index"),
+        ivf_src.contains("reddb_file::encode_ivf_index_frame")
+            && ivf_src.contains("reddb_file::decode_ivf_index_frame"),
         "ivf.rs must call the reddb-file IVF codec"
     );
     assert!(
-        impl_access_src.contains("reddb_file::encode_graph_adjacency")
-            && impl_access_src.contains("reddb_file::decode_graph_adjacency")
-            && impl_access_src.contains("reddb_file::encode_fulltext_index")
-            && impl_access_src.contains("reddb_file::decode_fulltext_index")
-            && impl_access_src.contains("reddb_file::encode_document_pathvalue")
-            && impl_access_src.contains("reddb_file::decode_document_pathvalue"),
+        impl_access_src.contains("reddb_file::encode_native_graph_adjacency_frame")
+            && impl_access_src.contains("reddb_file::decode_native_graph_adjacency_frame")
+            && impl_access_src.contains("reddb_file::encode_native_fulltext_frame")
+            && impl_access_src.contains("reddb_file::decode_native_fulltext_frame")
+            && impl_access_src.contains("reddb_file::encode_native_doc_pathvalue_frame")
+            && impl_access_src.contains("reddb_file::decode_native_doc_pathvalue_frame"),
         "impl_access.rs must call the reddb-file native artifact codecs"
     );
     assert!(
-        table_src.contains("reddb_file::encode_table_def")
-            && table_src.contains("reddb_file::decode_table_def"),
+        table_src.contains("reddb_file::encode_table_def_frame")
+            && table_src.contains("reddb_file::decode_table_def_frame"),
         "table.rs must call the reddb-file RTBL codec"
     );
 }

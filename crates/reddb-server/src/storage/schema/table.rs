@@ -133,14 +133,14 @@ impl TableDef {
     /// Serialize table definition to bytes.
     ///
     /// The `RTBL` payload byte layout is owned by `reddb-file` (ADR 0046); this
-    /// projects the typed definition into [`reddb_file::TableDefLayout`], mapping
+    /// projects the typed definition into [`reddb_file::TableDefFrame`], mapping
     /// the SQL-level type/index/constraint enums to their on-disk discriminant
     /// bytes. The framing (magic, version, varints, strings) lives in the codec.
     pub fn to_bytes(&self) -> Vec<u8> {
         let columns = self
             .columns
             .iter()
-            .map(|col| reddb_file::ColumnLayout {
+            .map(|col| reddb_file::ColumnDefFrame {
                 name: col.name.clone(),
                 data_type: col.data_type.to_byte(),
                 nullable: col.nullable,
@@ -160,7 +160,7 @@ impl TableDef {
         let indexes = self
             .indexes
             .iter()
-            .map(|idx| reddb_file::IndexLayout {
+            .map(|idx| reddb_file::IndexDefFrame {
                 name: idx.name.clone(),
                 index_type: idx.index_type as u8,
                 unique: idx.unique,
@@ -170,7 +170,7 @@ impl TableDef {
         let constraints = self
             .constraints
             .iter()
-            .map(|c| reddb_file::ConstraintLayout {
+            .map(|c| reddb_file::ConstraintFrame {
                 name: c.name.clone(),
                 constraint_type: c.constraint_type as u8,
                 columns: c.columns.clone(),
@@ -178,7 +178,7 @@ impl TableDef {
                 ref_columns: c.ref_columns.clone(),
             })
             .collect();
-        let layout = reddb_file::TableDefLayout {
+        let frame = reddb_file::TableDefFrame {
             version: self.version,
             name: self.name.clone(),
             created_at: self.created_at,
@@ -188,15 +188,16 @@ impl TableDef {
             indexes,
             constraints,
         };
-        reddb_file::encode_table_def(&layout)
+        reddb_file::encode_table_def_frame(&frame)
     }
 
     /// Deserialize table definition from bytes via the `reddb-file` codec.
     pub fn from_bytes(data: &[u8]) -> Result<Self, TableDefError> {
-        let layout = reddb_file::decode_table_def(data).map_err(TableDefError::from_codec)?;
+        let frame =
+            reddb_file::decode_table_def_frame(data).map_err(TableDefError::from_frame_codec)?;
 
-        let mut columns = Vec::with_capacity(layout.columns.len());
-        for col in layout.columns {
+        let mut columns = Vec::with_capacity(frame.columns.len());
+        for col in frame.columns {
             let data_type =
                 DataType::from_byte(col.data_type).ok_or(TableDefError::InvalidDataType)?;
             let element_type = match col.element_type {
@@ -219,8 +220,8 @@ impl TableDef {
             });
         }
 
-        let mut indexes = Vec::with_capacity(layout.indexes.len());
-        for idx in layout.indexes {
+        let mut indexes = Vec::with_capacity(frame.indexes.len());
+        for idx in frame.indexes {
             let index_type =
                 IndexType::from_byte(idx.index_type).ok_or(TableDefError::InvalidIndexType)?;
             indexes.push(IndexDef {
@@ -231,8 +232,8 @@ impl TableDef {
             });
         }
 
-        let mut constraints = Vec::with_capacity(layout.constraints.len());
-        for c in layout.constraints {
+        let mut constraints = Vec::with_capacity(frame.constraints.len());
+        for c in frame.constraints {
             let constraint_type = ConstraintType::from_byte(c.constraint_type)
                 .ok_or(TableDefError::InvalidConstraintType)?;
             constraints.push(Constraint {
@@ -245,14 +246,14 @@ impl TableDef {
         }
 
         Ok(Self {
-            name: layout.name,
+            name: frame.name,
             columns,
-            primary_key: layout.primary_key,
+            primary_key: frame.primary_key,
             indexes,
             constraints,
-            version: layout.version,
-            created_at: layout.created_at,
-            updated_at: layout.updated_at,
+            version: frame.version,
+            created_at: frame.created_at,
+            updated_at: frame.updated_at,
         })
     }
 }
@@ -587,12 +588,11 @@ impl TableDefError {
     /// Map a `reddb-file` table-def codec error onto the server error type,
     /// preserving the legacy variant semantics (invalid UTF-8 surfaces as
     /// truncated data, as the previous hand-rolled reader did).
-    fn from_codec(err: reddb_file::TableDefCodecError) -> Self {
+    fn from_frame_codec(err: reddb_file::TableDefFrameError) -> Self {
         match err {
-            reddb_file::TableDefCodecError::TruncatedData => TableDefError::TruncatedData,
-            reddb_file::TableDefCodecError::InvalidMagic => TableDefError::InvalidMagic,
-            reddb_file::TableDefCodecError::VarintOverflow => TableDefError::VarintOverflow,
-            reddb_file::TableDefCodecError::InvalidUtf8 => TableDefError::TruncatedData,
+            reddb_file::TableDefFrameError::TruncatedData => TableDefError::TruncatedData,
+            reddb_file::TableDefFrameError::InvalidMagic => TableDefError::InvalidMagic,
+            reddb_file::TableDefFrameError::VarintOverflow => TableDefError::VarintOverflow,
         }
     }
 }
