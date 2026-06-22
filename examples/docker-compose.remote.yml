@@ -7,9 +7,11 @@ services:
     container_name: reddb-floci
     ports:
       - "55466:4566"
+    environment:
+      FLOCI_HOSTNAME: floci
 
   floci-init:
-    image: amazon/aws-cli:2
+    image: amazon/aws-cli:latest
     container_name: reddb-floci-init
     depends_on:
       - floci
@@ -38,20 +40,11 @@ services:
       floci-init:
         condition: service_completed_successfully
     ports:
-      - "55551:50051"
-      - "55880:8080"
+      - "5050:5050"
+      - "55055:55055"
+      - "5000:5000"
     volumes:
       - primary-data:/data
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--role"
-      - "primary"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     environment:
       RUST_LOG: info
       REDDB_TOPOLOGY: primary-replica
@@ -67,17 +60,11 @@ services:
       RED_S3_REGION: us-east-1
       RED_S3_ACCESS_KEY: test
       RED_S3_SECRET_KEY: test
-      RED_S3_KEY_PREFIX: reddb/
       RED_S3_PATH_STYLE: "true"
-      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
-    secrets:
-      - source: reddb_certificate
-        target: reddb_certificate
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
+      RED_S3_KEY_PREFIX: reddb/
+      REDDB_VAULT: "false"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -94,20 +81,11 @@ services:
       primary:
         condition: service_healthy
     ports:
-      - "55552:50051"
-      - "55881:8080"
+      - "5051:5050"
+      - "55056:55055"
+      - "5001:5000"
     volumes:
       - replica-data:/data
-    command:
-      - "replica"
-      - "--primary-addr"
-      - "http://primary:50051"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     environment:
       RUST_LOG: info
       REDDB_TOPOLOGY: primary-replica
@@ -123,26 +101,16 @@ services:
       RED_S3_REGION: us-east-1
       RED_S3_ACCESS_KEY: test
       RED_S3_SECRET_KEY: test
-      RED_S3_KEY_PREFIX: reddb/
       RED_S3_PATH_STYLE: "true"
-      REDDB_PRIMARY_ADDR: http://primary:50051
-      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
-    secrets:
-      - source: reddb_certificate
-        target: reddb_certificate
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
+      RED_S3_KEY_PREFIX: reddb/
+      REDDB_PRIMARY_ADDR: http://primary:55055
+      REDDB_VAULT: "false"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 10s
-
-secrets:
-  reddb_certificate:
-    external: true
 
 volumes:
   primary-data:

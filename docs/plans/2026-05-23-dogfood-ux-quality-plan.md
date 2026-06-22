@@ -267,7 +267,7 @@ This can come after core correctness fixes.
 
 ## Phase 6: Docs and quickstart consolidation
 
-Problem: docs mention `/health`, `/admin/health`, ports `5055`, `8080`, `50051`, etc. All may be valid, but first-run path feels fragmented.
+Problem: docs mention `/health`, `/admin/health`, ports `55055`, `5000`, `55055`, etc. All may be valid, but first-run path feels fragmented.
 
 ### Task 6.1: Create one canonical quickstart
 
@@ -344,15 +344,15 @@ Manual server:
 /opt/cargo-target/debug/red server \
   --dev \
   --path /tmp/reddb-server-dogfood/data.rdb \
-  --http-bind 127.0.0.1:5055 \
-  --grpc-bind 127.0.0.1:5555 \
+  --http-bind 127.0.0.1:5000 \
+  --grpc-bind 127.0.0.1:55055 \
   --no-log-file
 ```
 
 Manual HTTP:
 ```bash
-curl -i http://127.0.0.1:5055/health
-curl -X POST http://127.0.0.1:5055/query \
+curl -i http://127.0.0.1:5000/health
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT 1"}'
 ```

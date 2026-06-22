@@ -142,7 +142,7 @@ ALTER TABLE sessions SET VERSIONED = false
 Create a collection via the DDL endpoint:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections \
+curl -X POST http://127.0.0.1:5000/collections \
   -H 'content-type: application/json' \
   -d '{"name": "hosts", "ttl": "60m"}'
 ```
@@ -152,7 +152,7 @@ curl -X POST http://127.0.0.1:8080/collections \
 ```bash
 grpcurl -plaintext \
   -d '{"payloadJson": "{\"name\":\"hosts\",\"ttl\":\"60m\"}"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/CreateCollection
+  127.0.0.1:55055 reddb.v1.RedDb/CreateCollection
 ```
 
 Describe a collection's schema:
@@ -160,7 +160,7 @@ Describe a collection's schema:
 ```bash
 grpcurl -plaintext \
   -d '{"collection": "hosts"}' \
-  127.0.0.1:50051 reddb.v1.RedDb/DescribeCollection
+  127.0.0.1:55055 reddb.v1.RedDb/DescribeCollection
 ```
 
 > [!TIP]

@@ -5,29 +5,23 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-server-min
     ports:
-      - "55551:50051"
-      - "55880:8080"
-      - "55843:8443"
+      - "5050:5050"
+      - "55055:55055"
+      - "5000:5000"
+      - "55555:55555"
     volumes:
       - server-data:/data
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
-      - "--http-tls-bind"
-      - "0.0.0.0:8443"
     environment:
       RUST_LOG: info
+      REDDB_TOPOLOGY: standalone
+      REDDB_NODE_ROLE: standalone
       REDDB_STORAGE_PRESET: embedded
       REDDB_STORAGE_PROFILE: embedded
       REDDB_STORAGE_PACKAGING: single-file
       REDDB_REPLICA_COUNT: "0"
+      REDDB_VAULT: "false"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 5

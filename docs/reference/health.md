@@ -5,7 +5,7 @@ RedDB provides comprehensive health checks, readiness probes, and runtime statis
 ## Health Check
 
 ```bash
-curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:5000/health
 ```
 
 Response:
@@ -27,14 +27,14 @@ listener readiness:
 {
   "transport_listeners": {
     "active": [
-      { "transport": "grpc", "bind_addr": "127.0.0.1:50051", "explicit": true }
+      { "transport": "grpc", "bind_addr": "127.0.0.1:55055", "explicit": true }
     ],
     "failed": [
       {
         "transport": "http",
-        "bind_addr": "127.0.0.1:5055",
+        "bind_addr": "127.0.0.1:5000",
         "explicit": false,
-        "reason": "http listener bind 127.0.0.1:5055: address already in use"
+        "reason": "http listener bind 127.0.0.1:5000: address already in use"
       }
     ]
   }
@@ -60,7 +60,7 @@ reported here when another requested listener remains active.
 ## Runtime Statistics
 
 ```bash
-curl http://127.0.0.1:8080/stats
+curl http://127.0.0.1:5000/stats
 ```
 
 Response:
@@ -99,7 +99,7 @@ caveats.
 Get a comprehensive readiness view:
 
 ```bash
-curl http://127.0.0.1:8080/catalog/readiness
+curl http://127.0.0.1:5000/catalog/readiness
 ```
 
 This includes:
@@ -112,7 +112,7 @@ This includes:
 Find what needs attention:
 
 ```bash
-curl http://127.0.0.1:8080/catalog/attention
+curl http://127.0.0.1:5000/catalog/attention
 ```
 
 Returns failed indexes, stale projections, and other items needing operator action.
@@ -120,7 +120,7 @@ Returns failed indexes, stale projections, and other items needing operator acti
 ## Catalog Consistency
 
 ```bash
-curl http://127.0.0.1:8080/catalog/consistency
+curl http://127.0.0.1:5000/catalog/consistency
 ```
 
 Checks that the catalog state is consistent across all subsystems.
@@ -128,7 +128,7 @@ Checks that the catalog state is consistent across all subsystems.
 ## Physical Authority
 
 ```bash
-curl http://127.0.0.1:8080/physical/authority
+curl http://127.0.0.1:5000/physical/authority
 ```
 
 Returns the physical storage authority status, including header validity and repair needs.
@@ -141,14 +141,14 @@ Use health and readiness probes in Kubernetes:
 livenessProbe:
   httpGet:
     path: /health
-    port: 8080
+    port: 5000
   initialDelaySeconds: 5
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
     path: /ready
-    port: 8080
+    port: 5000
   initialDelaySeconds: 5
   periodSeconds: 5
 ```
@@ -158,5 +158,5 @@ readinessProbe:
 For continuous monitoring, poll the stats endpoint:
 
 ```bash
-watch -n 5 'curl -s http://127.0.0.1:8080/stats | python3 -m json.tool'
+watch -n 5 'curl -s http://127.0.0.1:5000/stats | python3 -m json.tool'
 ```

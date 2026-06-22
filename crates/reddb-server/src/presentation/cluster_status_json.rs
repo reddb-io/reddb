@@ -535,7 +535,7 @@ mod tests {
             transport: TransportSnapshot {
                 active: vec![TransportListenerView {
                     transport: "http".to_string(),
-                    bind_addr: "127.0.0.1:8080".to_string(),
+                    bind_addr: "127.0.0.1:5000".to_string(),
                     explicit: true,
                     reason: None,
                 }],
@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(active.len(), 1);
         let listener = obj(&active[0]);
         assert_eq!(s(listener.get("transport").unwrap()), "http");
-        assert_eq!(s(listener.get("bind_addr").unwrap()), "127.0.0.1:8080");
+        assert_eq!(s(listener.get("bind_addr").unwrap()), "127.0.0.1:5000");
 
         // Connections — measurable values keep their natural type.
         let conn = obj(root.get("connections").unwrap());
@@ -727,7 +727,7 @@ mod tests {
         inputs.system.os = "macos".to_string();
         inputs.transport.failed.push(TransportListenerView {
             transport: "grpc".to_string(),
-            bind_addr: "0.0.0.0:50051".to_string(),
+            bind_addr: "0.0.0.0:5000".to_string(),
             explicit: true,
             reason: Some("port_in_use".to_string()),
         });

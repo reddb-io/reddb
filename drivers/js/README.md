@@ -11,7 +11,7 @@ engine. For remote HTTP, gRPC, or RedWire connections, install
 
 ```bash
 npx @reddb-io/cli@latest version
-npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+npx @reddb-io/cli@latest server --http-bind 127.0.0.1:5000 --path ./data.rdb
 ```
 
 ## Install

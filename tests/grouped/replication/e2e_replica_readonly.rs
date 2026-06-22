@@ -58,7 +58,7 @@ fn replica_rejects_sql_ddl_and_dml_on_every_surface() {
     // 2. Re-open the same data directory under a replica config. Public
     //    mutation surfaces must reject; reads must still work.
     let opts = RedDBOptions::persistent(&primary_path)
-        .with_replication(ReplicationConfig::replica("http://primary:50051"));
+        .with_replication(ReplicationConfig::replica("http://primary:55055"));
     let rt = RedDBRuntime::with_options(opts).expect("replica open");
 
     let read = rt
@@ -188,7 +188,7 @@ fn replica_internal_apply_path_remains_privileged() {
     }
 
     let opts = RedDBOptions::persistent(&path)
-        .with_replication(ReplicationConfig::replica("http://primary:50051"));
+        .with_replication(ReplicationConfig::replica("http://primary:55055"));
     let rt = RedDBRuntime::with_options(opts).expect("replica open");
 
     // 1. Public surface is rejected.

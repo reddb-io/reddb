@@ -57,8 +57,8 @@ impl ServerTransport {
 
     pub const fn default_bind_addr(self) -> &'static str {
         match self {
-            Self::Grpc => "127.0.0.1:5555",
-            Self::Http => "127.0.0.1:5055",
+            Self::Grpc => "127.0.0.1:55055",
+            Self::Http => "127.0.0.1:5000",
             Self::Wire => "127.0.0.1:5050",
         }
     }
@@ -72,7 +72,7 @@ pub struct ServerCommandConfig {
     pub grpc_bind_addr: Option<String>,
     pub grpc_bind_explicit: bool,
     /// TLS-encrypted gRPC bind address. Can run side-by-side with
-    /// `grpc_bind_addr` (e.g. `:50051` plain + `:50052` TLS) or
+    /// `grpc_bind_addr` (e.g. `:55055` plain + `:55555` TLS) or
     /// stand alone for TLS-only deploys. Defaults to `None`.
     pub grpc_tls_bind_addr: Option<String>,
     /// Path to PEM-encoded gRPC server certificate. Resolved through
@@ -93,7 +93,7 @@ pub struct ServerCommandConfig {
     pub http_bind_explicit: bool,
     /// HTTPS bind address. When set, the HTTP server also serves a
     /// TLS-terminated listener on this addr. Plain HTTP and HTTPS can
-    /// run side by side (e.g. 8080 plain + 8443 TLS).
+    /// run side by side (e.g. 5000 plain + 55555 TLS).
     pub http_tls_bind_addr: Option<String>,
     /// PEM cert for HTTPS. Reads `REDDB_HTTP_TLS_CERT` / its `_FILE`
     /// companion when not set explicitly.
@@ -348,7 +348,7 @@ impl ServerCommandConfig {
                 let primary_addr = self
                     .primary_addr
                     .clone()
-                    .unwrap_or_else(|| "http://127.0.0.1:5555".to_string());
+                    .unwrap_or_else(|| "http://127.0.0.1:55055".to_string());
                 // Public-mutation rejection on replicas is enforced by
                 // `WriteGate` at the runtime/RPC boundary (PLAN.md W1).
                 // Leaving `options.read_only = false` keeps the pager
@@ -3113,7 +3113,7 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
 
         // Optional TLS gRPC listener. When `grpc_tls_bind_addr` is set
         // it spawns a separate listener so plaintext + TLS can run
-        // side-by-side (50051 plain + 50052 TLS, etc.).
+        // side-by-side (55055 plain + 55555 TLS, etc.).
         spawn_grpc_tls_listener_if_configured(&config, runtime.clone(), auth_store.clone());
 
         let server = RedDBGrpcServer::with_options(
@@ -3265,12 +3265,12 @@ mod tests {
             run_group: "reddb".to_string(),
             data_path: reddb_file::default_service_database_path(),
             router_bind_addr: None,
-            grpc_bind_addr: Some("0.0.0.0:5555".to_string()),
+            grpc_bind_addr: Some("0.0.0.0:55055".to_string()),
             http_bind_addr: None,
         };
 
         let unit = render_systemd_unit(&config);
-        assert!(unit.contains("ExecStart=/usr/local/bin/red server --path /var/lib/reddb/data.rdb --grpc-bind 0.0.0.0:5555"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/red server --path /var/lib/reddb/data.rdb --grpc-bind 0.0.0.0:55055"));
         assert!(unit.contains("ReadWritePaths=/var/lib/reddb"));
     }
 
@@ -3284,7 +3284,7 @@ mod tests {
             data_path: PathBuf::from("/srv/reddb/live/data.rdb"),
             router_bind_addr: None,
             grpc_bind_addr: None,
-            http_bind_addr: Some("127.0.0.1:5055".to_string()),
+            http_bind_addr: Some("127.0.0.1:5000".to_string()),
         };
 
         assert_eq!(config.data_dir(), PathBuf::from("/srv/reddb/live"));
@@ -3303,13 +3303,13 @@ mod tests {
             run_group: "reddb".to_string(),
             data_path: reddb_file::default_service_database_path(),
             router_bind_addr: None,
-            grpc_bind_addr: Some("0.0.0.0:5555".to_string()),
-            http_bind_addr: Some("0.0.0.0:5055".to_string()),
+            grpc_bind_addr: Some("0.0.0.0:55055".to_string()),
+            http_bind_addr: Some("0.0.0.0:5000".to_string()),
         };
 
         let unit = render_systemd_unit(&config);
-        assert!(unit.contains("--grpc-bind 0.0.0.0:5555"));
-        assert!(unit.contains("--http-bind 0.0.0.0:5055"));
+        assert!(unit.contains("--grpc-bind 0.0.0.0:55055"));
+        assert!(unit.contains("--http-bind 0.0.0.0:5000"));
     }
 
     #[test]

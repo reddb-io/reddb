@@ -52,13 +52,13 @@ DELETE FROM temp_data
 ### By RedDB ID
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/users/entities/102
+curl -X DELETE http://127.0.0.1:5000/collections/users/entities/102
 ```
 
 ### Via Query
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query": "DELETE FROM users WHERE active = $1", "params": [false]}'
 ```
@@ -68,7 +68,7 @@ curl -X POST http://127.0.0.1:8080/query \
 ```bash
 grpcurl -plaintext \
   -d '{"collection": "users", "id": 102}' \
-  127.0.0.1:50051 reddb.v1.RedDb/DeleteEntity
+  127.0.0.1:55055 reddb.v1.RedDb/DeleteEntity
 ```
 
 `DeleteEntityRequest.id` is the retained protobuf field name. Treat its value

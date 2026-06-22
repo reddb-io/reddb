@@ -157,11 +157,11 @@ class UrlTest {
             Arguments.of("red://example.com:9999", Url.Kind.REDWIRE, "example.com", 9999),
             Arguments.of("red://10.0.0.1:1234", Url.Kind.REDWIRE, "10.0.0.1", 1234),
             Arguments.of("reds://reddb.example.com", Url.Kind.REDWIRE_TLS, "reddb.example.com", 5050),
-            Arguments.of("reds://reddb.example.com:8443", Url.Kind.REDWIRE_TLS, "reddb.example.com", 8443),
-            Arguments.of("http://localhost", Url.Kind.HTTP, "localhost", 5050),
-            Arguments.of("http://localhost:8080", Url.Kind.HTTP, "localhost", 8080),
-            Arguments.of("https://reddb.example.com", Url.Kind.HTTPS, "reddb.example.com", 5050),
-            Arguments.of("https://reddb.example.com:8443", Url.Kind.HTTPS, "reddb.example.com", 8443),
+            Arguments.of("reds://reddb.example.com:55555", Url.Kind.REDWIRE_TLS, "reddb.example.com", 55555),
+            Arguments.of("http://localhost", Url.Kind.HTTP, "localhost", 5000),
+            Arguments.of("http://localhost:5000", Url.Kind.HTTP, "localhost", 5000),
+            Arguments.of("https://reddb.example.com", Url.Kind.HTTPS, "reddb.example.com", 55555),
+            Arguments.of("https://reddb.example.com:55555", Url.Kind.HTTPS, "reddb.example.com", 55555),
         )
     }
 }

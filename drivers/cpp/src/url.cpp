@@ -146,8 +146,8 @@ UrlKind resolve_kind(const std::string& proto) {
 
 uint16_t default_port_for(UrlKind kind) {
     switch (kind) {
-        case UrlKind::Http: return 8080;
-        case UrlKind::Https: return 8443;
+        case UrlKind::Http: return 5000;
+        case UrlKind::Https: return 55555;
         case UrlKind::Red: return 5050;
         case UrlKind::Reds: return 5050;
         case UrlKind::Embedded: return 0;

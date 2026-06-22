@@ -36,13 +36,13 @@ TEST(Url, RedsDefaultPort) {
 TEST(Url, HttpDefaultPort) {
     auto u = parse_uri("http://api.example.com");
     EXPECT_EQ(u.kind, UrlKind::Http);
-    EXPECT_EQ(u.port, 8080);
+    EXPECT_EQ(u.port, 5000);
 }
 
 TEST(Url, HttpsDefaultPort) {
     auto u = parse_uri("https://api.example.com");
     EXPECT_EQ(u.kind, UrlKind::Https);
-    EXPECT_EQ(u.port, 8443);
+    EXPECT_EQ(u.port, 55555);
 }
 
 TEST(Url, HttpExplicitPort) {
@@ -97,7 +97,7 @@ TEST(Url, LoginUrlAlias) {
 }
 
 TEST(Url, ProtoOverrideHttps) {
-    auto u = parse_uri("red://db.local:8443?proto=https");
+    auto u = parse_uri("red://db.local:55555?proto=https");
     EXPECT_EQ(u.kind, UrlKind::Https);
 }
 

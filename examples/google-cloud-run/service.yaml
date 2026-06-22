@@ -47,7 +47,7 @@ spec:
       containers:
         - image: us-central1-docker.pkg.dev/PROJECT/reddb/reddb:latest
           ports:
-            - containerPort: 8080
+            - containerPort: 5000
               name: http1
           resources:
             limits:
@@ -55,7 +55,7 @@ spec:
               memory: "2Gi"
           env:
             - name: REDDB_HTTP_BIND_ADDR
-              value: "0.0.0.0:8080"
+              value: "0.0.0.0:5000"
             - name: RED_BACKEND
               value: "s3"
             - name: RED_S3_ENDPOINT
@@ -104,17 +104,17 @@ spec:
           startupProbe:
             httpGet:
               path: /health/startup
-              port: 8080
+              port: 5000
             initialDelaySeconds: 0
             periodSeconds: 5
             failureThreshold: 12  # 60s grace for restore-from-remote
           livenessProbe:
             httpGet:
               path: /health/live
-              port: 8080
+              port: 5000
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /health/ready
-              port: 8080
+              port: 5000
             periodSeconds: 10

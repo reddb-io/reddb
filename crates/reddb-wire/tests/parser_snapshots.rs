@@ -64,8 +64,8 @@ snap!(cluster_empty_middle, "grpc://primary,,replica");
 snap!(cluster_empty_first, "grpc://,b");
 snap!(cluster_only_commas, "grpc://,,,");
 snap!(cluster_trailing_comma, "grpc://a,");
-snap!(cluster_non_numeric_port, "grpc://a:nope,b:5055");
-snap!(cluster_ipv6_unterminated, "grpc://[::1:5050,b:5055");
+snap!(cluster_non_numeric_port, "grpc://a:nope,b:55055");
+snap!(cluster_ipv6_unterminated, "grpc://[::1:5050,b:55055");
 
 // ----- InvalidUri: BIDI / control / weird codepoints -------------
 

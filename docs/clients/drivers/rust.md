@@ -35,7 +35,7 @@ use reddb_client::{Reddb, JsonValue, Value};
 
 #[tokio::main]
 async fn main() -> reddb_client::Result<()> {
-    let db = Reddb::connect("grpc://localhost:5055").await?;
+    let db = Reddb::connect("grpc://localhost:55055").await?;
 
     db.insert(
         "users",
@@ -104,17 +104,17 @@ let rows = client
 |--------------|----------------------------|:------------:|--------------------|
 | `red://`     | RedWire TCP                | 5050         | `redwire`          |
 | `reds://`    | RedWire over TLS / mTLS    | 5050         | `redwire-tls`      |
-| `grpc://`    | gRPC                       | 5055         | `grpc`             |
-| `grpcs://`   | gRPC over TLS              | 5056         | `grpc`             |
-| `http://`    | HTTP REST                  | 8080         | `http`             |
-| `https://`   | HTTPS REST                 | 8443         | `http`             |
+| `grpc://`    | gRPC                       | 55055         | `grpc`             |
+| `grpcs://`   | gRPC over TLS              | 55555         | `grpc`             |
+| `http://`    | HTTP REST                  | 5000         | `http`             |
+| `https://`   | HTTPS REST                 | 55555         | `http`             |
 | `memory://`  | Embedded in-memory engine  | —            | `embedded`         |
 | `file:///…`  | Embedded on-disk engine    | —            | `embedded`         |
 
 Topology / multi-host (read-replicas + primary failover):
 
 ```rust
-let db = Reddb::connect("grpc://primary:5055,replica1:5055,replica2:5055").await?;
+let db = Reddb::connect("grpc://primary:55055,replica1:55055,replica2:55055").await?;
 ```
 
 The driver round-robins reads across replicas and pins writes to the primary. See [Connection Strings — gRPC cluster](../connection-strings.md#grpc-cluster-primary--read-replicas).

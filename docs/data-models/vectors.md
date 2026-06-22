@@ -64,7 +64,7 @@ LIMIT 20
 #### **HTTP**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/docs/vectors \
+curl -X POST http://127.0.0.1:5000/collections/docs/vectors \
   -H 'content-type: application/json' \
   -d '{
     "dense": [0.12, 0.91, 0.44, 0.33, 0.67, 0.88, 0.21, 0.55],
@@ -85,7 +85,7 @@ grpcurl -plaintext \
     "collection": "docs",
     "payloadJson": "{\"dense\":[0.12,0.91,0.44,0.33,0.67,0.88,0.21,0.55],\"content\":\"Introduction to machine learning\"}"
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/CreateVector
+  127.0.0.1:55055 reddb.v1.RedDb/CreateVector
 ```
 
 #### **Rust (Embedded)**
@@ -113,7 +113,7 @@ let vector_id = db.vector("docs")
 Find the most similar vectors to a query vector:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/docs/similar \
+curl -X POST http://127.0.0.1:5000/collections/docs/similar \
   -H 'content-type: application/json' \
   -d '{
     "vector": [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50],
@@ -156,7 +156,7 @@ VECTOR SEARCH docs SIMILAR TO 'machine learning fundamentals' LIMIT 5
 Use inverted file index for approximate search on large datasets:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/docs/ivf/search \
+curl -X POST http://127.0.0.1:5000/collections/docs/ivf/search \
   -H 'content-type: application/json' \
   -d '{
     "vector": [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50],
@@ -179,7 +179,7 @@ PROBES 3
 Full-text search across vector content and metadata:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/text/search \
+curl -X POST http://127.0.0.1:5000/text/search \
   -H 'content-type: application/json' \
   -d '{
     "query": "machine learning basics",
@@ -204,7 +204,7 @@ SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT $1
 Combine structured filters with vector similarity:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/hybrid/search \
+curl -X POST http://127.0.0.1:5000/hybrid/search \
   -H 'content-type: application/json' \
   -d '{
     "collections": ["docs"],
@@ -239,7 +239,7 @@ This is useful for debugging ingestion pipelines, checking metadata, or auditing
 ## Bulk Insert
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/docs/bulk/vectors \
+curl -X POST http://127.0.0.1:5000/collections/docs/bulk/vectors \
   -H 'content-type: application/json' \
   -d '[
     {"dense": [0.1, 0.2, 0.3], "content": "Document A"},

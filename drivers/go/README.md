@@ -82,12 +82,12 @@ raw `$N` literals.
 | ------------------------------------ | -------------------------------------------- |
 | `red://host[:5050]`                  | RedWire (default)                            |
 | `reds://host[:5050]`                 | RedWire over TLS (`redwire/1` ALPN)          |
-| `grpc://host[:5055]`                 | gRPC query API                               |
-| `grpcs://host[:5055]`                | gRPC query API over TLS                      |
+| `grpc://host[:55055]`                 | gRPC query API                               |
+| `grpcs://host[:55555]`                | gRPC query API over TLS                      |
 | `red://host?proto=grpc`              | RedWire URI, but routed over gRPC            |
 | `red://host?proto=https`             | RedWire URI, but routed over HTTPS           |
-| `http://host[:8080]`                 | RedDB HTTP REST                              |
-| `https://host[:8443]`                | RedDB HTTP REST over TLS                     |
+| `http://host[:5000]`                 | RedDB HTTP REST                              |
+| `https://host[:55555]`                | RedDB HTTP REST over TLS                     |
 | `red:///path/file.rdb` *(unsupported)* | Embedded — pure-Go driver does not embed   |
 | `red://memory` *(unsupported)*       | Embedded in-memory — same                    |
 

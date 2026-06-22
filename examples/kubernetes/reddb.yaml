@@ -88,10 +88,10 @@ spec:
     app.kubernetes.io/name: reddb
   ports:
     - name: http
-      port: 8080
+      port: 5000
       targetPort: http
     - name: grpc
-      port: 50051
+      port: 55055
       targetPort: grpc
 ---
 apiVersion: v1
@@ -105,10 +105,10 @@ spec:
     app.kubernetes.io/name: reddb
   ports:
     - name: http
-      port: 8080
+      port: 5000
       targetPort: http
     - name: grpc
-      port: 50051
+      port: 55055
       targetPort: grpc
 ---
 apiVersion: apps/v1
@@ -152,9 +152,9 @@ spec:
             - --path
             - /data/data.rdb
             - --grpc-bind
-            - 0.0.0.0:50051
+            - 0.0.0.0:55055
             - --http-bind
-            - 0.0.0.0:8080
+            - 0.0.0.0:5000
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -165,9 +165,9 @@ spec:
               drop: ["ALL"]
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 5000
             - name: grpc
-              containerPort: 50051
+              containerPort: 55055
           envFrom:
             - configMapRef:
                 name: reddb-config

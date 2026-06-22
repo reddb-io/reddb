@@ -63,12 +63,12 @@ Tracked in the [12-week TS/CH parity plan](../../../.claude/plans/eu-recebi-esta
 
 ### Where we stay behind for now
 
-* **Distributed query / production sharding runtime** — not ready for a
-  production claim this cycle. Foundations (serialisable `ColumnBatch`, WAL
-  replication, quorum, and the cluster range ownership/routing model) are in
-  place; distributed SQL planning, coordinator merge, and Raft catalog land in
-  follow-on work. Documented in [Cluster Sharding](./cluster-sharding.md) and
-  [Distributed Roadmap](./distributed-roadmap.md).
+* **Distributed query / sharding** — not a productive cluster surface
+  for this cycle. Foundations (serialisable `ColumnBatch`, WAL
+  replication, quorum, shard/range catalog, and the slot-map target)
+  are in place; the router, coordinator, and control-plane catalog log
+  land in follow-on work. Documented in
+  [distributed-roadmap.md](./distributed-roadmap.md).
 * **Mature PG extension ecosystem** — not feasible without forking
   PostgreSQL. We add selected features natively (hypertables,
   continuous aggregates, pgvector surface) instead of importing the

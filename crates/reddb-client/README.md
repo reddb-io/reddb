@@ -243,7 +243,7 @@ engine, no embedded backend, just transports:
 |---------------------|------------|
 | `red://host[:port]` | gRPC, default port 5050 |
 | `reds://host[:port]`| TODO (TLS not yet wired in the bin) |
-| `grpc://host[:port]`| gRPC, default port 5055 |
+| `grpc://host[:port]`| gRPC, default port 55055 |
 | `http://host[:port]`| REST |
 | `memory:` / `file://` | rejected (exit 2, points to `red`) |
 

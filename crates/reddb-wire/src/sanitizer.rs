@@ -582,10 +582,10 @@ mod tests {
 
     #[test]
     fn parser_round_trip_grpc() {
-        let parsed = ConnStringSanitizer::parse("grpc://node-1:5055").unwrap();
+        let parsed = ConnStringSanitizer::parse("grpc://node-1:55055").unwrap();
         match parsed.target() {
             TaintedTarget::Grpc { endpoint } => {
-                assert_eq!(endpoint.expose_secret(), "http://node-1:5055");
+                assert_eq!(endpoint.expose_secret(), "http://node-1:55055");
                 let h = endpoint.escape_for(Boundary::HttpHeader).unwrap();
                 assert!(!h.as_str().contains('\n'));
             }

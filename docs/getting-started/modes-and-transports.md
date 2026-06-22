@@ -110,7 +110,7 @@ Use HTTP for JSON payloads, operational endpoints, and tooling that already expe
 Example:
 
 ```bash
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+red server --http --path ./data/reddb.rdb --bind 127.0.0.1:5000
 ```
 
 ### gRPC
@@ -126,7 +126,7 @@ This is also the transport used by:
 Example:
 
 ```bash
-red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:55055
 ```
 
 ### Wire

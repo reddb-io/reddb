@@ -72,7 +72,7 @@ The `id` column is the only system-managed field. It appears in every query resu
 Append a single log entry. Returns immediately (write-buffered for throughput).
 
 ```bash
-curl -X POST localhost:8080/logs/app_logs/append -d '{
+curl -X POST localhost:5000/logs/app_logs/append -d '{
   "level": "info",
   "message": "request handled",
   "path": "/api/users",
@@ -100,10 +100,10 @@ Query log entries. Returns newest-first by default.
 
 ```bash
 # Last 100 entries (newest first)
-curl "localhost:8080/logs/app_logs/query?limit=100"
+curl "localhost:5000/logs/app_logs/query?limit=100"
 
 # Entries since a specific ID (for pagination / tailing)
-curl "localhost:8080/logs/app_logs/query?since=7352947238912&limit=50"
+curl "localhost:5000/logs/app_logs/query?since=7352947238912&limit=50"
 ```
 
 **Response:**
@@ -145,7 +145,7 @@ The `since` parameter enables efficient log tailing: store the last `id` you rec
 Manually trigger retention cleanup for a log collection.
 
 ```bash
-curl -X POST localhost:8080/logs/app_logs/retention
+curl -X POST localhost:5000/logs/app_logs/retention
 ```
 
 **Response:**
@@ -257,7 +257,7 @@ To continuously tail a log collection from an HTTP client:
 LAST_ID=0
 
 while true; do
-  RESPONSE=$(curl -s "localhost:8080/logs/app_logs/query?since=$LAST_ID&limit=100")
+  RESPONSE=$(curl -s "localhost:5000/logs/app_logs/query?since=$LAST_ID&limit=100")
   
   # Process entries
   echo "$RESPONSE" | jq -r '.entries[] | "\(.timestamp_ms) [\(.level)] \(.message)"'
@@ -312,7 +312,7 @@ CREATE LOG app (
 
 ```bash
 # Structured application logs with native types
-curl -X POST localhost:8080/logs/app/append -d '{
+curl -X POST localhost:5000/logs/app/append -d '{
   "level": "info",
   "service": "api-gateway",
   "method": "GET",
@@ -324,7 +324,7 @@ curl -X POST localhost:8080/logs/app/append -d '{
 }'
 
 # Error with context
-curl -X POST localhost:8080/logs/app/append -d '{
+curl -X POST localhost:5000/logs/app/append -d '{
   "level": "error",
   "service": "auth-service",
   "message": "token validation failed",
@@ -333,7 +333,7 @@ curl -X POST localhost:8080/logs/app/append -d '{
 }'
 
 # Query recent logs
-curl "localhost:8080/logs/app/query?limit=50"
+curl "localhost:5000/logs/app/query?limit=50"
 ```
 
 ## Example: Audit Trail
@@ -349,7 +349,7 @@ CREATE LOG audit (
 ```
 
 ```bash
-curl -X POST localhost:8080/logs/audit/append -d '{
+curl -X POST localhost:5000/logs/audit/append -d '{
   "actor": "admin@company.com",
   "action": "update",
   "resource": "https://app.example.com/users/42",
@@ -357,7 +357,7 @@ curl -X POST localhost:8080/logs/audit/append -d '{
   "country": "BR"
 }'
 
-curl "localhost:8080/logs/audit/query?limit=100"
+curl "localhost:5000/logs/audit/query?limit=100"
 ```
 
 ## Example: Access Log
@@ -375,7 +375,7 @@ CREATE LOG access (
 ```
 
 ```bash
-curl -X POST localhost:8080/logs/access/append -d '{
+curl -X POST localhost:5000/logs/access/append -d '{
   "ip": "192.168.1.100",
   "path": "/api/products",
   "status": 200,
@@ -400,7 +400,7 @@ CREATE LOG metrics (
 ```bash
 # High-frequency metric ingestion
 for i in $(seq 1 1000); do
-  curl -s -X POST localhost:8080/logs/metrics/append -d "{
+  curl -s -X POST localhost:5000/logs/metrics/append -d "{
     \"host\": \"srv-1\",
     \"metric\": \"cpu.idle\",
     \"value\": $(( RANDOM % 100 )),
@@ -410,5 +410,5 @@ done
 wait
 
 # Query recent metrics
-curl "localhost:8080/logs/metrics/query?limit=10"
+curl "localhost:5000/logs/metrics/query?limit=10"
 ```

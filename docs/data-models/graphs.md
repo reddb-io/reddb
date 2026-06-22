@@ -51,7 +51,7 @@ Graph edges use `from_rid` and `to_rid` for their endpoints.
 #### **HTTP**
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/social/nodes \
+curl -X POST http://127.0.0.1:5000/collections/social/nodes \
   -H 'content-type: application/json' \
   -d '{
     "label": "alice",
@@ -72,7 +72,7 @@ grpcurl -plaintext \
     "collection": "social",
     "payloadJson": "{\"label\":\"alice\",\"node_type\":\"person\",\"properties\":{\"name\":\"Alice Johnson\"}}"
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/CreateNode
+  127.0.0.1:55055 reddb.v1.RedDb/CreateNode
 ```
 
 #### **Rust (Embedded)**
@@ -92,7 +92,7 @@ let node_rid = db.node("social", "alice")
 Edges connect two nodes with a labeled, optionally weighted relationship:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{
     "label": "REPORTS_TO",
@@ -151,7 +151,7 @@ non-null numeric field; arithmetic or domain errors abort the whole statement.
 Traverse the graph from a starting node:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/traverse \
+curl -X POST http://127.0.0.1:5000/graph/traverse \
   -H 'content-type: application/json' \
   -d '{
     "source": "alice",
@@ -182,7 +182,7 @@ GRAPH TRAVERSE FROM 'alice' STRATEGY dfs DIRECTION both MAX_DEPTH 2
 Find the shortest path between two nodes:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+curl -X POST http://127.0.0.1:5000/graph/shortest-path \
   -H 'content-type: application/json' \
   -d '{
     "source": "alice",
@@ -218,7 +218,7 @@ RedDB provides built-in graph analytics:
 ### Centrality
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
+curl -X POST http://127.0.0.1:5000/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "pagerank"}'
 ```
@@ -234,7 +234,7 @@ GRAPH CENTRALITY ALGORITHM pagerank
 ### Community Detection
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/community \
+curl -X POST http://127.0.0.1:5000/graph/analytics/community \
   -H 'content-type: application/json' \
   -d '{"algorithm": "louvain", "max_iterations": 100}'
 ```
@@ -250,7 +250,7 @@ GRAPH COMMUNITY ALGORITHM louvain MAX_ITERATIONS 100
 ### Connected Components
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/components \
+curl -X POST http://127.0.0.1:5000/graph/analytics/components \
   -H 'content-type: application/json' \
   -d '{"mode": "weakly_connected"}'
 ```
@@ -264,7 +264,7 @@ GRAPH COMPONENTS MODE weakly_connected
 ### Cycle Detection
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
+curl -X POST http://127.0.0.1:5000/graph/analytics/cycles \
   -H 'content-type: application/json' \
   -d '{"max_length": 10, "max_cycles": 50}'
 ```
@@ -288,7 +288,7 @@ GRAPH CYCLES MAX_LENGTH 10 MAX_CYCLES 50
 ### Graph Properties
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/analytics/properties \
+curl -X POST http://127.0.0.1:5000/graph/analytics/properties \
   -H 'content-type: application/json' \
   -d '{}'
 ```
@@ -312,7 +312,7 @@ grpcurl -plaintext \
     "node_types": ["person"],
     "edge_labels": ["REPORTS_TO", "COLLABORATES"]
   }' \
-  127.0.0.1:50051 reddb.v1.RedDb/SaveGraphProjection
+  127.0.0.1:55055 reddb.v1.RedDb/SaveGraphProjection
 ```
 
 ## Graph Query via SQL

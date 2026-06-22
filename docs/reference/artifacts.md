@@ -40,19 +40,19 @@ stateDiagram-v2
 
 ```bash
 # List index statuses
-grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/IndexStatuses
+grpcurl -plaintext 127.0.0.1:55055 reddb.v1.RedDb/IndexStatuses
 
 # Warm up an index
-grpcurl -plaintext -d '{"name": "my-index"}' 127.0.0.1:50051 reddb.v1.RedDb/WarmupIndex
+grpcurl -plaintext -d '{"name": "my-index"}' 127.0.0.1:55055 reddb.v1.RedDb/WarmupIndex
 
 # Mark an index as stale
-grpcurl -plaintext -d '{"name": "my-index"}' 127.0.0.1:50051 reddb.v1.RedDb/MarkIndexStale
+grpcurl -plaintext -d '{"name": "my-index"}' 127.0.0.1:55055 reddb.v1.RedDb/MarkIndexStale
 
 # Rebuild all indexes in a collection
-grpcurl -plaintext -d '{"collection": "users"}' 127.0.0.1:50051 reddb.v1.RedDb/RebuildIndexes
+grpcurl -plaintext -d '{"collection": "users"}' 127.0.0.1:55055 reddb.v1.RedDb/RebuildIndexes
 
 # Enable/disable an index
-grpcurl -plaintext -d '{"name": "my-index", "enabled": false}' 127.0.0.1:50051 reddb.v1.RedDb/SetIndexEnabled
+grpcurl -plaintext -d '{"name": "my-index", "enabled": false}' 127.0.0.1:55055 reddb.v1.RedDb/SetIndexEnabled
 ```
 
 ## Attention Endpoints
@@ -61,13 +61,13 @@ Find artifacts needing attention:
 
 ```bash
 # Indexes
-curl http://127.0.0.1:8080/catalog/indexes/attention
+curl http://127.0.0.1:5000/catalog/indexes/attention
 
 # Graph projections
-curl http://127.0.0.1:8080/catalog/graph/projections/attention
+curl http://127.0.0.1:5000/catalog/graph/projections/attention
 
 # Analytics jobs
-curl http://127.0.0.1:8080/catalog/analytics-jobs/attention
+curl http://127.0.0.1:5000/catalog/analytics-jobs/attention
 ```
 
 These return only artifacts in `failed`, `stale`, or `requires_rebuild` states.

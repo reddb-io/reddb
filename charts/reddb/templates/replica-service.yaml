@@ -14,6 +14,11 @@ metadata:
 spec:
   type: {{ .Values.replica.service.type }}
   ports:
+    - name: wire
+      port: {{ .Values.replica.service.wirePort }}
+      targetPort: wire
+      protocol: TCP
+      appProtocol: tcp
     - name: grpc
       port: {{ .Values.replica.service.grpcPort }}
       targetPort: grpc
@@ -54,23 +59,27 @@ spec:
   clusterIP: None
   publishNotReadyAddresses: true
   ports:
+    - name: wire
+      port: {{ .Values.replica.service.wirePort }}
+      targetPort: wire
+      protocol: TCP
     - name: grpc
-      port: 50051
+      port: {{ .Values.replica.service.grpcPort }}
       targetPort: grpc
       protocol: TCP
     {{- if .Values.grpc.tls.enabled }}
     - name: grpc-tls
-      port: 50052
+      port: {{ .Values.replica.service.grpcTlsPort }}
       targetPort: grpc-tls
       protocol: TCP
     {{- end }}
     - name: http
-      port: 8080
+      port: {{ .Values.replica.service.httpPort }}
       targetPort: http
       protocol: TCP
     {{- if .Values.http.tls.enabled }}
     - name: https
-      port: 8443
+      port: {{ .Values.replica.service.httpTlsPort }}
       targetPort: https
       protocol: TCP
     {{- end }}

@@ -85,7 +85,7 @@ Local models live in the registry at `red.config.ai.models.{name}`
 (KV under the `red_config` collection). Use the HTTP API:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/models \
+curl -X POST http://127.0.0.1:5000/ai/models \
   -H 'content-type: application/json' \
   -d '{
     "name": "mini-en",
@@ -129,9 +129,9 @@ is read by query-time code and must never carry secrets. Use
 List, inspect, and update:
 
 ```bash
-curl http://127.0.0.1:8080/ai/models                 # list
-curl http://127.0.0.1:8080/ai/models/mini-en         # inspect one
-curl -X PUT http://127.0.0.1:8080/ai/models/mini-en \
+curl http://127.0.0.1:5000/ai/models                 # list
+curl http://127.0.0.1:5000/ai/models/mini-en         # inspect one
+curl -X PUT http://127.0.0.1:5000/ai/models/mini-en \
      -H 'content-type: application/json' \
      -d '{ ...same shape... }'                       # update
 ```
@@ -146,7 +146,7 @@ exists but no artifacts are on disk yet.
 Artifact acquisition is an **explicit operator action**:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/models/mini-en/pull \
+curl -X POST http://127.0.0.1:5000/ai/models/mini-en/pull \
   -H 'content-type: application/json' \
   -d '{ "fixture_dir": "/srv/reddb/fixtures/mini-en" }'
 ```
@@ -198,7 +198,7 @@ A successful pull returns the manifest and the resolved `cache_dir`.
 ### Inspect
 
 ```bash
-curl http://127.0.0.1:8080/ai/models/mini-en/cache
+curl http://127.0.0.1:5000/ai/models/mini-en/cache
 ```
 
 Returns one of:
@@ -216,7 +216,7 @@ can plot disk pressure without trusting the manifest.
 ### Drop cache
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/ai/models/mini-en/cache
+curl -X DELETE http://127.0.0.1:5000/ai/models/mini-en/cache
 ```
 
 Moves the model directory aside under `.purge/` and removes it. The
@@ -295,7 +295,7 @@ every embedding surface:
 ### HTTP — direct embedding
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/embeddings \
+curl -X POST http://127.0.0.1:5000/ai/embeddings \
   -H 'content-type: application/json' \
   -d '{
     "provider": "local",

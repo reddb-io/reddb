@@ -122,7 +122,7 @@ async function connectMockWss() {
 // ---- pure helpers -----------------------------------------------------------
 
 test('normalizeWssUrl: bare host:port → wss://…/redwire, full URL passes through', () => {
-  assert.equal(normalizeWssUrl('127.0.0.1:8443'), 'wss://127.0.0.1:8443/redwire')
+  assert.equal(normalizeWssUrl('127.0.0.1:55555'), 'wss://127.0.0.1:55555/redwire')
   assert.equal(normalizeWssUrl('db.example.com:443'), 'wss://db.example.com:443/redwire')
   assert.equal(normalizeWssUrl('wss://h:9/redwire'), 'wss://h:9/redwire')
   assert.equal(normalizeWssUrl('ws://h:9/x'), 'ws://h:9/x')

@@ -14,7 +14,7 @@ A node represents an entity in the graph:
 | `metadata` | No | Operational metadata |
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/social/nodes \
+curl -X POST http://127.0.0.1:5000/collections/social/nodes \
   -H 'content-type: application/json' \
   -d '{
     "label": "alice",
@@ -40,7 +40,7 @@ An edge represents a directed relationship between two nodes:
 | `metadata` | No | Operational metadata |
 
 ```bash
-curl -X POST http://127.0.0.1:8080/collections/social/edges \
+curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{
     "label": "FOLLOWS",

@@ -163,7 +163,7 @@ make release
 Then run the server:
 
 ```bash
-./target/release/red server --path ./tmp/bench.rdb --http-bind 127.0.0.1:8080
+./target/release/red server --path ./tmp/bench.rdb --http-bind 127.0.0.1:5000
 ```
 
 Now point your HTTP/gRPC benchmark tool at that process.

@@ -11,21 +11,12 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-primary
     ports:
-      - "55551:50051"
-      - "55880:8080"
+      - "5050:5050"
+      - "55055:55055"
+      - "5000:5000"
     volumes:
       - primary-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--role"
-      - "primary"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -39,8 +30,9 @@ services:
       - REDDB_STORAGE_PACKAGING=operational-directory
       - REDDB_REPLICA_COUNT=1
       - REDDB_CONFIG_FILE=/etc/reddb/config.json
+      - REDDB_VAULT=false
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -52,21 +44,12 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-replica
     ports:
-      - "55552:50051"
-      - "55881:8080"
+      - "5051:5050"
+      - "55056:55055"
+      - "5001:5000"
     volumes:
       - replica-data:/data
       - ./container-config.json:/etc/reddb/config.json:ro
-    command:
-      - "replica"
-      - "--primary-addr"
-      - "http://primary:50051"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -79,13 +62,14 @@ services:
       - REDDB_STORAGE_PROFILE=primary-replica
       - REDDB_STORAGE_PACKAGING=operational-directory
       - REDDB_REPLICA_COUNT=1
-      - REDDB_PRIMARY_ADDR=http://primary:50051
+      - REDDB_PRIMARY_ADDR=http://primary:55055
       - REDDB_CONFIG_FILE=/etc/reddb/config.json
+      - REDDB_VAULT=false
     depends_on:
       primary:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 5

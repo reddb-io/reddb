@@ -136,7 +136,7 @@ Set a default provider so you can drop `USING` from every query:
 
 ```bash
 # Set default provider -- no more USING on every query
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:5000/ai/credentials \
   -d '{"provider":"groq","api_key":"gsk_xxx","default":true}'
 ```
 
@@ -147,7 +147,7 @@ ASK 'what happened?'
 
 ```bash
 # Export/import all config as JSON
-curl http://127.0.0.1:8080/config
+curl http://127.0.0.1:5000/config
 ```
 
 ---
@@ -291,13 +291,13 @@ Built-in backup scheduler, WAL archiving, Change Data Capture (CDC), and Point-i
 
 ```bash
 # Poll real-time changes
-curl 'localhost:8080/changes?since_lsn=0'
+curl 'localhost:5000/changes?since_lsn=0'
 
 # Trigger manual backup
-curl -X POST localhost:8080/backup/trigger
+curl -X POST localhost:5000/backup/trigger
 
 # Check backup status
-curl localhost:8080/backup/status
+curl localhost:5000/backup/status
 ```
 
 Remote backends: S3, R2, DigitalOcean Spaces, GCS, Turso, Cloudflare D1, local filesystem.
@@ -314,25 +314,25 @@ Every collection doubles as a key-value store with dedicated REST endpoints:
 
 ```bash
 # Write a key
-curl -X PUT http://127.0.0.1:8080/collections/settings/kvs/theme \
+curl -X PUT http://127.0.0.1:5000/collections/settings/kvs/theme \
   -H 'content-type: application/json' -d '{"value": "dark"}'
 
 # Read a key
-curl http://127.0.0.1:8080/collections/settings/kvs/theme
+curl http://127.0.0.1:5000/collections/settings/kvs/theme
 
 # Delete a key
-curl -X DELETE http://127.0.0.1:8080/collections/settings/kvs/theme
+curl -X DELETE http://127.0.0.1:5000/collections/settings/kvs/theme
 ```
 
 Config keys work the same way -- read, write, or delete any `red_config` setting at runtime:
 
 ```bash
 # Set a config key
-curl -X PUT http://127.0.0.1:8080/config/red.ai.default.provider \
+curl -X PUT http://127.0.0.1:5000/config/red.ai.default.provider \
   -d '{"value": "groq"}'
 
 # Read a config key
-curl http://127.0.0.1:8080/config/red.ai.default.provider
+curl http://127.0.0.1:5000/config/red.ai.default.provider
 
 # Or manage config from SQL
 SET CONFIG red.ai.default.provider = 'groq'
@@ -346,7 +346,7 @@ SHOW CONFIG red.ai
 | Mode | Think of it as... | Access via |
 |:-----|:-------------------|:-----------|
 | **Embedded** | SQLite | Rust API -- `RedDB::open("data.rdb")` |
-| **Server** | Postgres | HTTP + gRPC -- dual-stack |
+| **Server** | Postgres | RedWire + gRPC + HTTP listeners |
 | **Agent** | MCP tool | `red mcp` -- AI agent integration |
 
 Same storage format across all three. Start embedded, scale to server, expose to agents -- no migration.
@@ -410,10 +410,10 @@ RedDB supports per-field eventual consistency via an append-only transaction log
 
 ```bash
 # Track clicks with async consolidation (returns instantly)
-curl -X POST localhost:8080/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
+curl -X POST localhost:5000/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
 
 # Check consolidated + pending value
-curl localhost:8080/ec/urls/clicks/status?id=1
+curl localhost:5000/ec/urls/clicks/status?id=1
 ```
 
 | Feature | Description |
@@ -445,7 +445,7 @@ FROM airports
 
 ```bash
 # HTTP API
-curl -X POST localhost:8080/geo/distance -d '{
+curl -X POST localhost:5000/geo/distance -d '{
   "from": {"lat": -23.55, "lon": -46.63},
   "to": {"lat": -22.91, "lon": -43.17}
 }'
@@ -468,12 +468,12 @@ Standalone K-Means and DBSCAN clustering on vector collections, with SIMD-accele
 
 ```bash
 # K-Means: group products into 5 clusters
-curl -X POST localhost:8080/vectors/cluster -d '{
+curl -X POST localhost:5000/vectors/cluster -d '{
   "collection": "products", "algorithm": "kmeans", "k": 5
 }'
 
 # DBSCAN: discover clusters automatically (no K needed)
-curl -X POST localhost:8080/vectors/cluster -d '{
+curl -X POST localhost:5000/vectors/cluster -d '{
   "collection": "products", "algorithm": "dbscan", "eps": 0.5, "min_points": 3
 }'
 ```
@@ -562,7 +562,7 @@ Launch the server from npm without a separate install step:
 
 ```bash
 npx @reddb-io/cli@latest version
-npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080 --path ./data.rdb
+npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:5000 --path ./data.rdb
 ```
 
 ---
@@ -573,16 +573,16 @@ npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1
 # Install
 curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
 
-# Start the server (wire: 5050, gRPC: 5055, HTTP: 8080)
-red server --wire-bind 127.0.0.1:5050 --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080 --path ./data.rdb
+# Start the server (wire: 5050, gRPC: 55055, HTTP: 5000)
+red server --wire-bind 127.0.0.1:5050 --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000 --path ./data.rdb
 
 # Insert data
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"INSERT INTO hosts (ip, os) VALUES ('\''10.0.0.1'\'', '\''linux'\'')"}'
 
 # Query it
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
@@ -590,14 +590,14 @@ curl -X POST http://127.0.0.1:8080/query \
 Or via npm CLI launcher:
 
 ```bash
-npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:5000
 ```
 
 Or via Docker:
 
 ```bash
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin # if GHCR requires auth
-docker run --rm -p 55050:5050 -p 55551:50051 -p 55880:8080 ghcr.io/reddb-io/reddb:latest
+docker run --rm -p 5050:5050 -p 55055:55055 -p 5000:5000 ghcr.io/reddb-io/reddb:latest
 ```
 
 Or, if you only need the thin remote-only client (~7 MB image):

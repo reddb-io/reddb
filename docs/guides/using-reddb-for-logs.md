@@ -116,7 +116,7 @@ Don't synthesise INSERT statements from your log pipeline. Use the
 `/ingest/{collection}` endpoint with a JSON body:
 
 ```bash
-curl -X POST http://localhost:8080/ingest/access_log \
+curl -X POST http://localhost:5000/ingest/access_log \
   -H 'Content-Type: application/json' \
   -d '[
     {"ts": 1714000000000000000, "service": "api", "severity": 2, "status": 200, "method": "GET", "path": "/health", "latency_ms": 3},
@@ -127,7 +127,7 @@ curl -X POST http://localhost:8080/ingest/access_log \
 Or pipe NDJSON from any tool that can emit one JSON object per line:
 
 ```bash
-cat today.ndjson | curl -X POST http://localhost:8080/ingest/access_log \
+cat today.ndjson | curl -X POST http://localhost:5000/ingest/access_log \
   -H 'Content-Type: application/x-ndjson' --data-binary @-
 ```
 
@@ -138,7 +138,7 @@ auth, troubleshooting).
 ### HTTP — SQL (when you need expressions)
 
 ```bash
-curl -X POST http://localhost:8080/sql \
+curl -X POST http://localhost:5000/sql \
   -H 'Content-Type: application/json' \
   -d '{"query":"INSERT INTO access_log (ts, service, severity, status, method, path, latency_ms) VALUES (1714000000000000000, '\''api'\'', 2, 200, '\''GET'\'', '\''/health'\'', 3)"}'
 ```
@@ -150,7 +150,7 @@ Python:
 ```python
 from reddb import Client
 
-db = Client("localhost:50051")
+db = Client("localhost:55055")
 db.insert_many("access_log", [
     {"ts": 1_714_000_000_000_000_000, "service": "api", "severity": 2,
      "status": 200, "method": "GET", "path": "/health",
@@ -163,7 +163,7 @@ Node / Bun:
 
 ```js
 import { Client } from "reddb";
-const db = new Client("localhost:50051");
+const db = new Client("localhost:55055");
 await db.insertMany("access_log", batch);
 ```
 

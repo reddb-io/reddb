@@ -832,7 +832,7 @@ mod tests {
             tail_lsns: 30,
             commit_watermark: 200,
             rollback_file: "/data/rollback/term7-lsn200-230.rbk".into(),
-            new_primary_addr: "http://node-b:50051".into(),
+            new_primary_addr: "http://node-b:55055".into(),
             new_term: 8,
         }
         .emit(&logger);

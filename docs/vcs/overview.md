@@ -123,12 +123,12 @@ ALTER TABLE sessions SET VERSIONED = false;
 
 ```bash
 # REST — collection-centric PUT on the collection's /vcs aspect
-curl -X PUT http://localhost:8080/collections/users/vcs \
+curl -X PUT http://localhost:5000/collections/users/vcs \
   -H 'content-type: application/json' \
   -d '{"versioned": true}'
 
 # Read current state
-curl http://localhost:8080/collections/users/vcs
+curl http://localhost:5000/collections/users/vcs
 # → { "ok": true, "result": { "collection": "users", "versioned": true } }
 ```
 

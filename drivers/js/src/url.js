@@ -6,10 +6,10 @@
  *   red://                                          embedded in-memory
  *   red:///abs/path/data.rdb                        embedded persistent
  *   red://user:pass@host:5050                       remote, default proto=red (wire)
- *   red://host:8080?proto=https                     remote HTTPS
+ *   red://host:5000?proto=https                     remote HTTPS
  *   red://host:5432?proto=pg                        PostgreSQL wire
- *   red://host:5055?proto=grpc&token=sk-abc         remote gRPC w/ bearer
- *   red://host:8080?proto=https&apiKey=ak-xyz       remote HTTPS w/ api key
+ *   red://host:55055?proto=grpc&token=sk-abc         remote gRPC w/ bearer
+ *   red://host:5000?proto=https&apiKey=ak-xyz       remote HTTPS w/ api key
  *
  * Backwards-compat: legacy `memory://`, `file://`, `grpc://` URLs
  * still work via `parseLegacyUrl`. New code should prefer `red://`
@@ -237,17 +237,17 @@ function resolveKind(protoQueryParam) {
 function defaultPortFor(kind) {
   switch (kind) {
     case 'http':
-      return 8080
+      return 5000
     case 'https':
-      return 8443
+      return 55555
     case 'red':
     case 'reds':
     case 'redwire':
       return 5050
     case 'grpc':
-      return 5055
+      return 55055
     case 'grpcs':
-      return 5056
+      return 55555
     case 'pg':
     case 'postgres':
     case 'postgresql':

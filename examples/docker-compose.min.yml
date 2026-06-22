@@ -9,25 +9,22 @@ services:
       dockerfile: Dockerfile
     container_name: reddb-server-min
     ports:
-      - "55551:50051"
-      - "55880:8080"
+      - "5050:5050"
+      - "55055:55055"
+      - "5000:5000"
     volumes:
       - server-data:/data
-    command:
-      - "server"
-      - "--path"
-      - "/data/data.rdb"
-      - "--grpc-bind"
-      - "0.0.0.0:50051"
-      - "--http-bind"
-      - "0.0.0.0:8080"
     environment:
       RUST_LOG: info
+      REDDB_TOPOLOGY: standalone
+      REDDB_NODE_ROLE: standalone
       REDDB_STORAGE_PRESET: embedded
       REDDB_STORAGE_PROFILE: embedded
       REDDB_STORAGE_PACKAGING: single-file
       REDDB_REPLICA_COUNT: "0"
-      # Uncomment when promoting to vault mode + add `--vault` to command:
+      REDDB_VAULT: "false"
+      # Uncomment when promoting to vault mode:
+      # REDDB_VAULT: "true"
       # REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
     # secrets:
     #   - source: reddb_certificate
@@ -36,7 +33,7 @@ services:
     #     gid: "10001"
     #     mode: 0400
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
       timeout: 3s
       retries: 5

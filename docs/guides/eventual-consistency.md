@@ -164,25 +164,25 @@ db.ec_register(config);
 
 ```bash
 # Add 100 to wallet balance
-curl -X POST localhost:8080/ec/wallets/balance/add \
+curl -X POST localhost:5000/ec/wallets/balance/add \
   -d '{"id": 42, "value": 100}'
 
 # Subtract 20
-curl -X POST localhost:8080/ec/wallets/balance/sub \
+curl -X POST localhost:5000/ec/wallets/balance/sub \
   -d '{"id": 42, "value": 20}'
 
 # Set to exact value (overrides previous add/sub)
-curl -X POST localhost:8080/ec/wallets/balance/set \
+curl -X POST localhost:5000/ec/wallets/balance/set \
   -d '{"id": 42, "value": 500}'
 
 # Check status (consolidated + pending)
-curl localhost:8080/ec/wallets/balance/status?id=42
+curl localhost:5000/ec/wallets/balance/status?id=42
 
 # Manually trigger consolidation
-curl -X POST localhost:8080/ec/wallets/balance/consolidate
+curl -X POST localhost:5000/ec/wallets/balance/consolidate
 
 # Global EC status
-curl localhost:8080/ec/status
+curl localhost:5000/ec/status
 ```
 
 **Status response:**
@@ -240,7 +240,7 @@ In serverless mode, the EC background worker runs during the warm phase. On recl
 # Serverless reclaim with EC consolidation
 grpcurl -plaintext -d '{
   "payload_json": "{\"operations\":[\"ec_consolidate\",\"checkpoint\"]}"
-}' localhost:50051 reddb.v1.RedDb/ServerlessReclaim
+}' localhost:55055 reddb.v1.RedDb/ServerlessReclaim
 ```
 
 The `flush()` method also auto-consolidates, so any path that calls `flush()` before shutdown is safe.
@@ -266,7 +266,7 @@ A high-throughput click counter that handles thousands of concurrent increments:
 
 ```bash
 # Configure via red_config
-curl localhost:8080/config -d '{
+curl localhost:5000/config -d '{
   "red.ec.urls.fields": "[\"clicks\"]",
   "red.ec.urls.clicks.reducer": "sum",
   "red.ec.urls.clicks.mode": "async",
@@ -274,17 +274,17 @@ curl localhost:8080/config -d '{
 }'
 
 # Create a URL
-curl localhost:8080/query -d '{
+curl localhost:5000/query -d '{
   "query": "INSERT INTO urls (slug, url, clicks) VALUES (\"home\", \"https://example.com\", 0)"
 }'
 
 # High-frequency click tracking (each returns immediately)
-curl -X POST localhost:8080/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
-curl -X POST localhost:8080/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
-curl -X POST localhost:8080/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
+curl -X POST localhost:5000/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
+curl -X POST localhost:5000/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
+curl -X POST localhost:5000/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
 
 # After ~10 seconds, the worker consolidates automatically
-curl localhost:8080/ec/urls/clicks/status?id=1
+curl localhost:5000/ec/urls/clicks/status?id=1
 # → { "consolidated": 3.0, "pending_transactions": 0, ... }
 ```
 
@@ -333,7 +333,7 @@ A `Set` operation acts as a checkpoint. During consolidation, the algorithm find
 
 ```bash
 # After many adds and subs, reset to a known value
-curl -X POST localhost:8080/ec/wallets/balance/set -d '{"id": 42, "value": 500}'
+curl -X POST localhost:5000/ec/wallets/balance/set -d '{"id": 42, "value": 500}'
 # All prior pending transactions before this SET are effectively ignored
 ```
 

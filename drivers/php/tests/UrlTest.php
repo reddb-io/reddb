@@ -20,11 +20,11 @@ final class UrlTest extends TestCase
         yield 'red custom port' => ['red://example.com:9999', Url::KIND_REDWIRE, 'example.com', 9999];
         yield 'red ipv4' => ['red://10.0.0.1:1234', Url::KIND_REDWIRE, '10.0.0.1', 1234];
         yield 'reds default' => ['reds://reddb.example.com', Url::KIND_REDWIRE_TLS, 'reddb.example.com', 5050];
-        yield 'reds 8443' => ['reds://reddb.example.com:8443', Url::KIND_REDWIRE_TLS, 'reddb.example.com', 8443];
-        yield 'http default' => ['http://localhost', Url::KIND_HTTP, 'localhost', 5050];
-        yield 'http 8080' => ['http://localhost:8080', Url::KIND_HTTP, 'localhost', 8080];
-        yield 'https default' => ['https://reddb.example.com', Url::KIND_HTTPS, 'reddb.example.com', 5050];
-        yield 'https 8443' => ['https://reddb.example.com:8443', Url::KIND_HTTPS, 'reddb.example.com', 8443];
+        yield 'reds 55555' => ['reds://reddb.example.com:55555', Url::KIND_REDWIRE_TLS, 'reddb.example.com', 55555];
+        yield 'http default' => ['http://localhost', Url::KIND_HTTP, 'localhost', 5000];
+        yield 'http 5000' => ['http://localhost:5000', Url::KIND_HTTP, 'localhost', 5000];
+        yield 'https default' => ['https://reddb.example.com', Url::KIND_HTTPS, 'reddb.example.com', 55555];
+        yield 'https 55555' => ['https://reddb.example.com:55555', Url::KIND_HTTPS, 'reddb.example.com', 55555];
     }
 
     #[DataProvider('remoteCases')]
@@ -183,7 +183,7 @@ final class UrlTest extends TestCase
 
     public function test_token_falls_back_to_url_query(): void
     {
-        $u = Url::parse('reds://host:8443?token=abc');
+        $u = Url::parse('reds://host:55555?token=abc');
         $this->assertSame('abc', $u->token);
     }
 

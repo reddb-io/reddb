@@ -72,7 +72,7 @@ Replica-side `apply_health` is in `/admin/status` under `replica.apply_health`. 
 ## Bootstrapping a new replica
 
 1. Provision the volume.
-2. Set `RED_REPLICATION_MODE=replica` + `RED_PRIMARY_ADDR=http://<primary>:50051`.
+2. Set `RED_REPLICATION_MODE=replica` + `RED_PRIMARY_ADDR=http://<primary>:55055`.
 3. If a recent snapshot is in the remote backend, set `RED_AUTO_RESTORE=true` so the replica seeds from there before catching up via WAL pull.
 4. Boot. Watch `replica.apply_health` flip to `connecting` then `ok`.
 5. Add to the read load balancer once `ok` and `lag_seconds < threshold`.

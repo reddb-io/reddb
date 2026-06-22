@@ -80,7 +80,7 @@ export function isEmbeddedUri(uri) {
 export function rejectEmbeddedUri(uri) {
   if (typeof uri !== 'string' || uri.length === 0) {
     throw new TypeError(
-      "connect() requires a URI string (e.g. 'red://localhost:5050' or 'grpc://host:5055')",
+      "connect() requires a URI string (e.g. 'red://localhost:5050' or 'grpc://host:55055')",
     )
   }
   if (isEmbeddedUri(uri)) {

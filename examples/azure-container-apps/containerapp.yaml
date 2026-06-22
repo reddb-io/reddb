@@ -17,7 +17,7 @@ properties:
     activeRevisionsMode: Single
     ingress:
       external: false
-      targetPort: 8080
+      targetPort: 5000
       transport: http
       allowInsecure: false
     secrets:
@@ -44,7 +44,7 @@ properties:
           memory: 2Gi
         env:
           - name: REDDB_HTTP_BIND_ADDR
-            value: "0.0.0.0:8080"
+            value: "0.0.0.0:5000"
           - name: RED_BACKEND
             value: "s3"
           - name: RED_S3_ENDPOINT
@@ -79,17 +79,17 @@ properties:
           - type: Liveness
             httpGet:
               path: /health/live
-              port: 8080
+              port: 5000
             periodSeconds: 10
           - type: Readiness
             httpGet:
               path: /health/ready
-              port: 8080
+              port: 5000
             periodSeconds: 10
           - type: Startup
             httpGet:
               path: /health/startup
-              port: 8080
+              port: 5000
             failureThreshold: 12
             periodSeconds: 5
         volumeMounts:

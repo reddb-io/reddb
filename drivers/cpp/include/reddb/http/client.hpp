@@ -18,7 +18,7 @@
 namespace reddb::http {
 
 struct HttpOpts {
-    std::string base_url; // e.g. "https://reddb.example.com:8443"
+    std::string base_url; // e.g. "https://reddb.example.com:55555"
     std::optional<std::string> bearer_token;
     bool dangerous_accept_invalid_certs = false;
     long connect_timeout_seconds = 10;

@@ -20,7 +20,7 @@ In scope:
 Out of scope:
 
 - Third-party AI provider APIs (report to the provider).
-- User misconfiguration (e.g. exposing port 8080 to the public internet without auth).
+- User misconfiguration (e.g. exposing port 5000 to the public internet without auth).
 - Social engineering, physical attacks, denial-of-service against managed Cloud.
 
 ## Coordinated disclosure

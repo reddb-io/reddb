@@ -6,7 +6,7 @@ Quickstart::
     from reddb_asyncio import connect
 
     async def main():
-        async with await connect("http://localhost:8080") as db:
+        async with await connect("http://localhost:5000") as db:
             print(await db.query(
                 "SELECT * FROM users WHERE name = $1",
                 ["alice"],

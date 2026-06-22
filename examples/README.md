@@ -9,7 +9,7 @@ Available profiles:
 - `min`: one local server only
 - `replica`: primary + one replica
 - `full`: primary + two replicas
-- `remote`: primary + replica + Floci for remote snapshot/WAL tests
+- `remote`: primary + replica + Floci S3 emulator for remote snapshot/WAL tests
 - `backup`: single remote-backed server + Floci for backup flows
 - `pitr`: single remote-backed primary + Floci for restore-point flows
 - `serverless`: single remote-backed node + Floci for serverless-style readiness/warmup flows
@@ -17,12 +17,16 @@ Available profiles:
 
 Each Compose profile sets the same storage contract consumed by the CLI:
 `REDDB_STORAGE_PRESET`, `REDDB_STORAGE_PROFILE`, `REDDB_STORAGE_PACKAGING`, and
-`REDDB_REPLICA_COUNT`. The `cluster` profile is intentionally a cluster-shaped
-delivery contract: it uses stable identities and cluster storage env today while
-the real cluster supervisor/range ownership runtime continues to mature. The
-current sharding contract, including hash-vs-ordered ranges and cross-range
-guardrails, is documented in
-[Cluster Sharding](../docs/architecture/cluster-sharding.md).
+`REDDB_REPLICA_COUNT`. The `cluster` profile is a declarative symmetric
+container shape with stable identity/discovery env; today each member still runs
+the standalone process role with `REDDB_STORAGE_PRESET=cluster` until the
+cluster supervisor and range ownership runtime mature.
+
+Port convention:
+
+- `5000` and nearby `50xx` host ports are product-facing HTTP/RedWire surfaces.
+- `55055` and nearby `55xxx` host ports are infrastructure/control-plane
+  surfaces such as gRPC, TLS/extra listeners, and local Floci endpoints.
 
 Quick commands:
 

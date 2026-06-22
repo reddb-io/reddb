@@ -47,10 +47,10 @@ Checkpoints flush WAL entries to the main database file. They happen:
 
 ```bash
 # Force a checkpoint
-curl -X POST http://127.0.0.1:8080/checkpoint
+curl -X POST http://127.0.0.1:5000/checkpoint
 
 # Via gRPC
-grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/Checkpoint
+grpcurl -plaintext 127.0.0.1:55055 reddb.v1.RedDb/Checkpoint
 ```
 
 ## WAL File
