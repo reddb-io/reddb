@@ -1167,6 +1167,11 @@ impl RedDBServer {
         // saturation against the bounded handler-thread cap.
         self.http_metrics().render(&mut body, self.http_limiter());
 
+        // Issue #1239 — HTTP request/error volume by method, matched route
+        // template, and status class. Read from the operational telemetry
+        // substrate; this surface only shapes it (ADR 0017 boundary).
+        self.http_request_metrics().render(&mut body);
+
         HttpResponse {
             status: 200,
             content_type: "text/plain; version=0.0.4",
