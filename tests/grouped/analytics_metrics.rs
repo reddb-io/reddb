@@ -6,6 +6,9 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "timeseries_remaining/shared.rs"]
+mod timeseries_remaining_shared;
+
 #[path = "sql_window/conformance_window.rs"]
 mod conformance_window;
 

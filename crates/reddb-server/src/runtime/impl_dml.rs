@@ -4196,8 +4196,21 @@ fn merge_dotted_tenant(current: Value, tail: &str, tenant_id: &str) -> RedDBResu
 mod tests {
     use crate::storage::schema::Value;
     use crate::storage::wal::{WalReader, WalRecord};
+    use crate::storage::{DeployProfile, StoragePackaging, StorageProfileSelection};
     use crate::{RedDBOptions, RedDBRuntime};
     use std::path::Path;
+
+    fn persistent_operational_options(path: &Path) -> RedDBOptions {
+        RedDBOptions::persistent(path)
+            .with_storage_profile(StorageProfileSelection {
+                deploy_profile: DeployProfile::Embedded,
+                packaging: StoragePackaging::OperationalDirectory,
+                replica_count: 0,
+                managed_backup: false,
+                wal_retention: false,
+            })
+            .unwrap()
+    }
 
     fn store_commit_batches(wal_path: &Path) -> Vec<Vec<Vec<u8>>> {
         WalReader::open(wal_path)
@@ -4259,7 +4272,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("events_dual_write.rdb");
         let wal_path = reddb_file::layout::unified_wal_path(&db_path);
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
+        let rt = RedDBRuntime::with_options(persistent_operational_options(&db_path)).unwrap();
 
         rt.execute_query("CREATE TABLE users (id INT, email TEXT) WITH EVENTS")
             .unwrap();
@@ -4277,7 +4290,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("events_update_atomic.rdb");
         let wal_path = reddb_file::layout::unified_wal_path(&db_path);
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
+        let rt = RedDBRuntime::with_options(persistent_operational_options(&db_path)).unwrap();
 
         rt.execute_query(
             "CREATE TABLE users (id INT, email TEXT) WITH EVENTS (UPDATE) TO user_updates",
@@ -4300,7 +4313,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("events_delete_atomic.rdb");
         let wal_path = reddb_file::layout::unified_wal_path(&db_path);
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
+        let rt = RedDBRuntime::with_options(persistent_operational_options(&db_path)).unwrap();
 
         rt.execute_query(
             "CREATE TABLE users (id INT, email TEXT) WITH EVENTS (DELETE) TO user_deletes",

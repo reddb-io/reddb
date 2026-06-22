@@ -1224,7 +1224,12 @@ impl RedDB {
     }
 
     pub(crate) fn readiness_flags_from_health(&self, report: &HealthReport) -> (bool, bool, bool) {
-        let query_allowed = if self.options.mode == StorageMode::Persistent {
+        let embedded_single_file = self.options.storage_profile.deploy_profile
+            == crate::storage::DeployProfile::Embedded
+            && self.options.storage_profile.packaging
+                == crate::storage::StoragePackaging::SingleFile;
+        let query_allowed = if self.options.mode == StorageMode::Persistent && !embedded_single_file
+        {
             let authority = self.physical_authority_status();
             (authority.native_bootstrap_ready || authority.sidecar_loaded_from.is_some())
                 && report.allows_serving_traffic()

@@ -6,6 +6,9 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "config_tier/shared.rs"]
+mod config_tier_shared;
+
 #[path = "chaos/chaos_ack_n_timeout_fail_closed.rs"]
 mod chaos_ack_n_timeout_fail_closed;
 

@@ -6,6 +6,9 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "ai_search/support.rs"]
+mod support;
+
 #[path = "surface_contracts/compile_fail.rs"]
 mod compile_fail;
 

@@ -6,6 +6,12 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "../support/mod.rs"]
+mod support;
+
+#[path = "config_tier/shared.rs"]
+mod config_tier_shared;
+
 #[path = "../audit_query_endpoint.rs"]
 mod audit_query_endpoint;
 

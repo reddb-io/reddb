@@ -899,7 +899,12 @@ impl RedDB {
                     "metadata.tree_definitions",
                     metadata.tree_definitions.len().to_string(),
                 );
-            } else if self.options.mode == StorageMode::Persistent {
+            } else if self.options.mode == StorageMode::Persistent
+                && !(self.options.storage_profile.deploy_profile
+                    == crate::storage::DeployProfile::Embedded
+                    && self.options.storage_profile.packaging
+                        == crate::storage::StoragePackaging::SingleFile)
+            {
                 report.issue(
                     "metadata",
                     "physical metadata sidecar is missing or unreadable",

@@ -117,6 +117,7 @@ fn register_collection(rt: &RedDBRuntime, name: &str, model: CollectionModel) {
             session_gap_ms: None,
             retention_duration_ms: None,
             analytical_storage: None,
+            ai_policy: None,
         })
         .unwrap_or_else(|err| panic!("contract {name}: {err}"));
 }
