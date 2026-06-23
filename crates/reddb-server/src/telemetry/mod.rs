@@ -37,6 +37,7 @@ pub mod operator_event_router;
 #[cfg(feature = "otel")]
 pub mod otel;
 pub mod slow_query_logger;
+pub mod slow_query_store;
 pub mod span;
 
 /// Stdio / file output format. `Pretty` renders human-readable coloured

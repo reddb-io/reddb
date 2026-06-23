@@ -1205,6 +1205,11 @@ struct RuntimeInner {
     /// `runtime.slow_query.threshold_ms` / `.sample_pct` (config matrix)
     /// at construction; live tuning via the config tree is a follow-up.
     slow_query_logger: Arc<crate::telemetry::slow_query_logger::SlowQueryLogger>,
+    /// Issue #1238 — operational telemetry substrate for slow-query events
+    /// (ADR 0060, §2). Bounded ring buffer that the slow-query logger dual-
+    /// writes into alongside `red-slow.log`. Exposed to read-model consumers
+    /// via `slow_query_store()`.
+    slow_query_store: Arc<crate::telemetry::slow_query_store::SlowQueryStore>,
     /// Process-local normal-KV operation counters. These are intentionally
     /// runtime-local; persistent accounting belongs in catalog stats.
     kv_stats: KvStatsCounters,
