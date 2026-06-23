@@ -2515,6 +2515,9 @@ impl RedDBRuntime {
                 queue_telemetry: Arc::new(
                     crate::runtime::queue_telemetry::QueueTelemetryCounters::default(),
                 ),
+                query_latency_telemetry: Arc::new(
+                    crate::runtime::query_latency_telemetry::QueryLatencyTelemetry::default(),
+                ),
                 queue_presence: Arc::new(
                     crate::storage::queue::presence::ConsumerPresenceRegistry::new(),
                 ),
@@ -3636,6 +3639,22 @@ impl RedDBRuntime {
         }
     }
 
+    /// Per-`kind` query latency histograms for `/metrics` (only kinds with
+    /// a real sample are present — empty kinds are absent, not zero-filled).
+    pub fn query_latency_snapshot(
+        &self,
+    ) -> Vec<crate::runtime::query_latency_telemetry::QueryLatencyHistogram> {
+        self.inner.query_latency_telemetry.snapshot()
+    }
+
+    /// Cross-kind query latency rollup for `/cluster/status` and the
+    /// red-ui percentile panels. `count == 0` until a real sample exists.
+    pub fn query_latency_rollup(
+        &self,
+    ) -> crate::runtime::query_latency_telemetry::QueryLatencyHistogram {
+        self.inner.query_latency_telemetry.rollup()
+    }
+
     /// Issue #742 — consumer presence registry. Heartbeats land here
     /// from `QUEUE READ` (and, in a follow-up slice, an explicit
     /// `QUEUE HEARTBEAT` command); Red UI and `red.queue_consumers`
@@ -4231,6 +4250,15 @@ impl RedDBRuntime {
         self.inner
             .slow_query_logger
             .record(kind, elapsed_ms, query.to_string(), &scope);
+
+        // Issue #1241 — record latency into the bounded per-`kind`
+        // histogram substrate (always, not only above the slow-query
+        // threshold). `started.elapsed()` is re-read here for sub-ms
+        // resolution; the cost is one `Instant::now` plus a handful of
+        // relaxed atomic adds (see `query_latency_telemetry` docs).
+        self.inner
+            .query_latency_telemetry
+            .observe(kind, started.elapsed().as_secs_f64());
 
         if let Ok(ref mut query_result) = result {
             if matches!(query_result.statement_type, "insert" | "update" | "delete") {
