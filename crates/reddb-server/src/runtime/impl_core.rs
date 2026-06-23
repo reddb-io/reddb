@@ -2461,11 +2461,33 @@ impl RedDBRuntime {
                             .clone()
                             .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
                     };
-                    let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
-                    Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
-                        &audit_dest,
-                        &data_path,
-                    ))
+                    if !embedded_single_file
+                        && options
+                            .metadata
+                            .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY)
+                    {
+                        // Ephemeral (in-memory) runtimes all live in the
+                        // system temp dir, so the fixed `.audit.log` sibling
+                        // that `legacy_audit_log_path` returns collides across
+                        // instances. Under nextest's process-per-test model
+                        // many ephemeral runtimes run concurrently and truncate
+                        // each other's audit log, flaking audit assertions.
+                        // Derive the sink from the unique ephemeral data-file
+                        // stem so every runtime gets its own file.
+                        let audit_path = reddb_file::layout::sibling_path(
+                            &data_path,
+                            &reddb_file::layout::sidecar_file_name(&data_path, "audit.log"),
+                        );
+                        Arc::new(crate::runtime::audit_log::AuditLogger::with_path(
+                            audit_path,
+                        ))
+                    } else {
+                        let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
+                        Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
+                            &audit_dest,
+                            &data_path,
+                        ))
+                    }
                 },
                 control_event_ledger: parking_lot::RwLock::new(Arc::new(
                     crate::runtime::control_events::RuntimeLedger::new(db.store()),
