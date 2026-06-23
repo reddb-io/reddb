@@ -359,6 +359,9 @@ jobs:
           workspaces: |
             . -> target
             . -> target/persistent-tests
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - name: Prepare isolated temp dir
         run: |
           mkdir -p "$RUNNER_TEMP/reddb-test-suite-tmp"
@@ -367,8 +370,15 @@ jobs:
         run: cargo build --locked --bin red_client -p reddb-io-client --no-default-features
       - name: red_client size budget
         run: ./scripts/check-red-client-size.sh
-      - name: Run default test layer
-        run: cargo test --locked --verbose
+      - name: Run default test layer (nextest — parallel across test binaries)
+        # cargo test runs the grouped integration binaries sequentially, so the
+        # per-test sleeps (replication/timing tests) sum and blew past the 20m
+        # cap. nextest runs every test in a global parallel process pool (sleeps
+        # overlap) and the `ci` profile enforces a hard per-test timeout
+        # (.config/nextest.toml) so a hung test is killed, not the whole run.
+        run: cargo nextest run --workspace --locked --profile ci
+      - name: Doctests (nextest does not execute doctests)
+        run: cargo test --workspace --locked --doc
       - name: Run persistent multimodel layer
         env:
           CARGO_TARGET_DIR: target/persistent-tests
