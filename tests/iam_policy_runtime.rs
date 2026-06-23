@@ -15,12 +15,20 @@ use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
     set_current_tenant,
 };
+use reddb::storage::layout::{LayoutOverrides, LogDestination, LogRoutingOverrides};
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn runtime_with_auth() -> (support::TempDataDir, RedDBRuntime, Arc<AuthStore>) {
     let dir = support::temp_data_dir("iam-policy-runtime");
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
-        .expect("runtime");
+    let options =
+        RedDBOptions::persistent(dir.join("data.rdb")).with_layout_overrides(LayoutOverrides {
+            logs: LogRoutingOverrides {
+                audit_log: Some(LogDestination::File(dir.join("audit.log"))),
+                ..LogRoutingOverrides::default()
+            },
+            ..LayoutOverrides::default()
+        });
+    let rt = RedDBRuntime::with_options(options).expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
     // The runtime IAM tests below assume the strict posture — "no
     // matching policy → deny". Under the default `LegacyRbac` mode

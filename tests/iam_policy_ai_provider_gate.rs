@@ -27,12 +27,20 @@ use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
 };
+use reddb::storage::layout::{LayoutOverrides, LogDestination, LogRoutingOverrides};
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn runtime_with_auth() -> (support::TempDataDir, RedDBRuntime, Arc<AuthStore>) {
     let dir = support::temp_data_dir("ai-provider-gate");
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
-        .expect("runtime");
+    let options =
+        RedDBOptions::persistent(dir.join("data.rdb")).with_layout_overrides(LayoutOverrides {
+            logs: LogRoutingOverrides {
+                audit_log: Some(LogDestination::File(dir.join("audit.log"))),
+                ..LogRoutingOverrides::default()
+            },
+            ..LayoutOverrides::default()
+        });
+    let rt = RedDBRuntime::with_options(options).expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
     // LegacyRbac (default) — Role::Admin grants the SQL surface so
     // statements reach the AI provider gate rather than failing at an
@@ -155,12 +163,13 @@ fn ask_gate_records_planner_audit_event_on_deny() {
     let _ = as_user("alice", Role::Admin, || {
         rt.execute_query("ASK 'what is going on' USING openai")
     });
-    rt.audit_log().wait_idle(std::time::Duration::from_secs(2));
+    let audit_path = rt.audit_log().path().to_path_buf();
+    let audit_drained = rt.audit_log().wait_idle(std::time::Duration::from_secs(2));
 
-    let body = std::fs::read_to_string(rt.audit_log().path()).unwrap_or_default();
+    let body = std::fs::read_to_string(&audit_path).unwrap_or_default();
     assert!(
         body.contains("ai.provider.gate"),
-        "expected ai.provider.gate audit event; audit:\n{body}"
+        "expected ai.provider.gate audit event; path={audit_path:?} drained={audit_drained}; audit:\n{body}"
     );
     assert!(
         body.contains("\"outcome\":\"denied\""),
