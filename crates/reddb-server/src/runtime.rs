@@ -1214,6 +1214,11 @@ struct RuntimeInner {
     /// lifecycle (delivered/acked/nacked) rendered onto `/metrics`.
     /// Process-local; counters reset on restart by design.
     queue_telemetry: std::sync::Arc<queue_telemetry::QueueTelemetryCounters>,
+    /// Issue #1241 — query latency histogram substrate (per-`kind`
+    /// `reddb_query_duration_seconds`). Process-local measurement + read
+    /// model that `/metrics`, `/cluster/status`, and the red-ui percentile
+    /// panels all consume; counters reset on restart by design.
+    query_latency_telemetry: std::sync::Arc<query_latency_telemetry::QueryLatencyTelemetry>,
     /// Issue #742 — consumer presence (heartbeat / lease / lifecycle
     /// state per (queue, group, consumer)). Process-local in this
     /// slice; durability across restart lands in the follow-up that
@@ -1381,6 +1386,7 @@ pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub mod query_audit;
 pub(crate) mod query_exec;
+pub(crate) mod query_latency_telemetry;
 pub(crate) mod queue_lifecycle;
 pub(crate) mod queue_telemetry;
 pub(crate) mod queue_wait_registry;
