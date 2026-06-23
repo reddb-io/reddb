@@ -137,6 +137,54 @@ impl RedDB {
         }
     }
 
+    /// Single-file artifact only: mirror the current contract set into the
+    /// store's auxiliary-metadata blob so it rides the binary dump. Without
+    /// this the contracts live only in the in-memory cache and a collection's
+    /// declared model (e.g. `kv`) is lost on reopen — recovery would re-infer
+    /// it from the stored entities and a KV collection would come back as a
+    /// table. No-op for other profiles, which persist contracts via the
+    /// metadata sidecar.
+    pub(crate) fn sync_single_file_contract_blob(&self) {
+        let contracts = self.collection_contracts();
+        let bytes = crate::physical::serialize_collection_contracts(&contracts);
+        self.store().set_aux_metadata(bytes);
+    }
+
+    /// Seed the in-memory contract cache from the store's auxiliary-metadata
+    /// blob (single-file artifact). Called on open so a collection's declared
+    /// model survives a restart. Does nothing when the blob is absent (older
+    /// V9 dumps) or empty.
+    pub(crate) fn seed_contract_cache_from_store_aux(&self) {
+        let bytes = self.store().aux_metadata();
+        if bytes.is_empty() {
+            return;
+        }
+        let contracts = match crate::physical::deserialize_collection_contracts(&bytes) {
+            Ok(contracts) => contracts,
+            Err(_) => return,
+        };
+        let map: std::collections::HashMap<_, _> = contracts
+            .into_iter()
+            .map(|contract| (contract.name.clone(), std::sync::Arc::new(contract)))
+            .collect();
+        // Restore the per-collection state derived from contracts (context
+        // index enablement + default TTLs) so the full collection definition —
+        // not just the declared model — survives a restart.
+        let store = self.store();
+        let index = store.context_index();
+        if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
+            for contract in map.values() {
+                index.set_collection_enabled(&contract.name, contract.context_index_enabled);
+                if let Some(ttl_ms) = contract.default_ttl_ms {
+                    defaults.insert(contract.name.clone(), ttl_ms);
+                }
+            }
+        }
+        if let Ok(mut guard) = self.collection_contract_cache.write() {
+            *guard = Some(std::sync::Arc::new(map));
+        }
+    }
+
     pub fn save_collection_contract(
         &self,
         contract: crate::physical::CollectionContract,
@@ -173,6 +221,7 @@ impl RedDB {
                 contracts.insert(contract.name.clone(), std::sync::Arc::new(contract.clone()));
                 *guard = Some(std::sync::Arc::new(contracts));
             }
+            self.sync_single_file_contract_blob();
             return Ok(contract);
         }
 
@@ -233,6 +282,7 @@ impl RedDB {
                     .map(|contract| (*contract).clone());
                 *guard = Some(std::sync::Arc::new(contracts));
             }
+            self.sync_single_file_contract_blob();
             return Ok(removed);
         }
 

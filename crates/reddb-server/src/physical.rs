@@ -401,6 +401,10 @@ mod json_codec;
 mod metadata_file;
 pub mod shm;
 
+pub(crate) use self::json_codec::{
+    deserialize_collection_contracts, serialize_collection_contracts,
+};
+
 pub use self::shm::{
     provision_shm, read_shm_header, set_shm_provisioning_enabled, shm_path_for,
     shm_provisioning_enabled, ShmHandle, ShmHeader, ShmProvisionState, SHM_FILE_SIZE,

@@ -370,6 +370,19 @@ impl UnifiedStore {
         None
     }
 
+    /// Replace the opaque store-level auxiliary metadata blob. Persisted
+    /// inside the binary dump (store format V10+); see the `aux_metadata`
+    /// field. RedDB uses it to carry collection contracts through the
+    /// single-file artifact.
+    pub fn set_aux_metadata(&self, bytes: Vec<u8>) {
+        *self.aux_metadata.write() = bytes;
+    }
+
+    /// Read the opaque store-level auxiliary metadata blob. Empty when unset.
+    pub fn aux_metadata(&self) -> Vec<u8> {
+        self.aux_metadata.read().clone()
+    }
+
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
         self.collections.read().keys().cloned().collect()
