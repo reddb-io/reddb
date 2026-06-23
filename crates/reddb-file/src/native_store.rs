@@ -13,25 +13,12 @@ use crate::embedded::{RdbFileError, RdbFileResult};
 use crate::physical_metadata::{ManifestEvent, ManifestEventKind};
 
 pub const STORE_MAGIC: &[u8; 4] = b"RDST";
-pub const STORE_VERSION_V1: u32 = 1;
-pub const STORE_VERSION_V2: u32 = 2;
-pub const STORE_VERSION_V3: u32 = 3;
-pub const STORE_VERSION_V4: u32 = 4;
-pub const STORE_VERSION_V5: u32 = 5;
-pub const STORE_VERSION_V6: u32 = 6;
-/// Entity records include metadata (`serialize_entity_record` format).
-pub const STORE_VERSION_V7: u32 = 7;
-/// Table rows may carry explicit logical identity.
-pub const STORE_VERSION_V8: u32 = 8;
-/// Entity records persist MVCC xmin/xmax.
-pub const STORE_VERSION_V9: u32 = 9;
-/// A trailing opaque auxiliary-metadata blob follows the cross-references
-/// (before the CRC footer). It carries store-level metadata that must
-/// survive a restart inside the single-file artifact — most importantly the
-/// collection contracts (their `declared_model`), which otherwise live only
-/// in RedDB's in-memory cache and are lost on reopen.
-pub const STORE_VERSION_V10: u32 = 10;
-pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V10;
+/// Current native unified-store dump format.
+///
+/// This is intentionally the only supported store-dump version. RedDB has no
+/// external production users yet, so we reject older experimental layouts
+/// instead of carrying compatibility branches through the storage path.
+pub const STORE_VERSION_CURRENT: u32 = 10;
 
 pub const METADATA_MAGIC: &[u8; 4] = b"RDM2";
 pub const METADATA_HEADER_BYTES: usize = 12;
@@ -412,19 +399,7 @@ pub fn decode_native_dump_cross_ref(
 }
 
 pub fn is_supported_store_version(version: u32) -> bool {
-    matches!(
-        version,
-        STORE_VERSION_V1
-            | STORE_VERSION_V2
-            | STORE_VERSION_V3
-            | STORE_VERSION_V4
-            | STORE_VERSION_V5
-            | STORE_VERSION_V6
-            | STORE_VERSION_V7
-            | STORE_VERSION_V8
-            | STORE_VERSION_V9
-            | STORE_VERSION_V10
-    )
+    version == STORE_VERSION_CURRENT
 }
 
 pub fn encode_native_store_header(version: u32) -> Vec<u8> {
@@ -458,8 +433,10 @@ pub fn append_native_store_crc32_footer(bytes: &mut Vec<u8>) {
 }
 
 pub fn verify_native_store_crc32_footer(bytes: &mut Vec<u8>, version: u32) -> RdbFileResult<()> {
-    if version < STORE_VERSION_V3 {
-        return Ok(());
+    if version != STORE_VERSION_CURRENT {
+        return Err(RdbFileError::InvalidOperation(format!(
+            "Unsupported version: {version}"
+        )));
     }
     if bytes.len() < 12 {
         return Err(RdbFileError::InvalidOperation(

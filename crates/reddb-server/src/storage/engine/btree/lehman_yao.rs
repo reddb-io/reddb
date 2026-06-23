@@ -14,10 +14,10 @@
 //!    release it the moment the right-link is wired up (so other
 //!    readers can immediately follow through).
 //!
-//! Items (1)–(3) require an on-disk format bump (`STORE_VERSION_V8`)
-//! plus a migration that fills `high_key` on existing leaves from
-//! their current highest key, followed by lock protocol changes
-//! across `nbtree`-analogous modules.
+//! Items (1)–(3) require an on-disk format change that fills
+//! `high_key` on existing leaves from their current highest key,
+//! followed by lock protocol changes across `nbtree`-analogous
+//! modules.
 //!
 //! This module is the coordination surface for that work:
 //!
@@ -31,7 +31,7 @@
 //!   Lehman-Yao semantics once the storage changes land.
 //! - `HighKey` is the on-disk shape for the leaf-page upper bound.
 //!   Today it's only written by callers that opt in; the full
-//!   wire-up lands with `STORE_VERSION_V8`.
+//!   wire-up lands with the native store format change.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

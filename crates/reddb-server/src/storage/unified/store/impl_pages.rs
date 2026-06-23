@@ -253,7 +253,7 @@ impl UnifiedStore {
             }
         }
 
-        let format_version = STORE_VERSION_V9;
+        let format_version = STORE_VERSION_CURRENT;
         self.set_format_version(format_version);
 
         let collections = self.collections.read();
@@ -326,7 +326,7 @@ impl UnifiedStore {
     pub fn with_config(config: UnifiedStoreConfig) -> Self {
         Self {
             config,
-            format_version: AtomicU32::new(STORE_VERSION_V9),
+            format_version: AtomicU32::new(STORE_VERSION_CURRENT),
             next_entity_id: AtomicU64::new(1),
             collections: RwLock::new(HashMap::new()),
             cross_refs: RwLock::new(HashMap::new()),
@@ -400,7 +400,7 @@ impl UnifiedStore {
 
         let store = Self {
             config,
-            format_version: AtomicU32::new(STORE_VERSION_V9),
+            format_version: AtomicU32::new(STORE_VERSION_CURRENT),
             next_entity_id: AtomicU64::new(1),
             collections: RwLock::new(HashMap::new()),
             cross_refs: RwLock::new(HashMap::new()),
@@ -511,27 +511,22 @@ impl UnifiedStore {
             let content: &[u8] = &content_vec;
             if content.len() >= 4 {
                 let mut pos = 0;
-                let mut format_version = STORE_VERSION_V1;
-
                 let collection_count = if let Some(header) =
                     reddb_file::decode_native_paged_metadata_header(content)
                         .map_err(|err| StoreError::Serialization(err.to_string()))?
                 {
-                    format_version = header.format_version;
+                    let format_version = header.format_version;
+                    if !is_supported_store_version(format_version) {
+                        return Err(StoreError::Serialization(format!(
+                            "unsupported native paged metadata version {format_version}"
+                        )));
+                    }
+                    self.set_format_version(format_version);
                     pos += reddb_file::METADATA_HEADER_BYTES;
                     header.collection_count as usize
                 } else {
-                    let count = u32::from_le_bytes([
-                        content[pos],
-                        content[pos + 1],
-                        content[pos + 2],
-                        content[pos + 3],
-                    ]) as usize;
-                    pos += 4;
-                    count
+                    return Ok(());
                 };
-
-                self.set_format_version(format_version);
 
                 if pos > content.len() {
                     return Ok(());
@@ -593,7 +588,7 @@ impl UnifiedStore {
                     }
                 }
 
-                if format_version >= STORE_VERSION_V2 && pos + 4 <= content.len() {
+                if pos + 4 <= content.len() {
                     let cross_ref_count = u32::from_le_bytes([
                         content[pos],
                         content[pos + 1],
@@ -640,10 +635,6 @@ impl UnifiedStore {
                     }
                 }
             }
-        }
-
-        if self.format_version() < STORE_VERSION_V9 {
-            self.set_format_version(STORE_VERSION_V9);
         }
 
         Ok(())
@@ -829,7 +820,7 @@ impl UnifiedStore {
         // Write collection metadata to page 1
         let mut meta_data = Vec::with_capacity(4096);
 
-        let format_version = STORE_VERSION_V9;
+        let format_version = STORE_VERSION_CURRENT;
         self.set_format_version(format_version);
 
         reddb_file::encode_native_paged_metadata_header(

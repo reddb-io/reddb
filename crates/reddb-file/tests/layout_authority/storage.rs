@@ -767,8 +767,7 @@ fn server_does_not_redeclare_native_store_file_contracts() {
 
     for forbidden in [
         "const STORE_MAGIC",
-        "const STORE_VERSION_V1",
-        "const STORE_VERSION_V9",
+        "const STORE_VERSION_",
         "const METADATA_MAGIC",
         "const NATIVE_COLLECTION_ROOTS_MAGIC",
         "const NATIVE_MANIFEST_MAGIC",

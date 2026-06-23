@@ -296,14 +296,9 @@ fn native_store_header_and_crc_reject_bad_inputs() {
 
     let unsupported = encode_native_store_header(STORE_VERSION_CURRENT + 1);
     assert!(decode_native_store_header(&unsupported).is_err());
-    assert!(is_supported_store_version(STORE_VERSION_V1));
-    assert!(is_supported_store_version(STORE_VERSION_V9));
+    assert!(is_supported_store_version(STORE_VERSION_CURRENT));
+    assert!(!is_supported_store_version(STORE_VERSION_CURRENT - 1));
     assert!(!is_supported_store_version(STORE_VERSION_CURRENT + 1));
-
-    let mut legacy = encode_native_store_header(STORE_VERSION_V2);
-    legacy.extend_from_slice(b"payload");
-    verify_native_store_crc32_footer(&mut legacy, STORE_VERSION_V2).unwrap();
-    assert_eq!(&legacy[8..], b"payload");
 
     let mut too_short = encode_native_store_header(STORE_VERSION_CURRENT);
     assert!(verify_native_store_crc32_footer(&mut too_short, STORE_VERSION_CURRENT).is_err());

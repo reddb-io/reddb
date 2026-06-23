@@ -91,27 +91,21 @@ impl UnifiedStore {
                 reddb_file::decode_native_dump_collection_header(&buf, &mut pos)
                     .map_err(|e| e.to_string())?;
 
-            // Read each entity — V7+ includes metadata alongside entity data.
+            // Read each entity. The current dump format stores every entity in
+            // the native entity+metadata record envelope.
             for _ in 0..collection_header.entity_count {
-                if version >= STORE_VERSION_V7 {
-                    // Length-prefixed entity+metadata record (serialize_entity_record format)
-                    let record_bytes = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
-                        .map_err(|e| e.to_string())?;
+                let record_bytes = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
+                    .map_err(|e| e.to_string())?;
 
-                    let (entity, metadata) = Self::deserialize_entity_record(record_bytes, version)
-                        .map_err(|e| format!("Entity record deserialization error: {e}"))?;
+                let (entity, metadata) = Self::deserialize_entity_record(record_bytes, version)
+                    .map_err(|e| format!("Entity record deserialization error: {e}"))?;
 
-                    store.insert_auto(&collection_header.name, entity.clone())?;
+                store.insert_auto(&collection_header.name, entity.clone())?;
 
-                    if let Some(metadata) = metadata {
-                        if let Some(manager) = store.get_collection(&collection_header.name) {
-                            let _ = manager.set_metadata(entity.id, metadata);
-                        }
+                if let Some(metadata) = metadata {
+                    if let Some(manager) = store.get_collection(&collection_header.name) {
+                        let _ = manager.set_metadata(entity.id, metadata);
                     }
-                } else {
-                    // V1–V6: entity only, no metadata
-                    let entity = Self::read_entity_binary(&buf, &mut pos, version)?;
-                    store.insert_auto(&collection_header.name, entity)?;
                 }
             }
         }
@@ -141,20 +135,20 @@ impl UnifiedStore {
             }
         }
 
-        // V10+: a trailing opaque auxiliary-metadata blob follows the
-        // cross-references. RedDB stores the collection contracts here so the
-        // single-file artifact carries each collection's declared model across
-        // a restart. Older dumps end at the cross-refs and have no blob.
-        if version >= reddb_file::STORE_VERSION_V10 && pos < buf.len() {
-            let aux = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
-                .map_err(|e| e.to_string())?;
-            if !aux.is_empty() {
-                store.set_aux_metadata(aux.to_vec());
-            }
+        // A trailing opaque auxiliary-metadata blob carries store-level
+        // metadata such as collection contracts for the single-file artifact.
+        let aux = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
+            .map_err(|e| e.to_string())?;
+        if !aux.is_empty() {
+            store.set_aux_metadata(aux.to_vec());
         }
 
-        if store.format_version() < STORE_VERSION_CURRENT {
-            store.set_format_version(STORE_VERSION_CURRENT);
+        if pos != buf.len() {
+            return Err(format!(
+                "unexpected trailing native store bytes: {}",
+                buf.len() - pos
+            )
+            .into());
         }
 
         Ok(store)
@@ -173,8 +167,7 @@ impl UnifiedStore {
     pub(crate) fn to_binary_dump_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Version 9 includes explicit table-row logical identity plus MVCC
-        // xmin/xmax alongside the V7 metadata envelope.
+        // Current native-store dump format.
         buf.extend_from_slice(&reddb_file::encode_native_store_header(
             STORE_VERSION_CURRENT,
         ));
@@ -189,8 +182,7 @@ impl UnifiedStore {
             let entities = manager.query_all(|_| true);
             reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
 
-            // V7+: serialize entity+metadata as a length-prefixed record.
-            // Each record: [u32 len][serialize_entity_record bytes]
+            // Serialize entity+metadata as a length-prefixed record.
             for entity in entities {
                 let metadata = manager.get_metadata(entity.id);
                 let record = Self::serialize_entity_record(&entity, metadata.as_ref(), fv);
@@ -215,9 +207,8 @@ impl UnifiedStore {
             }
         }
 
-        // V10+: trailing opaque auxiliary-metadata blob (collection contracts
-        // for the single-file artifact). Always written — empty when unused —
-        // so the read side can unconditionally expect it for V10 dumps.
+        // Trailing opaque auxiliary-metadata blob (collection contracts for the
+        // single-file artifact). Always written, empty when unused.
         {
             let aux = self.aux_metadata.read();
             reddb_file::encode_native_dump_entity_record(&mut buf, &aux);
@@ -233,7 +224,7 @@ impl UnifiedStore {
     pub(crate) fn read_entity_binary(
         buf: &[u8],
         pos: &mut usize,
-        format_version: u32,
+        _format_version: u32,
     ) -> Result<UnifiedEntity, Box<dyn std::error::Error>> {
         // Entity ID
         let id = read_varu64(buf, pos).map_err(|e| format!("Failed to read entity id: {:?}", e))?;
@@ -370,15 +361,13 @@ impl UnifiedStore {
                     dense.push(f32::from_le_bytes(bytes));
                 }
                 let mut vector = VectorData::new(dense);
-                if format_version >= STORE_VERSION_V6 {
-                    let has_content = buf[*pos] != 0;
-                    *pos += 1;
-                    if has_content {
-                        let content_len = Self::read_varu32_safe(buf, pos)?;
-                        vector.content =
-                            Some(String::from_utf8(buf[*pos..*pos + content_len].to_vec())?);
-                        *pos += content_len;
-                    }
+                let has_content = buf[*pos] != 0;
+                *pos += 1;
+                if has_content {
+                    let content_len = Self::read_varu32_safe(buf, pos)?;
+                    vector.content =
+                        Some(String::from_utf8(buf[*pos..*pos + content_len].to_vec())?);
+                    *pos += content_len;
                 }
                 EntityData::Vector(vector)
             }
@@ -399,19 +388,16 @@ impl UnifiedStore {
                     buf[*pos + 7],
                 ];
                 *pos += 8;
-                let mut tags = HashMap::new();
-                if format_version >= STORE_VERSION_V5 {
-                    let tag_count = Self::read_varu32_safe(buf, pos)?;
-                    tags = HashMap::with_capacity(tag_count);
-                    for _ in 0..tag_count {
-                        let key_len = Self::read_varu32_safe(buf, pos)?;
-                        let key = String::from_utf8(buf[*pos..*pos + key_len].to_vec())?;
-                        *pos += key_len;
-                        let value_len = Self::read_varu32_safe(buf, pos)?;
-                        let value = String::from_utf8(buf[*pos..*pos + value_len].to_vec())?;
-                        *pos += value_len;
-                        tags.insert(key, value);
-                    }
+                let tag_count = Self::read_varu32_safe(buf, pos)?;
+                let mut tags = HashMap::with_capacity(tag_count);
+                for _ in 0..tag_count {
+                    let key_len = Self::read_varu32_safe(buf, pos)?;
+                    let key = String::from_utf8(buf[*pos..*pos + key_len].to_vec())?;
+                    *pos += key_len;
+                    let value_len = Self::read_varu32_safe(buf, pos)?;
+                    let value = String::from_utf8(buf[*pos..*pos + value_len].to_vec())?;
+                    *pos += value_len;
+                    tags.insert(key, value);
                 }
                 EntityData::TimeSeries(crate::storage::unified::entity::TimeSeriesData {
                     metric,
@@ -489,18 +475,13 @@ impl UnifiedStore {
             let target = Self::read_varu64_safe(buf, pos)?;
             let ref_type_byte = buf[*pos];
             *pos += 1;
-            let (target_collection, weight, created_at) = if format_version >= STORE_VERSION_V2 {
-                let coll_len = Self::read_varu32_safe(buf, pos)?;
-                let collection = String::from_utf8(buf[*pos..*pos + coll_len].to_vec())?;
-                *pos += coll_len;
-                let weight_bytes = [buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]];
-                *pos += 4;
-                let weight = f32::from_le_bytes(weight_bytes);
-                let created_at = Self::read_varu64_safe(buf, pos)?;
-                (collection, weight, created_at)
-            } else {
-                (String::new(), 1.0, 0)
-            };
+            let coll_len = Self::read_varu32_safe(buf, pos)?;
+            let target_collection = String::from_utf8(buf[*pos..*pos + coll_len].to_vec())?;
+            *pos += coll_len;
+            let weight_bytes = [buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]];
+            *pos += 4;
+            let weight = f32::from_le_bytes(weight_bytes);
+            let created_at = Self::read_varu64_safe(buf, pos)?;
 
             let mut cross_ref = CrossRef::new(
                 EntityId::new(source),
@@ -516,49 +497,41 @@ impl UnifiedStore {
         // Sequence ID
         let sequence_id = Self::read_varu64_safe(buf, pos)?;
 
-        if format_version >= STORE_VERSION_V4 {
-            if let EntityData::QueueMessage(message) = &mut data {
-                if *pos < buf.len() {
-                    let priority_present = buf[*pos] != 0;
-                    *pos += 1;
-                    message.priority = if priority_present {
-                        if *pos + 4 > buf.len() {
-                            return Err("truncated queue priority".into());
-                        }
-                        let bytes = [buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]];
-                        *pos += 4;
-                        Some(i32::from_le_bytes(bytes))
-                    } else {
-                        None
-                    };
-                    message.max_attempts = Self::read_varu32_safe(buf, pos)? as u32;
-                    if *pos >= buf.len() {
-                        return Err("truncated queue ack flag".into());
-                    }
-                    message.acked = buf[*pos] != 0;
-                    *pos += 1;
+        if let EntityData::QueueMessage(message) = &mut data {
+            let priority_present = buf[*pos] != 0;
+            *pos += 1;
+            message.priority = if priority_present {
+                if *pos + 4 > buf.len() {
+                    return Err("truncated queue priority".into());
                 }
+                let bytes = [buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]];
+                *pos += 4;
+                Some(i32::from_le_bytes(bytes))
+            } else {
+                None
+            };
+            message.max_attempts = Self::read_varu32_safe(buf, pos)? as u32;
+            if *pos >= buf.len() {
+                return Err("truncated queue ack flag".into());
             }
+            message.acked = buf[*pos] != 0;
+            *pos += 1;
         }
 
         let mut entity = UnifiedEntity::new(EntityId::new(id), kind, data);
         entity.created_at = created_at;
         entity.updated_at = updated_at;
         entity.sequence_id = sequence_id;
-        if format_version >= STORE_VERSION_V8 && *pos < buf.len() {
-            let has_logical_id = buf[*pos] != 0;
-            *pos += 1;
-            if has_logical_id {
-                let logical_id = Self::read_varu64_safe(buf, pos)?;
-                entity.set_logical_id(EntityId::new(logical_id));
-            }
+        let has_logical_id = buf[*pos] != 0;
+        *pos += 1;
+        if has_logical_id {
+            let logical_id = Self::read_varu64_safe(buf, pos)?;
+            entity.set_logical_id(EntityId::new(logical_id));
         }
-        if format_version >= STORE_VERSION_V9 && *pos < buf.len() {
-            let xmin = Self::read_varu64_safe(buf, pos)?;
-            let xmax = Self::read_varu64_safe(buf, pos)?;
-            entity.set_xmin(xmin);
-            entity.set_xmax(xmax);
-        }
+        let xmin = Self::read_varu64_safe(buf, pos)?;
+        let xmax = Self::read_varu64_safe(buf, pos)?;
+        entity.set_xmin(xmin);
+        entity.set_xmax(xmax);
         if !embeddings.is_empty() || !cross_refs.is_empty() {
             entity.embeddings_mut().extend(embeddings);
             entity.cross_refs_mut().extend(cross_refs);
@@ -583,7 +556,7 @@ impl UnifiedStore {
     pub(crate) fn write_entity_binary(
         buf: &mut Vec<u8>,
         entity: &UnifiedEntity,
-        format_version: u32,
+        _format_version: u32,
     ) {
         // Entity ID
         write_varu64(buf, entity.id.raw());
@@ -689,12 +662,10 @@ impl UnifiedStore {
                 for f in &vec.dense {
                     buf.extend_from_slice(&f.to_le_bytes());
                 }
-                if format_version >= STORE_VERSION_V6 {
-                    buf.push(u8::from(vec.content.is_some()));
-                    if let Some(content) = &vec.content {
-                        write_varu32(buf, content.len() as u32);
-                        buf.extend_from_slice(content.as_bytes());
-                    }
+                buf.push(u8::from(vec.content.is_some()));
+                if let Some(content) = &vec.content {
+                    write_varu32(buf, content.len() as u32);
+                    buf.extend_from_slice(content.as_bytes());
                 }
             }
             EntityData::TimeSeries(ts) => {
@@ -703,16 +674,14 @@ impl UnifiedStore {
                 buf.extend_from_slice(ts.metric.as_bytes());
                 write_varu64(buf, ts.timestamp_ns);
                 buf.extend_from_slice(&ts.value.to_le_bytes());
-                if format_version >= STORE_VERSION_V5 {
-                    write_varu32(buf, ts.tags.len() as u32);
-                    let mut tag_entries: Vec<_> = ts.tags.iter().collect();
-                    tag_entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-                    for (key, value) in tag_entries {
-                        write_varu32(buf, key.len() as u32);
-                        buf.extend_from_slice(key.as_bytes());
-                        write_varu32(buf, value.len() as u32);
-                        buf.extend_from_slice(value.as_bytes());
-                    }
+                write_varu32(buf, ts.tags.len() as u32);
+                let mut tag_entries: Vec<_> = ts.tags.iter().collect();
+                tag_entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                for (key, value) in tag_entries {
+                    write_varu32(buf, key.len() as u32);
+                    buf.extend_from_slice(key.as_bytes());
+                    write_varu32(buf, value.len() as u32);
+                    buf.extend_from_slice(value.as_bytes());
                 }
             }
             EntityData::QueueMessage(msg) => {
@@ -746,38 +715,30 @@ impl UnifiedStore {
             write_varu64(buf, cross_ref.source.raw());
             write_varu64(buf, cross_ref.target.raw());
             buf.push(cross_ref.ref_type.to_byte());
-            if format_version >= STORE_VERSION_V2 {
-                write_varu32(buf, cross_ref.target_collection.len() as u32);
-                buf.extend_from_slice(cross_ref.target_collection.as_bytes());
-                buf.extend_from_slice(&cross_ref.weight.to_le_bytes());
-                write_varu64(buf, cross_ref.created_at);
-            }
+            write_varu32(buf, cross_ref.target_collection.len() as u32);
+            buf.extend_from_slice(cross_ref.target_collection.as_bytes());
+            buf.extend_from_slice(&cross_ref.weight.to_le_bytes());
+            write_varu64(buf, cross_ref.created_at);
         }
 
         // Sequence ID
         write_varu64(buf, entity.sequence_id);
 
-        if format_version >= STORE_VERSION_V4 {
-            if let EntityData::QueueMessage(message) = &entity.data {
-                buf.push(u8::from(message.priority.is_some()));
-                if let Some(priority) = message.priority {
-                    buf.extend_from_slice(&priority.to_le_bytes());
-                }
-                write_varu32(buf, message.max_attempts);
-                buf.push(u8::from(message.acked));
+        if let EntityData::QueueMessage(message) = &entity.data {
+            buf.push(u8::from(message.priority.is_some()));
+            if let Some(priority) = message.priority {
+                buf.extend_from_slice(&priority.to_le_bytes());
             }
+            write_varu32(buf, message.max_attempts);
+            buf.push(u8::from(message.acked));
         }
 
-        if format_version >= STORE_VERSION_V8 {
-            buf.push(u8::from(entity.has_explicit_logical_id()));
-            if entity.has_explicit_logical_id() {
-                write_varu64(buf, entity.logical_id().raw());
-            }
+        buf.push(u8::from(entity.has_explicit_logical_id()));
+        if entity.has_explicit_logical_id() {
+            write_varu64(buf, entity.logical_id().raw());
         }
-        if format_version >= STORE_VERSION_V9 {
-            write_varu64(buf, entity.xmin);
-            write_varu64(buf, entity.xmax);
-        }
+        write_varu64(buf, entity.xmin);
+        write_varu64(buf, entity.xmax);
     }
 
     /// Read a Value from binary buffer
