@@ -2508,12 +2508,18 @@ impl RedDBRuntime {
                         sample_pct,
                     )
                 },
+                slow_query_store: crate::telemetry::slow_query_store::SlowQueryStore::new(
+                    crate::telemetry::slow_query_store::DEFAULT_CAP,
+                ),
                 kv_stats: crate::runtime::KvStatsCounters::default(),
                 metrics_ingest_stats: crate::runtime::MetricsIngestCounters::default(),
                 metrics_tenant_activity_stats:
                     crate::runtime::MetricsTenantActivityCounters::default(),
                 queue_telemetry: Arc::new(
                     crate::runtime::queue_telemetry::QueueTelemetryCounters::default(),
+                ),
+                query_latency_telemetry: Arc::new(
+                    crate::runtime::query_latency_telemetry::QueryLatencyTelemetry::default(),
                 ),
                 queue_presence: Arc::new(
                     crate::storage::queue::presence::ConsumerPresenceRegistry::new(),
@@ -2537,6 +2543,13 @@ impl RedDBRuntime {
         crate::telemetry::operator_event::install_global_audit_sink(Arc::clone(
             &runtime.inner.audit_log,
         ));
+
+        // Issue #1238 — wire the slow-query telemetry substrate (ADR 0060).
+        // The logger dual-writes: file sink (existing) + ring store (new).
+        runtime
+            .inner
+            .slow_query_logger
+            .attach_store(Arc::clone(&runtime.inner.slow_query_store));
 
         // PLAN.md Phase 9.1 — backfill cold-start phase markers
         // from the wall-clock captured before storage open. The
@@ -3636,6 +3649,22 @@ impl RedDBRuntime {
         }
     }
 
+    /// Per-`kind` query latency histograms for `/metrics` (only kinds with
+    /// a real sample are present — empty kinds are absent, not zero-filled).
+    pub fn query_latency_snapshot(
+        &self,
+    ) -> Vec<crate::runtime::query_latency_telemetry::QueryLatencyHistogram> {
+        self.inner.query_latency_telemetry.snapshot()
+    }
+
+    /// Cross-kind query latency rollup for `/cluster/status` and the
+    /// red-ui percentile panels. `count == 0` until a real sample exists.
+    pub fn query_latency_rollup(
+        &self,
+    ) -> crate::runtime::query_latency_telemetry::QueryLatencyHistogram {
+        self.inner.query_latency_telemetry.rollup()
+    }
+
     /// Issue #742 — consumer presence registry. Heartbeats land here
     /// from `QUEUE READ` (and, in a follow-up slice, an explicit
     /// `QUEUE HEARTBEAT` command); Red UI and `red.queue_consumers`
@@ -3706,6 +3735,15 @@ impl RedDBRuntime {
         collection: &str,
     ) -> Option<crate::storage::vector::introspection::VectorIntrospection> {
         self.inner.vector_introspection.get(collection)
+    }
+
+    /// Issue #1238 — ADR 0060 read-model accessor for slow-query telemetry.
+    ///
+    /// Returns a reference to the bounded ring store so HTTP handlers and
+    /// the red-ui read model can call `store.read(filter)` without
+    /// touching `red-slow.log` directly.
+    pub fn slow_query_store(&self) -> &Arc<crate::telemetry::slow_query_store::SlowQueryStore> {
+        &self.inner.slow_query_store
     }
 
     /// Slice 10 of issue #527 — render-time scan of pending entries
@@ -4231,6 +4269,15 @@ impl RedDBRuntime {
         self.inner
             .slow_query_logger
             .record(kind, elapsed_ms, query.to_string(), &scope);
+
+        // Issue #1241 — record latency into the bounded per-`kind`
+        // histogram substrate (always, not only above the slow-query
+        // threshold). `started.elapsed()` is re-read here for sub-ms
+        // resolution; the cost is one `Instant::now` plus a handful of
+        // relaxed atomic adds (see `query_latency_telemetry` docs).
+        self.inner
+            .query_latency_telemetry
+            .observe(kind, started.elapsed().as_secs_f64());
 
         if let Ok(ref mut query_result) = result {
             if matches!(query_result.statement_type, "insert" | "update" | "delete") {
