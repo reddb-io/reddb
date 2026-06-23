@@ -1,7 +1,8 @@
 ---
 source: crates/reddb-server/tests/queue_parser_snapshots.rs
+assertion_line: 100
 expression: "fmt_parse_error(\"QUEUE FROBNICATE q\")"
 ---
 input: "QUEUE FROBNICATE q"
 kind:  Syntax
-error: Parse error at 1:7: Unexpected token: FROBNICATE (expected: PUSH, POP, PEEK, LEN, PURGE, GROUP, READ, ACK, NACK, LPUSH, RPUSH, LPOP, RPOP, PENDING, CLAIM)
+error: Parse error at 1:7: Unexpected token: FROBNICATE (expected: PUSH, POP, PEEK, LEN, PURGE, GROUP, READ, ACK, NACK, LPUSH, RPUSH, LPOP, RPOP, PENDING, CLAIM, MOVE)

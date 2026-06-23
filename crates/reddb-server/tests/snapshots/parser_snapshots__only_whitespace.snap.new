@@ -1,8 +1,0 @@
----
-source: crates/reddb-server/tests/parser_snapshots.rs
-assertion_line: 86
-expression: "fmt_parse_error(\"    \\n\\t  \")"
----
-input: "    \n\t  "
-kind:  Syntax
-error: Parse error at 2:4: Unexpected token: EOF (expected: SELECT, MATCH, PATH, FROM, VECTOR, HYBRID, INSERT, UPDATE, DELETE, TRUNCATE, CREATE, DROP, ALTER, GRAPH, SEARCH, ASK, QUEUE, EVENTS, KV, HLL, TREE, SKETCH, FILTER, SET, SHOW)

@@ -1,8 +1,0 @@
----
-source: crates/reddb-server/tests/migration_parser_snapshots.rs
-assertion_line: 64
-expression: "fmt_parse_error(\"CREATE\")"
----
-input: "CREATE"
-kind:  Syntax
-error: Parse error at 1:1: Unexpected token: EOF (expected: TABLE, GRAPH, VECTOR, DOCUMENT, KV, COLLECTION, INDEX, UNIQUE, TIMESERIES, QUEUE, TREE, HLL, SKETCH, FILTER, SCHEMA, SEQUENCE, MIGRATION)
