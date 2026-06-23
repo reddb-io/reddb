@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"CREATE INDEX gix ON sites () USING RTREE\")"
 ---
 input: "CREATE INDEX gix ON sites () USING RTREE"
 kind:  Syntax
-error: Parse error at 1:28: Unexpected token: ) (expected: identifier)
+error: Parse error at 1:28: Unexpected token: ) (expected: identifier or type name)

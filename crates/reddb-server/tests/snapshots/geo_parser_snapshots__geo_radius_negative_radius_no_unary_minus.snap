@@ -2,7 +2,6 @@
 source: crates/reddb-server/tests/geo_parser_snapshots.rs
 expression: "fmt_parse_error(\"SEARCH SPATIAL RADIUS 0.0 0.0 -10.0 COLLECTION c COLUMN col\")"
 ---
-UNEXPECTED OK
 input: "SEARCH SPATIAL RADIUS 0.0 0.0 -10.0 COLLECTION c COLUMN col"
 kind:  ValueOutOfRange { field: "radius", constraint: "must be a positive number" }
 error: Parse error at 1:31: radius must be a positive number
