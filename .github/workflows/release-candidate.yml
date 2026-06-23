@@ -72,6 +72,20 @@ jobs:
           version: '28.3'
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: rui314/setup-mold@v1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Sync RC version across all manifests
+        run: |
+          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${RC_VERSION}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
+
+      - name: Regenerate lockfile after version sync
+        run: cargo generate-lockfile
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rc-linux-x86_64
@@ -82,8 +96,8 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
         run: |
-          cargo build --locked --profile release-fast --bin red
-          cargo build --locked --profile release-fast --bin red_client -p reddb-io-client --no-default-features
+          cargo build --profile release-fast --bin red
+          cargo build --profile release-fast --bin red_client -p reddb-io-client --no-default-features
 
       - name: Strip
         run: |
@@ -150,7 +164,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   publish-npm:
-    name: Publish npm @rc
+    name: Publish npm packages @rc
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
@@ -162,12 +176,14 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
 
-      - name: Set RC version in package.json
+      - name: Sync RC version across all manifests
         run: |
           RC_VERSION="${{ needs.plan.outputs.rc_version }}"
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${RC_VERSION}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
 
-      - name: Publish
+      - name: Publish all public packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -175,4 +191,65 @@ jobs:
             echo "::warning::NPM_TOKEN not set — skipping npm @rc publish."
             exit 0
           fi
-          pnpm publish --tag rc --access public --no-git-checks
+          for PKG_DIR in . drivers/js drivers/js-client drivers/bun; do
+            echo "==> publishing ${PKG_DIR}"
+            pnpm publish --filter "./${PKG_DIR}" --tag rc --access public --no-git-checks
+          done
+
+  publish-cargo:
+    name: Publish crates @rc
+    needs: [plan, build-linux]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Sync RC version across all manifests
+        run: |
+          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${RC_VERSION}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
+
+      - name: Regenerate lockfile after version sync
+        run: cargo generate-lockfile
+
+      - name: Publish workspace crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN not set — skipping crates.io @rc publish."
+            exit 0
+          fi
+
+          publish_one() {
+            local crate="$1"
+            echo "==> publish ${crate}@${{ needs.plan.outputs.rc_version }}"
+            local out
+            out=$(cargo publish --allow-dirty --no-verify -p "$crate" 2>&1) && { echo "$out"; return 0; }
+            if echo "$out" | grep -qE "already uploaded|already exists"; then
+              echo "  ${crate} already on crates.io — skipping"
+            else
+              echo "$out" >&2
+              return 1
+            fi
+          }
+
+          publish_one reddb-io-types
+          publish_one reddb-io-crypto
+          publish_one reddb-io-file
+          publish_one reddb-io-rql
+          publish_one reddb-io-wire
+          publish_one reddb-io-grpc-proto
+          publish_one reddb-io-client-connector
+          publish_one reddb-io-server
+          publish_one reddb-io-client
+          publish_one reddb-io
