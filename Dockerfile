@@ -19,16 +19,13 @@ RUN apt-get update \
 WORKDIR /app
 
 # Copy manifests first for layer caching
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY docs/spec/ docs/spec/
 
-# Create dummy binaries so dependency compilation is cached before source copy
-RUN mkdir -p src/bin \
-    && echo 'fn main() {}' > src/bin/red.rs \
-    && echo '' > src/lib.rs \
-    && cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} 2>/dev/null || true \
-    && rm -rf src
+# Fetch dependencies before copying source so registry/git downloads stay cached
+# without producing a dummy `red` binary in target/release.
+RUN cargo fetch --locked
 
 # Copy full source and build for real
 COPY src/ src/

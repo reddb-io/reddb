@@ -5,7 +5,7 @@
 # runs on every Linux distro (no glibc dependency, no shared libs).
 #
 # Build:
-#   docker buildx build -f Dockerfile.musl -t reddb:musl .
+#   docker buildx build -f docker/Dockerfile.musl -t reddb:musl .
 #
 # Run with secret-file mounts (no shell available — the binary itself
 # resolves *_FILE env vars; see src/auth/vault.rs and Agent #2's
@@ -25,7 +25,6 @@ COPY proto ./proto
 COPY src ./src
 COPY benches ./benches
 COPY tests ./tests
-COPY build.rs ./build.rs
 RUN rustup target add x86_64-unknown-linux-musl
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN cargo build \

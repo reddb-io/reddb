@@ -1,13 +1,10 @@
 *
 !Cargo.toml
 !Cargo.lock
-!build.rs
 !rust-toolchain.toml
 !rustfmt.toml
 !Dockerfile
 !Dockerfile.client
-!Dockerfile.release
-!Dockerfile.client.release
 !README.md
 !crates/
 !crates/**

@@ -66,7 +66,6 @@ keywords = ["database", "vector-search", "graph", "document-store", "rust"]
 categories = ["database-implementations", "data-structures"]
 include = [
     "/src/**/*.rs",
-    "/build.rs",
     "/README.md",
     "/Cargo.toml",
     "/LICENSE",

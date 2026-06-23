@@ -37,7 +37,7 @@ WORKDIR /app
 
 # Workspace manifests + the workspace crates. Proto schemas live in
 # crates/reddb-grpc-proto/proto/ — pulled in by `crates/`.
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 
 # The umbrella `reddb` crate (root Cargo.toml) declares src/lib.rs and
