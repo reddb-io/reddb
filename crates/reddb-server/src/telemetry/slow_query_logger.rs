@@ -40,7 +40,21 @@ pub enum QueryKind {
 }
 
 impl QueryKind {
-    fn as_str(self) -> &'static str {
+    /// Every variant, in stable order. The histogram substrate (#1241)
+    /// keys one fixed cell per variant off this array, so the order
+    /// here defines the bounded `kind` cardinality budget (ADR 0060 §4).
+    pub const ALL: [QueryKind; 8] = [
+        Self::Select,
+        Self::Insert,
+        Self::Update,
+        Self::Delete,
+        Self::Bulk,
+        Self::Aggregate,
+        Self::DDL,
+        Self::Internal,
+    ];
+
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Select => "select",
             Self::Insert => "insert",
@@ -50,6 +64,21 @@ impl QueryKind {
             Self::Aggregate => "aggregate",
             Self::DDL => "ddl",
             Self::Internal => "internal",
+        }
+    }
+
+    /// Dense index into [`QueryKind::ALL`] — the cell offset used by the
+    /// latency histogram substrate.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Select => 0,
+            Self::Insert => 1,
+            Self::Update => 2,
+            Self::Delete => 3,
+            Self::Bulk => 4,
+            Self::Aggregate => 5,
+            Self::DDL => 6,
+            Self::Internal => 7,
         }
     }
 }
@@ -69,6 +98,9 @@ pub struct SlowQueryLogger {
     /// Monotonic counter across above-threshold calls — drives round-robin
     /// sampling so exactly `sample_pct`% of above-threshold calls emit.
     above_count: AtomicU64,
+    /// Durable telemetry substrate (ADR 0060). When attached, above-threshold
+    /// events are dual-written: file sink (existing behavior) + ring store.
+    store: std::sync::OnceLock<std::sync::Arc<super::slow_query_store::SlowQueryStore>>,
 }
 
 impl SlowQueryLogger {
@@ -142,7 +174,17 @@ impl SlowQueryLogger {
             threshold_ms: AtomicU64::new(threshold_ms),
             sample_pct: AtomicU8::new(sample_pct.min(100)),
             above_count: AtomicU64::new(0),
+            store: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Attach the operational telemetry substrate store (ADR 0060).
+    ///
+    /// Called once at runtime startup. Above-threshold, sampled events will
+    /// be written to both the file sink and the ring store. A second call
+    /// is a no-op (first registration wins).
+    pub fn attach_store(&self, store: std::sync::Arc<super::slow_query_store::SlowQueryStore>) {
+        let _ = self.store.set(store);
     }
 
     /// Record a completed query. Below-threshold: single relaxed load, no
@@ -188,6 +230,20 @@ impl SlowQueryLogger {
             .map(|(u, _)| u.as_str())
             .unwrap_or("")
             .to_string();
+
+        // Durable substrate (ADR 0060): push to the ring store with hashed
+        // tenant/identity before writing the file line. Store is optional;
+        // missing store → file-only behavior (backward-compatible).
+        if let Some(store) = self.store.get() {
+            store.push(super::slow_query_store::SlowQueryEvent {
+                ts_ms,
+                kind: kind.as_str(),
+                duration_ms,
+                sql_redacted: sql_redacted.clone(),
+                tenant_hash: super::slow_query_store::hash_label(&tenant),
+                identity_hash: super::slow_query_store::hash_label(&identity),
+            });
+        }
 
         let mut map = std::collections::BTreeMap::new();
         map.insert(
