@@ -217,15 +217,31 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Sync RC version across all manifests
-        # workspace dep requirements ("1.0") are intentionally kept as-is so
-        # cargo resolves them against the already-published stable siblings on
-        # crates.io. cargo publish does not use Cargo.lock, so no generate-lockfile.
+      - name: Update crate package versions for RC
+        # sync-version.js updates dep version requirements in per-crate Cargo.toml
+        # table-format entries (e.g. [dependencies.reddb-io-*]\nversion = "...") to
+        # the RC version, which does not exist on crates.io yet and breaks cargo
+        # publish. Use a targeted Python script that touches only [package] version,
+        # leaving all dep requirements pointing to stable siblings on crates.io.
+        # cargo publish does not consult Cargo.lock, so no generate-lockfile needed.
+        env:
+          RC_VERSION: ${{ needs.plan.outputs.rc_version }}
         run: |
-          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${RC_VERSION}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
-          node scripts/sync-version.js
-          bash scripts/check-versions.sh
+          python3 - << 'PYEOF'
+          import os, re, glob
+          rc = os.environ['RC_VERSION']
+          for path in ['Cargo.toml'] + glob.glob('crates/*/Cargo.toml'):
+              lines = open(path).readlines()
+              in_pkg, replaced, out = False, False, []
+              for l in lines:
+                  if l.strip() == '[package]': in_pkg = True
+                  elif l.startswith('[') and l.strip() != '[package]': in_pkg = False
+                  if in_pkg and not replaced and re.match(r'^\s*version\s*=\s*"', l):
+                      l = re.sub(r'(version\s*=\s*")[^"]*"', f'\\g<1>{rc}"', l, count=1)
+                      replaced = True
+                  out.append(l)
+              open(path, 'w').writelines(out)
+          PYEOF
 
       - name: Publish workspace crates
         env:
