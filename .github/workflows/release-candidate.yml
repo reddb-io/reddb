@@ -207,6 +207,10 @@ jobs:
     name: Publish crates @rc
     needs: [plan, build-linux]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Cargo workspace pre-release publishing is best-effort: cargo resolves path
+    # deps locally and rejects RC versions against range requirements (^1.0 excludes
+    # pre-release). Failures here do not block the GitHub binary or npm @rc publish.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
