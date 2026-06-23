@@ -6,19 +6,33 @@ use std::time::Duration;
 
 use reddb::application::{CatalogUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::catalog::CollectionModel;
+use reddb::storage::layout::{LayoutOverrides, LogDestination, LogRoutingOverrides};
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::queue::QueueMode;
 use reddb::storage::schema::Value;
 use reddb::storage::{
     EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
 };
-use reddb::RedDBRuntime;
+use reddb::{RedDBOptions, RedDBRuntime};
 use std::collections::{HashMap, HashSet};
 
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
+}
+
+fn persistent_rt_with_audit(tag: &str) -> (support::TempDbFile, RedDBRuntime) {
+    let db = support::temp_db_file(tag);
+    let options = RedDBOptions::persistent(db.path()).with_layout_overrides(LayoutOverrides {
+        logs: LogRoutingOverrides {
+            audit_log: Some(LogDestination::File(db.path().with_file_name("audit.log"))),
+            ..LogRoutingOverrides::default()
+        },
+        ..LayoutOverrides::default()
+    });
+    let runtime = RedDBRuntime::with_options(options).expect("persistent runtime");
+    (db, runtime)
 }
 
 /// Decode an internally-stored time-series tag value. Issue #543
@@ -259,7 +273,7 @@ fn test_select_from_queue_projects_without_consuming_or_leasing() {
 
 #[test]
 fn test_queue_move_filters_limits_and_keeps_peek_compatible() {
-    let rt = support::persistent_test_runtime("queue-move-audit");
+    let (_guard, rt) = persistent_rt_with_audit("queue-move-audit");
 
     exec(&rt, "CREATE QUEUE failed_jobs");
     exec(&rt, "CREATE QUEUE jobs");
