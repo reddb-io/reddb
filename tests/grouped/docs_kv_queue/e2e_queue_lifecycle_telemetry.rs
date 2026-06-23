@@ -12,13 +12,23 @@ mod support;
 use std::time::Duration;
 
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
+use reddb::storage::layout::{LayoutOverrides, LogDestination, LogRoutingOverrides};
 use reddb::storage::schema::Value;
-use reddb::RedDBRuntime;
+use reddb::{RedDBOptions, RedDBRuntime};
 
 use support::prometheus::get;
 
-fn rt(tag: &str) -> support::PersistentRuntime {
-    support::persistent_test_runtime(tag)
+fn rt(tag: &str) -> (support::TempDbFile, RedDBRuntime) {
+    let db = support::temp_db_file(tag);
+    let options = RedDBOptions::persistent(db.path()).with_layout_overrides(LayoutOverrides {
+        logs: LogRoutingOverrides {
+            audit_log: Some(LogDestination::File(db.path().with_file_name("audit.log"))),
+            ..LogRoutingOverrides::default()
+        },
+        ..LayoutOverrides::default()
+    });
+    let runtime = RedDBRuntime::with_options(options).expect("runtime");
+    (db, runtime)
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
@@ -43,7 +53,7 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
     // Queue DLQ promotion must still persist to the runtime that performed
     // the NACK, not whichever runtime first installed the global sink.
     let _global_sink_owner = rt("queue-lifecycle-global-sink");
-    let rt = rt("queue-lifecycle-audit");
+    let (_guard, rt) = rt("queue-lifecycle-audit");
 
     // Build a queue with a DLQ target + a low max_attempts so the
     // second NACK promotes immediately.
@@ -112,7 +122,7 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
     // -------------------------------------------------------------
     // Prometheus assertion — scrape via the public /metrics endpoint
     // -------------------------------------------------------------
-    let (status, body) = get(rt.clone_runtime(), "/metrics");
+    let (status, body) = get(rt.clone(), "/metrics");
     assert_eq!(status, 200, "metrics endpoint should return 200");
 
     // deliver fired twice (one per READ).
