@@ -150,7 +150,7 @@ root `package.json` together.
   Runner, AWS Lambda+EFS (read replica), Azure Container Apps,
   Cloudflare Containers, Fly Machines, Google Cloud Run, HashiCorp
   Nomad, and Kubernetes (StatefulSet + PVC).
-- **`Dockerfile.musl`** — static-binary container image
+- **`docker/Dockerfile.musl`** — static-binary container image
   (`release-static` profile, `panic = "abort"`), suitable for
   distroless / scratch base images.
 - **systemd unit** + **Dockerfile health probe** wired through the

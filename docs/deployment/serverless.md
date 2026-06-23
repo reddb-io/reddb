@@ -174,7 +174,7 @@ End-to-end examples live in `examples/`. All set
 | HashiCorp Nomad | `examples/nomad/reddb.nomad.hcl` |
 | Kubernetes (StatefulSet + PVC) | `examples/kubernetes/reddb.yaml` |
 
-Static-binary container image is shipped via `Dockerfile.musl`
+Static-binary container image is shipped via `docker/Dockerfile.musl`
 (release profile `release-static`, `panic = "abort"`), suitable for
 distroless / scratch base images.
 

@@ -32,7 +32,7 @@ test("red_client container release contract uses the thin client Dockerfile and 
   assert.match(dockerfile, /FROM gcr\.io\/distroless\/static-debian12:nonroot AS runtime/);
   assert.match(dockerfile, /ENTRYPOINT \["\/red_client"\]/);
   assert.match(releaseWorkflow, /publish-client-image:/);
-  assert.match(releaseWorkflow, /file: Dockerfile\.client/);
+  assert.match(releaseWorkflow, /file: docker\/Dockerfile\.client\.release/);
   assert.match(releaseWorkflow, /ghcr\.io\/\$\{\{ github\.repository \}\}-client/);
   assert.match(adr, /ghcr\.io\/reddb-io\/reddb-client:<version>/);
   assert.match(adr, /Target size: < 10 MB/);
@@ -40,7 +40,7 @@ test("red_client container release contract uses the thin client Dockerfile and 
 
 test("Docker release images publish from GitHub Actions under reddb-io GHCR only", () => {
   const releaseWorkflow = read(".github/workflows/release.yml");
-  const releaseDockerfile = read("Dockerfile.release");
+  const releaseDockerfile = read("docker/Dockerfile.release");
   const dockerHubHost = new RegExp(["docker", "io"].join("\\."));
   const dockerHubSecretPrefix = new RegExp(["DOCKER", "HUB_"].join(""));
   const legacyPersonalGhcrNamespace = new RegExp(["ghcr\\.io/[^\\s'\"]*foratt", "ini"].join(""), "i");
@@ -57,7 +57,7 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
   const publishDocker = releaseWorkflow.match(/publish-docker:[\s\S]*?(?=\n  publish-client-image:)/)?.[0] ?? "";
   assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-x86_64/);
   assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-aarch64/);
-  assert.match(publishDocker, /file: Dockerfile\.release/);
+  assert.match(publishDocker, /file: docker\/Dockerfile\.release/);
 });
 
 test("release workflow uses runnable toolchain and pack commands", () => {
@@ -73,6 +73,9 @@ test("main Docker image builds from files present in the repository", () => {
   const compose = read("testdata/compose/replica.yml");
 
   assert.match(dockerfile, /COPY crates\/ crates\//);
+  assert.match(dockerfile, /cargo fetch --locked/);
+  assert.match(dockerfile, /cargo build --release --locked --bin red/);
+  assert.doesNotMatch(dockerfile, /echo 'fn main\(\) \{\}'/);
   assert.doesNotMatch(dockerfile, /COPY proto\//);
   assert.doesNotMatch(dockerfile, /COPY benches\//);
   assert.match(compose, /context: \.\.\/\.\./);
@@ -132,7 +135,7 @@ test("nightly DR drill workflow uses the current-shell runner and public make ta
 
 test("changesets checkout uses the default token before release PAT handoff", () => {
   const workflow = read(".github/workflows/changesets.yml");
-  const checkoutStep = workflow.match(/- uses: actions\/checkout@v5[\s\S]*?(?=\n\n      - uses: pnpm\/action-setup@v4)/)?.[0] ?? "";
+  const checkoutStep = workflow.match(/- uses: actions\/checkout@v6[\s\S]*?(?=\n\n      - uses: pnpm\/action-setup@v6)/)?.[0] ?? "";
 
   assert.match(checkoutStep, /fetch-depth: 0/);
   assert.doesNotMatch(checkoutStep, /\n\s+token:/);
