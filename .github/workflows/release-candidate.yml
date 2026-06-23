@@ -1,0 +1,178 @@
+name: Release Candidate
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+# New pushes to main cancel the in-flight RC — only the latest commit matters.
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: github.actor != 'dependabot[bot]'
+    outputs:
+      should_skip: ${{ steps.plan.outputs.should_skip }}
+      rc_version: ${{ steps.plan.outputs.rc_version }}
+      rc_tag: ${{ steps.plan.outputs.rc_tag }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compute release candidate version
+        id: plan
+        env:
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          COMMIT_MSG="${HEAD_COMMIT_MESSAGE:-}"
+          SHOULD_SKIP=false
+
+          # Skip release-bot commits and explicit [skip rc] marker.
+          if [[ "$COMMIT_MSG" =~ ^chore:\ release ]] \
+            || [[ "$COMMIT_MSG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || [[ "$COMMIT_MSG" == *"[skip rc]"* ]]; then
+            SHOULD_SKIP=true
+          fi
+
+          BASE_VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)
+          RC_VERSION="${BASE_VERSION}-rc.${GITHUB_RUN_NUMBER}"
+          RC_TAG="v${RC_VERSION}"
+
+          echo "should_skip=${SHOULD_SKIP}" >> "$GITHUB_OUTPUT"
+          echo "rc_version=${RC_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "rc_tag=${RC_TAG}" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Build Linux x86_64
+    needs: [plan]
+    if: needs.plan.outputs.should_skip != 'true'
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rc-linux-x86_64
+          cache-on-failure: "true"
+
+      - name: Build (release-fast)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+        run: |
+          cargo build --locked --profile release-fast --bin red
+          cargo build --locked --profile release-fast --bin red_client -p reddb-io-client --no-default-features
+
+      - name: Strip
+        run: |
+          strip target/release-fast/red
+          strip target/release-fast/red_client
+
+      - name: Package
+        run: |
+          cp target/release-fast/red red-linux-x86_64
+          cp target/release-fast/red_client red_client-linux-x86_64
+          shasum -a 256 red-linux-x86_64 > red-linux-x86_64.sha256
+          shasum -a 256 red_client-linux-x86_64 > red_client-linux-x86_64.sha256
+
+      - name: Smoke test
+        run: |
+          ./red-linux-x86_64 version
+          set +e; ./red_client-linux-x86_64; rc=$?; set -e
+          [[ "$rc" == "1" ]] || { echo "red_client smoke: expected exit 1, got $rc"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64
+          path: |
+            red-linux-x86_64
+            red-linux-x86_64.sha256
+            red_client-linux-x86_64
+            red_client-linux-x86_64.sha256
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  publish-github:
+    name: GitHub Pre-release
+    needs: [plan, build-linux]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Create pre-release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.plan.outputs.rc_tag }}
+          name: RedDB ${{ needs.plan.outputs.rc_tag }}
+          prerelease: true
+          body: |
+            Release candidate built from `${{ github.sha }}` with `--profile release-fast`.
+
+            **Not for production use.** Linux x86_64 binary only.
+
+            ```bash
+            # Server + embedded engine
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/red-linux-x86_64 -o red && chmod +x red
+
+            # Thin remote-only client
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/red_client-linux-x86_64 -o red_client && chmod +x red_client
+            ```
+          files: release/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    name: Publish npm @rc
+    needs: [plan, publish-github]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Set RC version in package.json
+        run: |
+          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${RC_VERSION}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "::warning::NPM_TOKEN not set — skipping npm @rc publish."
+            exit 0
+          fi
+          pnpm publish --tag rc --access public --no-git-checks
