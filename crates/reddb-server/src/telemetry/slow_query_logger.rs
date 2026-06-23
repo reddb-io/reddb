@@ -40,7 +40,21 @@ pub enum QueryKind {
 }
 
 impl QueryKind {
-    fn as_str(self) -> &'static str {
+    /// Every variant, in stable order. The histogram substrate (#1241)
+    /// keys one fixed cell per variant off this array, so the order
+    /// here defines the bounded `kind` cardinality budget (ADR 0060 §4).
+    pub const ALL: [QueryKind; 8] = [
+        Self::Select,
+        Self::Insert,
+        Self::Update,
+        Self::Delete,
+        Self::Bulk,
+        Self::Aggregate,
+        Self::DDL,
+        Self::Internal,
+    ];
+
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Select => "select",
             Self::Insert => "insert",
@@ -50,6 +64,21 @@ impl QueryKind {
             Self::Aggregate => "aggregate",
             Self::DDL => "ddl",
             Self::Internal => "internal",
+        }
+    }
+
+    /// Dense index into [`QueryKind::ALL`] — the cell offset used by the
+    /// latency histogram substrate.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Select => 0,
+            Self::Insert => 1,
+            Self::Update => 2,
+            Self::Delete => 3,
+            Self::Bulk => 4,
+            Self::Aggregate => 5,
+            Self::DDL => 6,
+            Self::Internal => 7,
         }
     }
 }
