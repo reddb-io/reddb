@@ -509,7 +509,7 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), Token::String(_)) {
             return self.parse_string();
         }
-        // SELECT / INSERT / UPDATE / DELETE are real tokens; everything
+        // SELECT / INSERT / UPDATE / DELETE / DROP are real tokens; everything
         // else is exposed as an `Ident` by the lexer.
         match self.peek() {
             Token::Select => {
@@ -527,6 +527,10 @@ impl<'a> Parser<'a> {
             Token::Delete => {
                 self.advance()?;
                 Ok("delete".into())
+            }
+            Token::Drop => {
+                self.advance()?;
+                Ok("drop".into())
             }
             Token::Ident(_) => {
                 let raw = self.expect_ident()?;

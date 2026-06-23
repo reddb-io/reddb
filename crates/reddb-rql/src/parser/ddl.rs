@@ -868,7 +868,7 @@ impl<'a> Parser<'a> {
         if self.consume(&Token::Add)? {
             if self.consume_ident_ci("SUBSCRIPTION")? {
                 // ADD SUBSCRIPTION name TO queue [REDACT (...)] [WHERE ...]
-                let sub_name = self.expect_ident()?;
+                let sub_name = self.expect_ident_or_keyword()?;
                 let descriptor = self.parse_subscription_descriptor(table_name.to_string())?;
                 Ok(AlterOperation::AddSubscription {
                     name: sub_name,
@@ -898,7 +898,7 @@ impl<'a> Parser<'a> {
         } else if self.consume(&Token::Drop)? {
             if self.consume_ident_ci("SUBSCRIPTION")? {
                 // DROP SUBSCRIPTION name
-                let sub_name = self.expect_ident()?;
+                let sub_name = self.expect_ident_or_keyword()?;
                 Ok(AlterOperation::DropSubscription { name: sub_name })
             } else {
                 // DROP COLUMN name (COLUMN keyword is optional)

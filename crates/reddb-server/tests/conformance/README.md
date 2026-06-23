@@ -30,7 +30,7 @@ error fragment:
 input = "INSERT INTO users (id)"
 expected_error_substring = "Unexpected token: <EOF>"
 expected_error_kind = "Syntax"
-source = "crates/reddb-server/src/storage/query/parser/error.rs:81"
+source = "crates/reddb-rql/src/parser/error.rs:81"
 kind = "negative"
 ```
 
