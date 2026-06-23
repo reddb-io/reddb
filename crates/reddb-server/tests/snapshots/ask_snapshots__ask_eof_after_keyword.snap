@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"ASK\")"
 ---
 input: "ASK"
 kind:  Syntax
-error: Parse error at 1:4: Unexpected token: EOF (expected: string)
+error: Parse error at 1:4: Unexpected token: EOF (expected: string, $N, ?)

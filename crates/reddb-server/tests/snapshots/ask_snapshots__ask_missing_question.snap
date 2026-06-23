@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"ASK USING openai\")"
 ---
 input: "ASK USING openai"
 kind:  Syntax
-error: Parse error at 1:5: Unexpected token: USING (expected: string)
+error: Parse error at 1:5: Unexpected token: USING (expected: string, $N, ?)
