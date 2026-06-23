@@ -25,7 +25,13 @@ pub const STORE_VERSION_V7: u32 = 7;
 pub const STORE_VERSION_V8: u32 = 8;
 /// Entity records persist MVCC xmin/xmax.
 pub const STORE_VERSION_V9: u32 = 9;
-pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V9;
+/// A trailing opaque auxiliary-metadata blob follows the cross-references
+/// (before the CRC footer). It carries store-level metadata that must
+/// survive a restart inside the single-file artifact — most importantly the
+/// collection contracts (their `declared_model`), which otherwise live only
+/// in RedDB's in-memory cache and are lost on reopen.
+pub const STORE_VERSION_V10: u32 = 10;
+pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V10;
 
 pub const METADATA_MAGIC: &[u8; 4] = b"RDM2";
 pub const METADATA_HEADER_BYTES: usize = 12;
@@ -417,6 +423,7 @@ pub fn is_supported_store_version(version: u32) -> bool {
             | STORE_VERSION_V7
             | STORE_VERSION_V8
             | STORE_VERSION_V9
+            | STORE_VERSION_V10
     )
 }
 
