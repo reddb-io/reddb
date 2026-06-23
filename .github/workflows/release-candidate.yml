@@ -218,19 +218,14 @@ jobs:
           node-version: '22'
 
       - name: Sync RC version across all manifests
+        # workspace dep requirements ("1.0") are intentionally kept as-is so
+        # cargo resolves them against the already-published stable siblings on
+        # crates.io. cargo publish does not use Cargo.lock, so no generate-lockfile.
         run: |
           RC_VERSION="${{ needs.plan.outputs.rc_version }}"
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${RC_VERSION}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
           node scripts/sync-version.js
           bash scripts/check-versions.sh
-
-      - name: Patch workspace dep version requirements for RC
-        run: |
-          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
-          sed -i -E "s/(package = \"reddb-io-[^\"]+\", version = \")[^\"]+(\")/\1=${RC_VERSION}\2/" Cargo.toml
-
-      - name: Regenerate lockfile after version sync
-        run: cargo generate-lockfile
 
       - name: Publish workspace crates
         env:
