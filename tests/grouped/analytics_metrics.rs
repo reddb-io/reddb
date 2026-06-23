@@ -21,6 +21,9 @@ mod e2e_analytics_v0_smoke;
 #[path = "docs_kv_queue/e2e_document_sql_analytics.rs"]
 mod e2e_document_sql_analytics;
 
+#[path = "../e2e_issue_1241_query_latency_histogram.rs"]
+mod e2e_issue_1241_query_latency_histogram;
+
 #[path = "probabilistic/e2e_issue_542_probabilistic_commands.rs"]
 mod e2e_issue_542_probabilistic_commands;
 

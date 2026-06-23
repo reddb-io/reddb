@@ -61,6 +61,24 @@ pub(crate) struct ClusterStatusInputs {
     pub(crate) system: SystemSnapshot,
 
     pub(crate) replication: ReplicationSnapshot,
+
+    /// Query latency percentiles derived from the recorded histogram
+    /// substrate (#1241). `None` when no query has been sampled yet —
+    /// the field stays an honest `unavailable` envelope (§6) rather than
+    /// reporting a fabricated zero.
+    pub(crate) latency: Option<LatencySample>,
+}
+
+/// Overall query latency percentiles for `/cluster/status`, derived from
+/// the cross-kind histogram rollup. Seconds.
+#[derive(Debug, Clone)]
+pub(crate) struct LatencySample {
+    pub(crate) p50_seconds: f64,
+    pub(crate) p95_seconds: f64,
+    pub(crate) p99_seconds: f64,
+    /// Number of samples behind the percentiles, so the UI can show how
+    /// much the window is backed by.
+    pub(crate) sample_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +189,36 @@ pub(crate) fn unavailable_json(reason: &str) -> JsonValue {
     JsonValue::Object(object)
 }
 
+/// Render the query latency field (#1241). Honest by construction: with
+/// no recorded sample the field is the same `unavailable` envelope it was
+/// before this slice (`latency_not_sampled`); once real samples exist it
+/// carries the P50/P95/P99 derived from the histogram rollup.
+fn latency_json(sample: Option<&LatencySample>) -> JsonValue {
+    let Some(sample) = sample else {
+        return unavailable_json("latency_not_sampled");
+    };
+    let round_us = |secs: f64| (secs * 1_000_000.0).round() / 1_000_000.0;
+    let mut object = Map::new();
+    object.insert("available".to_string(), JsonValue::Bool(true));
+    object.insert(
+        "p50_seconds".to_string(),
+        JsonValue::Number(round_us(sample.p50_seconds)),
+    );
+    object.insert(
+        "p95_seconds".to_string(),
+        JsonValue::Number(round_us(sample.p95_seconds)),
+    );
+    object.insert(
+        "p99_seconds".to_string(),
+        JsonValue::Number(round_us(sample.p99_seconds)),
+    );
+    object.insert(
+        "sample_count".to_string(),
+        JsonValue::Number(sample.sample_count as f64),
+    );
+    JsonValue::Object(object)
+}
+
 /// Build the `/cluster/status` payload from a captured snapshot.
 pub(crate) fn cluster_status_json(inputs: &ClusterStatusInputs) -> JsonValue {
     let mut object = Map::new();
@@ -217,10 +265,7 @@ pub(crate) fn cluster_status_json(inputs: &ClusterStatusInputs) -> JsonValue {
         "throughput".to_string(),
         unavailable_json("throughput_not_sampled"),
     );
-    object.insert(
-        "latency".to_string(),
-        unavailable_json("latency_not_sampled"),
-    );
+    object.insert("latency".to_string(), latency_json(inputs.latency.as_ref()));
     object.insert(
         "last_error".to_string(),
         unavailable_json("last_error_not_tracked"),
@@ -574,6 +619,7 @@ mod tests {
                 apply_health: None,
                 apply_errors: vec![],
             },
+            latency: None,
         }
     }
 
@@ -823,6 +869,35 @@ mod tests {
             unavail_reason(repl.get("degraded").unwrap()),
             "process_role_unknown"
         );
+    }
+
+    #[test]
+    fn latency_flips_from_unavailable_to_percentiles_once_sampled() {
+        // #1241 — with no sample the field stays the honest envelope.
+        let json = cluster_status_json(&base_inputs());
+        assert_eq!(
+            unavail_reason(obj(&json).get("latency").unwrap()),
+            "latency_not_sampled"
+        );
+
+        // With a recorded sample it carries P50/P95/P99 + count.
+        let mut inputs = base_inputs();
+        inputs.latency = Some(LatencySample {
+            p50_seconds: 0.01,
+            p95_seconds: 0.2,
+            p99_seconds: 0.9,
+            sample_count: 100,
+        });
+        let json = cluster_status_json(&inputs);
+        let lat = obj(obj(&json).get("latency").unwrap());
+        assert_eq!(
+            lat.get("available").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(n(lat.get("p50_seconds").unwrap()), 0.01);
+        assert_eq!(n(lat.get("p95_seconds").unwrap()), 0.2);
+        assert_eq!(n(lat.get("p99_seconds").unwrap()), 0.9);
+        assert_eq!(n(lat.get("sample_count").unwrap()), 100.0);
     }
 
     #[test]
