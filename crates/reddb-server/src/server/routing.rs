@@ -3958,6 +3958,26 @@ mod tests {
         RedDBServer::new(runtime)
     }
 
+    fn fresh_audited_server() -> (tempfile::TempDir, RedDBServer) {
+        let dir = tempfile::Builder::new()
+            .prefix("reddb-routing-audit-")
+            .tempdir()
+            .expect("temp dir");
+        let opts = RedDBOptions::in_memory()
+            .with_data_path(dir.path().join("data.rdb"))
+            .with_layout_overrides(crate::storage::layout::LayoutOverrides {
+                logs: crate::storage::layout::LogRoutingOverrides {
+                    audit_log: Some(crate::storage::layout::LogDestination::File(
+                        dir.path().join("audit.log"),
+                    )),
+                    ..crate::storage::layout::LogRoutingOverrides::default()
+                },
+                ..crate::storage::layout::LayoutOverrides::default()
+            });
+        let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+        (dir, RedDBServer::new(runtime))
+    }
+
     #[test]
     fn ui_metadata_table_contract() {
         let server = fresh_server();
@@ -5448,10 +5468,7 @@ mod tests {
     /// Extract the `lease_handle` value (32-char hex) from an NDJSON
     /// `{"end": …}` envelope. Returns `None` when the envelope does not
     /// carry one (e.g. a non-streaming HTTP error response). Tests use
-    /// the handle as a unique key when grepping the shared audit log —
-    /// `RedDBOptions::in_memory()` writes `.audit.log` next to the
-    /// (unique-per-test) data path's *parent* `/tmp`, so multiple
-    /// tests running in the same process share the file.
+    /// the handle as a unique key when grepping the audit log.
     fn extract_lease_handle(raw: &[u8]) -> Option<String> {
         let (_head, body) = split_response(raw);
         let decoded = decode_chunked_body(&body);
@@ -5469,9 +5486,8 @@ mod tests {
         // an audit event. After a successful stream we expect both a
         // `stream.opened` and a `stream.closed` line carrying our
         // stream's unique lease_handle, with `reason=ok`. We filter
-        // by handle (not by action count) because the audit file is
-        // shared across in-process tests.
-        let server = fresh_server();
+        // by handle (not by action count).
+        let (_audit_dir, server) = fresh_audited_server();
         let raw = ndjson_query(&server, "SELECT 1 as n");
         let handle = extract_lease_handle(&raw).expect("end envelope carries handle");
         let body = read_audit_log(&server);
@@ -5571,7 +5587,7 @@ mod tests {
         // transition; the audit log must carry a `stream.closed` row
         // with `reason: capacity_refused` even though no lease was
         // ever issued.
-        let server = fresh_server();
+        let (_audit_dir, server) = fresh_audited_server();
         server
             .runtime
             .execute_query("SET CONFIG stream.max_global = 1")
@@ -5647,7 +5663,7 @@ mod tests {
         // = true. The stream itself still completes successfully —
         // the lease, not the token, governs subsequent chunks (PRD
         // #759 lease-decoupling property).
-        let server = fresh_server();
+        let (_audit_dir, server) = fresh_audited_server();
         // Synthetic JWT — header.payload.signature where payload
         // sets `exp: 1` (Unix epoch, well in the past). Auth is not
         // configured on this server, so the bearer is unverified;
@@ -5697,15 +5713,13 @@ mod tests {
         // Counterpoint — an opaque (non-JWT) bearer carries no `exp`
         // claim so the audit emitter has nothing to record. The
         // detector must not false-positive on api-key shapes.
-        let server = fresh_server();
+        let (_audit_dir, server) = fresh_audited_server();
         let request = ndjson_request_with_bearer("SELECT 1 as n", Some("opaque-api-key"));
         let raw = dispatch_streaming(&server, &request);
         assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 200"));
         let handle = extract_lease_handle(&raw).expect("end envelope carries handle");
         let body = read_audit_log(&server);
-        // Filter strictly by our stream's handle — the shared audit
-        // log may carry token-expired rows from other tests, but
-        // none should match this lease handle.
+        // Filter strictly by our stream's handle.
         assert!(
             !body.lines().any(|l| {
                 l.contains("\"action\":\"stream.token_expired_during_lease\"")
@@ -5753,7 +5767,7 @@ mod tests {
         // this test pins that property at the wire layer. The stream
         // must complete with `reason=ok` even though the JWT `exp` is
         // already in the past at the moment the open call returns.
-        let server = fresh_server();
+        let (_audit_dir, server) = fresh_audited_server();
         let token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.sig";
         let request = ndjson_request_with_bearer("SELECT 1 as n", Some(token));
         let raw = dispatch_streaming(&server, &request);
@@ -5770,8 +5784,7 @@ mod tests {
             text.lines().any(|l| l.starts_with("{\"row\":")),
             "row data must still flow when bearer credential is expired: {text}"
         );
-        // Close audit reason is `ok` — filter by handle so the shared
-        // audit file's other rows don't break the assertion.
+        // Close audit reason is `ok` — filter by handle.
         let audit = read_audit_log(&server);
         let close = audit
             .lines()
@@ -5792,7 +5805,7 @@ mod tests {
         // successful insert path produces the same opened/closed
         // pair, distinguishable from output streams only by the
         // executed query (recorded via query_hash).
-        let server = fresh_server();
+        let (_audit_dir, server) = fresh_audited_server();
         ddl(
             &server,
             "CREATE TABLE rows767 (id INTEGER PRIMARY KEY, name TEXT)",
