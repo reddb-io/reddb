@@ -49,7 +49,7 @@ cast_possible_truncation = "warn"
 
 [package]
 name = "reddb-io"
-version = "1.12.0"
+version = "1.12.1"
 edition.workspace = true
 # Cargo auto-discovers every top-level `tests/*.rs` file as a separate
 # integration-test binary. This crate has 269 such files; keep discovery off
