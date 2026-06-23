@@ -83,6 +83,13 @@ jobs:
           node scripts/sync-version.js
           bash scripts/check-versions.sh
 
+      - name: Patch workspace dep version requirements for RC
+        # Cargo does not match pre-release versions against range requirements like "^1.0".
+        # Pin every internal workspace dep to the exact RC version so generate-lockfile resolves.
+        run: |
+          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
+          sed -i -E "s/(package = \"reddb-io-[^\"]+\", version = \")[^\"]+(\")/\1=${RC_VERSION}\2/" Cargo.toml
+
       - name: Regenerate lockfile after version sync
         run: cargo generate-lockfile
 
@@ -216,6 +223,11 @@ jobs:
           node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${RC_VERSION}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
           node scripts/sync-version.js
           bash scripts/check-versions.sh
+
+      - name: Patch workspace dep version requirements for RC
+        run: |
+          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
+          sed -i -E "s/(package = \"reddb-io-[^\"]+\", version = \")[^\"]+(\")/\1=${RC_VERSION}\2/" Cargo.toml
 
       - name: Regenerate lockfile after version sync
         run: cargo generate-lockfile
