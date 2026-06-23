@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-rql"
-version = "1.12.0"
+version = "1.13.0"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB Query Language (RQL) front-end + conformance authority (ADR 0053). Owns the sqllogictest-format conformance suite whose truth comes from the public SQLite corpus; depends only on reddb-io-types."
