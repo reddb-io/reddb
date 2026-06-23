@@ -1,8 +1,0 @@
----
-source: crates/reddb-server/tests/queue_parser_snapshots.rs
-assertion_line: 95
-expression: "fmt_parse_error(\"QUEUE READ q workers\")"
----
-input: "QUEUE READ q workers"
-kind:  Syntax
-error: Parse error at 1:14: Unexpected token: workers (expected: CONSUMER)

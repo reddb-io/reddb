@@ -1,8 +1,0 @@
----
-source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
-assertion_line: 116
-expression: "fmt_parse_error(\"CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '-1d'\")"
----
-input: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '-1d'"
-kind:  Syntax
-error: Parse error at 1:57: CHUNK_INTERVAL duration "-1d" is not a valid duration literal

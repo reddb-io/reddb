@@ -1,8 +1,0 @@
----
-source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
-assertion_line: 76
-expression: "fmt_parse_error(\"CREATE TIMESERIES m1 RETENTION 90 fortnights\")"
----
-input: "CREATE TIMESERIES m1 RETENTION 90 fortnights"
-kind:  Syntax
-error: Parse error at 1:35: unknown duration unit "fortnights", expected s/m/h/d

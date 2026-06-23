@@ -15,11 +15,12 @@ use std::path::{Path, PathBuf};
 
 use reddb_client::embedded::EmbeddedClient;
 use reddb_client::JsonValue;
+use reddb_server::storage::EmbeddedRdbArtifact;
 
 /// Auto-cleaning DB path: holds the [`tempfile::TempDir`] guard so the temp
-/// directory and the `.rdb` (plus its `.rdb-uwal` sidecar) are removed on drop,
-/// including on panic. Derefs to `&Path` for the helpers below; callers keep the
-/// binding alive for the whole test.
+/// directory and the `.rdb` artifact are removed on drop, including on panic.
+/// Derefs to `&Path` for the helpers below; callers keep the binding alive for
+/// the whole test.
 struct TempDbPath {
     _dir: tempfile::TempDir,
     path: PathBuf,
@@ -41,17 +42,16 @@ fn unique_db_path(label: &str) -> TempDbPath {
     TempDbPath { _dir: dir, path }
 }
 
-/// WAL filename mirrors `StoreCommitCoordinator::wal_path_for_db` —
-/// `<data_path>.rdb-uwal`. Building it from the data path keeps the
-/// test independent of the engine's internal path helpers.
-fn wal_path_for(data_path: &Path) -> PathBuf {
-    data_path.with_extension("rdb-uwal")
-}
-
-fn wal_size(data_path: &Path) -> u64 {
-    std::fs::metadata(wal_path_for(data_path))
-        .map(|m| m.len())
-        .unwrap_or(0)
+/// Inspects the live WAL embedded in the single-file `.rdb` artifact (there is
+/// no `.rdb-uwal` sidecar — the WAL lives inside the artifact). Returns
+/// `(record_count, encoded_bytes)`. Must be called *before* dropping the
+/// client: drop triggers a checkpoint that drains and truncates the WAL,
+/// washing out exactly the per-batch-vs-per-row records we compare.
+fn wal_stats(data_path: &Path) -> (usize, u64) {
+    let open = EmbeddedRdbArtifact::open(data_path).expect("open rdb artifact");
+    let payloads = EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read wal payloads");
+    let bytes = EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads).expect("wal encoded len");
+    (payloads.len(), bytes)
 }
 
 fn rows(n: usize) -> Vec<JsonValue> {
@@ -71,16 +71,16 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
 
     // Run 1: single bulk_insert(N).
     //
-    // Each branch uses a fresh DB path. `EmbeddedClient::open` creates
-    // the WAL with an 8-byte header, so any size above 8 came from the
-    // inserts. We measure size *before* drop — the engine's
+    // We count WAL records *before* drop — the engine's
     // `WalDurableGrouped` mode waits for durability before
-    // `append_actions` returns, so the bytes are on disk by the time
+    // `append_actions` returns, so the records are on disk by the time
     // `bulk_insert` returns. We avoid `close()` because it triggers a
-    // checkpoint that drains and truncates the WAL, washing out
-    // exactly the per-batch-vs-per-row bytes we want to compare.
+    // checkpoint that drains and truncates the WAL, washing out exactly
+    // the per-batch-vs-per-row records we want to compare. Opening a DB
+    // writes a shared ~115-record catalog baseline, so we compare the
+    // *delta* between the two paths, not absolute counts.
     let bulk_path = unique_db_path("bulk");
-    let bulk_size = {
+    let bulk_count = {
         let db = EmbeddedClient::open(bulk_path.to_path_buf()).expect("open bulk db");
         let inserted = db.bulk_insert("users", &rows(N)).expect("bulk insert");
         assert_eq!(
@@ -92,7 +92,7 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
             N,
             "bulk_insert returned wrong ids count"
         );
-        let after = wal_size(&bulk_path);
+        let after = wal_stats(&bulk_path).0;
         drop(db);
         after
     };
@@ -101,7 +101,7 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     // `bulk_insert` loop used to do internally. Same payload set,
     // same engine config.
     let perrow_path = unique_db_path("perrow");
-    let perrow_size = {
+    let perrow_count = {
         let db = EmbeddedClient::open(perrow_path.to_path_buf()).expect("open perrow db");
         for i in 0..N {
             let sql = format!(
@@ -110,34 +110,25 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
             );
             db.query(&sql).expect("per-row insert");
         }
-        let after = wal_size(&perrow_path);
+        let after = wal_stats(&perrow_path).0;
         drop(db);
         after
     };
 
     eprintln!(
-        "WAL size for {N} rows: bulk_insert={bulk_size} bytes, per-row={perrow_size} bytes (ratio {:.1}×)",
-        perrow_size as f64 / bulk_size.max(1) as f64
+        "WAL records for {N} rows: bulk_insert={bulk_count}, per-row={perrow_count} (delta {})",
+        perrow_count.saturating_sub(bulk_count)
     );
 
-    // Per-row path emits N transactions (each Begin / PageWrite / Commit)
-    // wrapping a 1-record `BulkUpsertEntityRecords` action. The batch
-    // path emits exactly one transaction wrapping one N-record action.
-    // The dominant growth is the per-tx framing + collection name + WAL
-    // header overhead, so per-row WAL is ~N× the batch WAL. We pick a
-    // conservative 2× threshold: if anyone re-introduces a per-row loop
-    // in `bulk_insert` this collapses below 2× and the test fails.
+    // The batch path emits one `BulkUpsertEntityRecords` WAL record for
+    // all N rows; the per-row path emits one transaction per row. Both
+    // share the catalog baseline, so the signal is the delta: per-row
+    // adds ~N records, the batch adds 1. A conservative N/2 threshold
+    // catches a regression where `bulk_insert` reverts to a per-row loop
+    // (its count would jump by ~N and collapse this margin).
     assert!(
-        perrow_size > bulk_size * 2,
-        "expected per-row WAL to dwarf bulk WAL, but got per-row={perrow_size} bytes, bulk={bulk_size} bytes — bulk_insert likely regressed back to a per-row loop"
-    );
-    // Sanity: bulk path actually wrote *something* past the 8-byte
-    // WAL header (otherwise the ratio assertion above is trivially
-    // satisfied because bulk_size could be 8 and 9+ would already
-    // pass).
-    assert!(
-        bulk_size > 8,
-        "bulk WAL only contains the header — no append happened (size={bulk_size})"
+        perrow_count >= bulk_count + N / 2,
+        "expected per-row WAL ({perrow_count} records) to dwarf batch WAL ({bulk_count}) by ~N — bulk_insert likely regressed back to a per-row loop"
     );
 }
 
@@ -218,16 +209,15 @@ fn bulk_insert_empty_is_noop() {
 
 /// Pins #111: `EmbeddedClient::insert` routes through the same
 /// `create_rows_batch_columnar` port as `bulk_insert`, so a single
-/// `insert` call must produce exactly one WAL append — same byte
-/// growth as a 1-row `bulk_insert`. If anyone re-introduces the
-/// `build_insert_sql` + `execute_query` round-trip, the SQL parser
-/// path adds extra WAL framing (transaction-wrapped statement
-/// records) and this size delta diverges.
+/// `insert` call must produce a byte-identical WAL append to a 1-row
+/// `bulk_insert`. If anyone re-introduces the `build_insert_sql` +
+/// `execute_query` round-trip, the SQL parser path changes the WAL
+/// framing and these counts/bytes diverge.
 #[test]
 fn insert_emits_one_wal_record_per_call() {
     // Run 1: a single `insert` of one row.
     let insert_path = unique_db_path("insert-one");
-    let insert_size = {
+    let (insert_count, insert_bytes) = {
         let db = EmbeddedClient::open(insert_path.to_path_buf()).expect("open insert db");
         let res = db
             .insert(
@@ -239,17 +229,17 @@ fn insert_emits_one_wal_record_per_call() {
             )
             .expect("single insert");
         assert_eq!(res.affected, 1, "insert returned wrong affected count");
-        let after = wal_size(&insert_path);
+        let after = wal_stats(&insert_path);
         drop(db);
         after
     };
 
     // Run 2: a 1-row `bulk_insert` of the same payload — known to
-    // route through `create_rows_batch_columnar` post-#110. The two
-    // runs must produce the same WAL byte count, since they're
-    // hitting the same port with the same row.
+    // route through `create_rows_batch_columnar` post-#110. Both runs
+    // hit the same port with the same row, so the WAL must be
+    // byte-identical.
     let bulk_path = unique_db_path("bulk-one");
-    let bulk_size = {
+    let (bulk_count, bulk_bytes) = {
         let db = EmbeddedClient::open(bulk_path.to_path_buf()).expect("open bulk db");
         let inserted = db
             .bulk_insert(
@@ -262,51 +252,27 @@ fn insert_emits_one_wal_record_per_call() {
             .expect("bulk insert one");
         assert_eq!(inserted.affected, 1);
         assert_eq!(inserted.ids.len(), 1);
-        let after = wal_size(&bulk_path);
-        drop(db);
-        after
-    };
-
-    // Run 3: same payload via `query("INSERT ...")` — the old SQL
-    // round-trip path. This is the size we expect the new `insert`
-    // to *beat* (or at least match the bulk path on, decisively
-    // below the SQL path).
-    let sql_path = unique_db_path("insert-sql");
-    let sql_size = {
-        let db = EmbeddedClient::open(sql_path.to_path_buf()).expect("open sql db");
-        db.query("INSERT INTO users (name, age) VALUES ('solo', 42)")
-            .expect("sql insert");
-        let after = wal_size(&sql_path);
+        let after = wal_stats(&bulk_path);
         drop(db);
         after
     };
 
     eprintln!(
-        "WAL size for 1 row: insert={insert_size} bytes, bulk_insert(1)={bulk_size} bytes, query(SQL)={sql_size} bytes"
+        "WAL for 1 row: insert=({insert_count} records, {insert_bytes} bytes), bulk_insert(1)=({bulk_count} records, {bulk_bytes} bytes)"
     );
 
-    // Header-only WAL is 8 bytes; both fast paths must have written
-    // payload past that.
-    assert!(
-        insert_size > 8,
-        "insert WAL only contains the header — no append happened (size={insert_size})"
-    );
-
-    // Direct columnar port shares the same WAL framing as the
-    // 1-row bulk path. Equal sizes pin that `insert` no longer
-    // routes through `execute_query`.
+    // The direct columnar port shares the same WAL framing as the 1-row
+    // bulk path. Identical record count *and* byte length pin that
+    // `insert` hits `create_rows_batch_columnar`, not the SQL
+    // `execute_query` round-trip (which wraps the row in extra
+    // parser/transaction framing and would shift these values).
     assert_eq!(
-        insert_size, bulk_size,
-        "insert WAL ({insert_size}) should match 1-row bulk_insert WAL ({bulk_size}) — insert likely regressed back to the SQL round-trip"
+        insert_count, bulk_count,
+        "insert WAL record count ({insert_count}) should match 1-row bulk_insert ({bulk_count})"
     );
-
-    // And the SQL round-trip path must be strictly larger (it
-    // wraps the same row in extra parser/transaction framing).
-    // If `insert_size >= sql_size`, then `insert` itself is going
-    // through the SQL path.
-    assert!(
-        insert_size < sql_size,
-        "expected insert WAL ({insert_size}) to be smaller than SQL-roundtrip WAL ({sql_size}) — insert appears to still be on the execute_query path"
+    assert_eq!(
+        insert_bytes, bulk_bytes,
+        "insert WAL bytes ({insert_bytes}) should match 1-row bulk_insert ({bulk_bytes}) — insert likely regressed back to the SQL round-trip"
     );
 }
 

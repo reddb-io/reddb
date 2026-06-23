@@ -1,7 +1,8 @@
 ---
 source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+assertion_line: 128
 expression: "fmt_parse_error(\"CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '1 fortnight'\")"
 ---
 input: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '1 fortnight'"
 kind:  Syntax
-error: Parse error at 1:66: TTL duration '1 fortnight' is not a valid duration literal
+error: Parse error at 1:66: TTL duration "1 fortnight" is not a valid duration literal
