@@ -294,7 +294,42 @@ impl RedDBServer {
             .and_then(|(id, _role)| id.tenant)
     }
 
+    /// Dispatch one HTTP request and record its method/route/status into
+    /// the operational telemetry counter (`reddb_http_requests_total`,
+    /// issue #1239). The label normalization folds the raw path to its
+    /// matched route *template* (or `__unmatched__`) so high-cardinality
+    /// paths/ids/query strings never become labels; the status is folded to
+    /// its class. Recording wraps the full dispatch so gate rejections
+    /// (401/404/405/429) are counted too — every handled request increments.
     pub(crate) fn route(&self, request: HttpRequest) -> HttpResponse {
+        let method_label = http_request_metrics::method_label(&request.method);
+        let route_label = self.http_metric_route_label(&request.method, &request.path);
+        let response = self.dispatch_route(request);
+        self.http_request_metrics()
+            .record(method_label, route_label, response.status);
+        response
+    }
+
+    /// Normalize `(method, path)` to a bounded static route label: the
+    /// matched catalog route *template* (e.g. `/catalog/collections/:name`),
+    /// or the reserved `__unmatched__` bucket. Alias paths are resolved to
+    /// their canonical template first so an alias and its canonical share
+    /// one label. This is the only place raw paths are inspected, and the
+    /// output is always one of the static route patterns — never the path.
+    fn http_metric_route_label(&self, method: &str, path: &str) -> &'static str {
+        let Some(method) = route_catalog::RouteMethod::from_http_method(method) else {
+            return http_request_metrics::UNMATCHED_ROUTE;
+        };
+        let catalog = routes::discovered_route_catalog();
+        let canonical = catalog.resolve_alias(method, path);
+        let lookup = canonical.as_deref().unwrap_or(path);
+        match catalog.find(method, lookup) {
+            Some(matched) => matched.spec.pattern,
+            None => http_request_metrics::UNMATCHED_ROUTE,
+        }
+    }
+
+    fn dispatch_route(&self, request: HttpRequest) -> HttpResponse {
         let request = Self::rewrite_route_alias(request);
         let HttpRequest {
             method,
@@ -3286,6 +3321,65 @@ mod tests {
             .headers
             .insert("authorization".to_string(), format!("Bearer {token}"));
         request
+    }
+
+    #[test]
+    fn http_request_counter_collapses_raw_paths_to_route_template() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        // Two distinct high-cardinality paths under the same dynamic route
+        // must both fold to the single `/catalog/collections/:name` label —
+        // the raw collection names never appear as labels. Status class is
+        // left unasserted (the collections may not exist); the point is the
+        // route dimension collapses regardless of outcome.
+        let _ = server.route(request("/catalog/collections/users"));
+        let _ = server.route(request("/catalog/collections/orders"));
+
+        let snapshot = server.http_request_metrics().snapshot();
+        let collapsed: u64 = snapshot
+            .iter()
+            .filter(|(labels, _)| {
+                labels.method == "GET" && labels.route == "/catalog/collections/:name"
+            })
+            .map(|(_, count)| *count)
+            .sum();
+        assert_eq!(
+            collapsed, 2,
+            "both raw collection paths must collapse to one route-template series: {snapshot:?}"
+        );
+
+        // The raw paths must not have leaked into the snapshot as labels.
+        assert!(
+            snapshot
+                .iter()
+                .all(|(labels, _)| !labels.route.contains("users")
+                    && !labels.route.contains("orders")),
+            "raw collection names must never become route labels: {snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn http_request_counter_records_unmatched_paths_in_reserved_bucket() {
+        use crate::server::http_request_metrics::{HttpRequestLabels, UNMATCHED_ROUTE};
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        // Unknown high-cardinality paths must fold to the reserved bucket so
+        // a 404 scan cannot blow up the `route` dimension.
+        let _ = server.route(request("/no/such/path/aaaa"));
+        let _ = server.route(request("/no/such/path/bbbb"));
+
+        let unmatched = server.http_request_metrics().count(HttpRequestLabels {
+            method: "GET",
+            route: UNMATCHED_ROUTE,
+            status: "4xx",
+        });
+        assert_eq!(
+            unmatched, 2,
+            "unmatched paths collapse to one bounded bucket"
+        );
     }
 
     #[test]

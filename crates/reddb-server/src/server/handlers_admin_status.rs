@@ -270,8 +270,8 @@ impl RedDBServer {
     pub(crate) fn handle_cluster_status(&self) -> HttpResponse {
         use crate::presentation::cluster_status_json::{
             cluster_status_json, ClusterStatusInputs, ConnectionSnapshot, DeploymentShapeView,
-            ProcessRoleView, ReplicaView, ReplicationSnapshot, StorageSnapshot, SystemSnapshot,
-            TransportListenerView, TransportSnapshot, WalSnapshot,
+            LatencySample, ProcessRoleView, ReplicaView, ReplicationSnapshot, StorageSnapshot,
+            SystemSnapshot, TransportListenerView, TransportSnapshot, WalSnapshot,
         };
 
         let lifecycle = self.runtime.lifecycle();
@@ -374,6 +374,24 @@ impl RedDBServer {
             .map(|(kind, count)| (kind.label().to_string(), *count))
             .collect();
 
+        // Issue #1241 — derive overall latency percentiles from the
+        // recorded histogram rollup. Stays `None` (honest unavailable
+        // envelope) until at least one query has been sampled.
+        let latency_rollup = self.runtime.query_latency_rollup();
+        let latency = match (
+            latency_rollup.quantile(0.50),
+            latency_rollup.quantile(0.95),
+            latency_rollup.quantile(0.99),
+        ) {
+            (Some(p50), Some(p95), Some(p99)) => Some(LatencySample {
+                p50_seconds: p50,
+                p95_seconds: p95,
+                p99_seconds: p99,
+                sample_count: latency_rollup.count,
+            }),
+            _ => None,
+        };
+
         let inputs = ClusterStatusInputs {
             snapshot_at_unix_ms: now_ms,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -414,6 +432,7 @@ impl RedDBServer {
                 apply_health: self.runtime.replica_apply_health(),
                 apply_errors,
             },
+            latency,
         };
 
         json_response(200, cluster_status_json(&inputs))

@@ -162,6 +162,7 @@ pub mod http_connection_limiter;
 pub mod http_handler_metrics;
 pub mod http_limits;
 pub mod http_principal_limiter;
+pub mod http_request_metrics;
 pub mod ingest_pipeline;
 pub mod output_stream;
 mod patch_support;
@@ -189,6 +190,7 @@ pub use self::http_limits::{
     HttpLimitsCliInput, HttpLimitsResolved, DEFAULT_HANDLER_TIMEOUT_MS, DEFAULT_RETRY_AFTER_SECS,
 };
 use self::http_principal_limiter::PrincipalConnectionLimiter;
+use self::http_request_metrics::HttpRequestMetrics;
 use self::patch_support::*;
 use self::request_body::*;
 use self::routing::*;
@@ -306,6 +308,12 @@ pub struct RedDBServer {
     /// with the server via `Arc` so every serve loop on the same
     /// `RedDBServer` writes to one set of counters.
     http_metrics: HttpHandlerMetrics,
+    /// Issue #1239 / PRD #1237 — `reddb_http_requests_total` counters by
+    /// `method`, matched route template, and status class. Recorded once
+    /// per handled request in `route()`; read by `/metrics` and the
+    /// operational telemetry read model. Cloned with the server via `Arc`
+    /// so every serve loop on the same `RedDBServer` shares one counter set.
+    http_request_metrics: HttpRequestMetrics,
     /// `Retry-After` value (seconds) emitted in the async edge's
     /// capacity-reject 503 path (issue #574 slice 5). Read on the reject
     /// path in `axum_edge`.
@@ -440,6 +448,7 @@ impl RedDBServer {
             handler_clock: Arc::new(SystemMonotonicClock::new()),
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
             http_metrics: HttpHandlerMetrics::new(),
+            http_request_metrics: HttpRequestMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
             principal_limiter: PrincipalConnectionLimiter::new(
                 http_limits::DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL,
@@ -468,6 +477,13 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn http_metrics(&self) -> &HttpHandlerMetrics {
         &self.http_metrics
+    }
+
+    /// HTTP request/error volume counters (`reddb_http_requests_total`).
+    /// Read by `/metrics` and the operational telemetry read model.
+    #[doc(hidden)]
+    pub fn http_request_metrics(&self) -> &HttpRequestMetrics {
+        &self.http_request_metrics
     }
 
     /// Visible for tests. Lets the integration test in
