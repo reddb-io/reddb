@@ -1099,6 +1099,54 @@ impl RedDBServer {
             }
         }
 
+        // Query latency histogram — issue #1241. Bounded to the `kind`
+        // dimension (ADR 0060 §4); no SQL/collection/tenant/user labels.
+        // Only kinds with a real sample are emitted (honesty rule §6).
+        {
+            let latency = self.runtime.query_latency_snapshot();
+            if !latency.is_empty() {
+                let _ = writeln!(
+                    body,
+                    "# HELP reddb_query_duration_seconds Query execution latency by kind, seconds."
+                );
+                let _ = writeln!(body, "# TYPE reddb_query_duration_seconds histogram");
+                for hist in &latency {
+                    for (i, le) in
+                        crate::runtime::query_latency_telemetry::QUERY_DURATION_BUCKETS_SECONDS
+                            .iter()
+                            .enumerate()
+                    {
+                        let count = hist.bucket_counts.get(i).copied().unwrap_or(0);
+                        let _ = writeln!(
+                            body,
+                            "reddb_query_duration_seconds_bucket{{kind=\"{}\",le=\"{}\"}} {}",
+                            sanitize_label(hist.kind),
+                            le,
+                            count
+                        );
+                    }
+                    let _ = writeln!(
+                        body,
+                        "reddb_query_duration_seconds_bucket{{kind=\"{}\",le=\"+Inf\"}} {}",
+                        sanitize_label(hist.kind),
+                        hist.count
+                    );
+                    let _ = writeln!(
+                        body,
+                        "reddb_query_duration_seconds_sum{{kind=\"{}\"}} {}",
+                        sanitize_label(hist.kind),
+                        hist.sum_seconds
+                    );
+                    let _ = writeln!(
+                        body,
+                        "reddb_query_duration_seconds_count{{kind=\"{}\"}} {}",
+                        sanitize_label(hist.kind),
+                        hist.count
+                    );
+                }
+            }
+        }
+
         // Events outbox metrics — issue #299
         {
             use crate::runtime::impl_queue::{
