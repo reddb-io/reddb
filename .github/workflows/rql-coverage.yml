@@ -53,7 +53,7 @@ jobs:
           cache-on-failure: "true"
 
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
+        run: cargo install cargo-llvm-cov --version 0.6.21 --locked --force
 
       - name: Run coverage (reddb-io-rql)
         env:
