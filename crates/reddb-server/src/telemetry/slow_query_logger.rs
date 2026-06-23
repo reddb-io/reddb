@@ -118,6 +118,7 @@ impl SlowQueryLogger {
             threshold_ms: AtomicU64::new(u64::MAX),
             sample_pct: AtomicU8::new(0),
             above_count: AtomicU64::new(0),
+            store: std::sync::OnceLock::new(),
         })
     }
 
