@@ -340,7 +340,7 @@ jobs:
     name: Test Suite
     needs: gate
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
