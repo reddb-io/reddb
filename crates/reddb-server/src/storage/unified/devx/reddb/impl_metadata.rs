@@ -391,6 +391,18 @@ impl RedDB {
             // that caused stack overflow / 12-second hang on startup.
         }
         self.load_collection_ttl_defaults_from_metadata();
+        // Single-file artifact: collection contracts ride the store's binary
+        // dump, not the metadata sidecar (which is never written in this
+        // profile). Seed the contract cache from that blob so each
+        // collection's declared model survives a restart — otherwise recovery
+        // re-infers the model from the stored entities and a KV collection
+        // comes back as a table.
+        if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
+            && self.options.storage_profile.packaging
+                == crate::storage::StoragePackaging::SingleFile
+        {
+            self.seed_contract_cache_from_store_aux();
+        }
         // Issue #866 — rehydrate the hypertable chunk spine before the
         // API opens so chunk routing / pruning / TTL work immediately
         // after a restart.

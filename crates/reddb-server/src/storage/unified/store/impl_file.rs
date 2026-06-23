@@ -141,6 +141,18 @@ impl UnifiedStore {
             }
         }
 
+        // V10+: a trailing opaque auxiliary-metadata blob follows the
+        // cross-references. RedDB stores the collection contracts here so the
+        // single-file artifact carries each collection's declared model across
+        // a restart. Older dumps end at the cross-refs and have no blob.
+        if version >= reddb_file::STORE_VERSION_V10 && pos < buf.len() {
+            let aux = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
+                .map_err(|e| e.to_string())?;
+            if !aux.is_empty() {
+                store.set_aux_metadata(aux.to_vec());
+            }
+        }
+
         if store.format_version() < STORE_VERSION_CURRENT {
             store.set_format_version(STORE_VERSION_CURRENT);
         }
@@ -201,6 +213,14 @@ impl UnifiedStore {
                     collection,
                 );
             }
+        }
+
+        // V10+: trailing opaque auxiliary-metadata blob (collection contracts
+        // for the single-file artifact). Always written — empty when unused —
+        // so the read side can unconditionally expect it for V10 dumps.
+        {
+            let aux = self.aux_metadata.read();
+            reddb_file::encode_native_dump_entity_record(&mut buf, &aux);
         }
 
         self.set_format_version(STORE_VERSION_CURRENT);
@@ -1535,5 +1555,31 @@ impl UnifiedStore {
                 buf.extend_from_slice(hash.as_bytes());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod aux_metadata_dump_tests {
+    use super::*;
+
+    #[test]
+    fn aux_metadata_round_trips_through_binary_dump() {
+        let store = UnifiedStore::with_config(UnifiedStoreConfig::default());
+        store.create_collection("k").expect("create collection");
+        store.set_aux_metadata(b"contract-blob".to_vec());
+
+        let bytes = store.to_binary_dump_bytes();
+        let reloaded = UnifiedStore::load_from_bytes(&bytes).expect("reload dump");
+
+        assert_eq!(reloaded.aux_metadata(), b"contract-blob".to_vec());
+    }
+
+    #[test]
+    fn empty_aux_metadata_round_trips_as_empty() {
+        let store = UnifiedStore::with_config(UnifiedStoreConfig::default());
+        let bytes = store.to_binary_dump_bytes();
+        let reloaded = UnifiedStore::load_from_bytes(&bytes).expect("reload dump");
+
+        assert!(reloaded.aux_metadata().is_empty());
     }
 }

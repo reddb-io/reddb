@@ -1047,6 +1047,28 @@ pub(super) fn export_descriptor_from_json(value: &JsonValue) -> io::Result<Expor
         .map_err(|err| invalid_data(format!("decode physical export descriptor: {err}")))
 }
 
+/// Serialize a set of collection contracts to a self-describing JSON-array
+/// blob. Used to carry contracts through the single-file binary dump (store
+/// format V10+) so each collection's `declared_model` survives a restart.
+pub(crate) fn serialize_collection_contracts(contracts: &[CollectionContract]) -> Vec<u8> {
+    let array = JsonValue::Array(contracts.iter().map(collection_contract_to_json).collect());
+    array.to_string_compact().into_bytes()
+}
+
+/// Inverse of [`serialize_collection_contracts`].
+pub(crate) fn deserialize_collection_contracts(
+    bytes: &[u8],
+) -> io::Result<Vec<CollectionContract>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| invalid_data(format!("collection contract blob is not utf8: {err}")))?;
+    let value = crate::json::from_str::<JsonValue>(text)
+        .map_err(|err| invalid_data(format!("invalid collection contract blob: {err}")))?;
+    match value {
+        JsonValue::Array(items) => items.iter().map(collection_contract_from_json).collect(),
+        _ => Err(invalid_data("collection contract blob is not a JSON array")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

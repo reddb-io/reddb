@@ -353,6 +353,12 @@ pub struct UnifiedStore {
     /// rebuilt state is byte-deterministic against the pre-restart
     /// state under a fixed codec seed.
     pub(crate) replayed_turbo_inserts: parking_lot::Mutex<HashMap<String, Vec<(u64, Vec<f32>)>>>,
+    /// Opaque store-level auxiliary metadata persisted inside the binary dump
+    /// (store format V10+). RedDB uses this to carry collection contracts
+    /// through the single-file artifact so a collection's `declared_model`
+    /// (e.g. `kv`) survives a restart instead of being re-inferred as a table.
+    /// The store treats the bytes as opaque; only RedDB interprets them.
+    pub(crate) aux_metadata: RwLock<Vec<u8>>,
 }
 
 mod builder;

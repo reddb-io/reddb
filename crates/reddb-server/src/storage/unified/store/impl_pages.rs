@@ -341,6 +341,7 @@ impl UnifiedStore {
             commit: None,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
+            aux_metadata: RwLock::new(Vec::new()),
         }
     }
 
@@ -414,6 +415,7 @@ impl UnifiedStore {
             commit,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
+            aux_metadata: RwLock::new(Vec::new()),
         };
 
         // Load existing data from pages if database exists
