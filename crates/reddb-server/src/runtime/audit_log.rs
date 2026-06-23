@@ -680,6 +680,7 @@ enum WriterMsg {
 
 #[derive(Debug)]
 pub struct AuditLogger {
+    disabled: bool,
     path: PathBuf,
     tx: Mutex<Option<mpsc::SyncSender<WriterMsg>>>,
     /// Direct-write fallback mutex. Used when the writer thread isn't
@@ -700,6 +701,24 @@ pub struct AuditLogger {
 }
 
 impl AuditLogger {
+    /// In-process sink for embedded single-file defaults. Explicit file-backed
+    /// log destinations still use [`AuditLogger::with_path`].
+    pub fn disabled() -> Self {
+        Self {
+            disabled: true,
+            path: PathBuf::new(),
+            tx: Mutex::new(None),
+            fallback_lock: Mutex::new(()),
+            last_hash: Arc::new(Mutex::new(None)),
+            max_bytes: 0,
+            fsync_mode: FsyncMode::Off,
+            stream_url: None,
+            writer_alive: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(AtomicU64::new(0)),
+            handle: Mutex::new(None),
+        }
+    }
+
     /// Place the audit log next to the primary `.rdb` file so backup
     /// + restore flows can ship it together.
     pub fn for_data_path(data_path: &Path) -> Self {
@@ -767,6 +786,7 @@ impl AuditLogger {
         }
         let last_hash = Arc::new(Mutex::new(seed));
         let logger = Self {
+            disabled: false,
             path,
             tx: Mutex::new(None),
             fallback_lock: Mutex::new(()),
@@ -831,6 +851,9 @@ impl AuditLogger {
     /// Block until the writer thread has drained every pending event.
     /// Tests use this to make assertions deterministic.
     pub fn wait_idle(&self, timeout: Duration) -> bool {
+        if self.disabled {
+            return true;
+        }
         let deadline = Instant::now() + timeout;
         let tx_guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = tx_guard.as_ref() {
@@ -863,6 +886,9 @@ impl AuditLogger {
     /// capacity; falls back to a sync write when full or the writer
     /// thread has shut down.
     pub fn record_event(&self, event: AuditEvent) {
+        if self.disabled {
+            return;
+        }
         let tx_guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
         let recovered_event: AuditEvent;
         if let Some(tx) = tx_guard.as_ref() {

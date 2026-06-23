@@ -72,6 +72,23 @@ pub struct SlowQueryLogger {
 }
 
 impl SlowQueryLogger {
+    /// In-process sink for embedded single-file defaults. Explicit file-backed
+    /// log destinations still use [`SlowQueryLogger::open_at`].
+    pub fn disabled() -> Arc<Self> {
+        let (writer, guard) = NonBlockingBuilder::default()
+            .buffered_lines_limit(1)
+            .lossy(true)
+            .finish(std::io::sink());
+
+        Arc::new(Self {
+            writer: Mutex::new(writer),
+            _guard: guard,
+            threshold_ms: AtomicU64::new(u64::MAX),
+            sample_pct: AtomicU8::new(0),
+            above_count: AtomicU64::new(0),
+        })
+    }
+
     pub fn new(opts: SlowQueryOpts) -> Arc<Self> {
         let path = reddb_file::layout::legacy_slow_query_log_path(&opts.log_dir);
         Self::open_at(path, opts.threshold_ms, opts.sample_pct)

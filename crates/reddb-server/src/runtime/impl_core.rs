@@ -2445,10 +2445,16 @@ impl RedDBRuntime {
                         }
                     });
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
-                    Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
-                        &audit_dest,
-                        &data_path,
-                    ))
+                    if embedded_single_file
+                        && !matches!(audit_dest, crate::storage::layout::LogDestination::File(_))
+                    {
+                        Arc::new(crate::runtime::audit_log::AuditLogger::disabled())
+                    } else {
+                        Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
+                            &audit_dest,
+                            &data_path,
+                        ))
+                    }
                 },
                 control_event_ledger: parking_lot::RwLock::new(Arc::new(
                     crate::runtime::control_events::RuntimeLedger::new(db.store()),
@@ -2501,12 +2507,18 @@ impl RedDBRuntime {
                         .and_then(|s| s.parse::<u8>().ok())
                         .unwrap_or(100);
                     let (_, slow_dest) = crate::api::tier_wiring::current_log_destinations();
-                    crate::telemetry::slow_query_logger::SlowQueryLogger::for_destination(
-                        &slow_dest,
-                        &fallback_dir,
-                        threshold_ms,
-                        sample_pct,
-                    )
+                    if embedded_single_file
+                        && !matches!(slow_dest, crate::storage::layout::LogDestination::File(_))
+                    {
+                        crate::telemetry::slow_query_logger::SlowQueryLogger::disabled()
+                    } else {
+                        crate::telemetry::slow_query_logger::SlowQueryLogger::for_destination(
+                            &slow_dest,
+                            &fallback_dir,
+                            threshold_ms,
+                            sample_pct,
+                        )
+                    }
                 },
                 kv_stats: crate::runtime::KvStatsCounters::default(),
                 metrics_ingest_stats: crate::runtime::MetricsIngestCounters::default(),
