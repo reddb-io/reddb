@@ -14,12 +14,21 @@ use std::time::Duration;
 
 use reddb::runtime::audit_log::{AuditAuthSource, AuditEvent, Outcome};
 use reddb::server::RedDBServer;
+use reddb::storage::layout::{LayoutOverrides, LogDestination, LogRoutingOverrides};
 use reddb::{RedDBOptions, RedDBRuntime};
 
 /// Unique per-test data path so the audit logger doesn't share
 /// `<tmp>/.audit.log` across parallel tests.
 fn isolated_runtime(dir: &support::TempDataDir) -> RedDBRuntime {
-    let opts = RedDBOptions::in_memory().with_data_path(dir.join("data.rdb"));
+    let opts = RedDBOptions::in_memory()
+        .with_data_path(dir.join("data.rdb"))
+        .with_layout_overrides(LayoutOverrides {
+            logs: LogRoutingOverrides {
+                audit_log: Some(LogDestination::File(dir.join("audit.log"))),
+                ..LogRoutingOverrides::default()
+            },
+            ..LayoutOverrides::default()
+        });
     RedDBRuntime::with_options(opts).expect("runtime")
 }
 
