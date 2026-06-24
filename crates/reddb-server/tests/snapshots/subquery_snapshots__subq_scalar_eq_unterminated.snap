@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"SELECT * FROM t WHERE x = (SELECT\")"
 ---
 input: "SELECT * FROM t WHERE x = (SELECT"
 kind:  Syntax
-error: Parse error at 1:34: Unexpected token: EOF (expected: ))
+error: Parse error at 1:34: Unexpected token: EOF (expected: identifier or field name)

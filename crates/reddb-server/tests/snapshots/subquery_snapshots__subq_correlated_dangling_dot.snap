@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"SELECT * FROM users u WHERE u.id IN \\\n     (SEL
 ---
 input: "SELECT * FROM users u WHERE u.id IN (SELECT user_id FROM orders o WHERE o. = u.id)"
 kind:  Syntax
-error: Parse error at 1:38: Unexpected token: SELECT (expected: string, number, true, false, null, [, {)
+error: Parse error at 1:76: Unexpected token: = (expected: identifier or type name)

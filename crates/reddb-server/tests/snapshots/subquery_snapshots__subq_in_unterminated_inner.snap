@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"SELECT * FROM t WHERE id IN (SELECT id FROM u\")"
 ---
 input: "SELECT * FROM t WHERE id IN (SELECT id FROM u"
 kind:  Syntax
-error: Parse error at 1:30: Unexpected token: SELECT (expected: string, number, true, false, null, [, {)
+error: Parse error at 1:46: Unexpected token: EOF (expected: ))
