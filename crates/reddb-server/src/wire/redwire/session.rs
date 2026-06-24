@@ -922,10 +922,12 @@ where
 
 /// 3-RTT SCRAM-SHA-256 server handshake (RFC 5802 + RFC 7677).
 ///
-///     C → S  AuthResponse(client-first-message)         (already received as client-first)
-///     S → C  AuthRequest(server-first-message)
-///     C → S  AuthResponse(client-final-message)
-///     S → C  AuthOk(v=server-signature)
+/// ```text
+/// C → S  AuthResponse(client-first-message)         (already received as client-first)
+/// S → C  AuthRequest(server-first-message)
+/// C → S  AuthResponse(client-final-message)
+/// S → C  AuthOk(v=server-signature)
+/// ```
 async fn perform_scram_handshake<S>(
     stream: &mut S,
     auth_store: Option<&AuthStore>,
