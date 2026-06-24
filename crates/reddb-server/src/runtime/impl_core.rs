@@ -2462,13 +2462,11 @@ impl RedDBRuntime {
                             .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
                     };
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
-                    if !matches!(
-                        audit_dest,
-                        crate::storage::layout::LogDestination::File(_)
-                    ) && (embedded_single_file
-                        || options
-                            .metadata
-                            .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY))
+                    if !matches!(audit_dest, crate::storage::layout::LogDestination::File(_))
+                        && (embedded_single_file
+                            || options
+                                .metadata
+                                .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY))
                     {
                         // The Stderr/Syslog lower-tier sink resolves to a
                         // `for_data_path` sibling that collides across concurrent

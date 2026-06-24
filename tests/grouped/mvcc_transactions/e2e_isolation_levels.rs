@@ -221,9 +221,7 @@ fn snapshot_isolation_blocks_read_skew() {
     try_exec(&rt, "COMMIT").unwrap();
 
     let res3 = rt
-        .execute_query(&format!(
-            "SELECT v FROM skew_check WHERE rid = {rid}"
-        ))
+        .execute_query(&format!("SELECT v FROM skew_check WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(res3.result.records.len(), 1, "new snapshot sees row");
     assert_eq!(
@@ -257,17 +255,13 @@ fn transaction_update_write_set_rolls_back_cleanly() {
     )
     .unwrap();
     let writer = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE rid = {rid}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(writer.result.records[0].get("v"), Some(&Value::Integer(20)));
 
     set_current_connection_id(9951);
     let outsider = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE rid = {rid}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(
         outsider.result.records[0].get("v"),
@@ -278,9 +272,7 @@ fn transaction_update_write_set_rolls_back_cleanly() {
     set_current_connection_id(9950);
     try_exec(&rt, "ROLLBACK").unwrap();
     let after_rollback = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE rid = {rid}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(
         after_rollback.result.records[0].get("v"),
@@ -296,9 +288,7 @@ fn transaction_update_write_set_rolls_back_cleanly() {
     .unwrap();
     try_exec(&rt, "COMMIT").unwrap();
     let after_commit = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE rid = {rid}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(
         after_commit.result.records[0].get("v"),

@@ -235,8 +235,7 @@ fn live_comment_clustering_calls_real_models() {
         (
             "source_query",
             JsonValue::String(
-                "SELECT rid, comment FROM comments ORDER BY rid ASC LIMIT 200"
-                    .to_string(),
+                "SELECT rid, comment FROM comments ORDER BY rid ASC LIMIT 200".to_string(),
             ),
         ),
         ("source_mode", JsonValue::String("row".to_string())),

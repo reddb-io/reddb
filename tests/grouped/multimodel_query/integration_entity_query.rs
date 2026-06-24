@@ -317,7 +317,8 @@ fn test_table_row_logical_identity_compatibility() {
 
     let new_row = query
         .execute(ExecuteQueryInput {
-            query: "INSERT INTO logical_identity_rows (name, seen) VALUES ('new', 1) RETURNING rid".into(),
+            query: "INSERT INTO logical_identity_rows (name, seen) VALUES ('new', 1) RETURNING rid"
+                .into(),
         })
         .expect("new row insert should succeed");
     let new_id = match new_row.result.records[0].get("rid") {
@@ -333,9 +334,7 @@ fn test_table_row_logical_identity_compatibility() {
 
     let selected = query
         .execute(ExecuteQueryInput {
-            query:
-                "SELECT rid, name FROM logical_identity_rows WHERE rid = 100"
-                    .into(),
+            query: "SELECT rid, name FROM logical_identity_rows WHERE rid = 100".into(),
         })
         .expect("SELECT by logical id should succeed");
     assert_eq!(selected.result.records.len(), 1);

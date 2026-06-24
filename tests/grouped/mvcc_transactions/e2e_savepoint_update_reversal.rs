@@ -26,9 +26,7 @@ fn rid(rt: &RedDBRuntime, table: &str) -> u64 {
 
 fn label_for(rt: &RedDBRuntime, table: &str, rid: u64) -> String {
     let result = rt
-        .execute_query(&format!(
-            "SELECT label FROM {table} WHERE rid = {rid}"
-        ))
+        .execute_query(&format!("SELECT label FROM {table} WHERE rid = {rid}"))
         .expect("select label");
     match result.result.records[0].get("label") {
         Some(Value::Text(value)) => value.to_string(),

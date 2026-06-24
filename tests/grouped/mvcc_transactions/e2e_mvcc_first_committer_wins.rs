@@ -21,9 +21,7 @@ fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
 
 fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
     let result = rt
-        .execute_query(&format!(
-            "SELECT rid FROM {table} WHERE id = {id}"
-        ))
+        .execute_query(&format!("SELECT rid FROM {table} WHERE id = {id}"))
         .expect("select rid");
     match result.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
@@ -34,9 +32,7 @@ fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
 
 fn label_for(rt: &RedDBRuntime, table: &str, rid: u64) -> Option<String> {
     let result = rt
-        .execute_query(&format!(
-            "SELECT label FROM {table} WHERE rid = {rid}"
-        ))
+        .execute_query(&format!("SELECT label FROM {table} WHERE rid = {rid}"))
         .expect("select label");
     result
         .result

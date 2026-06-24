@@ -33,9 +33,7 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
 
 fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
     let result = rt
-        .execute_query(&format!(
-            "SELECT rid FROM {table} WHERE id = {id}"
-        ))
+        .execute_query(&format!("SELECT rid FROM {table} WHERE id = {id}"))
         .expect("select rid");
     match result.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
@@ -214,10 +212,7 @@ fn autocommit_table_mutations_write_tx_commit_batch_records() {
             &rt,
             &format!("UPDATE txb_shape SET label = 'aa' WHERE rid = {updated}"),
         );
-        exec(
-            &rt,
-            &format!("DELETE FROM txb_shape WHERE rid = {deleted}"),
-        );
+        exec(&rt, &format!("DELETE FROM txb_shape WHERE rid = {deleted}"));
         clear_current_connection_id();
     }
 
