@@ -79,8 +79,14 @@ detect_platform() {
     *) echo "Unsupported architecture: $arch"; exit 1 ;;
   esac
 
-  if [[ "$OS" == "linux" ]] && [[ "$STATIC" == "true" ]] && [[ "$ARCH" == "aarch64" ]]; then
+  # On Linux, prefer the fully static (musl) asset by default — it has no glibc
+  # dependency and runs on any distro/kernel, old or new. Keep the glibc build as
+  # a fallback for releases/arches that don't publish a static asset yet
+  # (resolved in download_binary). macOS/Windows ship a single asset each.
+  PLATFORM_FALLBACK=""
+  if [[ "$OS" == "linux" ]] && { [[ "$ARCH" == "x86_64" ]] || [[ "$ARCH" == "aarch64" ]]; }; then
     PLATFORM="${OS}-${ARCH}-static"
+    PLATFORM_FALLBACK="${OS}-${ARCH}"
   else
     PLATFORM="${OS}-${ARCH}"
   fi
@@ -156,24 +162,31 @@ fetch_release_info() {
 
 download_binary() {
   local name="$1"
-  local binary_name="${name}-${PLATFORM}"
-  local tmp_file="/tmp/${binary_name}"
+  local ext=""
+  [[ "$OS" == "windows" ]] && ext=".exe"
 
-  if [[ "$OS" == "windows" ]]; then
-    binary_name="${binary_name}.exe"
+  # Try the preferred platform (static on Linux), then the fallback (glibc) so
+  # the installer still works against releases that predate the static asset.
+  local platforms=("$PLATFORM")
+  [[ -n "$PLATFORM_FALLBACK" ]] && platforms+=("$PLATFORM_FALLBACK")
+
+  local platform binary_name tmp_file url
+  for platform in "${platforms[@]}"; do
+    binary_name="${name}-${platform}${ext}"
     tmp_file="/tmp/${binary_name}"
-  fi
-
-  local url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${binary_name}"
-  echo "Downloading ${name} from ${url}"
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL -o "$tmp_file" "$url"
-  else
-    wget -O "$tmp_file" "$url"
-  fi
-
-  DOWNLOADED_FILES+=("${name}:${tmp_file}")
+    url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${binary_name}"
+    echo "Downloading ${name} from ${url}"
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fL -o "$tmp_file" "$url"; then DOWNLOADED_FILES+=("${name}:${tmp_file}"); return 0; fi
+    else
+      if wget -O "$tmp_file" "$url"; then DOWNLOADED_FILES+=("${name}:${tmp_file}"); return 0; fi
+    fi
+    if [[ -n "$PLATFORM_FALLBACK" && "$platform" != "$PLATFORM_FALLBACK" ]]; then
+      echo "  ${name}-${platform} not found in ${RELEASE_TAG}; trying ${PLATFORM_FALLBACK}"
+    fi
+  done
+  echo "Failed to download ${name}: no asset for [${platforms[*]}] in ${RELEASE_TAG}"
+  exit 1
 }
 
 verify_checksum() {
@@ -230,6 +243,30 @@ install_file() {
   echo "Installed: ${binary_path}"
 }
 
+# The static `red` has no hard runtime deps. The one optional dep is a CA-cert
+# bundle, needed ONLY for outbound TLS to remote storage backends (S3 / Turso /
+# D1). Detect its absence and guide — never auto-install (that would need sudo
+# and can't be done safely from a piped installer).
+check_optional_runtime_deps() {
+  [[ "$OS" != "linux" ]] && return 0   # macOS/Windows ship a system trust store
+  local ca
+  for ca in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+            /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem; do
+    [[ -f "$ca" ]] && return 0
+  done
+  echo ""
+  echo "Note: no CA-certificate bundle found. The local database works without it,"
+  echo "but outbound TLS (S3 / Turso / D1 remote backends) needs one:"
+  if   command -v apt-get >/dev/null 2>&1; then echo "  sudo apt-get install -y ca-certificates"
+  elif command -v dnf     >/dev/null 2>&1; then echo "  sudo dnf install -y ca-certificates"
+  elif command -v yum     >/dev/null 2>&1; then echo "  sudo yum install -y ca-certificates"
+  elif command -v apk     >/dev/null 2>&1; then echo "  sudo apk add ca-certificates"
+  elif command -v pacman  >/dev/null 2>&1; then echo "  sudo pacman -S --noconfirm ca-certificates"
+  elif command -v zypper  >/dev/null 2>&1; then echo "  sudo zypper install -y ca-certificates"
+  else echo "  install your distro's 'ca-certificates' package"
+  fi
+}
+
 main() {
   detect_platform
   fetch_release_info
@@ -246,6 +283,7 @@ main() {
   done
 
   echo "✅ RedDB installed."
+  check_optional_runtime_deps
   echo ""
   echo "Quick start:"
   echo "  red --help"
