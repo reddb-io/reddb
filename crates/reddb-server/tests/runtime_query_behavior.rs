@@ -2085,11 +2085,6 @@ fn insert_node_returning_star_exposes_entity_id() {
     assert_eq!(text_at(&res, 0, "name"), "Cinderella");
 }
 
-// QUARANTINE (tracked: #1369) — RETURNING * does not project the entity-id
-// (`rid`) column for non-graph entities yet (reads None). This is the deferred
-// select-* entity-id projection work in the #1369 cluster. Ignore to unblock
-// main; re-enable with the projection fix.
-#[ignore = "tracked #1369: RETURNING * omits rid for non-graph entities"]
 #[test]
 fn insert_returning_star_exposes_entity_id_for_non_graph_entities() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
