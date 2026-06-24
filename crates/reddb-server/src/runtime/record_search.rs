@@ -3,8 +3,8 @@ use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::sql_lowering::effective_table_projections;
 use crate::storage::query::unified::{
     sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_capabilities,
-    sys_key_red_collection, sys_key_red_entity_type, sys_key_red_kind,
-    sys_key_red_sequence_id, sys_key_rid, sys_key_row_id, sys_key_tenant, sys_key_updated_at,
+    sys_key_red_collection, sys_key_red_entity_type, sys_key_red_kind, sys_key_red_sequence_id,
+    sys_key_rid, sys_key_row_id, sys_key_tenant, sys_key_updated_at,
 };
 
 /// Per-thread cache of composite schemas `[<user columns…>, rid, collection,

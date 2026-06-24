@@ -144,10 +144,7 @@ where
                         "entity_id".to_string(),
                         JsonValue::Number(item.entity_id as f64),
                     );
-                    entry.insert(
-                        "rid".to_string(),
-                        JsonValue::Number(item.entity_id as f64),
-                    );
+                    entry.insert("rid".to_string(), JsonValue::Number(item.entity_id as f64));
                     entry.insert(
                         "distance".to_string(),
                         JsonValue::Number(item.distance as f64),

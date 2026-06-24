@@ -102,11 +102,7 @@ pub(crate) fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec
 }
 
 fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<u8> {
-    let mut cols: Vec<String> = vec![
-        "rid".into(),
-        "created_at".into(),
-        "updated_at".into(),
-    ];
+    let mut cols: Vec<String> = vec!["rid".into(), "created_at".into(), "updated_at".into()];
     if let EntityData::Row(ref row) = entity.data {
         if let Some(ref named) = row.named {
             cols.extend(named.keys().cloned());

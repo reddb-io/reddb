@@ -985,9 +985,7 @@ fn estimate_wire_columns_response_capacity(cols: &[WireColumn], row_hint: usize)
 
 fn estimated_wire_column_value_bytes(col: &WireColumn) -> usize {
     match &col.source {
-        WireColumnSource::Rid
-        | WireColumnSource::CreatedAt
-        | WireColumnSource::UpdatedAt => 9,
+        WireColumnSource::Rid | WireColumnSource::CreatedAt | WireColumnSource::UpdatedAt => 9,
         _ => estimated_wire_value_bytes(col.name.as_ref()),
     }
 }

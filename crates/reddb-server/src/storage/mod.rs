@@ -131,7 +131,6 @@ pub use unified::{
     // Entity types - Universal data model
     EntityId,
     EntityKind,
-    FIRST_USER_ENTITY_ID,
     FilterOp,
     FilterValue,
     // Graph adjacency index
@@ -211,6 +210,7 @@ pub use unified::{
     VectorQueryBuilder,
     VectorSearchResult,
     WhereClause,
+    FIRST_USER_ENTITY_ID,
     // Query DSL - Entry point for all queries
     Q as Query,
 };

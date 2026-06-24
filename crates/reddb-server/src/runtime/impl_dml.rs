@@ -24,8 +24,8 @@ use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
 use crate::storage::query::unified::{
-    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_rid,
-    sys_key_tenant, sys_key_updated_at, UnifiedRecord, UnifiedResult,
+    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_rid, sys_key_tenant,
+    sys_key_updated_at, UnifiedRecord, UnifiedResult,
 };
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
