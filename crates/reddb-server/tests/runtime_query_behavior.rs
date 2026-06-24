@@ -1313,14 +1313,18 @@ fn vector_turbo_search_matches_scalar_oracle_top_k() {
 }
 
 #[test]
-fn create_document_reaches_executor_not_yet_supported() {
+fn create_document_creates_a_usable_document_collection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
-    let err = rt
-        .execute_query("CREATE DOCUMENT docs")
-        .expect_err("document executor rejects unsupported storage");
-    let msg = err.to_string();
-    assert!(msg.contains("NOT_YET_SUPPORTED"), "{msg}");
-    assert!(msg.contains("auto-created table"), "{msg}");
+    // #1364 — CREATE DOCUMENT is supported: it provisions a document-model
+    // collection that accepts DOCUMENT inserts and is queryable end-to-end.
+    rt.execute_query("CREATE DOCUMENT docs")
+        .expect("CREATE DOCUMENT provisions a document collection");
+    rt.execute_query("INSERT INTO docs DOCUMENT (body) VALUES ('{\"title\":\"one\"}')")
+        .expect("document insert into the created collection");
+    let res = rt
+        .execute_query("SELECT * FROM docs")
+        .expect("SELECT * over the document collection");
+    assert_eq!(res.result.len(), 1, "the inserted document is returned");
 }
 
 #[test]
