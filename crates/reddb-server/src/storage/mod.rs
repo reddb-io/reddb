@@ -131,6 +131,7 @@ pub use unified::{
     // Entity types - Universal data model
     EntityId,
     EntityKind,
+    FIRST_USER_ENTITY_ID,
     FilterOp,
     FilterValue,
     // Graph adjacency index

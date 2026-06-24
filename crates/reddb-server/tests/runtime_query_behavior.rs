@@ -2229,16 +2229,18 @@ fn insert_multi_row_edge_failure_is_atomic() {
 
 // ── Issue #421: first user-inserted entity id is documented & pinned ────────
 //
-// The first ~100 entity ids are consumed by internal collection-descriptor
-// records before any user INSERT runs. The exact offset is part of the
-// documented contract in `docs/data-models/graphs.md` and
-// `docs/engine/file-format.md` (look for "first user id"). If you tripped
-// this test by changing the descriptor allocation, update the docs in the
-// same commit — the number IS the contract for users computing ids
+// Ids `1..FIRST_USER_ENTITY_ID` are reserved for internal collection-descriptor
+// and config-default entities seeded at boot; the engine bumps the allocator up
+// to `FIRST_USER_ENTITY_ID` after seeding so the first user INSERT always gets
+// that id — stable regardless of how many config defaults the build ships
+// (#1369; previously the offset drifted up by one per config default). The
+// offset is part of the documented contract in `docs/data-models/graphs.md` and
+// `docs/engine/file-format.md`. If you change `FIRST_USER_ENTITY_ID`, update the
+// docs in the same commit — the number IS the contract for users computing ids
 // off-thread.
 
 #[test]
-fn first_user_entity_id_is_one_hundred_and_two() {
+fn first_user_entity_id_is_the_reserved_floor() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let res = rt
         .execute_query(
@@ -2247,15 +2249,15 @@ fn first_user_entity_id_is_one_hundred_and_two() {
         .expect("first user insert");
     let id = u64_at(&res, 0, "rid");
     assert_eq!(
-        id, 102,
-        "first user-inserted entity id must be 102 (documented offset). \
-         If you changed this, update docs/data-models/graphs.md AND \
-         docs/engine/file-format.md."
+        id, 1024,
+        "first user-inserted entity id must be FIRST_USER_ENTITY_ID (1024, the \
+         reserved internal-id floor). If you changed FIRST_USER_ENTITY_ID, update \
+         docs/data-models/graphs.md AND docs/engine/file-format.md."
     );
 }
 
 #[test]
-fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
+fn first_file_backed_user_entity_id_is_the_reserved_floor() {
     let dir = tempfile::Builder::new()
         .prefix("reddb-test-first-user-entity-id-")
         .tempdir()
@@ -2272,8 +2274,8 @@ fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
     drop(rt);
 
     assert_eq!(
-        id, 102,
-        "first file-backed user-inserted entity id must match the documented 102 offset"
+        id, 1024,
+        "first file-backed user-inserted entity id must match FIRST_USER_ENTITY_ID (1024)"
     );
 }
 

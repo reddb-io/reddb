@@ -32,9 +32,12 @@ PATH FROM 'web-01' TO 'db-01' ALGORITHM bfs DIRECTION both
 Every graph node and edge is an item with a unique RedDB ID exposed as `rid`.
 Graph edges use `from_rid` and `to_rid` for their endpoints.
 
-> **First user-inserted item gets `rid = 102`.** The first 101 ids
-> in every new database are reserved for internal collection-descriptor
-> records that the engine writes during bootstrap. Stable across in-memory
+> **First user-inserted item gets `rid = 1024`.** Ids `1..1023` in every new
+> database are reserved for internal collection-descriptor and config-default
+> records the engine seeds during bootstrap; the allocator is bumped to the
+> fixed floor (`FIRST_USER_ENTITY_ID = 1024`) after seeding, so the first user
+> id is **stable** regardless of how many config defaults a build ships (it no
+> longer drifts up by one per added default). Stable across in-memory
 > and on-disk databases — do not hardcode lower ids, and do not assume `1`
 > in tests or migrations. If you need the assigned RedDB ID for application use,
 > read it back from `INSERT ... RETURNING rid` or `INSERT ... RETURNING *` rather than
@@ -96,8 +99,8 @@ curl -X POST http://127.0.0.1:5000/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{
     "label": "REPORTS_TO",
-    "from_rid": 102,
-    "to_rid": 103,
+    "from_rid": 1024,
+    "to_rid": 1025,
     "weight": 1.0,
     "properties": {
       "since": "2023-06-01"
@@ -130,7 +133,7 @@ RETURNING rid, label, visits
 ```sql
 UPDATE social EDGES
 SET weight += 0.5
-WHERE label = 'FOLLOWS' AND from_rid = 102
+WHERE label = 'FOLLOWS' AND from_rid = 1024
 RETURNING rid, from_rid, to_rid, weight
 ```
 

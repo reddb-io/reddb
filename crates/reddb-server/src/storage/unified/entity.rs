@@ -9,6 +9,19 @@ use std::sync::Arc;
 
 use crate::storage::schema::Value;
 
+/// The first entity-id handed to user-inserted data. Ids `1..FIRST_USER_ENTITY_ID`
+/// are reserved for the internal collection-descriptor and config-default entities
+/// the engine seeds at boot, so the first user-inserted `rid` is a STABLE,
+/// documented value regardless of how many config defaults a build ships.
+///
+/// Before this floor existed the offset drifted upward by one for every config
+/// default added (101 → 114 over time), silently breaking the documented
+/// file-format invariant (#1369). The boot sequence bumps the allocator up to
+/// this floor after seeding internals; it only ever raises the counter, so a
+/// database that already holds user data is untouched. Mirrors
+/// `FIRST_USER_LABEL_ID` in the graph label registry.
+pub const FIRST_USER_ENTITY_ID: u64 = 1024;
+
 /// Unique identifier for any entity in the unified storage
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId(pub u64);
