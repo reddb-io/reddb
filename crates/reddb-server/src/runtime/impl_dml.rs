@@ -2629,6 +2629,11 @@ fn public_returning_item_kind(entity: &crate::storage::UnifiedEntity) -> Option<
             Some("edge")
         }
         (_, crate::storage::EntityData::Row(_)) => Some(public_returning_row_kind(entity)),
+        // #1369 — every entity model must expose its `rid` in RETURNING *.
+        // Vectors carry their payload in `EntityData::Vector`, not `Row`, so
+        // they were falling through to the legacy `red_entity_id`-only envelope
+        // and `RETURNING *` never surfaced the entity-id.
+        (_, crate::storage::EntityData::Vector(_)) => Some("vector"),
         _ => None,
     }
 }
