@@ -258,6 +258,16 @@ impl RedDBRuntime {
     ) -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
         let do_read =
             |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
+                // #1371 — serialize concurrent group consumers on this queue so
+                // a single available message is claimed (mark_pending) and
+                // returned by exactly one consumer. Without this, woken
+                // competing waiters all observe the message as available and
+                // each delivers it (double-delivery across the wake-all).
+                let read_lock = runtime
+                    .inner
+                    .rmw_locks
+                    .lock_for(queue, "__queue_group_read__");
+                let _read_guard = read_lock.lock();
                 let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
                 lifecycle
                     .group_read(&txn, queue, group, consumer, count)
