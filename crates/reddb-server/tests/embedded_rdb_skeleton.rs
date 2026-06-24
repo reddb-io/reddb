@@ -17,9 +17,15 @@ fn temp_dir(label: &str) -> tempfile::TempDir {
 }
 
 fn artifact_names(dir: &Path) -> Vec<String> {
+    // Operational telemetry sinks (audit log, slow-query log, …) resolve next
+    // to the data path and end in `.log`. They are not part of the embedded
+    // single-file DB *storage* contract this asserts, so filter them to keep
+    // the assertion focused on the `.rdb` data artifact. (Whether embedded mode
+    // should emit these sidecars at all is a separate operational-policy call.)
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| !name.ends_with(".log"))
         .collect();
     names.sort();
     names
