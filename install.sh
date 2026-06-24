@@ -243,6 +243,30 @@ install_file() {
   echo "Installed: ${binary_path}"
 }
 
+# The static `red` has no hard runtime deps. The one optional dep is a CA-cert
+# bundle, needed ONLY for outbound TLS to remote storage backends (S3 / Turso /
+# D1). Detect its absence and guide — never auto-install (that would need sudo
+# and can't be done safely from a piped installer).
+check_optional_runtime_deps() {
+  [[ "$OS" != "linux" ]] && return 0   # macOS/Windows ship a system trust store
+  local ca
+  for ca in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+            /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem; do
+    [[ -f "$ca" ]] && return 0
+  done
+  echo ""
+  echo "Note: no CA-certificate bundle found. The local database works without it,"
+  echo "but outbound TLS (S3 / Turso / D1 remote backends) needs one:"
+  if   command -v apt-get >/dev/null 2>&1; then echo "  sudo apt-get install -y ca-certificates"
+  elif command -v dnf     >/dev/null 2>&1; then echo "  sudo dnf install -y ca-certificates"
+  elif command -v yum     >/dev/null 2>&1; then echo "  sudo yum install -y ca-certificates"
+  elif command -v apk     >/dev/null 2>&1; then echo "  sudo apk add ca-certificates"
+  elif command -v pacman  >/dev/null 2>&1; then echo "  sudo pacman -S --noconfirm ca-certificates"
+  elif command -v zypper  >/dev/null 2>&1; then echo "  sudo zypper install -y ca-certificates"
+  else echo "  install your distro's 'ca-certificates' package"
+  fi
+}
+
 main() {
   detect_platform
   fetch_release_info
@@ -259,6 +283,7 @@ main() {
   done
 
   echo "✅ RedDB installed."
+  check_optional_runtime_deps
   echo ""
   echo "Quick start:"
   echo "  red --help"
