@@ -450,10 +450,6 @@ fn unaliased_expression_columns_use_source_text_labels() {
     assert_eq!(text_at(&aliased, 0, "upn"), "ALICE");
 }
 
-// QUARANTINE (tracked: #1370) — RQL runtime regression: the CURRENT_TIME* /
-// TIMESTAMP_MS surface this exercises fails after the parser move. Ignored to
-// unblock main; re-enable with the #1370 CI-gap fix.
-#[ignore = "tracked #1370: current_time / timestamp runtime regression"]
 #[test]
 fn current_time_bare_builtins_are_single_row_scalars_and_work_in_expressions() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
@@ -643,11 +639,6 @@ fn show_create_unknown_collection_reports_clear_error() {
     assert!(err.contains("COLLECTION_NOT_FOUND"), "{err}");
 }
 
-// QUARANTINE (tracked: #1370) — RQL runtime regression: `$config.<path>` lookup
-// no longer matches the value stored by `SET CONFIG <path>` (namespace mismatch
-// vs the red.config/ reference), so the predicate matches 0 rows. Ignored to
-// unblock main; re-enable with the #1370 fix.
-#[ignore = "tracked #1370: $config runtime lookup namespace mismatch"]
 #[test]
 fn config_reference_compares_stored_value_without_reparsing_sql() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
@@ -1318,11 +1309,6 @@ fn vector_turbo_search_matches_scalar_oracle_top_k() {
     );
 }
 
-// QUARANTINE (tracked: #1364) — `CREATE DOCUMENT` is being activated (#1361/
-// #1364), so it no longer returns NOT_YET_SUPPORTED and this stale assertion
-// fails. Ignored to unblock main; #1364 replaces it with real CREATE DOCUMENT
-// coverage.
-#[ignore = "tracked #1364: CREATE DOCUMENT now activated; stale not-supported assert"]
 #[test]
 fn create_document_reaches_executor_not_yet_supported() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
