@@ -371,12 +371,22 @@ impl RedDBOptions {
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let unique = NEXT_EPHEMERAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "reddb-ephemeral-{}-{}-{}.rdb",
+        // Each ephemeral runtime gets its OWN directory, not just a unique
+        // filename in the shared temp dir. Sibling artifacts (the audit log,
+        // WAL, snapshots) are derived from this data path's PARENT, so a
+        // shared parent collapses every ephemeral runtime's `.audit.log`
+        // onto one file — which parallel test processes (nextest runs each
+        // test in its own process, frequently under one shared `TMPDIR`)
+        // then truncate/remove out from under one another. A per-instance
+        // directory keeps each runtime's siblings self-contained.
+        let dir = std::env::temp_dir().join(format!(
+            "reddb-ephemeral-{}-{}-{}",
             std::process::id(),
             now_nanos,
             unique
         ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("db.rdb");
         let _ = std::fs::remove_file(&path);
         let mut metadata = BTreeMap::new();
         metadata.insert(
