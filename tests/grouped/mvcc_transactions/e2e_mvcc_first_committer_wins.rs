@@ -19,23 +19,23 @@ fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
         .to_string()
 }
 
-fn red_entity_id(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
+fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
     let result = rt
         .execute_query(&format!(
-            "SELECT red_entity_id FROM {table} WHERE id = {id}"
+            "SELECT rid FROM {table} WHERE id = {id}"
         ))
-        .expect("select red_entity_id");
-    match result.result.records[0].get("red_entity_id") {
+        .expect("select rid");
+    match result.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
         Some(Value::Integer(id)) => *id as u64,
-        other => panic!("expected red_entity_id, got {other:?}"),
+        other => panic!("expected rid, got {other:?}"),
     }
 }
 
-fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> Option<String> {
+fn label_for(rt: &RedDBRuntime, table: &str, rid: u64) -> Option<String> {
     let result = rt
         .execute_query(&format!(
-            "SELECT label FROM {table} WHERE red_entity_id = {red_entity_id}"
+            "SELECT label FROM {table} WHERE rid = {rid}"
         ))
         .expect("select label");
     result
@@ -61,7 +61,7 @@ fn concurrent_updates_same_logical_row_conflict_on_second_commit() {
     set_current_connection_id(43901);
     exec(&rt, "CREATE TABLE fcw_update (id INT, label TEXT)");
     exec(&rt, "INSERT INTO fcw_update (id, label) VALUES (1, 'base')");
-    let eid = red_entity_id(&rt, "fcw_update", 1);
+    let eid = rid(&rt, "fcw_update", 1);
 
     set_current_connection_id(43902);
     exec(&rt, "BEGIN");
@@ -71,12 +71,12 @@ fn concurrent_updates_same_logical_row_conflict_on_second_commit() {
     set_current_connection_id(43902);
     exec(
         &rt,
-        &format!("UPDATE fcw_update SET label = 'first' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE fcw_update SET label = 'first' WHERE rid = {eid}"),
     );
     set_current_connection_id(43903);
     exec(
         &rt,
-        &format!("UPDATE fcw_update SET label = 'second' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE fcw_update SET label = 'second' WHERE rid = {eid}"),
     );
 
     set_current_connection_id(43902);
@@ -98,8 +98,8 @@ fn concurrent_updates_different_logical_rows_both_commit() {
         &rt,
         "INSERT INTO fcw_distinct (id, label) VALUES (1, 'one'), (2, 'two')",
     );
-    let eid1 = red_entity_id(&rt, "fcw_distinct", 1);
-    let eid2 = red_entity_id(&rt, "fcw_distinct", 2);
+    let eid1 = rid(&rt, "fcw_distinct", 1);
+    let eid2 = rid(&rt, "fcw_distinct", 2);
 
     set_current_connection_id(43912);
     exec(&rt, "BEGIN");
@@ -109,12 +109,12 @@ fn concurrent_updates_different_logical_rows_both_commit() {
     set_current_connection_id(43912);
     exec(
         &rt,
-        &format!("UPDATE fcw_distinct SET label = 'first' WHERE red_entity_id = {eid1}"),
+        &format!("UPDATE fcw_distinct SET label = 'first' WHERE rid = {eid1}"),
     );
     set_current_connection_id(43913);
     exec(
         &rt,
-        &format!("UPDATE fcw_distinct SET label = 'second' WHERE red_entity_id = {eid2}"),
+        &format!("UPDATE fcw_distinct SET label = 'second' WHERE rid = {eid2}"),
     );
 
     set_current_connection_id(43912);
@@ -143,7 +143,7 @@ fn update_then_delete_same_logical_row_conflicts() {
         &rt,
         "INSERT INTO fcw_update_delete (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "fcw_update_delete", 1);
+    let eid = rid(&rt, "fcw_update_delete", 1);
 
     set_current_connection_id(43922);
     exec(&rt, "BEGIN");
@@ -153,12 +153,12 @@ fn update_then_delete_same_logical_row_conflicts() {
     set_current_connection_id(43922);
     exec(
         &rt,
-        &format!("UPDATE fcw_update_delete SET label = 'kept' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE fcw_update_delete SET label = 'kept' WHERE rid = {eid}"),
     );
     set_current_connection_id(43923);
     exec(
         &rt,
-        &format!("DELETE FROM fcw_update_delete WHERE red_entity_id = {eid}"),
+        &format!("DELETE FROM fcw_update_delete WHERE rid = {eid}"),
     );
 
     set_current_connection_id(43922);
@@ -183,7 +183,7 @@ fn delete_then_update_same_logical_row_conflicts() {
         &rt,
         "INSERT INTO fcw_delete_update (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "fcw_delete_update", 1);
+    let eid = rid(&rt, "fcw_delete_update", 1);
 
     set_current_connection_id(43932);
     exec(&rt, "BEGIN");
@@ -193,12 +193,12 @@ fn delete_then_update_same_logical_row_conflicts() {
     set_current_connection_id(43932);
     exec(
         &rt,
-        &format!("DELETE FROM fcw_delete_update WHERE red_entity_id = {eid}"),
+        &format!("DELETE FROM fcw_delete_update WHERE rid = {eid}"),
     );
     set_current_connection_id(43933);
     exec(
         &rt,
-        &format!("UPDATE fcw_delete_update SET label = 'stale' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE fcw_delete_update SET label = 'stale' WHERE rid = {eid}"),
     );
 
     set_current_connection_id(43932);
@@ -220,7 +220,7 @@ fn stale_transaction_conflicts_with_autocommit_update() {
         &rt,
         "INSERT INTO fcw_autocommit (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "fcw_autocommit", 1);
+    let eid = rid(&rt, "fcw_autocommit", 1);
 
     set_current_connection_id(43942);
     exec(&rt, "BEGIN");
@@ -228,13 +228,13 @@ fn stale_transaction_conflicts_with_autocommit_update() {
     set_current_connection_id(43943);
     exec(
         &rt,
-        &format!("UPDATE fcw_autocommit SET label = 'auto' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE fcw_autocommit SET label = 'auto' WHERE rid = {eid}"),
     );
 
     set_current_connection_id(43942);
     exec(
         &rt,
-        &format!("UPDATE fcw_autocommit SET label = 'stale' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE fcw_autocommit SET label = 'stale' WHERE rid = {eid}"),
     );
     assert_conflict(&exec_err(&rt, "COMMIT"));
 

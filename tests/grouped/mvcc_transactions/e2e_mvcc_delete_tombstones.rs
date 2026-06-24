@@ -13,21 +13,21 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
 }
 
-fn red_entity_id(rt: &RedDBRuntime, table: &str) -> u64 {
+fn rid(rt: &RedDBRuntime, table: &str) -> u64 {
     let result = rt
-        .execute_query(&format!("SELECT red_entity_id FROM {table} WHERE id = 1"))
-        .expect("select red_entity_id");
-    match result.result.records[0].get("red_entity_id") {
+        .execute_query(&format!("SELECT rid FROM {table} WHERE id = 1"))
+        .expect("select rid");
+    match result.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
         Some(Value::Integer(id)) => *id as u64,
-        other => panic!("expected red_entity_id, got {other:?}"),
+        other => panic!("expected rid, got {other:?}"),
     }
 }
 
-fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> Option<String> {
+fn label_for(rt: &RedDBRuntime, table: &str, rid: u64) -> Option<String> {
     let result = rt
         .execute_query(&format!(
-            "SELECT label FROM {table} WHERE red_entity_id = {red_entity_id}"
+            "SELECT label FROM {table} WHERE rid = {rid}"
         ))
         .expect("select label");
     result
@@ -64,7 +64,7 @@ fn delete_tombstone_preserves_old_snapshot_and_hides_new_snapshot() {
         &rt,
         "INSERT INTO mvcc_delete_snap (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "mvcc_delete_snap");
+    let eid = rid(&rt, "mvcc_delete_snap");
 
     exec(&rt, "BEGIN");
     assert_eq!(
@@ -75,7 +75,7 @@ fn delete_tombstone_preserves_old_snapshot_and_hides_new_snapshot() {
     set_current_connection_id(43802);
     exec(
         &rt,
-        &format!("DELETE FROM mvcc_delete_snap WHERE red_entity_id = {eid}"),
+        &format!("DELETE FROM mvcc_delete_snap WHERE rid = {eid}"),
     );
     assert_eq!(label_for(&rt, "mvcc_delete_snap", eid), None);
 
@@ -130,13 +130,13 @@ fn explicit_delete_is_invisible_to_other_transactions_until_commit() {
         &rt,
         "INSERT INTO mvcc_delete_tx (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "mvcc_delete_tx");
+    let eid = rid(&rt, "mvcc_delete_tx");
 
     set_current_connection_id(43812);
     exec(&rt, "BEGIN");
     exec(
         &rt,
-        &format!("DELETE FROM mvcc_delete_tx WHERE red_entity_id = {eid}"),
+        &format!("DELETE FROM mvcc_delete_tx WHERE rid = {eid}"),
     );
     assert_eq!(label_for(&rt, "mvcc_delete_tx", eid), None);
 
@@ -168,12 +168,12 @@ fn rollback_of_staged_delete_leaves_row_visible() {
         &rt,
         "INSERT INTO mvcc_delete_rollback (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "mvcc_delete_rollback");
+    let eid = rid(&rt, "mvcc_delete_rollback");
 
     exec(&rt, "BEGIN");
     exec(
         &rt,
-        &format!("DELETE FROM mvcc_delete_rollback WHERE red_entity_id = {eid}"),
+        &format!("DELETE FROM mvcc_delete_rollback WHERE rid = {eid}"),
     );
     assert_eq!(label_for(&rt, "mvcc_delete_rollback", eid), None);
     exec(&rt, "ROLLBACK");

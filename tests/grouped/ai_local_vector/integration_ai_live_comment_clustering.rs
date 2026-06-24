@@ -235,7 +235,7 @@ fn live_comment_clustering_calls_real_models() {
         (
             "source_query",
             JsonValue::String(
-                "SELECT red_entity_id, comment FROM comments ORDER BY red_entity_id ASC LIMIT 200"
+                "SELECT rid, comment FROM comments ORDER BY rid ASC LIMIT 200"
                     .to_string(),
             ),
         ),
@@ -371,7 +371,7 @@ fn live_comment_clustering_calls_real_models() {
         query
             .execute(ExecuteQueryInput {
                 query: format!(
-                    "UPDATE comments SET category_id = '{}' WHERE red_entity_id = {}",
+                    "UPDATE comments SET category_id = '{}' WHERE rid = {}",
                     category_id.replace('\'', "''"),
                     assignment.linked_row_id
                 ),
