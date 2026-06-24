@@ -275,26 +275,12 @@ fn parse_error_kind_name(kind: &ParseErrorKind) -> &'static str {
     }
 }
 
-/// QUARANTINE (tracked: #1369 / #1370) — parser-behaviour regressions surfaced
-/// after the parser moved to `reddb-rql`. These corpus cases diverge from the
-/// documented surface and are skipped until the CI-gap fixes restore behaviour,
-/// at which point AFK removes them from this list.
-const QUARANTINED_CONFORMANCE_CASES: &[&str] = &[
-    "events_e15_add_subscription_filter.toml",
-    "events_e17_drop_subscription.toml",
-    "postfix_not_without_between_or_in.toml",
-    "simulate_policy_ddl_drop_collection.toml",
-];
-
 #[test]
 fn conformance_corpus() {
     let mut failures = Vec::new();
 
     for (path, case) in conformance_cases() {
         let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if QUARANTINED_CONFORMANCE_CASES.contains(&file_name.as_str()) {
-            continue;
-        }
         let input = case.expanded_input();
 
         match case.kind.as_str() {
@@ -364,10 +350,6 @@ fn conformance_corpus() {
     }
 }
 
-// QUARANTINE (tracked: #1369 / #1370) — the parser moved to `reddb-rql`, so the
-// corpus `source:` references still point at the old reddb-server paths. Ignored
-// until the references are re-homed; AFK removes this attribute as part of the fix.
-#[ignore = "tracked #1369/#1370: corpus source refs point at pre-reddb-rql parser paths"]
 #[test]
 fn conformance_sources_exist() {
     let root = repo_root();
