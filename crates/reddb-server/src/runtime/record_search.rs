@@ -1071,6 +1071,11 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
             for (key, value) in &edge.properties {
                 record.set(key, value.clone());
             }
+            // #1369 — graph edges must surface their endpoints as NodeRef so
+            // `SELECT *` carries graph semantics, not the raw text the INSERT
+            // happened to store in properties.
+            record.set("from", Value::NodeRef(edge_kind.from_node.clone()));
+            record.set("to", Value::NodeRef(edge_kind.to_node.clone()));
             set_public_graph_envelope(&mut record, entity, "edge");
             (
                 "graph_edge",
