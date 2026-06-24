@@ -1,5 +1,8 @@
 input = "SELECT id FROM users WHERE age NOT LIKE 30"
-expected_error_substring = "Unexpected token: NOT"
+# NOT LIKE is a valid operator (#1374); the parse error is now the non-string
+# LIKE-pattern operand, not the NOT itself. RedDB requires a string LIKE
+# pattern (stricter than PostgreSQL, which coerces — a pinned divergence).
+expected_error_substring = "expected: string"
 expected_error_kind = "Syntax"
 source = "crates/reddb-rql/src/parser/expr.rs:672"
 kind = "negative"
