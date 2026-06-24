@@ -487,12 +487,17 @@ impl RedDBRuntime {
             ]],
             None => Vec::new(),
         };
-        Ok(RuntimeQueryResult::ok_records(
-            raw_query.to_string(),
-            columns,
-            rows,
-            "select",
-        ))
+        let mut result =
+            RuntimeQueryResult::ok_records(raw_query.to_string(), columns, rows, "select");
+        result.statement = "approx_rank_of";
+        // Tag as `runtime-rank` so the 30s result cache skips this read
+        // (see `should_write_result_cache`). The approximate rank is rebuilt
+        // from a live full scan on every call (criterion 4: it must track
+        // score changes); a cached entry, scoped only to the ranking name and
+        // never the underlying table, would otherwise survive inserts into
+        // that table and serve a stale rank.
+        result.engine = "runtime-rank";
+        Ok(result)
     }
 
     /// Refresh the per-`(table, column)` score sketch from the rows visible
