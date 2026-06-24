@@ -241,8 +241,22 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Mutex to serialize keyring tests (they modify shared state)
-    static KEYRING_TEST_LOCK: Mutex<()> = Mutex::new(());
+    // Serialize keyring tests that touch the shared on-disk keyring file.
+    // Under nextest each test runs in its OWN PROCESS, so an in-process Mutex
+    // cannot stop concurrent processes from racing on the fixed
+    // `$XDG_CONFIG_HOME/reddb/keyring.enc` path (the source of the flaky
+    // `test_keyring_save_and_retrieve`). On first lock, lazily point
+    // XDG_CONFIG_HOME at a process-unique temp dir so every test process gets
+    // its own keyring file; the Mutex still serializes the in-process case for
+    // a plain `cargo test` run.
+    static KEYRING_TEST_LOCK: std::sync::LazyLock<Mutex<()>> =
+        std::sync::LazyLock::new(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("reddb-keyring-test-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("XDG_CONFIG_HOME", dir);
+            Mutex::new(())
+        });
 
     #[test]
     fn test_password_source_is_encrypted() {
