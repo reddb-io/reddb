@@ -376,7 +376,10 @@ jobs:
         # cap. nextest runs every test in a global parallel process pool (sleeps
         # overlap) and the `ci` profile enforces a hard per-test timeout
         # (.config/nextest.toml) so a hung test is killed, not the whole run.
-        run: cargo nextest run --workspace --locked --profile ci
+        # REPAIR (PRD #1362 / #1376): --no-fail-fast surfaces the full broken-test
+        # backlog every run so fixing one cluster does not re-hide the next. Revert
+        # to fail-fast once the suite is green (the #1376 capstone restores posture).
+        run: cargo nextest run --workspace --locked --profile ci --no-fail-fast
       - name: Doctests (nextest does not execute doctests)
         run: cargo test --workspace --locked --doc
       - name: Run persistent multimodel layer
