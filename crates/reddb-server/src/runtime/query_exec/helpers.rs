@@ -56,6 +56,12 @@ pub(crate) fn extract_entity_id_from_filter(
             match value {
                 Value::Integer(n) => Some(*n as u64),
                 Value::UnsignedInteger(n) => Some(*n),
+                // The document/client API passes the rid as a string literal
+                // (`WHERE rid = '1024'`, since `Documents::get` takes `rid:
+                // &str`); coerce a numeric-text rid to the entity-id so the
+                // O(1) lookup fires and `get(collection, rid)` resolves
+                // (#1364 / #1369 — rid is the canonical entity-id).
+                Value::Text(s) => s.parse::<u64>().ok(),
                 _ => None,
             }
         }
