@@ -81,7 +81,7 @@ fn insert_graph_node(rt: &RedDBRuntime, label: &str, name: &str) -> u64 {
             "INSERT INTO tales NODE (label, name) VALUES ('{label}', '{name}') RETURNING *"
         ))
         .expect("insert graph node");
-    match res.result.records[0].get("red_entity_id") {
+    match res.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(value)) => *value,
         Some(Value::Integer(value)) => *value as u64,
         other => panic!("expected graph node id, got {other:?}"),
@@ -2065,7 +2065,7 @@ fn insert_node_returning_star_exposes_entity_id() {
         .expect("INSERT NODE RETURNING * executes");
     assert_eq!(res.affected_rows, 1, "one node inserted");
     assert_eq!(res.result.len(), 1, "one RETURNING row");
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     assert!(id > 0, "engine-assigned id must be present (got {id})");
     assert_eq!(text_at(&res, 0, "label"), "cinderella");
     assert_eq!(text_at(&res, 0, "name"), "Cinderella");
@@ -2085,7 +2085,7 @@ fn insert_returning_star_exposes_entity_id_for_non_graph_entities() {
         let res = rt.execute_query(sql).expect("INSERT RETURNING * executes");
         assert_eq!(res.affected_rows, 1, "{sql}");
         assert_eq!(res.result.len(), 1, "{sql}");
-        let id = u64_at(&res, 0, "red_entity_id");
+        let id = u64_at(&res, 0, "rid");
         assert!(id > 0, "{sql} must expose red_entity_id");
     }
 }
@@ -2099,8 +2099,8 @@ fn insert_edge_returning_star_exposes_entity_id() {
     let b = rt
         .execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B') RETURNING *")
         .expect("insert b");
-    let a_id = u64_at(&a, 0, "red_entity_id");
-    let b_id = u64_at(&b, 0, "red_entity_id");
+    let a_id = u64_at(&a, 0, "rid");
+    let b_id = u64_at(&b, 0, "rid");
 
     let res = rt
         .execute_query(&format!(
@@ -2109,7 +2109,7 @@ fn insert_edge_returning_star_exposes_entity_id() {
         .expect("INSERT EDGE RETURNING * executes");
     assert_eq!(res.affected_rows, 1);
     assert_eq!(res.result.len(), 1);
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     assert!(id > 0);
     assert_eq!(text_at(&res, 0, "label"), "KNOWS");
 }
@@ -2124,8 +2124,8 @@ fn insert_multi_row_node_returning_star_emits_one_row_per_insert() {
         .expect("multi-row NODE insert executes");
     assert_eq!(res.affected_rows, 2);
     assert_eq!(res.result.len(), 2);
-    let id_a = u64_at(&res, 0, "red_entity_id");
-    let id_b = u64_at(&res, 1, "red_entity_id");
+    let id_a = u64_at(&res, 0, "rid");
+    let id_b = u64_at(&res, 1, "rid");
     assert!(id_a > 0 && id_b > 0 && id_a != id_b);
 }
 
@@ -2141,9 +2141,9 @@ fn insert_multi_row_edge_returning_star_emits_one_row_per_insert() {
     let c = rt
         .execute_query("INSERT INTO tales NODE (label, name) VALUES ('c', 'C') RETURNING *")
         .expect("insert c");
-    let a_id = u64_at(&a, 0, "red_entity_id");
-    let b_id = u64_at(&b, 0, "red_entity_id");
-    let c_id = u64_at(&c, 0, "red_entity_id");
+    let a_id = u64_at(&a, 0, "rid");
+    let b_id = u64_at(&b, 0, "rid");
+    let c_id = u64_at(&c, 0, "rid");
 
     let res = rt
         .execute_query(&format!(
@@ -2153,8 +2153,8 @@ fn insert_multi_row_edge_returning_star_emits_one_row_per_insert() {
         .expect("multi-row EDGE insert executes");
     assert_eq!(res.affected_rows, 2);
     assert_eq!(res.result.len(), 2);
-    let id_a = u64_at(&res, 0, "red_entity_id");
-    let id_b = u64_at(&res, 1, "red_entity_id");
+    let id_a = u64_at(&res, 0, "rid");
+    let id_b = u64_at(&res, 1, "rid");
     assert!(id_a > 0 && id_b > 0 && id_a != id_b);
     assert_eq!(text_at(&res, 0, "label"), "KNOWS");
     assert_eq!(text_at(&res, 1, "label"), "KNOWS");
@@ -2189,8 +2189,8 @@ fn insert_multi_row_edge_failure_is_atomic() {
     let b = rt
         .execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B') RETURNING *")
         .expect("insert b");
-    let a_id = u64_at(&a, 0, "red_entity_id");
-    let b_id = u64_at(&b, 0, "red_entity_id");
+    let a_id = u64_at(&a, 0, "rid");
+    let b_id = u64_at(&b, 0, "rid");
 
     let err = rt
         .execute_query(&format!(
@@ -2238,7 +2238,7 @@ fn first_user_entity_id_is_one_hundred_and_two() {
             "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
         )
         .expect("first user insert");
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     assert_eq!(
         id, 102,
         "first user-inserted entity id must be 102 (documented offset). \
@@ -2261,7 +2261,7 @@ fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
             "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
         )
         .expect("first persistent user insert");
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     drop(rt);
 
     assert_eq!(
@@ -2312,7 +2312,7 @@ fn graph_properties_by_numeric_id_returns_property_bag() {
             "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
         )
         .expect("insert");
-    let id = u64_at(&ins, 0, "red_entity_id");
+    let id = u64_at(&ins, 0, "rid");
     let res = rt
         .execute_query(&format!("GRAPH PROPERTIES '{id}'"))
         .expect("by numeric id resolves");
