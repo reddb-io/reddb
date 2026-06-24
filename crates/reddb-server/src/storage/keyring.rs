@@ -249,14 +249,12 @@ mod tests {
     // XDG_CONFIG_HOME at a process-unique temp dir so every test process gets
     // its own keyring file; the Mutex still serializes the in-process case for
     // a plain `cargo test` run.
-    static KEYRING_TEST_LOCK: std::sync::LazyLock<Mutex<()>> =
-        std::sync::LazyLock::new(|| {
-            let dir = std::env::temp_dir()
-                .join(format!("reddb-keyring-test-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&dir);
-            std::env::set_var("XDG_CONFIG_HOME", dir);
-            Mutex::new(())
-        });
+    static KEYRING_TEST_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| {
+        let dir = std::env::temp_dir().join(format!("reddb-keyring-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("XDG_CONFIG_HOME", dir);
+        Mutex::new(())
+    });
 
     #[test]
     fn test_password_source_is_encrypted() {
