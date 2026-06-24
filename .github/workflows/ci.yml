@@ -383,7 +383,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/persistent-tests
         run: >-
-          cargo test --locked --test grouped_runtime_persistence integration_persistent_multimodel -- --ignored
+          cargo test --locked --test grouped_general_multimodel integration_persistent_multimodel -- --ignored
       - name: Check for temp-file residue (leak guard)
         # Issue #972 — fail the build if any reddb-*/reddb_*/*.rdb/*.wal
         # temp residue remains in TMPDIR after the full test suite.  All
