@@ -2461,19 +2461,20 @@ impl RedDBRuntime {
                             .clone()
                             .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
                     };
-                    if !embedded_single_file
-                        && options
-                            .metadata
-                            .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY)
+                    if options
+                        .metadata
+                        .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY)
                     {
                         // Ephemeral (in-memory) runtimes all live in the
-                        // system temp dir, so the fixed `.audit.log` sibling
-                        // that `legacy_audit_log_path` returns collides across
+                        // system temp dir, so the tier-derived `for_destination`
+                        // sink (a shared support-dir path) collides across
                         // instances. Under nextest's process-per-test model
                         // many ephemeral runtimes run concurrently and truncate
                         // each other's audit log, flaking audit assertions.
-                        // Derive the sink from the unique ephemeral data-file
-                        // stem so every runtime gets its own file.
+                        // Derive the sink from this runtime's unique data path
+                        // (process-unique for the embedded case, tempdir-unique
+                        // otherwise) so every runtime gets its own file — applies
+                        // whether or not it is also single-file embedded.
                         let audit_path = reddb_file::layout::sibling_path(
                             &data_path,
                             &reddb_file::layout::sidecar_file_name(&data_path, "audit.log"),
