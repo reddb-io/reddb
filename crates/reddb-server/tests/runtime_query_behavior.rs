@@ -488,17 +488,20 @@ fn current_time_bare_builtins_are_single_row_scalars_and_work_in_expressions() {
     assert_eq!(time.as_bytes()[2], b':');
     assert_eq!(time.as_bytes()[5], b':');
 
-    rt.execute_query("CREATE TABLE time_t (created_at TIMESTAMP_MS, name TEXT)")
+    // `created_at` is a reserved system-envelope field (ADR 0057) unless the
+    // table opts into managed timestamps; this test only needs an ordinary
+    // timestamp column to exercise CURRENT_TIMESTAMP, so use a non-reserved name.
+    rt.execute_query("CREATE TABLE time_t (recorded_at TIMESTAMP_MS, name TEXT)")
         .expect("create time_t");
-    rt.execute_query("INSERT INTO time_t (created_at, name) VALUES (32503680000000, 'future')")
+    rt.execute_query("INSERT INTO time_t (recorded_at, name) VALUES (32503680000000, 'future')")
         .expect("insert time_t");
     let projected = rt
-        .execute_query("SELECT created_at >= CURRENT_TIMESTAMP - 86400000 AS keep_row FROM time_t")
+        .execute_query("SELECT recorded_at >= CURRENT_TIMESTAMP - 86400000 AS keep_row FROM time_t")
         .expect("CURRENT_TIMESTAMP expression projects");
     assert_eq!(projected.result.records.len(), 1);
     assert!(bool_at(&projected, 0, "keep_row"));
     let filtered = rt
-        .execute_query("SELECT name FROM time_t WHERE created_at >= CURRENT_TIMESTAMP - 86400000")
+        .execute_query("SELECT name FROM time_t WHERE recorded_at >= CURRENT_TIMESTAMP - 86400000")
         .expect("CURRENT_TIMESTAMP works in WHERE expression");
     assert_eq!(filtered.result.records.len(), 1);
     assert_eq!(text_at(&filtered, 0, "name"), "future");
