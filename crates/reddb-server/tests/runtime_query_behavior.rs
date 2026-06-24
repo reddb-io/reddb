@@ -876,8 +876,13 @@ fn select_star_returns_graph_entities_inserted_into_collection() {
         Some(Value::Text(value)) => assert_eq!(value.as_ref(), "rescues"),
         other => panic!("expected edge label text, got {other:?}"),
     }
-    assert!(matches!(edge.get("from"), Some(Value::NodeRef(_))));
-    assert!(matches!(edge.get("to"), Some(Value::NodeRef(_))));
+    // #1369 — edges surface their endpoints as canonical rid references
+    // (`from_rid`/`to_rid`), not raw `from`/`to`, keeping the public graph
+    // envelope rid-based.
+    assert!(edge.get("from_rid").is_some(), "edge exposes from_rid");
+    assert!(edge.get("to_rid").is_some(), "edge exposes to_rid");
+    assert!(edge.get("from").is_none(), "edge must not expose raw from");
+    assert!(edge.get("to").is_none(), "edge must not expose raw to");
 
     let filtered = rt
         .execute_query("SELECT label, name FROM tales WHERE label = 'cinderella'")
