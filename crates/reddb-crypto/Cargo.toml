@@ -8,6 +8,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/reddb-io-crypto"
+readme = "README.md"
 keywords = ["database", "encryption", "aes-gcm", "at-rest", "envelope"]
 categories = ["cryptography", "database-implementations"]
 

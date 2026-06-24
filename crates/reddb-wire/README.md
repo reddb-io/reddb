@@ -1,17 +1,17 @@
-# reddb-wire
+# reddb-io-wire
 
 Transport-agnostic protocol vocabulary for RedDB. This crate is the
-shared layer that `reddb-server`, `reddb-client`, and the
+shared layer that `reddb-io-server`, `reddb-io-client`, and the
 official language drivers all depend on.
 
-`reddb-wire` is the canonical protocol crate. RedProtocol is the
+`reddb-io-wire` is the canonical protocol crate. RedProtocol is the
 logical contract; RedWire is the binary frame format inside that
 contract. Server runtime, storage, auth validation, sockets, and task
 scheduling stay outside this crate.
 
 ## Audience
 
-Pick `reddb-wire` when you need to:
+Pick `reddb-io-wire` when you need to:
 
 - Parse a RedDB connection string (`red://`, `reds://`, `grpc://`,
   `grpcs://`, `http://`, `https://`, `memory://`, `file://`) into a
@@ -23,8 +23,8 @@ Pick `reddb-wire` when you need to:
   stream envelopes, queue-wait envelopes, and topology advertisements.
 
 If you only need a connector that wraps a server, use the
-published [`reddb-client`](../reddb-client) driver. It depends on
-`reddb-wire` for parsing and frame types.
+published [`reddb-io-client`](../reddb-client) driver. It depends on
+`reddb-io-wire` for parsing and frame types.
 
 ## What's inside
 
@@ -36,14 +36,14 @@ published [`reddb-client`](../reddb-client) driver. It depends on
 - `redwire::frame` and `redwire::codec` — the RedWire frame layout
   and zstd-aware codec defined by [ADR 0001][adr-0001].
 - `redwire::handshake` — Hello, HelloAck, AuthOk, and AuthFail payload
-  contracts. Credential validation remains in `reddb-server`.
+  contracts. Credential validation remains in `reddb-io-server`.
 - `redwire::stream` and `redwire::queue` — JSON payload contracts for
   multiplexed streams and queue wait. Stream registries, leases,
-  runtime execution, and cancellation tasks remain in `reddb-server`.
+  runtime execution, and cancellation tasks remain in `reddb-io-server`.
 - `replication` — transport-agnostic payload contracts for WAL pull,
   replica ACK, basebackup chunks, catchup mode, and timeline fork
   notices. Applying WAL, writing snapshots, and failover policy remain
-  in `reddb-server` / `reddb-file`.
+  in `reddb-io-server` / `reddb-io-file`.
 - `topology` — the binary topology advertisement shared by RedWire and
   gRPC.
 - Constants: `DEFAULT_PORT_RED`, `DEFAULT_PORT_GRPC`, `DEFAULT_PORT_GRPCS`,

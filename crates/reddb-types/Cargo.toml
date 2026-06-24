@@ -8,6 +8,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/reddb-io-types"
+readme = "README.md"
 keywords = ["database", "type-system", "value", "sql-types"]
 categories = ["database-implementations", "data-structures"]
 

@@ -1,4 +1,4 @@
-# reddb-server
+# reddb-io-server
 
 The server-side guts of RedDB: engine, storage, runtime,
 replication, MCP, AI, and every protocol dispatcher (gRPC, HTTP,
@@ -8,15 +8,15 @@ split.
 
 ## Audience
 
-Pick `reddb-server` when you need to **embed the engine** in a
+Pick `reddb-io-server` when you need to **embed the engine** in a
 Rust process — for example, a custom server, an integration test
 that drives the engine in-memory, or a tool that performs
 offline maintenance on a `.rdb` file.
 
 If you're writing application code that just talks to a running
-server, you want the published [`reddb-client`][drivers-rust]
+server, you want the published [`reddb-io-client`][drivers-rust]
 driver instead. The thin `red_client` binary lives in
-[`reddb-client-internal`](../reddb-client) (workspace).
+[`reddb-io-client`](../reddb-client) (workspace).
 
 ## What's inside
 
@@ -29,7 +29,7 @@ Top-level modules (full list in `src/lib.rs`):
 - `server` — HTTP/REST handlers, OpenAPI surface
 - `grpc` — gRPC service implementation
 - `wire`  — RedWire dispatcher (frame layout/codec are owned by
-  [`reddb-wire`](../reddb-wire) and re-exported here)
+  [`reddb-io-wire`](../reddb-wire) and re-exported here)
 - `service_cli`, `service_router` — bind logic + per-port routing
 - `rpc_stdio` — JSON-RPC stdio mode used by spawning drivers
 
@@ -46,7 +46,7 @@ Top-level modules (full list in `src/lib.rs`):
 - [Connection strings][conn-strings]
 - [ADR 0001 — RedWire][adr-0001]
 - [Disk format v1](../../.red/adr/0003-disk-format-v1.md)
-- [Workspace migration guide](../../docs/migration/workspace-split.md)
+- [Monorepo structure](../../docs/dev/monorepo-structure.md)
 
 [adr-0001]: ../../.red/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md

@@ -8,6 +8,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/reddb-io-rql"
+readme = "README.md"
 keywords = ["database", "sql", "rql", "conformance", "sqllogictest"]
 categories = ["database-implementations", "parser-implementations"]
 

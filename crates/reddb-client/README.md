@@ -4,13 +4,13 @@ Official Rust client for [RedDB](https://github.com/reddb-io/reddb).
 One connection-string API across embedded, gRPC, HTTP, and
 RedWire transports. Also hosts the `red_client` binary and the
 workspace-internal connector used by `red`'s REPL and
-`reddb-server`'s rpc_stdio mode.
+`reddb-io-server`'s rpc_stdio mode.
 
 ## Quickstart (library)
 
 ```toml
 [dependencies]
-reddb-io-client = "1.2"
+reddb-io-client = "1.13"
 ```
 
 ```rust,no_run
@@ -256,19 +256,19 @@ every PR to catch accidental engine re-linkage.
 - `crate::Reddb` / `JsonValue` / `ClientError` — published
   high-level API.
 - `crate::connect::{Target, parse}` — back-compat shim over
-  [`reddb-wire`'s][rw] connection-string parser.
+  [`reddb-io-wire`'s][rw] connection-string parser.
 - `crate::connector::{RedDBClient, repl, http, redwire}` —
   workspace-internal connector consumed by the `red` REPL,
-  `red_client` bin, and `reddb-server`'s rpc_stdio mode. The
+  `red_client` bin, and `reddb-io-server`'s rpc_stdio mode. The
   gRPC connector type itself lives in the
-  [`reddb-client-connector`](../reddb-client-connector) sibling
+  [`reddb-io-client-connector`](../reddb-client-connector) sibling
   crate to break a path-dependency cycle.
 
 ## References
 
 - [Connection strings][conn-strings]
 - [ADR 0001 — RedWire][adr-0001]
-- [Workspace migration guide](../../docs/migration/workspace-split.md)
+- [Monorepo structure](../../docs/dev/monorepo-structure.md)
 
 [adr-0001]: ../../.red/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md

@@ -8,6 +8,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/reddb-io-file"
+readme = "README.md"
 keywords = ["database", "wal", "storage", "filesystem"]
 categories = ["database-implementations", "filesystem"]
 

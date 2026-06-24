@@ -1,4 +1,4 @@
-# reddb-grpc-proto
+# reddb-io-grpc-proto
 
 Generated gRPC protobuf types and tonic client/server stubs for
 RedDB. The `.proto` source lives in this crate's `proto/` directory
@@ -8,13 +8,13 @@ and is compiled by `tonic-prost-build` at build time.
 
 This crate is consumed by:
 
-- `reddb-server` — server-side dispatch handlers.
-- `reddb-client` — gRPC connector used by the `red` and
+- `reddb-io-server` — server-side dispatch handlers.
+- `reddb-io-client` — gRPC connector used by the `red` and
   `red_client` binaries (via the workspace-internal
-  `reddb-client-connector` sibling).
+  `reddb-io-client-connector` sibling).
 
 You usually want one of those higher-level crates instead of
-depending on `reddb-grpc-proto` directly. The crate exists so the
+depending on `reddb-io-grpc-proto` directly. The crate exists so the
 two sides can share generated types without one depending on the
 other (which would form a dependency cycle).
 
