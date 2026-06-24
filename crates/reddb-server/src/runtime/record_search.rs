@@ -1002,6 +1002,10 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         set_runtime_entity_metadata(&mut record, entity_type, capabilities);
         apply_runtime_identity_hints(&mut record, &identity_entity);
     } else {
+        // #1369 — every entity model exposes its entity-id as `rid`, not only
+        // the legacy `red_entity_id` alias (vector / time-series / queue rows).
+        // `rid` is mandatory for every model, never optional.
+        record.set_arc(sys_key_rid(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
         record.set_arc(sys_key_red_kind(), Value::text(storage_type));
@@ -1131,6 +1135,10 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         set_runtime_entity_metadata(&mut record, entity_type, capabilities);
         apply_runtime_identity_hints(&mut record, entity);
     } else {
+        // #1369 — every entity model exposes its entity-id as `rid`, not only
+        // the legacy `red_entity_id` alias (vector / time-series / queue rows).
+        // `rid` is mandatory for every model, never optional.
+        record.set_arc(sys_key_rid(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
         record.set_arc(sys_key_red_kind(), Value::text(storage_type));
