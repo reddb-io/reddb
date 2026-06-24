@@ -2041,6 +2041,12 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
         "pg_try_advisory_lock",
         "pg_advisory_unlock",
         "random()",
+        // `$config.<path>` / `$secret.<path>` resolve mutable runtime config /
+        // vault state at execution time (#1370). A cached result would serve a
+        // stale value after a later `SET CONFIG` / `SET SECRET`, so treat any
+        // query referencing them as volatile (never result-cache it).
+        "$config",
+        "$secret",
         // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
         // omitted for now — they ARE volatile but today's tests rely
         // on caching them. Revisit once a tighter volatility story
