@@ -80,8 +80,9 @@ fn dollar_secret_payload_lands_as_typed_function_call() {
         other => panic!("secret-ref arg must be Value::Text path, got {other:?}"),
     };
     assert_eq!(
-        path, "mycompany.injection.payload",
-        "path literal must be the secret path, not the secret value"
+        path, "red.vault/mycompany.injection.payload",
+        "path literal must be the secret path (namespaced under the red.vault \
+         collection by the reddb-rql parser), not the secret value"
     );
 }
 
