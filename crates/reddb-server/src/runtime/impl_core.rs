@@ -2461,20 +2461,24 @@ impl RedDBRuntime {
                             .clone()
                             .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
                     };
-                    if options
-                        .metadata
-                        .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY)
+                    let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
+                    if !matches!(
+                        audit_dest,
+                        crate::storage::layout::LogDestination::File(_)
+                    ) && (embedded_single_file
+                        || options
+                            .metadata
+                            .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY))
                     {
-                        // Ephemeral (in-memory) runtimes all live in the
-                        // system temp dir, so the tier-derived `for_destination`
-                        // sink (a shared support-dir path) collides across
-                        // instances. Under nextest's process-per-test model
-                        // many ephemeral runtimes run concurrently and truncate
-                        // each other's audit log, flaking audit assertions.
-                        // Derive the sink from this runtime's unique data path
-                        // (process-unique for the embedded case, tempdir-unique
-                        // otherwise) so every runtime gets its own file — applies
-                        // whether or not it is also single-file embedded.
+                        // The Stderr/Syslog lower-tier sink resolves to a
+                        // `for_data_path` sibling that collides across concurrent
+                        // temp-dir runtimes — nextest's process-per-test model
+                        // truncates one shared file, flaking audit assertions.
+                        // Pin a unique sibling for these short-lived ephemeral /
+                        // single-file embedded runtimes. The file-owned support-
+                        // dir tier (`File`) is already per-data unique, so leave
+                        // it to `for_destination` (#1375: the embedded audit then
+                        // still never lands a sibling next to the `.rdb`).
                         let audit_path = reddb_file::layout::sibling_path(
                             &data_path,
                             &reddb_file::layout::sidecar_file_name(&data_path, "audit.log"),
@@ -2483,7 +2487,6 @@ impl RedDBRuntime {
                             audit_path,
                         ))
                     } else {
-                        let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
                         Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
                             &audit_dest,
                             &data_path,
