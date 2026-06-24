@@ -693,7 +693,7 @@ pub(super) fn resolve_runtime_projection_value(
         .get(column)
         .cloned()
         .or_else(|| {
-            // Explicit `SELECT red_entity_id` / `red_collection` /
+            // Explicit `SELECT entity_id` / `red_collection` /
             // `red_kind` resolves to the rid-envelope field even on the
             // lean fast paths that don't pre-materialize the legacy alias
             // column. `SELECT *` never names these, so the envelope stays
@@ -1389,13 +1389,13 @@ pub(super) fn compare_runtime_optional_values(
 /// Map a legacy public-identity column name to its canonical rid-envelope
 /// field. The rid-envelope refactor exposes identity under `rid` /
 /// `collection` / `kind`, but WHERE/ORDER predicates written against the
-/// older `red_entity_id` / `red_collection` / `red_kind` names must still
+/// older `entity_id` / `red_collection` / `red_kind` names must still
 /// resolve. We only consult this alias when the literal column is absent
 /// from the materialized record, so it never shadows a real user column and
 /// never adds these names to `SELECT *` output (that stays envelope-clean).
 pub(super) fn legacy_runtime_system_alias(column: &str) -> Option<&'static str> {
     match column {
-        "red_entity_id" | "entity_id" => Some("rid"),
+        "entity_id" => Some("rid"),
         "red_collection" => Some("collection"),
         "red_kind" => Some("kind"),
         _ => None,

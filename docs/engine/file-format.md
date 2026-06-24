@@ -236,7 +236,10 @@ and bootstrap markers) before any user mutation runs. As a result:
 > database, identical for both `memory://` and `file://` backends. The
 > assignment is stable: re-opening a file does not re-issue ids 1..101 to
 > user entities. Application code that needs the id should read it back via
-> `INSERT ... RETURNING *` (the `red_entity_id` column) rather than guessing.
+> `INSERT ... RETURNING *` (the `rid` column) rather than guessing.
+>
+> The legacy `red_entity_id` column is retired in this version; `rid` is the
+> sole canonical entity-id column.
 
 This offset is part of the persisted file-format contract — changing it
 requires a `.rdb` format version bump and a migration. The behaviour is

@@ -128,7 +128,7 @@ fn classify_field_inner(
     // System fields take precedence — same order as
     // `resolve_entity_field`.
     match column {
-        "rid" | "red_entity_id" | "entity_id" => return EntityFieldKind::SystemEntityId,
+        "rid" | "entity_id" => return EntityFieldKind::SystemEntityId,
         "created_at" => return EntityFieldKind::SystemCreatedAt,
         "updated_at" => return EntityFieldKind::SystemUpdatedAt,
         "red_sequence_id" => return EntityFieldKind::SystemSequenceId,
@@ -754,7 +754,6 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
 fn collect_required_bloom(filter: &Filter) -> u64 {
     const SYSTEM_FIELDS: &[&str] = &[
         "rid",
-        "red_entity_id",
         "entity_id",
         "created_at",
         "updated_at",
@@ -975,7 +974,7 @@ mod tests {
     fn classify_system_entity_id() {
         let f = FieldRef::TableColumn {
             table: String::new(),
-            column: "red_entity_id".to_string(),
+            column: "rid".to_string(),
         };
         assert!(matches!(
             classify_field(&f, "users", "u"),
@@ -1129,7 +1128,7 @@ mod tests {
         let f = Filter::Compare {
             field: FieldRef::TableColumn {
                 table: String::new(),
-                column: "red_entity_id".to_string(),
+                column: "rid".to_string(),
             },
             op: CompareOp::Eq,
             value: Value::UnsignedInteger(42),

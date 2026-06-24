@@ -419,7 +419,7 @@ impl RedDBRuntime {
         // The exact head: top-K rows in rank order. Each row here already
         // passed MVCC visibility *and* RLS/tenant filtering during the
         // scan, so identifying the target *within* this result (rather
-        // than via a separate `red_entity_id` lookup, which takes the
+        // than via a separate `rid` lookup, which takes the
         // direct entity-fetch path that bypasses the RLS gate) is what
         // makes the rank honor policy/tenant scope (criterion 5).
         let dir = if descriptor.descending { "DESC" } else { "ASC" };
@@ -12052,7 +12052,7 @@ fn push_returning_policy_column(columns: &mut Vec<String>, column: &str) {
 fn returning_public_envelope_column(column: &str) -> bool {
     matches!(
         column.to_ascii_lowercase().as_str(),
-        "rid" | "collection" | "kind" | "tenant" | "created_at" | "updated_at" | "red_entity_id"
+        "rid" | "collection" | "kind" | "tenant" | "created_at" | "updated_at"
     )
 }
 

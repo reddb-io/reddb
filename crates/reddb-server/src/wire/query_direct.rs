@@ -146,7 +146,7 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
     let effective_filter = effective_table_filter(tq);
 
     // Defer to execute_query's point-lookup path when WHERE reduces
-    // to `red_entity_id = N` — that path handles MVCC + error shapes
+    // to `rid = N` — that path handles MVCC + error shapes
     // we don't want to re-implement here.
     if extract_entity_id_from_filter(&effective_filter).is_some() {
         return None;
@@ -985,7 +985,7 @@ fn estimate_wire_columns_response_capacity(cols: &[WireColumn], row_hint: usize)
 
 fn estimated_wire_column_value_bytes(col: &WireColumn) -> usize {
     match &col.source {
-        WireColumnSource::RedEntityId
+        WireColumnSource::Rid
         | WireColumnSource::CreatedAt
         | WireColumnSource::UpdatedAt => 9,
         _ => estimated_wire_value_bytes(col.name.as_ref()),
@@ -994,7 +994,7 @@ fn estimated_wire_column_value_bytes(col: &WireColumn) -> usize {
 
 fn estimated_wire_value_bytes(column: &str) -> usize {
     match column {
-        "id" | "age" | "score" | "red_entity_id" | "created_at_ms" | "updated_at_ms" => 9,
+        "id" | "age" | "score" | "rid" | "created_at_ms" | "updated_at_ms" => 9,
         "city" => 16,
         "name" => 32,
         "email" => 48,
@@ -1187,7 +1187,7 @@ struct WireColumn {
 
 #[derive(Clone)]
 enum WireColumnSource {
-    RedEntityId,
+    Rid,
     CreatedAt,
     UpdatedAt,
     RowIndexTrusted { index: usize },
@@ -1203,10 +1203,7 @@ fn resolve_wire_columns(tq: &TableQuery, row: &RowData) -> Vec<WireColumn> {
 
     if wildcard {
         let mut out = Vec::with_capacity(3 + row.columns.len());
-        out.push(WireColumn::system(
-            "red_entity_id",
-            WireColumnSource::RedEntityId,
-        ));
+        out.push(WireColumn::system("rid", WireColumnSource::Rid));
         out.push(WireColumn::system(
             "created_at",
             WireColumnSource::CreatedAt,
@@ -1258,10 +1255,7 @@ fn resolve_wire_columns_from_query_schema(tq: &TableQuery, schema: &[String]) ->
 
     if wildcard {
         let mut out = Vec::with_capacity(3 + schema.len());
-        out.push(WireColumn::system(
-            "red_entity_id",
-            WireColumnSource::RedEntityId,
-        ));
+        out.push(WireColumn::system("rid", WireColumnSource::Rid));
         out.push(WireColumn::system(
             "created_at",
             WireColumnSource::CreatedAt,
@@ -1347,7 +1341,7 @@ impl WireColumn {
 
 fn resolve_named_wire_column_for_empty_row(name: &str, source_column: &str) -> WireColumn {
     let source = match source_column {
-        "red_entity_id" => WireColumnSource::RedEntityId,
+        "rid" => WireColumnSource::Rid,
         "created_at" => WireColumnSource::CreatedAt,
         "updated_at" => WireColumnSource::UpdatedAt,
         _ => WireColumnSource::RowName(Arc::<str>::from(source_column)),
@@ -1364,7 +1358,7 @@ fn resolve_named_wire_column_from_schema(
     schema: &[String],
 ) -> WireColumn {
     let source = match source_column {
-        "red_entity_id" => WireColumnSource::RedEntityId,
+        "rid" => WireColumnSource::Rid,
         "created_at" => WireColumnSource::CreatedAt,
         "updated_at" => WireColumnSource::UpdatedAt,
         _ => match schema.iter().position(|col| col == source_column) {
@@ -1380,7 +1374,7 @@ fn resolve_named_wire_column_from_schema(
 
 fn resolve_named_wire_column(name: &str, source_column: &str, row: &RowData) -> WireColumn {
     let source = match source_column {
-        "red_entity_id" => WireColumnSource::RedEntityId,
+        "rid" => WireColumnSource::Rid,
         "created_at" => WireColumnSource::CreatedAt,
         "updated_at" => WireColumnSource::UpdatedAt,
         _ => {
@@ -1411,7 +1405,7 @@ fn encode_entity_wire_value(
     col: &WireColumn,
 ) {
     match &col.source {
-        WireColumnSource::RedEntityId => encode_wire_u64(body, entity.logical_id().raw()),
+        WireColumnSource::Rid => encode_wire_u64(body, entity.logical_id().raw()),
         WireColumnSource::CreatedAt => encode_wire_u64(body, entity.created_at),
         WireColumnSource::UpdatedAt => encode_wire_u64(body, entity.updated_at),
         WireColumnSource::RowIndexTrusted { index } => match row.columns.get(*index) {

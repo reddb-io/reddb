@@ -50,7 +50,7 @@ pub(crate) fn extract_entity_id_from_filter(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if field_name != "rid" && field_name != "red_entity_id" && field_name != "entity_id" {
+            if field_name != "rid" && field_name != "entity_id" {
                 return None;
             }
             match value {
@@ -68,7 +68,7 @@ pub(crate) fn extract_entity_id_from_filter(
 /// Extract a bloom filter key hint from an internal-PK equality filter.
 ///
 /// The segment-level bloom only indexes RedDB's synthetic
-/// `red_entity_id` column — every entity is hashed into the bloom by
+/// `rid` entity-id column — every entity is hashed into the bloom by
 /// that key on insert. User-declared columns named `id`, `row_id`, or
 /// `key` are NOT guaranteed to be in the bloom (they're application
 /// data, not engine-managed PKs); treating them as bloom-keyed
@@ -76,7 +76,7 @@ pub(crate) fn extract_entity_id_from_filter(
 /// matching `WHERE id = N` against tables whose `id` column was just
 /// a regular user field.
 ///
-/// Restricted to `red_entity_id` so the bloom probe is always sound.
+/// Restricted to `rid` so the bloom probe is always sound.
 /// User-PK pruning belongs in a separate code path tied to actual
 /// PRIMARY KEY metadata or registered index hints.
 pub(crate) fn extract_bloom_key_for_pk(
@@ -89,7 +89,7 @@ pub(crate) fn extract_bloom_key_for_pk(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if field_name != "red_entity_id" {
+            if field_name != "rid" {
                 return None;
             }
             let key = match value {
@@ -195,8 +195,7 @@ pub(crate) fn extract_zone_predicates(
                 _ => return,
             };
             // Skip system fields — they live outside named HashMap
-            if col.starts_with('_') || col == "rid" || col == "red_entity_id" || col == "entity_id"
-            {
+            if col.starts_with('_') || col == "rid" || col == "entity_id" {
                 return;
             }
             let kind = match op {
@@ -214,8 +213,7 @@ pub(crate) fn extract_zone_predicates(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return,
             };
-            if col.starts_with('_') || col == "rid" || col == "red_entity_id" || col == "entity_id"
-            {
+            if col.starts_with('_') || col == "rid" || col == "entity_id" {
                 return;
             }
             out.push((col.to_string(), low.clone(), ZoneColPredKind::Gte));
@@ -306,7 +304,7 @@ pub(crate) fn resolve_entity_field<'a>(
 
     // System fields — accessed directly from entity struct fields
     match column {
-        "rid" | "red_entity_id" | "entity_id" => {
+        "rid" | "entity_id" => {
             return Some(Cow::Owned(Value::UnsignedInteger(
                 entity.logical_id().raw(),
             )));

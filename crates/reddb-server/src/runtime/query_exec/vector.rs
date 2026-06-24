@@ -239,7 +239,7 @@ pub(crate) fn runtime_vector_record_matches_filter(
 ) -> bool {
     let entity_id = record
         .get("entity_id")
-        .or_else(|| record.get("red_entity_id"))
+        .or_else(|| record.get("rid"))
         .and_then(|value| match value {
             Value::UnsignedInteger(value) => Some(EntityId::new(*value)),
             Value::Integer(value) if *value >= 0 => Some(EntityId::new(*value as u64)),

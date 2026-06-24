@@ -103,7 +103,7 @@ pub(crate) fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec
 
 fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<u8> {
     let mut cols: Vec<String> = vec![
-        "red_entity_id".into(),
+        "rid".into(),
         "created_at".into(),
         "updated_at".into(),
     ];
@@ -117,7 +117,7 @@ fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<
     encode_result_payload_header(&mut body, cols.iter().map(String::as_str), 1);
     for col in &cols {
         let val = match col.as_str() {
-            "red_entity_id" => Value::UnsignedInteger(entity.logical_id().raw()),
+            "rid" => Value::UnsignedInteger(entity.logical_id().raw()),
             "created_at" => Value::UnsignedInteger(entity.created_at),
             "updated_at" => Value::UnsignedInteger(entity.updated_at),
             other => {

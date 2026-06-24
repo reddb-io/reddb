@@ -2093,7 +2093,7 @@ fn insert_returning_star_exposes_entity_id_for_non_graph_entities() {
         assert_eq!(res.affected_rows, 1, "{sql}");
         assert_eq!(res.result.len(), 1, "{sql}");
         let id = u64_at(&res, 0, "rid");
-        assert!(id > 0, "{sql} must expose red_entity_id");
+        assert!(id > 0, "{sql} must expose rid");
     }
 }
 
