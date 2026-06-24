@@ -60,6 +60,62 @@ sudo install -m 0755 ./red /usr/local/bin/red
 red version
 ```
 
+## Runtime requirements
+
+`red` is a self-contained binary — it does **not** require Rust, Node, a JVM, or any
+RedDB-specific runtime to be installed. What it needs depends on which asset you use.
+
+### Linux
+
+Two Linux x86_64 assets are published per release:
+
+| Asset | Runtime dependency | Use when |
+|---|---|---|
+| **`red-linux-x86_64-static`** | **None** — fully static (musl); runs on any Linux kernel | **Recommended.** Any distro old or new, containers, minimal/scratch images. |
+| `red-linux-x86_64` | glibc ≥ the build runner's version (currently **2.39**) | Only on a recent distro (Ubuntu 24.04+, Debian 13+, Fedora 39+). |
+
+The installer script and the npm postinstall prefer the **static** asset, so you normally
+don't choose. If you download manually and hit:
+
+```
+red: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by red)
+```
+
+your host's glibc is older than the `red-linux-x86_64` build — switch to
+**`red-linux-x86_64-static`**, which has no glibc dependency at all. Confirm a binary is
+static with:
+
+```bash
+ldd ./red        # a static binary prints: "not a dynamic executable"
+```
+
+ARM Linux: `red-linux-aarch64-static` (static) or `red-linux-aarch64` (glibc); 32-bit
+ARMv7: `red-linux-armv7`.
+
+### macOS
+
+`red-macos-aarch64` (Apple Silicon) and `red-macos-x86_64` (Intel) depend only on system
+libraries present on every supported macOS — no extra install. The binaries target
+macOS 11+.
+
+### Windows
+
+`red-windows-x86_64.exe` is built with the MSVC toolchain and needs the Microsoft Visual
+C++ runtime, present on current Windows. On a stripped-down image, install the
+[VC++ redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
+### Building `red` yourself
+
+Building from source needs **Rust** and **`protoc`** (the Protocol Buffers compiler) on the
+build host — these are *build-time only*, never runtime deps. For a fully static, runs-on-any-Linux
+build, use the musl target (no openssl in the dependency tree, so it links cleanly):
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl --bin red
+ldd target/x86_64-unknown-linux-musl/release/red   # → "not a dynamic executable"
+```
+
 ## Install with `npx`
 
 The `@reddb-io/cli` npm package installs the real `red` binary and forwards CLI arguments directly to it.
