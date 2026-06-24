@@ -175,6 +175,11 @@ jobs:
           # toolchain inside messense/rust-musl-cross) — still on a
           # Blacksmith x86_64 runner so the docker spawn is unchanged.
           - { os: blacksmith-8vcpu-ubuntu-2404, target: aarch64-unknown-linux-musl, asset_name: linux-aarch64-static, cross: true }
+          # x86_64-musl: THE portable Linux asset. Fully static (rustls/ring, no
+          # openssl) → ZERO runtime deps, runs on ANY Linux regardless of glibc
+          # version, unlike the glibc-linked `linux-x86_64`. Same Docker musl-
+          # cross path as aarch64.
+          - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-musl, asset_name: linux-x86_64-static, cross: true }
           # Build Intel macOS on the ARM macOS pool. The macos-13 Intel pool
           # frequently queues long enough to block publishing; cross-building
           # from macos-14 still produces the x86_64-apple-darwin asset, but we
@@ -225,7 +230,7 @@ jobs:
           sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
 
       - name: Build
-        if: matrix.target != 'aarch64-unknown-linux-musl'
+        if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'x86_64-unknown-linux-musl'
         shell: bash
         env:
           SCCACHE_GHA_ENABLED: ${{ !matrix.cross && 'true' || '' }}
@@ -243,19 +248,24 @@ jobs:
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
 
-      - name: Build (musl)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+      - name: Build (musl, static)
+        # Both Linux musl targets build fully static via the messense musl-cross
+        # toolchain Docker image (bundles musl gcc + the rust musl target). The
+        # resulting binary has no glibc dependency, so it runs on any Linux.
+        if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          MUSL_IMAGE: ${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64-musl' || 'x86_64-musl' }}
         run: |
-          docker run --rm -v "${PWD}:/volume" -w /volume messense/rust-musl-cross:aarch64-musl \
+          docker run --rm -v "${PWD}:/volume" -w /volume "messense/rust-musl-cross:${MUSL_IMAGE}" \
             bash -lc '
               set -euo pipefail
               rm -f rust-toolchain.toml
               curl -sSL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip -o /tmp/protoc.zip
               unzip -o /tmp/protoc.zip -d /usr/local >/dev/null
-              cargo build --release --target aarch64-unknown-linux-musl --bin red
-              cargo build --release --target aarch64-unknown-linux-musl --bin red_client -p reddb-io-client --no-default-features
+              cargo build --release --target ${{ matrix.target }} --bin red
+              cargo build --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
             '
-          sudo chown -R "$(id -u):$(id -g)" target/aarch64-unknown-linux-musl
+          sudo chown -R "$(id -u):$(id -g)" target/${{ matrix.target }}
 
       - name: Strip (Linux native)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -272,6 +282,22 @@ jobs:
             cp "target/${{ matrix.target }}/release/${BIN}${EXT}" "${ASSET}"
             shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
           done
+
+      - name: Verify portability (musl x86_64 — static, runs anywhere)
+        # x86_64-musl runs on this x86_64 runner, so assert the portability
+        # guarantee directly: no glibc dependency (fully static) + smoke runs.
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          asset="red-${{ matrix.asset_name }}"
+          if ldd "$asset" 2>&1 | grep -qE "not a dynamic executable|statically linked"; then
+            echo "OK: $asset is fully static (no glibc dependency)."
+          else
+            echo "FAIL: $asset is dynamically linked — would not run on every Linux:"
+            ldd "$asset" || true
+            exit 1
+          fi
+          ./"$asset" version
 
       - name: Smoke test
         if: "!matrix.cross && matrix.smoke != false"
