@@ -1465,6 +1465,11 @@ pub(super) fn legacy_runtime_system_alias(column: &str) -> Option<&'static str> 
         "entity_id" => Some("rid"),
         "red_collection" => Some("collection"),
         "red_kind" => Some("kind"),
+        // "id" maps to the entity logical id ("rid") for document/entity
+        // records that have no user-defined "id" column. Callers try
+        // record.get("id") first; this alias fires only on miss, so
+        // schema-based tables with a real "id" column are unaffected.
+        "id" => Some("rid"),
         _ => None,
     }
 }
