@@ -26,16 +26,27 @@ pub struct ResourceDef {
     pub body: fn() -> String,
 }
 
-/// The static set of knowledge resources `red mcp` serves. The first domain is
-/// the RQL reference, generated from `reddb-io-rql` (ADR 0061).
+/// The static set of knowledge resources `red mcp` serves. Each domain is
+/// generated from the engine's own authorities (ADR 0061): the RQL reference
+/// from `reddb-io-rql`, and the value-type catalog + multi-model map from
+/// `reddb-io-types`.
 pub fn knowledge_resources() -> Vec<ResourceDef> {
-    vec![ResourceDef {
-        uri: reddb_rql::knowledge::RESOURCE_URI,
-        title: reddb_rql::knowledge::RESOURCE_TITLE,
-        description: reddb_rql::knowledge::RESOURCE_DESCRIPTION,
-        mime_type: "text/markdown",
-        body: reddb_rql::knowledge::rql_reference_markdown,
-    }]
+    vec![
+        ResourceDef {
+            uri: reddb_rql::knowledge::RESOURCE_URI,
+            title: reddb_rql::knowledge::RESOURCE_TITLE,
+            description: reddb_rql::knowledge::RESOURCE_DESCRIPTION,
+            mime_type: "text/markdown",
+            body: reddb_rql::knowledge::rql_reference_markdown,
+        },
+        ResourceDef {
+            uri: reddb_types::knowledge::RESOURCE_URI,
+            title: reddb_types::knowledge::RESOURCE_TITLE,
+            description: reddb_types::knowledge::RESOURCE_DESCRIPTION,
+            mime_type: "text/markdown",
+            body: reddb_types::knowledge::type_reference_markdown,
+        },
+    ]
 }
 
 /// Build a JSON Schema object from a list of field descriptors.
