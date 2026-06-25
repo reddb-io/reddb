@@ -167,6 +167,11 @@ pub(crate) struct ReplicationSnapshot {
     /// `(kind, count)` pairs sourced from
     /// `runtime.replica_apply_error_counts()`.
     pub(crate) apply_errors: Vec<(String, u64)>,
+    /// Issue #1243 (PRD #1237 Phase B) — primary<->replica reconnects since
+    /// process start, from `runtime.replication_reconnects_count()`. Lets
+    /// the UI explain link instability instead of a last-error snapshot.
+    /// Rendered as a number on a replica; `not_applicable` elsewhere.
+    pub(crate) reconnects_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -554,6 +559,18 @@ fn replication_json(repl: &ReplicationSnapshot, current_lsn: u64) -> JsonValue {
     }
     object.insert("apply_errors".to_string(), JsonValue::Object(errors_obj));
 
+    // Issue #1243 — reconnect count. Honest by role: a number on a replica
+    // (the loop that produces it ran), `not_applicable` on standalone /
+    // primary where there is no upstream link to reconnect to.
+    let reconnects_json = match repl.role {
+        ProcessRoleView::Replica => JsonValue::Number(repl.reconnects_total as f64),
+        ProcessRoleView::Standalone | ProcessRoleView::Primary => {
+            JsonValue::String("not_applicable".to_string())
+        }
+        ProcessRoleView::Unknown => unavailable_json("process_role_unknown"),
+    };
+    object.insert("reconnects_total".to_string(), reconnects_json);
+
     JsonValue::Object(object)
 }
 
@@ -618,6 +635,7 @@ mod tests {
                 replicas: vec![],
                 apply_health: None,
                 apply_errors: vec![],
+                reconnects_total: 0,
             },
             latency: None,
         }
@@ -792,6 +810,7 @@ mod tests {
             }],
             apply_health: Some("stalled_gap".to_string()),
             apply_errors: vec![("gap".to_string(), 3), ("apply".to_string(), 0)],
+            reconnects_total: 4,
         };
 
         let json = cluster_status_json(&inputs);
@@ -842,6 +861,8 @@ mod tests {
         let errs = obj(repl.get("apply_errors").unwrap());
         assert_eq!(n(errs.get("gap").unwrap()), 3.0);
         assert_eq!(n(errs.get("apply").unwrap()), 0.0);
+        // Issue #1243 — reconnect count rendered as a number on a replica.
+        assert_eq!(n(repl.get("reconnects_total").unwrap()), 4.0);
     }
 
     #[test]
