@@ -536,7 +536,32 @@ mod tests {
     use super::*;
     use crate::runtime::audit_log::AuditLogger;
 
-    fn make_logger() -> (AuditLogger, std::path::PathBuf) {
+    /// RAII guard owning a per-test operator-event log directory; removes it
+    /// wholesale on drop so nothing is left in TMPDIR for the leak guard
+    /// (scripts/check-temp-residue.sh). Derefs to the audit-log `PathBuf` inside
+    /// the dir so existing `&path` call sites keep working via deref coercion.
+    struct TempEventLog {
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+    impl std::ops::Deref for TempEventLog {
+        type Target = std::path::PathBuf;
+        fn deref(&self) -> &std::path::PathBuf {
+            &self.path
+        }
+    }
+    impl AsRef<std::path::Path> for TempEventLog {
+        fn as_ref(&self) -> &std::path::Path {
+            self.path.as_ref()
+        }
+    }
+    impl Drop for TempEventLog {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn make_logger() -> (AuditLogger, TempEventLog) {
         let mut dir = std::env::temp_dir();
         dir.push(format!(
             "reddb-op-event-{}-{}",
@@ -546,7 +571,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".audit.log");
         let logger = AuditLogger::with_path(path.clone());
-        (logger, path)
+        (logger, TempEventLog { dir, path })
     }
 
     fn drain(logger: &AuditLogger) {
