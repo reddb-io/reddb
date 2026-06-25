@@ -470,9 +470,28 @@ mod tests {
     }
 
     fn cleanup(path: &Path) {
-        let _ = fs::remove_file(path);
-        let wal_path = reddb_file::layout::engine_wal_path(path);
-        let _ = fs::remove_file(wal_path);
+        // Remove the `.rdb` AND every pager sidecar written next to it
+        // (`-dwb`/`-hdr`/`-meta`/WAL/shadows) by prefix-matching the file name,
+        // so nothing is left in TMPDIR for the leak guard
+        // (scripts/check-temp-residue.sh). Prefix-matching embeds no owned
+        // file-format suffix literals (the `layout_authority` tests forbid them
+        // in server source).
+        if let (Some(dir), Some(name)) = (
+            path.parent(),
+            path.file_name().and_then(|name| name.to_str()),
+        ) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|entry_name| entry_name.starts_with(name))
+                    {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
