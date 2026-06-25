@@ -599,15 +599,24 @@ mod tests {
     use super::*;
     use crate::json::Value as JsonValue;
 
-    fn tmp_path(label: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "reddb-intent-{}-{}-{}.log",
-            label,
-            std::process::id(),
-            crate::utils::now_unix_nanos()
-        ));
-        p
+    fn tmp_path(label: &str) -> (tempfile::NamedTempFile, PathBuf) {
+        let file = tempfile::Builder::new()
+            .prefix(&format!("reddb-intent-{label}-"))
+            .suffix(".log")
+            .tempfile()
+            .expect("temp intent log file");
+        let path = file.path().to_path_buf();
+        (file, path)
+    }
+
+    fn cleanup(file: tempfile::NamedTempFile, path: &Path) {
+        // `NamedTempFile::close` removes the file; on panic the Drop impl
+        // still runs. The explicit `_ = remove_file` is a belt-and-braces
+        // fallback in case the path was renamed (some intent log paths move
+        // the file when rotating — see writer). Either way the leak guard
+        // (scripts/check-temp-residue.sh) must see no residue.
+        drop(file);
+        let _ = std::fs::remove_file(path);
     }
 
     fn last_line_json(path: &Path) -> JsonValue {
@@ -629,7 +638,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn begin_writes_running_record() {
-        let path = tmp_path("begin");
+        let (_tmpfile, path) = tmp_path("begin");
         let log = AdminIntentLog::open(&path).unwrap();
         let handle = log
             .begin(IntentOp::ReplicaBootstrap, "ops-bot", IntentArgs::new())
@@ -652,7 +661,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn complete_writes_completed_phase() {
-        let path = tmp_path("complete");
+        let (_tmpfile, path) = tmp_path("complete");
         let log = AdminIntentLog::open(&path).unwrap();
         let handle = log
             .begin(IntentOp::ReplicaBootstrap, "admin", IntentArgs::new())
@@ -672,7 +681,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn drop_without_complete_writes_aborted() {
-        let path = tmp_path("drop-abort");
+        let (_tmpfile, path) = tmp_path("drop-abort");
         let log = AdminIntentLog::open(&path).unwrap();
         {
             let _handle = log
@@ -690,7 +699,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn checkpoint_writes_intermediate_records() {
-        let path = tmp_path("checkpoint");
+        let (_tmpfile, path) = tmp_path("checkpoint");
         let log = AdminIntentLog::open(&path).unwrap();
         let mut handle = log
             .begin(IntentOp::ReplicaBootstrap, "admin", IntentArgs::new())
@@ -716,7 +725,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn scan_and_report_finds_unfinished_intents() {
-        let path = tmp_path("scan");
+        let (_tmpfile, path) = tmp_path("scan");
         let log = AdminIntentLog::open(&path).unwrap();
 
         // Use mem::forget to simulate a crash — prevents Drop from writing aborted,
@@ -746,7 +755,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn record_too_large_returns_error_no_write() {
-        let path = tmp_path("toolarge");
+        let (_tmpfile, path) = tmp_path("toolarge");
         let log = AdminIntentLog::open(&path).unwrap();
 
         // Build args that blow past 3KB
@@ -772,7 +781,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn corrupted_line_skipped_in_scan() {
-        let path = tmp_path("corrupt");
+        let (_tmpfile, path) = tmp_path("corrupt");
         let log = AdminIntentLog::open(&path).unwrap();
         let h = log
             .begin(IntentOp::ReplicaBootstrap, "admin", IntentArgs::new())
@@ -796,7 +805,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn sensitive_keys_are_redacted() {
-        let path = tmp_path("redact");
+        let (_tmpfile, path) = tmp_path("redact");
         let log = AdminIntentLog::open(&path).unwrap();
         let args = IntentArgs::new()
             .insert("password", JsonValue::String("hunter2".to_string()))
