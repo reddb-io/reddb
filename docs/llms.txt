@@ -34,3 +34,50 @@ RQL provides these built-in functions, grouped by kind:
 `CURRENT_DATE`, `CURRENT_ROLE`, `CURRENT_TENANT`, `CURRENT_TIMESTAMP`, `CURRENT_USER`, `NOW`, `SESSION_USER`, `VERIFY_PASSWORD`
 
 <!-- END GENERATED: rql -->
+
+<!-- BEGIN GENERATED: connection -->
+# RedDB Connection & Topology Guide
+
+RedDB speaks several transports, but they are not equal. **RedWire (`red://` / `reds://`) is the principal transport** — the native, lowest-overhead binary protocol the engine is built around. RedDB is *not* "only gRPC" and *not* "only WebSocket": gRPC, HTTP, and WebSocket are compatibility transports, and `memory://` / `file://` are the embedded engine itself.
+
+The supported schemes below are generated from the connection layer (`reddb-io-wire` connection-string parser); the default ports are the parser's own constants. Do not edit by hand — regenerate from the engine.
+
+## Schemes & transports (10)
+
+The URI scheme selects the transport. Choose `red://` unless a specific compatibility need (a gRPC-only client, a plain HTTP caller, a browser) dictates otherwise:
+
+| Scheme | Transport | When to use |
+|---|---|---|
+| `red://host:port` | RedWire — framed binary protocol over TCP (ADR 0001) | Principal transport: the lowest-overhead native protocol. Reach for this first. |
+| `reds://host:port` | RedWire over TLS | Principal transport, encrypted: RedWire with TLS for untrusted networks. |
+| `red+ws://host` | RedWire over WebSocket (ADR 0047 direct-when-reachable) | Browser-native RedWire: the UI connects directly, no local bridge. |
+| `red+wss://host` | RedWire over secure WebSocket (WSS) | Browser-native RedWire, encrypted: the hosted-endpoint default for the UI. |
+| `grpc://host:port` | gRPC (tonic) | Compatibility transport for gRPC-native clients; cluster URIs list replicas. |
+| `grpcs://host:port` | gRPC over TLS | Compatibility transport, encrypted: gRPC with TLS. |
+| `http://host:port` | HTTP / REST (JSON over HTTP) | REST endpoint for HTTP-only callers and health checks. |
+| `https://host` | HTTPS / REST (JSON over TLS) | REST endpoint, encrypted. |
+| `memory://` | Embedded engine, in-process, ephemeral | Zero-config default: a genuine in-memory engine instance, not a mock. |
+| `file:///path/to/db` | Embedded engine, in-process, persisted to disk | Embedded engine that persists to a local path. |
+
+### Default ports
+
+When the URI omits a port, the connection layer applies these defaults:
+
+- RedWire `red://`: `5050`
+- RedWire-over-WebSocket `red+ws://`: `80`; `red+wss://`: `443`
+- gRPC `grpc://`: `55055`; `grpcs://`: `55555`
+- HTTP `http://`: `80`; `https://`: `443`
+
+## Deployment topologies
+
+RedDB is one engine that scales from a library call to a replicated cluster. The same data model and the same RQL surface apply at every size; only the connection URI changes.
+
+- **Embedded / standalone.** The engine runs in-process — no server, no socket. Open it with `memory://` (ephemeral) or `file:///path` (persisted). This is the default and the fastest path: there is no transport at all, just function calls into the engine. A standalone `red` server process that a single client talks to over `red://` is the same engine with a listener attached.
+
+- **Serverless.** A short-lived process (a function invocation, a job) opens an embedded `memory://`/`file://` engine for its lifetime, or connects out to a remote endpoint over `red://`/`reds://`. There is no long-running server to manage; the engine's cost is paid only while the process is alive.
+
+- **Primary-replica.** A writable primary fans changes out to read-only replicas. Point writes at the primary and spread reads across replicas with a multi-host URI (`red://primary,replica-a,replica-b`); append `?route=primary` to force a read onto the primary when you need read-your-writes. Replicas serve reads at lower latency and absorb read load.
+
+- **Cluster.** Multiple nodes coordinate for availability and horizontal capacity. Clients address the cluster with a multi-host URI listing the member endpoints; the connector resolves the primary for writes and balances reads across the rest. Cluster URIs work over `red://`/`reds://` and `grpc://`/`grpcs://`.
+
+<!-- END GENERATED: connection -->
