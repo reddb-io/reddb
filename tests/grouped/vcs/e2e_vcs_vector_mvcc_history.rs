@@ -1,42 +1,30 @@
-//! Versioned VECTOR collections — SCOPED FOLLOW-UP for Phase 3 of the
-//! multi-model versioning rollout (KV Phase 1, documents Phase 2, graph
-//! Phase 3a SHIPPED). Vector versioning is NOT shipped in this pass; the
-//! `#[ignore]`d tests below are an executable specification of the
-//! remaining work so a follow-up can drive them red→green.
+//! Versioned VECTOR collections retain MVCC history (Phase 3 of the
+//! multi-model versioning rollout; KV Phase 1, documents Phase 2, graph
+//! Phase 3a). A vector's only read surface is `VECTOR SEARCH`, so the
+//! correctness bar here is: a deleted / superseded vector must NOT
+//! appear in `VECTOR SEARCH` results.
 //!
-//! WHY VECTOR IS DEFERRED (investigated, not assumed):
+//! TWO bugs are fixed in this pass:
 //!
-//! 1. No snapshot-honoring read surface. A vector's only read surface is
-//!    `VECTOR SEARCH`. Its read path (runtime/query_exec/vector.rs)
-//!    fetches each index hit via `store.get` and filters with
-//!    `entity_visible_with_context(capture_current_snapshot(), entity)`.
-//!    In autocommit (the common case) there is no active snapshot, so
-//!    `capture_current_snapshot()` is `None` and the visibility check
-//!    returns `true` unconditionally — a tombstoned vector stays in the
-//!    results. `VECTOR SEARCH` also has no `AS OF` clause, so historical
-//!    versions can never be read back. `SELECT ... FROM <vector>` does
-//!    not surface vectors as rows at all (they live in `EntityData::
-//!    Vector`, not a queryable row), so there is no row-scan fallback.
+//! 1. Pre-existing delete bug (ALL vector collections, independent of
+//!    versioning): the derived TurboQuant index is append-only and is
+//!    never pruned on delete, and the per-hit visibility filter used the
+//!    `entity_visible_with_context(None, …)` path which returns `true`
+//!    unconditionally in autocommit. So a physically-deleted vector
+//!    could linger in search results. The search read path now filters
+//!    each hit through `entity_visible_under_current_snapshot`, which in
+//!    autocommit hides any superseded/tombstoned physical version
+//!    (`xmax != 0`).
 //!
-//! 2. Derived index is not pruned. The TurboQuant index
-//!    (runtime/vector_turbo_kind.rs) is appended on insert
-//!    (application/ports_impls_entity.rs `create_vector`) but never has
-//!    entries removed on delete (`delete_entities_batch` →
-//!    `store.delete_batch` does not touch the turbo index). So even a
-//!    physically-removed vector lingers in the index and is only hidden
-//!    if the per-hit `store.get` returns `None` AND a snapshot is
-//!    active.
-//!
-//! Shipping write-side vector tombstoning WITHOUT (1) would make a
-//! deleted versioned vector stay searchable in autocommit — strictly
-//! worse than today — so vector versioning is held until the search read
-//! path honors snapshot visibility (always capture a read snapshot) and
-//! the turbo index is pruned/version-filtered. The graph half of Phase 3
-//! ships in this same change set (e2e_vcs_graph_mvcc_history.rs).
+//! 2. Versioned vector deletes now tombstone (xmax stamp) instead of
+//!    physically dropping, so history is retained — but the same
+//!    visibility post-filter keeps the tombstoned version out of live
+//!    search. Non-versioned vectors keep the legacy physical delete.
 
 use std::sync::Arc;
 
 use reddb::application::VcsUseCases;
+use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
@@ -88,15 +76,31 @@ fn search_contents(rt: &RedDBRuntime, collection: &str, dense: &str, limit: usiz
         .collect()
 }
 
-/// FOLLOW-UP SPEC (currently failing — vector versioning not shipped):
-/// after versioning, a live `VECTOR SEARCH` must return only the live
-/// version, not the tombstoned old one. Requires the search read path to
-/// (a) always capture a read snapshot so `entity_visible_with_context`
-/// can hide tombstones in autocommit, and (b) tombstone (not physically
-/// drop) versioned vector deletes while pruning/version-filtering the
-/// TurboQuant index. See module docs for the precise blockers.
+/// (a) Pre-existing delete bug — NON-versioned: a deleted vector must
+/// not appear in `VECTOR SEARCH`. Fails on `e4c7a640` because the turbo
+/// index is never pruned and the autocommit visibility filter is a
+/// no-op.
 #[test]
-#[ignore = "vector versioning deferred: VECTOR SEARCH read path does not honor snapshot visibility in autocommit; see module docs"]
+fn non_versioned_vector_delete_excludes_from_search() {
+    let rt = rt();
+    rt.execute_query("CREATE VECTOR pvec_del DIM 2 METRIC cosine")
+        .expect("CREATE VECTOR");
+
+    let rid_a = insert_vector(&rt, "pvec_del", "[1.0, 0.0]", "a");
+    insert_vector(&rt, "pvec_del", "[0.0, 1.0]", "b");
+    rt.execute_query(&format!("DELETE FROM pvec_del WHERE rid = {rid_a}"))
+        .expect("DELETE a");
+
+    let hits = search_contents(&rt, "pvec_del", "[1.0, 0.0]", 5);
+    assert!(
+        !hits.contains(&"a".to_string()),
+        "deleted vector 'a' must not appear in VECTOR SEARCH; got {hits:?}"
+    );
+}
+
+/// (b) Versioned search returns only the live version after a delete +
+/// re-insert that supersedes: the tombstoned old version is excluded.
+#[test]
 fn versioned_vector_search_excludes_tombstoned_version() {
     let rt = rt();
     rt.execute_query("CREATE VECTOR vvec_search DIM 2 METRIC cosine")
@@ -116,4 +120,98 @@ fn versioned_vector_search_excludes_tombstoned_version() {
         vec!["v2".to_string()],
         "live VECTOR SEARCH must return only the live version, not the tombstoned 'v1'"
     );
+}
+
+/// (c) Versioned delete excludes from search, and the tombstone retains
+/// history (the entity stays physically alive with xmax set).
+#[test]
+fn versioned_vector_delete_excludes_from_search() {
+    let rt = rt();
+    rt.execute_query("CREATE VECTOR vvec_del DIM 2 METRIC cosine")
+        .expect("CREATE VECTOR");
+    VcsUseCases::new(&*rt)
+        .set_versioned("vvec_del", true)
+        .unwrap();
+
+    let rid = insert_vector(&rt, "vvec_del", "[1.0, 0.0]", "v1");
+    insert_vector(&rt, "vvec_del", "[0.0, 1.0]", "keep");
+    rt.execute_query(&format!("DELETE FROM vvec_del WHERE rid = {rid}"))
+        .expect("DELETE v1");
+
+    let hits = search_contents(&rt, "vvec_del", "[1.0, 0.0]", 5);
+    assert!(
+        !hits.contains(&"v1".to_string()),
+        "tombstoned versioned vector 'v1' must not appear in search; got {hits:?}"
+    );
+}
+
+/// DEFERRED — time-travel read surface for vectors. `VECTOR SEARCH` has
+/// no `AS OF` clause and `SELECT ... FROM <vector>` surfaces zero rows
+/// (vectors live in `EntityData::Vector`, not a queryable row), so a
+/// historical (tombstoned) vector version cannot be read back today.
+/// Versioned vector deletes already retain history physically (the
+/// tombstoned version stays alive with `xmax` set), so the read surface
+/// can be added later without a data-model change. Adding `AS OF` to the
+/// vector grammar + planner + a historical-version resolver is a large
+/// structural change and is intentionally out of scope for this pass;
+/// live-search correctness (deleted/superseded versions excluded) is the
+/// shipped guarantee. Un-ignore when the read surface lands.
+#[test]
+#[ignore = "time-travel AS OF read surface for vectors is deferred; history is retained physically — see module docs and this test's doc comment"]
+fn versioned_vector_as_of_resolves_prior_version() {
+    let rt = rt();
+    rt.execute_query("CREATE VECTOR vvec_asof DIM 2 METRIC cosine")
+        .expect("CREATE VECTOR");
+    VcsUseCases::new(&*rt)
+        .set_versioned("vvec_asof", true)
+        .unwrap();
+
+    let rid_v1 = insert_vector(&rt, "vvec_asof", "[1.0, 0.0]", "v1");
+    rt.execute_query(&format!("DELETE FROM vvec_asof WHERE rid = {rid_v1}"))
+        .expect("DELETE v1");
+
+    // Intended contract once the read surface lands: an AS OF read taken
+    // before the delete must still resolve "v1".
+    let hits = search_contents(&rt, "vvec_asof", "[1.0, 0.0]", 5);
+    assert_eq!(hits, vec!["v1".to_string()]);
+}
+
+/// (d) First-committer-wins on concurrent versioned vector delete: two
+/// transactions both snapshot the same live vector and DELETE it; T1
+/// commits, T2's commit must fail with a serialization conflict.
+#[test]
+fn concurrent_versioned_vector_delete_conflicts_on_second_commit() {
+    let rt = rt();
+    set_current_connection_id(80001);
+    rt.execute_query("CREATE VECTOR vvec_wc DIM 2 METRIC cosine")
+        .expect("CREATE VECTOR");
+    VcsUseCases::new(&*rt)
+        .set_versioned("vvec_wc", true)
+        .unwrap();
+    let rid = insert_vector(&rt, "vvec_wc", "[1.0, 0.0]", "v1");
+
+    set_current_connection_id(80002);
+    rt.execute_query("BEGIN").expect("T1 begin");
+    set_current_connection_id(80003);
+    rt.execute_query("BEGIN").expect("T2 begin");
+
+    set_current_connection_id(80002);
+    rt.execute_query(&format!("DELETE FROM vvec_wc WHERE rid = {rid}"))
+        .expect("T1 delete");
+    set_current_connection_id(80003);
+    rt.execute_query(&format!("DELETE FROM vvec_wc WHERE rid = {rid}"))
+        .expect("T2 delete");
+
+    set_current_connection_id(80002);
+    rt.execute_query("COMMIT").expect("T1 commit");
+    set_current_connection_id(80003);
+    let err = rt
+        .execute_query("COMMIT")
+        .expect_err("T2 commit must conflict");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("serialization conflict"),
+        "expected serialization conflict, got: {msg}"
+    );
+    clear_current_connection_id();
 }
