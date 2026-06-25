@@ -1,0 +1,38 @@
+{
+  "name": "@reddb-io/mcp",
+  "version": "1.15.0",
+  "description": "Zero-install npx launcher for the RedDB MCP surface — fetches the matching red binary and spawns `red mcp` over stdio.",
+  "type": "module",
+  "bin": {
+    "reddb-mcp": "./src/launcher.js"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/launcher.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "reddb",
+    "mcp",
+    "model-context-protocol",
+    "database",
+    "agent",
+    "npx",
+    "launcher"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/reddb-io/reddb",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reddb-io/reddb.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/reddb-io/reddb/issues"
+  }
+}

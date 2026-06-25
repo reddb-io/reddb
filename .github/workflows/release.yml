@@ -681,6 +681,42 @@ jobs:
           TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
+  publish-mcp:
+    name: Publish @reddb-io/mcp (npm)
+    needs: [plan, publish-github, verify-release-assets]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: |
+      needs.plan.outputs.should_skip != 'true' &&
+      needs.plan.outputs.release_channel == 'stable'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Sync release version
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
+      - name: Verify pack
+        working-directory: packages/mcp
+        run: pnpm pack --pack-destination "$RUNNER_TEMP"
+      - name: Publish
+        working-directory: packages/mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
+            exit 0
+          fi
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          pnpm publish --tag "${TAG}" --access public --no-git-checks
+
   publish-docker:
     name: Docker image (GHCR)
     needs: [plan, build]
