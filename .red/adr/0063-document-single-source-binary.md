@@ -1,6 +1,6 @@
 # ADR 0063 — DOCUMENT collections: single source of truth in a native binary body
 
-Status: proposed
+Status: accepted
 
 Date: 2026-06-25
 
