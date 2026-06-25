@@ -268,14 +268,36 @@ mod tests {
     use crate::runtime::EffectiveScope;
     use crate::storage::transaction::snapshot::Snapshot;
 
-    fn tmp_dir() -> PathBuf {
+    /// RAII guard owning a per-test log directory; removes it wholesale on drop
+    /// so nothing is left in TMPDIR for the leak guard
+    /// (scripts/check-temp-residue.sh). Derefs to `PathBuf` so existing `&dir`
+    /// call sites keep working via deref coercion.
+    struct TempLogDir(PathBuf);
+    impl std::ops::Deref for TempLogDir {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+    impl AsRef<std::path::Path> for TempLogDir {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.as_ref()
+        }
+    }
+    impl Drop for TempLogDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmp_dir() -> TempLogDir {
         let mut d = std::env::temp_dir();
         d.push(format!(
             "reddb-slow-{}-{}",
             std::process::id(),
             crate::utils::now_unix_nanos()
         ));
-        d
+        TempLogDir(d)
     }
 
     fn logger(dir: &PathBuf, threshold_ms: u64, sample_pct: u8) -> Arc<SlowQueryLogger> {
