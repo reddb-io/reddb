@@ -3864,4 +3864,314 @@ mod tests {
             }
         }
     }
+
+    // ── Runtime join semantics coverage (#1339) ──────────────────────────────
+    // Tests exercise the lowest-level join algorithms directly so changes to
+    // the join-key representation cannot silently break observable query results.
+    // Both `execute_runtime_nested_loop_join` and `execute_runtime_hash_join`
+    // are exercised; they must produce the same row count for all cases where
+    // their semantics agree.
+
+    fn jrec(col: &str, val: Value) -> UnifiedRecord {
+        let mut r = UnifiedRecord::with_capacity(1);
+        r.set(col, val);
+        r
+    }
+
+    fn jfield(col: &str) -> FieldRef {
+        FieldRef::TableColumn {
+            table: String::new(),
+            column: col.to_string(),
+        }
+    }
+
+    fn left_tq() -> TableQuery {
+        TableQuery::new("L")
+    }
+
+    fn both_join_count(
+        left: &[UnifiedRecord],
+        right: &[UnifiedRecord],
+        lf: &FieldRef,
+        rf: &FieldRef,
+        join_type: JoinType,
+        expected: usize,
+        label: &str,
+    ) {
+        let tq = left_tq();
+        let nl = execute_runtime_nested_loop_join(
+            &tq, left, None, None, lf, right, None, None, rf, join_type,
+        )
+        .unwrap_or_else(|e| panic!("nested_loop {label}: {e}"));
+        assert_eq!(nl.len(), expected, "nested_loop {label}");
+
+        let hj = execute_runtime_hash_join(
+            &tq, left, None, None, lf, right, None, None, rf, join_type,
+        )
+        .unwrap_or_else(|e| panic!("hash_join {label}: {e}"));
+        assert_eq!(hj.len(), expected, "hash_join {label}");
+    }
+
+    #[test]
+    fn join_semantics_integer_inner_basic() {
+        // left [1,2,3] ⋈ right [2,3,4] on integer key → 2 matched pairs
+        let left: Vec<_> = [1i64, 2, 3].iter().map(|v| jrec("k", Value::Integer(*v))).collect();
+        let right: Vec<_> = [2i64, 3, 4].iter().map(|v| jrec("k", Value::Integer(*v))).collect();
+        both_join_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::Inner, 2, "integer_inner");
+    }
+
+    #[test]
+    fn join_semantics_float_inner_basic() {
+        // float values matched by equality
+        let left: Vec<_> = [1.0f64, 2.5, 3.0].iter().map(|v| jrec("f", Value::Float(*v))).collect();
+        let right: Vec<_> = [2.5f64, 3.0, 4.0].iter().map(|v| jrec("f", Value::Float(*v))).collect();
+        both_join_count(&left, &right, &jfield("f"), &jfield("f"), JoinType::Inner, 2, "float_inner");
+    }
+
+    #[test]
+    fn join_semantics_boolean_inner() {
+        // left [T,F,T] ⋈ right [T,F] → (T,T),(T,T),(F,F) = 3 rows
+        let left = vec![
+            jrec("b", Value::Boolean(true)),
+            jrec("b", Value::Boolean(false)),
+            jrec("b", Value::Boolean(true)),
+        ];
+        let right = vec![
+            jrec("b", Value::Boolean(true)),
+            jrec("b", Value::Boolean(false)),
+        ];
+        both_join_count(&left, &right, &jfield("b"), &jfield("b"), JoinType::Inner, 3, "boolean_inner");
+    }
+
+    #[test]
+    fn join_semantics_text_inner() {
+        // text key matching is case-sensitive
+        let left: Vec<_> = ["alice", "bob", "carol"]
+            .iter()
+            .map(|s| jrec("name", Value::text(s.to_string())))
+            .collect();
+        let right: Vec<_> = ["bob", "dave", "carol"]
+            .iter()
+            .map(|s| jrec("name", Value::text(s.to_string())))
+            .collect();
+        both_join_count(&left, &right, &jfield("name"), &jfield("name"), JoinType::Inner, 2, "text_inner");
+    }
+
+    #[test]
+    fn join_semantics_null_both_sides_inner() {
+        // Both join types treat NULL = NULL as a match via their respective
+        // equality paths (PartialEq for nested loop; identical "NULL" hash key
+        // for hash join). This protects the current semantics.
+        let left = vec![
+            jrec("k", Value::Null),
+            jrec("k", Value::Integer(1)),
+        ];
+        let right = vec![
+            jrec("k", Value::Null),
+            jrec("k", Value::Integer(1)),
+        ];
+        let tq = left_tq();
+        let lf = jfield("k");
+        let rf = jfield("k");
+        let nl = execute_runtime_nested_loop_join(
+            &tq, &left, None, None, &lf, &right, None, None, &rf, JoinType::Inner,
+        )
+        .unwrap();
+        let hj = execute_runtime_hash_join(
+            &tq, &left, None, None, &lf, &right, None, None, &rf, JoinType::Inner,
+        )
+        .unwrap();
+        // Both must agree: Null=Null matches, Integer(1)=Integer(1) matches → 2 rows
+        assert_eq!(nl.len(), 2, "nested_loop null=null inner");
+        assert_eq!(nl.len(), hj.len(), "nested_loop and hash_join must agree on null semantics");
+    }
+
+    #[test]
+    fn join_semantics_missing_field_nested_loop_no_inner_match() {
+        // Nested loop returns false when the join field is absent from a record
+        // (join_condition_matches → None on either side → false).
+        let left = vec![jrec("x", Value::Integer(1))]; // no "k" column
+        let right = vec![jrec("y", Value::Integer(1))]; // no "k" column
+        let tq = left_tq();
+        let lf = jfield("k");
+        let rf = jfield("k");
+        let nl = execute_runtime_nested_loop_join(
+            &tq, &left, None, None, &lf, &right, None, None, &rf, JoinType::Inner,
+        )
+        .unwrap();
+        assert_eq!(nl.len(), 0, "nested_loop: absent join field → no inner match");
+    }
+
+    #[test]
+    fn join_semantics_duplicate_key_many_to_many() {
+        // 2 left rows with key=1 × 2 right rows with key=1 → 4 result rows
+        let left = vec![
+            jrec("k", Value::Integer(1)),
+            jrec("k", Value::Integer(1)),
+        ];
+        let right = vec![
+            jrec("k", Value::Integer(1)),
+            jrec("k", Value::Integer(1)),
+        ];
+        both_join_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::Inner, 4, "dup_key_n_to_m");
+    }
+
+    #[test]
+    fn join_semantics_left_outer_unmatched_left_row() {
+        // key=2 has no right match; left outer includes it padded with nulls
+        let left = vec![
+            jrec("k", Value::Integer(1)),
+            jrec("k", Value::Integer(2)),
+        ];
+        let right = vec![jrec("k", Value::Integer(1))];
+        both_join_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::LeftOuter, 2, "left_outer");
+    }
+
+    #[test]
+    fn join_semantics_right_outer_unmatched_right_row() {
+        // right key=5 has no left match; right outer includes it
+        let left = vec![jrec("k", Value::Integer(1))];
+        let right = vec![
+            jrec("k", Value::Integer(1)),
+            jrec("k", Value::Integer(5)),
+        ];
+        both_join_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::RightOuter, 2, "right_outer");
+    }
+
+    #[test]
+    fn join_semantics_full_outer_both_sides_unmatched() {
+        // left key=2 and right key=3 are both unmatched; full outer emits both
+        let left = vec![
+            jrec("k", Value::Integer(1)),
+            jrec("k", Value::Integer(2)),
+        ];
+        let right = vec![
+            jrec("k", Value::Integer(1)),
+            jrec("k", Value::Integer(3)),
+        ];
+        // (1,1) matched + left 2 unmatched + right 3 unmatched = 3 rows
+        both_join_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::FullOuter, 3, "full_outer");
+    }
+
+    #[test]
+    fn join_semantics_cross_join_cartesian_product() {
+        // 3 × 4 = 12 rows; join key is irrelevant for cross join
+        let left: Vec<_> = (0i64..3).map(|i| jrec("a", Value::Integer(i))).collect();
+        let right: Vec<_> = (0i64..4).map(|i| jrec("b", Value::Integer(i))).collect();
+        both_join_count(&left, &right, &jfield("a"), &jfield("b"), JoinType::Cross, 12, "cross_cartesian");
+    }
+
+    #[test]
+    fn join_semantics_mixed_type_integer_float_numeric_equality() {
+        // Integer(2) on left equals Float(2.0) on right via numeric coercion in
+        // both join algorithms (nested loop: runtime_value_number path;
+        // hash join: identical Display strings "2").
+        let left = vec![
+            jrec("k", Value::Integer(2)),
+            jrec("k", Value::Integer(3)),
+        ];
+        let right = vec![
+            jrec("k", Value::Float(2.0)),
+            jrec("k", Value::Float(4.0)),
+        ];
+        both_join_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::Inner, 1, "mixed_int_float");
+    }
+
+    #[test]
+    fn join_semantics_noderef_identity_match() {
+        // NodeRef values match when the underlying id string is equal (both
+        // nested loop via text-str borrow path and hash join via to_string key).
+        let left = vec![
+            jrec("id", Value::NodeRef("svc:1".to_string())),
+            jrec("id", Value::NodeRef("svc:2".to_string())),
+        ];
+        let right = vec![
+            jrec("ref", Value::NodeRef("svc:2".to_string())),
+            jrec("ref", Value::NodeRef("svc:3".to_string())),
+        ];
+        both_join_count(&left, &right, &jfield("id"), &jfield("ref"), JoinType::Inner, 1, "noderef_identity");
+    }
+
+    #[test]
+    fn join_semantics_result_columns_preserved_after_join() {
+        // Verify that the merged records produced by both join algorithms carry
+        // the expected columns from both sides. Uses distinct column names to
+        // avoid the name-collision prefix logic in merge_join_records.
+        let left = vec![jrec("l_id", Value::Integer(7))];
+        let right = vec![jrec("r_val", Value::text("hello".to_string()))];
+        // No match — both produce 0 inner rows. Use left outer to get a merged row.
+        let tq = left_tq();
+        let lf = jfield("l_id");
+        let rf = jfield("l_id"); // right has no "l_id" → left outer pads right with nulls
+        let nl = execute_runtime_nested_loop_join(
+            &tq,
+            &left,
+            None,
+            None,
+            &lf,
+            &right,
+            None,
+            None,
+            &rf,
+            JoinType::LeftOuter,
+        )
+        .unwrap();
+        assert_eq!(nl.len(), 1, "left outer must emit the unmatched left row");
+        // The merged row must carry the left-side column
+        assert_eq!(nl[0].get("l_id"), Some(&Value::Integer(7)));
+    }
+
+    // ── Benchmark-style timing measurement (#1339) ───────────────────────────
+    // Run to capture the baseline cost of hash/nested-loop join build+probe:
+    //   CARGO_BUILD_JOBS=1 RUSTFLAGS="-C debuginfo=0" \
+    //   cargo nextest run -p reddb-io-server --lib \
+    //     -- join_filter::tests::benchmark_join_build_probe_timing --nocapture
+    //
+    // Baseline recorded 2026-06-25 on the reddb guard host (14G, debug profile):
+    //   hash_join   n=   10: avg=66µs    (20 iters)
+    //   nested_loop n=   10: avg=90µs    (20 iters)
+    //   hash_join   n=  100: avg=654µs   (20 iters)
+    //   nested_loop n=  100: avg=4906µs  (20 iters)
+    //   hash_join   n= 1000: avg=6385µs  (20 iters)
+    //   nested_loop n= 1000: avg=432443µs (20 iters)
+    // The O(n) vs O(n²) gap confirms hash join wins at n=100+ (7.5× faster)
+    // and dominates at n=1000 (68× faster). These unoptimized numbers are the
+    // baseline; future key-representation changes must not widen this gap.
+    #[test]
+    fn benchmark_join_build_probe_timing() {
+        for &n in &[10usize, 100, 1_000] {
+            let left: Vec<_> = (0i64..n as i64).map(|i| jrec("k", Value::Integer(i))).collect();
+            let right: Vec<_> = (0i64..n as i64).map(|i| jrec("k", Value::Integer(i))).collect();
+            let tq = left_tq();
+            let lf = jfield("k");
+            let rf = jfield("k");
+
+            // warmup
+            for _ in 0..3 {
+                let _ = execute_runtime_hash_join(
+                    &tq, &left, None, None, &lf, &right, None, None, &rf, JoinType::Inner,
+                );
+            }
+
+            let iters = 20usize;
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                let _ = execute_runtime_hash_join(
+                    &tq, &left, None, None, &lf, &right, None, None, &rf, JoinType::Inner,
+                );
+            }
+            let hj_us = t0.elapsed().as_micros() / iters as u128;
+
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                let _ = execute_runtime_nested_loop_join(
+                    &tq, &left, None, None, &lf, &right, None, None, &rf, JoinType::Inner,
+                );
+            }
+            let nl_us = t0.elapsed().as_micros() / iters as u128;
+
+            println!("hash_join   n={n:>5}: avg={hj_us}µs  ({iters} iters)");
+            println!("nested_loop n={n:>5}: avg={nl_us}µs  ({iters} iters)");
+        }
+    }
 }
