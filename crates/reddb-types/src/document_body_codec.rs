@@ -348,7 +348,7 @@ mod tests {
     /// decode_value_at_offset provides direct O(1) access given a known offset.
     #[test]
     fn decode_value_at_offset_matches_full_decode() {
-        let fields = [("x", Value::Integer(100)), ("y", Value::Float(3.14))];
+        let fields = [("x", Value::Integer(100)), ("y", Value::Float(1.5))];
         let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
         let mut buf = Vec::new();
         encode(&refs, &mut buf).expect("encode");
