@@ -246,7 +246,10 @@ impl McpServer {
         };
 
         let mut contents = Map::new();
-        contents.insert("uri".to_string(), JsonValue::String(resource.uri.to_string()));
+        contents.insert(
+            "uri".to_string(),
+            JsonValue::String(resource.uri.to_string()),
+        );
         contents.insert(
             "mimeType".to_string(),
             JsonValue::String(resource.mime_type.to_string()),
@@ -1595,9 +1598,7 @@ mod tests {
 
         let rql = resources
             .iter()
-            .find(|res| {
-                res.get("uri").and_then(JsonValue::as_str) == Some("reddb://knowledge/rql")
-            })
+            .find(|res| res.get("uri").and_then(JsonValue::as_str) == Some("reddb://knowledge/rql"))
             .expect("rql knowledge resource listed");
         assert_eq!(
             rql.get("mimeType").and_then(JsonValue::as_str),
