@@ -249,12 +249,38 @@ mod tests {
     // XDG_CONFIG_HOME at a process-unique temp dir so every test process gets
     // its own keyring file; the Mutex still serializes the in-process case for
     // a plain `cargo test` run.
-    static KEYRING_TEST_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| {
-        let dir = std::env::temp_dir().join(format!("reddb-keyring-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("XDG_CONFIG_HOME", dir);
-        Mutex::new(())
-    });
+    static KEYRING_TEST_DIR: std::sync::LazyLock<std::path::PathBuf> =
+        std::sync::LazyLock::new(|| {
+            let dir =
+                std::env::temp_dir().join(format!("reddb-keyring-test-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
+            dir
+        });
+    static KEYRING_TEST_LOCK: std::sync::LazyLock<Mutex<()>> =
+        std::sync::LazyLock::new(|| Mutex::new(()));
+
+    /// Holds the keyring test lock and wipes the process-unique keyring temp
+    /// dir on drop, so nothing is left in TMPDIR for the leak guard
+    /// (scripts/check-temp-residue.sh). The whole dir is removed wholesale (no
+    /// file-format suffixes embedded); `save_to_keyring` recreates the `reddb/`
+    /// subtree via `create_dir_all` on the next test that needs it. The custom
+    /// `Drop` runs before the inner `MutexGuard` field drops, so the directory
+    /// is removed while the lock is still held (serialised in-process).
+    struct KeyringTestGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for KeyringTestGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&*KEYRING_TEST_DIR);
+        }
+    }
+
+    /// Acquire the keyring test lock after ensuring the process-unique temp
+    /// dir + `XDG_CONFIG_HOME` override are initialised. Bind the returned
+    /// guard (`let _lock = keyring_test_lock();`) for the test body.
+    fn keyring_test_lock() -> KeyringTestGuard {
+        std::sync::LazyLock::force(&KEYRING_TEST_DIR);
+        KeyringTestGuard(KEYRING_TEST_LOCK.lock().unwrap())
+    }
 
     #[test]
     fn test_password_source_is_encrypted() {
@@ -327,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_resolve_password_empty_flag() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         std::env::remove_var("REDDB_KEY");
         let _ = clear_keyring();
 
@@ -338,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_resolve_password_env_var() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         let _ = clear_keyring();
 
         std::env::set_var("REDDB_KEY", "env_test_password");
@@ -362,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_keyring_save_and_retrieve() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
 
         // Clear any existing keyring
         let _ = clear_keyring();
@@ -382,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_keyring_has_password() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
 
         let _ = clear_keyring();
         assert!(!has_keyring_password());
@@ -396,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_clear_keyring_nonexistent() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
 
         // Should not error if keyring doesn't exist
         let _ = clear_keyring();
@@ -406,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_keyring_special_characters() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         let _ = clear_keyring();
 
         // Test password with special characters
@@ -422,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_keyring_unicode_password() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         let _ = clear_keyring();
 
         // Test password with unicode characters
@@ -438,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_keyring_empty_password() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         let _ = clear_keyring();
 
         // Even empty password should work
@@ -453,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_keyring_long_password() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         let _ = clear_keyring();
 
         // Test very long password
@@ -469,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_resolve_password_keyring_integration() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         std::env::remove_var("REDDB_KEY");
         let _ = clear_keyring();
 
@@ -488,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_resolve_password_none_when_empty() {
-        let _lock = KEYRING_TEST_LOCK.lock().unwrap();
+        let _lock = keyring_test_lock();
         std::env::remove_var("REDDB_KEY");
         let _ = clear_keyring();
 
