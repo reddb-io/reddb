@@ -104,17 +104,47 @@ mod tests {
     use super::*;
     use crate::storage::engine::PagerConfig;
 
+    /// RAII guard: removes the temp `.db` file and every pager sidecar
+    /// (`-dwb`/`-hdr`/…) on drop by prefix-matching the file name, so nothing
+    /// is left in TMPDIR for the leak guard (scripts/check-temp-residue.sh).
+    /// Prefix-matching embeds no owned file-format suffix literals.
+    struct TempExtentPath(std::path::PathBuf);
+    impl Drop for TempExtentPath {
+        fn drop(&mut self) {
+            if let (Some(dir), Some(name)) = (
+                self.0.parent(),
+                self.0.file_name().and_then(|name| name.to_str()),
+            ) {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        if entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|entry_name| entry_name.starts_with(name))
+                        {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn turbo_extent_reads_across_page_boundaries() {
-        let path =
-            std::env::temp_dir().join(format!("reddb-turbo-extent-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let pager = Arc::new(Pager::open(&path, PagerConfig::default()).unwrap());
+        let path = TempExtentPath(
+            std::env::temp_dir().join(format!("reddb-turbo-extent-{}.db", std::process::id())),
+        );
+        let _ = std::fs::remove_file(&path.0);
+        let pager = Arc::new(Pager::open(&path.0, PagerConfig::default()).unwrap());
         let mut extent = TurboExtent::new(pager).unwrap();
         extent.write_offset = PAYLOAD_BYTES_PER_PAGE - 2;
         extent.ensure_capacity(PAYLOAD_BYTES_PER_PAGE + 2).unwrap();
         let offset = extent.append(&[1, 2, 3, 4]).unwrap();
         assert_eq!(extent.read(offset, 4).unwrap(), vec![1, 2, 3, 4]);
-        let _ = std::fs::remove_file(path);
+        // Drop the extent (and its pager) before the guard so the pager's
+        // drop-time header flush happens before the prefix cleanup runs.
+        drop(extent);
+        drop(path);
     }
 }
