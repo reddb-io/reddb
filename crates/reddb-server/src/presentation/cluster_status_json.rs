@@ -153,6 +153,13 @@ pub(crate) struct SystemSnapshot {
     /// `0`.
     pub(crate) total_memory_bytes: Option<u64>,
     pub(crate) available_memory_bytes: Option<u64>,
+    /// `Some(fraction)` when a real CPU delta is available (≥ 2 samples,
+    /// Linux only). `None` on the first scrape or unsupported platforms
+    /// — renders as the honest `unavailable` envelope (#738 / ADR 0060 §6).
+    pub(crate) cpu_usage: Option<f64>,
+    /// `Some(fraction)` when total/available memory is readable (Linux).
+    /// `None` on unsupported platforms — same honest envelope.
+    pub(crate) ram_usage: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -451,11 +458,17 @@ fn system_json(system: &SystemSnapshot) -> JsonValue {
     );
     object.insert(
         "cpu_usage".to_string(),
-        unavailable_json("cpu_usage_not_sampled"),
+        match system.cpu_usage {
+            Some(u) => JsonValue::Number((u * 100_000.0).round() / 1_000.0),
+            None => unavailable_json("cpu_usage_not_sampled"),
+        },
     );
     object.insert(
         "ram_usage".to_string(),
-        unavailable_json("ram_usage_not_sampled"),
+        match system.ram_usage {
+            Some(u) => JsonValue::Number((u * 100_000.0).round() / 1_000.0),
+            None => unavailable_json("ram_usage_not_sampled"),
+        },
     );
     JsonValue::Object(object)
 }
@@ -611,6 +624,8 @@ mod tests {
                 hostname: "test-host".to_string(),
                 total_memory_bytes: Some(16 * 1024 * 1024 * 1024),
                 available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+                cpu_usage: None,
+                ram_usage: None,
             },
             replication: ReplicationSnapshot {
                 role: ProcessRoleView::Standalone,
@@ -907,5 +922,68 @@ mod tests {
         assert_eq!(o.get("available").and_then(JsonValue::as_bool), Some(false));
         assert_eq!(s(o.get("reason").unwrap()), "foo");
         assert_eq!(o.len(), 2);
+    }
+
+    // #1244 — CPU/RAM occupancy contract tests (measured, no-sample-yet,
+    // unsupported-platform branches).
+
+    #[test]
+    fn cpu_ram_unavailable_when_no_sample_yet() {
+        // `base_inputs()` sets cpu_usage=None / ram_usage=None, which is the
+        // state before the first occupancy delta is available. Both fields
+        // must remain the honest `unavailable` envelope.
+        let json = cluster_status_json(&base_inputs());
+        let sys = obj(obj(&json).get("system").unwrap());
+        assert_eq!(
+            unavail_reason(sys.get("cpu_usage").unwrap()),
+            "cpu_usage_not_sampled"
+        );
+        assert_eq!(
+            unavail_reason(sys.get("ram_usage").unwrap()),
+            "ram_usage_not_sampled"
+        );
+    }
+
+    #[test]
+    fn cpu_ram_render_as_numbers_when_measured() {
+        let mut inputs = base_inputs();
+        inputs.system.cpu_usage = Some(0.42);
+        inputs.system.ram_usage = Some(0.65);
+        let json = cluster_status_json(&inputs);
+        let sys = obj(obj(&json).get("system").unwrap());
+        // Values are rendered as percentage numbers (two-decimal resolution).
+        let cpu = n(sys.get("cpu_usage").unwrap());
+        let ram = n(sys.get("ram_usage").unwrap());
+        // 0.42 → 42.0 %, 0.65 → 65.0 %.
+        assert!(
+            (cpu - 42.0).abs() < 0.1,
+            "expected ~42.0, got {cpu}"
+        );
+        assert!(
+            (ram - 65.0).abs() < 0.1,
+            "expected ~65.0, got {ram}"
+        );
+    }
+
+    #[test]
+    fn cpu_ram_unavailable_on_unsupported_platform() {
+        // Simulates a non-Linux host where the sampler cannot read /proc.
+        // The presentation layer must emit honest unavailable envelopes, not
+        // fabricate zeros.
+        let mut inputs = base_inputs();
+        inputs.system.cpu_usage = None;
+        inputs.system.ram_usage = None;
+        let json = cluster_status_json(&inputs);
+        let sys = obj(obj(&json).get("system").unwrap());
+        assert_eq!(
+            unavail_reason(sys.get("cpu_usage").unwrap()),
+            "cpu_usage_not_sampled",
+            "unsupported platform must produce honest unavailable, not a fabricated value"
+        );
+        assert_eq!(
+            unavail_reason(sys.get("ram_usage").unwrap()),
+            "ram_usage_not_sampled",
+            "unsupported platform must produce honest unavailable, not a fabricated value"
+        );
     }
 }
