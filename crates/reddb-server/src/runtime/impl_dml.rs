@@ -405,15 +405,47 @@ impl RedDBRuntime {
         let mut physical_delete_ids = Vec::new();
         let table_row_resolver =
             crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
+        // Phase 3: versioned graph collections tombstone node/edge
+        // deletes (xmax stamp) instead of physically removing them, so
+        // `AS OF` time-travel can still resolve the pre-delete version.
+        // Non-versioned graph collections keep the legacy physical
+        // delete (no history). Row entities (Phase 1/2) always tombstone
+        // under universal MVCC and are unaffected by this flag.
+        //
+        // Vectors (Phase 3b): versioned vector deletes tombstone (xmax
+        // stamp) instead of physically dropping, so history is retained.
+        // The `VECTOR SEARCH` read path post-filters every candidate
+        // through the current-snapshot visibility gate (which hides
+        // `xmax != 0` even in autocommit), so a tombstoned versioned
+        // vector never reaches live search. Non-versioned vectors keep
+        // the legacy physical delete.
+        let versioned_collection = self.vcs_is_versioned(collection).unwrap_or(false);
 
         for &id in ids {
             let Some(mut entity) = manager.get(id) else {
                 continue;
             };
-            if matches!(entity.data, EntityData::Row(_)) {
+            let is_versioned_graph = versioned_collection
+                && matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
+            let is_versioned_vector =
+                versioned_collection && matches!(entity.data, EntityData::Vector(_));
+            if matches!(entity.data, EntityData::Row(_))
+                || is_versioned_graph
+                || is_versioned_vector
+            {
                 let previous_xmax = entity.xmax;
                 if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }) {
                     if table_row_resolver.resolve_candidate(&entity).is_none() {
+                        continue;
+                    }
+                } else if is_versioned_vector {
+                    // Versioned vectors gate the delete on the statement
+                    // snapshot (not a crude `xmax != 0`) so a concurrent
+                    // delete whose snapshot predates a still-uncommitted
+                    // tombstone still targets the row, records its own
+                    // pending tombstone, and conflicts at commit
+                    // (first-committer-wins).
+                    if table_row_resolver.resolve_read_candidate(&entity).is_none() {
                         continue;
                     }
                 } else if entity.xmax != 0 {
