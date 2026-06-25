@@ -18,6 +18,7 @@
 
 pub mod ai_model_cache;
 pub mod audit_log;
+pub mod clock;
 pub mod backup_manifest;
 pub mod backup_temp;
 pub mod blob_cache;
@@ -58,6 +59,7 @@ pub mod wal_header;
 pub mod wal_record;
 pub mod zone_map;
 
+pub use clock::{Clock, SimClock, SystemClock};
 pub use ai_model_cache::{
     ai_model_cache_manifest_path, ai_model_cache_manifest_temp_path, ai_model_cache_purge_dir,
     ai_model_cache_purge_root, ai_model_cache_root, ai_model_cache_staging_dir,
