@@ -27,5 +27,8 @@ mod rql_conformance;
 #[path = "grouped/surface_contracts/rql_reddb_conformance.rs"]
 mod rql_reddb_conformance;
 
+#[path = "grouped/surface_contracts/rql_sqlite_differential.rs"]
+mod rql_sqlite_differential;
+
 #[path = "grouped/surface_contracts/smoke_embedded.rs"]
 mod smoke_embedded;
