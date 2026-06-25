@@ -2462,6 +2462,9 @@ impl RedDBRuntime {
                 replica_apply_metrics: std::sync::Arc::new(
                     crate::replication::logical::ReplicaApplyMetrics::default(),
                 ),
+                replica_link_metrics: std::sync::Arc::new(
+                    crate::replication::reconnect::ReplicaLinkMetrics::default(),
+                ),
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
                 schema_vocabulary: parking_lot::RwLock::new(
                     crate::runtime::schema_vocabulary::SchemaVocabulary::new(),
