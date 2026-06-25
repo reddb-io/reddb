@@ -32,6 +32,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 pub mod canonical_key;
+pub mod document_body_codec;
 pub mod cast_catalog;
 pub mod catalog;
 pub mod coerce;
