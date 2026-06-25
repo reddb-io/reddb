@@ -9,6 +9,7 @@ members = [
     "crates/reddb-server",
     "crates/reddb-types",
     "crates/reddb-wire",
+    "crates/unreliable-libc",
 ]
 resolver = "2"
 
