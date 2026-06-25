@@ -150,6 +150,15 @@ impl RedDBRuntime {
         self.inner.replica_apply_metrics.snapshot()
     }
 
+    /// Issue #1242 — accessor for WAL apply throughput counters.
+    /// Returns `(bytes_applied_total, records_applied_total)` as a
+    /// monotonic snapshot since process start. Used to export
+    /// `reddb_replication_apply_bytes_total` and
+    /// `reddb_replication_apply_records_total` via `/metrics`.
+    pub fn replica_apply_throughput_counts(&self) -> (u64, u64) {
+        self.inner.replica_apply_metrics.snapshot_throughput()
+    }
+
     /// PLAN.md Phase 11.4 — observability snapshot of every
     /// replica's durable LSN as known to the commit waiter. Empty
     /// vec on non-primary instances or when no replica has acked.

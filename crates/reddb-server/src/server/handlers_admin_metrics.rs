@@ -581,6 +581,33 @@ impl RedDBServer {
                 sanitize_label(&health)
             );
         }
+        // Issue #1242 — WAL apply throughput counters. Both are monotonic
+        // within one process lifetime and reset to 0 on restart; readers
+        // that track rate must detect a reset (new < prior) as a restart.
+        // Bounded by replica/node identity per the Phase 0 cardinality
+        // contract (ADR 0060): single-instance counters, no per-label fan-out.
+        let (apply_bytes, apply_records) = self.runtime.replica_apply_throughput_counts();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_apply_bytes_total Entity-payload bytes applied from the primary WAL since process start (insert/update payload; refresh payload; deletes contribute 0)."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_replication_apply_bytes_total counter"
+        );
+        let _ = writeln!(body, "reddb_replication_apply_bytes_total {apply_bytes}");
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_apply_records_total Logical WAL records successfully applied from the primary since process start."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_replication_apply_records_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_replication_apply_records_total {apply_records}"
+        );
 
         // PLAN.md Phase 4.4 — per-caller quota rejections. Empty
         // when the quota is unconfigured or no caller has been
