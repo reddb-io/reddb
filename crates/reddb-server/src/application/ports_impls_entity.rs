@@ -1964,9 +1964,7 @@ impl RedDBRuntime {
         // top-level keys here and patch them into the body before promoting.
         let is_document_collection = db
             .collection_contract(&collection)
-            .map(|contract| {
-                contract.declared_model == crate::catalog::CollectionModel::Document
-            })
+            .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
             .unwrap_or(false);
         let document_body_updates: Vec<(String, Value)> = if is_document_collection {
             static_field_assignments

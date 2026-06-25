@@ -365,10 +365,16 @@ fn document_compound_update_keeps_body_json_in_sync() {
         "UPDATE body_compound_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
     );
 
-    let promoted = exec(&rt, "SELECT score FROM body_compound_docs WHERE name = 'doc'");
+    let promoted = exec(
+        &rt,
+        "SELECT score FROM body_compound_docs WHERE name = 'doc'",
+    );
     assert_eq!(int_field(only_record(&promoted), "score"), 15);
 
-    let with_body = exec(&rt, "SELECT body FROM body_compound_docs WHERE name = 'doc'");
+    let with_body = exec(
+        &rt,
+        "SELECT body FROM body_compound_docs WHERE name = 'doc'",
+    );
     let body = json_field(only_record(&with_body), "body");
     assert_eq!(
         body["score"].as_i64(),
