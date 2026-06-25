@@ -242,6 +242,31 @@ Testing on an Intel Core i5-10210U (Comet Lake):
 **Verdict**: Useful for profiling headroom but not for distributed artifacts.
 The `release-static` binary is already the distribution target.
 
+### Profile-Guided Optimization (PGO)
+
+PGO is feasible in principle but requires a two-phase build workflow:
+
+1. **Instrument**: compile with `-C profile-generate=/tmp/pgo-data`
+2. **Collect**: run representative workloads against the instrumented binary
+3. **Optimize**: compile with `-C profile-use=/tmp/pgo-data` using the gathered profiles
+
+For reddb, the primary challenge is workload representativeness: the correct
+mix of reads/writes/queries/codec operations is application-specific. Without
+a realistic workload, PGO profiles may optimize for synthetic patterns and
+regress real-world throughput.
+
+Expected gain: 5–20% on branch-prediction-sensitive paths (RQL planner, index
+lookup, write-path dispatch). Minimal gain for codec paths (already
+vectorized by the compiler).
+
+Build complexity:
+- CI would need 3 stages per release (instrument → run-workload → optimize)
+- Requires a representative in-repo workload fixture (one does not yet exist)
+
+**Verdict**: Not feasible in this slice. A PGO follow-up slice should first
+define the representative workload corpus (e.g., an extended version of the
+existing `bench/kv/` and `columnar_read_bench` scenarios), then measure.
+
 ### Allocator (system malloc vs jemalloc / mimalloc)
 
 Linux glibc malloc is competitive for single-threaded workloads. For
