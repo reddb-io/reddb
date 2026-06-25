@@ -1283,10 +1283,39 @@ impl RedDBRuntime {
         operations: Vec<PatchEntityOperation>,
     ) -> RedDBResult<AppliedEntityMutation> {
         let id = entity.id;
+        let previous_xmax = entity.xmax;
         let operations = normalize_ttl_patch_operations(operations)?;
         // Snapshot pre-patch row fields for the secondary-index hook —
         // empty for non-row entities, which is the desired no-op.
         let pre_mutation_fields = entity_row_fields_snapshot(&entity);
+
+        // Versioned collections retain MVCC history: a PATCH must produce
+        // a NEW full version (the merged document/row) with the prior
+        // version tombstoned, mirroring the SQL UPDATE row path. Gated
+        // STRICTLY on the collection `versioned` flag — non-versioned
+        // collections keep last-writer-wins in-place mutation. Only Row
+        // entities (documents / table rows / KV) carry logical-id MVCC
+        // history; graph/vector/etc. stay in-place.
+        let patch_versions = matches!(entity.data, crate::storage::EntityData::Row(_))
+            && self.vcs_is_versioned(&collection).unwrap_or(false);
+        let versioned_update_xid = if patch_versions {
+            match self.current_xid() {
+                Some(xid) => Some(xid),
+                None => {
+                    let snapshot_manager = self.snapshot_manager();
+                    let xid = snapshot_manager.begin();
+                    snapshot_manager.commit(xid);
+                    Some(xid)
+                }
+            }
+        } else {
+            None
+        };
+        let mut replaced_entity = versioned_update_xid.map(|xid| {
+            let mut old = entity.clone();
+            old.set_xmax(xid);
+            old
+        });
 
         let db = self.db();
         let store = db.store();
@@ -1806,18 +1835,34 @@ impl RedDBRuntime {
             .unwrap_or_default()
             .as_secs();
 
+        // Versioned PATCH: re-stamp the merged post-image as a fresh
+        // physical version keyed on the same logical_id, and close the
+        // prior version's xmax at the same xid. `install_versioned_*`
+        // in persist installs the new row and tombstones the old one;
+        // `record_pending_versioned_update` arms first-committer-wins.
+        if let Some(xid) = versioned_update_xid {
+            let logical_id = entity.logical_id();
+            entity.id = store.next_entity_id();
+            entity.set_logical_id(logical_id);
+            entity.set_xmin(xid);
+            entity.set_xmax(0);
+            if let Some(old) = replaced_entity.as_mut() {
+                old.set_xmax(xid);
+            }
+        }
+
         modified_columns = dedupe_modified_columns(modified_columns);
 
         Ok(AppliedEntityMutation {
-            id,
+            id: entity.id,
             collection,
             entity,
             metadata: patch_metadata,
             modified_columns,
             persist_metadata: metadata_changed,
             context_index_dirty,
-            replaced_entity: None,
-            replaced_entity_previous_xmax: 0,
+            replaced_entity,
+            replaced_entity_previous_xmax: previous_xmax,
             pre_mutation_fields,
         })
     }
