@@ -599,7 +599,44 @@ mod tests {
     use super::*;
     use crate::json::Value as JsonValue;
 
-    fn tmp_path(label: &str) -> PathBuf {
+    /// RAII guard owning a per-test intent-log file; removes it (and any rotated
+    /// siblings) on drop by prefix-matching the file name, so nothing is left in
+    /// TMPDIR for the leak guard (scripts/check-temp-residue.sh). Derefs to
+    /// `PathBuf` so existing `&path` call sites keep working via deref coercion.
+    struct TempIntentLog(PathBuf);
+    impl std::ops::Deref for TempIntentLog {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for TempIntentLog {
+        fn as_ref(&self) -> &Path {
+            self.0.as_ref()
+        }
+    }
+    impl Drop for TempIntentLog {
+        fn drop(&mut self) {
+            if let (Some(dir), Some(name)) = (
+                self.0.parent(),
+                self.0.file_name().and_then(|name| name.to_str()),
+            ) {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        if entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|entry_name| entry_name.starts_with(name))
+                        {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn tmp_path(label: &str) -> TempIntentLog {
         let mut p = std::env::temp_dir();
         p.push(format!(
             "reddb-intent-{}-{}-{}.log",
@@ -607,7 +644,7 @@ mod tests {
             std::process::id(),
             crate::utils::now_unix_nanos()
         ));
-        p
+        TempIntentLog(p)
     }
 
     fn last_line_json(path: &Path) -> JsonValue {
