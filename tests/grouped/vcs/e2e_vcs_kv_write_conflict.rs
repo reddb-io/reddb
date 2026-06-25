@@ -50,7 +50,9 @@ fn assert_conflict(message: &str) {
 /// leave exactly one live version per key.
 fn live_values(rt: &RedDBRuntime, collection: &str, key: &str) -> Vec<String> {
     let result = rt
-        .execute_query(&format!("SELECT value FROM {collection} WHERE key = '{key}'"))
+        .execute_query(&format!(
+            "SELECT value FROM {collection} WHERE key = '{key}'"
+        ))
         .expect("scan key");
     result
         .result
