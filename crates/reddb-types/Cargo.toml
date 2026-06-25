@@ -22,7 +22,12 @@ path = "src/bin/measure_value_layout.rs"
 [dependencies]
 zstd = { version = "0.13", default-features = false }
 
+[[bench]]
+name = "array_display_bench"
+harness = false
+
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
 
 [lints]
