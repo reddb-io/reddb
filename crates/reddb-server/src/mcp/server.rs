@@ -1634,6 +1634,35 @@ mod tests {
     }
 
     #[test]
+    fn resources_read_returns_generated_type_reference() {
+        let mut srv = make_server();
+        let request = parse_json(
+            r#"{"jsonrpc":"2.0","id":10,"method":"resources/read","params":{"uri":"reddb://knowledge/types"}}"#,
+        );
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let text = parsed
+            .get("result")
+            .and_then(|result| result.get("contents"))
+            .and_then(JsonValue::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("resource text");
+
+        // The body is exactly what the type authority generates — same source as
+        // docs/llms.txt.
+        assert_eq!(text, reddb_types::knowledge::type_reference_markdown());
+        // And it is genuinely generated from the engine: a sampled value type and
+        // a multi-model paradigm are present.
+        assert!(
+            text.contains("`INTEGER`"),
+            "value type missing: {text:.120}"
+        );
+        assert!(text.contains("Multi-model map"), "multi-model map missing");
+    }
+
+    #[test]
     fn resources_read_unknown_uri_errors() {
         let mut srv = make_server();
         let request = parse_json(
