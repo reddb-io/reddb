@@ -1,0 +1,50 @@
+# rs-afk-attempt — reddb's caller for the RedSkills AFK Actions lane (ADR 0059/0062).
+#
+# Runs ONE attempt per dispatch against an executable ready-for-agent issue —
+# no fleet, no admin-merge in CI. The PR is the deliverable; the merge decision
+# stays human. Delegates triggers + trust gate to the published reusable.
+#
+# Auth: org-level secrets are inherited (`secrets: inherit`); the reusable picks
+# up MINIMAX_API_KEY (case-insensitive match to its `minimax_api_key` input).
+#
+# Dispatch-only by design: the reusable's `issues: labeled` auto-trigger is off
+# upstream, so issues are processed via the Actions UI or:
+#   gh workflow run rs-afk-attempt.yml -f issue_number=1245
+
+name: rs-afk-attempt
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to process. Leave EMPTY to auto-pick the oldest open ready-for-agent issue."
+        required: false
+        type: string
+        default: ""
+      runner:
+        description: "AFK runner to drive (claude|codex|opencode)."
+        required: false
+        type: string
+        default: "opencode"
+      model:
+        description: "Model override for every tier (e.g. minimax/MiniMax-M3). Empty = config."
+        required: false
+        type: string
+        default: "minimax/MiniMax-M3"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  attempt:
+    uses: reddb-io/red-skills/.github/workflows/reusable-afk-attempt.yml@v1
+    with:
+      issue_number: ${{ inputs.issue_number }}
+      runner: ${{ inputs.runner }}
+      model: ${{ inputs.model }}
+      enforce_trust_gate: "true"
+      allowlist_authors: "filipeforattini"
+      allowlist_label_actors: "filipeforattini"
+    secrets: inherit
