@@ -1406,6 +1406,17 @@ mod tests {
                     expected.into_iter().collect();
                 prop_assert_eq!(&candidate_contents, &expected_contents);
 
+                // Drop the trees and pagers BEFORE cleanup. The pager flushes
+                // its header (`.db-hdr`) on drop, so cleaning up while an
+                // `Arc<Pager>` is still alive lets the final drop re-create the
+                // sidecar AFTER removal — exactly the leak the guard
+                // (scripts/check-temp-residue.sh) flags (128 `.db-hdr` files,
+                // one per tree per proptest case). Explicit drops make cleanup
+                // the last thing to touch these paths.
+                drop(baseline);
+                drop(candidate);
+                drop(_baseline_pager);
+                drop(_candidate_pager);
                 cleanup(&baseline_path);
                 cleanup(&candidate_path);
             }
