@@ -1,0 +1,36 @@
+# RedDB — LLM Reference (llms.txt)
+
+> RedDB is a multi-model database (documents, key-value, queues, graph, vault, config, and RQL-tabular collections) with its own SQL-family query language (RQL). RedWire (`red://` / `reds://`) is the principal transport.
+
+This file is generated from the engine's own authorities — do not edit by hand. See `AGENTS.md` for the human/agent overview. Each section below is emitted from source so it cannot drift from the engine.
+
+<!-- BEGIN GENERATED: rql -->
+# RedDB RQL Reference
+
+RQL (RedDB Query Language) is RedDB's SQL-family query surface across its multi-model store (documents, key-value, queues, graph, vault, config, and RQL-tabular collections).
+
+This reference is generated from the `reddb-io-rql` lexer (keyword authority) and the `reddb-io-types` function catalog. Do not edit by hand — regenerate from the engine.
+
+## Keywords (186)
+
+RQL recognises the following reserved keywords (case-insensitive at the lexer):
+
+`ACK`, `ADD`, `ALGORITHM`, `ALL`, `ALTER`, `ANALYZE`, `AND`, `AS`, `ASC`, `ATTACH`, `AVG`, `BEGIN`, `BETWEEN`, `BY`, `CASCADE`, `CENTRALITY`, `CLUSTERING`, `COLLECTION`, `COLUMN`, `COMMIT`, `COMMUNITY`, `COMPONENTS`, `COMPRESS`, `CONTAINS`, `COPY`, `COSINE`, `COUNT`, `CREATE`, `CROSS`, `CURRENT`, `CYCLES`, `DATA`, `DEFAULT`, `DELETE`, `DELIMITER`, `DEPTH`, `DESC`, `DETACH`, `DIRECTION`, `DISABLE`, `DISTINCT`, `DOCUMENT`, `DROP`, `EDGE`, `ENABLE`, `ENDS`, `ENRICH`, `EXISTS`, `EXPLAIN`, `FALSE`, `FIRST`, `FOLLOWING`, `FOR`, `FOREIGN`, `FORMAT`, `FROM`, `FULL`, `FUSION`, `FUZZY`, `GAP`, `GRAPH`, `GROUP`, `HASH`, `HEADER`, `HYBRID`, `IF`, `IN`, `INCLUDE`, `INCREMENT`, `INDEX`, `INNER`, `INNERPRODUCT`, `INNER_PRODUCT`, `INSERT`, `INTERSECTION`, `INTO`, `IS`, `JOIN`, `JSON`, `K`, `KEY`, `KV`, `L2`, `LAST`, `LEFT`, `LEVEL`, `LIKE`, `LIMIT`, `LIST`, `MATCH`, `MATERIALIZED`, `MAX`, `MAXITERATIONS`, `MAXLENGTH`, `MAX_ITERATIONS`, `MAX_LENGTH`, `METADATA`, `METRIC`, `MIN`, `MINSCORE`, `MIN_SCORE`, `MODE`, `NACK`, `NEIGHBORHOOD`, `NODE`, `NOT`, `NULL`, `NULLS`, `OF`, `OFFSET`, `ON`, `OPTIONS`, `OR`, `ORDER`, `OUTER`, `OVER`, `PARTITION`, `PATH`, `PEEK`, `POLICY`, `POP`, `PRECEDING`, `PRIMARY`, `PRIORITY`, `PROPERTIES`, `PURGE`, `PUSH`, `QUEUE`, `RANGE`, `RECURSIVE`, `REFRESH`, `RELEASE`, `RENAME`, `RERANK`, `RETENTION`, `RETURN`, `RETURNING`, `RIGHT`, `ROLLBACK`, `ROW`, `ROWS`, `RRF`, `SAVEPOINT`, `SCHEMA`, `SEARCH`, `SECURITY`, `SELECT`, `SEQUENCE`, `SERVER`, `SESSIONIZE`, `SET`, `SHORTESTPATH`, `SHORTEST_PATH`, `SIMILAR`, `START`, `STARTS`, `STRATEGY`, `SUM`, `TABLE`, `TEXT`, `THRESHOLD`, `TIMESERIES`, `TO`, `TOPOLOGICALSORT`, `TOPOLOGICAL_SORT`, `TRANSACTION`, `TRAVERSE`, `TREE`, `TRUE`, `TRUNCATE`, `UNBOUNDED`, `UNION`, `UNIQUE`, `UPDATE`, `USING`, `VACUUM`, `VALUES`, `VECTOR`, `VECTORS`, `VIA`, `VIEW`, `WEIGHT`, `WHERE`, `WITH`, `WORK`, `WRAPPER`
+
+## Functions (81)
+
+RQL provides these built-in functions, grouped by kind:
+
+### Aggregate functions
+
+`AVG`, `COUNT`, `GROUP_CONCAT`, `MAX`, `MIN`, `STDDEV`, `STRING_AGG`, `SUM`, `VARIANCE`
+
+### Scalar functions
+
+`ABS`, `ACOS`, `ARCCOS`, `ARCSIN`, `ARCTAN`, `ASIN`, `ATAN`, `ATAN2`, `BIT_LENGTH`, `BTRIM`, `CEIL`, `CHARACTER_LENGTH`, `CHAR_LENGTH`, `COALESCE`, `CONCAT`, `CONCAT_WS`, `CONTAINS`, `COS`, `COT`, `DEGREES`, `EXP`, `FLOOR`, `GEO_BEARING`, `GEO_DISTANCE`, `HAVERSINE`, `JSON_ARRAY`, `JSON_ARRAY_LENGTH`, `JSON_EXTRACT`, `JSON_EXTRACT_TEXT`, `JSON_OBJECT`, `JSON_SET`, `JSON_TYPEOF`, `JSON_VALID`, `LEFT`, `LENGTH`, `LN`, `LOG`, `LOG10`, `LOWER`, `LTRIM`, `MONEY`, `MONEY_ASSET`, `MONEY_MINOR`, `MONEY_SCALE`, `OCTET_LENGTH`, `PI`, `POSITION`, `POW`, `POWER`, `QUOTE_LITERAL`, `RADIANS`, `REVERSE`, `RIGHT`, `ROUND`, `RTRIM`, `SIN`, `SQRT`, `SUBSTR`, `SUBSTRING`, `TAN`, `TIME_BUCKET`, `TRIM`, `UPPER`, `VINCENTY`
+
+### Volatile functions
+
+`CURRENT_DATE`, `CURRENT_ROLE`, `CURRENT_TENANT`, `CURRENT_TIMESTAMP`, `CURRENT_USER`, `NOW`, `SESSION_USER`, `VERIFY_PASSWORD`
+
+<!-- END GENERATED: rql -->

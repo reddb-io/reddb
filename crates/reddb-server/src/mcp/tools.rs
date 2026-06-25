@@ -12,6 +12,32 @@ pub struct ToolDef {
     pub input_schema: JsonValue,
 }
 
+/// Definition of a read-only MCP knowledge resource (ADR 0061).
+///
+/// The body is produced lazily by `body()` from the engine's own authorities
+/// (e.g. `reddb_rql::knowledge` reads the lexer keyword set and the
+/// `reddb-io-types` function catalog), so the served text cannot drift from the
+/// engine and the resource carries no mutable state.
+pub struct ResourceDef {
+    pub uri: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub mime_type: &'static str,
+    pub body: fn() -> String,
+}
+
+/// The static set of knowledge resources `red mcp` serves. The first domain is
+/// the RQL reference, generated from `reddb-io-rql` (ADR 0061).
+pub fn knowledge_resources() -> Vec<ResourceDef> {
+    vec![ResourceDef {
+        uri: reddb_rql::knowledge::RESOURCE_URI,
+        title: reddb_rql::knowledge::RESOURCE_TITLE,
+        description: reddb_rql::knowledge::RESOURCE_DESCRIPTION,
+        mime_type: "text/markdown",
+        body: reddb_rql::knowledge::rql_reference_markdown,
+    }]
+}
+
 /// Build a JSON Schema object from a list of field descriptors.
 fn schema(properties: Vec<(&str, &str, &str)>, required: Vec<&str>) -> JsonValue {
     let mut props = Map::new();
