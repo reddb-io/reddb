@@ -1431,13 +1431,25 @@ impl RedDBRuntime {
 
                 if !field_ops.is_empty() {
                     context_index_dirty = true;
-                    for op in &field_ops {
-                        if let Some(col) = op.path.first() {
-                            modified_columns.push(col.clone());
-                        }
-                    }
                     let named = row.named.get_or_insert_with(Default::default);
-                    apply_patch_operations_to_storage_map(named, &field_ops)?;
+                    if is_document_collection {
+                        // Document fields are projections of the canonical `body`
+                        // JSON. Apply the assignment to the body so the stored
+                        // document and its promoted columns stay in sync, then
+                        // re-promote every top-level key. Patching only the
+                        // promoted column would leave `SELECT body` stale (#1394).
+                        let mut body = document_body_from_named(named)?;
+                        apply_patch_operations_to_json(&mut body, &field_ops)
+                            .map_err(crate::RedDBError::Query)?;
+                        replace_document_row_body(named, body, &mut modified_columns)?;
+                    } else {
+                        for op in &field_ops {
+                            if let Some(col) = op.path.first() {
+                                modified_columns.push(col.clone());
+                            }
+                        }
+                        apply_patch_operations_to_storage_map(named, &field_ops)?;
+                    }
                 }
 
                 if let Some(fields) = payload
@@ -1456,9 +1468,21 @@ impl RedDBRuntime {
                     }
                     context_index_dirty = true;
                     let named = row.named.get_or_insert_with(Default::default);
-                    for (key, value) in fields {
-                        modified_columns.push(key.clone());
-                        named.insert(key.clone(), json_to_storage_value(value)?);
+                    if is_document_collection {
+                        // Mirror the `field_ops` path above: keep the canonical
+                        // `body` JSON in sync with its promoted columns (#1394).
+                        let mut body = document_body_from_named(named)?;
+                        if let JsonValue::Object(map) = &mut body {
+                            for (key, value) in fields {
+                                map.insert(key.clone(), value.clone());
+                            }
+                        }
+                        replace_document_row_body(named, body, &mut modified_columns)?;
+                    } else {
+                        for (key, value) in fields {
+                            modified_columns.push(key.clone());
+                            named.insert(key.clone(), json_to_storage_value(value)?);
+                        }
                     }
                 }
 
@@ -1932,8 +1956,50 @@ impl RedDBRuntime {
         };
 
         let _ = row_contract_plan;
+
+        // Documents store the full JSON under the `body` column plus promoted
+        // top-level columns for filtering. A SET on a promoted column must also
+        // be reflected in `body`, otherwise `SELECT body` keeps the old value
+        // while `SELECT <col>` shows the new one (#1394). Collect the assigned
+        // top-level keys here and patch them into the body before promoting.
+        let is_document_collection = db
+            .collection_contract(&collection)
+            .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
+            .unwrap_or(false);
+        let document_body_updates: Vec<(String, Value)> = if is_document_collection {
+            static_field_assignments
+                .iter()
+                .cloned()
+                .chain(dynamic_field_assignments.iter().cloned())
+                .filter(|(column, _)| column != "body")
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         apply_row_field_assignments_raw(row, static_field_assignments.iter().cloned());
         apply_row_field_assignments_raw(row, dynamic_field_assignments);
+
+        if !document_body_updates.is_empty() {
+            let named = row.named.get_or_insert_with(Default::default);
+            let mut body = document_body_from_named(named)?;
+            if let JsonValue::Object(map) = &mut body {
+                for (column, value) in &document_body_updates {
+                    map.insert(
+                        column.clone(),
+                        crate::presentation::entity_json::storage_value_to_json(value),
+                    );
+                }
+            }
+            let body_bytes = json_to_vec(&body).map_err(|err| {
+                crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
+            })?;
+            named.insert("body".to_string(), Value::Json(body_bytes));
+            context_index_dirty = true;
+            if !modified_columns.iter().any(|column| column == "body") {
+                modified_columns.push("body".to_string());
+            }
+        }
 
         for (key, value) in static_metadata_assignments
             .iter()
