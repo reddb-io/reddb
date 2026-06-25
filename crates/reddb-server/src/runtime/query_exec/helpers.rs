@@ -359,6 +359,15 @@ pub(crate) fn resolve_entity_field<'a>(
                 return Some(Cow::Borrowed(value));
             }
         }
+        // "id" is an alias for the entity logical id on row entities
+        // (documents, KV, named tables) when no user-defined "id" field
+        // exists in the row. Schema-based tables with a DDL `id` column
+        // already return above via row.get_field(column).
+        if column == "id" {
+            return Some(Cow::Owned(Value::UnsignedInteger(
+                entity.logical_id().raw(),
+            )));
+        }
     }
 
     // Node properties
