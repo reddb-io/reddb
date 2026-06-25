@@ -32,13 +32,13 @@
 #![allow(clippy::cast_possible_truncation)]
 
 pub mod canonical_key;
-pub mod document_body_codec;
 pub mod cast_catalog;
 pub mod catalog;
 pub mod coerce;
 pub mod coercion_spine;
 mod conversions;
 pub mod distance;
+pub mod document_body_codec;
 pub mod duration;
 pub mod function_catalog;
 pub mod index_hint;

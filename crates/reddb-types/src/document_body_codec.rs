@@ -69,7 +69,9 @@ impl std::fmt::Display for DocBodyError {
             Self::UnsupportedVersion(v) => write!(f, "document body: unsupported version {v}"),
             Self::OffsetOutOfBounds => write!(f, "document body: offset points outside buffer"),
             Self::InvalidFieldName => write!(f, "document body: field name is not valid UTF-8"),
-            Self::FieldLimitExceeded => write!(f, "document body: field or key-length limit exceeded"),
+            Self::FieldLimitExceeded => {
+                write!(f, "document body: field or key-length limit exceeded")
+            }
             Self::ValueCodecError(e) => write!(f, "document body: value codec error: {e}"),
         }
     }
@@ -232,8 +234,12 @@ pub fn parse_header(data: &[u8]) -> Result<(usize, Vec<(u16, u32)>), DocBodyErro
     for i in 0..n {
         let base = 7 + i * ENTRY_SIZE;
         let key_len = u16::from_le_bytes([data[base], data[base + 1]]);
-        let val_offset =
-            u32::from_le_bytes([data[base + 2], data[base + 3], data[base + 4], data[base + 5]]);
+        let val_offset = u32::from_le_bytes([
+            data[base + 2],
+            data[base + 3],
+            data[base + 4],
+            data[base + 5],
+        ]);
         table.push((key_len, val_offset));
     }
 
@@ -303,11 +309,11 @@ mod tests {
                     scale: 2,
                 },
             ),
+            ("geo", Value::GeoPoint(-23_550_520, -46_633_308)),
             (
-                "geo",
-                Value::GeoPoint(-23_550_520, -46_633_308),
+                "ip_mixed",
+                Value::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
             ),
-            ("ip_mixed", Value::IpAddr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))),
             ("url", Value::Url("https://reddb.io".to_string())),
             ("color_alpha", Value::ColorAlpha([1, 2, 3, 255])),
             ("lang", Value::Lang2(*b"en")),
@@ -333,7 +339,9 @@ mod tests {
         let mut buf = Vec::new();
         encode(&refs, &mut buf).expect("encode");
 
-        let v = read_field_by_name(&buf, "b").expect("lookup").expect("found");
+        let v = read_field_by_name(&buf, "b")
+            .expect("lookup")
+            .expect("found");
         assert_eq!(v, Value::text("hello"));
 
         let missing = read_field_by_name(&buf, "z").expect("lookup");
@@ -343,10 +351,7 @@ mod tests {
     /// decode_value_at_offset provides direct O(1) access given a known offset.
     #[test]
     fn decode_value_at_offset_matches_full_decode() {
-        let fields = [
-            ("x", Value::Integer(100)),
-            ("y", Value::Float(3.14)),
-        ];
+        let fields = [("x", Value::Integer(100)), ("y", Value::Float(3.14))];
         let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
         let mut buf = Vec::new();
         encode(&refs, &mut buf).expect("encode");
@@ -373,7 +378,10 @@ mod tests {
     #[test]
     fn rejects_truncated_buffer() {
         assert_eq!(decode(&[]), Err(DocBodyError::TruncatedData));
-        assert_eq!(decode(&[b'R', b'D', b'O', b'C', 1, 0]), Err(DocBodyError::TruncatedData));
+        assert_eq!(
+            decode(&[b'R', b'D', b'O', b'C', 1, 0]),
+            Err(DocBodyError::TruncatedData)
+        );
     }
 
     #[test]
