@@ -307,6 +307,77 @@ fn explicit_document_update_emits_event_and_cdc_identity() {
     assert_eq!(update.kind(), "document");
 }
 
+fn json_field(record: &UnifiedRecord, field: &str) -> serde_json::Value {
+    match record.get(field) {
+        Some(Value::Json(bytes)) => {
+            serde_json::from_slice(bytes).expect("body field should be valid JSON")
+        }
+        other => panic!("expected {field} json field, got {other:?} in {record:?}"),
+    }
+}
+
+#[test]
+fn document_update_keeps_body_json_in_sync_with_promoted_column() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_sync_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_sync_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10,"keep":"me"}')"#,
+    );
+
+    exec(
+        &rt,
+        "UPDATE body_sync_docs DOCUMENTS SET score = 42 WHERE name = 'doc'",
+    );
+
+    // The promoted top-level column reflects the new value.
+    let promoted = exec(&rt, "SELECT score FROM body_sync_docs WHERE name = 'doc'");
+    assert_eq!(int_field(only_record(&promoted), "score"), 42);
+
+    // The full document body JSON must be re-serialized so it agrees with the
+    // promoted column. Other fields must be preserved untouched.
+    let with_body = exec(&rt, "SELECT body FROM body_sync_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["score"].as_i64(),
+        Some(42),
+        "body JSON should reflect the updated promoted column, got {body:?}"
+    );
+    assert_eq!(body["name"].as_str(), Some("doc"));
+    assert_eq!(
+        body["keep"].as_str(),
+        Some("me"),
+        "untargeted document fields must survive the UPDATE, got {body:?}"
+    );
+}
+
+#[test]
+fn document_compound_update_keeps_body_json_in_sync() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_compound_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_compound_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+    );
+
+    exec(
+        &rt,
+        "UPDATE body_compound_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
+    );
+
+    let promoted = exec(&rt, "SELECT score FROM body_compound_docs WHERE name = 'doc'");
+    assert_eq!(int_field(only_record(&promoted), "score"), 15);
+
+    let with_body = exec(&rt, "SELECT body FROM body_compound_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["score"].as_i64(),
+        Some(15),
+        "body JSON should reflect the compound-updated column, got {body:?}"
+    );
+    assert_eq!(body["name"].as_str(), Some("doc"));
+}
+
 #[test]
 fn explicit_updates_recheck_changed_indexed_fields() {
     let rt = runtime();
