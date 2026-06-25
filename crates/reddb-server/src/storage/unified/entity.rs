@@ -727,22 +727,21 @@ impl UnifiedEntity {
 
     /// Ensure entities written by the current engine carry explicit
     /// logical identity. Table rows + documents (Phase 1/2) and graph
-    /// nodes/edges + vectors (Phase 3) all participate in the multi-model
-    /// MVCC versioning rollout and so need a stable logical id for
+    /// nodes/edges (Phase 3) participate in the multi-model MVCC
+    /// versioning rollout and so need a stable logical id for
     /// version-chain selection. Stamping the logical id is inert for
     /// non-versioned collections: history only accrues through
     /// `install_versioned_table_row_update`, which is gated on the
     /// collection `versioned` flag, so a stamped-but-never-superseded
     /// entity keeps `logical_id == id` and behaves exactly as before.
+    /// Vectors are intentionally excluded pending their read-path follow
+    /// up (no snapshot-honoring `VECTOR SEARCH`).
     #[inline]
     pub(crate) fn ensure_table_logical_id(&mut self) {
         if self.logical_id.is_none()
             && matches!(
                 self.kind,
-                EntityKind::TableRow { .. }
-                    | EntityKind::GraphNode(_)
-                    | EntityKind::GraphEdge(_)
-                    | EntityKind::Vector { .. }
+                EntityKind::TableRow { .. } | EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
             )
         {
             self.logical_id = Some(self.id);

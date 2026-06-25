@@ -411,6 +411,12 @@ impl RedDBRuntime {
         // Non-versioned graph collections keep the legacy physical
         // delete (no history). Row entities (Phase 1/2) always tombstone
         // under universal MVCC and are unaffected by this flag.
+        //
+        // Vectors are intentionally NOT included: their only read surface
+        // is `VECTOR SEARCH`, which reads without a snapshot context in
+        // autocommit (so a tombstone would stay searchable) and the
+        // TurboQuant index is not pruned on delete. Vector versioning is
+        // scoped as a follow-up; see e2e_vcs_vector_mvcc_history.rs.
         let versioned_collection = self.vcs_is_versioned(collection).unwrap_or(false);
 
         for &id in ids {

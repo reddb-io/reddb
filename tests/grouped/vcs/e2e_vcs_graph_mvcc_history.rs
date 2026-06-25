@@ -78,8 +78,9 @@ fn update_score(rt: &RedDBRuntime, collection: &str, label: &str, value: i64) {
 /// Read `score` for the node with `label` at a historical commit via
 /// SQL `AS OF`. Returns `None` when not visible.
 fn as_of_score(rt: &RedDBRuntime, collection: &str, label: &str, commit_hash: &str) -> Option<i64> {
-    let sql =
-        format!("SELECT score FROM {collection} AS OF COMMIT '{commit_hash}' WHERE label = '{label}'");
+    let sql = format!(
+        "SELECT score FROM {collection} AS OF COMMIT '{commit_hash}' WHERE label = '{label}'"
+    );
     read_single_score(rt, &sql)
 }
 
