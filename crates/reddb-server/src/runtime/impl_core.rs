@@ -419,7 +419,7 @@ impl RedDBRuntime {
         // The exact head: top-K rows in rank order. Each row here already
         // passed MVCC visibility *and* RLS/tenant filtering during the
         // scan, so identifying the target *within* this result (rather
-        // than via a separate `red_entity_id` lookup, which takes the
+        // than via a separate `rid` lookup, which takes the
         // direct entity-fetch path that bypasses the RLS gate) is what
         // makes the rank honor policy/tenant scope (criterion 5).
         let dir = if descriptor.descending { "DESC" } else { "ASC" };
@@ -487,12 +487,17 @@ impl RedDBRuntime {
             ]],
             None => Vec::new(),
         };
-        Ok(RuntimeQueryResult::ok_records(
-            raw_query.to_string(),
-            columns,
-            rows,
-            "select",
-        ))
+        let mut result =
+            RuntimeQueryResult::ok_records(raw_query.to_string(), columns, rows, "select");
+        result.statement = "approx_rank_of";
+        // Tag as `runtime-rank` so the 30s result cache skips this read
+        // (see `should_write_result_cache`). The approximate rank is rebuilt
+        // from a live full scan on every call (criterion 4: it must track
+        // score changes); a cached entry, scoped only to the ranking name and
+        // never the underlying table, would otherwise survive inserts into
+        // that table and serve a stale rank.
+        result.engine = "runtime-rank";
+        Ok(result)
     }
 
     /// Refresh the per-`(table, column)` score sketch from the rows visible
@@ -2041,6 +2046,12 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
         "pg_try_advisory_lock",
         "pg_advisory_unlock",
         "random()",
+        // `$config.<path>` / `$secret.<path>` resolve mutable runtime config /
+        // vault state at execution time (#1370). A cached result would serve a
+        // stale value after a later `SET CONFIG` / `SET SECRET`, so treat any
+        // query referencing them as volatile (never result-cache it).
+        "$config",
+        "$secret",
         // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
         // omitted for now — they ARE volatile but today's tests rely
         // on caching them. Revisit once a tighter volatility story
@@ -2435,20 +2446,50 @@ impl RedDBRuntime {
                     // support-directory logs tier;
                     // lower tiers / ephemeral runs report `Stderr`
                     // and we keep the legacy file-next-to-data sink.
-                    let data_path = options.data_path.clone().unwrap_or_else(|| {
-                        if embedded_single_file {
-                            std::env::temp_dir()
-                                .join("reddb-embedded-runtime")
-                                .join(format!("audit-{}", std::process::id()))
-                        } else {
-                            std::env::temp_dir().join("reddb")
-                        }
-                    });
+                    // #1375 — single-file embedded mode keeps the data
+                    // directory to exactly the `.rdb` artifact, so the audit
+                    // log must NOT land as a sibling. Route it to a
+                    // process-unique temp location even when a data path is
+                    // set; only the non-embedded case uses the data dir.
+                    let data_path = if embedded_single_file {
+                        std::env::temp_dir()
+                            .join("reddb-embedded-runtime")
+                            .join(format!("audit-{}", std::process::id()))
+                    } else {
+                        options
+                            .data_path
+                            .clone()
+                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
+                    };
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
-                    Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
-                        &audit_dest,
-                        &data_path,
-                    ))
+                    if !matches!(audit_dest, crate::storage::layout::LogDestination::File(_))
+                        && (embedded_single_file
+                            || options
+                                .metadata
+                                .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY))
+                    {
+                        // The Stderr/Syslog lower-tier sink resolves to a
+                        // `for_data_path` sibling that collides across concurrent
+                        // temp-dir runtimes — nextest's process-per-test model
+                        // truncates one shared file, flaking audit assertions.
+                        // Pin a unique sibling for these short-lived ephemeral /
+                        // single-file embedded runtimes. The file-owned support-
+                        // dir tier (`File`) is already per-data unique, so leave
+                        // it to `for_destination` (#1375: the embedded audit then
+                        // still never lands a sibling next to the `.rdb`).
+                        let audit_path = reddb_file::layout::sibling_path(
+                            &data_path,
+                            &reddb_file::layout::sidecar_file_name(&data_path, "audit.log"),
+                        );
+                        Arc::new(crate::runtime::audit_log::AuditLogger::with_path(
+                            audit_path,
+                        ))
+                    } else {
+                        Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
+                            &audit_dest,
+                            &data_path,
+                        ))
+                    }
                 },
                 control_event_ledger: parking_lot::RwLock::new(Arc::new(
                     crate::runtime::control_events::RuntimeLedger::new(db.store()),
@@ -2482,19 +2523,21 @@ impl RedDBRuntime {
                     // lands under the file-owned support-directory logs tier;
                     // lower tiers fall back to `red-slow.log` in the
                     // data directory.
-                    let fallback_dir = options
-                        .data_path
-                        .as_ref()
-                        .and_then(|p| p.parent().map(std::path::PathBuf::from))
-                        .unwrap_or_else(|| {
-                            if embedded_single_file {
-                                std::env::temp_dir()
-                                    .join("reddb-embedded-runtime")
-                                    .join(format!("slow-{}", std::process::id()))
-                            } else {
-                                std::env::temp_dir().join("reddb")
-                            }
-                        });
+                    // #1375 — see the audit-log note above: single-file mode
+                    // never writes the slow-query log as a sibling of the
+                    // `.rdb`. Route to a process-unique temp dir when embedded,
+                    // regardless of the data path.
+                    let fallback_dir = if embedded_single_file {
+                        std::env::temp_dir()
+                            .join("reddb-embedded-runtime")
+                            .join(format!("slow-{}", std::process::id()))
+                    } else {
+                        options
+                            .data_path
+                            .as_ref()
+                            .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
+                    };
                     let threshold_ms = std::env::var("RED_SLOW_QUERY_THRESHOLD_MS")
                         .ok()
                         .and_then(|s| s.parse::<u64>().ok())
@@ -2875,6 +2918,21 @@ impl RedDBRuntime {
         // graph collection (declared WITH ANALYTICS) and its metadata sidecar
         // exist. Idempotent and survives restarts via the WAL-backed contract.
         let _ = crate::application::topology_collections::ensure(&runtime);
+
+        // #1369 — reserve a fixed internal-id floor so the first user-inserted
+        // entity always receives a stable, documented `rid` (FIRST_USER_ENTITY_ID),
+        // independent of how many internal collection-descriptor / config-default
+        // entities the boot sequence seeded above. `register_entity_id` only ever
+        // raises the allocator, so a database that already holds user data
+        // (counter past the floor) is untouched; a freshly-seeded database jumps
+        // straight to the floor.
+        runtime
+            .inner
+            .db
+            .store()
+            .register_entity_id(crate::storage::EntityId::new(
+                crate::storage::FIRST_USER_ENTITY_ID - 1,
+            ));
 
         // Start background maintenance thread (context index refresh +
         // session purge). Held by a WEAK reference to `RuntimeInner`
@@ -12047,7 +12105,7 @@ fn push_returning_policy_column(columns: &mut Vec<String>, column: &str) {
 fn returning_public_envelope_column(column: &str) -> bool {
     matches!(
         column.to_ascii_lowercase().as_str(),
-        "rid" | "collection" | "kind" | "tenant" | "created_at" | "updated_at" | "red_entity_id"
+        "rid" | "collection" | "kind" | "tenant" | "created_at" | "updated_at"
     )
 }
 

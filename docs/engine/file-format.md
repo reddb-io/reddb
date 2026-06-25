@@ -228,19 +228,26 @@ Entities are the fundamental data units stored in B-tree leaf cells and in binar
 ### Entity ID Allocation
 
 Entity IDs are issued from a single monotonic counter (`UnifiedStore::next_entity_id`,
-seeded at `1`). The engine consumes the first 101 ids on startup to materialise
-internal collection-descriptor entities (column descriptors, projection metadata,
-and bootstrap markers) before any user mutation runs. As a result:
+seeded at `1`). Ids `1..1023` are reserved for internal collection-descriptor and
+config-default entities (column descriptors, projection metadata, bootstrap markers,
+and the seeded `red_config` defaults). After seeding those, the engine bumps the
+counter up to a fixed floor (`FIRST_USER_ENTITY_ID = 1024`) before any user mutation
+runs. As a result:
 
-> **The first user-inserted entity is assigned `_entity_id = 102`** on a fresh
+> **The first user-inserted entity is assigned `rid = 1024`** on a fresh
 > database, identical for both `memory://` and `file://` backends. The
-> assignment is stable: re-opening a file does not re-issue ids 1..101 to
-> user entities. Application code that needs the id should read it back via
-> `INSERT ... RETURNING *` (the `red_entity_id` column) rather than guessing.
+> assignment is stable: re-opening a file does not re-issue ids 1..1023 to
+> user entities, and — unlike the previous single-counter scheme — the offset
+> no longer drifts when config defaults are added (it stays pinned to
+> `FIRST_USER_ENTITY_ID`). Application code that needs the id should read it
+> back via `INSERT ... RETURNING *` (the `rid` column) rather than guessing.
+>
+> The legacy `red_entity_id` column is retired in this version; `rid` is the
+> sole canonical entity-id column.
 
-This offset is part of the persisted file-format contract — changing it
-requires a `.rdb` format version bump and a migration. The behaviour is
-regression-pinned by `first_user_entity_id_is_one_hundred_and_two` in
+The floor (`FIRST_USER_ENTITY_ID`) is part of the persisted file-format contract —
+changing it requires a `.rdb` format version bump and a migration. The behaviour is
+regression-pinned by `first_user_entity_id_is_the_reserved_floor` in
 `crates/reddb-server/tests/runtime_query_behavior.rs`, and cross-referenced
 from [docs/data-models/graphs.md](../data-models/graphs.md).
 

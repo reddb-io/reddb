@@ -128,30 +128,63 @@ pub(crate) fn runtime_vector_matches(
                 )));
             }
         }
+        // TurboQuant returns *approximate* (quantised) scores; on small or
+        // low-dimensional collections the quantisation collapses the scores
+        // and the approximate order is wrong (#1372). Over-fetch a generous
+        // candidate set from the index, then re-rank with full-precision
+        // exact distances so metric ordering is correct. The index still
+        // prunes the candidate set on large collections.
+        const RERANK_OVERFETCH: usize = 32;
+        let k = query.k.max(1);
+        let collection_count = manager.count().max(1);
         let search_k = if effective_vector_filter(query).is_some() {
-            manager.count().max(1)
+            collection_count
         } else {
-            query.k.max(1)
+            k.saturating_mul(RERANK_OVERFETCH).min(collection_count)
         };
-        let index = state.index.lock();
-        let raw = index.search(vector, search_k, metric);
-        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+        let raw = {
+            let index = state.index.lock();
+            index.search(vector, search_k, metric)
+        };
         let mut results = Vec::with_capacity(raw.len());
         for hit in raw {
             let Some(entity) = db.store().get(&query.collection, hit.entity_id) else {
                 continue;
             };
-            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), &entity) {
+            // The TurboQuant index is append-only and never prunes
+            // deleted/superseded vectors (#673/#688 own removal). Post-
+            // filter every candidate through the current-snapshot
+            // visibility gate — which hides any tombstoned/superseded
+            // physical version (`xmax != 0`) even in autocommit (where
+            // there is no captured snapshot context) — so a deleted or
+            // version-superseded vector never reaches the results.
+            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
                 continue;
             }
-            let distance = match metric {
-                DistanceMetric::Cosine => 1.0 - hit.score,
-                DistanceMetric::InnerProduct | DistanceMetric::L2 => -hit.score,
+            // Exact re-rank against the stored full-precision vector rather
+            // than trusting the quantised approximate score.
+            let (score, distance) = match &entity.data {
+                EntityData::Vector(data) => {
+                    let raw_distance =
+                        crate::storage::engine::distance::distance(vector, &data.dense, metric);
+                    let score = match metric {
+                        DistanceMetric::Cosine => 1.0 - raw_distance,
+                        DistanceMetric::InnerProduct | DistanceMetric::L2 => -raw_distance,
+                    };
+                    (score, raw_distance)
+                }
+                _ => {
+                    let distance = match metric {
+                        DistanceMetric::Cosine => 1.0 - hit.score,
+                        DistanceMetric::InnerProduct | DistanceMetric::L2 => -hit.score,
+                    };
+                    (hit.score, distance)
+                }
             };
             if let Some(threshold) = query.threshold {
                 let pass = match metric {
                     DistanceMetric::L2 => distance <= threshold,
-                    DistanceMetric::Cosine | DistanceMetric::InnerProduct => hit.score >= threshold,
+                    DistanceMetric::Cosine | DistanceMetric::InnerProduct => score >= threshold,
                 };
                 if !pass {
                     continue;
@@ -159,11 +192,18 @@ pub(crate) fn runtime_vector_matches(
             }
             results.push(SimilarResult {
                 entity_id: hit.entity_id,
-                score: hit.score,
+                score,
                 distance,
                 entity,
             });
         }
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entity_id.raw().cmp(&b.entity_id.raw()))
+        });
+        results.truncate(k);
         return Ok(results);
     }
 
@@ -176,6 +216,17 @@ pub(crate) fn runtime_vector_matches(
     };
 
     for entity in manager.query_all(|entity| {
+        // `query_all` may fan out across worker threads that do not
+        // inherit the dispatch thread's snapshot thread-local, so we
+        // pass the captured snapshot context explicitly. In autocommit
+        // there is no captured context (`None`); the table-scan paths
+        // would treat that as "always visible", but a deleted/superseded
+        // vector carries `xmax != 0` and must be hidden — mirror the
+        // autocommit rule of `entity_visible_under_current_snapshot`.
+        if snap_ctx.is_none() {
+            return entity.xmax == 0
+                && !crate::runtime::ai::moderation::entity_moderation_hidden(entity);
+        }
         crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
     }) {
         if let EntityData::Vector(data) = &entity.data {
@@ -187,7 +238,14 @@ pub(crate) fn runtime_vector_matches(
         }
     }
 
-    Ok(index.search(vector, search_k, metric, query.threshold))
+    let out = index.search(vector, search_k, metric, query.threshold);
+    eprintln!(
+        "VECDBG matches metric={metric:?} k={search_k}: {:?}",
+        out.iter()
+            .map(|m| (m.entity_id.raw(), m.score))
+            .collect::<Vec<_>>()
+    );
+    Ok(out)
 }
 
 pub(crate) fn runtime_vector_record_matches_filter(
@@ -198,7 +256,7 @@ pub(crate) fn runtime_vector_record_matches_filter(
 ) -> bool {
     let entity_id = record
         .get("entity_id")
-        .or_else(|| record.get("red_entity_id"))
+        .or_else(|| record.get("rid"))
         .and_then(|value| match value {
             Value::UnsignedInteger(value) => Some(EntityId::new(*value)),
             Value::Integer(value) if *value >= 0 => Some(EntityId::new(*value as u64)),

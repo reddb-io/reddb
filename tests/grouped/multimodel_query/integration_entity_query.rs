@@ -230,20 +230,20 @@ fn test_select_by_entity_id_sees_latest_updated_row_image() {
     query
         .execute(ExecuteQueryInput {
             query: format!(
-                "UPDATE entity_id_latest SET role = 'architect' WHERE red_entity_id = {}",
+                "UPDATE entity_id_latest SET role = 'architect' WHERE rid = {}",
                 created.id.raw()
             ),
         })
-        .expect("UPDATE by red_entity_id should succeed");
+        .expect("UPDATE by rid should succeed");
 
     let result = query
         .execute(ExecuteQueryInput {
             query: format!(
-                "SELECT role FROM entity_id_latest WHERE red_entity_id = {}",
+                "SELECT role FROM entity_id_latest WHERE rid = {}",
                 created.id.raw()
             ),
         })
-        .expect("SELECT by red_entity_id should succeed");
+        .expect("SELECT by rid should succeed");
 
     assert_eq!(
         result.result.records.len(),
@@ -317,13 +317,14 @@ fn test_table_row_logical_identity_compatibility() {
 
     let new_row = query
         .execute(ExecuteQueryInput {
-            query: "INSERT INTO logical_identity_rows (name, seen) VALUES ('new', 1) RETURNING red_entity_id".into(),
+            query: "INSERT INTO logical_identity_rows (name, seen) VALUES ('new', 1) RETURNING rid"
+                .into(),
         })
         .expect("new row insert should succeed");
-    let new_id = match new_row.result.records[0].get("red_entity_id") {
+    let new_id = match new_row.result.records[0].get("rid") {
         Some(Value::Integer(id)) => EntityId::new(*id as u64),
         Some(Value::UnsignedInteger(id)) => EntityId::new(*id),
-        other => panic!("expected returned red_entity_id, got {other:?}"),
+        other => panic!("expected returned rid, got {other:?}"),
     };
     let stored_new = store
         .get("logical_identity_rows", new_id)
@@ -333,14 +334,12 @@ fn test_table_row_logical_identity_compatibility() {
 
     let selected = query
         .execute(ExecuteQueryInput {
-            query:
-                "SELECT red_entity_id, name FROM logical_identity_rows WHERE red_entity_id = 100"
-                    .into(),
+            query: "SELECT rid, name FROM logical_identity_rows WHERE rid = 100".into(),
         })
         .expect("SELECT by logical id should succeed");
     assert_eq!(selected.result.records.len(), 1);
     assert_eq!(
-        selected.result.records[0].get("red_entity_id"),
+        selected.result.records[0].get("rid"),
         Some(&Value::UnsignedInteger(100))
     );
     assert_eq!(
@@ -350,12 +349,12 @@ fn test_table_row_logical_identity_compatibility() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "UPDATE logical_identity_rows SET seen = 2 WHERE red_entity_id = 100".into(),
+            query: "UPDATE logical_identity_rows SET seen = 2 WHERE rid = 100".into(),
         })
         .expect("UPDATE by logical id should succeed");
     let updated = query
         .execute(ExecuteQueryInput {
-            query: "SELECT seen FROM logical_identity_rows WHERE red_entity_id = 100".into(),
+            query: "SELECT seen FROM logical_identity_rows WHERE rid = 100".into(),
         })
         .expect("SELECT after logical-id update should succeed");
     assert_eq!(
@@ -365,12 +364,12 @@ fn test_table_row_logical_identity_compatibility() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "DELETE FROM logical_identity_rows WHERE red_entity_id = 100".into(),
+            query: "DELETE FROM logical_identity_rows WHERE rid = 100".into(),
         })
         .expect("DELETE by logical id should succeed");
     let deleted = query
         .execute(ExecuteQueryInput {
-            query: "SELECT name FROM logical_identity_rows WHERE red_entity_id = 100".into(),
+            query: "SELECT name FROM logical_identity_rows WHERE rid = 100".into(),
         })
         .expect("SELECT after logical-id delete should succeed");
     assert!(deleted.result.records.is_empty());
@@ -2343,14 +2342,14 @@ fn test_fast_entity_id_lookup_persistent() {
         other => panic!("rid was not UnsignedInteger: {other:?}"),
     };
 
-    let eq_sql = format!("SELECT * FROM fastid WHERE red_entity_id = {eid}");
+    let eq_sql = format!("SELECT * FROM fastid WHERE rid = {eid}");
     let by_eq = q
         .execute(ExecuteQueryInput { query: eq_sql })
         .expect("fast-path select should succeed");
     assert_eq!(
         by_eq.result.records.len(),
         1,
-        "fast path `red_entity_id = {eid}` must return the inserted row"
+        "fast path `rid = {eid}` must return the inserted row"
     );
 }
 

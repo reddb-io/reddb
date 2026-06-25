@@ -35,7 +35,7 @@ where
                         JsonValue::Number(result.entity_id.raw() as f64),
                     );
                     item.insert(
-                        "red_entity_id".to_string(),
+                        "rid".to_string(),
                         JsonValue::Number(result.entity_id.raw() as f64),
                     );
                     item.insert("score".to_string(), JsonValue::Number(result.score as f64));
@@ -144,10 +144,7 @@ where
                         "entity_id".to_string(),
                         JsonValue::Number(item.entity_id as f64),
                     );
-                    entry.insert(
-                        "red_entity_id".to_string(),
-                        JsonValue::Number(item.entity_id as f64),
-                    );
+                    entry.insert("rid".to_string(), JsonValue::Number(item.entity_id as f64));
                     entry.insert(
                         "distance".to_string(),
                         JsonValue::Number(item.distance as f64),
@@ -266,7 +263,7 @@ where
         JsonValue::Number(item.entity.logical_id().raw() as f64),
     );
     object.insert(
-        "red_entity_id".to_string(),
+        "rid".to_string(),
         JsonValue::Number(item.entity.logical_id().raw() as f64),
     );
     object.insert(

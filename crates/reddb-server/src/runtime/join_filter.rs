@@ -693,7 +693,7 @@ pub(super) fn resolve_runtime_projection_value(
         .get(column)
         .cloned()
         .or_else(|| {
-            // Explicit `SELECT red_entity_id` / `red_collection` /
+            // Explicit `SELECT entity_id` / `red_collection` /
             // `red_kind` resolves to the rid-envelope field even on the
             // lean fast paths that don't pre-materialize the legacy alias
             // column. `SELECT *` never names these, so the envelope stays
@@ -820,16 +820,83 @@ pub(super) fn projection_name(projection: &Projection) -> String {
         // as `"FUNC:alias"` in the first tuple field. If an alias
         // is present, expose it as the output column name; otherwise
         // fall back to the function name.
-        Projection::Function(name, _) => {
+        Projection::Function(name, args) => {
             if let Some((_, alias)) = name.split_once(':') {
                 alias.to_string()
             } else {
-                name.clone()
+                // #1370 — an unaliased function / operator projection is labeled
+                // with its source-text form (`UPPER(name)`, `id * 2`,
+                // `name || '!'`), reconstructed from the lowered projection.
+                render_projection_label(name, args)
             }
         }
         Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
         Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| field_ref_name(field)),
         Projection::Window { name, alias, .. } => alias.clone().unwrap_or_else(|| name.clone()),
+    }
+}
+
+/// SQL infix symbol for an arithmetic / concat operator that
+/// `sql_lowering::projection_binop_name` lowered to a function name.
+fn projection_operator_symbol(name: &str) -> Option<&'static str> {
+    match name {
+        "ADD" => Some("+"),
+        "SUB" => Some("-"),
+        "MUL" => Some("*"),
+        "DIV" => Some("/"),
+        "MOD" => Some("%"),
+        "CONCAT" => Some("||"),
+        _ => None,
+    }
+}
+
+/// Render one argument of an unaliased function/operator projection back to
+/// its source-text label.
+fn projection_arg_label(projection: &Projection) -> String {
+    match projection {
+        Projection::Column(column) => match column.strip_prefix("LIT:") {
+            // Numbers / bool / null render bare; string literals are re-quoted
+            // to match the source text the user wrote (#1370).
+            Some(lit)
+                if lit.is_empty()
+                    || lit.parse::<f64>().is_ok()
+                    || lit.eq_ignore_ascii_case("true")
+                    || lit.eq_ignore_ascii_case("false")
+                    || lit.eq_ignore_ascii_case("null") =>
+            {
+                lit.to_string()
+            }
+            Some(lit) => format!("'{lit}'"),
+            None => column.clone(),
+        },
+        Projection::Function(name, args) => {
+            let base = name.split_once(':').map(|(b, _)| b).unwrap_or(name);
+            render_projection_label(base, args)
+        }
+        Projection::Field(field, _) => field_ref_name(field),
+        Projection::Alias(_, alias) => alias.clone(),
+        other => projection_name(other),
+    }
+}
+
+/// Reconstruct the source-text label of an unaliased function / operator
+/// projection: operators render infix (`id * 2`), other functions render as
+/// calls (`UPPER(name)`, `COALESCE(name, 'fb')`).
+fn render_projection_label(name: &str, args: &[Projection]) -> String {
+    if let Some(symbol) = projection_operator_symbol(name) {
+        args.iter()
+            .map(projection_arg_label)
+            .collect::<Vec<_>>()
+            .join(&format!(" {symbol} "))
+    } else {
+        format!(
+            "{}({})",
+            name,
+            args.iter()
+                .map(projection_arg_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 
@@ -1389,13 +1456,13 @@ pub(super) fn compare_runtime_optional_values(
 /// Map a legacy public-identity column name to its canonical rid-envelope
 /// field. The rid-envelope refactor exposes identity under `rid` /
 /// `collection` / `kind`, but WHERE/ORDER predicates written against the
-/// older `red_entity_id` / `red_collection` / `red_kind` names must still
+/// older `entity_id` / `red_collection` / `red_kind` names must still
 /// resolve. We only consult this alias when the literal column is absent
 /// from the materialized record, so it never shadows a real user column and
 /// never adds these names to `SELECT *` output (that stays envelope-clean).
 pub(super) fn legacy_runtime_system_alias(column: &str) -> Option<&'static str> {
     match column {
-        "red_entity_id" | "entity_id" => Some("rid"),
+        "entity_id" => Some("rid"),
         "red_collection" => Some("collection"),
         "red_kind" => Some("kind"),
         _ => None,
@@ -3110,7 +3177,14 @@ fn evaluate_projection_config_function(
         return Some(value);
     }
     if let Some(db) = db {
-        if let Some(value) = super::expr_eval::lookup_latest_kv_value(db, "red_config", &key) {
+        // `$config.<path>` desugars to CONFIG("red.config/<path>") but SET CONFIG
+        // stores under the bare key — try the stripped key too (#1370). This is
+        // the WHERE-clause / projection legacy path (evaluate_scalar_function_with_db).
+        let key_str: &str = key.as_ref();
+        let bare = key_str.strip_prefix("red.config/").unwrap_or(key_str);
+        if let Some(value) = super::expr_eval::lookup_latest_kv_value(db, "red_config", &key)
+            .or_else(|| super::expr_eval::lookup_latest_kv_value(db, "red_config", bare))
+        {
             return Some(value);
         }
     }

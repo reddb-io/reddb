@@ -345,7 +345,13 @@ fn evaluate_runtime_config_function(
         return Some(value);
     }
     if let Some(db) = db {
-        if let Some(value) = lookup_latest_kv_value(db, "red_config", &key) {
+        // `$config.<path>` desugars to CONFIG("red.config/<path>") but SET CONFIG
+        // stores under the bare key — so try the stripped key too (#1370).
+        let key_str: &str = key.as_ref();
+        let bare = key_str.strip_prefix("red.config/").unwrap_or(key_str);
+        if let Some(value) = lookup_latest_kv_value(db, "red_config", &key)
+            .or_else(|| lookup_latest_kv_value(db, "red_config", bare))
+        {
             return Some(value);
         }
     }

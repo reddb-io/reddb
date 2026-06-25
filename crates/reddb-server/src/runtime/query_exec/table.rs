@@ -312,7 +312,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let store = db.store();
             // Use lean materialization (skip red_* system fields) when SELECT *
             // was requested.  Explicit projection columns still go through the full
-            // path below so user-specified system fields (e.g. SELECT red_entity_id,
+            // path below so user-specified system fields (e.g. SELECT rid,
             // age FROM t) are not silently dropped.
             let lean = explicit_cols.is_empty(); // SELECT * → lean path
             let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
@@ -1919,7 +1919,6 @@ fn is_universal_runtime_field(field: &str) -> bool {
         "rid"
             | "row_id"
             | "entity_id"
-            | "red_entity_id"
             | "collection"
             | "red_collection"
             | "kind"
@@ -2095,16 +2094,14 @@ mod tests {
             .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
     }
 
-    fn red_entity_id(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
+    fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
         let result = rt
-            .execute_query(&format!(
-                "SELECT red_entity_id FROM {table} WHERE id = {id}"
-            ))
-            .unwrap_or_else(|err| panic!("select red_entity_id from {table}: {err:?}"));
-        match result.result.records[0].get("red_entity_id") {
+            .execute_query(&format!("SELECT rid FROM {table} WHERE id = {id}"))
+            .unwrap_or_else(|err| panic!("select rid from {table}: {err:?}"));
+        match result.result.records[0].get("rid") {
             Some(Value::UnsignedInteger(id)) => *id,
             Some(Value::Integer(id)) => *id as u64,
-            other => panic!("expected red_entity_id, got {other:?}"),
+            other => panic!("expected rid, got {other:?}"),
         }
     }
 
@@ -2139,7 +2136,7 @@ mod tests {
             &rt,
             "CREATE INDEX idx_mvcc_stale_status ON mvcc_idx_stale (status) USING BTREE",
         );
-        let stale_id = red_entity_id(&rt, "mvcc_idx_stale", 1);
+        let stale_id = rid(&rt, "mvcc_idx_stale", 1);
 
         exec(&rt, "DELETE FROM mvcc_idx_stale WHERE id = 1");
         rt.index_store_ref()

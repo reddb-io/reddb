@@ -928,7 +928,7 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("SELECT * FROM {collection} WHERE red_entity_id = {id} LIMIT 1");
+            let sql = format!("SELECT * FROM {collection} WHERE rid = {id} LIMIT 1");
             let qr = runtime
                 .execute_query(&sql)
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -952,7 +952,7 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("DELETE FROM {collection} WHERE red_entity_id = {id}");
+            let sql = format!("DELETE FROM {collection} WHERE rid = {id}");
 
             if let Some(tx) = session.current_tx_mut() {
                 tx.write_set.push(PendingSql::Delete(sql));
@@ -1840,7 +1840,7 @@ fn dispatch_method_remote(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("SELECT * FROM {collection} WHERE red_entity_id = {id} LIMIT 1");
+            let sql = format!("SELECT * FROM {collection} WHERE rid = {id} LIMIT 1");
             let json_str = tokio_rt
                 .block_on(async {
                     let mut guard = client.lock().await;
@@ -2774,11 +2774,11 @@ mod tests {
 
             let bulk_rows = result_name_kind(&handle(
                 &rt,
-                r#"{"jsonrpc":"2.0","id":99,"method":"query","params":{"sql":"SELECT name, kind FROM bulk_prop ORDER BY red_entity_id"}}"#,
+                r#"{"jsonrpc":"2.0","id":99,"method":"query","params":{"sql":"SELECT name, kind FROM bulk_prop ORDER BY rid"}}"#,
             ));
             let seq_rows = result_name_kind(&handle(
                 &rt,
-                r#"{"jsonrpc":"2.0","id":100,"method":"query","params":{"sql":"SELECT name, kind FROM seq_prop ORDER BY red_entity_id"}}"#,
+                r#"{"jsonrpc":"2.0","id":100,"method":"query","params":{"sql":"SELECT name, kind FROM seq_prop ORDER BY rid"}}"#,
             ));
             prop_assert_eq!(bulk_rows, seq_rows);
         }
