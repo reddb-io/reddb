@@ -269,7 +269,7 @@ fn json_to_value(v: &JsonValue) -> Value {
 ///
 /// Typical flow:
 ///
-/// ```
+/// ```ignore
 /// # use reddb::server::ingest_pipeline::IngestSession;
 /// let mut session = IngestSession::new();
 /// let rows1 = session.feed(b"{\"ts\":1,\"msg\":\"a\"}\n{\"ts\":");

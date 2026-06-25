@@ -81,7 +81,7 @@ fn insert_graph_node(rt: &RedDBRuntime, label: &str, name: &str) -> u64 {
             "INSERT INTO tales NODE (label, name) VALUES ('{label}', '{name}') RETURNING *"
         ))
         .expect("insert graph node");
-    match res.result.records[0].get("red_entity_id") {
+    match res.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(value)) => *value,
         Some(Value::Integer(value)) => *value as u64,
         other => panic!("expected graph node id, got {other:?}"),
@@ -488,17 +488,20 @@ fn current_time_bare_builtins_are_single_row_scalars_and_work_in_expressions() {
     assert_eq!(time.as_bytes()[2], b':');
     assert_eq!(time.as_bytes()[5], b':');
 
-    rt.execute_query("CREATE TABLE time_t (created_at TIMESTAMP_MS, name TEXT)")
+    // `created_at` is a reserved system-envelope field (ADR 0057) unless the
+    // table opts into managed timestamps; this test only needs an ordinary
+    // timestamp column to exercise CURRENT_TIMESTAMP, so use a non-reserved name.
+    rt.execute_query("CREATE TABLE time_t (recorded_at TIMESTAMP_MS, name TEXT)")
         .expect("create time_t");
-    rt.execute_query("INSERT INTO time_t (created_at, name) VALUES (32503680000000, 'future')")
+    rt.execute_query("INSERT INTO time_t (recorded_at, name) VALUES (32503680000000, 'future')")
         .expect("insert time_t");
     let projected = rt
-        .execute_query("SELECT created_at >= CURRENT_TIMESTAMP - 86400000 AS keep_row FROM time_t")
+        .execute_query("SELECT recorded_at >= CURRENT_TIMESTAMP - 86400000 AS keep_row FROM time_t")
         .expect("CURRENT_TIMESTAMP expression projects");
     assert_eq!(projected.result.records.len(), 1);
     assert!(bool_at(&projected, 0, "keep_row"));
     let filtered = rt
-        .execute_query("SELECT name FROM time_t WHERE created_at >= CURRENT_TIMESTAMP - 86400000")
+        .execute_query("SELECT name FROM time_t WHERE recorded_at >= CURRENT_TIMESTAMP - 86400000")
         .expect("CURRENT_TIMESTAMP works in WHERE expression");
     assert_eq!(filtered.result.records.len(), 1);
     assert_eq!(text_at(&filtered, 0, "name"), "future");
@@ -873,8 +876,13 @@ fn select_star_returns_graph_entities_inserted_into_collection() {
         Some(Value::Text(value)) => assert_eq!(value.as_ref(), "rescues"),
         other => panic!("expected edge label text, got {other:?}"),
     }
-    assert!(matches!(edge.get("from"), Some(Value::NodeRef(_))));
-    assert!(matches!(edge.get("to"), Some(Value::NodeRef(_))));
+    // #1369 — edges surface their endpoints as canonical rid references
+    // (`from_rid`/`to_rid`), not raw `from`/`to`, keeping the public graph
+    // envelope rid-based.
+    assert!(edge.get("from_rid").is_some(), "edge exposes from_rid");
+    assert!(edge.get("to_rid").is_some(), "edge exposes to_rid");
+    assert!(edge.get("from").is_none(), "edge must not expose raw from");
+    assert!(edge.get("to").is_none(), "edge must not expose raw to");
 
     let filtered = rt
         .execute_query("SELECT label, name FROM tales WHERE label = 'cinderella'")
@@ -1310,14 +1318,18 @@ fn vector_turbo_search_matches_scalar_oracle_top_k() {
 }
 
 #[test]
-fn create_document_reaches_executor_not_yet_supported() {
+fn create_document_creates_a_usable_document_collection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
-    let err = rt
-        .execute_query("CREATE DOCUMENT docs")
-        .expect_err("document executor rejects unsupported storage");
-    let msg = err.to_string();
-    assert!(msg.contains("NOT_YET_SUPPORTED"), "{msg}");
-    assert!(msg.contains("auto-created table"), "{msg}");
+    // #1364 — CREATE DOCUMENT is supported: it provisions a document-model
+    // collection that accepts DOCUMENT inserts and is queryable end-to-end.
+    rt.execute_query("CREATE DOCUMENT docs")
+        .expect("CREATE DOCUMENT provisions a document collection");
+    rt.execute_query("INSERT INTO docs DOCUMENT (body) VALUES ('{\"title\":\"one\"}')")
+        .expect("document insert into the created collection");
+    let res = rt
+        .execute_query("SELECT * FROM docs")
+        .expect("SELECT * over the document collection");
+    assert_eq!(res.result.len(), 1, "the inserted document is returned");
 }
 
 #[test]
@@ -2065,7 +2077,7 @@ fn insert_node_returning_star_exposes_entity_id() {
         .expect("INSERT NODE RETURNING * executes");
     assert_eq!(res.affected_rows, 1, "one node inserted");
     assert_eq!(res.result.len(), 1, "one RETURNING row");
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     assert!(id > 0, "engine-assigned id must be present (got {id})");
     assert_eq!(text_at(&res, 0, "label"), "cinderella");
     assert_eq!(text_at(&res, 0, "name"), "Cinderella");
@@ -2085,8 +2097,8 @@ fn insert_returning_star_exposes_entity_id_for_non_graph_entities() {
         let res = rt.execute_query(sql).expect("INSERT RETURNING * executes");
         assert_eq!(res.affected_rows, 1, "{sql}");
         assert_eq!(res.result.len(), 1, "{sql}");
-        let id = u64_at(&res, 0, "red_entity_id");
-        assert!(id > 0, "{sql} must expose red_entity_id");
+        let id = u64_at(&res, 0, "rid");
+        assert!(id > 0, "{sql} must expose rid");
     }
 }
 
@@ -2099,8 +2111,8 @@ fn insert_edge_returning_star_exposes_entity_id() {
     let b = rt
         .execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B') RETURNING *")
         .expect("insert b");
-    let a_id = u64_at(&a, 0, "red_entity_id");
-    let b_id = u64_at(&b, 0, "red_entity_id");
+    let a_id = u64_at(&a, 0, "rid");
+    let b_id = u64_at(&b, 0, "rid");
 
     let res = rt
         .execute_query(&format!(
@@ -2109,7 +2121,7 @@ fn insert_edge_returning_star_exposes_entity_id() {
         .expect("INSERT EDGE RETURNING * executes");
     assert_eq!(res.affected_rows, 1);
     assert_eq!(res.result.len(), 1);
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     assert!(id > 0);
     assert_eq!(text_at(&res, 0, "label"), "KNOWS");
 }
@@ -2124,8 +2136,8 @@ fn insert_multi_row_node_returning_star_emits_one_row_per_insert() {
         .expect("multi-row NODE insert executes");
     assert_eq!(res.affected_rows, 2);
     assert_eq!(res.result.len(), 2);
-    let id_a = u64_at(&res, 0, "red_entity_id");
-    let id_b = u64_at(&res, 1, "red_entity_id");
+    let id_a = u64_at(&res, 0, "rid");
+    let id_b = u64_at(&res, 1, "rid");
     assert!(id_a > 0 && id_b > 0 && id_a != id_b);
 }
 
@@ -2141,9 +2153,9 @@ fn insert_multi_row_edge_returning_star_emits_one_row_per_insert() {
     let c = rt
         .execute_query("INSERT INTO tales NODE (label, name) VALUES ('c', 'C') RETURNING *")
         .expect("insert c");
-    let a_id = u64_at(&a, 0, "red_entity_id");
-    let b_id = u64_at(&b, 0, "red_entity_id");
-    let c_id = u64_at(&c, 0, "red_entity_id");
+    let a_id = u64_at(&a, 0, "rid");
+    let b_id = u64_at(&b, 0, "rid");
+    let c_id = u64_at(&c, 0, "rid");
 
     let res = rt
         .execute_query(&format!(
@@ -2153,8 +2165,8 @@ fn insert_multi_row_edge_returning_star_emits_one_row_per_insert() {
         .expect("multi-row EDGE insert executes");
     assert_eq!(res.affected_rows, 2);
     assert_eq!(res.result.len(), 2);
-    let id_a = u64_at(&res, 0, "red_entity_id");
-    let id_b = u64_at(&res, 1, "red_entity_id");
+    let id_a = u64_at(&res, 0, "rid");
+    let id_b = u64_at(&res, 1, "rid");
     assert!(id_a > 0 && id_b > 0 && id_a != id_b);
     assert_eq!(text_at(&res, 0, "label"), "KNOWS");
     assert_eq!(text_at(&res, 1, "label"), "KNOWS");
@@ -2189,8 +2201,8 @@ fn insert_multi_row_edge_failure_is_atomic() {
     let b = rt
         .execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B') RETURNING *")
         .expect("insert b");
-    let a_id = u64_at(&a, 0, "red_entity_id");
-    let b_id = u64_at(&b, 0, "red_entity_id");
+    let a_id = u64_at(&a, 0, "rid");
+    let b_id = u64_at(&b, 0, "rid");
 
     let err = rt
         .execute_query(&format!(
@@ -2222,33 +2234,35 @@ fn insert_multi_row_edge_failure_is_atomic() {
 
 // ── Issue #421: first user-inserted entity id is documented & pinned ────────
 //
-// The first ~100 entity ids are consumed by internal collection-descriptor
-// records before any user INSERT runs. The exact offset is part of the
-// documented contract in `docs/data-models/graphs.md` and
-// `docs/engine/file-format.md` (look for "first user id"). If you tripped
-// this test by changing the descriptor allocation, update the docs in the
-// same commit — the number IS the contract for users computing ids
+// Ids `1..FIRST_USER_ENTITY_ID` are reserved for internal collection-descriptor
+// and config-default entities seeded at boot; the engine bumps the allocator up
+// to `FIRST_USER_ENTITY_ID` after seeding so the first user INSERT always gets
+// that id — stable regardless of how many config defaults the build ships
+// (#1369; previously the offset drifted up by one per config default). The
+// offset is part of the documented contract in `docs/data-models/graphs.md` and
+// `docs/engine/file-format.md`. If you change `FIRST_USER_ENTITY_ID`, update the
+// docs in the same commit — the number IS the contract for users computing ids
 // off-thread.
 
 #[test]
-fn first_user_entity_id_is_one_hundred_and_two() {
+fn first_user_entity_id_is_the_reserved_floor() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let res = rt
         .execute_query(
             "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
         )
         .expect("first user insert");
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     assert_eq!(
-        id, 102,
-        "first user-inserted entity id must be 102 (documented offset). \
-         If you changed this, update docs/data-models/graphs.md AND \
-         docs/engine/file-format.md."
+        id, 1024,
+        "first user-inserted entity id must be FIRST_USER_ENTITY_ID (1024, the \
+         reserved internal-id floor). If you changed FIRST_USER_ENTITY_ID, update \
+         docs/data-models/graphs.md AND docs/engine/file-format.md."
     );
 }
 
 #[test]
-fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
+fn first_file_backed_user_entity_id_is_the_reserved_floor() {
     let dir = tempfile::Builder::new()
         .prefix("reddb-test-first-user-entity-id-")
         .tempdir()
@@ -2261,12 +2275,12 @@ fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
             "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
         )
         .expect("first persistent user insert");
-    let id = u64_at(&res, 0, "red_entity_id");
+    let id = u64_at(&res, 0, "rid");
     drop(rt);
 
     assert_eq!(
-        id, 102,
-        "first file-backed user-inserted entity id must match the documented 102 offset"
+        id, 1024,
+        "first file-backed user-inserted entity id must match FIRST_USER_ENTITY_ID (1024)"
     );
 }
 
@@ -2312,7 +2326,7 @@ fn graph_properties_by_numeric_id_returns_property_bag() {
             "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
         )
         .expect("insert");
-    let id = u64_at(&ins, 0, "red_entity_id");
+    let id = u64_at(&ins, 0, "rid");
     let res = rt
         .execute_query(&format!("GRAPH PROPERTIES '{id}'"))
         .expect("by numeric id resolves");

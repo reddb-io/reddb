@@ -126,8 +126,8 @@ Deprecated granular catalog endpoints return `Deprecation: 2026-08-08` and `Suns
 
 HTTP item results use the public envelope: `rid` is the RedDB ID, `collection`
 is the source collection, and `kind` is one of `row`, `document`, `kv`, `node`,
-`edge`, or `vector`. Older public identifier names such as `_entity_id`,
-`red_entity_id`, and `entity_id` are not part of the public response shape.
+`edge`, or `vector`. Older public identifier names such as `_entity_id`
+and `entity_id` are not part of the public response shape.
 
 ### Bulk Insert Performance
 

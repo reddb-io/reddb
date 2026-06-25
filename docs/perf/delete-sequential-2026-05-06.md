@@ -21,7 +21,7 @@ Companion to [`insert_sequential-2026-05-05.md`](insert_sequential-2026-05-05.md
   growing with collection size.
 - **Root cause is structural, not micro-optimisation.** The bench
   driver issues `DELETE FROM bench_users WHERE id = N`, where `id` is
-  a *user* column, not the synthetic `red_entity_id`. RedDB's
+  a *user* column, not the synthetic `rid`. RedDB's
   `delete_sequential` adapter doesn't call `post_seed`, so no hash
   index on `id` exists during the delete loop. The DML target scan
   therefore falls through every fast path and ends up doing a
@@ -31,7 +31,7 @@ Companion to [`insert_sequential-2026-05-05.md`](insert_sequential-2026-05-05.md
 - **Top three bottlenecks** (per row in the steady-state delete
   loop):
   1. Full segment scan in `for_each_entity_zoned` for every
-     `WHERE id = N` (no index, `id` ≠ `red_entity_id`).
+     `WHERE id = N` (no index, `id` ≠ `rid`).
   2. WAL group-commit fsync wait per single-row `DELETE`
      (`commit::append_actions` → `wait_until_durable`), inherited
      from #76 P1 — `DEFAULT_GROUP_COMMIT_WINDOW_MS = 0`.
@@ -140,7 +140,7 @@ Per `delete_sequential` row, with the bench's wire DELETE
    (`dml_target_scan.rs:58`):
    - **Entity-id fast path miss** (`:69`):
      `extract_entity_id_from_filter` only matches column names
-     `red_entity_id` or `entity_id`
+     `rid` or `entity_id`
      (`query_exec/helpers.rs:53`). The bench column is `id`, so this
      returns `None`.
    - **Hash index miss** (`:77`): `try_hash_eq_lookup` looks up an
@@ -395,7 +395,7 @@ Five concrete follow-up items the main agent can decide to file.
   so the historical 9k is *not* explainable from the current code.
   Worth checking whether an earlier `setup_schema` revision built
   `idx_id` for these adapters, or whether `id` was at one point
-  treated as the synthetic `red_entity_id`. Either explanation
+  treated as the synthetic `rid`. Either explanation
   reinforces the headline finding: the regression is about whether
   *something* indexes `id`, not about the engine's per-row delete
   cost.

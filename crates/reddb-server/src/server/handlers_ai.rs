@@ -2081,12 +2081,10 @@ fn embedding_source_row_ref(
     source_collection: Option<&str>,
 ) -> Option<TableRef> {
     let row_id = record
-        .get("red_entity_id")
-        .or_else(|| record.get("entity_id"))
+        .get("entity_id")
         .or_else(|| record.get("_entity_id"))
         // The row rid envelope exposes the logical row identity under the
-        // canonical `rid` key; legacy `red_entity_id` is only materialised when
-        // explicitly projected, so fall back to `rid` for query-sourced rows.
+        // canonical `rid` key, so fall back to `rid` for query-sourced rows.
         .or_else(|| record.get("rid"))
         .and_then(|value| match value {
             Value::UnsignedInteger(id) => Some(*id),

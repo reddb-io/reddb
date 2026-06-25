@@ -31,32 +31,30 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
 }
 
-fn red_entity_id(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
+fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
     let result = rt
-        .execute_query(&format!(
-            "SELECT red_entity_id FROM {table} WHERE id = {id}"
-        ))
-        .expect("select red_entity_id");
-    match result.result.records[0].get("red_entity_id") {
+        .execute_query(&format!("SELECT rid FROM {table} WHERE id = {id}"))
+        .expect("select rid");
+    match result.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
         Some(Value::Integer(id)) => *id as u64,
-        other => panic!("expected red_entity_id, got {other:?}"),
+        other => panic!("expected rid, got {other:?}"),
     }
 }
 
-fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> Option<String> {
+fn label_for(rt: &RedDBRuntime, table: &str, rid: u64) -> Option<String> {
     let result = rt
-        .execute_query(&format!("SELECT red_entity_id, label FROM {table}"))
+        .execute_query(&format!("SELECT rid, label FROM {table}"))
         .expect("select label");
     result.result.records.iter().find_map(|record| {
-        // Full-scan SELECT projects `red_entity_id` under the `rid` key
-        // (the projection-only path keeps the `red_entity_id` alias).
-        let row_id = match record.get("red_entity_id").or_else(|| record.get("rid")) {
+        // Full-scan SELECT projects `rid` under the `rid` key
+        // (the projection-only path keeps the `rid` alias).
+        let row_id = match record.get("rid").or_else(|| record.get("rid")) {
             Some(Value::UnsignedInteger(id)) => *id,
             Some(Value::Integer(id)) => *id as u64,
             _ => return None,
         };
-        if row_id != red_entity_id {
+        if row_id != rid {
             return None;
         }
         match record.get("label").or_else(|| record.get("c0")) {
@@ -101,15 +99,15 @@ fn autocommit_insert_update_delete_recover_from_commit_batches() {
             &rt,
             "INSERT INTO txb_recover (id, label) VALUES (1, 'inserted'), (2, 'delete-me')",
         );
-        let keep = red_entity_id(&rt, "txb_recover", 1);
-        let deleted = red_entity_id(&rt, "txb_recover", 2);
+        let keep = rid(&rt, "txb_recover", 1);
+        let deleted = rid(&rt, "txb_recover", 2);
         exec(
             &rt,
-            &format!("UPDATE txb_recover SET label = 'updated' WHERE red_entity_id = {keep}"),
+            &format!("UPDATE txb_recover SET label = 'updated' WHERE rid = {keep}"),
         );
         exec(
             &rt,
-            &format!("DELETE FROM txb_recover WHERE red_entity_id = {deleted}"),
+            &format!("DELETE FROM txb_recover WHERE rid = {deleted}"),
         );
         clear_current_connection_id();
         (keep, deleted)
@@ -183,7 +181,7 @@ fn truncated_commit_batch_is_absent_after_recovery() {
     {
         let rt = db_open(&db);
         set_current_connection_id(44012);
-        let base = red_entity_id(&rt, "txb_truncated", 1);
+        let base = rid(&rt, "txb_truncated", 1);
         assert_eq!(
             label_for(&rt, "txb_truncated", base).as_deref(),
             Some("base")
@@ -208,16 +206,13 @@ fn autocommit_table_mutations_write_tx_commit_batch_records() {
             &rt,
             "INSERT INTO txb_shape (id, label) VALUES (1, 'a'), (2, 'b')",
         );
-        let updated = red_entity_id(&rt, "txb_shape", 1);
-        let deleted = red_entity_id(&rt, "txb_shape", 2);
+        let updated = rid(&rt, "txb_shape", 1);
+        let deleted = rid(&rt, "txb_shape", 2);
         exec(
             &rt,
-            &format!("UPDATE txb_shape SET label = 'aa' WHERE red_entity_id = {updated}"),
+            &format!("UPDATE txb_shape SET label = 'aa' WHERE rid = {updated}"),
         );
-        exec(
-            &rt,
-            &format!("DELETE FROM txb_shape WHERE red_entity_id = {deleted}"),
-        );
+        exec(&rt, &format!("DELETE FROM txb_shape WHERE rid = {deleted}"));
         clear_current_connection_id();
     }
 

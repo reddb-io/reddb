@@ -528,6 +528,21 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok("delete".into())
             }
+            // #1374 — DDL action verbs tokenize as their own keyword tokens,
+            // not Ident; accept them as action names. Literals (numbers, etc.)
+            // and structural tokens still error with "expected: action keyword".
+            Token::Drop => {
+                self.advance()?;
+                Ok("drop".into())
+            }
+            Token::Create => {
+                self.advance()?;
+                Ok("create".into())
+            }
+            Token::Alter => {
+                self.advance()?;
+                Ok("alter".into())
+            }
             Token::Ident(_) => {
                 let raw = self.expect_ident()?;
                 Ok(raw.to_ascii_lowercase())

@@ -166,19 +166,37 @@ impl Drop for EphemeralDataPathCleanup {
                 let _ = fs::remove_file(path);
             }
         }
+        // Each ephemeral runtime owns a dedicated `reddb-ephemeral-*`
+        // directory (see `RedDBOptions::in_memory`); remove it wholesale so
+        // temp does not accumulate empty per-instance directories.
+        if let Some(parent) = self.path.parent() {
+            if is_ephemeral_owner_dir(parent) {
+                let _ = fs::remove_dir_all(parent);
+            }
+        }
     }
 }
 
-pub(super) fn is_ephemeral_data_path(path: &Path) -> bool {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+/// True when `dir` is a per-instance `reddb-ephemeral-*` directory created
+/// directly under the temp dir by [`crate::api::RedDBOptions::in_memory`].
+fn is_ephemeral_owner_dir(dir: &Path) -> bool {
+    let Some(dir_name) = dir.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    if !file_name.starts_with("reddb-ephemeral-") || !file_name.ends_with(".rdb") {
+    if !dir_name.starts_with("reddb-ephemeral-") {
         return false;
     }
-    path.parent()
-        .map(|parent| parent == std::env::temp_dir())
+    dir.parent()
+        .map(|grandparent| grandparent == std::env::temp_dir())
         .unwrap_or(false)
+}
+
+pub(super) fn is_ephemeral_data_path(path: &Path) -> bool {
+    // Ephemeral runtimes place their data file inside a dedicated
+    // `reddb-ephemeral-*` directory under the temp dir, so the data file
+    // plus every sibling (audit log, WAL, snapshots) is isolated per
+    // instance and cleanup never clobbers another live runtime's artifacts.
+    path.parent().map(is_ephemeral_owner_dir).unwrap_or(false)
 }
 
 fn ephemeral_data_artifacts(data_path: &Path) -> Vec<PathBuf> {

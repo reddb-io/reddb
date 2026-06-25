@@ -4,5 +4,5 @@ input_repeat_count = 32
 max_identifier_chars = 8
 expected_error_substring = "identifier exceeds maximum length"
 expected_error_kind = "IdentifierTooLong"
-source = "crates/reddb-server/src/storage/query/parser/error.rs:119"
+source = "crates/reddb-rql/src/parser/error.rs:119"
 kind = "negative"

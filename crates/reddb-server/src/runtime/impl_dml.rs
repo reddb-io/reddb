@@ -24,8 +24,8 @@ use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
 use crate::storage::query::unified::{
-    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_entity_id, sys_key_rid,
-    sys_key_tenant, sys_key_updated_at, UnifiedRecord, UnifiedResult,
+    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_rid, sys_key_tenant,
+    sys_key_updated_at, UnifiedRecord, UnifiedResult,
 };
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
@@ -2526,7 +2526,7 @@ fn build_returning_result(
                 .map(str::to_string),
             );
         } else if outputs.is_some() {
-            cols.push("red_entity_id".to_string());
+            cols.push("rid".to_string());
         }
         if let Some(first) = snapshots.first() {
             for (name, _) in first {
@@ -2573,23 +2573,15 @@ fn build_returning_result(
                             Arc::clone(&sys_key_updated_at()),
                             Value::UnsignedInteger(entity.updated_at),
                         );
-                        // Legacy alias: an explicit `RETURNING red_entity_id`
-                        // still resolves to the row's rid. Only surfaces when
-                        // the projected column list names it — `RETURNING *`
-                        // keeps the envelope clean (rid, not red_entity_id).
-                        values.insert(
-                            Arc::clone(&sys_key_red_entity_id()),
-                            Value::UnsignedInteger(out.id.raw()),
-                        );
                     } else {
                         values.insert(
-                            Arc::clone(&sys_key_red_entity_id()),
+                            Arc::clone(&sys_key_rid()),
                             Value::Integer(out.id.raw() as i64),
                         );
                     }
                 } else {
                     values.insert(
-                        Arc::clone(&sys_key_red_entity_id()),
+                        Arc::clone(&sys_key_rid()),
                         Value::Integer(out.id.raw() as i64),
                     );
                 }
@@ -2629,6 +2621,11 @@ fn public_returning_item_kind(entity: &crate::storage::UnifiedEntity) -> Option<
             Some("edge")
         }
         (_, crate::storage::EntityData::Row(_)) => Some(public_returning_row_kind(entity)),
+        // #1369 — every entity model must expose its `rid` in RETURNING *.
+        // Vectors carry their payload in `EntityData::Vector`, not `Row`, so
+        // they were falling through to a no-rid envelope
+        // and `RETURNING *` never surfaced the entity-id.
+        (_, crate::storage::EntityData::Vector(_)) => Some("vector"),
         _ => None,
     }
 }
@@ -4786,7 +4783,7 @@ mod tests {
     }
 
     /// Hook is a no-op when the row carries no `id` column. Conservative
-    /// match (case-sensitive `id`) — `Id`, `ID`, and `red_entity_id`
+    /// match (case-sensitive `id`) — `Id`, `ID`, and `rid`
     /// don't trigger it.
     #[test]
     fn auto_index_id_skips_when_no_id_column() {

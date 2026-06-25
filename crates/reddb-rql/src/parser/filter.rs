@@ -216,7 +216,15 @@ impl<'a> Parser<'a> {
             if let Some(field) = lhs_field.clone() {
                 self.expect(Token::LParen)?;
                 if self.check(&Token::Select) {
-                    let query = self.parse_select_query()?;
+                    // Bracket the subquery recursion in the depth counter so a
+                    // deeply nested `x IN (SELECT … WHERE x IN (…))` payload
+                    // hits `max_depth` and errors instead of overflowing the
+                    // Rust stack before the limit can fire (mirrors
+                    // `parse_not_expr`).
+                    self.enter_depth()?;
+                    let query = self.parse_select_query();
+                    self.exit_depth();
+                    let query = query?;
                     self.expect(Token::RParen)?;
                     return Ok(negate_if(
                         negated,
