@@ -331,6 +331,11 @@ impl RedDBServer {
 
         let (current_lsn, last_archived_lsn) = self.runtime.wal_archive_progress();
 
+        // Issue #1244 — advance the occupancy sampler window before
+        // building the system snapshot so this scrape's CPU/RAM values
+        // are as fresh as possible.
+        let occupancy = self.runtime.occupancy_sample();
+
         let system = &runtime_stats.system;
         let system_view = SystemSnapshot {
             pid: system.pid,
@@ -352,6 +357,8 @@ impl RedDBServer {
             } else {
                 Some(system.available_memory_bytes)
             },
+            cpu_usage: occupancy.cpu_usage,
+            ram_usage: occupancy.ram_usage,
         };
 
         let replicas = self
