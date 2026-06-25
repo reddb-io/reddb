@@ -265,17 +265,42 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn temp_path(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
+    /// RAII guard owning a per-test audit data directory; removes it wholesale
+    /// on drop so nothing is left in TMPDIR for the leak guard
+    /// (scripts/check-temp-residue.sh). Derefs to the `data.rdb` `PathBuf` so
+    /// existing `&data` call sites keep working via deref coercion.
+    struct TempAuditData {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+    impl std::ops::Deref for TempAuditData {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.path
+        }
+    }
+    impl AsRef<std::path::Path> for TempAuditData {
+        fn as_ref(&self) -> &std::path::Path {
+            self.path.as_ref()
+        }
+    }
+    impl Drop for TempAuditData {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn temp_path(tag: &str) -> TempAuditData {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
             "reddb-audit-query-{}-{}-{}",
             tag,
             std::process::id(),
             crate::utils::now_unix_nanos()
         ));
-        std::fs::create_dir_all(&p).unwrap();
-        p.push("data.rdb");
-        p
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.rdb");
+        TempAuditData { dir, path }
     }
 
     #[test]
