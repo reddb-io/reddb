@@ -161,6 +161,12 @@ fn classify_field_inner(
                 idx: idx as u16,
             };
         }
+    } else if column == "id" {
+        // No schema (document / named-HashMap collections): "id" is an alias
+        // for the entity logical id. Force the fallback path so the per-row
+        // bloom gate is bypassed and `resolve_entity_field` can return the
+        // entity logical id when no user-defined "id" row field is present.
+        return EntityFieldKind::Unknown;
     }
 
     EntityFieldKind::RowField(column.to_string())
