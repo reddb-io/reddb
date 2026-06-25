@@ -36,6 +36,29 @@ fn l2_cache(path: &Path) -> BlobCache {
     .expect("l2_cache test helper")
 }
 
+fn remove_l2(path: &Path) {
+    // Remove the L2 `.rdb` AND every sidecar (control, control-temp,
+    // double-write, synopsis, …) so nothing is left for the leak guard
+    // (scripts/check-temp-residue.sh) — the per-sidecar removals missed the
+    // control-temp file written by the synopsis tests.
+    if let (Some(dir), Some(name)) = (
+        path.parent(),
+        path.file_name().and_then(|name| name.to_str()),
+    ) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|entry_name| entry_name.starts_with(name))
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn put_get_and_exists_round_trip_blob() {
     let cache = small_cache(128);
@@ -610,9 +633,7 @@ fn l2_rehydrates_after_reopen_without_json_rows() {
         assert_eq!(&*hit.bytes, b"durable");
         assert_eq!(cache.stats().l2_bytes_in_use, 7);
     }
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -635,9 +656,7 @@ fn l2_expired_entry_does_not_rehydrate_on_reopen() {
         assert!(cache.get_at("n", "ttl", 1_010).is_none());
         assert_eq!(cache.stats().l2_bytes_in_use, 0);
     }
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -654,9 +673,7 @@ fn l2_invalidated_entry_does_not_resurrect_after_reopen() {
         let cache = l2_cache(&path);
         assert!(cache.get("n", "k").is_none());
     }
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -675,9 +692,7 @@ fn l2_rejects_put_when_hard_byte_cap_is_exceeded() {
         .expect_err("L2 cap rejects");
     assert_eq!(err, CacheError::L2Full { size: 3, max: 2 });
     assert_eq!(cache.stats().l2_full_rejections, 1);
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -698,9 +713,7 @@ fn l2_metadata_last_hides_partial_blob_after_fault() {
         assert!(cache.get("n", "partial").is_none());
         assert_eq!(cache.stats().l2_bytes_in_use, 0);
     }
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -713,9 +726,7 @@ fn l2_synopsis_negative_skip_avoids_metadata_read() {
     assert_eq!(stats.l2_negative_skips, 1);
     assert_eq!(stats.l2_metadata_reads, 0);
 
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -729,9 +740,7 @@ fn l2_synopsis_maybe_present_verifies_authoritative_metadata() {
     assert_eq!(stats.l2_negative_skips, 0);
     assert_eq!(stats.l2_metadata_reads, 1);
 
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -758,9 +767,7 @@ fn stale_synopsis_bits_after_delete_cannot_produce_present() {
     assert_eq!(stats.l2_metadata_reads, 1);
     assert_eq!(stats.synopsis_metadata_reads, 1);
 
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -792,9 +799,7 @@ fn stale_synopsis_bits_after_expiry_cannot_produce_present() {
     assert_eq!(stats.l2_metadata_reads, 1);
     assert_eq!(stats.l2_bytes_in_use, 0);
 
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -818,9 +823,7 @@ fn l2_synopsis_rebuilds_from_metadata_on_reopen() {
         assert_eq!(stats.l2_negative_skips, 0);
         assert_eq!(stats.l2_metadata_reads, 1);
     }
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]
@@ -853,9 +856,7 @@ fn deleted_l2_entries_never_return_present_under_repeated_stale_synopsis() {
     // metadata and finds nothing; that's the false-positive cost. Filter
     // sizing (10K capacity / 1% FPR) means most lookups hit fast.
     assert_eq!(cache.stats().l2_metadata_reads, 1_000);
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    remove_l2(&path);
 }
 
 #[test]

@@ -905,17 +905,59 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn temp_db_path() -> PathBuf {
+    /// RAII temp DB path: removes the `.db` and every pager sidecar
+    /// (`.db-dwb`, `.db-hdr`, `.db-wal`, …) on drop so nothing is left in
+    /// TMPDIR for the leak guard (scripts/check-temp-residue.sh). The existing
+    /// tests only call `cleanup` at the START (a no-op for unique paths), so
+    /// without this the sidecars created during the test leaked. Derefs to
+    /// `PathBuf` so every `&path` / `cleanup(&path)` call site keeps working.
+    struct TempDbPath(PathBuf);
+    impl std::ops::Deref for TempDbPath {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+    impl AsRef<std::path::Path> for TempDbPath {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.as_ref()
+        }
+    }
+    impl Drop for TempDbPath {
+        fn drop(&mut self) {
+            cleanup(&self.0);
+        }
+    }
+
+    fn temp_db_path() -> TempDbPath {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
         path.push(format!("reddb_btree_test_{}_{}.db", std::process::id(), id));
-        path
+        TempDbPath(path)
     }
 
     fn cleanup(path: &PathBuf) {
-        let _ = std::fs::remove_file(path);
+        // Remove the `.db` AND every sidecar the pager writes next to it
+        // (`.db-dwb`, `.db-hdr`, `.db-wal`, …) so nothing is left in TMPDIR for
+        // the leak guard (scripts/check-temp-residue.sh) to flag.
+        if let (Some(dir), Some(name)) = (
+            path.parent(),
+            path.file_name().and_then(|name| name.to_str()),
+        ) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|entry_name| entry_name.starts_with(name))
+                    {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1266,7 +1308,7 @@ mod tests {
 
         /// Build a tree pre-populated with `seed` and return the path so
         /// the caller can clean it up.
-        fn populate_tree(seed: &[(Vec<u8>, Vec<u8>)]) -> (BTree, PathBuf, Arc<Pager>) {
+        fn populate_tree(seed: &[(Vec<u8>, Vec<u8>)]) -> (BTree, TempDbPath, Arc<Pager>) {
             let path = temp_db_path();
             cleanup(&path);
             let pager =

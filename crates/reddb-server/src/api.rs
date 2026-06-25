@@ -413,6 +413,24 @@ impl RedDBOptions {
     }
 
     pub fn with_data_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        // `in_memory()` eagerly creates a `reddb-ephemeral-*` dir and points
+        // `data_path` at it. Overriding the path abandons that dir — and the
+        // per-runtime cleanup keys off the FINAL `data_path`, so the orphan
+        // would leak in TMPDIR (caught by scripts/check-temp-residue.sh). Remove
+        // it now if the previous path was such an eagerly-created ephemeral dir.
+        if let Some(old) = self.data_path.take() {
+            let tmp = std::env::temp_dir();
+            if let Some(parent) = old.parent() {
+                let orphaned = parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("reddb-ephemeral-"))
+                    && parent.parent() == Some(tmp.as_path());
+                if orphaned {
+                    let _ = std::fs::remove_dir_all(parent);
+                }
+            }
+        }
         self.data_path = Some(path.into());
         self
     }
