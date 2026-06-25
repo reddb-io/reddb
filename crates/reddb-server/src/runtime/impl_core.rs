@@ -2521,6 +2521,9 @@ impl RedDBRuntime {
                 query_latency_telemetry: Arc::new(
                     crate::runtime::query_latency_telemetry::QueryLatencyTelemetry::default(),
                 ),
+                node_load_telemetry: Arc::new(
+                    crate::runtime::node_load_telemetry::NodeLoadTelemetry::default(),
+                ),
                 queue_presence: Arc::new(
                     crate::storage::queue::presence::ConsumerPresenceRegistry::new(),
                 ),
@@ -3665,6 +3668,15 @@ impl RedDBRuntime {
         self.inner.query_latency_telemetry.rollup()
     }
 
+    /// Issue #1245 — point-in-time node load snapshot (active queries +
+    /// connect/disconnect churn). Feeds `/metrics`, `/cluster/status`, and
+    /// the red-ui load panels.
+    pub fn node_load_snapshot(
+        &self,
+    ) -> crate::runtime::node_load_telemetry::NodeLoadSnapshot {
+        self.inner.node_load_telemetry.snapshot()
+    }
+
     /// Issue #742 — consumer presence registry. Heartbeats land here
     /// from `QUEUE READ` (and, in a follow-up slice, an explicit
     /// `QUEUE HEARTBEAT` command); Red UI and `red.queue_consumers`
@@ -3978,6 +3990,10 @@ impl RedDBRuntime {
         pool.total_checkouts += 1;
         drop(pool);
 
+        // Issue #1245 — record the connection acquisition after releasing
+        // the pool lock so the lock hold time is unchanged.
+        self.inner.node_load_telemetry.record_connect();
+
         Ok(RuntimeConnection {
             id,
             inner: Arc::clone(&self.inner),
@@ -4204,6 +4220,7 @@ impl RedDBRuntime {
     /// cost on below-threshold paths is one relaxed atomic load.
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
+        self.inner.node_load_telemetry.query_start();
         let result = self.execute_query_inner(query);
         self.finish_query_lifecycle(query, started, result)
     }
@@ -4224,6 +4241,7 @@ impl RedDBRuntime {
             return self.execute_query(query);
         }
         let started = std::time::Instant::now();
+        self.inner.node_load_telemetry.query_start();
         let result = self.execute_query_with_params_inner(query, params);
         self.finish_query_lifecycle(query, started, result)
     }
@@ -4278,6 +4296,11 @@ impl RedDBRuntime {
         self.inner
             .query_latency_telemetry
             .observe(kind, started.elapsed().as_secs_f64());
+
+        // Issue #1245 — decrement the active-query gauge. One relaxed
+        // atomic sub; the matching increment happened at execute_query /
+        // execute_query_with_params entry.
+        self.inner.node_load_telemetry.query_finish();
 
         if let Ok(ref mut query_result) = result {
             if matches!(query_result.statement_type, "insert" | "update" | "delete") {
