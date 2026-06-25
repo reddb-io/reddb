@@ -763,25 +763,45 @@ mod tests {
     use super::*;
     use std::env;
 
-    fn test_config() -> SpillConfig {
+    /// RAII guard that removes a test spill directory (and any files spilled
+    /// into it) on drop so nothing is left in TMPDIR for the leak guard
+    /// (scripts/check-temp-residue.sh). The whole per-test directory is removed
+    /// wholesale, so no file-format suffixes are embedded here.
+    struct SpillDirGuard(std::path::PathBuf);
+    impl Drop for SpillDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn unique_spill_dir() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        env::temp_dir().join(format!("reddb-spill-test-{}-{}", std::process::id(), id))
+    }
+
+    fn test_config_in(dir: std::path::PathBuf) -> SpillConfig {
         SpillConfig::new()
             .max_memory(1024 * 1024) // 1MB for testing
             .spill_threshold(0.5)
             .target_after_spill(0.3)
             .min_spill_size(100)
-            .spill_dir(env::temp_dir().join(format!(
-                "reddb-spill-test-{}-{}",
-                std::process::id(),
-                id
-            )))
+            .spill_dir(dir)
+    }
+
+    /// Build a `SpillManager` over a unique temp spill dir, returning a guard
+    /// that wipes that dir on drop. Bind the guard (`let (manager, _guard)`)
+    /// for the lifetime of the test.
+    fn test_manager() -> (SpillManager, SpillDirGuard) {
+        let dir = unique_spill_dir();
+        let manager = SpillManager::new(test_config_in(dir.clone()));
+        (manager, SpillDirGuard(dir))
     }
 
     #[test]
     fn test_register_segment() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         manager.register_segment("seg1", 100_000);
         manager.register_segment("seg2", 200_000);
@@ -794,7 +814,7 @@ mod tests {
 
     #[test]
     fn test_update_size() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         manager.register_segment("seg1", 100_000);
         assert_eq!(manager.memory_usage(), 100_000);
@@ -808,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_needs_spill() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         // Below threshold
         manager.register_segment("seg1", 400_000); // 40%
@@ -830,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_spill_and_reload() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         manager.register_segment("test_seg", 1000);
 
@@ -848,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_checksum_validation() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         // Use unique segment name to avoid conflicts
         manager.register_segment("checksum_test_seg", 100);
@@ -864,7 +884,7 @@ mod tests {
 
     #[test]
     fn test_list_segments() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         manager.register_segment("alpha", 1000);
         manager.register_segment("beta", 2000);
@@ -881,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_unregister_segment() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         manager.register_segment("seg1", 100_000);
         manager.register_segment("seg2", 200_000);
@@ -896,7 +916,7 @@ mod tests {
 
     #[test]
     fn test_cleanup() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
 
         manager.register_segment("seg1", 100);
         manager.spill("seg1", b"test data").unwrap();
@@ -921,7 +941,7 @@ mod tests {
 
     #[test]
     fn test_v2_round_trip() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
         manager.register_segment("rt_seg", 100);
         let data: Vec<u8> = (0u8..=127).collect();
         manager.spill("rt_seg", &data).unwrap();
@@ -931,7 +951,7 @@ mod tests {
 
     #[test]
     fn test_single_byte_mutation_detected() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
         manager.register_segment("mut_seg", 100);
         let data = b"hello world mutation test data!!";
         let path = manager.spill("mut_seg", data).unwrap();
@@ -953,7 +973,7 @@ mod tests {
     fn test_byte_permutation_detected() {
         // The old fold checksum is commutative — swapping two bytes leaves the
         // sum unchanged. CRC-32 is not commutative, so v2 catches this.
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
         manager.register_segment("perm_seg", 100);
         let data = b"abcdefghij"; // all distinct bytes
         let path = manager.spill("perm_seg", data).unwrap();
@@ -976,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_path_traversal_rejected() {
-        let manager = SpillManager::new(test_config());
+        let (manager, _guard) = test_manager();
         for bad_name in &["../foo", "/etc/passwd", "a/b"] {
             manager.register_segment(bad_name, 100);
             let result = manager.spill(bad_name, b"data");
