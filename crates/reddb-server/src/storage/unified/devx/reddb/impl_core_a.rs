@@ -1281,6 +1281,14 @@ mod ephemeral_cleanup_tests {
         let path = options.data_path.as_ref().expect("in-memory data path");
 
         assert!(should_cleanup_ephemeral_data_path(&options, path));
+
+        // `in_memory()` eagerly creates the per-instance `reddb-ephemeral-*`
+        // dir, but this test never builds a runtime to arm the drop-time
+        // cleanup — so remove the dir wholesale here, otherwise it leaks into
+        // TMPDIR for the leak guard (scripts/check-temp-residue.sh).
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 
     #[test]
