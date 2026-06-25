@@ -392,6 +392,14 @@ impl RedDBServer {
             _ => None,
         };
 
+        // Issue #1245 — node load snapshot (active queries + churn counters).
+        let node_load = self.runtime.node_load_snapshot();
+        let load = if node_load.has_activity() {
+            Some(node_load)
+        } else {
+            None
+        };
+
         let inputs = ClusterStatusInputs {
             snapshot_at_unix_ms: now_ms,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -433,6 +441,7 @@ impl RedDBServer {
                 apply_errors,
             },
             latency,
+            load,
         };
 
         json_response(200, cluster_status_json(&inputs))
