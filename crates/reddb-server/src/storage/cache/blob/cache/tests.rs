@@ -37,20 +37,25 @@ fn l2_cache(path: &Path) -> BlobCache {
 }
 
 fn remove_l2(path: &Path) {
-    // Remove the L2 `.rdb` AND every sidecar (control, control-temp,
-    // double-write, synopsis, …) so nothing is left for the leak guard
-    // (scripts/check-temp-residue.sh) — the per-sidecar removals missed the
-    // control-temp file written by the synopsis tests.
+    // Remove the L2 `.rdb` AND every sidecar so nothing is left for the leak
+    // guard (scripts/check-temp-residue.sh). Match on the STEM (filename minus
+    // the `.rdb` extension): the control sidecar replaces the extension
+    // (`...rdb` → `...blob-cache.ctl`), so a full-name prefix match (which
+    // includes `.rdb`) would miss it; the pager sidecars (`.rdb-hdr`,
+    // `.rdb-dwb`) append to the full name and are still covered. The L2 stem
+    // (`reddb-blob-cache-<name>-<pid>-<nanos>`) is unique per file, so a stem
+    // prefix never clobbers a sibling.
     if let (Some(dir), Some(name)) = (
         path.parent(),
         path.file_name().and_then(|name| name.to_str()),
     ) {
+        let stem = name.strip_suffix(".rdb").unwrap_or(name);
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if entry
                     .file_name()
                     .to_str()
-                    .is_some_and(|entry_name| entry_name.starts_with(name))
+                    .is_some_and(|entry_name| entry_name.starts_with(stem))
                 {
                     let _ = std::fs::remove_file(entry.path());
                 }
@@ -692,6 +697,7 @@ fn l2_rejects_put_when_hard_byte_cap_is_exceeded() {
         .expect_err("L2 cap rejects");
     assert_eq!(err, CacheError::L2Full { size: 3, max: 2 });
     assert_eq!(cache.stats().l2_full_rejections, 1);
+    drop(cache);
     remove_l2(&path);
 }
 
@@ -726,6 +732,7 @@ fn l2_synopsis_negative_skip_avoids_metadata_read() {
     assert_eq!(stats.l2_negative_skips, 1);
     assert_eq!(stats.l2_metadata_reads, 0);
 
+    drop(cache);
     remove_l2(&path);
 }
 
@@ -740,6 +747,7 @@ fn l2_synopsis_maybe_present_verifies_authoritative_metadata() {
     assert_eq!(stats.l2_negative_skips, 0);
     assert_eq!(stats.l2_metadata_reads, 1);
 
+    drop(cache);
     remove_l2(&path);
 }
 
@@ -767,6 +775,7 @@ fn stale_synopsis_bits_after_delete_cannot_produce_present() {
     assert_eq!(stats.l2_metadata_reads, 1);
     assert_eq!(stats.synopsis_metadata_reads, 1);
 
+    drop(cache);
     remove_l2(&path);
 }
 
@@ -799,6 +808,7 @@ fn stale_synopsis_bits_after_expiry_cannot_produce_present() {
     assert_eq!(stats.l2_metadata_reads, 1);
     assert_eq!(stats.l2_bytes_in_use, 0);
 
+    drop(cache);
     remove_l2(&path);
 }
 
@@ -856,6 +866,7 @@ fn deleted_l2_entries_never_return_present_under_repeated_stale_synopsis() {
     // metadata and finds nothing; that's the false-positive cost. Filter
     // sizing (10K capacity / 1% FPR) means most lookups hit fast.
     assert_eq!(cache.stats().l2_metadata_reads, 1_000);
+    drop(cache);
     remove_l2(&path);
 }
 
@@ -1092,9 +1103,13 @@ fn blob_cache_is_send_and_sync_across_thread_boundary() {
 // -- Async promotion wiring (issue #193, lane 1/5) ----------------------
 
 fn cleanup_l2(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-    let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+    // Prefix-remove the L2 `.rdb` AND every sidecar (`.rdb-hdr`, `.rdb-dwb`,
+    // control, …). The previous fixed-suffix removal missed the pager header
+    // (`.rdb-hdr`) the async tests leave behind, which the leak guard
+    // (scripts/check-temp-residue.sh) flags. Callers must drop the cache
+    // BEFORE calling this so the pager's drop-time flush cannot re-create a
+    // sidecar after removal.
+    remove_l2(path);
 }
 
 /// Slow executor that sleeps `delay` then increments a counter.
@@ -1160,6 +1175,7 @@ async fn l2_hit_with_async_on_returns_immediately() {
     assert!(executed.load(Ordering::Relaxed) >= 1, "worker did not run");
 
     cache.shutdown_async_promotion();
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1197,6 +1213,7 @@ async fn l2_hit_with_async_off_uses_legacy_sync_path() {
     assert_eq!(s.promotion_dropped(), 0);
     assert_eq!(s.promotion_queue_depth(), 0);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1247,6 +1264,7 @@ async fn drop_on_saturation_never_loses_correctness() {
     );
 
     cache.shutdown_async_promotion();
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1298,6 +1316,7 @@ async fn shutdown_drains_pool_within_budget() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1413,6 +1432,7 @@ fn l2_round_trip_compresses_text_payload_and_returns_original_bytes() {
     assert!(stats.l2_compression_ratio_observed() > 1.0);
     assert!(stats.l2_bytes_saved_total() > 0);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1442,6 +1462,7 @@ fn l2_round_trip_with_compression_off_stores_raw_bytes() {
     assert_eq!(stats.l2_bytes_saved_total(), 0);
     assert_eq!(stats.l2_compression_ratio_observed(), 1.0);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1472,6 +1493,7 @@ fn l2_round_trip_with_image_content_type_stores_raw() {
     assert_eq!(stats.l2_compression_skipped_total(), 1);
     assert_eq!(stats.l2_bytes_saved_total(), 0);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1499,6 +1521,7 @@ fn l2_round_trip_with_high_entropy_payload_falls_back_to_raw_via_ratio_gate() {
     assert_eq!(stats.l2_bytes_in_use, payload.len() as u64);
     assert_eq!(stats.l2_compression_skipped_total(), 1);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1517,6 +1540,7 @@ fn l2_forward_compat_reads_legacy_v1_entry_written_before_compression() {
     let hit = cache.get("n", "legacy").expect("L2 hit");
     assert_eq!(&*hit.bytes, &payload[..]);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1565,6 +1589,7 @@ fn l2_budget_amplifies_when_entries_compress() {
     // Sanity: would have blown past the budget at raw sizing.
     assert!(stats.l2_bytes_in_use < raw_total / 2);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 
@@ -1607,6 +1632,7 @@ fn l2_compression_metrics_partition_compressible_and_skipped_entries() {
     );
     assert!(stats.l2_bytes_saved_total() > 0);
 
+    drop(cache);
     cleanup_l2(&path);
 }
 

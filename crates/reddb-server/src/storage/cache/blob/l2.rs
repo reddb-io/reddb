@@ -687,9 +687,33 @@ mod tests {
     }
 
     fn cleanup_l2(path: &Path) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-        let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+        // Prefix-remove the L2 `.rdb` AND every sidecar (`.rdb-hdr`, `.rdb-dwb`,
+        // `.blob-cache.ctl`, …). The previous fixed-suffix removal missed the
+        // pager header (`.rdb-hdr`) the L2 store leaves behind, which the leak
+        // guard (scripts/check-temp-residue.sh) flags. Match on the STEM
+        // (filename minus the `.rdb` extension) so the control sidecar — which
+        // replaces the extension (`...rdb` → `...blob-cache.ctl`) — is covered
+        // alongside the dash-suffix pager sidecars. The L2 stem is unique per
+        // file, so a stem prefix never clobbers a sibling. Callers must drop the
+        // cache BEFORE calling this so the pager's drop-time flush cannot
+        // re-create a sidecar after removal.
+        if let (Some(dir), Some(name)) = (
+            path.parent(),
+            path.file_name().and_then(|name| name.to_str()),
+        ) {
+            let stem = name.strip_suffix(".rdb").unwrap_or(name);
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|entry_name| entry_name.starts_with(stem))
+                    {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
     }
 
     fn l2_cache(path: &Path) -> BlobCache {
@@ -866,6 +890,7 @@ mod tests {
             "rebuilt filter FPR {observed_fpr:.4} exceeded target+tolerance"
         );
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -898,6 +923,7 @@ mod tests {
         assert!(stats.l2_compression_ratio_observed() > 1.0);
         assert!(stats.l2_bytes_saved_total() > 0);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -925,6 +951,7 @@ mod tests {
         assert_eq!(stats.l2_bytes_saved_total(), 0);
         assert_eq!(stats.l2_compression_ratio_observed(), 1.0);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -953,6 +980,7 @@ mod tests {
         assert_eq!(stats.l2_compression_skipped_total(), 1);
         assert_eq!(stats.l2_bytes_saved_total(), 0);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -978,6 +1006,7 @@ mod tests {
         assert_eq!(stats.l2_bytes_in_use, payload.len() as u64);
         assert_eq!(stats.l2_compression_skipped_total(), 1);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 }

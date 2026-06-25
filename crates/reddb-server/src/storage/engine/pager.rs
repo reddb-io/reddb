@@ -239,11 +239,35 @@ mod tests {
     }
 
     fn cleanup(path: &Path) {
-        let _ = fs::remove_file(path);
-        // Clean up companion files
-        let _ = fs::remove_file(reddb_file::layout::pager_header_shadow_path(path));
-        let _ = fs::remove_file(reddb_file::layout::pager_meta_shadow_path(path));
-        let _ = fs::remove_file(reddb_file::layout::pager_dwb_shadow_path(path));
+        // Prefix-remove the `.db` AND every sidecar the pager writes next to it
+        // (`.db-hdr`, `.rdb-hdr`, `.rdb-dwb`, …). The previous fixed-suffix
+        // removal only cleared the three dash-suffix shadows and missed the
+        // extension-replaced sidecars (`.rdb-hdr`/`.rdb-dwb`), which the leak
+        // guard (scripts/check-temp-residue.sh) flags. Tests must drop the
+        // pager BEFORE calling this so the drop-time flush cannot re-create a
+        // sidecar after removal (every call site already uses an inner block).
+        if let (Some(dir), Some(name)) = (
+            path.parent(),
+            path.file_name().and_then(|name| name.to_str()),
+        ) {
+            // Match on the stem (filename without the `.db` extension) so both
+            // dash-suffix (`foo.db-hdr`) and extension-replaced
+            // (`foo.rdb-hdr`) sidecars are covered. Require the next byte after
+            // the stem to be a separator (`.` or `-`) so a numeric-suffixed
+            // sibling (`reddb_test_5_1` vs `reddb_test_5_10`) is never clobbered.
+            let stem = name.strip_suffix(".db").unwrap_or(name);
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if entry.file_name().to_str().is_some_and(|entry_name| {
+                        entry_name
+                            .strip_prefix(stem)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-']))
+                    }) {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
     }
 
     fn dwb_path_for(path: &Path) -> PathBuf {
