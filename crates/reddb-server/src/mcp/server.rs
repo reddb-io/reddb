@@ -111,6 +111,8 @@ impl McpServer {
             }
             "tools/list" => Some(self.handle_tools_list(id)),
             "tools/call" => Some(self.handle_tools_call(id, msg.get("params"))),
+            "resources/list" => Some(self.handle_resources_list(id)),
+            "resources/read" => Some(self.handle_resources_read(id, msg.get("params"))),
             "ping" => {
                 let mut result = Map::new();
                 result.insert("status".to_string(), JsonValue::String("ok".to_string()));
@@ -139,6 +141,14 @@ impl McpServer {
             let mut tools_cap = Map::new();
             tools_cap.insert("listChanged".to_string(), JsonValue::Bool(false));
             capabilities.insert("tools".to_string(), JsonValue::Object(tools_cap));
+        }
+        {
+            // Read-only knowledge resources (ADR 0061). No subscriptions and
+            // the set is static, so both change-notification flags are false.
+            let mut resources_cap = Map::new();
+            resources_cap.insert("subscribe".to_string(), JsonValue::Bool(false));
+            resources_cap.insert("listChanged".to_string(), JsonValue::Bool(false));
+            capabilities.insert("resources".to_string(), JsonValue::Object(resources_cap));
         }
 
         let mut server_info = Map::new();
@@ -185,6 +195,72 @@ impl McpServer {
 
         let mut result = Map::new();
         result.insert("tools".to_string(), JsonValue::Array(tools_json));
+        protocol::build_result_message(id, JsonValue::Object(result))
+    }
+
+    // ------------------------------------------------------------------
+    // resources/list + resources/read (knowledge surface, ADR 0061)
+    // ------------------------------------------------------------------
+
+    fn handle_resources_list(&self, id: Option<&JsonValue>) -> String {
+        let resources: Vec<JsonValue> = tools::knowledge_resources()
+            .iter()
+            .map(|res| {
+                let mut obj = Map::new();
+                obj.insert("uri".to_string(), JsonValue::String(res.uri.to_string()));
+                obj.insert("name".to_string(), JsonValue::String(res.title.to_string()));
+                obj.insert(
+                    "description".to_string(),
+                    JsonValue::String(res.description.to_string()),
+                );
+                obj.insert(
+                    "mimeType".to_string(),
+                    JsonValue::String(res.mime_type.to_string()),
+                );
+                JsonValue::Object(obj)
+            })
+            .collect();
+
+        let mut result = Map::new();
+        result.insert("resources".to_string(), JsonValue::Array(resources));
+        protocol::build_result_message(id, JsonValue::Object(result))
+    }
+
+    fn handle_resources_read(&self, id: Option<&JsonValue>, params: Option<&JsonValue>) -> String {
+        let uri = params.and_then(|p| p.get("uri")).and_then(|v| v.as_str());
+        let uri = match uri {
+            Some(u) => u,
+            None => return protocol::build_error_message(id, -32602, "missing resource uri"),
+        };
+
+        let resources = tools::knowledge_resources();
+        let resource = match resources.iter().find(|res| res.uri == uri) {
+            Some(res) => res,
+            None => {
+                return protocol::build_error_message(
+                    id,
+                    -32602,
+                    &format!("unknown resource: {uri}"),
+                );
+            }
+        };
+
+        let mut contents = Map::new();
+        contents.insert(
+            "uri".to_string(),
+            JsonValue::String(resource.uri.to_string()),
+        );
+        contents.insert(
+            "mimeType".to_string(),
+            JsonValue::String(resource.mime_type.to_string()),
+        );
+        contents.insert("text".to_string(), JsonValue::String((resource.body)()));
+
+        let mut result = Map::new();
+        result.insert(
+            "contents".to_string(),
+            JsonValue::Array(vec![JsonValue::Object(contents)]),
+        );
         protocol::build_result_message(id, JsonValue::Object(result))
     }
 
@@ -1490,6 +1566,85 @@ mod tests {
 
     fn parse_json(s: &str) -> JsonValue {
         json_from_str(s).expect("valid json")
+    }
+
+    #[test]
+    fn initialize_advertises_resources_capability() {
+        let mut srv = make_server();
+        let response = srv.handle_initialize(Some(&JsonValue::Number(1.0)));
+        let parsed = parse_json(&response);
+        let resources = parsed
+            .get("result")
+            .and_then(|result| result.get("capabilities"))
+            .and_then(|caps| caps.get("resources"))
+            .expect("resources capability advertised");
+        assert_eq!(
+            resources.get("subscribe").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn resources_list_includes_rql_knowledge() {
+        let mut srv = make_server();
+        let request = parse_json(r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#);
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let resources = parsed
+            .get("result")
+            .and_then(|result| result.get("resources"))
+            .and_then(JsonValue::as_array)
+            .expect("resources array");
+
+        let rql = resources
+            .iter()
+            .find(|res| res.get("uri").and_then(JsonValue::as_str) == Some("reddb://knowledge/rql"))
+            .expect("rql knowledge resource listed");
+        assert_eq!(
+            rql.get("mimeType").and_then(JsonValue::as_str),
+            Some("text/markdown")
+        );
+        assert!(rql.get("name").and_then(JsonValue::as_str).is_some());
+    }
+
+    #[test]
+    fn resources_read_returns_generated_rql_reference() {
+        let mut srv = make_server();
+        let request = parse_json(
+            r#"{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"reddb://knowledge/rql"}}"#,
+        );
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let text = parsed
+            .get("result")
+            .and_then(|result| result.get("contents"))
+            .and_then(JsonValue::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("resource text");
+
+        // The body is exactly what the RQL authority generates — same source as
+        // docs/llms.txt.
+        assert_eq!(text, reddb_rql::knowledge::rql_reference_markdown());
+        // And it is genuinely generated from the engine: a sampled keyword and
+        // function from the authorities are present.
+        assert!(text.contains("`SELECT`"), "keyword missing: {text:.120}");
+        assert!(text.contains("`COUNT`"), "function missing");
+    }
+
+    #[test]
+    fn resources_read_unknown_uri_errors() {
+        let mut srv = make_server();
+        let request = parse_json(
+            r#"{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"reddb://knowledge/nope"}}"#,
+        );
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        assert!(
+            parsed.get("error").is_some(),
+            "unknown resource must error: {response}"
+        );
     }
 
     #[test]
