@@ -279,7 +279,28 @@ impl<'a> KvAtomicOps<'a> {
                 self.restamp_xmin(collection, new_entity, version_xid)?;
             }
             if let Some(prior) = prior_versioned_entity {
+                // First-committer-wins (ADR 0014): inside an explicit
+                // transaction, defer the prior version's tombstone to the
+                // commit-time conflict check by recording it as a pending
+                // versioned update — exactly like a table-row versioned
+                // UPDATE (`persist_applied_entity_mutations`). The check
+                // rejects this txn's COMMIT if the prior version was
+                // already tombstoned by a concurrent committed writer.
+                // Autocommit (`current_xid()` is None) commits eagerly and
+                // records nothing, matching the table path.
+                let previous_xmax = prior.xmax;
+                let old_id = prior.id;
                 self.tombstone_version(collection, prior, version_xid)?;
+                if self.runtime.current_xid().is_some() {
+                    self.runtime.record_pending_versioned_update(
+                        crate::runtime::impl_core::current_connection_id(),
+                        collection,
+                        old_id,
+                        output.id,
+                        version_xid,
+                        previous_xmax,
+                    );
+                }
             }
         }
         if model == crate::catalog::CollectionModel::Kv {
@@ -338,7 +359,25 @@ impl<'a> KvAtomicOps<'a> {
                 mgr.commit(xid);
                 xid
             });
+            // First-committer-wins (ADR 0014): inside an explicit
+            // transaction, defer this tombstone to the commit-time
+            // conflict check by recording it as a pending tombstone —
+            // exactly like a table-row DELETE (`delete_entities_batch`).
+            // The check rejects this txn's COMMIT if the version was
+            // already tombstoned by a concurrent committed writer.
+            // Autocommit (`current_xid()` is None) commits eagerly and
+            // records nothing, matching the table path.
+            let previous_xmax = entity.xmax;
             self.tombstone_version(collection, entity, xid)?;
+            if self.runtime.current_xid().is_some() {
+                self.runtime.record_pending_tombstone(
+                    crate::runtime::impl_core::current_connection_id(),
+                    collection,
+                    id,
+                    xid,
+                    previous_xmax,
+                );
+            }
             self.runtime.inner.kv_tag_index.remove(collection, key);
             self.runtime.record_kv_watch_event(
                 crate::replication::cdc::ChangeOperation::Delete,
