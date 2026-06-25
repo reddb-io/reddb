@@ -8,6 +8,8 @@
 //! - run with `REGENERATE_LLMS=1` to (re)write `docs/llms.txt` from source.
 //! - `rql_section_matches_mcp_resource` proves the file's RQL section is byte
 //!   identical to what `red mcp` serves, so the two surfaces share one source.
+//! - `connection_section_matches_mcp_resource` does the same for the
+//!   connection-model section emitted by `reddb_wire::knowledge`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -35,20 +37,20 @@ hand. See `AGENTS.md` for the human/agent overview. Each section below is \
 emitted from source so it cannot drift from the engine.\n\n",
     );
     out.push_str(&reddb_rql::knowledge::rql_llms_section());
+    out.push_str("\n\n");
+    out.push_str(&reddb_wire::knowledge::connection_llms_section());
     out.push('\n');
     out
 }
 
-/// Extract the RQL block between the generated markers.
-fn extract_rql_section(contents: &str) -> &str {
-    let begin = reddb_rql::knowledge::LLMS_BEGIN_MARKER;
-    let end = reddb_rql::knowledge::LLMS_END_MARKER;
+/// Extract the block delimited by `begin`/`end` markers from `contents`.
+fn extract_section<'a>(contents: &'a str, begin: &str, end: &str) -> &'a str {
     let start = contents
         .find(begin)
-        .expect("docs/llms.txt is missing the RQL begin marker");
+        .unwrap_or_else(|| panic!("docs/llms.txt is missing the begin marker {begin:?}"));
     let stop = contents
         .find(end)
-        .expect("docs/llms.txt is missing the RQL end marker");
+        .unwrap_or_else(|| panic!("docs/llms.txt is missing the end marker {end:?}"));
     contents[start..stop + end.len()].trim()
 }
 
@@ -82,8 +84,26 @@ regenerate it."
 fn rql_section_matches_mcp_resource() {
     let path = llms_txt_path();
     let on_disk = fs::read_to_string(&path).expect("read docs/llms.txt");
-    let section = extract_rql_section(&on_disk);
+    let section = extract_section(
+        &on_disk,
+        reddb_rql::knowledge::LLMS_BEGIN_MARKER,
+        reddb_rql::knowledge::LLMS_END_MARKER,
+    );
     // The same generated source feeds docs/llms.txt and the MCP resource.
     assert_eq!(section, reddb_rql::knowledge::rql_llms_section());
     assert!(section.contains(&reddb_rql::knowledge::rql_reference_markdown()));
+}
+
+#[test]
+fn connection_section_matches_mcp_resource() {
+    let path = llms_txt_path();
+    let on_disk = fs::read_to_string(&path).expect("read docs/llms.txt");
+    let section = extract_section(
+        &on_disk,
+        reddb_wire::knowledge::LLMS_BEGIN_MARKER,
+        reddb_wire::knowledge::LLMS_END_MARKER,
+    );
+    // The same generated source feeds docs/llms.txt and the MCP resource.
+    assert_eq!(section, reddb_wire::knowledge::connection_llms_section());
+    assert!(section.contains(&reddb_wire::knowledge::connection_reference_markdown()));
 }
