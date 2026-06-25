@@ -725,12 +725,26 @@ impl UnifiedEntity {
         self.logical_id = Some(logical_id);
     }
 
-    /// Ensure table rows written by the current engine carry explicit
-    /// logical identity. Other models retain the legacy implicit mapping
-    /// until their MVCC rollout adopts the resolver.
+    /// Ensure entities written by the current engine carry explicit
+    /// logical identity. Table rows + documents (Phase 1/2) and graph
+    /// nodes/edges + vectors (Phase 3) all participate in the multi-model
+    /// MVCC versioning rollout and so need a stable logical id for
+    /// version-chain selection. Stamping the logical id is inert for
+    /// non-versioned collections: history only accrues through
+    /// `install_versioned_table_row_update`, which is gated on the
+    /// collection `versioned` flag, so a stamped-but-never-superseded
+    /// entity keeps `logical_id == id` and behaves exactly as before.
     #[inline]
     pub(crate) fn ensure_table_logical_id(&mut self) {
-        if matches!(self.kind, EntityKind::TableRow { .. }) && self.logical_id.is_none() {
+        if self.logical_id.is_none()
+            && matches!(
+                self.kind,
+                EntityKind::TableRow { .. }
+                    | EntityKind::GraphNode(_)
+                    | EntityKind::GraphEdge(_)
+                    | EntityKind::Vector { .. }
+            )
+        {
             self.logical_id = Some(self.id);
         }
     }

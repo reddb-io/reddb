@@ -1289,15 +1289,23 @@ impl RedDBRuntime {
         // empty for non-row entities, which is the desired no-op.
         let pre_mutation_fields = entity_row_fields_snapshot(&entity);
 
-        // Versioned collections retain MVCC history: a PATCH must produce
-        // a NEW full version (the merged document/row) with the prior
-        // version tombstoned, mirroring the SQL UPDATE row path. Gated
-        // STRICTLY on the collection `versioned` flag — non-versioned
-        // collections keep last-writer-wins in-place mutation. Only Row
-        // entities (documents / table rows / KV) carry logical-id MVCC
-        // history; graph/vector/etc. stay in-place.
-        let patch_versions = matches!(entity.data, crate::storage::EntityData::Row(_))
-            && self.vcs_is_versioned(&collection).unwrap_or(false);
+        // Versioned collections retain MVCC history: a PATCH/UPDATE must
+        // produce a NEW full version (the merged document/row/node) with
+        // the prior version tombstoned, mirroring the SQL UPDATE row
+        // path. Gated STRICTLY on the collection `versioned` flag —
+        // non-versioned collections keep last-writer-wins in-place
+        // mutation. Row entities (documents / table rows / KV) carry
+        // logical-id MVCC history (Phase 1/2); graph nodes & edges join
+        // in Phase 3. The post-image re-stamp (new physical id, same
+        // logical_id, fresh xmin) at the tail of this function is fully
+        // kind-agnostic, so the same machinery installs a versioned
+        // graph-node update.
+        let patch_versions = matches!(
+            entity.data,
+            crate::storage::EntityData::Row(_)
+                | crate::storage::EntityData::Node(_)
+                | crate::storage::EntityData::Edge(_)
+        ) && self.vcs_is_versioned(&collection).unwrap_or(false);
         let versioned_update_xid = if patch_versions {
             match self.current_xid() {
                 Some(xid) => Some(xid),

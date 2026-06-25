@@ -72,6 +72,9 @@ mod e2e_vcs_kv_write_conflict;
 #[path = "vcs/e2e_vcs_document_mvcc_history.rs"]
 mod e2e_vcs_document_mvcc_history;
 
+#[path = "vcs/e2e_vcs_graph_mvcc_history.rs"]
+mod e2e_vcs_graph_mvcc_history;
+
 #[path = "vcs/e2e_vcs_opt_in.rs"]
 mod e2e_vcs_opt_in;
 

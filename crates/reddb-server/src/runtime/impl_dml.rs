@@ -405,12 +405,21 @@ impl RedDBRuntime {
         let mut physical_delete_ids = Vec::new();
         let table_row_resolver =
             crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
+        // Phase 3: versioned graph collections tombstone node/edge
+        // deletes (xmax stamp) instead of physically removing them, so
+        // `AS OF` time-travel can still resolve the pre-delete version.
+        // Non-versioned graph collections keep the legacy physical
+        // delete (no history). Row entities (Phase 1/2) always tombstone
+        // under universal MVCC and are unaffected by this flag.
+        let versioned_collection = self.vcs_is_versioned(collection).unwrap_or(false);
 
         for &id in ids {
             let Some(mut entity) = manager.get(id) else {
                 continue;
             };
-            if matches!(entity.data, EntityData::Row(_)) {
+            let is_versioned_graph = versioned_collection
+                && matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
+            if matches!(entity.data, EntityData::Row(_)) || is_versioned_graph {
                 let previous_xmax = entity.xmax;
                 if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }) {
                     if table_row_resolver.resolve_candidate(&entity).is_none() {
