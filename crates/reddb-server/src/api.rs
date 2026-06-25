@@ -371,12 +371,22 @@ impl RedDBOptions {
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let unique = NEXT_EPHEMERAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "reddb-ephemeral-{}-{}-{}.rdb",
+        // Each ephemeral runtime gets its OWN directory, not just a unique
+        // filename in the shared temp dir. Sibling artifacts (the audit log,
+        // WAL, snapshots) are derived from this data path's PARENT, so a
+        // shared parent collapses every ephemeral runtime's `.audit.log`
+        // onto one file — which parallel test processes (nextest runs each
+        // test in its own process, frequently under one shared `TMPDIR`)
+        // then truncate/remove out from under one another. A per-instance
+        // directory keeps each runtime's siblings self-contained.
+        let dir = std::env::temp_dir().join(format!(
+            "reddb-ephemeral-{}-{}-{}",
             std::process::id(),
             now_nanos,
             unique
         ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("db.rdb");
         let _ = std::fs::remove_file(&path);
         let mut metadata = BTreeMap::new();
         metadata.insert(
@@ -403,6 +413,24 @@ impl RedDBOptions {
     }
 
     pub fn with_data_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        // `in_memory()` eagerly creates a `reddb-ephemeral-*` dir and points
+        // `data_path` at it. Overriding the path abandons that dir — and the
+        // per-runtime cleanup keys off the FINAL `data_path`, so the orphan
+        // would leak in TMPDIR (caught by scripts/check-temp-residue.sh). Remove
+        // it now if the previous path was such an eagerly-created ephemeral dir.
+        if let Some(old) = self.data_path.take() {
+            let tmp = std::env::temp_dir();
+            if let Some(parent) = old.parent() {
+                let orphaned = parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("reddb-ephemeral-"))
+                    && parent.parent() == Some(tmp.as_path());
+                if orphaned {
+                    let _ = std::fs::remove_dir_all(parent);
+                }
+            }
+        }
         self.data_path = Some(path.into());
         self
     }

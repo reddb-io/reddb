@@ -393,9 +393,17 @@ pub(crate) fn current_config_value(path: &str) -> Option<Value> {
             resolver.values = Some(latest_config_snapshot(&resolver.db));
         }
         let values = resolver.values.as_ref()?;
+        // #1370 — `$config.<path>` desugars to `CONFIG("red.config/<path>")`,
+        // but `SET CONFIG <path>` stores under the bare key. Mirror the secret
+        // resolver: after the namespaced key, fall back to the stripped bare
+        // key, then the dotted `red.config.<rest>` legacy form.
         values.get(&key).cloned().or_else(|| {
-            key.strip_prefix("red.config/")
-                .and_then(|rest| values.get(&format!("red.config.{rest}")).cloned())
+            key.strip_prefix("red.config/").and_then(|rest| {
+                values
+                    .get(rest)
+                    .cloned()
+                    .or_else(|| values.get(&format!("red.config.{rest}")).cloned())
+            })
         })
     })
 }

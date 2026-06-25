@@ -302,6 +302,11 @@ impl RedDBRuntime {
         oldest_available_lsn: Option<u64>,
         catchup_mode: Option<reddb_file::ReplicaCatchupMode>,
     ) {
+        // Issue #1243 — observe every persisted health transition for
+        // reconnect telemetry. This is the single chokepoint the replica
+        // loop routes all state changes through, so the counter sees each
+        // link drop (`connecting`) and restore (`healthy`) exactly once.
+        self.inner.replica_link_metrics.observe_state(state);
         self.inner.db.store().set_config_tree(
             "red.replication",
             &crate::json!({

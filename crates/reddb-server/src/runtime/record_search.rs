@@ -3,8 +3,8 @@ use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::sql_lowering::effective_table_projections;
 use crate::storage::query::unified::{
     sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_capabilities,
-    sys_key_red_collection, sys_key_red_entity_id, sys_key_red_entity_type, sys_key_red_kind,
-    sys_key_red_sequence_id, sys_key_rid, sys_key_row_id, sys_key_tenant, sys_key_updated_at,
+    sys_key_red_collection, sys_key_red_entity_type, sys_key_red_kind, sys_key_red_sequence_id,
+    sys_key_rid, sys_key_row_id, sys_key_tenant, sys_key_updated_at,
 };
 
 /// Per-thread cache of composite schemas `[<user columns…>, rid, collection,
@@ -118,12 +118,6 @@ fn public_row_kind(row: &crate::storage::RowData) -> &'static str {
         "document"
     } else {
         "row"
-    }
-}
-
-fn set_legacy_row_id_if_requested(record: &mut UnifiedRecord, columns: &[String], rid: u64) {
-    if columns.iter().any(|column| column == "red_entity_id") {
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(rid));
     }
 }
 
@@ -415,7 +409,7 @@ pub(super) fn is_universal_entity_source(table: &str) -> bool {
 
 /// Lean materialization for the index scan hot path.
 ///
-/// Emits `red_entity_id`, `created_at`, `updated_at`, plus the raw user data
+/// Emits `rid`, `created_at`, `updated_at`, plus the raw user data
 /// columns. Skips the heavier red_* metadata fields (collection, kind, type,
 /// capabilities, sequence_id, row_id). Each skipped field is one fewer string
 /// clone and one fewer HashMap insert per entity.
@@ -589,7 +583,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
         }
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
+            record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
             record.set(
                 "red_collection",
                 Value::text(entity.kind.collection().to_string()),
@@ -671,7 +665,7 @@ pub(super) fn runtime_table_record_from_entity_ref_with_schema(
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
             record.set_arc(
-                sys_key_red_entity_id(),
+                sys_key_rid(),
                 Value::UnsignedInteger(entity.logical_id().raw()),
             );
             record.set(
@@ -774,13 +768,12 @@ pub(super) fn runtime_table_record_from_entity_projected(
                 sys_key_updated_at(),
                 Value::UnsignedInteger(entity.updated_at),
             );
-            set_legacy_row_id_if_requested(&mut record, columns, logical_id);
 
             Some(record)
         }
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::new();
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
+            record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
 
             for col in columns {
                 match col.as_str() {
@@ -836,7 +829,6 @@ pub(super) fn runtime_table_record_with_col_indices(
         }
     }
     set_public_row_envelope(&mut record, entity, row);
-    set_legacy_row_id_if_requested(&mut record, columns, entity.logical_id().raw());
     Some(record)
 }
 
@@ -884,7 +876,6 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
         }
     }
     set_public_row_envelope(&mut record, entity, row);
-    set_legacy_row_id_if_requested(&mut record, columns, entity.logical_id().raw());
     Some(record)
 }
 
@@ -1002,7 +993,10 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         set_runtime_entity_metadata(&mut record, entity_type, capabilities);
         apply_runtime_identity_hints(&mut record, &identity_entity);
     } else {
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
+        // #1369 — every entity model exposes its entity-id as `rid`
+        // (vector / time-series / queue rows). `rid` is mandatory for
+        // every model, never optional.
+        record.set_arc(sys_key_rid(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
         record.set_arc(sys_key_red_kind(), Value::text(storage_type));
         record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
@@ -1071,6 +1065,10 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
             for (key, value) in &edge.properties {
                 record.set(key, value.clone());
             }
+            // #1369 — graph edges surface their endpoints as `from_rid`/`to_rid`
+            // (the canonical rid references), NOT raw `from`/`to`, so the public
+            // envelope stays rid-based and never leaks the internal endpoint text
+            // the INSERT stored in properties.
             set_public_graph_envelope(&mut record, entity, "edge");
             (
                 "graph_edge",
@@ -1126,7 +1124,10 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         set_runtime_entity_metadata(&mut record, entity_type, capabilities);
         apply_runtime_identity_hints(&mut record, entity);
     } else {
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
+        // #1369 — every entity model exposes its entity-id as `rid`
+        // (vector / time-series / queue rows). `rid` is mandatory for
+        // every model, never optional.
+        record.set_arc(sys_key_rid(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
         record.set_arc(sys_key_red_kind(), Value::text(storage_type));
         record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
@@ -1487,7 +1488,7 @@ fn extract_runtime_vector_from_record(
         }
     }
 
-    for key in ["red_entity_id", "entity_id", "vector_id", "id"] {
+    for key in ["rid", "entity_id", "vector_id", "id"] {
         if let Some(value) = record.get(key) {
             if let Some(vector) = resolve_runtime_vector_entity_value(db, value)? {
                 return Ok(Some(vector));
@@ -1578,10 +1579,7 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
     let mut record = UnifiedRecord::new();
     let (entity_type, capabilities) = runtime_entity_type_and_capabilities(&item.entity);
     record.set("entity_id", Value::UnsignedInteger(item.entity_id.raw()));
-    record.set(
-        "red_entity_id",
-        Value::UnsignedInteger(item.entity_id.raw()),
-    );
+    record.set("rid", Value::UnsignedInteger(item.entity_id.raw()));
     record.set("score", Value::Float(item.score as f64));
     record.set("_score", Value::Float(item.score as f64));
     record.set("final_score", Value::Float(item.score as f64));
@@ -1701,10 +1699,7 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
         }
     }
 
-    if let Some(value) = record
-        .get("entity_id")
-        .or_else(|| record.get("red_entity_id"))
-    {
+    if let Some(value) = record.get("entity_id").or_else(|| record.get("rid")) {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("entity:{fragment}");
         }

@@ -181,11 +181,10 @@ fn execute_runtime_table_query_materialized(
                 resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id))
             {
                 let json = execute_runtime_serialize_single_entity(&entity);
-                // Honor explicit legacy-alias projections (e.g.
-                // `SELECT red_entity_id, …`) on the fast entity-id
-                // path; the bare-`from_entity` materialiser skips
-                // `set_legacy_row_id_if_requested`, so the column
-                // would otherwise come back missing.
+                // Honor explicit column projections on the fast
+                // entity-id path; the bare-`from_entity` materialiser
+                // only emits the lean envelope, so an explicitly named
+                // column would otherwise come back missing.
                 let explicit_cols = extract_select_column_names(&effective_projections);
                 let records: Vec<UnifiedRecord> = if explicit_cols.is_empty() {
                     runtime_table_record_from_entity(entity)

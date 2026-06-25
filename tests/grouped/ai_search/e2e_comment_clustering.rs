@@ -453,7 +453,7 @@ fn e2e_comments_embedding_cluster_label_and_writeback() {
     let embedding_payload: JsonValue = from_str(
         r#"{
             "provider": "openai",
-            "source_query": "SELECT red_entity_id, comment FROM comments ORDER BY red_entity_id ASC LIMIT 200",
+            "source_query": "SELECT rid, comment FROM comments ORDER BY rid ASC LIMIT 200",
             "source_mode": "row",
             "source_field": "comment",
             "source_collection": "comments",
@@ -545,7 +545,7 @@ fn e2e_comments_embedding_cluster_label_and_writeback() {
         query
             .execute(ExecuteQueryInput {
                 query: format!(
-                    "UPDATE comments SET category_id = '{}' WHERE red_entity_id = {}",
+                    "UPDATE comments SET category_id = '{}' WHERE rid = {}",
                     category_id, assignment.linked_row_id
                 ),
             })

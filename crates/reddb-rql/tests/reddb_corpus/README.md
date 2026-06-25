@@ -26,7 +26,7 @@ are 1.00 / 0.60 / 0.00 gives one strict ranking).
 
 The engine decorates each vector/graph result row with engine-internal,
 run-varying columns: auto-assigned entity ids (`entity_id`, `node_id`,
-`red_entity_id`), wall-clock stamps (`created_at`, `updated_at`), sequence
+`rid`), wall-clock stamps (`created_at`, `updated_at`), sequence
 numbers, `red_*` capability metadata, and raw distance/score floats whose exact
 value is engine-defined rather than oracle-defined. The harness projects every
 result down to a fixed allowlist of **semantic, deterministic** columns

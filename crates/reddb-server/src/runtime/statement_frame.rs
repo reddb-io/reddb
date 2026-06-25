@@ -499,19 +499,25 @@ impl StatementExecutionFrame {
             .unwrap_or("")
             .to_ascii_uppercase();
         let is_insert = first_word == "INSERT";
+        // #1370 — volatile queries ($config / $secret resolve mutable runtime
+        // state at execution time) must bypass the plan cache too. A cached
+        // optimized plan drops the live `$config` resolution, so a later
+        // `SET CONFIG` would be ignored and the query would serve a stale value.
+        // Re-parse fresh every time so the resolver runs against current state.
+        let bypass_plan_cache = is_insert || self.is_volatile_query;
 
         // Fused normalize+extract: one byte-scan produces both the
         // cache_key AND the literal bindings. Saves a second Lexer
         // pass over the query text on every cache hit — dominant
         // cost on tight UPDATE loops that hit the same shape
         // thousands of times with varying literals.
-        let (cache_key, prescan_binds) = if is_insert {
+        let (cache_key, prescan_binds) = if bypass_plan_cache {
             (String::new(), Vec::new())
         } else {
             crate::storage::query::planner::cache_key::normalize_and_extract(query)
         };
 
-        let expr = if is_insert {
+        let expr = if bypass_plan_cache {
             // Bypass plan cache for INSERT — shape varies per query.
             parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
         } else {

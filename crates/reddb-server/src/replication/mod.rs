@@ -34,6 +34,7 @@ pub mod lease;
 pub mod logical;
 pub mod primary;
 pub mod quorum;
+pub mod reconnect;
 pub mod replica;
 pub mod rollback;
 pub mod scheduler;

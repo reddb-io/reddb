@@ -44,7 +44,7 @@ issue searches resolve.
 ### 2.2 Public identity
 
 Public item identity is the string field `rid`. Drivers MUST NOT expose
-`red_entity_id`, `_entity_id`, or `entity_id` except in migration notes.
+`_entity_id` or `entity_id` except in migration notes.
 
 `rid` is lossless across drivers. JavaScript / TypeScript / JSON-only drivers
 that cannot represent large integers safely MUST treat `rid` as `string`.

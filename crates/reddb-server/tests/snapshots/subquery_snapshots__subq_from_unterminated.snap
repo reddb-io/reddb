@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"SELECT * FROM (SELECT id FROM t AS sub\")"
 ---
 input: "SELECT * FROM (SELECT id FROM t AS sub"
 kind:  Syntax
-error: Parse error at 1:15: Unexpected token: ( (expected: identifier)
+error: Parse error at 1:39: Unexpected token: EOF (expected: ))
