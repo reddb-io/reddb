@@ -20,6 +20,7 @@
 pub mod auth;
 pub mod conn_string;
 pub mod jsonrpc;
+pub mod knowledge;
 pub mod legacy;
 pub mod query_with_params;
 pub mod redwire;
