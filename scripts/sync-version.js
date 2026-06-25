@@ -128,6 +128,11 @@ const targets = [
     type: 'package-json',
   },
   {
+    label: 'packages/mcp/package.json (@reddb-io/mcp)',
+    file: path.join(root, 'packages', 'mcp', 'package.json'),
+    type: 'package-json',
+  },
+  {
     // Lane T (#136) introduces drivers/js-client/. Until that lane
     // merges, the file may not exist on this branch — `optional: true`
     // makes the sync step a no-op skip instead of failing the version
@@ -230,6 +235,7 @@ const stageList = [
   'packages/internal-asset-fetcher/package.json',
   'packages/internal-bin-resolver/package.json',
   'packages/internal-version-compare/package.json',
+  'packages/mcp/package.json',
   // drivers/js-client/package.json comes from Lane T (#136); the
   // .filter() below drops it from the stage list when absent.
   'drivers/js-client/package.json',
