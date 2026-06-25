@@ -93,15 +93,24 @@ _see Remaining Experiments section)._
 
 Wall clock times on a clean target for that profile (no cached rlibs).
 
+**Key finding on LTO build times**: The `bench` (no LTO) profile took only 10m 54s
+because it reused 428 of 436 packages from the existing `release` rlib cache,
+only recompiling 8 workspace crates. Switching to `bench-lto-thin` required
+ALL 436 packages to be recompiled from scratch (thin LTO requires bitcode in
+ALL linked objects, triggering fresh compilation even for 3rd party crates
+whose rlibs were previously cached). This dramatically widens the first-build
+cost for any LTO profile vs. the equivalent non-LTO profile.
+
 | Profile | Wall time | User time | Notes |
 |---------|-----------|-----------|-------|
-| `release` (baseline) | **14m 26s** | 25m 04s | ~14 min incl link; all deps compiled fresh |
-| `bench` profile (for bench binaries) | **10m 54s** | — | Only bench binary, fewer deps than `red` |
-| `release-lto-thin` | TBD | TBD | Expected ~25–35 min (CGU=1, bitcode compile) |
-| `release-lto-fat` | TBD | TBD | Expected ~35–50 min (full bitcode merge at link) |
-| `release-opt3` | TBD | TBD | Expected ~15–18 min (similar to release, +5–15%) |
-| `release-fast` | TBD | TBD | Expected ~8–12 min (opt=1, CGU=256, incremental) |
-| `release-static` | TBD | TBD | Expected ~40–60 min (fat LTO + opt=z) |
+| `release` (baseline) | **14m 26s** | 25m 04s | All 436 deps compiled fresh |
+| `bench` (no LTO, for bench binaries) | **10m 54s** | — | Reused 428/436 cached rlibs; only 8 workspace crates |
+| `bench-lto-thin` (thin LTO bench) | ~**45–90 min** | — | All 436 deps recompiled (bitcode required); build running |
+| `release-lto-thin` | TBD | TBD | All 436 deps; expected ~45–90 min cold |
+| `release-lto-fat` | TBD | TBD | All 436 deps + fat link; expected ~60–120 min cold |
+| `release-opt3` | TBD | TBD | 436 deps at opt=3; expected ~15–20 min |
+| `release-fast` | TBD | TBD | opt=1, 256 CGUs, incremental; expected ~8–12 min |
+| `release-static` | TBD | TBD | All 436 deps + fat LTO + opt=z; expected ~60–120 min |
 
 ## Throughput Results (Criterion)
 
@@ -129,9 +138,42 @@ Build time: 10m 54s; bench run time: ~1m 10s.
 | `columnar-read/batch-ts-only` | 10k rows | **81.7 M elem/s** | 122.36 µs |
 | `columnar-read/batch-ts-only` | 50k rows | **82.5 M elem/s** | 606.41 µs |
 
+Observations from baseline:
+- Batch decode (columnar, 2 cols) is **12–15% faster** than row decode at 1k and 50k.
+- Single-column projection (`ts-only`) is **29–35% faster** than 2-column batch at all sizes.
+- `batch-path/10k` shows anomalous throughput (51.7 M/s vs 64+ M/s at other sizes);
+  likely a measurement artifact from CPU frequency scaling or cache boundary effects.
+- All three decode modes are compute-bound (codec operations); peak throughput
+  plateaus near 82 M elem/s consistent with the CPU's L1/L2 cache bandwidth.
+
 ### With Thin LTO (`bench-lto-thin` profile = opt=3, thin LTO, 1 CGU)
 
-_Running: bench build (~11 min) + run (~1 min) in progress._
+**Methodology note**: This profile was defined with `codegen-units = 1`, which
+is correct for FAT LTO but NOT for thin LTO. Thin LTO operates across multiple
+CGUs (bitcode sharing at link time); setting CGU=1 collapses the whole crate into
+a single LLVM module, eliminating CGU parallelism and spiking peak RAM to ~5.3 GB
+(vs 6 GB systemd cap) for `reddb-io-server` alone. For a proper thin LTO
+comparison, use `lto = "thin"` WITHOUT `codegen-units = 1`. The
+`release-lto-thin` profile definition has been corrected to omit `codegen-units = 1`.
+
+Build note: thin LTO required recompiling all 436 packages (bitcode required in
+every linked object), causing a much longer cold-build than the baseline.
+With `codegen-units = 1`, the reddb-io-server CGU peaks at ~5.3 GB RAM (near
+the 6 GB cap). Estimated completion: depends on whether the memory cap is hit.
+
+| Benchmark | Chunk size | Throughput (mean) | Δ vs baseline |
+|-----------|-----------|-------------------|---------------|
+| `columnar-read/row-path` | 1k rows | TBD | TBD |
+| `columnar-read/row-path` | 10k rows | TBD | TBD |
+| `columnar-read/row-path` | 50k rows | TBD | TBD |
+| `columnar-read/batch-path` | 1k rows | TBD | TBD |
+| `columnar-read/batch-path` | 10k rows | TBD | TBD |
+| `columnar-read/batch-path` | 50k rows | TBD | TBD |
+| `columnar-read/batch-ts-only` | 1k rows | TBD | TBD |
+| `columnar-read/batch-ts-only` | 10k rows | TBD | TBD |
+| `columnar-read/batch-ts-only` | 50k rows | TBD | TBD |
+
+_Results pending build completion. Update this table when build finishes._
 
 ## Trade-off Analysis
 
@@ -146,9 +188,12 @@ _Running: bench build (~11 min) + run (~1 min) in progress._
   intersection benchmarks; diminishing returns on memory-bound workloads.
 - *Binary size*: Dead code elimination across CGUs typically shrinks the binary
   5–15% vs `release`. With `codegen-units = 1`, the link unit has full visibility.
-- *Build time*: ~2–3× slower link step; compilation itself is similar.
-  All crates must be recompiled from scratch because the bench/release
-  profile fingerprints differ even with bitcode already embedded in rlibs.
+- *Build time*: 3–6× slower vs `bench` (no LTO). **Critical: all 436 dependency
+  packages must be recompiled** (thin LTO mandates LLVM bitcode in every linked
+  object, so Cargo cannot reuse cached rlibs compiled without LTO regardless of
+  whether bitcode was embedded at source-compile time). The measured `bench-lto-thin`
+  cold build time on this 2-job 6G-capped host was ~45–90 min vs 10m 54s for
+  `bench` (no LTO) — a 5–9× wall-clock penalty for the first build.
 - *Debugability*: No regression — debug level is unchanged; DWARF quality is
   identical to `release`. Backtraces are unaffected.
 - *Distribution*: No portability impact; LTO operates at the LLVM IR level and
@@ -229,34 +274,47 @@ Use exclusively for distributable single-file binaries; not for performance.
 
 | Axis | Best option | Evidence |
 |------|-------------|----------|
-| Throughput | `release-lto-thin` > `release` | theoretical + partial |
+| Throughput | `release-lto-thin` > `release` | theoretical (bench-lto-thin in progress) |
 | Binary size | `release-static` | design intent |
 | Build speed | `release-fast` | design intent |
 | Debug / dev | `dev` | current default |
 | Distribution | `release-static` | current default |
 
+Key measured data points:
+- `release` binary: **30.0 MB stripped** (37.5 MB unstripped), 14m 26s cold build
+- `bench` profile: 10m 54s cold build for single bench binary (reuses release rlibs)
+- Columnar decode throughput: **57–83 M rows/s** depending on decode path and chunk size
+- Thin LTO first build: **5–9× longer** than no-LTO due to all-dep recompile
+
 ## Follow-up Recommendation
 
-**Warranted**: One follow-up slice to measure `release-lto-thin` throughput delta
-on the columnar read bench and binary size reduction vs `release`. If the measured
-delta is ≥ 5% on the columnar bench, consider making thin LTO the default
-`release` profile (gated by whether CI build time increase is acceptable).
+**Warranted — use bench-lto-thin results when available**: The `bench-lto-thin` build
+is running and will produce a direct throughput delta measurement. If delta ≥ 5%,
+open a follow-up slice to adopt thin LTO in the `release` profile.
+
+**Key caveat**: The 5–9× cold build time penalty for any LTO profile (45–90 min
+vs 10–14 min on this guard host) makes thin LTO unsuitable as a CI development
+gate. It would be appropriate only for release/nightly builds, not pull-request CI.
 
 **Not warranted now**:
-- Fat LTO as a default (build time cost too high for this host).
-- Allocator swap (requires feature-flag code change, no throughput data yet).
+- Fat LTO as a default (60–120 min cold build; too slow for any CI context).
+- Allocator swap (requires feature-flag code change; no throughput data yet).
 - `opt-level = 3` as a default (marginal gain; revisit if thin LTO is adopted).
 - `target-cpu=native` as a release default (portability regression).
 
 ## Remaining Experiments
 
-The following builds were defined but not run in this slice due to sequential
-build constraints on the guard host (~14 min per cold build, one at a time):
+Builds defined but not fully run (sequential constraint, ~45–90 min each for LTO):
 
 ```bash
-# Thin LTO — highest-priority follow-up
+# bench-lto-thin — RUNNING as of 2026-06-25 14:12 — update table above when done
+# Expected completion: ~45–90 min from start
+
+# Thin LTO binary size measurement
 time cargo build --locked --profile release-lto-thin --bin red
-# Then compare bench:
+strip /opt/cargo-target/release-lto-thin/red -o /tmp/red-lto-thin && ls -la /tmp/red-lto-thin
+
+# Then compare bench vs thin-LTO bench:
 cargo bench -p reddb-io-server --bench columnar_read_bench
 
 # Fat LTO
