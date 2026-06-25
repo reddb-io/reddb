@@ -83,6 +83,10 @@ path = "src/lib.rs"
 workspace = true
 
 [[test]]
+name = "llms_txt_generated"
+path = "tests/llms_txt_generated.rs"
+
+[[test]]
 name = "grouped_ai_search"
 path = "tests/grouped/ai_search.rs"
 
