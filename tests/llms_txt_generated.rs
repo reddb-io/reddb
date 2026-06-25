@@ -71,8 +71,7 @@ llms_txt_generated llms_txt_is_in_sync` to generate it.",
     });
 
     assert_eq!(
-        on_disk,
-        generated,
+        on_disk, generated,
         "docs/llms.txt is out of sync with the generator. Run \
 `REGENERATE_LLMS=1 cargo test --test llms_txt_generated llms_txt_is_in_sync` to \
 regenerate it."
