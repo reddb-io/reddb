@@ -143,9 +143,7 @@ pub fn decode(data: &[u8]) -> Result<Vec<(String, Value)>, DocBodyError> {
     let mut key_cursor = header_end;
     let mut result = Vec::with_capacity(n);
 
-    for i in 0..n {
-        let (key_len, val_offset) = table[i];
-
+    for &(key_len, val_offset) in &table {
         // Read field name
         let key_end = key_cursor + key_len as usize;
         if key_end > data.len() {
@@ -174,8 +172,7 @@ pub fn read_field_by_name(data: &[u8], name: &str) -> Result<Option<Value>, DocB
     let header_end = 7 + n * ENTRY_SIZE;
     let mut key_cursor = header_end;
 
-    for i in 0..n {
-        let (key_len, val_offset) = table[i];
+    for &(key_len, val_offset) in &table {
         let key_end = key_cursor + key_len as usize;
         if key_end > data.len() {
             return Err(DocBodyError::OffsetOutOfBounds);
