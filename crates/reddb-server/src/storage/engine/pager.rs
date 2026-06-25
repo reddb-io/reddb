@@ -239,34 +239,16 @@ mod tests {
     }
 
     fn cleanup(path: &Path) {
-        // Prefix-remove the `.db` AND every sidecar the pager writes next to it
-        // (`.db-hdr`, `.rdb-hdr`, `.rdb-dwb`, …). The previous fixed-suffix
-        // removal only cleared the three dash-suffix shadows and missed the
-        // extension-replaced sidecars (`.rdb-hdr`/`.rdb-dwb`), which the leak
-        // guard (scripts/check-temp-residue.sh) flags. Tests must drop the
-        // pager BEFORE calling this so the drop-time flush cannot re-create a
-        // sidecar after removal (every call site already uses an inner block).
-        if let (Some(dir), Some(name)) = (
-            path.parent(),
-            path.file_name().and_then(|name| name.to_str()),
-        ) {
-            // Match on the stem (filename without the `.db` extension) so both
-            // dash-suffix (`foo.db-hdr`) and extension-replaced
-            // (`foo.rdb-hdr`) sidecars are covered. Require the next byte after
-            // the stem to be a separator (`.` or `-`) so a numeric-suffixed
-            // sibling (`reddb_test_5_1` vs `reddb_test_5_10`) is never clobbered.
-            let stem = name.strip_suffix(".db").unwrap_or(name);
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if entry.file_name().to_str().is_some_and(|entry_name| {
-                        entry_name
-                            .strip_prefix(stem)
-                            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-']))
-                    }) {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
-            }
+        // Remove the data file AND every pager shadow sidecar via reddb-file's
+        // authoritative path helpers (the pager writes only these three shadows
+        // next to the data file). Deriving the paths through reddb-file keeps the
+        // file-suffix contract out of the server source (enforced by reddb-file's
+        // `server_source_does_not_embed_owned_file_suffixes`). Tests drop the
+        // pager BEFORE calling this (every call site uses an inner block) so the
+        // drop-time flush cannot re-create a sidecar after removal.
+        let _ = fs::remove_file(path);
+        for sidecar in reddb_file::layout::pager_shadow_sidecar_paths(path) {
+            let _ = fs::remove_file(sidecar);
         }
     }
 

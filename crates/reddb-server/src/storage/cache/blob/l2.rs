@@ -687,32 +687,24 @@ mod tests {
     }
 
     fn cleanup_l2(path: &Path) {
-        // Prefix-remove the L2 `.rdb` AND every sidecar (`.rdb-hdr`, `.rdb-dwb`,
-        // `.blob-cache.ctl`, …). The previous fixed-suffix removal missed the
-        // pager header (`.rdb-hdr`) the L2 store leaves behind, which the leak
-        // guard (scripts/check-temp-residue.sh) flags. Match on the STEM
-        // (filename minus the `.rdb` extension) so the control sidecar — which
-        // replaces the extension (`...rdb` → `...blob-cache.ctl`) — is covered
-        // alongside the dash-suffix pager sidecars. The L2 stem is unique per
-        // file, so a stem prefix never clobbers a sibling. Callers must drop the
-        // cache BEFORE calling this so the pager's drop-time flush cannot
-        // re-create a sidecar after removal.
-        if let (Some(dir), Some(name)) = (
-            path.parent(),
-            path.file_name().and_then(|name| name.to_str()),
-        ) {
-            let stem = name.strip_suffix(".rdb").unwrap_or(name);
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|entry_name| entry_name.starts_with(stem))
-                    {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
+        // Remove the L2 `.rdb` AND every sidecar so nothing is left for the leak
+        // guard (scripts/check-temp-residue.sh). The blob-cache L2 file format is
+        // owned by reddb-file, so derive each sidecar path through its
+        // authoritative helpers rather than re-declaring suffix literals here
+        // (enforced by `server_does_not_redeclare_blob_cache_l2_file_format`).
+        // Callers must drop the cache BEFORE calling this so the pager's
+        // drop-time flush cannot re-create a sidecar after removal.
+        let control = reddb_file::blob_cache_control_path(path);
+        for sidecar in [
+            path.to_path_buf(),
+            reddb_file::layout::pager_header_path(path),
+            reddb_file::layout::pager_meta_path(path),
+            reddb_file::layout::pager_dwb_path(path),
+            reddb_file::blob_cache_double_write_path(path),
+            reddb_file::blob_cache_control_temp_path(&control),
+            control,
+        ] {
+            let _ = std::fs::remove_file(sidecar);
         }
     }
 
