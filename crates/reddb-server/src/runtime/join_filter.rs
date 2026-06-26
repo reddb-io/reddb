@@ -367,14 +367,20 @@ pub(super) fn execute_runtime_indexed_join(
             left_table_name,
             left_table_alias,
         );
-        let candidate_indexes = left_value
+        // Borrow the candidate index list out of `right_index` instead of
+        // cloning it for every left row: the probe loop only reads
+        // `right_records` and writes `matched_right`/`records`, never mutating
+        // `right_index`, so the hash bucket can be iterated in place with zero
+        // temporary allocation (#1346).
+        let lookup_key = left_value.as_ref().and_then(runtime_join_lookup_key);
+        let candidate_indexes: &[usize] = lookup_key
             .as_ref()
-            .and_then(runtime_join_lookup_key)
-            .and_then(|key| right_index.get(&key).cloned())
-            .unwrap_or_default();
+            .and_then(|key| right_index.get(key))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let mut matched = false;
 
-        for index in candidate_indexes {
+        for &index in candidate_indexes {
             let right_record = &right_records[index];
             if join_condition_matches(
                 left_record,
@@ -501,6 +507,10 @@ pub(super) fn runtime_graph_join_probe_indexes(
     left_table_alias: Option<&str>,
     right_index: &HashMap<String, Vec<usize>>,
 ) -> Vec<usize> {
+    // Unlike the single-key indexed probe (which borrows one bucket in place,
+    // #1346), a graph left row can resolve to several lookup keys whose buckets
+    // overlap. We must own an allocation here to merge those buckets and dedup
+    // shared right rows so a candidate is probed at most once.
     let mut candidates = BTreeSet::new();
     if let Some(value) = resolve_runtime_field(
         left_record,
@@ -3440,6 +3450,53 @@ fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64
 mod tests {
     use super::*;
     use crate::storage::query::unified::MatchedNode;
+
+    fn jrec(column: &str, value: Value) -> UnifiedRecord {
+        let mut record = UnifiedRecord::new();
+        record.set(column, value);
+        record
+    }
+
+    #[test]
+    fn indexed_join_borrowed_candidate_list_matches_hash_join() {
+        // execute_runtime_indexed_join probes the right-side hash bucket by
+        // borrowing the candidate index list in place (no per-left-row clone,
+        // #1346). Duplicate keys force multi-element candidate lists — the exact
+        // path the borrow touches — and every join shape must stay identical to
+        // the hash join over the same inputs.
+        let left: Vec<_> = [1i64, 1, 2, 3]
+            .iter()
+            .map(|value| jrec("k", Value::Integer(*value)))
+            .collect();
+        let right: Vec<_> = [1i64, 1, 2, 4]
+            .iter()
+            .map(|value| jrec("k", Value::Integer(*value)))
+            .collect();
+        let tq = TableQuery::new("left");
+        let lf = FieldRef::column("", "k");
+        let rf = FieldRef::column("", "k");
+
+        for join_type in [
+            JoinType::Inner,
+            JoinType::LeftOuter,
+            JoinType::RightOuter,
+            JoinType::FullOuter,
+        ] {
+            let indexed = execute_runtime_indexed_join(
+                &tq, &left, None, None, &lf, &right, None, None, &rf, join_type,
+            )
+            .expect("indexed join");
+            let hashed = execute_runtime_hash_join(
+                &tq, &left, None, None, &lf, &right, None, None, &rf, join_type,
+            )
+            .expect("hash join");
+            assert_eq!(
+                indexed.len(),
+                hashed.len(),
+                "indexed join row count must match hash join for {join_type:?} after borrow change"
+            );
+        }
+    }
 
     #[test]
     fn test_evaluate_metadata_field_compare_entity_type_is_case_insensitive() {
