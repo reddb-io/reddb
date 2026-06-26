@@ -412,7 +412,10 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if !order_by.is_empty() && limit.is_none() {
+        // CLAIM LIMIT acts as the LIMIT for the purpose of ORDER BY semantics:
+        // a claim without a conventional LIMIT still has a deterministic bound.
+        let effective_limit = limit.is_some() || claim_limit.is_some();
+        if !order_by.is_empty() && !effective_limit {
             return Err(ParseError::new(
                 "UPDATE ORDER BY requires LIMIT",
                 self.position(),
