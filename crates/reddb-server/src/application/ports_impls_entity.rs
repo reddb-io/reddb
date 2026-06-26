@@ -1297,6 +1297,94 @@ fn replace_document_row_body(
     Ok(())
 }
 
+fn document_merge_patch_payload(payload: &JsonValue) -> &JsonValue {
+    if let JsonValue::Object(object) = payload {
+        if object.len() == 1 {
+            if let Some(body) = object.get("body") {
+                return body;
+            }
+        }
+    }
+    payload
+}
+
+fn apply_document_json_merge_patch(body: &mut JsonValue, patch: &JsonValue) -> RedDBResult<()> {
+    if !matches!(patch, JsonValue::Object(_)) {
+        *body = patch.clone();
+        return Ok(());
+    }
+
+    if matches!(patch, JsonValue::Object(object) if object.is_empty()) {
+        if !matches!(body, JsonValue::Object(_)) {
+            *body = JsonValue::Object(Default::default());
+        }
+        return Ok(());
+    }
+
+    let mut operations = Vec::new();
+    collect_document_json_merge_patch_operations(body, Vec::new(), patch, &mut operations);
+    apply_patch_operations_to_json(body, &operations).map_err(crate::RedDBError::Query)
+}
+
+fn collect_document_json_merge_patch_operations(
+    target: &JsonValue,
+    path: Vec<String>,
+    patch: &JsonValue,
+    operations: &mut Vec<PatchEntityOperation>,
+) {
+    let JsonValue::Object(patch_object) = patch else {
+        operations.push(PatchEntityOperation {
+            op: PatchEntityOperationType::Set,
+            path,
+            value: Some(patch.clone()),
+        });
+        return;
+    };
+
+    for (key, value) in patch_object {
+        let mut child_path = path.clone();
+        child_path.push(key.clone());
+        match value {
+            JsonValue::Null => operations.push(PatchEntityOperation {
+                op: PatchEntityOperationType::Unset,
+                path: child_path,
+                value: None,
+            }),
+            JsonValue::Object(object) if object.is_empty() => {
+                let child_target = match target {
+                    JsonValue::Object(target_object) => target_object.get(key),
+                    _ => None,
+                };
+                if !matches!(child_target, Some(JsonValue::Object(_))) {
+                    operations.push(PatchEntityOperation {
+                        op: PatchEntityOperationType::Set,
+                        path: child_path,
+                        value: Some(JsonValue::Object(Default::default())),
+                    });
+                }
+            }
+            JsonValue::Object(_) => {
+                let child_target = match target {
+                    JsonValue::Object(target_object) => target_object.get(key),
+                    _ => None,
+                }
+                .unwrap_or(&JsonValue::Null);
+                collect_document_json_merge_patch_operations(
+                    child_target,
+                    child_path,
+                    value,
+                    operations,
+                );
+            }
+            _ => operations.push(PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: child_path,
+                value: Some(value.clone()),
+            }),
+        }
+    }
+}
+
 impl RedDBRuntime {
     pub(crate) fn apply_loaded_patch_entity_core(
         &self,
@@ -1380,6 +1468,7 @@ impl RedDBRuntime {
                 let mut field_ops = Vec::new();
                 let mut metadata_ops = Vec::new();
                 let mut document_body_ops = Vec::new();
+                let has_patch_operations = !operations.is_empty();
 
                 for mut op in operations {
                     let Some(root) = op.path.first().map(String::as_str) else {
@@ -1445,16 +1534,17 @@ impl RedDBRuntime {
                     replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                 }
 
-                if is_document_collection {
-                    if let Some(body) = payload.get("body") {
+                if is_document_collection && !has_patch_operations {
+                    let named = row.named.get_or_insert_with(Default::default);
+                    let mut body = document_body_from_named(named)?;
+                    let previous_body = body.clone();
+                    apply_document_json_merge_patch(
+                        &mut body,
+                        document_merge_patch_payload(&payload),
+                    )?;
+                    if body != previous_body {
                         context_index_dirty = true;
-                        let named = row.named.get_or_insert_with(Default::default);
-                        replace_document_row_body(
-                            named,
-                            body.clone(),
-                            binary_body,
-                            &mut modified_columns,
-                        )?;
+                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                     }
                 }
 
