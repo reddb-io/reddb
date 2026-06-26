@@ -2239,19 +2239,31 @@ impl RedDBRuntime {
                     .into_iter()
                     .filter_map(|idx| idx.columns.first().cloned())
                     .collect();
-                let modified_cols: std::collections::HashSet<String> = damage
+                // Single-source documents keep promoted index columns in the
+                // body — surface them so the index sees the value move (a no-op
+                // for ordinary stored columns).
+                let pre_index_fields = self
+                    .index_store_ref()
+                    .augment_body_derived_index_fields(&applied.pre_mutation_fields, &indexed_cols);
+                let post_index_fields = self
+                    .index_store_ref()
+                    .augment_body_derived_index_fields(&post, &indexed_cols);
+                let modified_cols: std::collections::HashSet<String> =
+                    crate::application::entity::row_damage_vector(
+                        &pre_index_fields,
+                        &post_index_fields,
+                    )
                     .touched_columns()
                     .into_iter()
                     .map(str::to_string)
                     .collect();
                 if let Some(old_version) = applied.replaced_entity.as_ref() {
-                    let old_index_fields: Vec<(String, Value)> = applied
-                        .pre_mutation_fields
+                    let old_index_fields: Vec<(String, Value)> = pre_index_fields
                         .iter()
                         .filter(|(col, _)| indexed_cols.contains(col))
                         .cloned()
                         .collect();
-                    let new_index_fields: Vec<(String, Value)> = post
+                    let new_index_fields: Vec<(String, Value)> = post_index_fields
                         .iter()
                         .filter(|(col, _)| indexed_cols.contains(col))
                         .cloned()
@@ -2292,8 +2304,8 @@ impl RedDBRuntime {
                             .index_entity_update(
                                 &applied.collection,
                                 applied.id,
-                                &applied.pre_mutation_fields,
-                                &post,
+                                &pre_index_fields,
+                                &post_index_fields,
                             )
                             .map_err(crate::RedDBError::Internal)?;
                     } else {
