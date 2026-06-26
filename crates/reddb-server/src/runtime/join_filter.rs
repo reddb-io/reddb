@@ -164,8 +164,7 @@ pub(super) fn execute_runtime_hash_join(
     // path's distinct null/empty-bucket semantics asserted by the #1339
     // baseline tests; the prefix-namespaced typed keys live on the indexed
     // and graph-lookup paths.
-    let mut hash_table: HashMap<String, Vec<usize>> =
-        HashMap::with_capacity(right_records.len());
+    let mut hash_table: HashMap<String, Vec<usize>> = HashMap::with_capacity(right_records.len());
     for (idx, right_record) in right_records.iter().enumerate() {
         let key = resolve_runtime_field(
             right_record,
@@ -4362,11 +4361,9 @@ mod tests {
         join_type: JoinType,
     ) -> usize {
         let tq = left_tq();
-        execute_runtime_indexed_join(
-            &tq, left, None, None, lf, right, None, None, rf, join_type,
-        )
-        .unwrap()
-        .len()
+        execute_runtime_indexed_join(&tq, left, None, None, lf, right, None, None, rf, join_type)
+            .unwrap()
+            .len()
     }
 
     #[test]
