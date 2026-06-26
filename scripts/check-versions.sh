@@ -77,6 +77,7 @@ check "drivers/bun (@reddb-io/client-bun)"  "$(grep -m1 '"version"' drivers/bun/
 check "packages/internal-asset-fetcher" "$(grep -m1 '"version"' packages/internal-asset-fetcher/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-bin-resolver"  "$(grep -m1 '"version"' packages/internal-bin-resolver/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-version-compare" "$(grep -m1 '"version"' packages/internal-version-compare/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
+check "packages/mcp (@reddb-io/mcp)" "$(grep -m1 '"version"' packages/mcp/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 # drivers/js-client is being introduced by Lane T (#136) in parallel.
 # Skip gracefully if the manifest isn't on this branch yet — the line
 # becomes load-bearing once both lanes merge.

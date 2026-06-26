@@ -674,7 +674,6 @@ fn is_record_metadata_key(key: &str) -> bool {
     matches!(
         key,
         "rid"
-            | "red_entity_id"
             | "collection"
             | "red_collection"
             | "kind"
@@ -734,10 +733,7 @@ fn vector_search_result_json(result: &VectorSearchResult) -> JsonValue {
     let mut object = Map::new();
     object.insert("id".to_string(), JsonValue::Number(result.id as f64));
     object.insert("entity_id".to_string(), JsonValue::Number(result.id as f64));
-    object.insert(
-        "red_entity_id".to_string(),
-        JsonValue::Number(result.id as f64),
-    );
+    object.insert("rid".to_string(), JsonValue::Number(result.id as f64));
     object.insert(
         "collection".to_string(),
         JsonValue::String(result.collection.clone()),

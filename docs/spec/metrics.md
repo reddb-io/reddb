@@ -56,6 +56,7 @@ Per-replica metrics on the primary; absent on replicas / standalone. Replicas re
 | `reddb_slo_lag_budget_remaining_seconds` | gauge | `replica_id` | `RED_SLO_REPLICA_LAG_BUDGET_SECONDS` (default 60) minus `reddb_replica_lag_seconds`; negative means SLO breach. |
 | `reddb_replica_apply_errors_total` | counter | `kind` | `gap|divergence|apply|decode`. **`divergence > 0` = page operator immediately**. |
 | `reddb_replica_apply_health` | gauge (label-only) | `state` | Current apply state (`ok|healthy|connecting|stalled_gap|divergence|apply_error`). |
+| `reddb_replication_reconnects_total` | counter | `replica_id` (this node, when assigned) | Primary↔replica link reconnects since process start — a link that was healthy, dropped, and recovered. The initial connect is **not** counted; a multi-poll outage counts once. Emitted on the replica side; `0` where the replica loop never ran. Carries only the node's own `replica_id`, never the primary address or any credential. Issue #1243 (PRD #1237 Phase B). |
 | `reddb_primary_commit_policy` | gauge (label-only) | `policy` | `local|remote_wal|ack_n|quorum`. |
 | `reddb_commit_wait_total` | counter | `outcome` | `reached|timed_out|not_required`. |
 | `reddb_commit_wait_last_seconds` | gauge | — | Wall-clock seconds of the most recent commit wait. |
@@ -84,6 +85,24 @@ Tune to your SLA; these are starting points used by `red doctor` defaults:
 | `reddb_commit_wait_total{outcome="timed_out"} rising` | 10/min | 100/min | `ack_n` policy too tight or replicas can't keep up. |
 | `reddb_quota_rejected_total{principal=...} sustained` | 10/min | 100/min | Caller exceeded budget. |
 | `reddb_cold_start_duration_seconds > 2.0` | 1 occurrence | 3 occurrences | Cold start past target. |
+
+## Reset / restart behavior
+
+All `*_total` counters above are **process-lifetime, in-memory** values: they
+start at `0` on boot and are not persisted across restarts. A process restart
+resets them to `0`. Prometheus detects this via the process-start timestamp and
+keeps `rate()` / `increase()` correct across the gap, so dashboards should use
+those functions rather than reading raw counter deltas across a restart.
+
+`reddb_replication_reconnects_total` follows this rule specifically: a restarted
+replica re-establishes its link to the primary, but that first post-restart
+connect is the *initial* connect for the new process and is **not** counted as a
+reconnect. The same reconnect count is mirrored, un-reset, in the replica
+status read model (`replication.reconnects_total` in `/cluster/status`), which
+red-ui reads; it too is process-scoped and resets on restart. There is no
+durable event log of individual reconnects in this slice — only the live
+counter and snapshot; durable reconnect *events* land if/when the operational
+telemetry event store (ADR 0060) is implemented.
 
 ## Stability promise
 

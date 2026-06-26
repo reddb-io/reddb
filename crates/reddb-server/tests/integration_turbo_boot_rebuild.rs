@@ -7,11 +7,7 @@
 //! the pre-restart state exactly — same block/lane placement, same
 //! encoded codes, same scale, same search results.
 
-use reddb_server::runtime::vector_turbo_kind::TURBO_CODEC_SEED;
-use reddb_server::storage::engine::distance::DistanceMetric;
-use reddb_server::storage::engine::turboquant::index::TurboQuantIndex;
 use reddb_server::storage::engine::turboquant::storage::BLOCK_LANES;
-use reddb_server::storage::EntityId;
 use reddb_server::{RedDBOptions, RedDBRuntime};
 
 /// Auto-cleaning DB path: holds the [`tempfile::TempDir`] guard so the temp
@@ -97,22 +93,8 @@ fn turbo_collection_recovers_partial_block_tail_after_restart() {
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
         .expect("runtime reopens persistent");
 
-    // Independent scalar oracle: feed the same vectors in WAL order
-    // into a fresh TurboQuantIndex with the same codec seed. Boot
-    // recovery is deterministic iff the runtime arrives at the same
-    // search results as this oracle.
-    let mut oracle = TurboQuantIndex::new(8, TURBO_CODEC_SEED);
-    // Entity ids in the pre-restart phase are assigned by the store's
-    // next_entity_id counter, but the oracle only cares about ordering
-    // for top-k; we map oracle ids 1..=n to the same insertion order
-    // the WAL preserves.
-    for (i, v) in vectors.iter().enumerate() {
-        oracle.insert(EntityId::new((i + 1) as u64), v.clone());
-    }
-
     // Query the dominant axis of the very last partial-tail vector
-    // (lane 4 of block 2). Recovery must place it there for the
-    // search to surface it.
+    // (lane 4 of block 2). Recovery must surface it.
     let query = vectors[n - 1].clone();
     let query_lit = query
         .iter()
@@ -124,17 +106,39 @@ fn turbo_collection_recovers_partial_block_tail_after_restart() {
             "VECTOR SEARCH turbo_boot SIMILAR TO [{query_lit}] LIMIT 5"
         ))
         .expect("search after reopen");
-    let oracle_hits = oracle.search(&query, 5, DistanceMetric::Cosine);
+
+    // True scalar oracle: exact cosine distance over the raw FP32 vectors,
+    // in insertion order. The runtime over-fetches turbo candidates and
+    // re-ranks by full precision (#1372), so a correct boot rebuild must
+    // return the same top-k as a brute-force exact scan — independent of the
+    // lossy block/lane quantization. (The codec-quantized reference this test
+    // used before could not see the runtime's exact re-rank and diverged; the
+    // determinism-across-restarts contract is covered by the sibling test.)
+    fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 {
+            1.0
+        } else {
+            1.0 - dot / (na * nb)
+        }
+    }
+    let mut scored: Vec<(usize, f32)> = vectors
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (i, cosine_distance(&query, v)))
+        .collect();
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     assert_eq!(
         runtime_hits.result.len(),
-        oracle_hits.len(),
-        "runtime top-k size matches oracle"
+        5,
+        "runtime returns top-5 after boot rebuild"
     );
-    // The runtime returns rows with a `content` column; the oracle
-    // returns entity ids. We compare by `content` since the runtime
-    // assigns its own ids — what matters is the ordering of the
-    // FP32 vectors, not the id values.
+    // The runtime returns rows with a `content` column; compare by content
+    // since the runtime assigns its own ids — what matters is the ordering
+    // of the FP32 vectors, not the id values.
     let runtime_contents: Vec<String> = runtime_hits
         .result
         .records
@@ -144,13 +148,14 @@ fn turbo_collection_recovers_partial_block_tail_after_restart() {
             other => panic!("expected text content, got {other:?}"),
         })
         .collect();
-    let oracle_contents: Vec<String> = oracle_hits
+    let oracle_contents: Vec<String> = scored
         .iter()
-        .map(|hit| format!("v{}", hit.entity_id.raw() - 1))
+        .take(5)
+        .map(|(i, _)| format!("v{i}"))
         .collect();
     assert_eq!(
         runtime_contents, oracle_contents,
-        "runtime ordering must match scalar oracle after boot rebuild",
+        "runtime ordering must match exact scalar oracle after boot rebuild",
     );
 }
 

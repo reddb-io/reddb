@@ -158,11 +158,6 @@ pub fn sys_key_rid() -> Arc<str> {
     Arc::clone(KEY.get_or_init(|| Arc::from("rid")))
 }
 
-pub fn sys_key_red_entity_id() -> Arc<str> {
-    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
-    Arc::clone(KEY.get_or_init(|| Arc::from("red_entity_id")))
-}
-
 pub fn sys_key_collection() -> Arc<str> {
     static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
     Arc::clone(KEY.get_or_init(|| Arc::from("collection")))
@@ -333,7 +328,7 @@ impl UnifiedRecord {
     /// Set a column value using a pre-interned key. Zero allocation
     /// for the key in the schema-hit path — just an atomic refcount
     /// bump on the existing schema entry. Used by the scan lean path
-    /// for system fields like `red_entity_id`.
+    /// for system fields like `rid`.
     #[inline]
     pub fn set_arc(&mut self, column: Arc<str>, value: Value) {
         if let Some(idx) = self.schema_index(&column) {

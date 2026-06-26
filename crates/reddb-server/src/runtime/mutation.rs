@@ -407,7 +407,7 @@ impl<'rt> MutationEngine<'rt> {
     // on `delete_sequential` at 10k items.
     //
     // Match is **case-sensitive `id`** to start (conservative — does
-    // not auto-index `Id`, `ID`, or `red_entity_id`). The hook is a
+    // not auto-index `Id`, `ID`, or `rid`). The hook is a
     // no-op once any index already covers the `id` column on the
     // collection (whether auto-created here, or via explicit
     // `CREATE INDEX ... USING HASH/BTREE`).

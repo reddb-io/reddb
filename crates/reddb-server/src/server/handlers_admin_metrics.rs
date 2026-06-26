@@ -551,6 +551,33 @@ impl RedDBServer {
             self.runtime.replication_partial_resync_count()
         );
 
+        // Issue #1243 (PRD #1237 Phase B) — primary↔replica reconnect
+        // counter. A reconnect is a link that was healthy, dropped, and
+        // recovered; the initial connect is not counted. The series is
+        // dimensioned by this node's own stable `replica_id` (a bounded
+        // identity, ADR 0060 §4) and never carries the primary's address,
+        // URL, or any credential (ADR 0060 §5). Resets to 0 on restart.
+        let replica_id = self.runtime.replication_replica_id();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_reconnects_total Primary<->replica link reconnects since process start (initial connect excluded)."
+        );
+        let _ = writeln!(body, "# TYPE reddb_replication_reconnects_total counter");
+        if replica_id.is_empty() {
+            let _ = writeln!(
+                body,
+                "reddb_replication_reconnects_total {}",
+                self.runtime.replication_reconnects_count()
+            );
+        } else {
+            let _ = writeln!(
+                body,
+                "reddb_replication_reconnects_total{{replica_id=\"{}\"}} {}",
+                sanitize_label(&replica_id),
+                self.runtime.replication_reconnects_count()
+            );
+        }
+
         // PLAN.md Phase 11.5 — replica apply error counters and
         // current health label. Counters are global across the
         // instance lifetime; the health label reflects whatever the

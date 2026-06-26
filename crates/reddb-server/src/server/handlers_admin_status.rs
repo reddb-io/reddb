@@ -147,6 +147,14 @@ impl RedDBServer {
             errors_obj.insert(kind.label().to_string(), JsonValue::Number(count as f64));
         }
         replica_obj.insert("apply_errors".to_string(), JsonValue::Object(errors_obj));
+        // Issue #1243 (PRD #1237 Phase B) — primary<->replica reconnects
+        // since process start, fed to the red-ui status read model so it
+        // can explain link instability instead of a last-error snapshot.
+        // Privacy: a count only, never the primary's address (ADR 0060 §5).
+        replica_obj.insert(
+            "reconnects_total".to_string(),
+            JsonValue::Number(self.runtime.replication_reconnects_count() as f64),
+        );
 
         // Per-replica array (primary view). Empty on replica/standalone.
         let snaps = self.runtime.primary_replica_snapshots();
@@ -439,6 +447,7 @@ impl RedDBServer {
                 replicas,
                 apply_health: self.runtime.replica_apply_health(),
                 apply_errors,
+                reconnects_total: self.runtime.replication_reconnects_count(),
             },
             latency,
             load,

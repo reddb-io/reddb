@@ -868,7 +868,9 @@ impl<'a> Parser<'a> {
         if self.consume(&Token::Add)? {
             if self.consume_ident_ci("SUBSCRIPTION")? {
                 // ADD SUBSCRIPTION name TO queue [REDACT (...)] [WHERE ...]
-                let sub_name = self.expect_ident()?;
+                // #1374 — a subscription name may be a keyword (e.g. `search`);
+                // accept keyword tokens as identifiers here (PG-style).
+                let sub_name = self.expect_ident_or_keyword()?;
                 let descriptor = self.parse_subscription_descriptor(table_name.to_string())?;
                 Ok(AlterOperation::AddSubscription {
                     name: sub_name,
@@ -897,8 +899,8 @@ impl<'a> Parser<'a> {
             Ok(AlterOperation::RevokeSigner { pubkey })
         } else if self.consume(&Token::Drop)? {
             if self.consume_ident_ci("SUBSCRIPTION")? {
-                // DROP SUBSCRIPTION name
-                let sub_name = self.expect_ident()?;
+                // DROP SUBSCRIPTION name (may be a keyword, e.g. `search`)
+                let sub_name = self.expect_ident_or_keyword()?;
                 Ok(AlterOperation::DropSubscription { name: sub_name })
             } else {
                 // DROP COLUMN name (COLUMN keyword is optional)

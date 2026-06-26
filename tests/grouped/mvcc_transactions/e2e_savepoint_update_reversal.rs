@@ -13,22 +13,20 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
 }
 
-fn red_entity_id(rt: &RedDBRuntime, table: &str) -> u64 {
+fn rid(rt: &RedDBRuntime, table: &str) -> u64 {
     let result = rt
-        .execute_query(&format!("SELECT red_entity_id FROM {table} WHERE id = 1"))
-        .expect("select red_entity_id");
-    match result.result.records[0].get("red_entity_id") {
+        .execute_query(&format!("SELECT rid FROM {table} WHERE id = 1"))
+        .expect("select rid");
+    match result.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
         Some(Value::Integer(id)) => *id as u64,
-        other => panic!("expected red_entity_id, got {other:?}"),
+        other => panic!("expected rid, got {other:?}"),
     }
 }
 
-fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> String {
+fn label_for(rt: &RedDBRuntime, table: &str, rid: u64) -> String {
     let result = rt
-        .execute_query(&format!(
-            "SELECT label FROM {table} WHERE red_entity_id = {red_entity_id}"
-        ))
+        .execute_query(&format!("SELECT label FROM {table} WHERE rid = {rid}"))
         .expect("select label");
     match result.result.records[0].get("label") {
         Some(Value::Text(value)) => value.to_string(),
@@ -43,13 +41,13 @@ fn rollback_to_savepoint_restores_pre_update_value() {
 
     exec(&rt, "CREATE TABLE sp_upd (id INT, label TEXT)");
     exec(&rt, "INSERT INTO sp_upd (id, label) VALUES (1, 'before')");
-    let eid = red_entity_id(&rt, "sp_upd");
+    let eid = rid(&rt, "sp_upd");
 
     exec(&rt, "BEGIN");
     exec(&rt, "SAVEPOINT sp1");
     exec(
         &rt,
-        &format!("UPDATE sp_upd SET label = 'after' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE sp_upd SET label = 'after' WHERE rid = {eid}"),
     );
     exec(&rt, "ROLLBACK TO SAVEPOINT sp1");
     exec(&rt, "COMMIT");
@@ -69,22 +67,22 @@ fn nested_savepoints_restore_the_right_update_version() {
         &rt,
         "INSERT INTO sp_nested_upd (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "sp_nested_upd");
+    let eid = rid(&rt, "sp_nested_upd");
 
     exec(&rt, "BEGIN");
     exec(
         &rt,
-        &format!("UPDATE sp_nested_upd SET label = 'one' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE sp_nested_upd SET label = 'one' WHERE rid = {eid}"),
     );
     exec(&rt, "SAVEPOINT sp1");
     exec(
         &rt,
-        &format!("UPDATE sp_nested_upd SET label = 'two' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE sp_nested_upd SET label = 'two' WHERE rid = {eid}"),
     );
     exec(&rt, "SAVEPOINT sp2");
     exec(
         &rt,
-        &format!("UPDATE sp_nested_upd SET label = 'three' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE sp_nested_upd SET label = 'three' WHERE rid = {eid}"),
     );
     exec(&rt, "ROLLBACK TO SAVEPOINT sp2");
     assert_eq!(label_for(&rt, "sp_nested_upd", eid), "two");
@@ -106,13 +104,13 @@ fn release_savepoint_preserves_update_work() {
         &rt,
         "INSERT INTO sp_release_upd (id, label) VALUES (1, 'base')",
     );
-    let eid = red_entity_id(&rt, "sp_release_upd");
+    let eid = rid(&rt, "sp_release_upd");
 
     exec(&rt, "BEGIN");
     exec(&rt, "SAVEPOINT sp1");
     exec(
         &rt,
-        &format!("UPDATE sp_release_upd SET label = 'kept' WHERE red_entity_id = {eid}"),
+        &format!("UPDATE sp_release_upd SET label = 'kept' WHERE rid = {eid}"),
     );
     exec(&rt, "RELEASE SAVEPOINT sp1");
     assert_eq!(label_for(&rt, "sp_release_upd", eid), "kept");

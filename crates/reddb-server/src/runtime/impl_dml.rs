@@ -24,8 +24,8 @@ use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
 use crate::storage::query::unified::{
-    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_entity_id, sys_key_rid,
-    sys_key_tenant, sys_key_updated_at, UnifiedRecord, UnifiedResult,
+    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_rid, sys_key_tenant,
+    sys_key_updated_at, UnifiedRecord, UnifiedResult,
 };
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
@@ -405,15 +405,47 @@ impl RedDBRuntime {
         let mut physical_delete_ids = Vec::new();
         let table_row_resolver =
             crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
+        // Phase 3: versioned graph collections tombstone node/edge
+        // deletes (xmax stamp) instead of physically removing them, so
+        // `AS OF` time-travel can still resolve the pre-delete version.
+        // Non-versioned graph collections keep the legacy physical
+        // delete (no history). Row entities (Phase 1/2) always tombstone
+        // under universal MVCC and are unaffected by this flag.
+        //
+        // Vectors (Phase 3b): versioned vector deletes tombstone (xmax
+        // stamp) instead of physically dropping, so history is retained.
+        // The `VECTOR SEARCH` read path post-filters every candidate
+        // through the current-snapshot visibility gate (which hides
+        // `xmax != 0` even in autocommit), so a tombstoned versioned
+        // vector never reaches live search. Non-versioned vectors keep
+        // the legacy physical delete.
+        let versioned_collection = self.vcs_is_versioned(collection).unwrap_or(false);
 
         for &id in ids {
             let Some(mut entity) = manager.get(id) else {
                 continue;
             };
-            if matches!(entity.data, EntityData::Row(_)) {
+            let is_versioned_graph = versioned_collection
+                && matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
+            let is_versioned_vector =
+                versioned_collection && matches!(entity.data, EntityData::Vector(_));
+            if matches!(entity.data, EntityData::Row(_))
+                || is_versioned_graph
+                || is_versioned_vector
+            {
                 let previous_xmax = entity.xmax;
                 if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }) {
                     if table_row_resolver.resolve_candidate(&entity).is_none() {
+                        continue;
+                    }
+                } else if is_versioned_vector {
+                    // Versioned vectors gate the delete on the statement
+                    // snapshot (not a crude `xmax != 0`) so a concurrent
+                    // delete whose snapshot predates a still-uncommitted
+                    // tombstone still targets the row, records its own
+                    // pending tombstone, and conflicts at commit
+                    // (first-committer-wins).
+                    if table_row_resolver.resolve_read_candidate(&entity).is_none() {
                         continue;
                     }
                 } else if entity.xmax != 0 {
@@ -546,9 +578,19 @@ impl RedDBRuntime {
             return Ok(());
         }
 
+        // Single-source documents keep promoted index columns (`score`) in the
+        // body, not as stored fields. Resolve each indexed column from the body
+        // and fold it into the field snapshots so the diff below sees the value
+        // move — for an ordinary stored column this adds nothing.
+        let pre = self
+            .index_store_ref()
+            .augment_body_derived_index_fields(&applied.pre_mutation_fields, &indexed_cols);
+        let post = self
+            .index_store_ref()
+            .augment_body_derived_index_fields(&post, &indexed_cols);
+
         if let Some(old_version) = applied.replaced_entity.as_ref() {
-            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = applied
-                .pre_mutation_fields
+            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = pre
                 .iter()
                 .filter(|(col, _)| indexed_cols.contains(col))
                 .cloned()
@@ -571,20 +613,14 @@ impl RedDBRuntime {
             return Ok(());
         }
 
-        let damage =
-            crate::application::entity::row_damage_vector(&applied.pre_mutation_fields, &post);
+        let damage = crate::application::entity::row_damage_vector(&pre, &post);
         if damage
             .touched_columns()
             .into_iter()
             .any(|col| indexed_cols.contains(col))
         {
             self.index_store_ref()
-                .index_entity_update(
-                    &applied.collection,
-                    applied.id,
-                    &applied.pre_mutation_fields,
-                    &post,
-                )
+                .index_entity_update(&applied.collection, applied.id, &pre, &post)
                 .map_err(crate::RedDBError::Internal)?;
         }
         Ok(())
@@ -2526,7 +2562,7 @@ fn build_returning_result(
                 .map(str::to_string),
             );
         } else if outputs.is_some() {
-            cols.push("red_entity_id".to_string());
+            cols.push("rid".to_string());
         }
         if let Some(first) = snapshots.first() {
             for (name, _) in first {
@@ -2573,23 +2609,15 @@ fn build_returning_result(
                             Arc::clone(&sys_key_updated_at()),
                             Value::UnsignedInteger(entity.updated_at),
                         );
-                        // Legacy alias: an explicit `RETURNING red_entity_id`
-                        // still resolves to the row's rid. Only surfaces when
-                        // the projected column list names it — `RETURNING *`
-                        // keeps the envelope clean (rid, not red_entity_id).
-                        values.insert(
-                            Arc::clone(&sys_key_red_entity_id()),
-                            Value::UnsignedInteger(out.id.raw()),
-                        );
                     } else {
                         values.insert(
-                            Arc::clone(&sys_key_red_entity_id()),
+                            Arc::clone(&sys_key_rid()),
                             Value::Integer(out.id.raw() as i64),
                         );
                     }
                 } else {
                     values.insert(
-                        Arc::clone(&sys_key_red_entity_id()),
+                        Arc::clone(&sys_key_rid()),
                         Value::Integer(out.id.raw() as i64),
                     );
                 }
@@ -2629,6 +2657,11 @@ fn public_returning_item_kind(entity: &crate::storage::UnifiedEntity) -> Option<
             Some("edge")
         }
         (_, crate::storage::EntityData::Row(_)) => Some(public_returning_row_kind(entity)),
+        // #1369 — every entity model must expose its `rid` in RETURNING *.
+        // Vectors carry their payload in `EntityData::Vector`, not `Row`, so
+        // they were falling through to a no-rid envelope
+        // and `RETURNING *` never surfaced the entity-id.
+        (_, crate::storage::EntityData::Vector(_)) => Some("vector"),
         _ => None,
     }
 }
@@ -4786,7 +4819,7 @@ mod tests {
     }
 
     /// Hook is a no-op when the row carries no `id` column. Conservative
-    /// match (case-sensitive `id`) — `Id`, `ID`, and `red_entity_id`
+    /// match (case-sensitive `id`) — `Id`, `ID`, and `rid`
     /// don't trigger it.
     #[test]
     fn auto_index_id_skips_when_no_id_column() {

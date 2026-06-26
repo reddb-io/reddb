@@ -239,11 +239,17 @@ mod tests {
     }
 
     fn cleanup(path: &Path) {
+        // Remove the data file AND every pager shadow sidecar via reddb-file's
+        // authoritative path helpers (the pager writes only these three shadows
+        // next to the data file). Deriving the paths through reddb-file keeps the
+        // file-suffix contract out of the server source (enforced by reddb-file's
+        // `server_source_does_not_embed_owned_file_suffixes`). Tests drop the
+        // pager BEFORE calling this (every call site uses an inner block) so the
+        // drop-time flush cannot re-create a sidecar after removal.
         let _ = fs::remove_file(path);
-        // Clean up companion files
-        let _ = fs::remove_file(reddb_file::layout::pager_header_shadow_path(path));
-        let _ = fs::remove_file(reddb_file::layout::pager_meta_shadow_path(path));
-        let _ = fs::remove_file(reddb_file::layout::pager_dwb_shadow_path(path));
+        for sidecar in reddb_file::layout::pager_shadow_sidecar_paths(path) {
+            let _ = fs::remove_file(sidecar);
+        }
     }
 
     fn dwb_path_for(path: &Path) -> PathBuf {

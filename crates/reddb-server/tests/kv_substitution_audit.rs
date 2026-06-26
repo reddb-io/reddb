@@ -80,8 +80,9 @@ fn dollar_secret_payload_lands_as_typed_function_call() {
         other => panic!("secret-ref arg must be Value::Text path, got {other:?}"),
     };
     assert_eq!(
-        path, "mycompany.injection.payload",
-        "path literal must be the secret path, not the secret value"
+        path, "red.vault/mycompany.injection.payload",
+        "path literal must be the secret path (namespaced under the red.vault \
+         collection by the reddb-rql parser), not the secret value"
     );
 }
 
@@ -302,7 +303,11 @@ fn set_config_attacker_value_does_not_alter_predicate_at_parse() {
                         Value::Text(s) => s.to_string(),
                         other => panic!("path arg must be Value::Text, got {other:?}"),
                     };
-                    assert_eq!(text, "my.attack", "argument must be the typed path literal");
+                    assert_eq!(
+                        text, "red.config/my.attack",
+                        "argument must be the typed path literal (namespaced \
+                         under the red.config collection by the reddb-rql parser)"
+                    );
                 }
                 other => panic!("config path arg must be Literal(Text), got {other:?}"),
             }

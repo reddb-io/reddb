@@ -687,9 +687,25 @@ mod tests {
     }
 
     fn cleanup_l2(path: &Path) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(reddb_file::blob_cache_control_path(&path));
-        let _ = std::fs::remove_file(reddb_file::blob_cache_double_write_path(path));
+        // Remove the L2 `.rdb` AND every sidecar so nothing is left for the leak
+        // guard (scripts/check-temp-residue.sh). The blob-cache L2 file format is
+        // owned by reddb-file, so derive each sidecar path through its
+        // authoritative helpers rather than re-declaring suffix literals here
+        // (enforced by `server_does_not_redeclare_blob_cache_l2_file_format`).
+        // Callers must drop the cache BEFORE calling this so the pager's
+        // drop-time flush cannot re-create a sidecar after removal.
+        let control = reddb_file::blob_cache_control_path(path);
+        for sidecar in [
+            path.to_path_buf(),
+            reddb_file::layout::pager_header_path(path),
+            reddb_file::layout::pager_meta_path(path),
+            reddb_file::layout::pager_dwb_path(path),
+            reddb_file::blob_cache_double_write_path(path),
+            reddb_file::blob_cache_control_temp_path(&control),
+            control,
+        ] {
+            let _ = std::fs::remove_file(sidecar);
+        }
     }
 
     fn l2_cache(path: &Path) -> BlobCache {
@@ -866,6 +882,7 @@ mod tests {
             "rebuilt filter FPR {observed_fpr:.4} exceeded target+tolerance"
         );
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -898,6 +915,7 @@ mod tests {
         assert!(stats.l2_compression_ratio_observed() > 1.0);
         assert!(stats.l2_bytes_saved_total() > 0);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -925,6 +943,7 @@ mod tests {
         assert_eq!(stats.l2_bytes_saved_total(), 0);
         assert_eq!(stats.l2_compression_ratio_observed(), 1.0);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -953,6 +972,7 @@ mod tests {
         assert_eq!(stats.l2_compression_skipped_total(), 1);
         assert_eq!(stats.l2_bytes_saved_total(), 0);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 
@@ -978,6 +998,7 @@ mod tests {
         assert_eq!(stats.l2_bytes_in_use, payload.len() as u64);
         assert_eq!(stats.l2_compression_skipped_total(), 1);
 
+        drop(cache);
         cleanup_l2(&path);
     }
 }

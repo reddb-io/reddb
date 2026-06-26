@@ -27,7 +27,9 @@
 //! Index-only scans are the killer perf win for "narrow"
 //! queries that select only indexed columns:
 //!
-//!     SELECT user_id FROM users WHERE email = ?
+//! ```text
+//! SELECT user_id FROM users WHERE email = ?
+//! ```
 //!
 //! With an index on `email` covering `user_id`, the planner can
 //! skip the heap fetch entirely. But that's only safe when the

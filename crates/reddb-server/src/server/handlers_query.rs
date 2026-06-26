@@ -2329,7 +2329,8 @@ fn schema_json_field(
     name: &str,
 ) -> Option<JsonValue> {
     match schema_field(record, name)? {
-        Value::Json(bytes) => crate::json::from_slice(bytes).ok(),
+        Value::Json(bytes) => crate::document_body::decode_container_to_json(bytes)
+            .or_else(|| crate::json::from_slice(bytes).ok()),
         Value::Text(text) => crate::json::from_str(text).ok(),
         _ => None,
     }
