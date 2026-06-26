@@ -179,6 +179,10 @@ harness = false
 name = "columnar_read_bench"
 harness = false
 
+[[bench]]
+name = "row_id_intersection_bench"
+harness = false
+
 [dev-dependencies]
 # Criterion benchmark harness for blob_cache_bench (#190).
 criterion = { version = "0.8", features = ["html_reports"] }
