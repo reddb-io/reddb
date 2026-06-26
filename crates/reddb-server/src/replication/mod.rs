@@ -38,6 +38,7 @@ pub mod reconnect;
 pub mod replica;
 pub mod rollback;
 pub mod scheduler;
+pub mod simulation;
 pub mod swap_db;
 pub mod topology_advertiser;
 pub mod witness;
