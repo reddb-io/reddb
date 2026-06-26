@@ -278,9 +278,10 @@ impl RedDBServer {
     pub(crate) fn handle_cluster_status(&self) -> HttpResponse {
         use crate::presentation::cluster_status_json::{
             cluster_status_json, ClusterStatusInputs, ConnectionSnapshot, DeploymentShapeView,
-            LatencySample, ProcessRoleView, ReplicaView, ReplicationSnapshot, StorageSnapshot,
-            SystemSnapshot, TransportListenerView, TransportSnapshot, WalSnapshot,
+            LatencySample, OccupancyView, ProcessRoleView, ReplicaView, ReplicationSnapshot,
+            StorageSnapshot, SystemSnapshot, TransportListenerView, TransportSnapshot, WalSnapshot,
         };
+        use crate::runtime::occupancy_sampler::Occupancy;
 
         let lifecycle = self.runtime.lifecycle();
         let phase = lifecycle.phase();
@@ -339,6 +340,16 @@ impl RedDBServer {
 
         let (current_lsn, last_archived_lsn) = self.runtime.wal_archive_progress();
 
+        // Issue #1244 — take a fresh node CPU/RAM occupancy reading. CPU is
+        // measured over the interval since the previous status read; map the
+        // sampler's honest three-state result onto the presentation view.
+        let occupancy = self.runtime.sample_occupancy();
+        let occupancy_view = |o: Occupancy| match o {
+            Occupancy::Measured(ratio) => OccupancyView::Measured(ratio),
+            Occupancy::NotSampled => OccupancyView::NotSampled,
+            Occupancy::Unsupported => OccupancyView::Unsupported,
+        };
+
         let system = &runtime_stats.system;
         let system_view = SystemSnapshot {
             pid: system.pid,
@@ -360,6 +371,8 @@ impl RedDBServer {
             } else {
                 Some(system.available_memory_bytes)
             },
+            cpu_usage: occupancy_view(occupancy.cpu),
+            ram_usage: occupancy_view(occupancy.ram),
         };
 
         let replicas = self
