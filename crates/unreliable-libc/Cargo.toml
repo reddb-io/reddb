@@ -24,8 +24,16 @@ path = "src/lib.rs"
 name = "wal_workload"
 path = "src/bin/wal_workload.rs"
 
+# The seeded typed-value workload (#1356, pillar B), driven under the shim so a
+# real power-cut can crash it mid-write and the recovered committed values can be
+# compared against the seed's deterministic model.
+[[bin]]
+name = "typed_workload"
+path = "src/bin/typed_workload.rs"
+
 [dependencies]
 reddb-file = { workspace = true }
+reddb-types = { workspace = true }
 crc32fast = "1.5"
 
 [build-dependencies]
