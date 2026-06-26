@@ -1229,6 +1229,11 @@ struct RuntimeInner {
     /// model that `/metrics`, `/cluster/status`, and the red-ui percentile
     /// panels all consume; counters reset on restart by design.
     query_latency_telemetry: std::sync::Arc<query_latency_telemetry::QueryLatencyTelemetry>,
+    /// Issue #1244 — node CPU/RAM occupancy sampler (ADR 0060 §2 "node
+    /// samples"). Process-local measurement + current-snapshot read model
+    /// `/cluster/status` consumes; sampled on-demand from the status
+    /// handler. See `occupancy_sampler` for the overhead/interval contract.
+    occupancy_sampler: std::sync::Arc<occupancy_sampler::OccupancySampler>,
     /// Issue #742 — consumer presence (heartbeat / lease / lifecycle
     /// state per (queue, group, consumer)). Process-local in this
     /// slice; durability across restart lands in the follow-up that
@@ -1392,6 +1397,7 @@ pub mod locking;
 pub(crate) mod materialization_limit;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
+pub(crate) mod occupancy_sampler;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub mod query_audit;
