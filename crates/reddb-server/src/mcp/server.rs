@@ -312,6 +312,8 @@ impl McpServer {
             "reddb_graph_clustering" => self.tool_graph_clustering(args),
             "reddb_create_collection" => self.tool_create_collection(args),
             "reddb_drop_collection" => self.tool_drop_collection(args),
+            "reddb_rql_validate" => self.tool_rql_validate(args),
+            "reddb_rql_explain" => self.tool_rql_explain(args),
             "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
             "reddb_auth_create_user" => self.tool_auth_create_user(args),
             "reddb_auth_login" => self.tool_auth_login(args),
@@ -1298,6 +1300,45 @@ impl McpServer {
         resp.insert("dropped".into(), JsonValue::String(name.to_string()));
         json_to_string(&JsonValue::Object(resp)).map_err(|e| format!("serialization error: {}", e))
     }
+
+    fn tool_rql_validate(&self, args: &JsonValue) -> Result<String, String> {
+        let rql = get_str_field(args, "rql")?;
+        let verdict = reddb_rql::knowledge::validate_rql(rql);
+        let json = rql_validation_json(&verdict);
+        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_rql_explain(&self, args: &JsonValue) -> Result<String, String> {
+        let rql = get_str_field(args, "rql")?;
+        let explanation = reddb_rql::knowledge::explain_rql(rql);
+
+        let mut obj = Map::new();
+        obj.insert(
+            "validation".to_string(),
+            rql_validation_json(&explanation.validation),
+        );
+        if let Some(ast) = &explanation.ast {
+            obj.insert("ast".to_string(), JsonValue::String(ast.clone()));
+        }
+        if let Some(optimized) = &explanation.optimized_ast {
+            obj.insert(
+                "optimized_ast".to_string(),
+                JsonValue::String(optimized.clone()),
+            );
+        }
+        obj.insert(
+            "applied_passes".to_string(),
+            JsonValue::Array(
+                explanation
+                    .applied_passes
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        );
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1322,6 +1363,51 @@ fn format_mcp_ask_parse_error(err: crate::runtime::ai::mcp_ask_tool::ParseError)
         }
         ParseError::UnknownOption { path } => format!("unknown option {path}"),
     }
+}
+
+/// Render an RQL parse verdict (ADR 0061, #1317) as the JSON the
+/// `reddb_rql_validate` / `reddb_rql_explain` tools return.
+fn rql_validation_json(verdict: &reddb_rql::knowledge::RqlValidation) -> JsonValue {
+    let mut obj = Map::new();
+    obj.insert("valid".to_string(), JsonValue::Bool(verdict.valid));
+    if let Some(statement) = &verdict.statement {
+        obj.insert(
+            "statement".to_string(),
+            JsonValue::String(statement.clone()),
+        );
+    }
+    obj.insert(
+        "has_with_clause".to_string(),
+        JsonValue::Bool(verdict.has_with_clause),
+    );
+    if let Some(error) = &verdict.error {
+        obj.insert("error".to_string(), rql_diagnostic_json(error));
+    }
+    JsonValue::Object(obj)
+}
+
+/// Render a structured RQL parse diagnostic as JSON.
+fn rql_diagnostic_json(diag: &reddb_rql::knowledge::RqlDiagnostic) -> JsonValue {
+    let mut obj = Map::new();
+    obj.insert(
+        "message".to_string(),
+        JsonValue::String(diag.message.clone()),
+    );
+    obj.insert("line".to_string(), JsonValue::Number(diag.line as f64));
+    obj.insert("column".to_string(), JsonValue::Number(diag.column as f64));
+    obj.insert("offset".to_string(), JsonValue::Number(diag.offset as f64));
+    obj.insert("kind".to_string(), JsonValue::String(diag.kind.clone()));
+    obj.insert(
+        "expected".to_string(),
+        JsonValue::Array(
+            diag.expected
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    JsonValue::Object(obj)
 }
 
 fn parse_direction(s: Option<&str>) -> RuntimeGraphDirection {
@@ -1921,6 +2007,138 @@ mod tests {
                 "param did not bind: {e}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // RQL validate / explain tools (ADR 0061, #1317), exercised at the
+    // JSON-RPC tools/call seam.
+    // ------------------------------------------------------------------
+
+    fn call_tool(srv: &McpServer, name: &str, rql: &str) -> JsonValue {
+        let params = parse_json(
+            &json_to_string(&{
+                let mut p = Map::new();
+                p.insert("name".to_string(), JsonValue::String(name.to_string()));
+                let mut args = Map::new();
+                args.insert("rql".to_string(), JsonValue::String(rql.to_string()));
+                p.insert("arguments".to_string(), JsonValue::Object(args));
+                JsonValue::Object(p)
+            })
+            .expect("serialize params"),
+        );
+        let response = srv.handle_tools_call(Some(&JsonValue::Number(1.0)), Some(&params));
+        parse_json(&response)
+    }
+
+    fn tool_result_text(parsed: &JsonValue) -> String {
+        parsed
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("tool text")
+            .to_string()
+    }
+
+    #[test]
+    fn tools_list_registers_rql_validate_and_explain() {
+        let srv = make_server();
+        let response = srv.handle_tools_list(Some(&JsonValue::Number(1.0)));
+        let parsed = parse_json(&response);
+        let tools = parsed
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(JsonValue::as_array)
+            .expect("tools array");
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(JsonValue::as_str))
+            .collect();
+        assert!(names.contains(&"reddb_rql_validate"), "{names:?}");
+        assert!(names.contains(&"reddb_rql_explain"), "{names:?}");
+    }
+
+    #[test]
+    fn tools_call_rql_validate_accepts_valid_query() {
+        let srv = make_server();
+        let parsed = call_tool(&srv, "reddb_rql_validate", "SELECT * FROM users");
+        let result = parsed.get("result").expect("result");
+        assert_ne!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        let envelope = parse_json(&tool_result_text(&parsed));
+        assert_eq!(
+            envelope.get("valid").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            envelope.get("statement").and_then(JsonValue::as_str),
+            Some("Table")
+        );
+    }
+
+    #[test]
+    fn tools_call_rql_validate_reports_structured_error() {
+        let srv = make_server();
+        let parsed = call_tool(&srv, "reddb_rql_validate", "SELECT * FROM");
+        let envelope = parse_json(&tool_result_text(&parsed));
+        assert_eq!(
+            envelope.get("valid").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        let error = envelope.get("error").expect("structured error");
+        assert!(error
+            .get("message")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|m| !m.is_empty()));
+        assert!(error.get("line").and_then(JsonValue::as_f64).is_some());
+        assert!(error
+            .get("kind")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|k| !k.is_empty()));
+    }
+
+    #[test]
+    fn tools_call_rql_explain_returns_ast_and_plan() {
+        let srv = make_server();
+        let parsed = call_tool(
+            &srv,
+            "reddb_rql_explain",
+            "SELECT * FROM users WHERE id = 1",
+        );
+        let envelope = parse_json(&tool_result_text(&parsed));
+        assert_eq!(
+            envelope
+                .get("validation")
+                .and_then(|v| v.get("valid"))
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert!(envelope.get("ast").and_then(JsonValue::as_str).is_some());
+        assert!(envelope
+            .get("optimized_ast")
+            .and_then(JsonValue::as_str)
+            .is_some());
+        assert!(envelope
+            .get("applied_passes")
+            .and_then(JsonValue::as_array)
+            .is_some());
+    }
+
+    #[test]
+    fn tools_call_rql_validate_missing_field_errors() {
+        let srv = make_server();
+        let params = parse_json(r#"{"name":"reddb_rql_validate","arguments":{}}"#);
+        let response = srv.handle_tools_call(Some(&JsonValue::Number(1.0)), Some(&params));
+        let parsed = parse_json(&response);
+        let result = parsed.get("result").expect("result");
+        assert_eq!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
     }
 
     struct EnvVarGuard {
