@@ -2091,6 +2091,20 @@ fn test_parse_update_explicit_item_targets() {
 }
 
 #[test]
+fn test_parse_update_documents_path_target_round_trips() {
+    let sql = "UPDATE docs DOCUMENTS SET profile.address.city = 'Lisbon' WHERE name = 'ada'";
+    let query = parse(sql).unwrap();
+    let QueryExpr::Update(update) = &query else {
+        panic!("Expected UpdateQuery");
+    };
+
+    assert_eq!(update.target, crate::ast::UpdateTarget::Documents);
+    assert_eq!(update.assignment_exprs[0].0, "profile.address.city");
+    assert_eq!(update.assignments[0].0, "profile.address.city");
+    assert_eq!(crate::renderer::render(&query), sql);
+}
+
+#[test]
 fn test_parse_update_from_any_remains_rejected() {
     let err = parse("UPDATE FROM ANY SET status = 'bad'").unwrap_err();
     assert!(err.to_string().contains("expected: identifier"));
