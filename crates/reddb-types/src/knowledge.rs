@@ -436,8 +436,7 @@ pub fn operators_for(ty: DataType) -> Vec<&'static crate::operator_catalog::Oper
     OPERATOR_CATALOG
         .iter()
         .filter(|entry| {
-            let lhs_matches =
-                entry.kind != OperatorKind::Prefix && entry.lhs_type == ty;
+            let lhs_matches = entry.kind != OperatorKind::Prefix && entry.lhs_type == ty;
             lhs_matches || entry.rhs_type == ty
         })
         .collect()
@@ -465,7 +464,10 @@ pub fn type_facts_json(ty: DataType) -> JsonValue {
         .into_iter()
         .map(|entry| {
             let mut obj = Map::new();
-            obj.insert("symbol".to_string(), JsonValue::String(entry.name.to_string()));
+            obj.insert(
+                "symbol".to_string(),
+                JsonValue::String(entry.name.to_string()),
+            );
             obj.insert(
                 "kind".to_string(),
                 JsonValue::String(operator_kind_label(entry.kind).to_string()),
@@ -478,7 +480,10 @@ pub fn type_facts_json(ty: DataType) -> JsonValue {
                 JsonValue::String(entry.lhs_type.to_string())
             };
             obj.insert("lhs".to_string(), lhs);
-            obj.insert("rhs".to_string(), JsonValue::String(entry.rhs_type.to_string()));
+            obj.insert(
+                "rhs".to_string(),
+                JsonValue::String(entry.rhs_type.to_string()),
+            );
             obj.insert(
                 "returns".to_string(),
                 JsonValue::String(entry.return_type.to_string()),
@@ -496,7 +501,10 @@ pub fn type_facts_json(ty: DataType) -> JsonValue {
         "category".to_string(),
         JsonValue::String(category_label(ty.category()).to_string()),
     );
-    obj.insert("is_preferred".to_string(), JsonValue::Bool(ty.is_preferred()));
+    obj.insert(
+        "is_preferred".to_string(),
+        JsonValue::Bool(ty.is_preferred()),
+    );
     obj.insert("casts".to_string(), JsonValue::Array(casts));
     obj.insert("operators".to_string(), JsonValue::Array(operators));
     JsonValue::Object(obj)
@@ -698,15 +706,15 @@ reference"
     #[test]
     fn infer_literal_type_maps_json_shapes() {
         assert_eq!(infer_literal_type(&JsonValue::Null), DataType::Nullable);
-        assert_eq!(infer_literal_type(&JsonValue::Bool(true)), DataType::Boolean);
+        assert_eq!(
+            infer_literal_type(&JsonValue::Bool(true)),
+            DataType::Boolean
+        );
         assert_eq!(
             infer_literal_type(&JsonValue::Number(42.0)),
             DataType::Integer
         );
-        assert_eq!(
-            infer_literal_type(&JsonValue::Number(3.5)),
-            DataType::Float
-        );
+        assert_eq!(infer_literal_type(&JsonValue::Number(3.5)), DataType::Float);
         assert_eq!(
             infer_literal_type(&JsonValue::String("hi".to_string())),
             DataType::Text
@@ -778,14 +786,19 @@ reference"
         );
         let casts = facts.get("casts").and_then(JsonValue::as_array).unwrap();
         assert!(
-            casts.iter().any(|c| c.get("target").and_then(JsonValue::as_str)
-                == Some("FLOAT")),
+            casts
+                .iter()
+                .any(|c| c.get("target").and_then(JsonValue::as_str) == Some("FLOAT")),
             "INTEGER → FLOAT must appear in the casts"
         );
-        let operators = facts.get("operators").and_then(JsonValue::as_array).unwrap();
+        let operators = facts
+            .get("operators")
+            .and_then(JsonValue::as_array)
+            .unwrap();
         assert!(
-            operators.iter().any(|o| o.get("symbol").and_then(JsonValue::as_str)
-                == Some("+")),
+            operators
+                .iter()
+                .any(|o| o.get("symbol").and_then(JsonValue::as_str) == Some("+")),
             "the + operator must appear in the operators"
         );
     }

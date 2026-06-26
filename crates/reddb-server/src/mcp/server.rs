@@ -1350,14 +1350,17 @@ impl McpServer {
         let type_name = args.get("type").and_then(|v| v.as_str());
         let value = args.get("value");
         if type_name.is_none() && value.is_none() {
-            return Err("provide one of 'type' (a type name) or 'value' (a JSON literal)".to_string());
+            return Err(
+                "provide one of 'type' (a type name) or 'value' (a JSON literal)".to_string(),
+            );
         }
-        let facts = reddb_types::knowledge::type_of_json(type_name, value).ok_or_else(|| {
-            match type_name {
-                Some(name) => format!("unknown type name '{name}'"),
-                None => "could not resolve a type from the request".to_string(),
-            }
-        })?;
+        let facts =
+            reddb_types::knowledge::type_of_json(type_name, value).ok_or_else(
+                || match type_name {
+                    Some(name) => format!("unknown type name '{name}'"),
+                    None => "could not resolve a type from the request".to_string(),
+                },
+            )?;
         json_to_string(&facts).map_err(|e| format!("serialization error: {}", e))
     }
 }
@@ -1937,7 +1940,10 @@ mod tests {
             "casts: {casts:?}"
         );
         // Applicable operators include arithmetic +.
-        let operators = facts.get("operators").and_then(JsonValue::as_array).unwrap();
+        let operators = facts
+            .get("operators")
+            .and_then(JsonValue::as_array)
+            .unwrap();
         assert!(
             operators
                 .iter()
