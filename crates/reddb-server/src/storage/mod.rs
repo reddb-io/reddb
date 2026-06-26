@@ -210,6 +210,7 @@ pub use unified::{
     VectorQueryBuilder,
     VectorSearchResult,
     WhereClause,
+    FIRST_USER_ENTITY_ID,
     // Query DSL - Entry point for all queries
     Q as Query,
 };

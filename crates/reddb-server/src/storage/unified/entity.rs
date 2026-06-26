@@ -9,6 +9,19 @@ use std::sync::Arc;
 
 use crate::storage::schema::Value;
 
+/// The first entity-id handed to user-inserted data. Ids `1..FIRST_USER_ENTITY_ID`
+/// are reserved for the internal collection-descriptor and config-default entities
+/// the engine seeds at boot, so the first user-inserted `rid` is a STABLE,
+/// documented value regardless of how many config defaults a build ships.
+///
+/// Before this floor existed the offset drifted upward by one for every config
+/// default added (101 → 114 over time), silently breaking the documented
+/// file-format invariant (#1369). The boot sequence bumps the allocator up to
+/// this floor after seeding internals; it only ever raises the counter, so a
+/// database that already holds user data is untouched. Mirrors
+/// `FIRST_USER_LABEL_ID` in the graph label registry.
+pub const FIRST_USER_ENTITY_ID: u64 = 1024;
+
 /// Unique identifier for any entity in the unified storage
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId(pub u64);
@@ -616,7 +629,22 @@ pub fn compute_entity_field_bloom(data: &EntityData) -> u64 {
                 return 0;
             }
             if let Some(named) = &row.named {
-                named.keys().fold(0u64, |acc, k| acc | field_name_bloom(k))
+                let mut bloom = named.keys().fold(0u64, |acc, k| acc | field_name_bloom(k));
+                // Single-source documents no longer materialise promoted
+                // columns, so the body's top-level keys are the only place a
+                // `WHERE`/projection field lives. Fold them into the bloom so
+                // the field-bloom gate doesn't reject a row before the body
+                // read fallback ever runs. Inert for non-document rows (no
+                // binary-container `body` field) — `container_field_names`
+                // self-gates on the RDOC magic.
+                if let Some(Value::Json(bytes)) = named.get("body") {
+                    if let Some(names) = crate::document_body::container_field_names(bytes) {
+                        for name in names {
+                            bloom |= field_name_bloom(&name);
+                        }
+                    }
+                }
+                bloom
             } else {
                 0
             }
@@ -712,12 +740,25 @@ impl UnifiedEntity {
         self.logical_id = Some(logical_id);
     }
 
-    /// Ensure table rows written by the current engine carry explicit
-    /// logical identity. Other models retain the legacy implicit mapping
-    /// until their MVCC rollout adopts the resolver.
+    /// Ensure entities written by the current engine carry explicit
+    /// logical identity. Table rows + documents (Phase 1/2) and graph
+    /// nodes/edges (Phase 3) participate in the multi-model MVCC
+    /// versioning rollout and so need a stable logical id for
+    /// version-chain selection. Stamping the logical id is inert for
+    /// non-versioned collections: history only accrues through
+    /// `install_versioned_table_row_update`, which is gated on the
+    /// collection `versioned` flag, so a stamped-but-never-superseded
+    /// entity keeps `logical_id == id` and behaves exactly as before.
+    /// Vectors are intentionally excluded pending their read-path follow
+    /// up (no snapshot-honoring `VECTOR SEARCH`).
     #[inline]
     pub(crate) fn ensure_table_logical_id(&mut self) {
-        if matches!(self.kind, EntityKind::TableRow { .. }) && self.logical_id.is_none() {
+        if self.logical_id.is_none()
+            && matches!(
+                self.kind,
+                EntityKind::TableRow { .. } | EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+            )
+        {
             self.logical_id = Some(self.id);
         }
     }

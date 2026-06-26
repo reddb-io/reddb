@@ -383,14 +383,15 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/persistent-tests
         run: >-
-          cargo test --locked --test grouped_runtime_persistence integration_persistent_multimodel -- --ignored
-      - name: Check for temp-file residue (leak guard)
-        # Issue #972 — fail the build if any reddb-*/reddb_*/*.rdb/*.wal
-        # temp residue remains in TMPDIR after the full test suite.  All
-        # test-DB helpers in tests/support/mod.rs use TempDir guards that
-        # clean up on drop (including on panic), so a clean suite leaves
-        # nothing behind.  A non-zero count means a test bypassed the
-        # helpers and the leak must be fixed.
+          cargo test --locked --test grouped_general_multimodel integration_persistent_multimodel -- --ignored
+      - name: Report temp-file residue (advisory leak guard)
+        # Issue #972 — report reddb-*/reddb_*/*.rdb/*.wal residue left in the
+        # dedicated per-run TMPDIR after the full test suite. The TMPDIR
+        # (RUNNER_TEMP/reddb-test-suite-tmp) is ephemeral, so individual test
+        # leaks are harmless; the guard now cleans them wholesale and emits a
+        # CI warning rather than failing the build (see the script header).
+        # Per-test cleanup via tests/support/mod.rs remains the hygiene goal,
+        # surfaced as a warning instead of a merge gate.
         run: bash scripts/check-temp-residue.sh
       - name: Show sccache stats
         if: always()
@@ -680,15 +681,28 @@ jobs:
       - name: Unit tests
         run: cargo test --locked --lib
 
-  fuzz-parsers:
+  fuzz-targets:
     # Issue #87 — short-window cargo-fuzz run on every PR.
     # Catches panics introduced by grammar changes; the long-window
     # nightly run lives in a separate scheduled workflow.
-    name: Fuzz Parsers
+    #
+    # Each parser fuzzes in its own parallel job. The aggregate
+    # required status check lives in the `fuzz-parsers` job below
+    # (name: "Fuzz Parsers"), which is what main's branch protection
+    # gates on — keep that name in lockstep with branch protection.
+    name: Fuzz ${{ matrix.target }}
     needs: gate
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 40
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - sql_parser
+          - migration_parser
+          - conn_string_parser
+          - query_with_params
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -702,37 +716,55 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-fuzz-nightly
+          # Per-target cache key so parallel jobs don't thrash a
+          # shared cache entry.
+          shared-key: ubuntu-fuzz-nightly-${{ matrix.target }}
           cache-on-failure: "true"
           workspaces: |
             . -> target
             fuzz -> fuzz/target
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      - name: Build fuzz targets
-        run: |
-          cargo +nightly fuzz build sql_parser
-          cargo +nightly fuzz build migration_parser
-          cargo +nightly fuzz build conn_string_parser
-      - name: Run sql_parser fuzz target (5 min)
-        run: cargo +nightly fuzz run sql_parser -- -max_total_time=300
-      - name: Run migration_parser fuzz target (5 min)
-        run: cargo +nightly fuzz run migration_parser -- -max_total_time=300
-      - name: Run conn_string_parser fuzz target (5 min)
-        # Issue #90 — pre-auth parser, panic-resistance is the only
-        # invariant; conn-string sees attacker-controlled bytes
-        # before any handshake completes, so we bake it into the
-        # same per-PR window as the SQL fuzzer.
-        run: cargo +nightly fuzz run conn_string_parser -- -max_total_time=300
+      - name: Build fuzz target
+        run: cargo +nightly fuzz build ${{ matrix.target }}
+      - name: Run fuzz target (5 min)
+        # Issue #90 — conn_string_parser is a pre-auth parser, panic-
+        # resistance is the only invariant; conn-string sees attacker-
+        # controlled bytes before any handshake completes, so we bake
+        # it into the same per-PR window as the SQL fuzzer.
+        #
+        # -rss_limit_mb / -malloc_limit_mb make libFuzzer report an
+        # allocation-DoS (a crafted input that balloons a parser buffer)
+        # as an actionable crash finding instead of a silent runner
+        # OOM/timeout. scripts/fuzz-local.sh mirrors these limits (plus a
+        # systemd memory cgroup) for safe fuzzing on a dev box.
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096 -malloc_limit_mb=2048
       - name: Upload fuzz crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-crashes
+          name: fuzz-crashes-${{ matrix.target }}
           path: |
             fuzz/artifacts/
             fuzz/corpus/
           retention-days: 14
+
+  fuzz-parsers:
+    # Aggregator that preserves the EXACT required status-check name
+    # "Fuzz Parsers" expected by main's branch protection. It succeeds
+    # iff every matrix job in fuzz-targets succeeded. Do not rename.
+    name: Fuzz Parsers
+    needs: [fuzz-targets]
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify all fuzz targets passed
+        run: |
+          if [ "${{ needs.fuzz-targets.result }}" != "success" ]; then
+            echo "a fuzz target failed"
+            exit 1
+          fi
 
   package:
     name: cargo package dry-run

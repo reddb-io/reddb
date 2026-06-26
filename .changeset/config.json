@@ -8,6 +8,7 @@
       "@reddb-io/sdk",
       "@reddb-io/client",
       "@reddb-io/client-bun",
+      "@reddb-io/mcp",
       "@reddb-io/internal-asset-fetcher",
       "@reddb-io/internal-bin-resolver",
       "@reddb-io/internal-version-compare"

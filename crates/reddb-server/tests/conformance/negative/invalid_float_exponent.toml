@@ -1,5 +1,5 @@
 input = "SELECT * FROM users LIMIT 1e+"
 expected_error_substring = "Invalid float: 1e+"
 expected_error_kind = "Syntax"
-source = "crates/reddb-server/src/storage/query/lexer.rs:1024"
+source = "crates/reddb-rql/src/lexer.rs:1024"
 kind = "negative"

@@ -92,7 +92,13 @@ fn sql_json_extract_in_select_projects_leaf_value() {
         page.result.records
     );
     let record = &page.result.records[0];
-    let label = "JSON_EXTRACT";
+    // An unaliased function projection is labeled with its source-text form
+    // (#1370): `json_extract(body, '$.level')` lowers to the `JSON_EXTRACT`
+    // builtin, so the output column reads `JSON_EXTRACT(body, '$.level')`.
+    // The contract this test pins is that the function dispatched and the
+    // path resolved — not the exact column header — so we look the value up
+    // under the reconstructed label.
+    let label = "JSON_EXTRACT(body, '$.level')";
     match record.get(label) {
         Some(Value::Text(value)) => {
             // JSON_EXTRACT returns the raw JSON encoding of the leaf,

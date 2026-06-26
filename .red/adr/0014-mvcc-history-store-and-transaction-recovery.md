@@ -371,3 +371,63 @@ events unavoidable.
 - Old-snapshot index performance: v1.0 table-row correctness requires MVCC
   recheck plus fallback scan/history lookup. Historical secondary indexes are
   explicitly deferred as a performance feature.
+
+## Amendment — 2026-06-25: multi-model history adoption (lifting the non-table deferral)
+
+**Status:** Accepted — extends the Decision above.
+
+The original rollout contract deferred non-table models: *"non-table models must
+not claim the new guarantee until their read and write paths explicitly adopt the
+resolver"* and *"Full multi-model adoption is deferred behind table-row
+correctness."* Table-row correctness is now shipped and stable (released in
+v1.14.0), so that deferral is lifted by product decision: **non-table collections
+explicitly marked `versioned` adopt the MVCC history-store resolver**, so
+AS OF / time-travel / VCS merge work across models, not only tables. This is what
+makes the VCS ("Git for Data") premise hold for every model.
+
+### Gating principle
+
+History retention for non-table models is **opt-in per collection via the
+`versioned` flag** (`runtime.vcs_is_versioned()`). Non-versioned collections —
+including the `red_config` KV and the secrets vault — keep last-writer-wins and
+the zero-scan fast path unchanged. Table rows remain unconditionally versioned
+(the original baseline). The xmin/xmax stamping, `logical_id` version-selection
+(`resolve_read_candidate`), commit-time first-committer-wins
+(`check_table_row_write_conflicts`), tombstone-on-delete, and VACUUM reclamation
+are reused unchanged — every model travels the same machinery rather than
+duplicating rules.
+
+### Adopted (branch `feat/versioned-kv-mvcc-history`)
+
+- **KV** — full: tombstone-on-PUT/DELETE, snapshot version-selection (keyed on the
+  `key` field), first-committer-wins. Caught a real bug along the way: the
+  autocommit-pool xmin is non-monotonic vs commit xids, so the new version's xmin
+  is restamped via `begin()/commit()`.
+- **Document** — full: stored as `EntityKind::TableRow` with `logical_id`, so reads
+  and SQL `UPDATE` already versioned; the only gap was PATCH (mutated in place) —
+  now emits a versioned post-image.
+- **Graph** (nodes/edges) — full: own `EntityKind` but the machinery is
+  kind-agnostic; stamp `logical_id`, open the PATCH/UPDATE and DELETE gates; the
+  read path was already snapshot-correct.
+- **Vector** — live-read correct + write-side history: the TurboQuant index is
+  append-only (no removal), so search post-filters every candidate by
+  snapshot/xmax visibility. This also fixed a pre-existing bug where
+  `DELETE FROM <vector> WHERE rid=N` matched zero rows (vector deletes never took
+  effect) and deleted vectors lingered in search results. Versioned vector deletes
+  tombstone with first-committer-wins.
+
+### Still deferred (scoped follow-ups; `#[ignore]`d specs left in `tests/grouped/vcs/`)
+
+- **Vector AS OF read surface** — `VECTOR SEARCH` has no `AS OF` grammar and vectors
+  are not row-scannable, so reading a historical vector version back needs
+  grammar + planner + a historical-version resolver. Write-side history is retained
+  physically, so this lands later without a data-model change.
+- **CDC/watch-event transactionality** — KV (`record_kv_watch_event`) and document
+  CDC emit eagerly during the write rather than at commit, so a rolled-back or
+  conflicted versioned write still emits its event. The table path defers CDC to
+  `finalize_pending_*`; the non-table paths should follow (consistent with the CDC
+  idempotence deferral above).
+- **PATCH vs SQL-UPDATE gating** — SQL `UPDATE` versions table rows unconditionally
+  (the baseline); the new non-table PATCH path is flag-gated. For a non-versioned
+  document the two verbs therefore differ in history accrual (invisible without
+  AS OF, which is rejected for non-versioned). Align if uniform behavior is wanted.
