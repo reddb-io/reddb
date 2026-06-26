@@ -312,6 +312,8 @@ impl McpServer {
             "reddb_graph_clustering" => self.tool_graph_clustering(args),
             "reddb_create_collection" => self.tool_create_collection(args),
             "reddb_drop_collection" => self.tool_drop_collection(args),
+            "reddb_rql_validate" => self.tool_rql_validate(args),
+            "reddb_rql_explain" => self.tool_rql_explain(args),
             "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
             "reddb_auth_create_user" => self.tool_auth_create_user(args),
             "reddb_auth_login" => self.tool_auth_login(args),
@@ -427,6 +429,32 @@ impl McpServer {
             .execute_ask("ASK <mcp>", &ask)
             .map_err(|e| format!("{}", e))?;
         let json = crate::rpc_stdio::query_result_to_json(&result);
+        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    /// Parse a submitted RQL/SQL string through the real `reddb-io-rql`
+    /// parser and return the verdict (ADR 0061). No execution, no side
+    /// effects — the tool exists so an agent learns the dialect by
+    /// submitting a query and reading the structured result.
+    fn tool_rql_validate(&self, args: &JsonValue) -> Result<String, String> {
+        let rql = args
+            .get("rql")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'rql'")?;
+        let json = rql_validate_json(rql);
+        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    /// Parse a submitted RQL/SQL string through the real `reddb-io-rql`
+    /// parser and, on success, run it through the real query optimizer to
+    /// surface the plan (applied passes + optimized AST). Returns the same
+    /// structured parse error as `reddb_rql_validate` on invalid input.
+    fn tool_rql_explain(&self, args: &JsonValue) -> Result<String, String> {
+        let rql = args
+            .get("rql")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'rql'")?;
+        let json = rql_explain_json(rql);
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
     }
 
@@ -1420,6 +1448,140 @@ fn reject_mcp_volatile_options(args: &JsonValue, domain: &str) -> Result<(), Str
     Ok(())
 }
 
+// ------------------------------------------------------------------
+// RQL validate / explain helpers (ADR 0061)
+//
+// These parse a submitted RQL/SQL string through the *real*
+// `reddb-io-rql` parser (never a reimplementation) and shape the verdict
+// as JSON. `rql_validate_json` stops at the parse; `rql_explain_json`
+// additionally runs the real query optimizer to surface the plan.
+// ------------------------------------------------------------------
+
+/// Stable name for a `ParseErrorKind` discriminant, so callers can branch
+/// on the failure category (DoS refusal vs. plain syntax) without string
+/// matching on the message.
+fn rql_error_kind_name(kind: &reddb_rql::ParseErrorKind) -> &'static str {
+    use reddb_rql::ParseErrorKind as K;
+    match kind {
+        K::Syntax => "syntax",
+        K::DepthLimit { .. } => "depth_limit",
+        K::InputTooLarge { .. } => "input_too_large",
+        K::IdentifierTooLong { .. } => "identifier_too_long",
+        K::TokenLimit { .. } => "token_limit",
+        K::ValueOutOfRange { .. } => "value_out_of_range",
+        K::UnsupportedToken { .. } => "unsupported_token",
+    }
+}
+
+/// Short discriminant name for a parsed statement (e.g. `"Insert"`,
+/// `"Table"`), derived from the `QueryExpr` `Debug` repr so it tracks the
+/// AST without an exhaustive match that would rot as variants are added.
+fn rql_statement_kind(query: &reddb_rql::ast::QueryExpr) -> String {
+    let dbg = format!("{:?}", query);
+    dbg.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Build the shared structured parse-error object.
+fn rql_parse_error_json(err: &reddb_rql::ParseError) -> JsonValue {
+    let mut e = Map::new();
+    e.insert("message".into(), JsonValue::String(err.message.clone()));
+    e.insert(
+        "line".into(),
+        JsonValue::Number(f64::from(err.position.line)),
+    );
+    e.insert(
+        "column".into(),
+        JsonValue::Number(f64::from(err.position.column)),
+    );
+    e.insert(
+        "offset".into(),
+        JsonValue::Number(f64::from(err.position.offset)),
+    );
+    e.insert(
+        "kind".into(),
+        JsonValue::String(rql_error_kind_name(&err.kind).into()),
+    );
+    e.insert("display".into(), JsonValue::String(err.to_string()));
+    if !err.expected.is_empty() {
+        e.insert(
+            "expected".into(),
+            JsonValue::Array(
+                err.expected
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        );
+    }
+    JsonValue::Object(e)
+}
+
+/// `{valid:false, error:{...}}` for a failed parse.
+fn rql_invalid_json(err: &reddb_rql::ParseError) -> JsonValue {
+    let mut obj = Map::new();
+    obj.insert("valid".into(), JsonValue::Bool(false));
+    obj.insert("error".into(), rql_parse_error_json(err));
+    JsonValue::Object(obj)
+}
+
+/// Parse-only verdict for `reddb_rql_validate`.
+fn rql_validate_json(rql: &str) -> JsonValue {
+    match reddb_rql::parse(rql) {
+        Ok(parsed) => {
+            let mut obj = Map::new();
+            obj.insert("valid".into(), JsonValue::Bool(true));
+            obj.insert(
+                "statement".into(),
+                JsonValue::String(rql_statement_kind(&parsed.query)),
+            );
+            obj.insert(
+                "ast".into(),
+                JsonValue::String(format!("{:#?}", parsed.query)),
+            );
+            JsonValue::Object(obj)
+        }
+        Err(err) => rql_invalid_json(&err),
+    }
+}
+
+/// Parse + plan verdict for `reddb_rql_explain`.
+fn rql_explain_json(rql: &str) -> JsonValue {
+    match reddb_rql::parse(rql) {
+        Ok(parsed) => {
+            let mut obj = Map::new();
+            obj.insert("valid".into(), JsonValue::Bool(true));
+            obj.insert(
+                "statement".into(),
+                JsonValue::String(rql_statement_kind(&parsed.query)),
+            );
+            obj.insert(
+                "ast".into(),
+                JsonValue::String(format!("{:#?}", parsed.query)),
+            );
+
+            // Run the real query optimizer to surface the plan.
+            let optimizer = reddb_rql::planner::QueryOptimizer::new();
+            let (optimized, applied) = optimizer.optimize(parsed.query.clone());
+            let mut plan = Map::new();
+            plan.insert(
+                "optimizations".into(),
+                JsonValue::Array(applied.into_iter().map(JsonValue::String).collect()),
+            );
+            plan.insert(
+                "optimized_ast".into(),
+                JsonValue::String(format!("{:#?}", optimized)),
+            );
+            obj.insert("plan".into(), JsonValue::Object(plan));
+            JsonValue::Object(obj)
+        }
+        Err(err) => rql_invalid_json(&err),
+    }
+}
+
 // Convert a storage Value to JSON (local helper to avoid visibility issues).
 fn get_str_field<'a>(args: &'a JsonValue, field: &str) -> Result<&'a str, String> {
     args.get(field)
@@ -1660,6 +1822,115 @@ mod tests {
             "value type missing: {text:.120}"
         );
         assert!(text.contains("Multi-model map"), "multi-model map missing");
+    }
+
+    // Helper: invoke a tool over the JSON-RPC `tools/call` seam and return the
+    // re-parsed JSON text content of a non-error result.
+    fn call_tool_ok(srv: &McpServer, name: &str, args: &str) -> JsonValue {
+        let params = parse_json(&format!(r#"{{"name":"{name}","arguments":{args}}}"#));
+        let response = srv.handle_tools_call(Some(&JsonValue::Number(1.0)), Some(&params));
+        let parsed = parse_json(&response);
+        let result = parsed.get("result").expect("result");
+        assert_ne!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true),
+            "unexpected error: {response}"
+        );
+        let text = result
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("content text");
+        parse_json(text)
+    }
+
+    #[test]
+    fn tools_call_rql_validate_accepts_valid_rql() {
+        let srv = make_server();
+        let verdict = call_tool_ok(
+            &srv,
+            "reddb_rql_validate",
+            r#"{"rql":"SELECT id, name FROM users WHERE age > 21"}"#,
+        );
+        assert_eq!(
+            verdict.get("valid").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        // The statement kind tracks the real AST variant.
+        assert_eq!(
+            verdict.get("statement").and_then(JsonValue::as_str),
+            Some("Table")
+        );
+        // The AST is the real parser output, not a stub.
+        let ast = verdict
+            .get("ast")
+            .and_then(JsonValue::as_str)
+            .expect("ast text");
+        assert!(ast.contains("TableQuery"), "ast: {ast:.200}");
+    }
+
+    #[test]
+    fn tools_call_rql_validate_reports_structured_parse_error() {
+        let srv = make_server();
+        let verdict = call_tool_ok(&srv, "reddb_rql_validate", r#"{"rql":"SELECT FROM WHERE"}"#);
+        assert_eq!(
+            verdict.get("valid").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        let error = verdict.get("error").expect("error object");
+        assert!(
+            error
+                .get("message")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|m| !m.is_empty()),
+            "error message missing"
+        );
+        // Position is surfaced structurally so an agent can locate the fault.
+        assert!(error.get("line").and_then(JsonValue::as_u64).is_some());
+        assert!(error.get("column").and_then(JsonValue::as_u64).is_some());
+        assert!(error.get("kind").and_then(JsonValue::as_str).is_some());
+    }
+
+    #[test]
+    fn tools_call_rql_explain_returns_ast_and_plan() {
+        let srv = make_server();
+        let verdict = call_tool_ok(
+            &srv,
+            "reddb_rql_explain",
+            r#"{"rql":"SELECT id FROM users WHERE age > 21 LIMIT 5"}"#,
+        );
+        assert_eq!(
+            verdict.get("valid").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        let plan = verdict.get("plan").expect("plan object");
+        // The plan carries the optimizer's applied-pass list and the
+        // resulting optimized AST — both produced by the real optimizer.
+        assert!(
+            plan.get("optimizations")
+                .and_then(JsonValue::as_array)
+                .is_some(),
+            "optimizations list missing"
+        );
+        assert!(
+            plan.get("optimized_ast")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|a| !a.is_empty()),
+            "optimized_ast missing"
+        );
+    }
+
+    #[test]
+    fn tools_call_rql_explain_reports_structured_parse_error() {
+        let srv = make_server();
+        let verdict = call_tool_ok(&srv, "reddb_rql_explain", r#"{"rql":"SELCT oops"}"#);
+        assert_eq!(
+            verdict.get("valid").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        assert!(verdict.get("error").is_some(), "error object missing");
     }
 
     #[test]
