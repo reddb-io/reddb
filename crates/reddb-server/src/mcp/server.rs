@@ -312,6 +312,7 @@ impl McpServer {
             "reddb_graph_clustering" => self.tool_graph_clustering(args),
             "reddb_create_collection" => self.tool_create_collection(args),
             "reddb_drop_collection" => self.tool_drop_collection(args),
+            "reddb_type_of" => self.tool_type_of(args),
             "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
             "reddb_auth_create_user" => self.tool_auth_create_user(args),
             "reddb_auth_login" => self.tool_auth_login(args),
@@ -932,6 +933,89 @@ impl McpServer {
         obj.insert("count".to_string(), JsonValue::Number(items.len() as f64));
         obj.insert("results".to_string(), JsonValue::Array(items));
         json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    /// `reddb_type_of` — resolve the canonical type for a value or type name,
+    /// answering from the generated `reddb-io-types` catalogs (ADR 0061). The
+    /// engine does no storage or evaluation here: a `value` is classified by the
+    /// value codec's `data_type()`, a `type` name by the SQL-name parser, and
+    /// the casts/operators come straight from the function/operator/cast tables.
+    fn tool_type_of(&self, args: &JsonValue) -> Result<String, String> {
+        use reddb_types::knowledge::{
+            cast_context_label, category_label, resolve_type_name, type_facts, CastFact,
+        };
+
+        let has_value = args.get("value").is_some();
+        let type_name = args.get("type").and_then(|v| v.as_str());
+
+        // Build the input echo and resolve the canonical type from exactly one
+        // of `value` / `type`.
+        let mut input_echo = Map::new();
+        let canonical = match (has_value, type_name) {
+            (true, Some(_)) => {
+                return Err("provide either 'value' or 'type', not both".to_string());
+            }
+            (false, None) => {
+                return Err("missing required field: provide 'value' or 'type'".to_string());
+            }
+            (true, None) => {
+                let raw = args.get("value").expect("value present");
+                input_echo.insert("value".to_string(), raw.clone());
+                crate::rpc_stdio::json_value_to_schema_value(raw).data_type()
+            }
+            (false, Some(name)) => {
+                input_echo.insert("type".to_string(), JsonValue::String(name.to_string()));
+                resolve_type_name(name).ok_or_else(|| format!("unknown type name: {name:?}"))?
+            }
+        };
+
+        let facts = type_facts(canonical);
+
+        let render_cast = |cast: &CastFact| {
+            let mut obj = Map::new();
+            obj.insert("src".to_string(), JsonValue::String(cast.src.to_string()));
+            obj.insert(
+                "target".to_string(),
+                JsonValue::String(cast.target.to_string()),
+            );
+            obj.insert(
+                "context".to_string(),
+                JsonValue::String(cast_context_label(cast.context).to_string()),
+            );
+            obj.insert("lossy".to_string(), JsonValue::Bool(cast.lossy));
+            JsonValue::Object(obj)
+        };
+
+        let mut out = Map::new();
+        out.insert("input".to_string(), JsonValue::Object(input_echo));
+        out.insert(
+            "canonical_type".to_string(),
+            JsonValue::String(facts.canonical.to_string()),
+        );
+        out.insert(
+            "category".to_string(),
+            JsonValue::String(category_label(facts.category).to_string()),
+        );
+        out.insert(
+            "operators".to_string(),
+            JsonValue::Array(
+                facts
+                    .operators
+                    .iter()
+                    .map(|op| JsonValue::String((*op).to_string()))
+                    .collect(),
+            ),
+        );
+        out.insert(
+            "casts_from".to_string(),
+            JsonValue::Array(facts.casts_from.iter().map(render_cast).collect()),
+        );
+        out.insert(
+            "casts_to".to_string(),
+            JsonValue::Array(facts.casts_to.iter().map(render_cast).collect()),
+        );
+
+        json_to_string(&JsonValue::Object(out)).map_err(|e| format!("serialization error: {}", e))
     }
 
     fn tool_health(&self) -> Result<String, String> {
@@ -1754,6 +1838,109 @@ mod tests {
             .and_then(JsonValue::as_str)
             .expect("error text");
         assert!(text.contains("options.tempurature"), "text: {text}");
+    }
+
+    /// Helper: drive `tools/call` for `reddb_type_of` and return the parsed
+    /// result object (or panic with the raw response).
+    fn type_of_call(srv: &McpServer, arguments: &str) -> JsonValue {
+        let params = parse_json(&format!(
+            r#"{{"name":"reddb_type_of","arguments":{arguments}}}"#
+        ));
+        let response = srv.handle_tools_call(Some(&JsonValue::Number(1.0)), Some(&params));
+        let parsed = parse_json(&response);
+        parsed.get("result").cloned().unwrap_or_else(|| {
+            panic!("no result in response: {response}");
+        })
+    }
+
+    fn type_of_envelope(result: &JsonValue) -> JsonValue {
+        let text = result
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("tool text");
+        parse_json(text)
+    }
+
+    #[test]
+    fn tools_call_reddb_type_of_resolves_type_name_from_catalog() {
+        let srv = make_server();
+        let result = type_of_call(&srv, r#"{"type":"int"}"#);
+        assert_ne!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true),
+            "result: {result:?}"
+        );
+        let env = type_of_envelope(&result);
+        assert_eq!(
+            env.get("canonical_type").and_then(JsonValue::as_str),
+            Some("INTEGER")
+        );
+        assert_eq!(
+            env.get("category").and_then(JsonValue::as_str),
+            Some("Numeric")
+        );
+
+        let operators: Vec<&str> = env
+            .get("operators")
+            .and_then(JsonValue::as_array)
+            .expect("operators")
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .collect();
+        assert!(operators.contains(&"+"), "operators: {operators:?}");
+
+        // Integer widens implicitly to float — the cast comes from the catalog.
+        let casts_from = env
+            .get("casts_from")
+            .and_then(JsonValue::as_array)
+            .expect("casts_from");
+        assert!(
+            casts_from.iter().any(|c| {
+                c.get("target").and_then(JsonValue::as_str) == Some("FLOAT")
+                    && c.get("context").and_then(JsonValue::as_str) == Some("implicit")
+            }),
+            "expected implicit int->float cast: {casts_from:?}"
+        );
+    }
+
+    #[test]
+    fn tools_call_reddb_type_of_infers_value_type() {
+        let srv = make_server();
+        let result = type_of_call(&srv, r#"{"value":"hello"}"#);
+        let env = type_of_envelope(&result);
+        assert_eq!(
+            env.get("canonical_type").and_then(JsonValue::as_str),
+            Some("TEXT")
+        );
+        assert_eq!(
+            env.get("input")
+                .and_then(|i| i.get("value"))
+                .and_then(JsonValue::as_str),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn tools_call_reddb_type_of_rejects_unknown_and_missing_input() {
+        let srv = make_server();
+
+        let unknown = type_of_call(&srv, r#"{"type":"not-a-type"}"#);
+        assert_eq!(
+            unknown.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let missing = type_of_call(&srv, r#"{}"#);
+        assert_eq!(
+            missing.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let both = type_of_call(&srv, r#"{"type":"int","value":1}"#);
+        assert_eq!(both.get("isError").and_then(JsonValue::as_bool), Some(true));
     }
 
     #[test]
