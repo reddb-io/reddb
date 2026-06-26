@@ -1940,12 +1940,13 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
 /// ASCII case-insensitive substring match. False positives (the
 /// token appears in a quoted string) only skip caching, which is
 /// the conservative direction.
-/// If `sql` starts with `EXPLAIN` followed by a non-`ALTER` token,
+/// If `sql` starts with `EXPLAIN` followed by a generic explainable statement,
 /// return the trimmed inner statement; otherwise `None`.
 ///
 /// `EXPLAIN ALTER FOR CREATE TABLE ...` is a separate schema-diff
 /// command handled inside the normal SQL parser, so we leave it
-/// alone here.
+/// alone here. `EXPLAIN ASK` and `EXPLAIN MIGRATION` are also executable
+/// read paths handled by the parser/runtime directly.
 fn strip_explain_prefix(sql: &str) -> Option<&str> {
     let trimmed = sql.trim_start();
     let (head, rest) = trimmed.split_at(
@@ -1960,12 +1961,12 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
     if rest.is_empty() {
         return None;
     }
-    // Peek the next token — if ALTER or ASK, defer to the normal parser.
-    // `EXPLAIN ASK` is an executable read path: it runs retrieval and
-    // provider selection, then short-circuits before the LLM call.
+    // Peek the next token; command-specific EXPLAIN forms defer to
+    // the normal parser.
     let next_head_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     if rest[..next_head_end].eq_ignore_ascii_case("ALTER")
         || rest[..next_head_end].eq_ignore_ascii_case("ASK")
+        || rest[..next_head_end].eq_ignore_ascii_case("MIGRATION")
     {
         return None;
     }

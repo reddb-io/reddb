@@ -15,7 +15,7 @@ engine.
 When you declare `BATCH N ROWS`, RedDB does not execute the body as a single
 statement. It rewrites the body into an iterative loop:
 
-1. Execute the body with `LIMIT N` appended to the `WHERE` clause.
+1. Execute the body with `LIMIT N` appended to the statement.
 2. Count the affected rows. Persist `rows_processed += count` to
    `red_migrations`.
 3. If the affected count equals `N`, there may be more rows. Go to step 1.
@@ -29,9 +29,10 @@ checkpoint.
 
 ### The loop body requirement
 
-The body of a batched migration must be a single `UPDATE` or `DELETE`
+The body of a batched migration must currently be a single `UPDATE`
 statement with a `WHERE` clause that filters for unprocessed rows. RedDB
-appends `LIMIT N` to that `WHERE` clause.
+appends `LIMIT N` to the statement. Batched `DELETE` bodies are not supported
+yet.
 
 ```sql
 -- Correct: the WHERE clause identifies unprocessed rows
@@ -138,7 +139,10 @@ For these cases, declare `NO ROLLBACK`:
 ```sql
 CREATE MIGRATION purge_deleted_accounts BATCH 500 ROWS NO ROLLBACK
 AS
-  DELETE FROM users WHERE deleted_at < now() - INTERVAL '90 days';
+  UPDATE users
+  SET email = NULL, display_name = NULL
+  WHERE deleted_at < now() - INTERVAL '90 days'
+    AND email IS NOT NULL;
 ```
 
 Attempting to roll back this migration returns:
@@ -202,8 +206,6 @@ granularity.
   contention.
 - Prefer smaller batches if the table receives heavy writes during the migration
   — shorter lock windows reduce the chance of blocking application queries.
-- For pure `DELETE` purges on append-only or low-write tables, 10,000–50,000
-  rows per batch is usually fine.
 - Never use `BATCH 1 ROW` — the per-row overhead of the checkpoint write
   dominates.
 
@@ -211,8 +213,8 @@ granularity.
 
 ## Multi-statement bodies in data migrations
 
-`BATCH N ROWS` applies to the first (and typically only) DML statement in
-the body. If you need to update multiple tables in a coordinated migration,
+`BATCH N ROWS` applies to one `UPDATE` statement. If you need to update
+multiple tables in a coordinated migration,
 write separate migrations with explicit `DEPENDS ON`:
 
 ```sql

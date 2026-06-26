@@ -5560,6 +5560,9 @@ fn test_parse_migration_forms() {
     let query = parse("EXPLAIN MIGRATION m2").unwrap();
     assert!(matches!(query, QueryExpr::ExplainMigration(e) if e.name == "m2"));
 
+    let query = parse("EXPLAIN MIGRATION *").unwrap();
+    assert!(matches!(query, QueryExpr::ExplainMigration(e) if e.name == "*"));
+
     let query = parse("APPLY MIGRATION m2 FOR TENANT 'tenant-string'").unwrap();
     assert!(matches!(
         query,
@@ -5578,6 +5581,13 @@ fn test_parse_migration_forms() {
                 && !migration.no_rollback
                 && migration.body == "CREATE INDEX idx ON accounts ( id )"
     ));
+
+    let err = parse("CREATE MIGRATION m4 BATCH 0 ROWS AS UPDATE accounts SET done = true")
+        .expect_err("BATCH 0 ROWS must be rejected");
+    assert!(
+        err.to_string().contains("positive BATCH size"),
+        "unexpected error: {err}"
+    );
 
     for sql in [
         "APPLY m2",

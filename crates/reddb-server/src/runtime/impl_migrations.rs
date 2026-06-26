@@ -236,7 +236,11 @@ impl RedDBRuntime {
         fields.insert("status".to_string(), Value::text("pending"));
         fields.insert(
             "kind".to_string(),
-            Value::text(if q.no_rollback { "data" } else { "ddl" }),
+            Value::text(if q.batch_size.is_some() {
+                "data"
+            } else {
+                "schema"
+            }),
         );
         fields.insert("body".to_string(), Value::text(q.body.as_str()));
         fields.insert(
@@ -559,17 +563,30 @@ impl RedDBRuntime {
             }
             Ok(rows_processed) => {
                 let author = migration_author(self);
-                let commit_hash = self
-                    .vcs_commit(CreateCommitInput {
-                        connection_id: 0,
-                        message: format!("migration: {name}"),
-                        author,
-                        committer: None,
-                        amend: false,
-                        allow_empty: true,
-                    })
-                    .map(|c| c.hash)
-                    .unwrap_or_default();
+                let commit_hash = match self.vcs_commit(CreateCommitInput {
+                    connection_id: 0,
+                    message: format!("migration: apply {name}"),
+                    author,
+                    committer: None,
+                    amend: false,
+                    allow_empty: true,
+                }) {
+                    Ok(commit) => commit.hash,
+                    Err(e) => {
+                        let err_msg = format!("VCS commit failed: {e}");
+                        let _ =
+                            update_migration_field(store, name, "status", Value::text("failed"));
+                        let _ = update_migration_field(
+                            store,
+                            name,
+                            "error",
+                            Value::text(err_msg.as_str()),
+                        );
+                        return Err(RedDBError::Query(format!(
+                            "migration '{name}' applied but {err_msg}"
+                        )));
+                    }
+                };
 
                 let _ = update_migration_field(store, name, "status", Value::text("applied"));
                 let _ =
@@ -714,16 +731,41 @@ impl RedDBRuntime {
             )));
         }
 
+        for (migration, dep) in load_all_edges(store) {
+            if dep != q.name {
+                continue;
+            }
+            let Some((_, dependent_fields)) = find_migration(store, &migration) else {
+                continue;
+            };
+            if dependent_fields.get("status").and_then(|v| val_text(v)) == Some("applied") {
+                return Err(RedDBError::Query(format!(
+                    "cannot rollback '{}' - applied migration '{}' depends on it",
+                    q.name, migration
+                )));
+            }
+        }
+
         let commit_hash = fields
             .get("vcs_commit_hash")
             .and_then(|v| val_text(v))
             .unwrap_or("")
             .to_string();
 
-        if !commit_hash.is_empty() {
-            let author = migration_author(self);
-            let _ = self.vcs_revert(0, &commit_hash, author);
+        if commit_hash.is_empty() {
+            return Err(RedDBError::Query(format!(
+                "migration '{}' has no VCS commit hash to revert",
+                q.name
+            )));
         }
+
+        let author = migration_author(self);
+        self.vcs_revert(0, &commit_hash, author).map_err(|e| {
+            RedDBError::Query(format!(
+                "rollback of migration '{}' failed: VCS revert failed: {e}",
+                q.name
+            ))
+        })?;
 
         let _ = update_migration_field(store, &q.name, "status", Value::text("pending"));
         let _ = update_migration_field(store, &q.name, "applied_at", Value::Null);
@@ -745,25 +787,6 @@ impl RedDBRuntime {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
 
-        let (_, fields) = find_migration(store, &q.name)
-            .ok_or_else(|| RedDBError::NotFound(format!("migration '{}' not found", q.name)))?;
-
-        let status = fields
-            .get("status")
-            .and_then(|v| val_text(v))
-            .unwrap_or("unknown")
-            .to_string();
-        let body = fields
-            .get("body")
-            .and_then(|v| val_text(v))
-            .unwrap_or("")
-            .to_string();
-        let kind = fields
-            .get("kind")
-            .and_then(|v| val_text(v))
-            .unwrap_or("ddl")
-            .to_string();
-
         let columns = vec![
             "migration".to_string(),
             "status".to_string(),
@@ -773,20 +796,51 @@ impl RedDBRuntime {
             "lock_duration_ms".to_string(),
         ];
 
-        let row: Vec<(String, Value)> = vec![
-            ("migration".to_string(), Value::text(q.name.as_str())),
-            ("status".to_string(), Value::text(status.as_str())),
-            ("kind".to_string(), Value::text(kind.as_str())),
-            ("body".to_string(), Value::text(body.as_str())),
-            ("estimated_rows".to_string(), Value::Null),
-            ("lock_duration_ms".to_string(), Value::UnsignedInteger(0)),
-        ];
+        if q.name == "*" {
+            let mut rows = Vec::new();
+            for name in self.collect_pending_migrations(store) {
+                let Some((_, fields)) = find_migration(store, &name) else {
+                    continue;
+                };
+                rows.push(explain_migration_row(&name, &fields));
+            }
+            return Ok(RuntimeQueryResult::ok_records(
+                raw_query.to_string(),
+                columns,
+                rows,
+                "explain_migration",
+            ));
+        }
+
+        let (_, fields) = find_migration(store, &q.name)
+            .ok_or_else(|| RedDBError::NotFound(format!("migration '{}' not found", q.name)))?;
 
         Ok(RuntimeQueryResult::ok_records(
             raw_query.to_string(),
             columns,
-            vec![row],
+            vec![explain_migration_row(&q.name, &fields)],
             "explain_migration",
         ))
     }
+}
+
+fn explain_migration_row(name: &str, fields: &HashMap<String, Value>) -> Vec<(String, Value)> {
+    let status = fields
+        .get("status")
+        .and_then(|v| val_text(v))
+        .unwrap_or("unknown");
+    let body = fields.get("body").and_then(|v| val_text(v)).unwrap_or("");
+    let kind = fields
+        .get("kind")
+        .and_then(|v| val_text(v))
+        .unwrap_or("schema");
+
+    vec![
+        ("migration".to_string(), Value::text(name)),
+        ("status".to_string(), Value::text(status)),
+        ("kind".to_string(), Value::text(kind)),
+        ("body".to_string(), Value::text(body)),
+        ("estimated_rows".to_string(), Value::Null),
+        ("lock_duration_ms".to_string(), Value::UnsignedInteger(0)),
+    ]
 }

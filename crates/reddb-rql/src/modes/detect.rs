@@ -349,6 +349,7 @@ mod tests {
         assert_eq!(detect_mode("SHOW INDICES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW INDEXES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW STATS users"), QueryMode::Sql);
+        assert_eq!(detect_mode("EXPLAIN MIGRATION *"), QueryMode::Sql);
     }
 
     #[test]
