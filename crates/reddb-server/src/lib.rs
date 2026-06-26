@@ -32,6 +32,7 @@ pub mod cluster;
 pub mod config;
 pub mod crypto;
 pub mod document_body;
+pub mod document_migration;
 pub mod ec;
 pub mod engine;
 pub mod geo;
