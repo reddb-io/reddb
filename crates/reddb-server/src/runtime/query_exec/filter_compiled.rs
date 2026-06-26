@@ -318,6 +318,14 @@ pub(crate) fn resolve_kind<'a>(
             if let Some(value) = resolve_timeseries_field(entity, name) {
                 return Some(value);
             }
+            // `id` aliases the entity logical id when no real column or
+            // property named `id` exists — mirrors `resolve_entity_field`
+            // so documents/KV match `WHERE id = <v>` by logical id.
+            if name == "id" {
+                return Some(Cow::Owned(Value::UnsignedInteger(
+                    entity.logical_id().raw(),
+                )));
+            }
             None
         }
         EntityFieldKind::RowFieldFast { name, idx } => {
