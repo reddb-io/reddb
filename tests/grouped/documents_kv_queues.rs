@@ -18,6 +18,9 @@ mod e2e_issue_535_red_queues_virtual_table;
 #[path = "docs_kv_queue/e2e_issue_540_documents_basics.rs"]
 mod e2e_issue_540_documents_basics;
 
+#[path = "docs_kv_queue/e2e_issue_1402_document_binary_body.rs"]
+mod e2e_issue_1402_document_binary_body;
+
 #[path = "docs_kv_queue/e2e_issue_541_kv_namespaced_keys.rs"]
 mod e2e_issue_541_kv_namespaced_keys;
 
