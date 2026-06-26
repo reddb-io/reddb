@@ -255,6 +255,11 @@ pub(crate) fn resolve_kind<'a>(
         EntityFieldKind::RowField(name) => {
             // Hot path: SQL column on a TableRow.
             if let Some(row) = entity.data.as_row() {
+                if name == "id" && row_has_document_body(row) {
+                    return Some(Cow::Owned(Value::UnsignedInteger(
+                        entity.logical_id().raw(),
+                    )));
+                }
                 if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
                 }
@@ -317,6 +322,11 @@ pub(crate) fn resolve_kind<'a>(
         }
         EntityFieldKind::RowFieldFast { name, idx } => {
             if let Some(row) = entity.data.as_row() {
+                if name == "id" && row_has_document_body(row) {
+                    return Some(Cow::Owned(Value::UnsignedInteger(
+                        entity.logical_id().raw(),
+                    )));
+                }
                 // Fast path (bulk-insert entities): columns[] in schema order, O(1).
                 if row.named.is_none() {
                     return row.columns.get(*idx as usize).map(Cow::Borrowed);
@@ -343,6 +353,15 @@ pub(crate) fn resolve_kind<'a>(
         }
         EntityFieldKind::Unknown => None,
     }
+}
+
+fn row_has_document_body(row: &crate::storage::unified::entity::RowData) -> bool {
+    row.named.as_ref().is_some_and(|named| {
+        matches!(
+            named.get("body"),
+            Some(Value::Json(_)) | Some(Value::Blob(_))
+        )
+    })
 }
 
 fn resolve_timeseries_field<'a>(entity: &'a UnifiedEntity, name: &str) -> Option<Cow<'a, Value>> {
