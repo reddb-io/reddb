@@ -342,7 +342,7 @@ impl<'a> Parser<'a> {
         let mut assignment_exprs = Vec::new();
         let mut compound_assignment_ops = Vec::new();
         loop {
-            let col = self.expect_column_ident()?;
+            let col = self.parse_update_assignment_target(target)?;
             let compound_op = if self.consume(&Token::Eq)? {
                 None
             } else {
@@ -448,6 +448,19 @@ impl<'a> Parser<'a> {
             limit,
             suppress_events,
         }))
+    }
+
+    fn parse_update_assignment_target(
+        &mut self,
+        target: UpdateTarget,
+    ) -> Result<String, ParseError> {
+        let mut segments = vec![self.expect_column_ident()?];
+        if matches!(target, UpdateTarget::Documents) {
+            while self.consume(&Token::Dot)? {
+                segments.push(self.expect_column_ident()?);
+            }
+        }
+        Ok(segments.join("."))
     }
 
     fn parse_update_target(&mut self) -> Result<UpdateTarget, ParseError> {
