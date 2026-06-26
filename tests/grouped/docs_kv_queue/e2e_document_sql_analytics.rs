@@ -245,10 +245,7 @@ fn runtime_btree_document_path_range_order_and_limit() {
         ('{"name":"ddd","tier":"platinum"}'),
         ('{"name":"eee","tier":"silver"}')"#,
     );
-    exec(
-        &rt,
-        "CREATE INDEX idx_range_tier ON range_docs (body.tier)",
-    );
+    exec(&rt, "CREATE INDEX idx_range_tier ON range_docs (body.tier)");
 
     // Equality — uses the companion hash index auto-created by BTree.
     let eq = exec(&rt, "SELECT name FROM range_docs WHERE body.tier = 'gold'");
@@ -285,10 +282,7 @@ fn runtime_btree_document_path_range_order_and_limit() {
     assert_eq!(text(&between.result.records[2], "name"), "ddd"); // platinum
 
     // ORDER BY via index: all docs sorted ascending by tier
-    let sorted = exec(
-        &rt,
-        "SELECT name FROM range_docs ORDER BY body.tier",
-    );
+    let sorted = exec(&rt, "SELECT name FROM range_docs ORDER BY body.tier");
     assert_eq!(sorted.result.records.len(), 5, "sorted={sorted:?}");
     assert_eq!(text(&sorted.result.records[0], "name"), "aaa"); // bronze
     assert_eq!(text(&sorted.result.records[4], "name"), "eee"); // silver
