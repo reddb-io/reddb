@@ -115,10 +115,16 @@ fn print_report() {
     println!("  arch            : {}", std::env::consts::ARCH);
     println!("  size_of<Value>  = {} bytes", enum_size);
     println!("  align_of<Value> = {} bytes", enum_align);
-    println!("  largest payload = {} bytes  ← sets the enum floor", max_payload);
+    println!(
+        "  largest payload = {} bytes  ← sets the enum floor",
+        max_payload
+    );
 
     let overhead = enum_size.saturating_sub(max_payload);
-    println!("  discriminant slot = {} bytes  (enum_size − max_payload)", overhead);
+    println!(
+        "  discriminant slot = {} bytes  (enum_size − max_payload)",
+        overhead
+    );
 
     let scalar_payload = size_of::<i64>(); // Integer / Float — most common value
     let waste_per_scalar = enum_size.saturating_sub(scalar_payload);
@@ -190,7 +196,10 @@ fn print_report() {
         }
         println!();
         println!("  Recommendation: box fat variants (KeyRef, Money, Vector,");
-        println!("  Array, Secret) behind a pointer.  Expected: {} → ≤24 B", enum_size);
+        println!(
+            "  Array, Secret) behind a pointer.  Expected: {} → ≤24 B",
+            enum_size
+        );
         println!("  per common scalar, removing the excess cache-line pressure.");
     } else {
         println!();
