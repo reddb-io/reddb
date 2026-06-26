@@ -1580,6 +1580,7 @@ mod tests {
             order_by: vec![OrderByClause::asc(field("id"))],
             limit: Some(1),
             claim_limit: None,
+            claim_exact: false,
             suppress_events: false,
         };
         assert!(matches!(

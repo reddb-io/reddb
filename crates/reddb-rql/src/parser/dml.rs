@@ -387,11 +387,15 @@ impl<'a> Parser<'a> {
 
         let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
-        let claim_limit = if self.consume_ident_ci("CLAIM")? {
-            self.expect(Token::Limit)?;
-            Some(self.parse_integer()? as u64)
+        let (claim_limit, claim_exact) = if self.consume_ident_ci("CLAIM")? {
+            if self.consume_ident_ci("EXACT")? {
+                (Some(self.parse_integer()? as u64), true)
+            } else {
+                self.expect(Token::Limit)?;
+                (Some(self.parse_integer()? as u64), false)
+            }
         } else {
-            None
+            (None, false)
         };
 
         let mut order_by = if self.consume(&Token::Order)? {
@@ -461,6 +465,7 @@ impl<'a> Parser<'a> {
             with_metadata,
             returning,
             claim_limit,
+            claim_exact,
             order_by,
             limit,
             suppress_events,
@@ -1225,6 +1230,7 @@ mod tests {
         assert_eq!(query.ttl_ms, Some(30_000));
         assert_eq!(query.with_metadata.len(), 1);
         assert_eq!(query.claim_limit, None);
+        assert!(!query.claim_exact);
         assert_eq!(query.limit, Some(5));
         assert_eq!(query.order_by.len(), 2);
         assert!(matches!(
@@ -1251,6 +1257,20 @@ mod tests {
              CLAIM LIMIT 2 ORDER BY priority ASC RETURNING id",
         );
         assert_eq!(query.claim_limit, Some(2));
+        assert!(!query.claim_exact);
+        assert_eq!(query.limit, None);
+        assert_eq!(query.order_by.len(), 2);
+        assert!(matches!(
+            &query.order_by[1].field,
+            FieldRef::TableColumn { column, .. } if column == "rid"
+        ));
+
+        let query = update(
+            "UPDATE docs SET status = 'reserved' WHERE status = 'available' \
+             CLAIM EXACT 2 ORDER BY priority ASC RETURNING id",
+        );
+        assert_eq!(query.claim_limit, Some(2));
+        assert!(query.claim_exact);
         assert_eq!(query.limit, None);
         assert_eq!(query.order_by.len(), 2);
         assert!(matches!(
