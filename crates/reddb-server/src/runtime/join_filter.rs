@@ -367,14 +367,21 @@ pub(super) fn execute_runtime_indexed_join(
             left_table_name,
             left_table_alias,
         );
-        let candidate_indexes = left_value
+        // Borrow the matching bucket straight out of `right_index`
+        // instead of cloning it: the probe loop only reads the index
+        // list (and mutates the disjoint `matched_right` / `records`
+        // state), so there is no need to own a temporary `Vec<usize>`
+        // per left row. `usize` is `Copy`, so iterating `&[usize]`
+        // yields owned indices with no allocation.
+        let candidate_indexes: &[usize] = left_value
             .as_ref()
             .and_then(runtime_join_lookup_key)
-            .and_then(|key| right_index.get(&key).cloned())
+            .and_then(|key| right_index.get(&key))
+            .map(Vec::as_slice)
             .unwrap_or_default();
         let mut matched = false;
 
-        for index in candidate_indexes {
+        for &index in candidate_indexes {
             let right_record = &right_records[index];
             if join_condition_matches(
                 left_record,
@@ -501,6 +508,13 @@ pub(super) fn runtime_graph_join_probe_indexes(
     left_table_alias: Option<&str>,
     right_index: &HashMap<String, Vec<usize>>,
 ) -> Vec<usize> {
+    // A graph-join left row probes several lookup keys (the join field
+    // plus the `_source_*` / `_linked_identity` hints), so a single
+    // borrowed bucket is not enough — the candidate indexes from every
+    // matching key must be merged and de-duplicated. The owned
+    // `BTreeSet` is therefore required for correctness (it prevents a
+    // right row reachable via two keys from producing duplicate result
+    // rows); it is not an avoidable clone of one stored bucket.
     let mut candidates = BTreeSet::new();
     if let Some(value) = resolve_runtime_field(
         left_record,
@@ -3863,5 +3877,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Regression guard for #1346: the indexed-join probe loop now borrows
+    // each candidate bucket straight out of the right-side index instead of
+    // cloning it per left row. The observable result set and multiplicity
+    // must be unchanged — most importantly when one left key matches several
+    // right rows (the multi-element bucket the clone used to copy).
+    #[test]
+    fn indexed_join_probe_borrows_candidate_buckets() {
+        let field = FieldRef::TableColumn {
+            table: String::new(),
+            column: "id".to_string(),
+        };
+        let left_query = TableQuery::new("left");
+
+        let left = vec![rec_i("id", 1), rec_i("id", 2), rec_i("id", 3)];
+        // id=2 appears twice on the right → a two-element candidate bucket.
+        let right = vec![rec_i("id", 2), rec_i("id", 2), rec_i("id", 4)];
+
+        // INNER: only id=2 matches, once per duplicate right row → 2 rows.
+        let inner = execute_runtime_indexed_join(
+            &left_query,
+            &left,
+            None,
+            None,
+            &field,
+            &right,
+            None,
+            None,
+            &field,
+            JoinType::Inner,
+        )
+        .expect("indexed inner join");
+        assert_eq!(inner.len(), 2);
+        for row in &inner {
+            assert_eq!(row.get("id"), Some(&Value::Integer(2)));
+        }
+
+        // LEFT OUTER: 2 matched rows + unmatched id=1 and id=3 padded → 4.
+        let left_outer = execute_runtime_indexed_join(
+            &left_query,
+            &left,
+            None,
+            None,
+            &field,
+            &right,
+            None,
+            None,
+            &field,
+            JoinType::LeftOuter,
+        )
+        .expect("indexed left outer join");
+        assert_eq!(left_outer.len(), 4);
+
+        // No left key match → empty inner result; the empty-bucket path must
+        // not panic now that it returns a borrowed empty slice.
+        let none_match = execute_runtime_indexed_join(
+            &left_query,
+            &[rec_i("id", 99)],
+            None,
+            None,
+            &field,
+            &right,
+            None,
+            None,
+            &field,
+            JoinType::Inner,
+        )
+        .expect("indexed inner join with no match");
+        assert!(none_match.is_empty());
     }
 }
