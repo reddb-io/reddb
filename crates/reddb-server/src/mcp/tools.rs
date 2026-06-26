@@ -678,6 +678,25 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec!["name"],
             ),
         },
+        // RQL learning tools (ADR 0061) — parse a submitted RQL/SQL string
+        // through the real `reddb-io-rql` parser so an agent learns the
+        // dialect by submitting, not by guessing.
+        ToolDef {
+            name: "reddb_rql_validate",
+            description: "Validate an RQL/SQL statement by parsing it through RedDB's real query parser (reddb-io-rql) — no execution, no side effects. Returns `{valid:true, statement, ast}` on success or `{valid:false, error:{message,line,column,kind,expected}}` on a parse error. Submit a query and read the verdict to learn the RQL dialect instead of guessing.",
+            input_schema: schema(
+                vec![("rql", "string", "The RQL/SQL statement to parse and validate.")],
+                vec!["rql"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_rql_explain",
+            description: "Parse an RQL/SQL statement through RedDB's real parser (reddb-io-rql) and return the parsed AST plus the optimizer plan — the passes the query optimizer would apply and the resulting optimized AST. Returns a structured parse error on invalid input. No execution, no side effects. Use it to understand how RedDB plans a query.",
+            input_schema: schema(
+                vec![("rql", "string", "The RQL/SQL statement to parse and explain.")],
+                vec!["rql"],
+            ),
+        },
     ]
 }
 
@@ -721,6 +740,33 @@ mod tests {
         assert!(names.contains(&"reddb_graph_clustering"));
         assert!(names.contains(&"reddb_create_collection"));
         assert!(names.contains(&"reddb_drop_collection"));
+        // RQL learning tools (ADR 0061)
+        assert!(names.contains(&"reddb_rql_validate"));
+        assert!(names.contains(&"reddb_rql_explain"));
+    }
+
+    #[test]
+    fn test_rql_tools_schema() {
+        let tools = all_tools();
+        for name in ["reddb_rql_validate", "reddb_rql_explain"] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("tool '{name}' missing"));
+            let props = tool
+                .input_schema
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .unwrap();
+            assert!(props.contains_key("rql"), "{name} must take 'rql'");
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .unwrap();
+            let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+            assert!(required_strs.contains(&"rql"), "{name} must require 'rql'");
+        }
     }
 
     #[test]
