@@ -1398,6 +1398,37 @@ impl IndexStore {
         out
     }
 
+    /// Like `indexed_columns_set` but also includes every parent path segment
+    /// of dot-path indexed columns so that entity-field change detection works
+    /// for document body indexes (e.g. a `"body.service.tier"` index also adds
+    /// `"body"` and `"body.service"` so that a changed `"body"` field triggers
+    /// the index refresh path for that nested column).
+    pub fn indexed_columns_set_with_parents(
+        &self,
+        collection: &str,
+    ) -> std::collections::HashSet<String> {
+        let registry = read_unpoisoned(&self.registry);
+        let mut out = std::collections::HashSet::new();
+        for idx in registry.values() {
+            if idx.collection == collection {
+                for col in &idx.columns {
+                    out.insert(col.clone());
+                    if col.contains('.') {
+                        let mut prefix = String::new();
+                        for segment in col.split('.') {
+                            if !prefix.is_empty() {
+                                out.insert(prefix.clone());
+                                prefix.push('.');
+                            }
+                            prefix.push_str(segment);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Batched counterpart of `index_entity_insert`: takes a full
     /// slice of `(EntityId, Vec<(String, Value)>)` pairs and walks
     /// the index registry ONCE, then loops inside each registered
@@ -1610,21 +1641,36 @@ impl IndexStore {
     ) -> Result<(), String> {
         // Snapshot the indexed columns once to avoid holding the registry
         // lock across delete/insert sub-calls (those re-acquire it).
+        // Also include parent path segments (e.g. "body" for "body.service.tier")
+        // so that a changed top-level "body" field triggers re-indexing for
+        // nested path indexes.
         let indexed_cols: std::collections::HashSet<String> = {
             let registry = self.registry.read();
-            registry
-                .values()
-                .filter(|idx| idx.collection == collection)
-                .filter_map(|idx| idx.columns.first().cloned())
-                .collect()
+            let mut cols = std::collections::HashSet::new();
+            for idx in registry.values().filter(|idx| idx.collection == collection) {
+                for col in &idx.columns {
+                    cols.insert(col.clone());
+                    if col.contains('.') {
+                        let mut prefix = String::new();
+                        for segment in col.split('.') {
+                            if !prefix.is_empty() {
+                                cols.insert(prefix.clone());
+                                prefix.push('.');
+                            }
+                            prefix.push_str(segment);
+                        }
+                    }
+                }
+            }
+            cols
         };
         if indexed_cols.is_empty() {
             return Ok(());
         }
 
         // Compute the full damage-vector once, then filter to the
-        // indexed columns. Drops the previous O(indexed × old.len)
-        // pairwise scan to a single pass over old + new.
+        // indexed columns (or their parent path segments). Drops the
+        // previous O(indexed × old.len) pairwise scan to a single pass.
         let damage = crate::application::entity::row_damage_vector(old_fields, new_fields);
 
         for (col, old_value, new_value) in &damage.changed {

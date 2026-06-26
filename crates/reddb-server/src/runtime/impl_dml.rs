@@ -571,9 +571,12 @@ impl RedDBRuntime {
             return Ok(());
         }
 
+        // Use the parent-expanded set so that dot-path indexes (e.g.
+        // "body.service.tier") are triggered when the root field ("body")
+        // is modified.
         let indexed_cols = self
             .index_store_ref()
-            .indexed_columns_set(&applied.collection);
+            .indexed_columns_set_with_parents(&applied.collection);
         if indexed_cols.is_empty() {
             return Ok(());
         }
