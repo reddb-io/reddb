@@ -2233,12 +2233,12 @@ impl RedDBRuntime {
                 // — avoiding it saves a few microseconds per UPDATE.
                 // Page-local replace + t_ctid chain support (true
                 // HOT) lives in a follow-up storage spec.
+                // Use the parent-expanded set so that dot-path indexes
+                // (e.g. "body.service.tier") are triggered when the root
+                // field ("body") appears in modified_columns.
                 let indexed_cols: std::collections::HashSet<String> = self
                     .index_store_ref()
-                    .list_indices(applied.collection.as_str())
-                    .into_iter()
-                    .filter_map(|idx| idx.columns.first().cloned())
-                    .collect();
+                    .indexed_columns_set_with_parents(applied.collection.as_str());
                 // Single-source documents keep promoted index columns in the
                 // body — surface them so the index sees the value move (a no-op
                 // for ordinary stored columns).

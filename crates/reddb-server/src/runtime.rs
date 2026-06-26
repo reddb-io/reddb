@@ -1229,6 +1229,11 @@ struct RuntimeInner {
     /// model that `/metrics`, `/cluster/status`, and the red-ui percentile
     /// panels all consume; counters reset on restart by design.
     query_latency_telemetry: std::sync::Arc<query_latency_telemetry::QueryLatencyTelemetry>,
+    /// Issue #1244 — node CPU/RAM occupancy sampler (ADR 0060 §2 "node
+    /// samples"). Process-local measurement + current-snapshot read model
+    /// `/cluster/status` consumes; sampled on-demand from the status
+    /// handler. See `occupancy_sampler` for the overhead/interval contract.
+    occupancy_sampler: std::sync::Arc<occupancy_sampler::OccupancySampler>,
     /// Issue #1245 — per-node load telemetry (active query gauge +
     /// connect/disconnect churn counters). Three atomics; no per-client
     /// labels; feeds `/metrics`, `/cluster/status`, and the red-ui load
@@ -1398,6 +1403,7 @@ pub(crate) mod materialization_limit;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
 pub(crate) mod node_load_telemetry;
+pub(crate) mod occupancy_sampler;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub mod query_audit;

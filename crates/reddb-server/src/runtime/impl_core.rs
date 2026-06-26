@@ -2567,6 +2567,9 @@ impl RedDBRuntime {
                 query_latency_telemetry: Arc::new(
                     crate::runtime::query_latency_telemetry::QueryLatencyTelemetry::default(),
                 ),
+                occupancy_sampler: Arc::new(
+                    crate::runtime::occupancy_sampler::OccupancySampler::new(),
+                ),
                 node_load_telemetry: Arc::new(
                     crate::runtime::node_load_telemetry::NodeLoadTelemetry::default(),
                 ),
@@ -3736,6 +3739,14 @@ impl RedDBRuntime {
         &self,
     ) -> crate::runtime::query_latency_telemetry::QueryLatencyHistogram {
         self.inner.query_latency_telemetry.rollup()
+    }
+
+    /// Issue #1244 — take a fresh node CPU/RAM occupancy reading for
+    /// `/cluster/status`. CPU utilisation is measured over the interval
+    /// since the previous call (the first call only establishes a baseline
+    /// and reports `NotSampled`). See `occupancy_sampler` for overhead.
+    pub fn sample_occupancy(&self) -> crate::runtime::occupancy_sampler::OccupancySample {
+        self.inner.occupancy_sampler.sample()
     }
 
     /// Issue #1245 — point-in-time node load snapshot (active queries +
