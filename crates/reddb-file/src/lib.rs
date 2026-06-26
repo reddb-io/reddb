@@ -23,6 +23,7 @@ pub mod backup_temp;
 pub mod blob_cache;
 pub mod bloom_segment;
 pub mod btree_value_layout;
+pub mod clock;
 pub mod column_block;
 pub mod control_store;
 pub mod embedded;
@@ -106,6 +107,7 @@ pub use btree_value_layout::{
     encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_MAX_SIZE,
     BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
+pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
     decode_column_block_granule_index_blob, encode_column_block_frame,
