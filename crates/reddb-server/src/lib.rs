@@ -31,6 +31,7 @@ pub mod cli;
 pub mod cluster;
 pub mod config;
 pub mod crypto;
+pub mod document_body;
 pub mod ec;
 pub mod engine;
 pub mod geo;
