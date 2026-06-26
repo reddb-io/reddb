@@ -976,14 +976,8 @@ mod tests {
         let cpu = n(sys.get("cpu_usage").unwrap());
         let ram = n(sys.get("ram_usage").unwrap());
         // 0.42 → 42.0 %, 0.65 → 65.0 %.
-        assert!(
-            (cpu - 42.0).abs() < 0.1,
-            "expected ~42.0, got {cpu}"
-        );
-        assert!(
-            (ram - 65.0).abs() < 0.1,
-            "expected ~65.0, got {ram}"
-        );
+        assert!((cpu - 42.0).abs() < 0.1, "expected ~42.0, got {cpu}");
+        assert!((ram - 65.0).abs() < 0.1, "expected ~65.0, got {ram}");
     }
 
     #[test]

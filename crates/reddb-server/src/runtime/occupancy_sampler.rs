@@ -146,8 +146,7 @@ impl OccupancySampler {
         }
         // busy = user + nice + system + irq + softirq + steal
         let (user, nice, system, idle, iowait, irq, softirq, steal) = (
-            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6],
-            fields[7],
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7],
         );
         let busy = user + nice + system + irq + softirq + steal;
         let total = busy + idle + iowait;
@@ -161,15 +160,9 @@ impl OccupancySampler {
         let mut available_kb = None::<u64>;
         for line in raw.lines() {
             if line.starts_with("MemTotal:") {
-                total_kb = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse().ok());
+                total_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok());
             } else if line.starts_with("MemAvailable:") {
-                available_kb = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse().ok());
+                available_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok());
             }
             if total_kb.is_some() && available_kb.is_some() {
                 break;
@@ -212,7 +205,7 @@ mod tests {
     fn second_sample_returns_measured_cpu_on_linux() {
         let sampler = OccupancySampler::default();
         sampler.sample(); // seed the first reading
-        // Do some work so the delta is measurable.
+                          // Do some work so the delta is measurable.
         let _ = (0u64..200_000).fold(0u64, |a, b| a.wrapping_add(b));
         let s = sampler.sample();
         let usage = s

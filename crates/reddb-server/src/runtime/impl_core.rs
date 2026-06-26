@@ -3741,9 +3741,7 @@ impl RedDBRuntime {
     /// Issue #1244 — advance the CPU/RAM occupancy measurement window and
     /// return the latest values. The first call returns `cpu_usage: None`
     /// (no delta yet); all subsequent calls on Linux return real fractions.
-    pub fn occupancy_sample(
-        &self,
-    ) -> crate::runtime::occupancy_sampler::OccupancySample {
+    pub fn occupancy_sample(&self) -> crate::runtime::occupancy_sampler::OccupancySample {
         self.inner.occupancy_sampler.sample()
     }
 
