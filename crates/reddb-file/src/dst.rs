@@ -11,7 +11,7 @@ const DEFAULT_BUGGIFY_PPM: u64 = 10_000;
 const PPM_DENOMINATOR: u64 = 1_000_000;
 
 thread_local! {
-    static ACTIVE: RefCell<Option<Rc<RefCell<ActiveSimulation>>>> = RefCell::new(None);
+    static ACTIVE: RefCell<Option<Rc<RefCell<ActiveSimulation>>>> = const { RefCell::new(None) };
 }
 
 #[derive(Debug, Clone, Copy)]
