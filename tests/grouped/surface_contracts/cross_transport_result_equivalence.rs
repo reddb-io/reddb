@@ -51,8 +51,7 @@ const SELECT_SQL: &str = "SELECT id, label FROM xport_equiv_1354 ORDER BY id";
 /// one parameter), which serialises the full `runtime_query_json` envelope.
 /// `WHERE id > $1` with `$1 = 0` is semantically equivalent to the
 /// unfiltered SELECT since all inserted rows have id ∈ {1, 2, 3}.
-const SELECT_SQL_REDWIRE: &str =
-    "SELECT id, label FROM xport_equiv_1354 WHERE id > $1 ORDER BY id";
+const SELECT_SQL_REDWIRE: &str = "SELECT id, label FROM xport_equiv_1354 WHERE id > $1 ORDER BY id";
 
 /// Transport-independent normalized result: (column names, rows-as-strings).
 type NormResult = (Vec<String>, Vec<Vec<String>>);
@@ -248,7 +247,9 @@ async fn drive_pgwire(addr: SocketAddr) -> NormResult {
     let sql = format!("{SELECT_SQL}\0");
     let qmsg_len = (sql.len() + 4) as u32;
     s.write_all(&[b'Q']).await.expect("pg Q tag");
-    s.write_all(&qmsg_len.to_be_bytes()).await.expect("pg Q len");
+    s.write_all(&qmsg_len.to_be_bytes())
+        .await
+        .expect("pg Q len");
     s.write_all(sql.as_bytes()).await.expect("pg Q sql");
 
     // --- Parse response frames
@@ -307,8 +308,8 @@ async fn drive_pgwire(addr: SocketAddr) -> NormResult {
                 }
                 rows.push(row);
             }
-            b'Z' => break,  // ReadyForQuery — response complete
-            _ => {}         // CommandComplete, Notice, Error, etc.
+            b'Z' => break, // ReadyForQuery — response complete
+            _ => {}        // CommandComplete, Notice, Error, etc.
         }
     }
 
@@ -327,9 +328,8 @@ async fn cross_transport_select_results_are_equivalent() {
     // One in-memory runtime shared across all five transports.
     // Data is seeded once via the embedded path before any listener starts,
     // so transport start-up races cannot create a read-before-write window.
-    let runtime = Arc::new(
-        RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"),
-    );
+    let runtime =
+        Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"));
 
     runtime
         .execute_query(&format!("CREATE TABLE {TABLE} (id INTEGER, label TEXT)"))
@@ -366,8 +366,7 @@ async fn cross_transport_select_results_are_equivalent() {
         tls: None,
     };
     let grpc_auth = Arc::new(AuthStore::new(AuthConfig::default()));
-    let grpc_server =
-        RedDBGrpcServer::with_options(runtime.as_ref().clone(), grpc_opts, grpc_auth);
+    let grpc_server = RedDBGrpcServer::with_options(runtime.as_ref().clone(), grpc_opts, grpc_auth);
     tokio::spawn(async move {
         let _ = grpc_server.serve().await;
     });
@@ -428,8 +427,7 @@ async fn cross_transport_select_results_are_equivalent() {
         );
         for (i, (br, or)) in base_rows.iter().zip(rows.iter()).enumerate() {
             assert_eq!(
-                br,
-                or,
+                br, or,
                 "row {i} mismatch: {base_name} vs {name}\n  {base_name}={br:?}\n  {name}={or:?}",
             );
         }
