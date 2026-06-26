@@ -9,6 +9,7 @@ const npmPublicPackages = [
   "drivers/js/package.json",
   "drivers/js-client/package.json",
   "drivers/bun/package.json",
+  "packages/mcp/package.json",
 ];
 
 const npmPrivateWorkspacePackages = [

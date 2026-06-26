@@ -113,6 +113,13 @@ pub fn push_json_tokens(tokens: &mut BTreeSet<String>, bytes: &[u8]) {
         }
     }
 
+    // A document body may be the native binary container (PRD-1398); decode it
+    // to JSON so its index tokens match those of an equivalent plain JSON body.
+    if let Some(value) = crate::document_body::decode_container_to_json(bytes) {
+        let mut budget = MAX_JSON_TOKEN_BUDGET;
+        collect(&value, tokens, &mut budget);
+        return;
+    }
     if let Ok(value) = crate::serde_json::from_slice::<crate::serde_json::Value>(bytes) {
         let mut budget = MAX_JSON_TOKEN_BUDGET;
         collect(&value, tokens, &mut budget);
