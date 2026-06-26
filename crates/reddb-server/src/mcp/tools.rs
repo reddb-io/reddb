@@ -678,6 +678,43 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec!["name"],
             ),
         },
+        ToolDef {
+            name: "reddb_type_of",
+            description: "Resolve the canonical RedDB type for a value or a type name, with the casts and operators that apply to it.\n\nPass either `value` (a literal classified by the engine's value codec) or `type` (a type name such as `INT`, `TEXT`, or a canonical reddb name). Returns the canonical type, its coercion category, the applicable operator symbols, and the casts that flow out of (`casts_from`) and into (`casts_to`) it. Answers entirely from the generated `reddb-io-types` function/operator/cast catalogs — no value is stored or evaluated.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("value", {
+                        let mut f = Map::new();
+                        f.insert(
+                            "description".to_string(),
+                            JsonValue::String(
+                                "A literal value to classify. Accepts null, boolean, number, string, array, or object; its canonical RedDB type is inferred by the value codec."
+                                    .to_string(),
+                            ),
+                        );
+                        f.insert(
+                            "anyOf".to_string(),
+                            JsonValue::Array(vec![
+                                type_field("null"),
+                                type_field("boolean"),
+                                type_field("number"),
+                                type_field("string"),
+                                type_field("array"),
+                                type_field("object"),
+                            ]),
+                        );
+                        JsonValue::Object(f)
+                    }),
+                    (
+                        "type",
+                        string_field(
+                            "A type name to look up instead of a value — an SQL alias (`INT`, `STRING`) or a canonical reddb name (`INTEGER`, `TEXT`), case-insensitive.",
+                        ),
+                    ),
+                ],
+                vec![],
+            ),
+        },
     ]
 }
 
@@ -721,6 +758,28 @@ mod tests {
         assert!(names.contains(&"reddb_graph_clustering"));
         assert!(names.contains(&"reddb_create_collection"));
         assert!(names.contains(&"reddb_drop_collection"));
+        assert!(names.contains(&"reddb_type_of"));
+    }
+
+    #[test]
+    fn test_type_of_tool_schema_accepts_value_or_type() {
+        let tools = all_tools();
+        let tool = tools.iter().find(|t| t.name == "reddb_type_of").unwrap();
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert!(props.contains_key("value"));
+        assert!(props.contains_key("type"));
+
+        // Neither field is required — the tool validates "exactly one" at call time.
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(required.is_empty());
     }
 
     #[test]
