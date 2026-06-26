@@ -1223,6 +1223,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_create_command_covers_view_refresh_and_modifier_errors() {
+        // CREATE MATERIALIZED VIEW with a REFRESH EVERY cadence — the
+        // refresh-clause block lives on the parse_create_command surface,
+        // distinct from the parse_sql_statement path the expr() helper uses.
+        let SqlCommand::CreateView(view) =
+            sql_command("CREATE MATERIALIZED VIEW mv AS SELECT id FROM users REFRESH EVERY 5 s")
+        else {
+            panic!("expected CreateView");
+        };
+        assert_eq!(view.name, "mv");
+        assert!(view.materialized);
+        assert_eq!(view.refresh_every_ms, Some(5_000));
+
+        for sql in [
+            // REFRESH EVERY is rejected on a non-materialized view.
+            "CREATE VIEW v AS SELECT id FROM users REFRESH EVERY 5 s",
+            // REFRESH without the EVERY keyword.
+            "CREATE MATERIALIZED VIEW mv AS SELECT id FROM users REFRESH 5",
+            // OR REPLACE / MATERIALIZED modifiers without a VIEW target.
+            "CREATE OR REPLACE TABLE t (id INT)",
+        ] {
+            assert!(
+                sql_command_result(sql).is_err(),
+                "{sql} should be rejected by parse_create_command"
+            );
+        }
+    }
+
+    #[test]
     fn parse_sql_command_covers_admin_set_reset_events_and_dispatch_errors() {
         // SET TENANT / RESET TENANT through the lower `parse_sql_command`
         // surface — the `expr()` helper routes these through
