@@ -26,6 +26,7 @@ pub mod btree_value_layout;
 pub mod clock;
 pub mod column_block;
 pub mod control_store;
+pub mod dst;
 pub mod embedded;
 pub mod file_format;
 pub mod graph_label_registry;
@@ -120,6 +121,7 @@ pub use control_store::{
     DurableLastVote, FileLastVoteStore, FileTermStore, DEFAULT_FILE_TERM, LAST_VOTE_TEMP_EXTENSION,
     TERM_TEMP_EXTENSION,
 };
+pub use dst::SimulationContext;
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock, RdbFileError,
     RdbFileResult, DEFAULT_FORMAT_VERSION, EMBEDDED_RDB_MANIFEST_OFFSET,
