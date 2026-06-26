@@ -314,6 +314,7 @@ impl McpServer {
             "reddb_drop_collection" => self.tool_drop_collection(args),
             "reddb_rql_validate" => self.tool_rql_validate(args),
             "reddb_rql_explain" => self.tool_rql_explain(args),
+            "reddb_type_of" => self.tool_type_of(args),
             "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
             "reddb_auth_create_user" => self.tool_auth_create_user(args),
             "reddb_auth_login" => self.tool_auth_login(args),
@@ -1339,6 +1340,26 @@ impl McpServer {
         );
         json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
     }
+
+    /// `reddb_type_of`: resolve a type name or a literal value to its canonical
+    /// type plus applicable casts/operators, answered entirely from the
+    /// generated `reddb-io-types` catalog (ADR 0061). This handler owns no type
+    /// knowledge — it only marshals arguments into and JSON out of
+    /// [`reddb_types::knowledge::type_of_json`].
+    fn tool_type_of(&self, args: &JsonValue) -> Result<String, String> {
+        let type_name = args.get("type").and_then(|v| v.as_str());
+        let value = args.get("value");
+        if type_name.is_none() && value.is_none() {
+            return Err("provide one of 'type' (a type name) or 'value' (a JSON literal)".to_string());
+        }
+        let facts = reddb_types::knowledge::type_of_json(type_name, value).ok_or_else(|| {
+            match type_name {
+                Some(name) => format!("unknown type name '{name}'"),
+                None => "could not resolve a type from the request".to_string(),
+            }
+        })?;
+        json_to_string(&facts).map_err(|e| format!("serialization error: {}", e))
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1840,6 +1861,128 @@ mod tests {
             .and_then(JsonValue::as_str)
             .expect("error text");
         assert!(text.contains("options.tempurature"), "text: {text}");
+    }
+
+    /// Helper: drive a `reddb_type_of` `tools/call` over the JSON-RPC seam and
+    /// return the parsed result object (`content`/`isError`), exercising the
+    /// real dispatcher.
+    fn call_type_of(srv: &mut McpServer, arguments: &str) -> JsonValue {
+        let request = parse_json(&format!(
+            r#"{{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{{"name":"reddb_type_of","arguments":{arguments}}}}}"#
+        ));
+        let response = srv.handle_message(&request).expect("response");
+        parse_json(&response)
+            .get("result")
+            .cloned()
+            .expect("result object")
+    }
+
+    /// Extract the text payload of a (non-error) tool result and parse it as JSON.
+    fn type_of_result_json(result: &JsonValue) -> JsonValue {
+        assert_ne!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true),
+            "tool returned an error: {result:?}"
+        );
+        let text = result
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("result text");
+        parse_json(text)
+    }
+
+    #[test]
+    fn tools_list_includes_reddb_type_of() {
+        let srv = make_server();
+        let response = srv.handle_tools_list(Some(&JsonValue::Number(1.0)));
+        let parsed = parse_json(&response);
+        let tools = parsed
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(JsonValue::as_array)
+            .expect("tools array");
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.get("name").and_then(JsonValue::as_str) == Some("reddb_type_of")),
+            "reddb_type_of must be advertised in tools/list"
+        );
+    }
+
+    #[test]
+    fn tools_call_type_of_resolves_type_name_from_catalog() {
+        let mut srv = make_server();
+        let result = call_type_of(&mut srv, r#"{"type":"int"}"#);
+        let facts = type_of_result_json(&result);
+
+        // Canonical type + category come from the catalog authority.
+        assert_eq!(
+            facts.get("canonical_type").and_then(JsonValue::as_str),
+            Some("INTEGER")
+        );
+        assert_eq!(
+            facts.get("category").and_then(JsonValue::as_str),
+            Some("Numeric")
+        );
+        // Applicable casts include the implicit INTEGER → FLOAT widening.
+        let casts = facts.get("casts").and_then(JsonValue::as_array).unwrap();
+        assert!(
+            casts.iter().any(|c| {
+                c.get("target").and_then(JsonValue::as_str) == Some("FLOAT")
+                    && c.get("context").and_then(JsonValue::as_str) == Some("implicit")
+            }),
+            "casts: {casts:?}"
+        );
+        // Applicable operators include arithmetic +.
+        let operators = facts.get("operators").and_then(JsonValue::as_array).unwrap();
+        assert!(
+            operators
+                .iter()
+                .any(|o| o.get("symbol").and_then(JsonValue::as_str) == Some("+")),
+            "operators: {operators:?}"
+        );
+    }
+
+    #[test]
+    fn tools_call_type_of_infers_type_from_literal_value() {
+        let mut srv = make_server();
+        let result = call_type_of(&mut srv, r#"{"value":true}"#);
+        let facts = type_of_result_json(&result);
+        assert_eq!(
+            facts.get("canonical_type").and_then(JsonValue::as_str),
+            Some("BOOLEAN")
+        );
+    }
+
+    #[test]
+    fn tools_call_type_of_unknown_name_is_error() {
+        let mut srv = make_server();
+        let result = call_type_of(&mut srv, r#"{"type":"frobnicate"}"#);
+        assert_eq!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        let text = result
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("error text");
+        assert!(text.contains("frobnicate"), "text: {text}");
+    }
+
+    #[test]
+    fn tools_call_type_of_requires_an_argument() {
+        let mut srv = make_server();
+        let result = call_type_of(&mut srv, r#"{}"#);
+        assert_eq!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
     }
 
     #[test]
