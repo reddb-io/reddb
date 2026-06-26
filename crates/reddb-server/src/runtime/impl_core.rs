@@ -3741,9 +3741,7 @@ impl RedDBRuntime {
     /// Issue #1245 — point-in-time node load snapshot (active queries +
     /// connect/disconnect churn). Feeds `/metrics`, `/cluster/status`, and
     /// the red-ui load panels.
-    pub fn node_load_snapshot(
-        &self,
-    ) -> crate::runtime::node_load_telemetry::NodeLoadSnapshot {
+    pub fn node_load_snapshot(&self) -> crate::runtime::node_load_telemetry::NodeLoadSnapshot {
         self.inner.node_load_telemetry.snapshot()
     }
 
