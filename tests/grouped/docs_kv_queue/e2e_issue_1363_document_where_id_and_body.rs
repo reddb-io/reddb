@@ -48,7 +48,13 @@ fn update_documents_where_id_matches_and_reports_record_count() {
 
     let inserted_rid = insert.result.records[0]
         .get("rid")
-        .and_then(|v| if let Value::UnsignedInteger(n) = v { Some(*n) } else { None })
+        .and_then(|v| {
+            if let Value::UnsignedInteger(n) = v {
+                Some(*n)
+            } else {
+                None
+            }
+        })
         .expect("rid on INSERT result");
 
     let updated = rt
@@ -138,13 +144,17 @@ fn select_documents_where_id_filters_correctly() {
 
     let rid = ins.result.records[0]
         .get("rid")
-        .and_then(|v| if let Value::UnsignedInteger(n) = v { Some(*n) } else { None })
+        .and_then(|v| {
+            if let Value::UnsignedInteger(n) = v {
+                Some(*n)
+            } else {
+                None
+            }
+        })
         .expect("rid on INSERT");
 
     let result = rt
-        .execute_query(&format!(
-            "SELECT name FROM select_id_docs WHERE id = {rid}"
-        ))
+        .execute_query(&format!("SELECT name FROM select_id_docs WHERE id = {rid}"))
         .expect("SELECT WHERE id should succeed");
     assert_eq!(result.result.records.len(), 1);
     assert_eq!(text_field(&result.result.records[0], "name"), "alice");
@@ -165,15 +175,22 @@ fn delete_documents_where_id_removes_correct_document() {
 
     let rid = ins.result.records[0]
         .get("rid")
-        .and_then(|v| if let Value::UnsignedInteger(n) = v { Some(*n) } else { None })
+        .and_then(|v| {
+            if let Value::UnsignedInteger(n) = v {
+                Some(*n)
+            } else {
+                None
+            }
+        })
         .expect("rid on INSERT");
 
     let deleted = rt
-        .execute_query(&format!(
-            "DELETE FROM delete_id_docs WHERE id = {rid}"
-        ))
+        .execute_query(&format!("DELETE FROM delete_id_docs WHERE id = {rid}"))
         .expect("DELETE WHERE id should succeed");
-    assert_eq!(deleted.affected_rows, 1, "DELETE WHERE id should remove one document");
+    assert_eq!(
+        deleted.affected_rows, 1,
+        "DELETE WHERE id should remove one document"
+    );
 
     let remaining = exec(&rt, "SELECT name FROM delete_id_docs");
     assert_eq!(remaining.result.records.len(), 1);
