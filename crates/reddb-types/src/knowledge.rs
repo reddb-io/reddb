@@ -205,8 +205,9 @@ pub fn implicit_casts() -> Vec<(DataType, DataType)> {
     pairs
 }
 
-/// Human label for a [`TypeCategory`], used by the generated map.
-fn category_label(category: TypeCategory) -> &'static str {
+/// Human label for a [`TypeCategory`], used by the generated map and the
+/// `reddb_type_of` lookup tool.
+pub fn category_label(category: TypeCategory) -> &'static str {
     match category {
         TypeCategory::Numeric => "Numeric",
         TypeCategory::String => "String",
@@ -352,6 +353,98 @@ pub fn type_llms_section() -> String {
         body = type_reference_markdown(),
         end = LLMS_END_MARKER,
     )
+}
+
+// ── Type-of lookup (the `reddb_type_of` active MCP tool, ADR 0061 §4) ──
+
+/// The resolved answer for a `reddb_type_of` lookup: a value's or named type's
+/// canonical [`DataType`] plus the casts and operators the engine's catalogs
+/// make available to it. Every field is read live from the cast / operator
+/// authorities in this crate, so the answer cannot drift from the engine.
+pub struct TypeOf {
+    /// The canonical value type the input resolves to.
+    pub canonical: DataType,
+    /// The coercion category the canonical type belongs to.
+    pub category: TypeCategory,
+    /// Targets the engine widens to silently (lossless [`CastContext::Implicit`]
+    /// casts) — usable anywhere without writing `CAST(...)`. Sorted, deduped.
+    pub implicit_cast_targets: Vec<DataType>,
+    /// Targets reachable only via an explicit `CAST(...)` / `expr::type` or an
+    /// assignment-context coercion (everything in the cast catalog whose minimum
+    /// context is above implicit). Sorted, deduped.
+    pub explicit_cast_targets: Vec<DataType>,
+    /// Operator symbols for which the canonical type is a declared operand
+    /// (either side of an infix overload, or the operand of a prefix overload).
+    /// Sorted, deduped.
+    pub operators: Vec<&'static str>,
+}
+
+/// Resolve an SQL-level or canonical type name (case-insensitive) to its
+/// [`DataType`]. Thin pass-through to [`DataType::from_sql_name`] so the
+/// knowledge layer is the single resolver the MCP tool calls. Returns `None`
+/// for unknown names.
+pub fn resolve_type_name(name: &str) -> Option<DataType> {
+    DataType::from_sql_name(name)
+}
+
+/// Infer the canonical value type of a JSON value as the type system would see
+/// it. `Null` carries no type, so it returns `None`; an integral JSON number is
+/// reported as `INTEGER` and a fractional one as `FLOAT`. Strings map to the
+/// general `TEXT` type (domain refinements like `EMAIL` are opt-in, not
+/// inferred), arrays to `ARRAY`, and objects to `JSON`.
+pub fn canonical_type_of_json(value: &crate::json::Value) -> Option<DataType> {
+    use crate::json::Value;
+    Some(match value {
+        Value::Null => return None,
+        Value::Bool(_) => DataType::Boolean,
+        Value::Number(n) => {
+            if n.fract() == 0.0 && n.is_finite() {
+                DataType::Integer
+            } else {
+                DataType::Float
+            }
+        }
+        Value::String(_) => DataType::Text,
+        Value::Array(_) => DataType::Array,
+        Value::Object(_) => DataType::Json,
+    })
+}
+
+/// Build the [`TypeOf`] answer for `ty` straight from the cast and operator
+/// catalogs. The applicable casts and operators are the catalog rows that name
+/// `ty`, so adding a row to either authority flows automatically into the tool.
+pub fn type_of(ty: DataType) -> TypeOf {
+    let mut implicit_cast_targets: Vec<DataType> = CAST_CATALOG
+        .iter()
+        .filter(|cast| cast.src == ty && cast.context == CastContext::Implicit)
+        .map(|cast| cast.target)
+        .collect();
+    implicit_cast_targets.sort_by_key(|target| *target as u8);
+    implicit_cast_targets.dedup();
+
+    let mut explicit_cast_targets: Vec<DataType> = CAST_CATALOG
+        .iter()
+        .filter(|cast| cast.src == ty && cast.context != CastContext::Implicit)
+        .map(|cast| cast.target)
+        .collect();
+    explicit_cast_targets.sort_by_key(|target| *target as u8);
+    explicit_cast_targets.dedup();
+
+    let mut operators: Vec<&'static str> = OPERATOR_CATALOG
+        .iter()
+        .filter(|entry| entry.lhs_type == ty || entry.rhs_type == ty)
+        .map(|entry| entry.name)
+        .collect();
+    operators.sort_unstable();
+    operators.dedup();
+
+    TypeOf {
+        canonical: ty,
+        category: ty.category(),
+        implicit_cast_targets,
+        explicit_cast_targets,
+        operators,
+    }
 }
 
 #[cfg(test)]
@@ -518,5 +611,115 @@ reference"
         assert!(section.starts_with(LLMS_BEGIN_MARKER));
         assert!(section.ends_with(LLMS_END_MARKER));
         assert!(section.contains(&type_reference_markdown()));
+    }
+
+    /// Type names resolve case-insensitively, accepting both SQL aliases and the
+    /// canonical names `Display` renders.
+    #[test]
+    fn resolve_type_name_accepts_aliases_and_canonical() {
+        assert_eq!(resolve_type_name("int"), Some(DataType::Integer));
+        assert_eq!(resolve_type_name("INTEGER"), Some(DataType::Integer));
+        assert_eq!(resolve_type_name("string"), Some(DataType::Text));
+        assert_eq!(resolve_type_name("BIGINT"), Some(DataType::BigInt));
+        assert_eq!(resolve_type_name("not_a_type"), None);
+    }
+
+    /// JSON values infer to their canonical value type; `null` carries none.
+    #[test]
+    fn canonical_type_of_json_infers_by_kind() {
+        use crate::json::Value;
+        assert_eq!(canonical_type_of_json(&Value::Null), None);
+        assert_eq!(
+            canonical_type_of_json(&Value::Bool(true)),
+            Some(DataType::Boolean)
+        );
+        assert_eq!(
+            canonical_type_of_json(&Value::Number(42.0)),
+            Some(DataType::Integer)
+        );
+        assert_eq!(
+            canonical_type_of_json(&Value::Number(3.5)),
+            Some(DataType::Float)
+        );
+        assert_eq!(
+            canonical_type_of_json(&Value::String("hi".to_string())),
+            Some(DataType::Text)
+        );
+        assert_eq!(
+            canonical_type_of_json(&Value::Array(vec![])),
+            Some(DataType::Array)
+        );
+        assert_eq!(
+            canonical_type_of_json(&Value::Object(Default::default())),
+            Some(DataType::Json)
+        );
+    }
+
+    /// `type_of` reports the canonical type, its category, and the casts &
+    /// operators the catalogs make available — all read from the authorities.
+    #[test]
+    fn type_of_integer_reports_catalog_casts_and_operators() {
+        let answer = type_of(DataType::Integer);
+        assert_eq!(answer.canonical, DataType::Integer);
+        assert_eq!(answer.category, TypeCategory::Numeric);
+
+        // Integer widens implicitly to the wider numeric types (lossless).
+        assert!(answer.implicit_cast_targets.contains(&DataType::Float));
+        assert!(answer.implicit_cast_targets.contains(&DataType::BigInt));
+
+        // Arithmetic operators name Integer as an operand.
+        assert!(answer.operators.contains(&"+"));
+        assert!(answer.operators.contains(&"*"));
+    }
+
+    /// Every cast/operator the tool reports is actually present in the source
+    /// catalogs for that type — the anti-drift guarantee for the lookup tool.
+    #[test]
+    fn type_of_answers_are_backed_by_the_catalogs() {
+        for ty in catalogued_value_types() {
+            let answer = type_of(ty);
+            for target in &answer.implicit_cast_targets {
+                assert!(
+                    CAST_CATALOG.iter().any(|cast| cast.src == ty
+                        && cast.target == *target
+                        && cast.context == CastContext::Implicit),
+                    "implicit cast {ty} → {target} is not in CAST_CATALOG"
+                );
+            }
+            for target in &answer.explicit_cast_targets {
+                assert!(
+                    CAST_CATALOG.iter().any(|cast| cast.src == ty
+                        && cast.target == *target
+                        && cast.context != CastContext::Implicit),
+                    "explicit cast {ty} → {target} is not in CAST_CATALOG"
+                );
+            }
+            for op in &answer.operators {
+                assert!(
+                    OPERATOR_CATALOG
+                        .iter()
+                        .any(|entry| entry.name == *op
+                            && (entry.lhs_type == ty || entry.rhs_type == ty)),
+                    "operator {op:?} is not declared for {ty} in OPERATOR_CATALOG"
+                );
+            }
+        }
+    }
+
+    /// The implicit and explicit cast target lists never overlap and are sorted.
+    #[test]
+    fn type_of_cast_lists_are_disjoint_and_sorted() {
+        for ty in catalogued_value_types() {
+            let answer = type_of(ty);
+            for target in &answer.implicit_cast_targets {
+                assert!(
+                    !answer.explicit_cast_targets.contains(target),
+                    "{ty} → {target} appears in both implicit and explicit lists"
+                );
+            }
+            let mut sorted = answer.implicit_cast_targets.clone();
+            sorted.sort_by_key(|t| *t as u8);
+            assert_eq!(answer.implicit_cast_targets, sorted);
+        }
     }
 }
