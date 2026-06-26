@@ -1232,9 +1232,17 @@ fn reject_document_array_position_path(path: &[String]) -> RedDBResult<()> {
 
 fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<JsonValue> {
     match fields.get("body") {
-        Some(Value::Json(bytes)) => crate::json::from_slice(bytes).map_err(|err| {
-            crate::RedDBError::Query(format!("failed to decode document body: {err}"))
-        }),
+        Some(Value::Json(bytes)) => {
+            // The stored body may be the native binary container (PRD-1398) or
+            // plain JSON; decode either form back to JSON.
+            if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
+                Ok(body)
+            } else {
+                crate::json::from_slice(bytes).map_err(|err| {
+                    crate::RedDBError::Query(format!("failed to decode document body: {err}"))
+                })
+            }
+        }
         Some(_) => Err(crate::RedDBError::Query(
             "document body field must contain JSON".to_string(),
         )),
@@ -1245,6 +1253,7 @@ fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<Json
 fn replace_document_row_body(
     fields: &mut HashMap<String, Value>,
     body: JsonValue,
+    binary: bool,
     modified_columns: &mut Vec<String>,
 ) -> RedDBResult<()> {
     modified_columns.push("body".to_string());
@@ -1259,9 +1268,7 @@ fn replace_document_row_body(
         modified_columns.push(key);
     }
 
-    let body_bytes = json_to_vec(&body).map_err(|err| {
-        crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
-    })?;
+    let body_bytes = crate::document_body::serialize_document_body(&body, binary)?;
     fields.insert("body".to_string(), Value::Json(body_bytes));
 
     if let JsonValue::Object(map) = &body {
@@ -1353,6 +1360,7 @@ impl RedDBRuntime {
                         contract.declared_model == crate::catalog::CollectionModel::Document
                     })
                     .unwrap_or(false);
+                let binary_body = self.binary_document_body_enabled();
                 let mut field_ops = Vec::new();
                 let mut metadata_ops = Vec::new();
                 let mut document_body_ops = Vec::new();
@@ -1418,14 +1426,19 @@ impl RedDBRuntime {
                     let mut body = document_body_from_named(named)?;
                     apply_patch_operations_to_json(&mut body, &document_body_ops)
                         .map_err(crate::RedDBError::Query)?;
-                    replace_document_row_body(named, body, &mut modified_columns)?;
+                    replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                 }
 
                 if is_document_collection {
                     if let Some(body) = payload.get("body") {
                         context_index_dirty = true;
                         let named = row.named.get_or_insert_with(Default::default);
-                        replace_document_row_body(named, body.clone(), &mut modified_columns)?;
+                        replace_document_row_body(
+                            named,
+                            body.clone(),
+                            binary_body,
+                            &mut modified_columns,
+                        )?;
                     }
                 }
 
@@ -1441,7 +1454,7 @@ impl RedDBRuntime {
                         let mut body = document_body_from_named(named)?;
                         apply_patch_operations_to_json(&mut body, &field_ops)
                             .map_err(crate::RedDBError::Query)?;
-                        replace_document_row_body(named, body, &mut modified_columns)?;
+                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                     } else {
                         for op in &field_ops {
                             if let Some(col) = op.path.first() {
@@ -1477,7 +1490,7 @@ impl RedDBRuntime {
                                 map.insert(key.clone(), value.clone());
                             }
                         }
-                        replace_document_row_body(named, body, &mut modified_columns)?;
+                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                     } else {
                         for (key, value) in fields {
                             modified_columns.push(key.clone());
@@ -1991,9 +2004,10 @@ impl RedDBRuntime {
                     );
                 }
             }
-            let body_bytes = json_to_vec(&body).map_err(|err| {
-                crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
-            })?;
+            let body_bytes = crate::document_body::serialize_document_body(
+                &body,
+                self.binary_document_body_enabled(),
+            )?;
             named.insert("body".to_string(), Value::Json(body_bytes));
             context_index_dirty = true;
             if !modified_columns.iter().any(|column| column == "body") {
@@ -2919,10 +2933,13 @@ impl RuntimeEntityPort for RedDBRuntime {
             )?;
         }
 
-        // Serialize the full body as Value::Json for the "body" field
-        let body_bytes = json_to_vec(&input.body).map_err(|err| {
-            crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
-        })?;
+        // Serialize the full body for the "body" field. Behind the
+        // `storage.binary_document_body` flag (PRD-1398) this is the native binary
+        // container; otherwise plain JSON. Reads decode either form to JSON.
+        let body_bytes = crate::document_body::serialize_document_body(
+            &input.body,
+            self.binary_document_body_enabled(),
+        )?;
         let mut fields: Vec<(String, crate::storage::schema::Value)> = vec![(
             "body".to_string(),
             crate::storage::schema::Value::Json(body_bytes),
