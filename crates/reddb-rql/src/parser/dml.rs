@@ -387,6 +387,13 @@ impl<'a> Parser<'a> {
 
         let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
+        let claim_limit = if self.consume_ident_ci("CLAIM")? {
+            self.expect(Token::Limit)?;
+            Some(self.parse_integer()? as u64)
+        } else {
+            None
+        };
+
         let mut order_by = if self.consume(&Token::Order)? {
             self.expect(Token::By)?;
             let clauses = self.parse_order_by_list()?;
@@ -405,9 +412,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if !order_by.is_empty() && limit.is_none() {
+        // CLAIM LIMIT acts as the LIMIT for the purpose of ORDER BY semantics:
+        // a claim without a conventional LIMIT still has a deterministic bound.
+        let effective_limit = limit.is_some() || claim_limit.is_some();
+        if !order_by.is_empty() && !effective_limit {
             return Err(ParseError::new(
                 "UPDATE ORDER BY requires LIMIT",
+                self.position(),
+            ));
+        }
+        if claim_limit.is_some() && order_by.is_empty() {
+            return Err(ParseError::new(
+                "UPDATE CLAIM requires ORDER BY",
                 self.position(),
             ));
         }
@@ -444,6 +460,7 @@ impl<'a> Parser<'a> {
             expires_at_ms,
             with_metadata,
             returning,
+            claim_limit,
             order_by,
             limit,
             suppress_events,
@@ -1207,6 +1224,7 @@ mod tests {
         assert!(query.where_expr.is_some());
         assert_eq!(query.ttl_ms, Some(30_000));
         assert_eq!(query.with_metadata.len(), 1);
+        assert_eq!(query.claim_limit, None);
         assert_eq!(query.limit, Some(5));
         assert_eq!(query.order_by.len(), 2);
         assert!(matches!(
@@ -1224,6 +1242,27 @@ mod tests {
             )
         );
         assert!(query.suppress_events);
+    }
+
+    #[test]
+    fn update_claim_limit_requires_order_by() {
+        let query = update(
+            "UPDATE docs SET status = 'reserved' WHERE status = 'available' \
+             CLAIM LIMIT 2 ORDER BY priority ASC RETURNING id",
+        );
+        assert_eq!(query.claim_limit, Some(2));
+        assert_eq!(query.limit, None);
+        assert_eq!(query.order_by.len(), 2);
+        assert!(matches!(
+            &query.order_by[1].field,
+            FieldRef::TableColumn { column, .. } if column == "rid"
+        ));
+
+        let mut parser = make_parser("UPDATE docs SET status = 'reserved' CLAIM LIMIT 1");
+        let err = parser
+            .parse_update_query()
+            .expect_err("claim without order should fail");
+        assert!(err.to_string().contains("CLAIM requires ORDER BY"));
     }
 
     #[test]

@@ -1866,6 +1866,8 @@ pub struct UpdateQuery {
     pub with_metadata: Vec<(String, Value)>,
     /// Optional RETURNING clause items.
     pub returning: Option<Vec<ReturningItem>>,
+    /// Optional partial Concurrent claim cardinality.
+    pub claim_limit: Option<u64>,
     /// Optional deterministic target ordering for limited UPDATE batches.
     pub order_by: Vec<OrderByClause>,
     /// Optional `LIMIT N` cap. Caps the number of targets the executor
