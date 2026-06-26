@@ -678,6 +678,33 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec!["name"],
             ),
         },
+        // Knowledge tool — answers from the generated reddb-io-types catalog (ADR 0061).
+        ToolDef {
+            name: "reddb_type_of",
+            description: "Look up a RedDB value type from the generated type catalog. Provide either `value` (a JSON value whose canonical type is inferred) or `type` (a type name like \"int\", \"TEXT\", \"BIGINT\"). Returns the canonical type, its coercion category, the implicit (silent, lossless) and explicit (CAST-required) cast targets, and the operators that accept it — all read live from the `reddb-io-types` function/operator/cast authorities, so the answer never drifts from the engine.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("value", {
+                        let mut f = Map::new();
+                        f.insert(
+                            "description".to_string(),
+                            JsonValue::String(
+                                "A JSON value whose canonical RedDB type is inferred. Mutually exclusive with `type`."
+                                    .to_string(),
+                            ),
+                        );
+                        JsonValue::Object(f)
+                    }),
+                    (
+                        "type",
+                        string_field(
+                            "A RedDB or SQL type name (case-insensitive), e.g. \"int\", \"TEXT\", \"BIGINT\". Mutually exclusive with `value`.",
+                        ),
+                    ),
+                ],
+                vec![],
+            ),
+        },
     ]
 }
 
@@ -721,6 +748,27 @@ mod tests {
         assert!(names.contains(&"reddb_graph_clustering"));
         assert!(names.contains(&"reddb_create_collection"));
         assert!(names.contains(&"reddb_drop_collection"));
+        assert!(names.contains(&"reddb_type_of"));
+    }
+
+    #[test]
+    fn test_type_of_tool_schema() {
+        let tools = all_tools();
+        let tool = tools.iter().find(|t| t.name == "reddb_type_of").unwrap();
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert!(props.contains_key("value"));
+        assert!(props.contains_key("type"));
+        // Both inputs are optional; the handler enforces that exactly one is given.
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(required.is_empty());
     }
 
     #[test]
