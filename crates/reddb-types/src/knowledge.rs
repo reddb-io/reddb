@@ -205,8 +205,108 @@ pub fn implicit_casts() -> Vec<(DataType, DataType)> {
     pairs
 }
 
-/// Human label for a [`TypeCategory`], used by the generated map.
-fn category_label(category: TypeCategory) -> &'static str {
+/// Human label for the minimum context a cast requires, as published by the
+/// type-of lookup. Mirrors [`CastContext`] one-for-one.
+pub fn cast_context_label(context: CastContext) -> &'static str {
+    match context {
+        CastContext::Implicit => "implicit",
+        CastContext::Assignment => "assignment",
+        CastContext::Explicit => "explicit",
+    }
+}
+
+/// One cast edge in a type's cast neighbourhood, read live from
+/// [`CAST_CATALOG`]. The `context` is the minimum coercion context the cast
+/// requires and `lossy` flags conversions that may drop information.
+#[derive(Debug, Clone, Copy)]
+pub struct CastFact {
+    /// Source type of the cast.
+    pub src: DataType,
+    /// Target type of the cast.
+    pub target: DataType,
+    /// Minimum context in which the cast is legal (implicit/assignment/explicit).
+    pub context: CastContext,
+    /// Whether the cast may lose information.
+    pub lossy: bool,
+}
+
+/// The catalog facts for one value type: its coercion category, the operator
+/// symbols whose overloads accept it, and the casts that flow out of and into
+/// it. Every field is read live from the function/operator/cast authorities in
+/// this crate, so a type-of answer cannot drift from the engine.
+pub struct TypeFacts {
+    /// The canonical value type these facts describe.
+    pub canonical: DataType,
+    /// The coercion category the canonical type belongs to.
+    pub category: TypeCategory,
+    /// Distinct operator symbols whose [`OPERATOR_CATALOG`] overloads name the
+    /// canonical type as an operand, sorted.
+    pub operators: Vec<&'static str>,
+    /// Casts whose source is the canonical type, sorted by target then context.
+    pub casts_from: Vec<CastFact>,
+    /// Casts whose target is the canonical type, sorted by source then context.
+    pub casts_to: Vec<CastFact>,
+}
+
+/// Resolve a type name — an SQL alias (`INT`, `STRING`) or a canonical reddb
+/// name (`INTEGER`, `TEXT`), case-insensitive — to its canonical [`DataType`].
+///
+/// Delegates to the engine's own [`DataType::from_sql_name`] parser so no
+/// separate name table is maintained here; returns `None` for unknown names.
+pub fn resolve_type_name(name: &str) -> Option<DataType> {
+    DataType::from_sql_name(name)
+}
+
+/// Look up the catalog facts for a value type. Operators are the distinct
+/// symbols whose [`OPERATOR_CATALOG`] overloads name `ty` as an operand; casts
+/// are every [`CAST_CATALOG`] edge with `ty` as source (`casts_from`) or target
+/// (`casts_to`). Pure function of the static catalogs — see
+/// [`tests::type_facts_read_only_from_catalogs`].
+pub fn type_facts(ty: DataType) -> TypeFacts {
+    let mut operators: Vec<&'static str> = OPERATOR_CATALOG
+        .iter()
+        .filter(|entry| entry.lhs_type == ty || entry.rhs_type == ty)
+        .map(|entry| entry.name)
+        .collect();
+    operators.sort_unstable();
+    operators.dedup();
+
+    let mut casts_from: Vec<CastFact> = CAST_CATALOG
+        .iter()
+        .filter(|entry| entry.src == ty)
+        .map(|entry| CastFact {
+            src: entry.src,
+            target: entry.target,
+            context: entry.context,
+            lossy: entry.lossy,
+        })
+        .collect();
+    casts_from.sort_by_key(|cast| (cast.target as u8, cast.context as u8));
+
+    let mut casts_to: Vec<CastFact> = CAST_CATALOG
+        .iter()
+        .filter(|entry| entry.target == ty)
+        .map(|entry| CastFact {
+            src: entry.src,
+            target: entry.target,
+            context: entry.context,
+            lossy: entry.lossy,
+        })
+        .collect();
+    casts_to.sort_by_key(|cast| (cast.src as u8, cast.context as u8));
+
+    TypeFacts {
+        canonical: ty,
+        category: ty.category(),
+        operators,
+        casts_from,
+        casts_to,
+    }
+}
+
+/// Human label for a [`TypeCategory`], used by the generated map and the
+/// type-of lookup.
+pub fn category_label(category: TypeCategory) -> &'static str {
     match category {
         TypeCategory::Numeric => "Numeric",
         TypeCategory::String => "String",
@@ -509,6 +609,82 @@ reference"
     #[test]
     fn reference_is_deterministic() {
         assert_eq!(type_reference_markdown(), type_reference_markdown());
+    }
+
+    /// `resolve_type_name` answers from the engine's own SQL-name parser:
+    /// aliases and canonical names both resolve, unknown names return `None`.
+    #[test]
+    fn resolve_type_name_accepts_aliases_and_rejects_unknown() {
+        assert_eq!(resolve_type_name("int"), Some(DataType::Integer));
+        assert_eq!(resolve_type_name("INTEGER"), Some(DataType::Integer));
+        assert_eq!(resolve_type_name("string"), Some(DataType::Text));
+        assert_eq!(resolve_type_name("BIGINT"), Some(DataType::BigInt));
+        assert_eq!(resolve_type_name("not-a-type"), None);
+    }
+
+    /// `type_facts` surfaces an integer's catalogued casts and operators: the
+    /// implicit widening to a wider numeric type and the arithmetic/comparison
+    /// operators it participates in.
+    #[test]
+    fn type_facts_integer_has_widening_casts_and_operators() {
+        let facts = type_facts(DataType::Integer);
+        assert_eq!(facts.canonical, DataType::Integer);
+        assert_eq!(facts.category, TypeCategory::Numeric);
+
+        assert!(
+            facts.operators.contains(&"+"),
+            "integer should support `+`: {:?}",
+            facts.operators
+        );
+        assert!(
+            facts.operators.contains(&"="),
+            "integer should support `=`: {:?}",
+            facts.operators
+        );
+
+        assert!(
+            facts
+                .casts_from
+                .iter()
+                .any(|c| c.target == DataType::Float && c.context == CastContext::Implicit),
+            "integer should widen implicitly to float: {:?}",
+            facts.casts_from
+        );
+    }
+
+    /// `type_facts` reads only from the catalogs: every `casts_from` edge names
+    /// the queried type as its source and every `casts_to` edge as its target,
+    /// and the operator list is sorted and deduplicated.
+    #[test]
+    fn type_facts_read_only_from_catalogs() {
+        for ty in catalogued_value_types() {
+            let facts = type_facts(ty);
+            for cast in &facts.casts_from {
+                assert_eq!(cast.src, ty, "casts_from edge must originate at {ty}");
+            }
+            for cast in &facts.casts_to {
+                assert_eq!(cast.target, ty, "casts_to edge must arrive at {ty}");
+            }
+            let mut sorted = facts.operators.clone();
+            sorted.sort_unstable();
+            assert_eq!(facts.operators, sorted, "operators must be sorted for {ty}");
+            let mut deduped = facts.operators.clone();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                facts.operators.len(),
+                "operators must be unique for {ty}"
+            );
+        }
+    }
+
+    /// Cast-context labels are the lowercase three-state vocabulary the type-of
+    /// lookup publishes.
+    #[test]
+    fn cast_context_labels_are_stable() {
+        assert_eq!(cast_context_label(CastContext::Implicit), "implicit");
+        assert_eq!(cast_context_label(CastContext::Assignment), "assignment");
+        assert_eq!(cast_context_label(CastContext::Explicit), "explicit");
     }
 
     /// The `docs/llms.txt` block wraps exactly the reference between markers.
