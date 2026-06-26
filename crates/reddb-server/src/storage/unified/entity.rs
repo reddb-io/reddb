@@ -629,7 +629,22 @@ pub fn compute_entity_field_bloom(data: &EntityData) -> u64 {
                 return 0;
             }
             if let Some(named) = &row.named {
-                named.keys().fold(0u64, |acc, k| acc | field_name_bloom(k))
+                let mut bloom = named.keys().fold(0u64, |acc, k| acc | field_name_bloom(k));
+                // Single-source documents no longer materialise promoted
+                // columns, so the body's top-level keys are the only place a
+                // `WHERE`/projection field lives. Fold them into the bloom so
+                // the field-bloom gate doesn't reject a row before the body
+                // read fallback ever runs. Inert for non-document rows (no
+                // binary-container `body` field) — `container_field_names`
+                // self-gates on the RDOC magic.
+                if let Some(Value::Json(bytes)) = named.get("body") {
+                    if let Some(names) = crate::document_body::container_field_names(bytes) {
+                        for name in names {
+                            bloom |= field_name_bloom(&name);
+                        }
+                    }
+                }
+                bloom
             } else {
                 0
             }

@@ -34,3 +34,127 @@ RQL provides these built-in functions, grouped by kind:
 `CURRENT_DATE`, `CURRENT_ROLE`, `CURRENT_TENANT`, `CURRENT_TIMESTAMP`, `CURRENT_USER`, `NOW`, `SESSION_USER`, `VERIFY_PASSWORD`
 
 <!-- END GENERATED: rql -->
+
+<!-- BEGIN GENERATED: types -->
+# RedDB Type & Multi-Model Reference
+
+RedDB is a multi-model store (documents, key-value, queues, graph, vault, config, and RQL-tabular collections) layered over one logical type system.
+
+This reference is generated from the `reddb-io-types` function, operator, and cast catalogs. Do not edit by hand — regenerate from the engine.
+
+## Value types (25)
+
+Every concrete value type the engine's type-system authorities reference, grouped by coercion category:
+
+### Numeric types
+
+`INTEGER`, `UNSIGNED INTEGER`, `FLOAT`, `DECIMAL`, `BIGINT`
+
+### String types
+
+`TEXT`
+
+### Boolean types
+
+`BOOLEAN`
+
+### DateTime types
+
+`TIMESTAMP`, `DATE`, `TIME`, `TIMESTAMP_MS`
+
+### Domain types
+
+`COLOR`, `EMAIL`, `URL`, `PHONE`, `SEMVER`, `ASSET_CODE`, `MONEY`
+
+### Network types
+
+`IPADDR`, `CIDR`
+
+### Geo types
+
+`GEOPOINT`
+
+### Uuid types
+
+`UUID`
+
+### Json types
+
+`JSON`
+
+### Array types
+
+`ARRAY`
+
+### Opaque types
+
+`PASSWORD`
+
+## Operators (15)
+
+The type system resolves these built-in operators:
+
+`%`, `*`, `+`, `-`, `/`, `<`, `<=`, `<>`, `=`, `>`, `>=`, `AND`, `NOT`, `OR`, `||`
+
+## Implicit casts (10)
+
+Lossless widenings the engine inserts silently — usable anywhere without an explicit `CAST`:
+
+- `INTEGER` → `INTEGER`
+- `INTEGER` → `FLOAT`
+- `INTEGER` → `DECIMAL`
+- `INTEGER` → `BIGINT`
+- `UNSIGNED INTEGER` → `INTEGER`
+- `UNSIGNED INTEGER` → `FLOAT`
+- `FLOAT` → `FLOAT`
+- `TEXT` → `TEXT`
+- `BOOLEAN` → `BOOLEAN`
+- `BIGINT` → `FLOAT`
+
+## Multi-model map
+
+RedDB stores several paradigms over the value-type catalog above. Each paradigm's `Type families` point back into that catalog by category:
+
+### Documents
+
+Schemaless JSON-shaped entities addressed by collection + entity id; nested fields are typed value-by-value from the catalog below.
+
+Type families: `Json`, `String`, `Numeric`, `Boolean`
+
+### Key-value
+
+Flat collection + key → value pairs for caches and counters; any catalogued value type can be the stored payload.
+
+Type families: `String`, `Numeric`, `Json`
+
+### Queues
+
+Ordered FIFO/priority message streams (LPUSH/RPUSH/LPOP/RPOP, ACK/NACK); each message body is a catalogued value, usually text or JSON.
+
+Type families: `String`, `Json`, `TimeSpan`
+
+### Graph nodes & edges
+
+Property graph of nodes and edges; references between them are first-class value types and properties draw from the full catalog.
+
+Type families: `Reference`, `String`, `Numeric`
+
+### Vault secrets
+
+Encrypted secrets and password hashes that the expression layer treats as opaque — coercion must be opted into explicitly.
+
+Type families: `Opaque`, `String`
+
+### Config
+
+Hierarchical, resolvable configuration entries; values are catalogued scalars and JSON resolved per environment.
+
+Type families: `String`, `Boolean`, `Numeric`, `Json`
+
+### RQL-tabular
+
+Relational tables with typed columns queried through RQL; columns bind directly to the value types and categories of the catalog below.
+
+Type families: `Numeric`, `String`, `Boolean`, `DateTime`, `Domain`
+
+<!-- END GENERATED: types -->
