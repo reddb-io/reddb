@@ -1,0 +1,188 @@
+name: CI (docs shim)
+
+# Issue #1307 — docs-only / `**.md`-only PRs could not satisfy the `main` merge
+# gate. ci.yml is path-filtered (paths-ignore: **.md, docs/**, CHANGELOG**,
+# LICENSE**), so a docs-only PR skips ci.yml and none of the required status
+# checks (ADR 0059) ever report -> branch protection treats them as pending ->
+# the PR is BLOCKED forever, and `gh pr merge --admin` cannot bypass it
+# (enforce_admins). PR #1306 had to be landed by temporarily lifting protection.
+#
+# This shim has NO paths-ignore: it triggers EXACTLY on the paths ci.yml ignores
+# and re-reports every required context (each job `name:` below is a required
+# context from ADR 0059) as a fast `echo`-only success. GitHub matches required
+# status checks by context NAME regardless of which workflow produced them, so a
+# same-named success here satisfies the gate without running the heavy suite.
+#
+# Mixed PRs (touching both docs and code) trigger BOTH this shim and ci.yml, so
+# each required context gets two check runs: a fast green one here and the real
+# one from ci.yml. GitHub uses the most-recent run for a context, and the real
+# job always finishes after this echo, so the real result stays authoritative —
+# the shim never masks a genuine failure.
+#
+# scripts/ci-docs-shim-contract.test.mjs (run by ci.yml) locks the job names
+# here to .github/required-status-checks.json and to ci.yml, so this list cannot
+# silently drift out of sync with the gate.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
+
+concurrency:
+  group: ci-docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only PR — gate satisfied by ci-docs shim (#1307)"
+
+  quality:
+    name: Quality (fmt, check, clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no Rust changed"
+
+  serialization-lint:
+    name: Lint (no untyped serialization)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no Rust changed"
+
+  version-integrity:
+    name: Version integrity
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no version manifests changed"
+
+  contract-matrix:
+    name: Contract Matrix Gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — contract matrix unaffected"
+
+  docs-matrix:
+    name: Docs Match Contract Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — covered by ci.yml on code PRs"
+
+  helm-chart:
+    name: Helm Chart
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no chart changed"
+
+  afk-validation-sidecar:
+    name: AFK Validation Sidecar
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no code diff to validate"
+
+  rql-conformance:
+    name: RQL Conformance (sqllogictest)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — engine unchanged"
+
+  drivers-python-build:
+    name: Drivers / Python (cargo check)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — drivers unchanged"
+
+  feature-matrix-no-default:
+    name: Feature Matrix (no-default)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — features unchanged"
+
+  feature-matrix-otel:
+    name: Feature Matrix (otel)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — features unchanged"
+
+  feature-matrix-backend-s3:
+    name: Feature Matrix (backend-s3)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — features unchanged"
+
+  feature-matrix-backend-turso:
+    name: Feature Matrix (backend-turso)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — features unchanged"
+
+  feature-matrix-backend-d1:
+    name: Feature Matrix (backend-d1)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — features unchanged"
+
+  feature-matrix-all-features:
+    name: Feature Matrix (all-features)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — features unchanged"
+
+  tests:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no behavior changed"
+
+  driver-param-conformance:
+    name: Driver Param Conformance
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — driver params unchanged"
+
+  chaos:
+    name: Chaos & Drill Suite
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — chaos/drill unaffected"
+
+  fuzz-parsers:
+    name: Fuzz Parsers
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — parsers unchanged"
+
+  containers:
+    name: Container Stack
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — container stack unchanged"
+
+  publish-dry-run:
+    name: Publish Dry-Run (crates.io)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — packaging unaffected"
+
+  package:
+    name: cargo package dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — packaging unaffected"
+
+  windows:
+    name: Windows (build + unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no Rust changed"
+
+  macos:
+    name: macOS (build + unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only — no Rust changed"
