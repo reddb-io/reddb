@@ -9,6 +9,9 @@ members = [
     "crates/reddb-server",
     "crates/reddb-types",
     "crates/reddb-wire",
+    # DST Fatia 0 (#1351): standalone LD_PRELOAD fault-injection shim + the
+    # shared WAL recovery-invariant oracle reused by later DST slices.
+    "crates/unreliable-libc",
 ]
 resolver = "2"
 
