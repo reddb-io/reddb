@@ -118,6 +118,17 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Critical,
         default: || num(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES as f64),
     },
+    // storage.binary_document_body — DOCUMENT native binary body container
+    // (PRD-1398, ADR-0063). Opt-in: when true, document writes store the body
+    // as the native binary container; reads decode it back to JSON
+    // transparently. Default false so existing deployments keep the plain-JSON
+    // body until they choose to flip. (Keyed off `storage.*`, not `document.*`,
+    // because `document` is a reserved RQL keyword and would break SET CONFIG.)
+    ConfigDefault {
+        key: "storage.binary_document_body",
+        tier: Tier::Optional,
+        default: || JsonValue::Bool(false),
+    },
     // durability.*
     ConfigDefault {
         key: "durability.mode",

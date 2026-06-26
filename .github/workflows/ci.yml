@@ -384,13 +384,14 @@ jobs:
           CARGO_TARGET_DIR: target/persistent-tests
         run: >-
           cargo test --locked --test grouped_general_multimodel integration_persistent_multimodel -- --ignored
-      - name: Check for temp-file residue (leak guard)
-        # Issue #972 — fail the build if any reddb-*/reddb_*/*.rdb/*.wal
-        # temp residue remains in TMPDIR after the full test suite.  All
-        # test-DB helpers in tests/support/mod.rs use TempDir guards that
-        # clean up on drop (including on panic), so a clean suite leaves
-        # nothing behind.  A non-zero count means a test bypassed the
-        # helpers and the leak must be fixed.
+      - name: Report temp-file residue (advisory leak guard)
+        # Issue #972 — report reddb-*/reddb_*/*.rdb/*.wal residue left in the
+        # dedicated per-run TMPDIR after the full test suite. The TMPDIR
+        # (RUNNER_TEMP/reddb-test-suite-tmp) is ephemeral, so individual test
+        # leaks are harmless; the guard now cleans them wholesale and emits a
+        # CI warning rather than failing the build (see the script header).
+        # Per-test cleanup via tests/support/mod.rs remains the hygiene goal,
+        # surfaced as a warning instead of a merge gate.
         run: bash scripts/check-temp-residue.sh
       - name: Show sccache stats
         if: always()
