@@ -13,6 +13,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use reddb_file::SimulationContext;
 use std::path::Path;
 use unreliable_libc::vfs::POWER_CUT_MESSAGE;
 use unreliable_libc::wal_workload::{MANIFEST_FILE_NAME, MANIFEST_TEMP_NAME};
@@ -172,6 +173,27 @@ fn dropped_and_reordered_fsync_never_resurrect_data() {
     for seed in 0..64u64 {
         run_seed(seed, cfg);
     }
+}
+
+#[test]
+fn same_seed_produces_byte_identical_buggify_trace_log() {
+    fn trace_for(seed: u64) -> Vec<u8> {
+        let context = SimulationContext::new(seed);
+        let guard = context.install();
+        let _ = run_seed(seed, config_for(seed));
+        guard.trace()
+    }
+
+    let first = trace_for(4242);
+    let second = trace_for(4242);
+    assert_eq!(
+        first, second,
+        "same seed must produce byte-identical trace logs"
+    );
+
+    let trace = String::from_utf8(first).unwrap();
+    assert!(trace.contains("env=REDDB_TURBO_CRASH_AT"));
+    assert!(trace.contains("point=simvfs_"));
 }
 
 /// Pinned regression: a specific seed whose interleaving previously exercised a
