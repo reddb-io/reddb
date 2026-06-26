@@ -159,6 +159,28 @@ pub(crate) struct SystemSnapshot {
     /// `0`.
     pub(crate) total_memory_bytes: Option<u64>,
     pub(crate) available_memory_bytes: Option<u64>,
+    /// Issue #1244 — whole-node CPU utilisation occupancy. `Measured` once
+    /// two samples establish a delta; `NotSampled` on a supported platform
+    /// before then; `Unsupported` where the engine cannot probe it.
+    pub(crate) cpu_usage: OccupancyView,
+    /// Issue #1244 — whole-node RAM utilisation occupancy (used/total).
+    pub(crate) ram_usage: OccupancyView,
+}
+
+/// Presentation-side view of a node occupancy gauge (#1244). Mirrors the
+/// runtime sampler's three honest states without coupling the presentation
+/// layer to the sampler type; the handler maps one to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) enum OccupancyView {
+    /// Measured utilisation ratio in `0.0..=1.0`.
+    Measured(f64),
+    /// Supported platform, but no measured value yet (CPU needs a delta).
+    /// The honest default — a snapshot built without an occupancy reading
+    /// reports "not sampled", never a fabricated zero.
+    #[default]
+    NotSampled,
+    /// Platform cannot measure this field.
+    Unsupported,
 }
 
 #[derive(Debug, Clone)]
@@ -488,13 +510,50 @@ fn system_json(system: &SystemSnapshot) -> JsonValue {
     );
     object.insert(
         "cpu_usage".to_string(),
-        unavailable_json("cpu_usage_not_sampled"),
+        occupancy_json(
+            system.cpu_usage,
+            "cpu_usage_not_sampled",
+            "cpu_usage_not_supported",
+        ),
     );
     object.insert(
         "ram_usage".to_string(),
-        unavailable_json("ram_usage_not_sampled"),
+        occupancy_json(
+            system.ram_usage,
+            "ram_usage_not_sampled",
+            "ram_usage_not_supported",
+        ),
     );
     JsonValue::Object(object)
+}
+
+/// Render a node occupancy gauge (#1244). A measured value carries both the
+/// raw ratio (`0..=1`) and a convenience percent; the unmeasured states fall
+/// through to the stable `unavailable` envelope (§6) with a reason that
+/// distinguishes "no sample yet" from "platform cannot measure".
+fn occupancy_json(
+    view: OccupancyView,
+    not_sampled_reason: &str,
+    unsupported_reason: &str,
+) -> JsonValue {
+    match view {
+        OccupancyView::Measured(ratio) => {
+            let ratio = ratio.clamp(0.0, 1.0);
+            // Round the ratio to 4 decimals; percent is derived from the
+            // same rounded value so the two never disagree.
+            let ratio = (ratio * 10_000.0).round() / 10_000.0;
+            let mut object = Map::new();
+            object.insert("available".to_string(), JsonValue::Bool(true));
+            object.insert("usage_ratio".to_string(), JsonValue::Number(ratio));
+            object.insert(
+                "usage_percent".to_string(),
+                JsonValue::Number((ratio * 1_000.0).round() / 10.0),
+            );
+            JsonValue::Object(object)
+        }
+        OccupancyView::NotSampled => unavailable_json(not_sampled_reason),
+        OccupancyView::Unsupported => unavailable_json(unsupported_reason),
+    }
 }
 
 fn replication_json(repl: &ReplicationSnapshot, current_lsn: u64) -> JsonValue {
@@ -660,6 +719,8 @@ mod tests {
                 hostname: "test-host".to_string(),
                 total_memory_bytes: Some(16 * 1024 * 1024 * 1024),
                 available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+                cpu_usage: OccupancyView::NotSampled,
+                ram_usage: OccupancyView::NotSampled,
             },
             replication: ReplicationSnapshot {
                 role: ProcessRoleView::Standalone,
@@ -953,6 +1014,68 @@ mod tests {
         assert_eq!(n(lat.get("p95_seconds").unwrap()), 0.2);
         assert_eq!(n(lat.get("p99_seconds").unwrap()), 0.9);
         assert_eq!(n(lat.get("sample_count").unwrap()), 100.0);
+    }
+
+    #[test]
+    fn occupancy_measured_carries_ratio_and_percent() {
+        // #1244 — supported platform with real samples: cpu/ram flip from
+        // the honest envelope to measured values.
+        let mut inputs = base_inputs();
+        inputs.system.cpu_usage = OccupancyView::Measured(0.4237);
+        inputs.system.ram_usage = OccupancyView::Measured(0.75);
+        let json = cluster_status_json(&inputs);
+        let sys = obj(obj(&json).get("system").unwrap());
+
+        let cpu = obj(sys.get("cpu_usage").unwrap());
+        assert_eq!(
+            cpu.get("available").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(n(cpu.get("usage_ratio").unwrap()), 0.4237);
+        assert_eq!(n(cpu.get("usage_percent").unwrap()), 42.4);
+
+        let ram = obj(sys.get("ram_usage").unwrap());
+        assert_eq!(
+            ram.get("available").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(n(ram.get("usage_ratio").unwrap()), 0.75);
+        assert_eq!(n(ram.get("usage_percent").unwrap()), 75.0);
+    }
+
+    #[test]
+    fn occupancy_not_sampled_is_honest_envelope() {
+        // #1244 — supported platform, no measured value yet (CPU needs a
+        // delta; the no-sample-yet branch).
+        let json = cluster_status_json(&base_inputs());
+        let sys = obj(obj(&json).get("system").unwrap());
+        assert_eq!(
+            unavail_reason(sys.get("cpu_usage").unwrap()),
+            "cpu_usage_not_sampled"
+        );
+        assert_eq!(
+            unavail_reason(sys.get("ram_usage").unwrap()),
+            "ram_usage_not_sampled"
+        );
+    }
+
+    #[test]
+    fn occupancy_unsupported_platform_is_honest_envelope() {
+        // #1244 — platform that cannot probe occupancy keeps the
+        // `{ available: false, reason }` envelope with a distinct reason.
+        let mut inputs = base_inputs();
+        inputs.system.cpu_usage = OccupancyView::Unsupported;
+        inputs.system.ram_usage = OccupancyView::Unsupported;
+        let json = cluster_status_json(&inputs);
+        let sys = obj(obj(&json).get("system").unwrap());
+        assert_eq!(
+            unavail_reason(sys.get("cpu_usage").unwrap()),
+            "cpu_usage_not_supported"
+        );
+        assert_eq!(
+            unavail_reason(sys.get("ram_usage").unwrap()),
+            "ram_usage_not_supported"
+        );
     }
 
     #[test]
