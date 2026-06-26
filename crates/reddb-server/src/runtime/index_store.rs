@@ -1646,6 +1646,52 @@ impl IndexStore {
             }
             self.index_entity_insert(collection, entity_id, &[(col.clone(), new_value.clone())])?;
         }
+
+        // Single-source documents: an index on a promoted field (`score` or a
+        // dotted `body.score`) is backed by the body, not a stored column, so
+        // the field-name damage vector above never sees it change — it only
+        // sees `body` change. Re-evaluate every such index column directly from
+        // the old/new body. No-op for non-document collections, where these
+        // columns resolve to nothing in both snapshots.
+        for col in &indexed_cols {
+            if old_fields.iter().any(|(f, _)| f == col) || new_fields.iter().any(|(f, _)| f == col) {
+                // A real stored column — already handled by the damage loop.
+                continue;
+            }
+            let old_value = index_field_value(old_fields, col);
+            let new_value = index_field_value(new_fields, col);
+            match (old_value, new_value) {
+                (Some(old), Some(new)) => {
+                    if old.as_ref() != new.as_ref() {
+                        self.index_entity_delete(
+                            collection,
+                            entity_id,
+                            &[(col.clone(), old.into_owned())],
+                        )?;
+                        self.index_entity_insert(
+                            collection,
+                            entity_id,
+                            &[(col.clone(), new.into_owned())],
+                        )?;
+                    }
+                }
+                (Some(old), None) => {
+                    self.index_entity_delete(
+                        collection,
+                        entity_id,
+                        &[(col.clone(), old.into_owned())],
+                    )?;
+                }
+                (None, Some(new)) => {
+                    self.index_entity_insert(
+                        collection,
+                        entity_id,
+                        &[(col.clone(), new.into_owned())],
+                    )?;
+                }
+                (None, None) => {}
+            }
+        }
         Ok(())
     }
 }
@@ -1760,6 +1806,12 @@ fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<
         return Some(Cow::Borrowed(value));
     }
     if !column.contains('.') {
+        // Single-source document: an index on a bare promoted field (`score`)
+        // is backed by the body, since the column is no longer materialised.
+        // Offset-read it from the binary `body` container (inert otherwise).
+        if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
+            return crate::document_body::read_promoted_field(bytes, column).map(Cow::Owned);
+        }
         return None;
     }
 
