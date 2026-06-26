@@ -1227,15 +1227,16 @@ impl IndexStore {
                     let count = self.sorted.build_composite(collection, columns, entities);
                     return Ok(count);
                 }
-                // Build sorted in-memory index for range scans (single col)
-                let derived_entities;
-                let sorted_entities = if col.contains('.') {
-                    derived_entities = derive_index_entities_for_column(entities, col);
-                    derived_entities.as_slice()
-                } else {
-                    entities
-                };
-                let count = self.sorted.build_index(collection, col, sorted_entities);
+                // Build sorted in-memory index for range scans (single col).
+                // Derive the indexed value for every row via `index_field_value`,
+                // which resolves a bare promoted field (or a dotted path) from
+                // the document body when it is no longer a materialised column
+                // (single source of truth). For an ordinary stored column it
+                // returns the value directly, so this is a no-op there — but it
+                // ensures the sorted index is actually populated for a document
+                // field, instead of silently building an empty index.
+                let derived_entities = derive_index_entities_for_column(entities, col);
+                let count = self.sorted.build_index(collection, col, &derived_entities);
                 // Also build hash index for equality lookups on same column
                 self.hash
                     .create_index(&HashIndexConfig {
@@ -1646,6 +1647,53 @@ impl IndexStore {
             }
             self.index_entity_insert(collection, entity_id, &[(col.clone(), new_value.clone())])?;
         }
+
+        // Single-source documents: an index on a promoted field (`score` or a
+        // dotted `body.score`) is backed by the body, not a stored column, so
+        // the field-name damage vector above never sees it change — it only
+        // sees `body` change. Re-evaluate every such index column directly from
+        // the old/new body. No-op for non-document collections, where these
+        // columns resolve to nothing in both snapshots.
+        for col in &indexed_cols {
+            if old_fields.iter().any(|(f, _)| f == col) || new_fields.iter().any(|(f, _)| f == col)
+            {
+                // A real stored column — already handled by the damage loop.
+                continue;
+            }
+            let old_value = index_field_value(old_fields, col);
+            let new_value = index_field_value(new_fields, col);
+            match (old_value, new_value) {
+                (Some(old), Some(new)) => {
+                    if old.as_ref() != new.as_ref() {
+                        self.index_entity_delete(
+                            collection,
+                            entity_id,
+                            &[(col.clone(), old.into_owned())],
+                        )?;
+                        self.index_entity_insert(
+                            collection,
+                            entity_id,
+                            &[(col.clone(), new.into_owned())],
+                        )?;
+                    }
+                }
+                (Some(old), None) => {
+                    self.index_entity_delete(
+                        collection,
+                        entity_id,
+                        &[(col.clone(), old.into_owned())],
+                    )?;
+                }
+                (None, Some(new)) => {
+                    self.index_entity_insert(
+                        collection,
+                        entity_id,
+                        &[(col.clone(), new.into_owned())],
+                    )?;
+                }
+                (None, None) => {}
+            }
+        }
         Ok(())
     }
 }
@@ -1755,11 +1803,58 @@ impl SecondaryIndexBackend for IndexStore {
     }
 }
 
+impl IndexStore {
+    /// Resolve the value an index on `column` would store for a row, including a
+    /// bare/dotted document field offset-read from the `body` container when the
+    /// column is no longer a materialised field (single source of truth).
+    ///
+    /// Used by the update path to rebuild old/new index keys for body-derived
+    /// columns, which the field-name damage vector cannot see change on its own.
+    pub fn resolve_index_field_value(
+        &self,
+        fields: &[(String, Value)],
+        column: &str,
+    ) -> Option<Value> {
+        index_field_value(fields, column).map(Cow::into_owned)
+    }
+
+    /// Fold body-derived index columns into a row's field snapshot.
+    ///
+    /// Single-source documents keep promoted index columns (e.g. `score`) in
+    /// the `body` container, not as stored fields, so secondary-index
+    /// maintenance must surface their values as ordinary columns — otherwise
+    /// the diff between the old and new snapshots never sees a body-only change.
+    /// For each indexed column absent from `fields`, resolve it from the body
+    /// and append it; ordinary stored columns are returned untouched.
+    pub fn augment_body_derived_index_fields(
+        &self,
+        fields: &[(String, Value)],
+        indexed_cols: &std::collections::HashSet<String>,
+    ) -> Vec<(String, Value)> {
+        let mut out = fields.to_vec();
+        for col in indexed_cols {
+            if out.iter().any(|(existing, _)| existing == col) {
+                continue;
+            }
+            if let Some(value) = self.resolve_index_field_value(fields, col) {
+                out.push((col.clone(), value));
+            }
+        }
+        out
+    }
+}
+
 fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<Cow<'a, Value>> {
     if let Some((_, value)) = fields.iter().find(|(field, _)| field == column) {
         return Some(Cow::Borrowed(value));
     }
     if !column.contains('.') {
+        // Single-source document: an index on a bare promoted field (`score`)
+        // is backed by the body, since the column is no longer materialised.
+        // Offset-read it from the binary `body` container (inert otherwise).
+        if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
+            return crate::document_body::read_promoted_field(bytes, column).map(Cow::Owned);
+        }
         return None;
     }
 

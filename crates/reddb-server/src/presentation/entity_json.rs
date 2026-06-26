@@ -206,6 +206,11 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
 }
 
 pub(crate) fn storage_json_bytes_to_json(bytes: &[u8]) -> JsonValue {
+    // A document body may be stored as the native binary container (PRD-1398);
+    // decode it back to JSON for the wire. Plain-JSON bytes fall through.
+    if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
+        return body;
+    }
     json_from_slice::<JsonValue>(bytes).unwrap_or_else(|_| {
         JsonValue::Object(
             [
