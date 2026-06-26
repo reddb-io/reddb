@@ -66,6 +66,9 @@ mod e2e_vcs_as_of_parse;
 #[path = "vcs/e2e_vcs_kv_mvcc_history.rs"]
 mod e2e_vcs_kv_mvcc_history;
 
+#[path = "vcs/e2e_vcs_kv_connection_independent.rs"]
+mod e2e_vcs_kv_connection_independent;
+
 #[path = "vcs/e2e_vcs_kv_write_conflict.rs"]
 mod e2e_vcs_kv_write_conflict;
 
