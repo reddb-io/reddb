@@ -1190,7 +1190,7 @@ impl RedDBServer {
             let _ = writeln!(
                 body,
                 "reddb_node_active_queries{{node_id=\"{}\"}} {}",
-                sanitize_label(&node_id),
+                sanitize_label(node_id),
                 active
             );
             let _ = writeln!(
@@ -1201,7 +1201,7 @@ impl RedDBServer {
             let _ = writeln!(
                 body,
                 "reddb_node_connects_total{{node_id=\"{}\"}} {}",
-                sanitize_label(&node_id),
+                sanitize_label(node_id),
                 load.connects_total
             );
             let _ = writeln!(
@@ -1212,7 +1212,7 @@ impl RedDBServer {
             let _ = writeln!(
                 body,
                 "reddb_node_disconnects_total{{node_id=\"{}\"}} {}",
-                sanitize_label(&node_id),
+                sanitize_label(node_id),
                 load.disconnects_total
             );
         }
