@@ -1223,6 +1223,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_sql_command_covers_admin_set_reset_events_and_dispatch_errors() {
+        // SET TENANT / RESET TENANT through the lower `parse_sql_command`
+        // surface — the `expr()` helper routes these through
+        // `parse_sql_statement` instead, leaving this arm uncovered.
+        assert!(matches!(
+            sql_command("SET TENANT 'acme'"),
+            SqlCommand::SetTenant(Some(t)) if t == "acme"
+        ));
+        assert!(matches!(
+            sql_command("SET TENANT = 'beta'"),
+            SqlCommand::SetTenant(Some(t)) if t == "beta"
+        ));
+        assert!(matches!(
+            sql_command("SET TENANT NULL"),
+            SqlCommand::SetTenant(None)
+        ));
+        assert!(matches!(
+            sql_command("RESET TENANT"),
+            SqlCommand::SetTenant(None)
+        ));
+        assert!(matches!(sql_command("SHOW TENANT"), SqlCommand::ShowTenant));
+
+        // EVENTS STATUS happy path attaches a `collection =` filter onto the
+        // synthetic red.subscriptions table query.
+        let SqlCommand::Select(query) = sql_command("EVENTS STATUS users") else {
+            panic!("EVENTS STATUS should select red.subscriptions");
+        };
+        assert_eq!(query.table, "red.subscriptions");
+        assert!(query.filter.is_some());
+
+        // Error arms threaded across the dispatch.
+        for sql in [
+            "SET TENANT 42",     // non-text literal
+            "SET BOGUS",         // unknown SET target
+            "RESET BOGUS",       // RESET expects TENANT
+            "MIGRATE TABLE x",   // MIGRATE expects POLICY
+            "EVENTS FOO",        // EVENTS expects STATUS / BACKFILL
+            "SHOW BOGUS",        // unknown SHOW catalog
+            "42",                // unrecognized leading token → catch-all
+        ] {
+            assert!(
+                sql_command_result(sql).is_err(),
+                "{sql} should be rejected by parse_sql_command"
+            );
+        }
+    }
+
+    #[test]
     fn parse_sql_command_covers_iam_and_hypertable_dispatch_edges() {
         assert!(matches!(
             expr("CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'"),
