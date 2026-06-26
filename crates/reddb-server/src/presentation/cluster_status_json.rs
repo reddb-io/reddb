@@ -30,6 +30,7 @@
 //!   yet (replica fresh attach with no health label).
 
 use crate::json::{Map, Value as JsonValue};
+use crate::runtime::node_load_telemetry::NodeLoadSnapshot;
 
 /// What the snapshot can see at one moment in time.
 ///
@@ -67,6 +68,11 @@ pub(crate) struct ClusterStatusInputs {
     /// the field stays an honest `unavailable` envelope (§6) rather than
     /// reporting a fabricated zero.
     pub(crate) latency: Option<LatencySample>,
+
+    /// Per-node load signals (#1245): active query gauge + connection churn
+    /// counters. `None` when no connection has been seen yet — the field
+    /// stays an honest `unavailable` envelope (§6).
+    pub(crate) load: Option<NodeLoadSnapshot>,
 }
 
 /// Overall query latency percentiles for `/cluster/status`, derived from
@@ -224,6 +230,31 @@ fn latency_json(sample: Option<&LatencySample>) -> JsonValue {
     JsonValue::Object(object)
 }
 
+/// Render the node load field (#1245). Honest by construction: before any
+/// connection is seen the field is an `unavailable` envelope
+/// (`load_not_sampled`); once real samples exist it carries the three
+/// occupancy signals.
+fn load_json(snap: Option<&NodeLoadSnapshot>) -> JsonValue {
+    let Some(snap) = snap else {
+        return unavailable_json("load_not_sampled");
+    };
+    let mut object = Map::new();
+    object.insert("available".to_string(), JsonValue::Bool(true));
+    object.insert(
+        "active_queries".to_string(),
+        JsonValue::Number(snap.active_queries.max(0) as f64),
+    );
+    object.insert(
+        "connects_total".to_string(),
+        JsonValue::Number(snap.connects_total as f64),
+    );
+    object.insert(
+        "disconnects_total".to_string(),
+        JsonValue::Number(snap.disconnects_total as f64),
+    );
+    JsonValue::Object(object)
+}
+
 /// Build the `/cluster/status` payload from a captured snapshot.
 pub(crate) fn cluster_status_json(inputs: &ClusterStatusInputs) -> JsonValue {
     let mut object = Map::new();
@@ -271,6 +302,7 @@ pub(crate) fn cluster_status_json(inputs: &ClusterStatusInputs) -> JsonValue {
         unavailable_json("throughput_not_sampled"),
     );
     object.insert("latency".to_string(), latency_json(inputs.latency.as_ref()));
+    object.insert("load".to_string(), load_json(inputs.load.as_ref()));
     object.insert(
         "last_error".to_string(),
         unavailable_json("last_error_not_tracked"),
@@ -638,6 +670,7 @@ mod tests {
                 reconnects_total: 0,
             },
             latency: None,
+            load: None,
         }
     }
 
@@ -678,6 +711,7 @@ mod tests {
             "system",
             "throughput",
             "latency",
+            "load",
             "last_error",
             "replication",
         ] {
@@ -919,6 +953,51 @@ mod tests {
         assert_eq!(n(lat.get("p95_seconds").unwrap()), 0.2);
         assert_eq!(n(lat.get("p99_seconds").unwrap()), 0.9);
         assert_eq!(n(lat.get("sample_count").unwrap()), 100.0);
+    }
+
+    #[test]
+    fn load_flips_from_unavailable_to_counters_once_connected() {
+        // #1245 — with no activity the field stays the honest envelope.
+        let json = cluster_status_json(&base_inputs());
+        assert_eq!(
+            unavail_reason(obj(&json).get("load").unwrap()),
+            "load_not_sampled"
+        );
+
+        // With recorded connects/disconnects + active queries it carries
+        // the three occupancy signals.
+        let mut inputs = base_inputs();
+        inputs.load = Some(NodeLoadSnapshot {
+            active_queries: 3,
+            connects_total: 10,
+            disconnects_total: 7,
+        });
+        let json = cluster_status_json(&inputs);
+        let load = obj(obj(&json).get("load").unwrap());
+        assert_eq!(
+            load.get("available").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(n(load.get("active_queries").unwrap()), 3.0);
+        assert_eq!(n(load.get("connects_total").unwrap()), 10.0);
+        assert_eq!(n(load.get("disconnects_total").unwrap()), 7.0);
+    }
+
+    #[test]
+    fn load_clamps_negative_active_queries_to_zero() {
+        let mut inputs = base_inputs();
+        inputs.load = Some(NodeLoadSnapshot {
+            active_queries: -1,
+            connects_total: 5,
+            disconnects_total: 5,
+        });
+        let json = cluster_status_json(&inputs);
+        let load = obj(obj(&json).get("load").unwrap());
+        assert_eq!(
+            n(load.get("active_queries").unwrap()),
+            0.0,
+            "transient negative gauge must clamp to zero at the presentation layer"
+        );
     }
 
     #[test]

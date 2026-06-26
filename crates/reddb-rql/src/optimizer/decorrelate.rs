@@ -572,4 +572,234 @@ mod tests {
         assert!(rewrite.group_by.contains(&"customer_id".to_string()));
         assert!(rewrite.result_col.is_some());
     }
+
+    #[test]
+    fn test_scalar_non_aggregation_uses_left_join() {
+        let decorrelator = Decorrelator::new();
+        let analysis = decorrelator.analyze(
+            &["o.customer_id".to_string()],
+            &["customer_id".to_string()],
+            &[("o.customer_id".to_string(), "customer_id".to_string())],
+            SubqueryKind::Scalar,
+            false, // no aggregation
+            false,
+        );
+
+        assert!(analysis.is_correlated);
+        assert!(analysis.can_decorrelate);
+        assert!(matches!(
+            analysis.strategy,
+            Some(DecorrelationStrategy::LeftJoinWithGroupBy { .. })
+        ));
+    }
+
+    #[test]
+    fn test_not_exists_and_not_in_use_anti_join() {
+        let decorrelator = Decorrelator::new();
+        for kind in [SubqueryKind::NotExists, SubqueryKind::NotIn] {
+            let analysis = decorrelator.analyze(
+                &["o.id".to_string()],
+                &["order_id".to_string()],
+                &[("o.id".to_string(), "order_id".to_string())],
+                kind,
+                false,
+                false,
+            );
+
+            assert!(analysis.can_decorrelate);
+            assert!(matches!(
+                analysis.strategy,
+                Some(DecorrelationStrategy::AntiJoin { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn test_in_subquery_uses_semi_join() {
+        let decorrelator = Decorrelator::new();
+        let analysis = decorrelator.analyze(
+            &["o.id".to_string()],
+            &["order_id".to_string()],
+            &[("o.id".to_string(), "order_id".to_string())],
+            SubqueryKind::In,
+            false,
+            false,
+        );
+
+        assert!(matches!(
+            analysis.strategy,
+            Some(DecorrelationStrategy::SemiJoin { .. })
+        ));
+    }
+
+    #[test]
+    fn test_any_all_block_decorrelation_with_lateral_join() {
+        let decorrelator = Decorrelator::new();
+        for kind in [SubqueryKind::Any, SubqueryKind::All] {
+            let analysis = decorrelator.analyze(
+                &["o.id".to_string()],
+                &["order_id".to_string()],
+                &[("o.id".to_string(), "order_id".to_string())],
+                kind,
+                false,
+                false,
+            );
+
+            assert!(analysis.is_correlated);
+            assert!(!analysis.can_decorrelate);
+            assert!(analysis.strategy.is_none());
+            assert_eq!(
+                analysis.decorrelation_blocker,
+                Some(DecorrelationBlocker::RequiresLateralJoin)
+            );
+        }
+    }
+
+    #[test]
+    fn test_speedup_covers_every_strategy() {
+        let decorrelator = Decorrelator::new();
+        let join_condition = vec![("a".to_string(), "b".to_string())];
+
+        // JoinWithGroupBy + LeftJoinWithGroupBy + DistinctJoin + AntiJoin
+        let strategies = [
+            DecorrelationStrategy::JoinWithGroupBy {
+                group_by_cols: vec!["b".to_string()],
+                join_condition: join_condition.clone(),
+            },
+            DecorrelationStrategy::LeftJoinWithGroupBy {
+                group_by_cols: vec!["b".to_string()],
+                join_condition: join_condition.clone(),
+            },
+            DecorrelationStrategy::AntiJoin {
+                join_condition: join_condition.clone(),
+            },
+            DecorrelationStrategy::DistinctJoin {
+                join_condition: join_condition.clone(),
+            },
+        ];
+
+        for strategy in &strategies {
+            let speedup = decorrelator.estimate_speedup(1000, 1000, strategy);
+            assert!(speedup > 1.0, "expected speedup for {strategy:?}");
+        }
+    }
+
+    #[test]
+    fn test_speedup_guards_against_zero_cost() {
+        let decorrelator = Decorrelator::new();
+        // outer=0, inner=0 → decorrelated_cost < 1.0 → returns correlated_cost (0.0)
+        let speedup = decorrelator.estimate_speedup(
+            0,
+            0,
+            &DecorrelationStrategy::SemiJoin {
+                join_condition: vec![("a".to_string(), "b".to_string())],
+            },
+        );
+        assert_eq!(speedup, 0.0);
+    }
+
+    #[test]
+    fn test_should_decorrelate_threshold() {
+        let decorrelator = Decorrelator::new();
+        let strategy = DecorrelationStrategy::SemiJoin {
+            join_condition: vec![("a".to_string(), "b".to_string())],
+        };
+
+        // Large cardinalities → big speedup → worthwhile.
+        assert!(decorrelator.should_decorrelate(1000, 1000, &strategy));
+        // Tiny cardinalities → speedup below the 1.5x bar → not worthwhile.
+        assert!(!decorrelator.should_decorrelate(1, 1, &strategy));
+    }
+
+    #[test]
+    fn test_plan_rewrite_left_join() {
+        let mut decorrelator = Decorrelator::new();
+        let analysis = decorrelator.analyze(
+            &["o.customer_id".to_string()],
+            &["customer_id".to_string()],
+            &[("o.customer_id".to_string(), "customer_id".to_string())],
+            SubqueryKind::Scalar,
+            false,
+            false,
+        );
+
+        let rewrite = decorrelator
+            .plan_rewrite(&analysis, Some("last_total"))
+            .unwrap();
+        assert_eq!(rewrite.join_type, RewriteJoinType::Left);
+        assert!(rewrite.result_col.is_some());
+        assert!(rewrite.group_by.contains(&"customer_id".to_string()));
+    }
+
+    #[test]
+    fn test_plan_rewrite_semi_and_anti_join() {
+        let mut decorrelator = Decorrelator::new();
+
+        let semi = decorrelator.analyze(
+            &["o.id".to_string()],
+            &["order_id".to_string()],
+            &[("o.id".to_string(), "order_id".to_string())],
+            SubqueryKind::Exists,
+            false,
+            false,
+        );
+        let semi_rewrite = decorrelator.plan_rewrite(&semi, None).unwrap();
+        assert_eq!(semi_rewrite.join_type, RewriteJoinType::Semi);
+        assert!(semi_rewrite.result_col.is_none());
+        assert!(semi_rewrite.group_by.is_empty());
+
+        let anti = decorrelator.analyze(
+            &["o.id".to_string()],
+            &["order_id".to_string()],
+            &[("o.id".to_string(), "order_id".to_string())],
+            SubqueryKind::NotExists,
+            false,
+            false,
+        );
+        let anti_rewrite = decorrelator.plan_rewrite(&anti, None).unwrap();
+        assert_eq!(anti_rewrite.join_type, RewriteJoinType::Anti);
+    }
+
+    #[test]
+    fn test_plan_rewrite_distinct_join() {
+        let mut decorrelator = Decorrelator::new();
+        // DistinctJoin is not produced by `analyze`, so build the analysis by hand
+        // to exercise the `plan_rewrite` DistinctJoin arm.
+        let analysis = SubqueryAnalysis {
+            is_correlated: true,
+            correlation_predicates: Vec::new(),
+            can_decorrelate: true,
+            decorrelation_blocker: None,
+            strategy: Some(DecorrelationStrategy::DistinctJoin {
+                join_condition: vec![("o.id".to_string(), "order_id".to_string())],
+            }),
+        };
+
+        let rewrite = decorrelator.plan_rewrite(&analysis, None).unwrap();
+        assert_eq!(rewrite.join_type, RewriteJoinType::Semi);
+        // DISTINCT is expressed via GROUP BY on the inner join column.
+        assert_eq!(rewrite.group_by, vec!["order_id".to_string()]);
+        assert!(rewrite.join_on[0].1.ends_with(".order_id"));
+    }
+
+    #[test]
+    fn test_plan_rewrite_returns_none_without_strategy() {
+        let mut decorrelator = Decorrelator::new();
+        let analysis = decorrelator.analyze(
+            &[],
+            &["id".to_string()],
+            &[],
+            SubqueryKind::Scalar,
+            true,
+            false,
+        );
+        assert!(decorrelator.plan_rewrite(&analysis, None).is_none());
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let decorrelator = Decorrelator::default();
+        let analysis = decorrelator.analyze(&[], &[], &[], SubqueryKind::Scalar, false, false);
+        assert!(!analysis.is_correlated);
+    }
 }

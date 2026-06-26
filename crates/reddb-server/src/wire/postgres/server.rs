@@ -1093,7 +1093,9 @@ fn f64_field(record: &UnifiedRecord, key: &str) -> Option<f64> {
 
 fn json_field(record: &UnifiedRecord, key: &str) -> Option<crate::json::Value> {
     match record_field(record, key)? {
-        Value::Json(bytes) => crate::json::from_slice(bytes).ok(),
+        // Decode the native binary document-body container (PRD-1398) if present.
+        Value::Json(bytes) => crate::document_body::decode_container_to_json(bytes)
+            .or_else(|| crate::json::from_slice(bytes).ok()),
         Value::Text(text) => crate::json::from_str(text).ok(),
         _ => None,
     }

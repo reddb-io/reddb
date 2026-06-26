@@ -954,7 +954,11 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
 fn value_to_json(value: &Value) -> Option<crate::serde_json::Value> {
     match value {
         Value::Null => Some(crate::serde_json::Value::Null),
-        Value::Json(bytes) => crate::serde_json::from_slice(bytes).ok(),
+        // A document body may be the native binary container (PRD-1398); decode
+        // it to JSON so json_extract / CONTAINS see the same shape as a plain
+        // JSON body.
+        Value::Json(bytes) => crate::document_body::decode_container_to_json(bytes)
+            .or_else(|| crate::serde_json::from_slice(bytes).ok()),
         Value::Text(value) => crate::serde_json::from_str(value).ok(),
         _ => None,
     }
