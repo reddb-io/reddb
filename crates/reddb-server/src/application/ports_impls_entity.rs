@@ -1242,6 +1242,24 @@ fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<Json
     }
 }
 
+fn document_body_from_assignment(value: &Value) -> RedDBResult<JsonValue> {
+    match value {
+        Value::Json(bytes) | Value::Blob(bytes) => crate::json::from_slice(bytes)
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Text(text) => crate::json::from_str(text.as_ref())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Integer(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::UnsignedInteger(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Float(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        other => Err(crate::RedDBError::Query(format!(
+            "column 'body' expected JSON body, got {other:?}"
+        ))),
+    }
+}
+
 fn replace_document_row_body(
     fields: &mut HashMap<String, Value>,
     body: JsonValue,
@@ -1966,19 +1984,41 @@ impl RedDBRuntime {
             .collection_contract(&collection)
             .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
             .unwrap_or(false);
-        let document_body_updates: Vec<(String, Value)> = if is_document_collection {
-            static_field_assignments
+        let all_field_assignments: Vec<(String, Value)> = static_field_assignments
+            .iter()
+            .cloned()
+            .chain(dynamic_field_assignments)
+            .collect();
+        let document_body_replacement = if is_document_collection {
+            all_field_assignments
                 .iter()
-                .cloned()
-                .chain(dynamic_field_assignments.iter().cloned())
+                .rev()
+                .find(|(column, _)| column == "body")
+                .map(|(_, value)| document_body_from_assignment(value))
+                .transpose()?
+        } else {
+            None
+        };
+        let document_body_updates: Vec<(String, Value)> = if is_document_collection {
+            all_field_assignments
+                .iter()
                 .filter(|(column, _)| column != "body")
+                .cloned()
                 .collect()
         } else {
             Vec::new()
         };
 
-        apply_row_field_assignments_raw(row, static_field_assignments.iter().cloned());
-        apply_row_field_assignments_raw(row, dynamic_field_assignments);
+        if is_document_collection {
+            if let Some(body) = document_body_replacement {
+                let named = row.named.get_or_insert_with(Default::default);
+                replace_document_row_body(named, body, &mut modified_columns)?;
+                context_index_dirty = true;
+            }
+            apply_row_field_assignments_raw(row, document_body_updates.iter().cloned());
+        } else {
+            apply_row_field_assignments_raw(row, all_field_assignments);
+        }
 
         if !document_body_updates.is_empty() {
             let named = row.named.get_or_insert_with(Default::default);
@@ -1991,14 +2031,8 @@ impl RedDBRuntime {
                     );
                 }
             }
-            let body_bytes = json_to_vec(&body).map_err(|err| {
-                crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
-            })?;
-            named.insert("body".to_string(), Value::Json(body_bytes));
+            replace_document_row_body(named, body, &mut modified_columns)?;
             context_index_dirty = true;
-            if !modified_columns.iter().any(|column| column == "body") {
-                modified_columns.push("body".to_string());
-            }
         }
 
         for (key, value) in static_metadata_assignments
