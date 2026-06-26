@@ -533,6 +533,39 @@ pub(super) fn runtime_table_record_lean_in_collection(
 }
 
 #[inline(never)]
+/// Fill a single-source document's promoted columns into `record` by reading
+/// them from the binary `body` already placed on the record.
+///
+/// `columns = None` expands every top-level body field (SELECT *); `Some(cols)`
+/// offset-reads only the requested fields. A no-op unless the record's `body`
+/// is a binary container, so it never touches legacy plain-JSON documents (which
+/// still carry materialised promoted columns) or non-document rows.
+pub(super) fn fill_document_promoted_columns(record: &mut UnifiedRecord, columns: Option<&[String]>) {
+    // Decode into owned `(name, value)` pairs while borrowing the body, so the
+    // immutable borrow is released before we mutate the record below.
+    let promoted: Vec<(String, Value)> = match record.get("body") {
+        Some(Value::Json(bytes)) => match columns {
+            None => match crate::document_body::promoted_fields(bytes) {
+                Some(fields) => fields,
+                None => return,
+            },
+            // `read_promoted_field` self-gates on the container magic, so this
+            // collects nothing for legacy plain-JSON / non-document bodies.
+            Some(cols) => cols
+                .iter()
+                .filter_map(|col| {
+                    crate::document_body::read_promoted_field(bytes, col)
+                        .map(|value| (col.clone(), value))
+                })
+                .collect(),
+        },
+        _ => return,
+    };
+    for (name, value) in promoted {
+        record.set(&name, value);
+    }
+}
+
 pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
     // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
     if !matches!(entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
@@ -578,6 +611,10 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
                 sys_key_updated_at(),
                 Value::UnsignedInteger(entity.updated_at),
             );
+
+            // SELECT * over a single-source document: expand the promoted
+            // columns back out of the body (no-op for legacy/non-document rows).
+            fill_document_promoted_columns(&mut record, None);
 
             Some(record)
         }
@@ -659,6 +696,9 @@ pub(super) fn runtime_table_record_from_entity_ref_with_schema(
                 }
             }
             set_public_row_envelope(&mut record, entity, row);
+
+            // SELECT * over a single-source document — expand promoted columns.
+            fill_document_promoted_columns(&mut record, None);
 
             Some(record)
         }
@@ -769,6 +809,10 @@ pub(super) fn runtime_table_record_from_entity_projected(
                 Value::UnsignedInteger(entity.updated_at),
             );
 
+            // Single-source document: offset-read just the projected promoted
+            // fields from the body (no-op for legacy/non-document rows).
+            fill_document_promoted_columns(&mut record, Some(columns));
+
             Some(record)
         }
         EntityData::TimeSeries(ts) => {
@@ -876,6 +920,8 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
         }
     }
     set_public_row_envelope(&mut record, entity, row);
+    // Single-source document: offset-read the projected promoted fields.
+    fill_document_promoted_columns(&mut record, Some(columns));
     Some(record)
 }
 
