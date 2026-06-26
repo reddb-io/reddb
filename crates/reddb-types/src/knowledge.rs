@@ -27,7 +27,8 @@
 
 use crate::cast_catalog::{CastContext, CAST_CATALOG};
 use crate::function_catalog::FUNCTION_CATALOG;
-use crate::operator_catalog::OPERATOR_CATALOG;
+use crate::json::{Map, Value as JsonValue};
+use crate::operator_catalog::{OperatorKind, OPERATOR_CATALOG};
 use crate::types::{DataType, TypeCategory};
 
 /// Canonical URI for the type & multi-model knowledge resource served over MCP.
@@ -354,6 +355,168 @@ pub fn type_llms_section() -> String {
     )
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Active type/cast lookup (ADR 0061 §4 — the `reddb_type_of` MCP tool seam)
+//
+// Where the markdown reference above is the *passive* knowledge resource, the
+// functions below answer a *targeted* question — "what is this value or type
+// name, and what can I cast/operate it to?" — by reading the same three
+// catalogs live. The MCP `reddb_type_of` tool is a thin wrapper over
+// [`type_of_json`]: it owns no type knowledge of its own.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Resolve a type *name* (canonical reddb spelling or a common SQL alias, both
+/// case-insensitive — e.g. `INTEGER`, `int`, `string`) to its [`DataType`].
+///
+/// Delegates to [`DataType::from_sql_name`] so the accepted spellings stay in
+/// lockstep with the engine's own SQL type parser; returns `None` for names the
+/// engine does not recognise.
+pub fn resolve_type_name(name: &str) -> Option<DataType> {
+    DataType::from_sql_name(name)
+}
+
+/// Infer the [`DataType`] of a bare JSON literal as the engine would type it on
+/// the wire: `null → NULLABLE`, booleans → `BOOLEAN`, integral numbers →
+/// `INTEGER`, fractional numbers → `FLOAT`, strings → `TEXT`, arrays → `ARRAY`,
+/// objects → `JSON`.
+///
+/// This is deliberately the *structural* type of the literal, not a re-parse
+/// into a richer domain type (an email-shaped string is still `TEXT` here);
+/// callers wanting the domain type pass the type name explicitly.
+pub fn infer_literal_type(value: &JsonValue) -> DataType {
+    match value {
+        JsonValue::Null => DataType::Nullable,
+        JsonValue::Bool(_) => DataType::Boolean,
+        JsonValue::Number(n) => {
+            if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
+                DataType::Integer
+            } else {
+                DataType::Float
+            }
+        }
+        JsonValue::String(_) => DataType::Text,
+        JsonValue::Array(_) => DataType::Array,
+        JsonValue::Object(_) => DataType::Json,
+    }
+}
+
+/// Human label for a [`CastContext`], matching the engine's coercion vocabulary.
+fn cast_context_label(context: CastContext) -> &'static str {
+    match context {
+        CastContext::Implicit => "implicit",
+        CastContext::Assignment => "assignment",
+        CastContext::Explicit => "explicit",
+    }
+}
+
+/// Human label for an [`OperatorKind`].
+fn operator_kind_label(kind: OperatorKind) -> &'static str {
+    match kind {
+        OperatorKind::Infix => "infix",
+        OperatorKind::Prefix => "prefix",
+        OperatorKind::Postfix => "postfix",
+    }
+}
+
+/// Every cast *out of* `ty` registered in [`CAST_CATALOG`], in catalog order.
+/// Each tuple is `(target, context, lossy)` read straight from the catalog row.
+pub fn casts_from(ty: DataType) -> Vec<(DataType, CastContext, bool)> {
+    CAST_CATALOG
+        .iter()
+        .filter(|cast| cast.src == ty)
+        .map(|cast| (cast.target, cast.context, cast.lossy))
+        .collect()
+}
+
+/// Every operator overload in [`OPERATOR_CATALOG`] that accepts `ty` as one of
+/// its operands, in catalog order. The `Nullable` left-operand marker on prefix
+/// operators is treated as "no left operand", so a prefix `-` matches only when
+/// `ty` is its (right) operand, never via the marker.
+pub fn operators_for(ty: DataType) -> Vec<&'static crate::operator_catalog::OperatorEntry> {
+    OPERATOR_CATALOG
+        .iter()
+        .filter(|entry| {
+            let lhs_matches =
+                entry.kind != OperatorKind::Prefix && entry.lhs_type == ty;
+            lhs_matches || entry.rhs_type == ty
+        })
+        .collect()
+}
+
+/// Build the structured `reddb_type_of` answer for a resolved [`DataType`]: its
+/// canonical name + category, the casts available out of it, and the operator
+/// overloads that accept it — all read live from the catalogs.
+pub fn type_facts_json(ty: DataType) -> JsonValue {
+    let casts: Vec<JsonValue> = casts_from(ty)
+        .into_iter()
+        .map(|(target, context, lossy)| {
+            let mut obj = Map::new();
+            obj.insert("target".to_string(), JsonValue::String(target.to_string()));
+            obj.insert(
+                "context".to_string(),
+                JsonValue::String(cast_context_label(context).to_string()),
+            );
+            obj.insert("lossy".to_string(), JsonValue::Bool(lossy));
+            JsonValue::Object(obj)
+        })
+        .collect();
+
+    let operators: Vec<JsonValue> = operators_for(ty)
+        .into_iter()
+        .map(|entry| {
+            let mut obj = Map::new();
+            obj.insert("symbol".to_string(), JsonValue::String(entry.name.to_string()));
+            obj.insert(
+                "kind".to_string(),
+                JsonValue::String(operator_kind_label(entry.kind).to_string()),
+            );
+            // Prefix operators carry a `Nullable` left-operand marker, not a real
+            // operand — surface that as JSON null rather than leaking the marker.
+            let lhs = if entry.kind == OperatorKind::Prefix {
+                JsonValue::Null
+            } else {
+                JsonValue::String(entry.lhs_type.to_string())
+            };
+            obj.insert("lhs".to_string(), lhs);
+            obj.insert("rhs".to_string(), JsonValue::String(entry.rhs_type.to_string()));
+            obj.insert(
+                "returns".to_string(),
+                JsonValue::String(entry.return_type.to_string()),
+            );
+            JsonValue::Object(obj)
+        })
+        .collect();
+
+    let mut obj = Map::new();
+    obj.insert(
+        "canonical_type".to_string(),
+        JsonValue::String(ty.to_string()),
+    );
+    obj.insert(
+        "category".to_string(),
+        JsonValue::String(category_label(ty.category()).to_string()),
+    );
+    obj.insert("is_preferred".to_string(), JsonValue::Bool(ty.is_preferred()));
+    obj.insert("casts".to_string(), JsonValue::Array(casts));
+    obj.insert("operators".to_string(), JsonValue::Array(operators));
+    JsonValue::Object(obj)
+}
+
+/// Answer a `reddb_type_of` query. Exactly one of `type_name` or `value` should
+/// carry the lookup subject: a type name (resolved with [`resolve_type_name`])
+/// or a JSON literal whose structural type is inferred with
+/// [`infer_literal_type`]. Returns the structured facts from [`type_facts_json`]
+/// wrapped with the resolved canonical type, or `None` when a supplied type name
+/// is unknown to the engine.
+pub fn type_of_json(type_name: Option<&str>, value: Option<&JsonValue>) -> Option<JsonValue> {
+    let ty = match (type_name, value) {
+        (Some(name), _) => resolve_type_name(name)?,
+        (None, Some(literal)) => infer_literal_type(literal),
+        (None, None) => return None,
+    };
+    Some(type_facts_json(ty))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +681,134 @@ reference"
         assert!(section.starts_with(LLMS_BEGIN_MARKER));
         assert!(section.ends_with(LLMS_END_MARKER));
         assert!(section.contains(&type_reference_markdown()));
+    }
+
+    /// Type names resolve through the engine's own SQL parser — canonical
+    /// spelling and common aliases, case-insensitively.
+    #[test]
+    fn resolve_type_name_accepts_canonical_and_aliases() {
+        assert_eq!(resolve_type_name("INTEGER"), Some(DataType::Integer));
+        assert_eq!(resolve_type_name("int"), Some(DataType::Integer));
+        assert_eq!(resolve_type_name("string"), Some(DataType::Text));
+        assert_eq!(resolve_type_name("TEXT"), Some(DataType::Text));
+        assert_eq!(resolve_type_name("not-a-type"), None);
+    }
+
+    /// Bare JSON literals are typed structurally, the way the wire sees them.
+    #[test]
+    fn infer_literal_type_maps_json_shapes() {
+        assert_eq!(infer_literal_type(&JsonValue::Null), DataType::Nullable);
+        assert_eq!(infer_literal_type(&JsonValue::Bool(true)), DataType::Boolean);
+        assert_eq!(
+            infer_literal_type(&JsonValue::Number(42.0)),
+            DataType::Integer
+        );
+        assert_eq!(
+            infer_literal_type(&JsonValue::Number(3.5)),
+            DataType::Float
+        );
+        assert_eq!(
+            infer_literal_type(&JsonValue::String("hi".to_string())),
+            DataType::Text
+        );
+        assert_eq!(
+            infer_literal_type(&JsonValue::Array(vec![])),
+            DataType::Array
+        );
+        assert_eq!(
+            infer_literal_type(&JsonValue::Object(Map::new())),
+            DataType::Json
+        );
+    }
+
+    /// `casts_from` reports exactly the catalog rows whose `src` is the type,
+    /// and the catalog says INTEGER widens to FLOAT implicitly and losslessly.
+    #[test]
+    fn casts_from_reads_catalog_rows() {
+        let casts = casts_from(DataType::Integer);
+        let widen = casts
+            .iter()
+            .find(|(target, _, _)| *target == DataType::Float)
+            .expect("INTEGER → FLOAT cast present in catalog");
+        assert_eq!(widen.1, CastContext::Implicit);
+        assert!(!widen.2, "INTEGER → FLOAT must be lossless");
+        // Every returned row genuinely has INTEGER as its source.
+        for (target, _, _) in &casts {
+            assert!(CAST_CATALOG
+                .iter()
+                .any(|c| c.src == DataType::Integer && c.target == *target));
+        }
+    }
+
+    /// `operators_for` matches a type as either operand, and skips the prefix
+    /// `Nullable` left-operand marker.
+    #[test]
+    fn operators_for_matches_either_operand() {
+        let ops = operators_for(DataType::Integer);
+        assert!(
+            ops.iter().any(|e| e.name == "+"),
+            "INTEGER should accept the + operator"
+        );
+        // The prefix-`-` overload (unary negation) carries a Nullable lhs marker;
+        // it is matched via its (right) operand, never via the marker. So every
+        // matched entry that *does* carry a Nullable lhs must be a prefix whose
+        // right operand is the looked-up type.
+        for entry in &ops {
+            if entry.lhs_type == DataType::Nullable {
+                assert_eq!(entry.kind, OperatorKind::Prefix);
+                assert_eq!(entry.rhs_type, DataType::Integer);
+            } else {
+                assert!(entry.lhs_type == DataType::Integer || entry.rhs_type == DataType::Integer);
+            }
+        }
+    }
+
+    /// The structured answer carries the canonical type, category, casts and
+    /// operators — all sourced from the catalogs.
+    #[test]
+    fn type_facts_json_reports_canonical_casts_and_operators() {
+        let facts = type_facts_json(DataType::Integer);
+        assert_eq!(
+            facts.get("canonical_type").and_then(JsonValue::as_str),
+            Some("INTEGER")
+        );
+        assert_eq!(
+            facts.get("category").and_then(JsonValue::as_str),
+            Some("Numeric")
+        );
+        let casts = facts.get("casts").and_then(JsonValue::as_array).unwrap();
+        assert!(
+            casts.iter().any(|c| c.get("target").and_then(JsonValue::as_str)
+                == Some("FLOAT")),
+            "INTEGER → FLOAT must appear in the casts"
+        );
+        let operators = facts.get("operators").and_then(JsonValue::as_array).unwrap();
+        assert!(
+            operators.iter().any(|o| o.get("symbol").and_then(JsonValue::as_str)
+                == Some("+")),
+            "the + operator must appear in the operators"
+        );
+    }
+
+    /// The query entry point resolves by type name, infers from a value, and
+    /// rejects an unknown type name.
+    #[test]
+    fn type_of_json_resolves_name_and_value() {
+        // By type name (alias).
+        let by_name = type_of_json(Some("int"), None).expect("known type name");
+        assert_eq!(
+            by_name.get("canonical_type").and_then(JsonValue::as_str),
+            Some("INTEGER")
+        );
+        // By JSON value literal.
+        let by_value = type_of_json(None, Some(&JsonValue::Bool(false))).expect("value");
+        assert_eq!(
+            by_value.get("canonical_type").and_then(JsonValue::as_str),
+            Some("BOOLEAN")
+        );
+        // Unknown name → None so the caller can surface a parse error.
+        assert!(type_of_json(Some("frobnicate"), None).is_none());
+        // Nothing supplied → None.
+        assert!(type_of_json(None, None).is_none());
     }
 }
