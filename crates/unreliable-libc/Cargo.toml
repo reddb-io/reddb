@@ -1,0 +1,38 @@
+# DST Fatia 0 (#1351): the `unreliable-libc` LD_PRELOAD fault-injection shim
+# plus the shared WAL recovery-invariant oracle that later DST slices reuse.
+#
+# Internal test tooling: not published to crates.io (`publish = false`). The
+# version still tracks the workspace engine version for coherence.
+[package]
+name = "unreliable-libc"
+version = "1.15.0"
+edition.workspace = true
+authors.workspace = true
+description = "LD_PRELOAD libc fault-injection shim + WAL recovery-invariant oracle for deterministic simulation testing (DST Fatia 0)."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "unreliable_libc"
+path = "src/lib.rs"
+
+# The seeded WAL workload driven under the shim. Lives as a real binary so the
+# integration test can spawn it as a separate process with `LD_PRELOAD` set.
+[[bin]]
+name = "wal_workload"
+path = "src/bin/wal_workload.rs"
+
+[dependencies]
+reddb-file = { workspace = true }
+crc32fast = "1.5"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
