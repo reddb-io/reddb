@@ -1232,9 +1232,17 @@ fn reject_document_array_position_path(path: &[String]) -> RedDBResult<()> {
 
 fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<JsonValue> {
     match fields.get("body") {
-        Some(Value::Json(bytes)) => crate::json::from_slice(bytes).map_err(|err| {
-            crate::RedDBError::Query(format!("failed to decode document body: {err}"))
-        }),
+        Some(Value::Json(bytes)) => {
+            // The stored body may be the native binary container (PRD-1398) or
+            // plain JSON; decode either form back to JSON.
+            if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
+                Ok(body)
+            } else {
+                crate::json::from_slice(bytes).map_err(|err| {
+                    crate::RedDBError::Query(format!("failed to decode document body: {err}"))
+                })
+            }
+        }
         Some(_) => Err(crate::RedDBError::Query(
             "document body field must contain JSON".to_string(),
         )),
@@ -1260,9 +1268,20 @@ fn document_body_from_assignment(value: &Value) -> RedDBResult<JsonValue> {
     }
 }
 
+fn document_body_set_operation(column: &str, value: Value) -> PatchEntityOperation {
+    PatchEntityOperation {
+        op: PatchEntityOperationType::Set,
+        path: column.split('.').map(str::to_string).collect(),
+        value: Some(crate::presentation::entity_json::storage_value_to_json(
+            &value,
+        )),
+    }
+}
+
 fn replace_document_row_body(
     fields: &mut HashMap<String, Value>,
     body: JsonValue,
+    binary: bool,
     modified_columns: &mut Vec<String>,
 ) -> RedDBResult<()> {
     modified_columns.push("body".to_string());
@@ -1277,15 +1296,19 @@ fn replace_document_row_body(
         modified_columns.push(key);
     }
 
-    let body_bytes = json_to_vec(&body).map_err(|err| {
-        crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
-    })?;
+    let body_bytes = crate::document_body::serialize_document_body(&body, binary)?;
     fields.insert("body".to_string(), Value::Json(body_bytes));
 
-    if let JsonValue::Object(map) = &body {
-        for (key, value) in map {
-            fields.insert(key.clone(), json_to_storage_value(value)?);
-            modified_columns.push(key.clone());
+    // Single source of truth (PRD-1398): with the binary body on, the body is
+    // the only stored representation — don't re-promote top-level keys into
+    // columns (the loop above already dropped any stale ones). With the flag
+    // off (legacy) keep the promoted columns in sync with the body (#1394).
+    if !binary {
+        if let JsonValue::Object(map) = &body {
+            for (key, value) in map {
+                fields.insert(key.clone(), json_to_storage_value(value)?);
+                modified_columns.push(key.clone());
+            }
         }
     }
 
@@ -1371,6 +1394,7 @@ impl RedDBRuntime {
                         contract.declared_model == crate::catalog::CollectionModel::Document
                     })
                     .unwrap_or(false);
+                let binary_body = self.binary_document_body_enabled();
                 let mut field_ops = Vec::new();
                 let mut metadata_ops = Vec::new();
                 let mut document_body_ops = Vec::new();
@@ -1436,14 +1460,19 @@ impl RedDBRuntime {
                     let mut body = document_body_from_named(named)?;
                     apply_patch_operations_to_json(&mut body, &document_body_ops)
                         .map_err(crate::RedDBError::Query)?;
-                    replace_document_row_body(named, body, &mut modified_columns)?;
+                    replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                 }
 
                 if is_document_collection {
                     if let Some(body) = payload.get("body") {
                         context_index_dirty = true;
                         let named = row.named.get_or_insert_with(Default::default);
-                        replace_document_row_body(named, body.clone(), &mut modified_columns)?;
+                        replace_document_row_body(
+                            named,
+                            body.clone(),
+                            binary_body,
+                            &mut modified_columns,
+                        )?;
                     }
                 }
 
@@ -1459,7 +1488,7 @@ impl RedDBRuntime {
                         let mut body = document_body_from_named(named)?;
                         apply_patch_operations_to_json(&mut body, &field_ops)
                             .map_err(crate::RedDBError::Query)?;
-                        replace_document_row_body(named, body, &mut modified_columns)?;
+                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                     } else {
                         for op in &field_ops {
                             if let Some(col) = op.path.first() {
@@ -1495,7 +1524,7 @@ impl RedDBRuntime {
                                 map.insert(key.clone(), value.clone());
                             }
                         }
-                        replace_document_row_body(named, body, &mut modified_columns)?;
+                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                     } else {
                         for (key, value) in fields {
                             modified_columns.push(key.clone());
@@ -1975,64 +2004,81 @@ impl RedDBRuntime {
 
         let _ = row_contract_plan;
 
-        // Documents store the full JSON under the `body` column plus promoted
-        // top-level columns for filtering. A SET on a promoted column must also
-        // be reflected in `body`, otherwise `SELECT body` keeps the old value
-        // while `SELECT <col>` shows the new one (#1394). Collect the assigned
-        // top-level keys here and patch them into the body before promoting.
+        // Documents store the full JSON under the `body` column. Legacy rows
+        // also promote top-level keys for filtering, while binary body mode
+        // keeps `body` as the single source of truth. Reflect non-body SET
+        // assignments into `body` as patch operations so dotted paths update
+        // nested JSON instead of becoming literal top-level keys.
         let is_document_collection = db
             .collection_contract(&collection)
             .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
             .unwrap_or(false);
-        let all_field_assignments: Vec<(String, Value)> = static_field_assignments
-            .iter()
-            .cloned()
-            .chain(dynamic_field_assignments)
-            .collect();
-        let document_body_replacement = if is_document_collection {
-            all_field_assignments
+        if is_document_collection {
+            // #1366: when a SET assigns to `body`, treat it as a FULL REPLACE of
+            // the stored document — drop other column assignments, the new body
+            // is the single source of truth.
+            let body_assignment = static_field_assignments
                 .iter()
+                .chain(dynamic_field_assignments.iter())
                 .rev()
                 .find(|(column, _)| column == "body")
-                .map(|(_, value)| document_body_from_assignment(value))
-                .transpose()?
-        } else {
-            None
-        };
-        let document_body_updates: Vec<(String, Value)> = if is_document_collection {
-            all_field_assignments
-                .iter()
-                .filter(|(column, _)| column != "body")
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
+                .cloned();
 
-        if is_document_collection {
-            if let Some(body) = document_body_replacement {
-                let named = row.named.get_or_insert_with(Default::default);
-                replace_document_row_body(named, body, &mut modified_columns)?;
-                context_index_dirty = true;
-            }
-            apply_row_field_assignments_raw(row, document_body_updates.iter().cloned());
-        } else {
-            apply_row_field_assignments_raw(row, all_field_assignments);
-        }
-
-        if !document_body_updates.is_empty() {
-            let named = row.named.get_or_insert_with(Default::default);
-            let mut body = document_body_from_named(named)?;
-            if let JsonValue::Object(map) = &mut body {
-                for (column, value) in &document_body_updates {
-                    map.insert(
-                        column.clone(),
-                        crate::presentation::entity_json::storage_value_to_json(value),
-                    );
+            match body_assignment {
+                Some((_, value)) => {
+                    let body = document_body_from_assignment(&value)?;
+                    let named = row.named.get_or_insert_with(Default::default);
+                    replace_document_row_body(
+                        named,
+                        body,
+                        self.binary_document_body_enabled(),
+                        &mut modified_columns,
+                    )?;
+                    context_index_dirty = true;
+                }
+                None => {
+                    // #1365: no `body` assignment — fall back to nested-path
+                    // partial update via document_body_set_operation.
+                    let mut static_row_assignments = Vec::new();
+                    let mut dynamic_row_assignments = Vec::new();
+                    let mut document_body_ops = Vec::new();
+                    for (column, value) in static_field_assignments.iter().cloned() {
+                        if column == "body" {
+                            static_row_assignments.push((column, value));
+                        } else {
+                            document_body_ops.push(document_body_set_operation(&column, value));
+                        }
+                    }
+                    for (column, value) in dynamic_field_assignments {
+                        if column == "body" {
+                            dynamic_row_assignments.push((column, value));
+                        } else {
+                            document_body_ops.push(document_body_set_operation(&column, value));
+                        }
+                    }
+                    apply_row_field_assignments_raw(row, static_row_assignments);
+                    apply_row_field_assignments_raw(row, dynamic_row_assignments);
+                    if !document_body_ops.is_empty() {
+                        let named = row.named.get_or_insert_with(Default::default);
+                        let mut body = document_body_from_named(named)?;
+                        apply_patch_operations_to_json(&mut body, &document_body_ops)
+                            .map_err(crate::RedDBError::Query)?;
+                        replace_document_row_body(
+                            named,
+                            body,
+                            self.binary_document_body_enabled(),
+                            &mut modified_columns,
+                        )?;
+                        context_index_dirty = true;
+                    }
                 }
             }
-            replace_document_row_body(named, body, &mut modified_columns)?;
-            context_index_dirty = true;
+        } else {
+            // Non-document collection: every assignment is a regular row column.
+            let mut all_assignments: Vec<(String, Value)> =
+                static_field_assignments.iter().cloned().collect();
+            all_assignments.extend(dynamic_field_assignments);
+            apply_row_field_assignments_raw(row, all_assignments);
         }
 
         for (key, value) in static_metadata_assignments
@@ -2237,25 +2283,37 @@ impl RedDBRuntime {
                 // — avoiding it saves a few microseconds per UPDATE.
                 // Page-local replace + t_ctid chain support (true
                 // HOT) lives in a follow-up storage spec.
+                // Use the parent-expanded set so that dot-path indexes
+                // (e.g. "body.service.tier") are triggered when the root
+                // field ("body") appears in modified_columns.
                 let indexed_cols: std::collections::HashSet<String> = self
                     .index_store_ref()
-                    .list_indices(applied.collection.as_str())
-                    .into_iter()
-                    .filter_map(|idx| idx.columns.first().cloned())
-                    .collect();
-                let modified_cols: std::collections::HashSet<String> = damage
+                    .indexed_columns_set_with_parents(applied.collection.as_str());
+                // Single-source documents keep promoted index columns in the
+                // body — surface them so the index sees the value move (a no-op
+                // for ordinary stored columns).
+                let pre_index_fields = self
+                    .index_store_ref()
+                    .augment_body_derived_index_fields(&applied.pre_mutation_fields, &indexed_cols);
+                let post_index_fields = self
+                    .index_store_ref()
+                    .augment_body_derived_index_fields(&post, &indexed_cols);
+                let modified_cols: std::collections::HashSet<String> =
+                    crate::application::entity::row_damage_vector(
+                        &pre_index_fields,
+                        &post_index_fields,
+                    )
                     .touched_columns()
                     .into_iter()
                     .map(str::to_string)
                     .collect();
                 if let Some(old_version) = applied.replaced_entity.as_ref() {
-                    let old_index_fields: Vec<(String, Value)> = applied
-                        .pre_mutation_fields
+                    let old_index_fields: Vec<(String, Value)> = pre_index_fields
                         .iter()
                         .filter(|(col, _)| indexed_cols.contains(col))
                         .cloned()
                         .collect();
-                    let new_index_fields: Vec<(String, Value)> = post
+                    let new_index_fields: Vec<(String, Value)> = post_index_fields
                         .iter()
                         .filter(|(col, _)| indexed_cols.contains(col))
                         .cloned()
@@ -2296,8 +2354,8 @@ impl RedDBRuntime {
                             .index_entity_update(
                                 &applied.collection,
                                 applied.id,
-                                &applied.pre_mutation_fields,
-                                &post,
+                                &pre_index_fields,
+                                &post_index_fields,
                             )
                             .map_err(crate::RedDBError::Internal)?;
                     } else {
@@ -2953,20 +3011,27 @@ impl RuntimeEntityPort for RedDBRuntime {
             )?;
         }
 
-        // Serialize the full body as Value::Json for the "body" field
-        let body_bytes = json_to_vec(&input.body).map_err(|err| {
-            crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
-        })?;
+        // Serialize the full body for the "body" field. Behind the
+        // `storage.binary_document_body` flag (PRD-1398) this is the native binary
+        // container; otherwise plain JSON. Reads decode either form to JSON.
+        let binary_body = self.binary_document_body_enabled();
+        let body_bytes = crate::document_body::serialize_document_body(&input.body, binary_body)?;
         let mut fields: Vec<(String, crate::storage::schema::Value)> = vec![(
             "body".to_string(),
             crate::storage::schema::Value::Json(body_bytes),
         )];
 
-        // Flatten top-level keys from the body into named fields for filtering
-        if let JsonValue::Object(ref map) = input.body {
-            for (key, value) in map {
-                let storage_value = json_to_storage_value(value)?;
-                fields.push((key.clone(), storage_value));
+        // Single source of truth (PRD-1398): when the binary body is on, the
+        // body IS the document — promoted columns are no longer materialised.
+        // Filters resolve via the index, projections offset-read the body. With
+        // the flag off (legacy) we still flatten top-level keys into named
+        // columns for filtering.
+        if !binary_body {
+            if let JsonValue::Object(ref map) = input.body {
+                for (key, value) in map {
+                    let storage_value = json_to_storage_value(value)?;
+                    fields.push((key.clone(), storage_value));
+                }
             }
         }
 

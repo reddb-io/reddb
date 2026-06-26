@@ -1,0 +1,24 @@
+name: DST Nightly
+
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  dst-seed-sweep:
+    name: DST seed sweep
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: "28.3"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dst-nightly-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Run DST heavy seed sweep
+        run: cargo test --locked -p reddb-server replication::dst::tests::dst_seed_sweep -- --ignored

@@ -35,11 +35,20 @@ impl<'a> Parser<'a> {
                     }
                 }
             } else if self.consume_ident_ci("BATCH")? {
-                if let Token::Integer(n) = self.peek().clone() {
-                    self.advance()?;
-                    batch_size = Some(n as u64);
-                }
-                self.consume(&Token::Rows)?;
+                let n = match self.peek().clone() {
+                    Token::Integer(n) if n > 0 => {
+                        self.advance()?;
+                        n as u64
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            "expected positive BATCH size".to_string(),
+                            self.position(),
+                        ));
+                    }
+                };
+                self.expect(Token::Rows)?;
+                batch_size = Some(n);
             } else if self.consume_ident_ci("NO")? {
                 let _ = self.consume(&Token::Rollback)? || self.consume_ident_ci("ROLLBACK")?;
                 no_rollback = true;
@@ -128,7 +137,11 @@ impl<'a> Parser<'a> {
     /// Parse: EXPLAIN MIGRATION name  (called after EXPLAIN is consumed)
     pub fn parse_explain_migration_after_keyword(&mut self) -> Result<QueryExpr, ParseError> {
         self.consume_ident_ci("MIGRATION")?;
-        let name = self.expect_ident()?;
+        let name = if self.consume(&Token::Star)? {
+            "*".to_string()
+        } else {
+            self.expect_ident()?
+        };
         Ok(QueryExpr::ExplainMigration(ExplainMigrationQuery { name }))
     }
 

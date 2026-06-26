@@ -227,7 +227,11 @@ fn json_field(
     key: &str,
 ) -> Option<crate::json::Value> {
     match record_field(record, key)? {
-        crate::storage::schema::Value::Json(bytes) => crate::json::from_slice(bytes).ok(),
+        crate::storage::schema::Value::Json(bytes) => {
+            // Decode the native binary document-body container (PRD-1398) if present.
+            crate::document_body::decode_container_to_json(bytes)
+                .or_else(|| crate::json::from_slice(bytes).ok())
+        }
         crate::storage::schema::Value::Text(text) => crate::json::from_str(text).ok(),
         _ => None,
     }
@@ -447,10 +451,16 @@ pub fn write_value_json(buf: &mut String, value: &crate::storage::schema::Value)
             buf.push_str(&hex::encode(bytes));
             buf.push('"');
         }
-        Value::Json(bytes) => match crate::json::from_slice::<crate::json::Value>(bytes) {
-            Ok(json) => buf.push_str(&json.to_string_compact()),
-            Err(_) => buf.push_str("null"),
-        },
+        Value::Json(bytes) => {
+            // A document body may be the native binary container (PRD-1398);
+            // decode it to JSON for the gRPC wire.
+            match crate::document_body::decode_container_to_json(bytes)
+                .or_else(|| crate::json::from_slice::<crate::json::Value>(bytes).ok())
+            {
+                Some(json) => buf.push_str(&json.to_string_compact()),
+                None => buf.push_str("null"),
+            }
+        }
         _ => buf.push_str("null"),
     }
 }

@@ -647,4 +647,210 @@ mod tests {
         // Prefix match should be more selective (lower)
         assert!(prefix < contains);
     }
+
+    #[test]
+    fn test_filter_value_as_f64() {
+        assert_eq!(FilterValue::Int(7).as_f64(), Some(7.0));
+        assert_eq!(FilterValue::Float(1.5).as_f64(), Some(1.5));
+        assert_eq!(FilterValue::String("x".to_string()).as_f64(), None);
+        assert_eq!(FilterValue::Bool(true).as_f64(), None);
+        assert_eq!(FilterValue::Null.as_f64(), None);
+        assert_eq!(FilterValue::Bytes(vec![1, 2]).as_f64(), None);
+    }
+
+    #[test]
+    fn test_selectivity_for_every_variant() {
+        let ranker = FilterRanker::with_defaults();
+        let col = || "x".to_string();
+        let int = || FilterValue::Int(1);
+
+        // Range comparisons (Lt/Le/Gt/Ge) and Between hit the range estimator.
+        for filter in [
+            FilterExpr::Lt {
+                column: col(),
+                value: int(),
+            },
+            FilterExpr::Le {
+                column: col(),
+                value: int(),
+            },
+            FilterExpr::Gt {
+                column: col(),
+                value: int(),
+            },
+            FilterExpr::Ge {
+                column: col(),
+                value: int(),
+            },
+            FilterExpr::Between {
+                column: col(),
+                lower: FilterValue::Int(0),
+                upper: FilterValue::Int(10),
+            },
+        ] {
+            let sel = ranker.estimate_selectivity(&filter);
+            assert!((0.0..=1.0).contains(&sel));
+        }
+
+        // IS NOT NULL is the complement of IS NULL.
+        let is_null = ranker.estimate_selectivity(&FilterExpr::IsNull { column: col() });
+        let is_not_null = ranker.estimate_selectivity(&FilterExpr::IsNotNull { column: col() });
+        assert!((is_null + is_not_null - 1.0).abs() < 0.0001);
+
+        // OR combines via inclusion-exclusion.
+        let or_sel = ranker.estimate_selectivity(&FilterExpr::Or(
+            Box::new(FilterExpr::Eq {
+                column: col(),
+                value: int(),
+            }),
+            Box::new(FilterExpr::Eq {
+                column: "y".to_string(),
+                value: int(),
+            }),
+        ));
+        assert!(or_sel > 0.0);
+
+        // NOT inverts.
+        let not_sel = ranker.estimate_selectivity(&FilterExpr::Not(Box::new(FilterExpr::True)));
+        assert!(not_sel <= ranker.config().min_selectivity + 0.0001);
+
+        // Function / Subquery fall back to default equality.
+        let fn_sel = ranker.estimate_selectivity(&FilterExpr::Function {
+            name: "f".to_string(),
+            args: vec![],
+        });
+        let sub_sel = ranker.estimate_selectivity(&FilterExpr::Subquery { id: 9 });
+        assert_eq!(fn_sel, sub_sel);
+
+        // True passes all, False passes none (clamped to min_selectivity).
+        assert_eq!(ranker.estimate_selectivity(&FilterExpr::True), 1.0);
+        assert_eq!(
+            ranker.estimate_selectivity(&FilterExpr::False),
+            ranker.config().min_selectivity
+        );
+    }
+
+    #[test]
+    fn test_cost_for_every_variant() {
+        let ranker = FilterRanker::with_defaults();
+        let col = || "x".to_string();
+        let int = || FilterValue::Int(1);
+
+        // Range comparison costs.
+        for filter in [
+            FilterExpr::Lt {
+                column: col(),
+                value: int(),
+            },
+            FilterExpr::Le {
+                column: col(),
+                value: int(),
+            },
+            FilterExpr::Gt {
+                column: col(),
+                value: int(),
+            },
+            FilterExpr::Ge {
+                column: col(),
+                value: int(),
+            },
+        ] {
+            assert!(ranker.estimate_cost(&filter) > 0.0);
+        }
+
+        // Between sums both bound comparisons.
+        let between_cost = ranker.estimate_cost(&FilterExpr::Between {
+            column: col(),
+            lower: FilterValue::Bytes(vec![0u8; 4]),
+            upper: FilterValue::Int(10),
+        });
+        assert!(between_cost > 0.0);
+
+        // IN cost scales with element count.
+        let in_cost = ranker.estimate_cost(&FilterExpr::In {
+            column: col(),
+            values: vec![int(), int(), int()],
+        });
+        assert!(in_cost >= 3.0 * ranker.config().cost_model.in_per_element - 0.0001);
+
+        // Like cost includes the pattern-match base.
+        assert!(
+            ranker.estimate_cost(&FilterExpr::Like {
+                column: col(),
+                pattern: "abc%".to_string(),
+            }) >= ranker.config().cost_model.pattern_match
+        );
+
+        // IS NOT NULL is a null check.
+        assert_eq!(
+            ranker.estimate_cost(&FilterExpr::IsNotNull { column: col() }),
+            ranker.config().cost_model.null_check
+        );
+
+        // And/Or/Not recurse; Function sums arg costs.
+        let and_cost = ranker.estimate_cost(&FilterExpr::And(
+            Box::new(FilterExpr::IsNull { column: col() }),
+            Box::new(FilterExpr::IsNull { column: col() }),
+        ));
+        assert!(and_cost > 0.0);
+        let or_cost = ranker.estimate_cost(&FilterExpr::Or(
+            Box::new(FilterExpr::True),
+            Box::new(FilterExpr::False),
+        ));
+        assert_eq!(or_cost, 0.0);
+        let not_cost = ranker.estimate_cost(&FilterExpr::Not(Box::new(FilterExpr::IsNull {
+            column: col(),
+        })));
+        assert_eq!(not_cost, ranker.config().cost_model.null_check);
+        let fn_cost = ranker.estimate_cost(&FilterExpr::Function {
+            name: "f".to_string(),
+            args: vec![FilterExpr::IsNull { column: col() }],
+        });
+        assert!(fn_cost > ranker.config().cost_model.function_call);
+
+        // True/False are free.
+        assert_eq!(ranker.estimate_cost(&FilterExpr::True), 0.0);
+        assert_eq!(ranker.estimate_cost(&FilterExpr::False), 0.0);
+    }
+
+    #[test]
+    fn test_range_selectivity_with_statistics() {
+        let mut stats = TableStats::new("t".to_string(), 1000);
+        stats.add_column(ColumnStats {
+            name: "age".to_string(),
+            ndv: 100,
+            null_fraction: 0.2,
+            min_value: Some(0.0),
+            max_value: Some(100.0),
+        });
+        let ranker = FilterRanker::with_defaults().with_stats(stats);
+
+        // Range over a known min/max uses the fraction estimate, not the default.
+        let sel = ranker.estimate_selectivity(&FilterExpr::Between {
+            column: "age".to_string(),
+            lower: FilterValue::Int(0),
+            upper: FilterValue::Int(50),
+        });
+        assert!((sel - 0.5).abs() < 0.05);
+
+        // IS NULL / IS NOT NULL read the column's null fraction.
+        let null_sel = ranker.estimate_selectivity(&FilterExpr::IsNull {
+            column: "age".to_string(),
+        });
+        assert!((null_sel - 0.2).abs() < 0.0001);
+        let not_null_sel = ranker.estimate_selectivity(&FilterExpr::IsNotNull {
+            column: "age".to_string(),
+        });
+        assert!((not_null_sel - 0.8).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_ranked_filter_equality_and_ordering() {
+        let a = RankedFilter::new(FilterExpr::True, 0.5, 0.0, 0);
+        let b = RankedFilter::new(FilterExpr::False, 0.5, 0.0, 1);
+        // Equal scores compare equal (cost == 0.0 → score == selectivity).
+        assert_eq!(a, b);
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+        assert_eq!(a.score, 0.5);
+    }
 }

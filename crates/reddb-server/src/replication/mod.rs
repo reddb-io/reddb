@@ -26,6 +26,7 @@ pub mod cdc;
 pub mod commit_policy;
 pub mod commit_waiter;
 pub mod control_plane;
+pub mod dst;
 pub mod election;
 pub mod failover;
 pub mod fence;

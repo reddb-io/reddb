@@ -1347,7 +1347,11 @@ fn bool_field(record: &UnifiedRecord, name: &str) -> Option<bool> {
 
 fn json_field(record: &UnifiedRecord, name: &str) -> Option<Value> {
     match record_field(record, name)? {
-        SchemaValue::Json(bytes) => json::from_slice(bytes).ok(),
+        SchemaValue::Json(bytes) => {
+            // Decode the native binary document-body container (PRD-1398) if present.
+            crate::document_body::decode_container_to_json(bytes)
+                .or_else(|| json::from_slice(bytes).ok())
+        }
         SchemaValue::Text(text) => json::from_str(text).ok(),
         _ => None,
     }

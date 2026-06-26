@@ -157,6 +157,9 @@ fn crash_inject(point: &str) {
     {
         std::process::exit(173);
     }
+    if crate::buggify!(PRIMARY_REPLICA_CRASH_INJECT_ENV, point) {
+        std::process::exit(173);
+    }
 }
 
 fn now_unix_nanos() -> u128 {

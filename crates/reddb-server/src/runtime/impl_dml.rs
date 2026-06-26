@@ -571,16 +571,29 @@ impl RedDBRuntime {
             return Ok(());
         }
 
+        // Use the parent-expanded set so that dot-path indexes (e.g.
+        // "body.service.tier") are triggered when the root field ("body")
+        // is modified.
         let indexed_cols = self
             .index_store_ref()
-            .indexed_columns_set(&applied.collection);
+            .indexed_columns_set_with_parents(&applied.collection);
         if indexed_cols.is_empty() {
             return Ok(());
         }
 
+        // Single-source documents keep promoted index columns (`score`) in the
+        // body, not as stored fields. Resolve each indexed column from the body
+        // and fold it into the field snapshots so the diff below sees the value
+        // move — for an ordinary stored column this adds nothing.
+        let pre = self
+            .index_store_ref()
+            .augment_body_derived_index_fields(&applied.pre_mutation_fields, &indexed_cols);
+        let post = self
+            .index_store_ref()
+            .augment_body_derived_index_fields(&post, &indexed_cols);
+
         if let Some(old_version) = applied.replaced_entity.as_ref() {
-            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = applied
-                .pre_mutation_fields
+            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = pre
                 .iter()
                 .filter(|(col, _)| indexed_cols.contains(col))
                 .cloned()
@@ -603,20 +616,14 @@ impl RedDBRuntime {
             return Ok(());
         }
 
-        let damage =
-            crate::application::entity::row_damage_vector(&applied.pre_mutation_fields, &post);
+        let damage = crate::application::entity::row_damage_vector(&pre, &post);
         if damage
             .touched_columns()
             .into_iter()
             .any(|col| indexed_cols.contains(col))
         {
             self.index_store_ref()
-                .index_entity_update(
-                    &applied.collection,
-                    applied.id,
-                    &applied.pre_mutation_fields,
-                    &post,
-                )
+                .index_entity_update(&applied.collection, applied.id, &pre, &post)
                 .map_err(crate::RedDBError::Internal)?;
         }
         Ok(())

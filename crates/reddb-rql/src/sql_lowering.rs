@@ -1579,6 +1579,7 @@ mod tests {
             returning: None,
             order_by: vec![OrderByClause::asc(field("id"))],
             limit: Some(1),
+            claim_limit: None,
             suppress_events: false,
         };
         assert!(matches!(

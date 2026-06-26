@@ -352,6 +352,30 @@ fn document_update_keeps_body_json_in_sync_with_promoted_column() {
 }
 
 #[test]
+fn document_path_update_keeps_nested_sibling_fields() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_path_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_path_docs DOCUMENT (body)
+           VALUES ('{"name":"doc","profile":{"address":{"city":"Porto","zip":"4000"},"active":true},"keep":"me"}')"#,
+    );
+
+    let updated = exec(
+        &rt,
+        "UPDATE body_path_docs DOCUMENTS SET profile.address.city = 'Lisbon' WHERE name = 'doc'",
+    );
+    assert_eq!(updated.affected_rows, 1);
+
+    let with_body = exec(&rt, "SELECT body FROM body_path_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(body["profile"]["address"]["city"].as_str(), Some("Lisbon"));
+    assert_eq!(body["profile"]["address"]["zip"].as_str(), Some("4000"));
+    assert_eq!(body["profile"]["active"].as_bool(), Some(true));
+    assert_eq!(body["keep"].as_str(), Some("me"));
+}
+
+#[test]
 fn document_compound_update_keeps_body_json_in_sync() {
     let rt = runtime();
     exec(&rt, "CREATE DOCUMENT body_compound_docs");
