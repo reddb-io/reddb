@@ -132,7 +132,9 @@ fn bare_filter_and_projection_resolve_through_the_body() {
     assert_eq!(as_int(rows.result.records[0].get("score")), 50);
 
     // SELECT * expands the promoted columns back out of the body.
-    let star = rt.execute_query("SELECT * FROM docs WHERE name = 'alice'").expect("star");
+    let star = rt
+        .execute_query("SELECT * FROM docs WHERE name = 'alice'")
+        .expect("star");
     let row = &star.result.records[0];
     assert_eq!(as_text(row.get("name")), "alice");
     assert_eq!(as_int(row.get("score")), 30);
@@ -148,7 +150,11 @@ fn range_and_order_by_route_through_the_ordered_index() {
     let rt = binary_runtime();
     rt.execute_query("CREATE DOCUMENT docs").expect("create");
     for (name, score) in [("alice", 30), ("bob", 10), ("carol", 50), ("dave", 20)] {
-        insert(&rt, "docs", &format!(r#"{{"name":"{name}","score":{score}}}"#));
+        insert(
+            &rt,
+            "docs",
+            &format!(r#"{{"name":"{name}","score":{score}}}"#),
+        );
     }
     rt.execute_query("CREATE INDEX idx_score ON docs (score) USING BTREE")
         .expect("ordered index on a promoted field");
@@ -158,11 +164,19 @@ fn range_and_order_by_route_through_the_ordered_index() {
     );
 
     assert_eq!(
-        texts(&rt, "SELECT name FROM docs WHERE score > 20 ORDER BY score ASC", "name"),
+        texts(
+            &rt,
+            "SELECT name FROM docs WHERE score > 20 ORDER BY score ASC",
+            "name"
+        ),
         vec!["alice", "carol"],
     );
     assert_eq!(
-        texts(&rt, "SELECT name FROM docs WHERE score BETWEEN 15 AND 35 ORDER BY score ASC", "name"),
+        texts(
+            &rt,
+            "SELECT name FROM docs WHERE score BETWEEN 15 AND 35 ORDER BY score ASC",
+            "name"
+        ),
         vec!["dave", "alice"],
     );
     assert_eq!(
@@ -202,7 +216,11 @@ fn update_keeps_single_source_and_refreshes_index() {
 
     // The new value is found via the refreshed index; the old key is gone.
     assert_eq!(
-        texts(&rt, "SELECT name FROM docs WHERE score > 50 ORDER BY score", "name"),
+        texts(
+            &rt,
+            "SELECT name FROM docs WHERE score > 50 ORDER BY score",
+            "name"
+        ),
         vec!["alice"],
     );
     assert!(
@@ -211,7 +229,9 @@ fn update_keeps_single_source_and_refreshes_index() {
     );
 
     // The projected value reflects the update too.
-    let rows = rt.execute_query("SELECT score FROM docs WHERE name = 'alice'").expect("read");
+    let rows = rt
+        .execute_query("SELECT score FROM docs WHERE name = 'alice'")
+        .expect("read");
     assert_eq!(as_int(rows.result.records[0].get("score")), 80);
 }
 
@@ -259,7 +279,11 @@ fn versioned_document_as_of_projects_the_historical_body() {
     let live = rt
         .execute_query("SELECT score FROM vdocs WHERE name = 'alice'")
         .expect("live");
-    assert_eq!(as_int(live.result.records[0].get("score")), 2, "live is newest");
+    assert_eq!(
+        as_int(live.result.records[0].get("score")),
+        2,
+        "live is newest"
+    );
 
     // AS OF P1: the prior version, projected from the prior body.
     let historical = rt

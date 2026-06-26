@@ -2965,8 +2965,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // `storage.binary_document_body` flag (PRD-1398) this is the native binary
         // container; otherwise plain JSON. Reads decode either form to JSON.
         let binary_body = self.binary_document_body_enabled();
-        let body_bytes =
-            crate::document_body::serialize_document_body(&input.body, binary_body)?;
+        let body_bytes = crate::document_body::serialize_document_body(&input.body, binary_body)?;
         let mut fields: Vec<(String, crate::storage::schema::Value)> = vec![(
             "body".to_string(),
             crate::storage::schema::Value::Json(body_bytes),

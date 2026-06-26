@@ -718,7 +718,11 @@ pub(super) fn runtime_table_record_from_entity_ref_with_schema(
             set_public_row_envelope(&mut record, entity, row);
 
             // SELECT * over a single-source document — expand promoted columns.
-            fill_document_promoted_columns(&mut record, None, document_row_body_bytes(row).as_deref());
+            fill_document_promoted_columns(
+                &mut record,
+                None,
+                document_row_body_bytes(row).as_deref(),
+            );
 
             Some(record)
         }
@@ -943,7 +947,11 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
     }
     set_public_row_envelope(&mut record, entity, row);
     // Single-source document: offset-read the projected promoted fields.
-    fill_document_promoted_columns(&mut record, Some(columns), document_row_body_bytes(row).as_deref());
+    fill_document_promoted_columns(
+        &mut record,
+        Some(columns),
+        document_row_body_bytes(row).as_deref(),
+    );
     Some(record)
 }
 
