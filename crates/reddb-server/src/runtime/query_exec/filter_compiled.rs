@@ -362,7 +362,10 @@ pub(crate) fn resolve_kind<'a>(
 /// common case — legacy documents keep materialised columns, non-document rows
 /// have no `body`). This is what lets a bare `WHERE field`/`SELECT field` keep
 /// resolving once promoted columns stop being materialised.
-fn document_promoted_field(row: &crate::storage::unified::entity::RowData, name: &str) -> Option<Value> {
+fn document_promoted_field(
+    row: &crate::storage::unified::entity::RowData,
+    name: &str,
+) -> Option<Value> {
     match row.get_field("body") {
         Some(Value::Json(bytes)) => crate::document_body::read_promoted_field(bytes, name),
         _ => None,
