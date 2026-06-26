@@ -40,6 +40,7 @@ use reddb::server::RedDBServer;
 use reddb::wire::redwire::start_redwire_listener_on;
 use reddb::{GrpcServerOptions, RedDBGrpcServer};
 
+use reddb::client::RedDBClient;
 use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
 use reddb_client::{QueryResult, Value};
 
@@ -270,4 +271,52 @@ async fn cross_transport_select_envelope_matches() {
         "expected one row across all three transports, got {:?}",
         http_result.rows,
     );
+}
+
+#[tokio::test]
+async fn grpc_connector_document_update_reports_and_applies_affected_row() {
+    let (_db, runtime) = support::persistent_runtime("grpc-document-update-affected-row");
+    let grpc_port = pick_free_port();
+    let grpc_bind = format!("127.0.0.1:{grpc_port}");
+    let auth_store = Arc::new(AuthStore::new(AuthConfig::default()));
+    let grpc_server = RedDBGrpcServer::with_options(
+        runtime,
+        GrpcServerOptions {
+            bind_addr: grpc_bind,
+            tls: None,
+        },
+        auth_store,
+    );
+    tokio::spawn(async move {
+        let _ = grpc_server.serve().await;
+    });
+    await_tcp(grpc_port).await;
+
+    let mut client = RedDBClient::connect(&format!("127.0.0.1:{grpc_port}"), None)
+        .await
+        .expect("gRPC connect");
+    client
+        .query_reply("CREATE DOCUMENT grpc_docs")
+        .await
+        .expect("create document collection");
+    client
+        .query_reply(
+            r#"INSERT INTO grpc_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+        )
+        .await
+        .expect("insert document");
+
+    let updated = client
+        .query_reply("UPDATE grpc_docs DOCUMENTS SET score = 42 WHERE name = 'doc'")
+        .await
+        .expect("update document over gRPC connector");
+    assert_eq!(updated.affected_rows, 1);
+
+    let selected = client
+        .query_reply("SELECT score FROM grpc_docs WHERE name = 'doc'")
+        .await
+        .expect("select updated document");
+    let result: serde_json::Value =
+        serde_json::from_str(&selected.result_json).expect("select result_json");
+    assert_eq!(result["records"][0]["score"].as_i64(), Some(42));
 }
