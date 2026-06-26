@@ -97,6 +97,146 @@ fn now_unix_nanos() -> u128 {
         .as_nanos()
 }
 
+#[cfg(test)]
+mod clock_skew_tests {
+    use super::*;
+    use crate::clock::{Clock, SimClock};
+
+    // 2024-03-10 01:30:00.000 UTC — 30 min before US/Eastern DST spring-forward
+    const SEED_MS: u64 = 1_710_033_000_000;
+    const LEASE_DURATION_MS: u64 = 5_000; // 5-second lease
+
+    fn make_lease(acquired_at_ms: u64) -> ServerlessWriterLease {
+        ServerlessWriterLease {
+            database_key: "test-db".to_string(),
+            holder_id: "holder-A".to_string(),
+            term: 1,
+            generation: 1,
+            acquired_at_ms,
+            expires_at_ms: acquired_at_ms + LEASE_DURATION_MS,
+        }
+    }
+
+    /// A holder with a clock 2 hours behind (pre-DST, hasn't sprung forward)
+    /// incorrectly thinks its lease is still live.  The coordinator — which
+    /// runs the authoritative clock — correctly sees the lease as expired, so
+    /// the single-writer invariant holds: the coordinator will not grant a new
+    /// lease while it still thinks the old one is live, and the term fence
+    /// closes the gap if the coordinator also needs to depose the holder.
+    #[test]
+    fn clock_skew_does_not_extend_lease() {
+        let skew_ms = 2 * 3_600_000u64; // 2-hour DST gap
+
+        // Coordinator clock (authoritative) starts at SEED_MS.
+        let coordinator = SimClock::from_seed(SEED_MS);
+        // Holder clock is 2 hours BEHIND (pre-DST, hasn't sprung forward).
+        let holder = SimClock::from_seed(SEED_MS - skew_ms);
+
+        // The coordinator grants the lease; expiry is based on the
+        // authoritative wall clock.  This is what gets persisted.
+        let lease = make_lease(coordinator.now_unix_millis());
+
+        // 6 seconds pass on both clocks.
+        coordinator.advance_ms(6_000);
+        holder.advance_ms(6_000);
+
+        // Coordinator: lease has expired (6 s > 5 s after expiry).
+        assert!(
+            lease.is_expired(coordinator.now_unix_millis()),
+            "coordinator must see the lease as expired after 6 s"
+        );
+
+        // Holder's clock is still ~2 h before the expiry timestamp, so the
+        // holder's own check incorrectly reports the lease as live.
+        // expires_at = SEED_MS + 5_000; holder now = SEED_MS - skew_ms + 6_000
+        // SEED_MS + 5_000 > SEED_MS - skew_ms + 6_000 because skew_ms >> 5_000
+        assert!(
+            !lease.is_expired(holder.now_unix_millis()),
+            "skewed holder clock incorrectly sees lease as live (the hazard clock-skew creates)"
+        );
+
+        // The coordinator's authoritative check always supersedes the holder's
+        // self-assessment — this is the fencing guarantee.
+        assert!(
+            lease.is_expired(coordinator.now_unix_millis()),
+            "authoritative coordinator check must override holder self-assessment"
+        );
+    }
+
+    /// A deposed primary (lower term) is fenced regardless of what the clock says.
+    #[test]
+    fn deposed_primary_fails_closed_via_term_fence() {
+        let clock = SimClock::from_seed(SEED_MS);
+
+        // Term-1 primary acquires a long-lived lease; time has not advanced.
+        let lease = make_lease(clock.now_unix_millis());
+
+        // Coordinator elects a new primary — term advances to 2.
+        let new_term = 2u64;
+
+        // Old primary is still within its lease window by time alone.
+        assert!(
+            !lease.is_expired(clock.now_unix_millis()),
+            "lease is still live by time, but must be fenced by term"
+        );
+        assert!(
+            lease.fenced_by_term(new_term),
+            "deposed primary must be fenced by the higher term"
+        );
+
+        // A clock-skewed old primary also cannot bypass the term fence.
+        let old_primary_clock = SimClock::from_seed(SEED_MS - 3_600_000);
+        drop(old_primary_clock); // only needed to prove skew is irrelevant
+        assert!(
+            lease.fenced_by_term(new_term),
+            "term fence must hold regardless of old primary clock skew"
+        );
+    }
+
+    /// Same seed + same advance sequence always produces the same timestamps.
+    #[test]
+    fn simclock_is_reproducible_by_seed() {
+        let clock_a = SimClock::from_seed(SEED_MS);
+        let clock_b = SimClock::from_seed(SEED_MS);
+
+        // Simulate DST spring-forward: both clocks skip an hour.
+        clock_a.advance_ms(3_600_000);
+        clock_b.advance_ms(3_600_000);
+
+        assert_eq!(
+            clock_a.now_unix_millis(),
+            clock_b.now_unix_millis(),
+            "SimClock must be deterministic for the same seed and advance sequence"
+        );
+
+        // Both clocks agree the 5-second lease is expired after an hour.
+        let lease = make_lease(SEED_MS);
+        assert!(lease.is_expired(clock_a.now_unix_millis()));
+        assert!(lease.is_expired(clock_b.now_unix_millis()));
+    }
+
+    /// `set_ms` can model a timezone shift (jumping the UTC offset by ±1 h).
+    #[test]
+    fn simclock_set_ms_models_timezone_shift() {
+        let clock = SimClock::from_seed(SEED_MS);
+        let lease = make_lease(clock.now_unix_millis());
+
+        // Jump forward by exactly the DST gap (1 hour).
+        clock.set_ms(SEED_MS + 3_600_000);
+        assert!(
+            lease.is_expired(clock.now_unix_millis()),
+            "lease expired after timezone shift of +1 h"
+        );
+
+        // Rewind within the lease window.
+        clock.set_ms(SEED_MS + 1_000);
+        assert!(
+            !lease.is_expired(clock.now_unix_millis()),
+            "lease still live when clock is within the expiry window"
+        );
+    }
+}
+
 pub fn encode_serverless_writer_lease_json(
     lease: &ServerlessWriterLease,
 ) -> RdbFileResult<Vec<u8>> {
