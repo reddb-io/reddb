@@ -1597,6 +1597,45 @@ fn test_parse_fusion_strategies() {
     }
 }
 
+#[test]
+fn test_parse_fusion_strategy_identifier_forms() {
+    // The keyword tokens (RERANK/RRF/...) are covered above. These spellings
+    // arrive as bare identifiers and route through the ident arm of
+    // `parse_fusion_strategy`.
+    let filter_then = parse(
+        "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION FILTER_THEN_SEARCH LIMIT 10",
+    )
+    .unwrap();
+    assert!(matches!(
+        filter_then,
+        QueryExpr::Hybrid(hq) if matches!(hq.fusion, FusionStrategy::FilterThenSearch)
+    ));
+
+    let search_then = parse(
+        "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION SEARCH_THEN_FILTER LIMIT 10",
+    )
+    .unwrap();
+    assert!(matches!(
+        search_then,
+        QueryExpr::Hybrid(hq) if matches!(hq.fusion, FusionStrategy::SearchThenFilter)
+    ));
+
+    // Identifier-spelled RERANK with an explicit weight.
+    let rerank =
+        parse("HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION RERANK(0.25) LIMIT 10")
+            .unwrap();
+    assert!(matches!(
+        rerank,
+        QueryExpr::Hybrid(hq)
+            if matches!(hq.fusion, FusionStrategy::Rerank { weight } if (weight - 0.25).abs() < 0.01)
+    ));
+
+    // Unknown identifier strategy is rejected.
+    assert!(
+        parse("HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION NOPE LIMIT 10").is_err()
+    );
+}
+
 // ========================================================================
 // DML Tests: INSERT, UPDATE, DELETE
 // ========================================================================

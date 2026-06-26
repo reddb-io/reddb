@@ -29,3 +29,6 @@ mod rql_reddb_conformance;
 
 #[path = "grouped/surface_contracts/smoke_embedded.rs"]
 mod smoke_embedded;
+
+#[path = "grouped/surface_contracts/cross_transport_result_equivalence.rs"]
+mod cross_transport_result_equivalence;

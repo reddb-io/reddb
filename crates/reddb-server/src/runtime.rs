@@ -1234,6 +1234,11 @@ struct RuntimeInner {
     /// `/cluster/status` consumes; sampled on-demand from the status
     /// handler. See `occupancy_sampler` for the overhead/interval contract.
     occupancy_sampler: std::sync::Arc<occupancy_sampler::OccupancySampler>,
+    /// Issue #1245 — per-node load telemetry (active query gauge +
+    /// connect/disconnect churn counters). Three atomics; no per-client
+    /// labels; feeds `/metrics`, `/cluster/status`, and the red-ui load
+    /// panels (ADR 0060 §2 "node samples" data class).
+    node_load_telemetry: std::sync::Arc<node_load_telemetry::NodeLoadTelemetry>,
     /// Issue #742 — consumer presence (heartbeat / lease / lifecycle
     /// state per (queue, group, consumer)). Process-local in this
     /// slice; durability across restart lands in the follow-up that
@@ -1397,6 +1402,7 @@ pub mod locking;
 pub(crate) mod materialization_limit;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
+pub(crate) mod node_load_telemetry;
 pub(crate) mod occupancy_sampler;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
