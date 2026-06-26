@@ -2075,8 +2075,7 @@ impl RedDBRuntime {
             }
         } else {
             // Non-document collection: every assignment is a regular row column.
-            let mut all_assignments: Vec<(String, Value)> =
-                static_field_assignments.iter().cloned().collect();
+            let mut all_assignments: Vec<(String, Value)> = static_field_assignments.to_vec();
             all_assignments.extend(dynamic_field_assignments);
             apply_row_field_assignments_raw(row, all_assignments);
         }
