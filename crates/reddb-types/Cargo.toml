@@ -20,6 +20,14 @@ zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 proptest = "1"
+# Criterion harness for the array display/plain-text formatting allocation
+# benchmark (#1342). Pinned to the workspace-resolved 0.8 line already used by
+# reddb-io-server's benches, so no new lockfile entries are introduced.
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "array_format_bench"
+harness = false
 
 [lints]
 workspace = true
