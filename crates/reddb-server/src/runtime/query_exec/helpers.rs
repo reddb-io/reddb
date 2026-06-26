@@ -345,6 +345,21 @@ pub(crate) fn resolve_entity_field<'a>(
         _ => {}
     }
 
+    if column == "id" {
+        if let Some(row) = entity.data.as_row() {
+            if row.named.as_ref().is_some_and(|named| {
+                matches!(
+                    named.get("body"),
+                    Some(Value::Json(_)) | Some(Value::Blob(_))
+                )
+            }) {
+                return Some(Cow::Owned(Value::UnsignedInteger(
+                    entity.logical_id().raw(),
+                )));
+            }
+        }
+    }
+
     // User fields — row data (named HashMap or columnar schema)
     if let Some(row) = entity.data.as_row() {
         if let Some(value) = row.get_field(column) {
