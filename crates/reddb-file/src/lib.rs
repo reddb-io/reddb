@@ -18,12 +18,12 @@
 
 pub mod ai_model_cache;
 pub mod audit_log;
-pub mod clock;
 pub mod backup_manifest;
 pub mod backup_temp;
 pub mod blob_cache;
 pub mod bloom_segment;
 pub mod btree_value_layout;
+pub mod clock;
 pub mod column_block;
 pub mod control_store;
 pub mod embedded;
@@ -59,7 +59,6 @@ pub mod wal_header;
 pub mod wal_record;
 pub mod zone_map;
 
-pub use clock::{Clock, SimClock, SystemClock};
 pub use ai_model_cache::{
     ai_model_cache_manifest_path, ai_model_cache_manifest_temp_path, ai_model_cache_purge_dir,
     ai_model_cache_purge_root, ai_model_cache_root, ai_model_cache_staging_dir,
@@ -108,6 +107,7 @@ pub use btree_value_layout::{
     encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_MAX_SIZE,
     BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
+pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
     decode_column_block_granule_index_blob, encode_column_block_frame,
