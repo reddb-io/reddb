@@ -697,6 +697,34 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec!["rql"],
             ),
         },
+        // Type knowledge tool (ADR 0061): answer a type/cast lookup from the
+        // generated reddb-io-types catalog.
+        ToolDef {
+            name: "reddb_type_of",
+            description: "Look up a RedDB value type from the generated `reddb-io-types` catalog. Given either a type name (`type`, e.g. \"INTEGER\" or the SQL alias \"int\") or a literal JSON value (`value`, e.g. 42 or true), returns the canonical type, its coercion category, the casts available out of it, and the operator overloads that accept it. Provide exactly one of `type` or `value`; `type` wins if both are given.\n\nThe answer is read live from the engine's function/operator/cast catalogs — it never drifts from the type system.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("type", string_field("Type name to look up: a canonical RedDB type (e.g. \"INTEGER\", \"TEXT\") or a common SQL alias (e.g. \"int\", \"string\"), case-insensitive.")),
+                    ("value", {
+                        let mut f = Map::new();
+                        f.insert("description".to_string(), JsonValue::String("A literal JSON value (null, boolean, number, string, array, or object) whose canonical type to look up. Used only when `type` is omitted.".to_string()));
+                        f.insert(
+                            "anyOf".to_string(),
+                            JsonValue::Array(vec![
+                                type_field("null"),
+                                type_field("boolean"),
+                                type_field("number"),
+                                type_field("string"),
+                                type_field("array"),
+                                type_field("object"),
+                            ]),
+                        );
+                        JsonValue::Object(f)
+                    }),
+                ],
+                vec![],
+            ),
+        },
     ]
 }
 
@@ -743,6 +771,8 @@ mod tests {
         // RQL knowledge tools (ADR 0061).
         assert!(names.contains(&"reddb_rql_validate"));
         assert!(names.contains(&"reddb_rql_explain"));
+        // Type knowledge tool (ADR 0061).
+        assert!(names.contains(&"reddb_type_of"));
     }
 
     #[test]
@@ -1027,5 +1057,26 @@ mod tests {
             .unwrap();
         let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"name"));
+    }
+
+    #[test]
+    fn test_type_of_tool_schema() {
+        let tools = all_tools();
+        let tool = tools.iter().find(|t| t.name == "reddb_type_of").unwrap();
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        // Accepts either a type name or a literal value; neither is required so
+        // the handler can validate "exactly one of" and surface a clear error.
+        assert!(props.contains_key("type"));
+        assert!(props.contains_key("value"));
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(required.is_empty());
     }
 }
