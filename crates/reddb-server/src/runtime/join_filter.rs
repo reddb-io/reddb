@@ -1584,7 +1584,10 @@ pub(crate) fn resolve_runtime_document_path_from_value(
 
     match value {
         Value::Json(bytes) | Value::Blob(bytes) => {
-            let json = crate::json::from_slice::<JsonValue>(bytes).ok()?;
+            // A document body may be the native binary container (PRD-1398);
+            // decode it to JSON so dotted `body.field` paths resolve.
+            let json = crate::document_body::decode_container_to_json(bytes)
+                .or_else(|| crate::json::from_slice::<JsonValue>(bytes).ok())?;
             resolve_runtime_document_json_path(&json, path)
         }
         // Phase 2 dotted tenancy: users commonly declare JSON columns
