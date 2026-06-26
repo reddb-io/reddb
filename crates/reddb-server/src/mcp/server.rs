@@ -312,6 +312,7 @@ impl McpServer {
             "reddb_graph_clustering" => self.tool_graph_clustering(args),
             "reddb_create_collection" => self.tool_create_collection(args),
             "reddb_drop_collection" => self.tool_drop_collection(args),
+            "reddb_type_of" => self.tool_type_of(args),
             "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
             "reddb_auth_create_user" => self.tool_auth_create_user(args),
             "reddb_auth_login" => self.tool_auth_login(args),
@@ -1298,6 +1299,81 @@ impl McpServer {
         resp.insert("dropped".into(), JsonValue::String(name.to_string()));
         json_to_string(&JsonValue::Object(resp)).map_err(|e| format!("serialization error: {}", e))
     }
+
+    /// `reddb_type_of` — resolve a value or type name to its canonical type and
+    /// the casts/operators the engine's catalogs make available (ADR 0061 §4).
+    ///
+    /// The answer is produced entirely by `reddb_types::knowledge`, which reads
+    /// the cast/operator authorities live, so the tool never reimplements the
+    /// type system. Accepts exactly one of `value` (type inferred) or `type`
+    /// (named type resolved).
+    fn tool_type_of(&self, args: &JsonValue) -> Result<String, String> {
+        use reddb_types::knowledge;
+
+        let has_value = matches!(args.get("value"), Some(v) if !matches!(v, JsonValue::Null));
+        let type_name = args.get("type").and_then(|v| v.as_str());
+
+        let canonical = match (has_value, type_name) {
+            (true, Some(_)) => {
+                return Err("provide either 'value' or 'type', not both".to_string());
+            }
+            (false, None) => {
+                return Err("missing input: provide 'value' or 'type'".to_string());
+            }
+            (true, None) => {
+                let value = args.get("value").expect("value present");
+                knowledge::canonical_type_of_json(value).ok_or_else(|| {
+                    "JSON null has no value type; provide a non-null 'value' or a 'type' name"
+                        .to_string()
+                })?
+            }
+            (false, Some(name)) => knowledge::resolve_type_name(name)
+                .ok_or_else(|| format!("unknown type name: {name:?}"))?,
+        };
+
+        let answer = knowledge::type_of(canonical);
+
+        let mut obj = Map::new();
+        obj.insert(
+            "canonical_type".to_string(),
+            JsonValue::String(answer.canonical.to_string()),
+        );
+        obj.insert(
+            "category".to_string(),
+            JsonValue::String(knowledge::category_label(answer.category).to_string()),
+        );
+        obj.insert(
+            "implicit_casts".to_string(),
+            JsonValue::Array(
+                answer
+                    .implicit_cast_targets
+                    .iter()
+                    .map(|ty| JsonValue::String(ty.to_string()))
+                    .collect(),
+            ),
+        );
+        obj.insert(
+            "explicit_casts".to_string(),
+            JsonValue::Array(
+                answer
+                    .explicit_cast_targets
+                    .iter()
+                    .map(|ty| JsonValue::String(ty.to_string()))
+                    .collect(),
+            ),
+        );
+        obj.insert(
+            "operators".to_string(),
+            JsonValue::Array(
+                answer
+                    .operators
+                    .iter()
+                    .map(|op| JsonValue::String(op.to_string()))
+                    .collect(),
+            ),
+        );
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1660,6 +1736,135 @@ mod tests {
             "value type missing: {text:.120}"
         );
         assert!(text.contains("Multi-model map"), "multi-model map missing");
+    }
+
+    /// Parse the text payload out of a successful `tools/call` JSON-RPC reply.
+    fn tools_call_text(srv: &McpServer, params_json: &str) -> JsonValue {
+        let request =
+            format!(r#"{{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{params_json}}}"#);
+        let response = srv.handle_tools_call(
+            Some(&JsonValue::Number(42.0)),
+            parse_json(&request).get("params"),
+        );
+        let parsed = parse_json(&response);
+        let result = parsed.get("result").expect("result");
+        assert!(
+            result.get("isError").and_then(JsonValue::as_bool) != Some(true),
+            "unexpected tool error: {response}"
+        );
+        let text = result
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("content text");
+        parse_json(text)
+    }
+
+    #[test]
+    fn tools_list_includes_type_of() {
+        let srv = make_server();
+        let response = srv.handle_tools_list(Some(&JsonValue::Number(1.0)));
+        let parsed = parse_json(&response);
+        let tools = parsed
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(JsonValue::as_array)
+            .expect("tools array");
+        assert!(
+            tools
+                .iter()
+                .any(|t| t.get("name").and_then(JsonValue::as_str) == Some("reddb_type_of")),
+            "reddb_type_of must be advertised"
+        );
+    }
+
+    #[test]
+    fn tools_call_type_of_by_type_name_answers_from_catalog() {
+        let srv = make_server();
+        let answer = tools_call_text(
+            &srv,
+            r#"{"name":"reddb_type_of","arguments":{"type":"int"}}"#,
+        );
+        assert_eq!(
+            answer.get("canonical_type").and_then(JsonValue::as_str),
+            Some("INTEGER")
+        );
+        assert_eq!(
+            answer.get("category").and_then(JsonValue::as_str),
+            Some("Numeric")
+        );
+        let casts: Vec<&str> = answer
+            .get("implicit_casts")
+            .and_then(JsonValue::as_array)
+            .expect("implicit_casts")
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .collect();
+        assert!(casts.contains(&"FLOAT"), "implicit casts: {casts:?}");
+        let ops: Vec<&str> = answer
+            .get("operators")
+            .and_then(JsonValue::as_array)
+            .expect("operators")
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .collect();
+        assert!(ops.contains(&"+"), "operators: {ops:?}");
+    }
+
+    #[test]
+    fn tools_call_type_of_infers_value_type() {
+        let srv = make_server();
+        let answer = tools_call_text(
+            &srv,
+            r#"{"name":"reddb_type_of","arguments":{"value":"hello"}}"#,
+        );
+        assert_eq!(
+            answer.get("canonical_type").and_then(JsonValue::as_str),
+            Some("TEXT")
+        );
+    }
+
+    #[test]
+    fn tools_call_type_of_rejects_unknown_and_missing_input() {
+        let srv = make_server();
+        for (params, needle) in [
+            (
+                r#"{"name":"reddb_type_of","arguments":{"type":"not_a_type"}}"#,
+                "unknown type name",
+            ),
+            (
+                r#"{"name":"reddb_type_of","arguments":{}}"#,
+                "missing input",
+            ),
+            (
+                r#"{"name":"reddb_type_of","arguments":{"type":"int","value":1}}"#,
+                "not both",
+            ),
+        ] {
+            let request =
+                format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{params}}}"#);
+            let response = srv.handle_tools_call(
+                Some(&JsonValue::Number(1.0)),
+                parse_json(&request).get("params"),
+            );
+            let parsed = parse_json(&response);
+            let result = parsed.get("result").expect("result");
+            assert_eq!(
+                result.get("isError").and_then(JsonValue::as_bool),
+                Some(true),
+                "expected error for {params}"
+            );
+            let text = result
+                .get("content")
+                .and_then(JsonValue::as_array)
+                .and_then(|content| content.first())
+                .and_then(|item| item.get("text"))
+                .and_then(JsonValue::as_str)
+                .expect("error text");
+            assert!(text.contains(needle), "want {needle:?} in {text:?}");
+        }
     }
 
     #[test]
