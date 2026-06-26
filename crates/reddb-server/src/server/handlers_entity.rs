@@ -466,6 +466,40 @@ impl RedDBServer {
         }
     }
 
+    pub(crate) fn handle_replace_document(
+        &self,
+        collection: &str,
+        id: u64,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let body_value = payload
+            .get("body")
+            .cloned()
+            .unwrap_or_else(|| payload.clone());
+        let mut replacement = Map::new();
+        replacement.insert("body".to_string(), body_value);
+
+        match self.entity_use_cases().patch(PatchEntityInput {
+            collection: collection.to_string(),
+            id: EntityId::new(id),
+            payload: JsonValue::Object(replacement),
+            operations: Vec::new(),
+        }) {
+            Ok(output) => json_response(
+                200,
+                crate::presentation::entity_json::created_entity_output_json(&output),
+            ),
+            Err(err @ RedDBError::NotFound(_)) => {
+                json_error_code(404, "NOT_FOUND", err.to_string())
+            }
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
     /// `PATCH /collections/:name/kvs/:key` — issue #751. Apply structured
     /// JSON Patch operations against a KV value when the stored value is
     /// JSON-compatible (object/array, or a JSON-encoded value). Non-JSON
