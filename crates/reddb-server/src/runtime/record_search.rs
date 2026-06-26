@@ -478,6 +478,8 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
     let collection = entity.kind.collection().to_string();
     let tenant = runtime_row_tenant_value(&row);
     let kind = public_row_kind(&row).to_string();
+    // Capture the document body before `named` is consumed below.
+    let doc_body = document_row_body_bytes(&row);
     if let Some(named) = row.named {
         let mut record = UnifiedRecord::with_capacity(6 + named.len());
         // `set_owned` consumes the already-heap-allocated String key
@@ -492,6 +494,8 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         record.set_arc(sys_key_tenant(), tenant);
         record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
+        // Lean SELECT * over a single-source document — expand promoted columns.
+        fill_document_promoted_columns(&mut record, None, doc_body.as_deref());
         Some(record)
     } else if let Some(ref schema) = row.schema {
         let mut record = UnifiedRecord::with_capacity(6 + schema.len());
@@ -533,33 +537,47 @@ pub(super) fn runtime_table_record_lean_in_collection(
 }
 
 #[inline(never)]
+/// Clone a row's stored binary document `body` bytes, if any.
+///
+/// Sourced from the row rather than the record because a projection that does
+/// not SELECT `body` would never place it on the record — yet the promoted
+/// fields still have to be read out of it.
+fn document_row_body_bytes(row: &crate::storage::unified::entity::RowData) -> Option<Vec<u8>> {
+    match row.get_field("body") {
+        Some(Value::Json(bytes)) if crate::document_body::is_binary_container(bytes) => {
+            Some(bytes.clone())
+        }
+        _ => None,
+    }
+}
+
 /// Fill a single-source document's promoted columns into `record` by reading
-/// them from the binary `body` already placed on the record.
+/// them from the binary `body` (`body` = the row's container bytes).
 ///
 /// `columns = None` expands every top-level body field (SELECT *); `Some(cols)`
-/// offset-reads only the requested fields. A no-op unless the record's `body`
-/// is a binary container, so it never touches legacy plain-JSON documents (which
-/// still carry materialised promoted columns) or non-document rows.
-pub(super) fn fill_document_promoted_columns(record: &mut UnifiedRecord, columns: Option<&[String]>) {
-    // Decode into owned `(name, value)` pairs while borrowing the body, so the
-    // immutable borrow is released before we mutate the record below.
-    let promoted: Vec<(String, Value)> = match record.get("body") {
-        Some(Value::Json(bytes)) => match columns {
-            None => match crate::document_body::promoted_fields(bytes) {
-                Some(fields) => fields,
-                None => return,
-            },
-            // `read_promoted_field` self-gates on the container magic, so this
-            // collects nothing for legacy plain-JSON / non-document bodies.
-            Some(cols) => cols
-                .iter()
-                .filter_map(|col| {
-                    crate::document_body::read_promoted_field(bytes, col)
-                        .map(|value| (col.clone(), value))
-                })
-                .collect(),
+/// offset-reads only the requested fields. A no-op when `body` is `None` (legacy
+/// plain-JSON documents still carry materialised promoted columns, and
+/// non-document rows have no container body), so existing behaviour is untouched.
+pub(super) fn fill_document_promoted_columns(
+    record: &mut UnifiedRecord,
+    columns: Option<&[String]>,
+    body: Option<&[u8]>,
+) {
+    let Some(bytes) = body else {
+        return;
+    };
+    let promoted: Vec<(String, Value)> = match columns {
+        None => match crate::document_body::promoted_fields(bytes) {
+            Some(fields) => fields,
+            None => return,
         },
-        _ => return,
+        Some(cols) => cols
+            .iter()
+            .filter_map(|col| {
+                crate::document_body::read_promoted_field(bytes, col)
+                    .map(|value| (col.clone(), value))
+            })
+            .collect(),
     };
     for (name, value) in promoted {
         record.set(&name, value);
@@ -574,6 +592,8 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
     let logical_id = entity.logical_id().raw();
     match entity.data {
         EntityData::Row(row) => {
+            // Capture the document body before `named` is consumed below.
+            let doc_body = document_row_body_bytes(&row);
             // Pre-allocate: ~9 system fields + user fields
             let user_field_count = row
                 .named
@@ -614,7 +634,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
 
             // SELECT * over a single-source document: expand the promoted
             // columns back out of the body (no-op for legacy/non-document rows).
-            fill_document_promoted_columns(&mut record, None);
+            fill_document_promoted_columns(&mut record, None, doc_body.as_deref());
 
             Some(record)
         }
@@ -698,7 +718,7 @@ pub(super) fn runtime_table_record_from_entity_ref_with_schema(
             set_public_row_envelope(&mut record, entity, row);
 
             // SELECT * over a single-source document — expand promoted columns.
-            fill_document_promoted_columns(&mut record, None);
+            fill_document_promoted_columns(&mut record, None, document_row_body_bytes(row).as_deref());
 
             Some(record)
         }
@@ -763,6 +783,8 @@ pub(super) fn runtime_table_record_from_entity_projected(
 
     match entity.data {
         EntityData::Row(row) => {
+            // Capture the document body before `named` is consumed below.
+            let doc_body = document_row_body_bytes(&row);
             let mut record = UnifiedRecord::with_capacity(6 + columns.len());
             let collection = entity.kind.collection().to_string();
             let tenant = runtime_row_tenant_value(&row);
@@ -811,7 +833,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
 
             // Single-source document: offset-read just the projected promoted
             // fields from the body (no-op for legacy/non-document rows).
-            fill_document_promoted_columns(&mut record, Some(columns));
+            fill_document_promoted_columns(&mut record, Some(columns), doc_body.as_deref());
 
             Some(record)
         }
@@ -921,7 +943,7 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
     }
     set_public_row_envelope(&mut record, entity, row);
     // Single-source document: offset-read the projected promoted fields.
-    fill_document_promoted_columns(&mut record, Some(columns));
+    fill_document_promoted_columns(&mut record, Some(columns), document_row_body_bytes(row).as_deref());
     Some(record)
 }
 
