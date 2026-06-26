@@ -1637,7 +1637,12 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
 fn value_to_json(value: &Value) -> Option<crate::serde_json::Value> {
     match value {
         Value::Null => Some(crate::serde_json::Value::Null),
+        // A document body may be the native binary container (PRD-1398); decode
+        // it to JSON so json builtins see the same shape as a plain JSON body.
         Value::Json(bytes) => {
+            if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
+                return Some(body);
+            }
             let text = String::from_utf8_lossy(bytes);
             crate::serde_json::from_str(&text).ok()
         }
@@ -1690,6 +1695,10 @@ fn value_as_json(value: &Value) -> crate::serde_json::Value {
         Value::Float(n) => crate::serde_json::Value::Number(*n),
         Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
         Value::Json(bytes) => {
+            // Decode the native binary container (PRD-1398) if present.
+            if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
+                return body;
+            }
             let text = String::from_utf8_lossy(bytes);
             crate::serde_json::from_str(&text)
                 .unwrap_or_else(|_| crate::serde_json::Value::String(text.into_owned()))

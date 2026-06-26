@@ -28,6 +28,15 @@ fn text_field(record: &UnifiedRecord, field: &str) -> String {
     }
 }
 
+fn json_field(record: &UnifiedRecord, field: &str) -> reddb::json::Value {
+    match record.get(field) {
+        Some(Value::Json(value)) => {
+            reddb::json::from_slice(value).expect("json field should decode")
+        }
+        other => panic!("expected {field} json field, got {other:?} in {record:?}"),
+    }
+}
+
 fn uint_field(record: &UnifiedRecord, field: &str) -> u64 {
     match record.get(field) {
         Some(Value::UnsignedInteger(value)) => *value,
@@ -83,6 +92,28 @@ fn explicit_rows_documents_and_kv_targets_update_compatible_collections() {
     assert_eq!(kv.affected_rows, 1);
     let selected_kv = exec(&rt, "SELECT value FROM settings WHERE key = 'feature'");
     assert_eq!(text_field(only_record(&selected_kv), "value"), "on");
+}
+
+#[test]
+fn document_update_keeps_body_and_promoted_columns_in_sync() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT docs_sync");
+    exec(
+        &rt,
+        r#"INSERT INTO docs_sync DOCUMENT (body) VALUES ('{"name":"orig","score":1}')"#,
+    );
+
+    let updated = exec(
+        &rt,
+        "UPDATE docs_sync DOCUMENTS SET score = 99 WHERE name = 'orig'",
+    );
+
+    assert_eq!(updated.affected_rows, 1);
+    let selected = exec(&rt, "SELECT body, score FROM docs_sync WHERE name = 'orig'");
+    let record = only_record(&selected);
+    let body = json_field(record, "body");
+    assert_eq!(body["score"].as_i64(), Some(99));
+    assert_eq!(uint_field(record, "score"), 99);
 }
 
 #[test]

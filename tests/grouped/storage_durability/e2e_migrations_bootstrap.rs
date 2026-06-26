@@ -184,3 +184,106 @@ fn apply_migration_all_applies_pending_migrations_in_dependency_order() {
         .expect("audit visible after independent migration apply");
     assert_eq!(audit.result.records.len(), 1);
 }
+
+#[test]
+fn explain_migration_all_lists_pending_migrations_in_dependency_order() {
+    let rt = rt();
+
+    rt.execute_query(
+        "CREATE MIGRATION a_root AS \
+         CREATE TABLE explain_root (id BIGINT)",
+    )
+    .expect("a_root migration");
+    rt.execute_query(
+        "CREATE MIGRATION b_child \
+         DEPENDS ON a_root AS \
+         INSERT INTO explain_root (id) VALUES (1)",
+    )
+    .expect("b_child migration");
+    rt.execute_query(
+        "CREATE MIGRATION c_independent AS \
+         CREATE TABLE explain_independent (id BIGINT)",
+    )
+    .expect("c_independent migration");
+
+    let explained = rt
+        .execute_query("EXPLAIN MIGRATION *")
+        .expect("explain all migrations");
+    let names: Vec<&str> = explained
+        .result
+        .records
+        .iter()
+        .map(|record| text(record.get("migration")))
+        .collect();
+
+    assert_eq!(names, vec!["a_root", "c_independent", "b_child"]);
+}
+
+#[test]
+fn rollback_migration_refuses_when_applied_dependents_exist() {
+    let rt = rt();
+
+    rt.execute_query(
+        "CREATE MIGRATION create_parent AS \
+         CREATE TABLE rollback_parent (id BIGINT)",
+    )
+    .expect("create_parent migration");
+    rt.execute_query(
+        "CREATE MIGRATION seed_child \
+         DEPENDS ON create_parent AS \
+         INSERT INTO rollback_parent (id) VALUES (1)",
+    )
+    .expect("seed_child migration");
+    rt.execute_query("APPLY MIGRATION *")
+        .expect("apply migrations");
+
+    let err = rt
+        .execute_query("ROLLBACK MIGRATION create_parent")
+        .expect_err("rollback must reject applied dependents");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot rollback") && msg.contains("seed_child"),
+        "rollback error should name the applied dependent, got: {msg}"
+    );
+
+    let migrations = rt
+        .execute_query("SELECT name, status FROM red_migrations")
+        .expect("list migrations");
+    for record in &migrations.result.records {
+        assert_eq!(text(record.get("status")), "applied");
+    }
+}
+
+#[test]
+fn rollback_migration_keeps_status_when_vcs_revert_fails() {
+    let rt = rt();
+
+    rt.execute_query(
+        "CREATE MIGRATION revert_target AS \
+         CREATE TABLE rollback_vcs_failure (id BIGINT)",
+    )
+    .expect("revert_target migration");
+    rt.execute_query("APPLY MIGRATION revert_target")
+        .expect("apply migration");
+    rt.execute_query(
+        "UPDATE red_migrations \
+         SET vcs_commit_hash = 'not-a-real-commit' \
+         WHERE name = 'revert_target'",
+    )
+    .expect("replace commit hash");
+
+    let err = rt
+        .execute_query("ROLLBACK MIGRATION revert_target")
+        .expect_err("rollback must propagate VCS revert failure");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("VCS revert failed"),
+        "rollback error should expose VCS revert failure, got: {msg}"
+    );
+
+    let migrations = rt
+        .execute_query("SELECT name, status FROM red_migrations WHERE name = 'revert_target'")
+        .expect("list migration");
+    assert_eq!(migrations.result.records.len(), 1);
+    assert_eq!(text(migrations.result.records[0].get("status")), "applied");
+}

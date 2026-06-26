@@ -1940,12 +1940,13 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
 /// ASCII case-insensitive substring match. False positives (the
 /// token appears in a quoted string) only skip caching, which is
 /// the conservative direction.
-/// If `sql` starts with `EXPLAIN` followed by a non-`ALTER` token,
+/// If `sql` starts with `EXPLAIN` followed by a generic explainable statement,
 /// return the trimmed inner statement; otherwise `None`.
 ///
 /// `EXPLAIN ALTER FOR CREATE TABLE ...` is a separate schema-diff
 /// command handled inside the normal SQL parser, so we leave it
-/// alone here.
+/// alone here. `EXPLAIN ASK` and `EXPLAIN MIGRATION` are also executable
+/// read paths handled by the parser/runtime directly.
 fn strip_explain_prefix(sql: &str) -> Option<&str> {
     let trimmed = sql.trim_start();
     let (head, rest) = trimmed.split_at(
@@ -1960,12 +1961,12 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
     if rest.is_empty() {
         return None;
     }
-    // Peek the next token — if ALTER or ASK, defer to the normal parser.
-    // `EXPLAIN ASK` is an executable read path: it runs retrieval and
-    // provider selection, then short-circuits before the LLM call.
+    // Peek the next token; command-specific EXPLAIN forms defer to
+    // the normal parser.
     let next_head_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     if rest[..next_head_end].eq_ignore_ascii_case("ALTER")
         || rest[..next_head_end].eq_ignore_ascii_case("ASK")
+        || rest[..next_head_end].eq_ignore_ascii_case("MIGRATION")
     {
         return None;
     }
@@ -2566,6 +2567,12 @@ impl RedDBRuntime {
                 ),
                 query_latency_telemetry: Arc::new(
                     crate::runtime::query_latency_telemetry::QueryLatencyTelemetry::default(),
+                ),
+                occupancy_sampler: Arc::new(
+                    crate::runtime::occupancy_sampler::OccupancySampler::new(),
+                ),
+                node_load_telemetry: Arc::new(
+                    crate::runtime::node_load_telemetry::NodeLoadTelemetry::default(),
                 ),
                 queue_presence: Arc::new(
                     crate::storage::queue::presence::ConsumerPresenceRegistry::new(),
@@ -3366,6 +3373,15 @@ impl RedDBRuntime {
         result
     }
 
+    /// Whether DOCUMENT writes should store the body as the native binary
+    /// container (PRD-1398, ADR-0063). Off by default; flip via
+    /// `SET CONFIG storage.binary_document_body = true` or the
+    /// `REDDB_STORAGE_BINARY_DOCUMENT_BODY` env var. Reads decode the container
+    /// transparently regardless of this flag.
+    pub(crate) fn binary_document_body_enabled(&self) -> bool {
+        self.config_bool("storage.binary_document_body", false)
+    }
+
     pub(crate) fn config_u64(&self, key: &str, default: u64) -> u64 {
         if let Some(raw) = self.inner.env_config_overrides.get(key) {
             if let Some(crate::storage::schema::Value::UnsignedInteger(n)) =
@@ -3726,6 +3742,21 @@ impl RedDBRuntime {
         self.inner.query_latency_telemetry.rollup()
     }
 
+    /// Issue #1244 — take a fresh node CPU/RAM occupancy reading for
+    /// `/cluster/status`. CPU utilisation is measured over the interval
+    /// since the previous call (the first call only establishes a baseline
+    /// and reports `NotSampled`). See `occupancy_sampler` for overhead.
+    pub fn sample_occupancy(&self) -> crate::runtime::occupancy_sampler::OccupancySample {
+        self.inner.occupancy_sampler.sample()
+    }
+
+    /// Issue #1245 — point-in-time node load snapshot (active queries +
+    /// connect/disconnect churn). Feeds `/metrics`, `/cluster/status`, and
+    /// the red-ui load panels.
+    pub fn node_load_snapshot(&self) -> crate::runtime::node_load_telemetry::NodeLoadSnapshot {
+        self.inner.node_load_telemetry.snapshot()
+    }
+
     /// Issue #742 — consumer presence registry. Heartbeats land here
     /// from `QUEUE READ` (and, in a follow-up slice, an explicit
     /// `QUEUE HEARTBEAT` command); Red UI and `red.queue_consumers`
@@ -4039,6 +4070,10 @@ impl RedDBRuntime {
         pool.total_checkouts += 1;
         drop(pool);
 
+        // Issue #1245 — record the connection acquisition after releasing
+        // the pool lock so the lock hold time is unchanged.
+        self.inner.node_load_telemetry.record_connect();
+
         Ok(RuntimeConnection {
             id,
             inner: Arc::clone(&self.inner),
@@ -4265,6 +4300,7 @@ impl RedDBRuntime {
     /// cost on below-threshold paths is one relaxed atomic load.
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
+        self.inner.node_load_telemetry.query_start();
         let result = self.execute_query_inner(query);
         self.finish_query_lifecycle(query, started, result)
     }
@@ -4285,6 +4321,7 @@ impl RedDBRuntime {
             return self.execute_query(query);
         }
         let started = std::time::Instant::now();
+        self.inner.node_load_telemetry.query_start();
         let result = self.execute_query_with_params_inner(query, params);
         self.finish_query_lifecycle(query, started, result)
     }
@@ -4339,6 +4376,11 @@ impl RedDBRuntime {
         self.inner
             .query_latency_telemetry
             .observe(kind, started.elapsed().as_secs_f64());
+
+        // Issue #1245 — decrement the active-query gauge. One relaxed
+        // atomic sub; the matching increment happened at execute_query /
+        // execute_query_with_params entry.
+        self.inner.node_load_telemetry.query_finish();
 
         if let Ok(ref mut query_result) = result {
             if matches!(query_result.statement_type, "insert" | "update" | "delete") {

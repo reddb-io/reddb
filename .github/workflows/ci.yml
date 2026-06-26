@@ -145,6 +145,8 @@ jobs:
         run: node scripts/verify-contract-matrix.mjs
       - name: Contract-matrix tooling contract test
         run: node --test scripts/contract_matrix_contract.test.mjs
+      - name: Docs-shim ⇔ required-checks ⇔ ci.yml lock-step (#1307)
+        run: node --test scripts/ci-docs-shim-contract.test.mjs
 
   docs-matrix:
     # Issue #568 — public docs (README, docs/query/*.md, driver READMEs) are

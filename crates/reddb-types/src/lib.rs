@@ -43,6 +43,7 @@ pub mod duration;
 pub mod function_catalog;
 pub mod index_hint;
 pub mod json;
+pub mod key_dictionary;
 pub mod knowledge;
 pub mod operator;
 pub mod operator_catalog;
