@@ -3743,6 +3743,7 @@ dependencies = [
  "cc",
  "crc32fast",
  "reddb-io-file",
+ "reddb-io-types",
  "tempfile",
 ]
 
