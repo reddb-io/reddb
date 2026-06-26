@@ -21,6 +21,9 @@ mod e2e_issue_540_documents_basics;
 #[path = "docs_kv_queue/e2e_issue_1402_document_binary_body.rs"]
 mod e2e_issue_1402_document_binary_body;
 
+#[path = "docs_kv_queue/e2e_issue_1403_document_single_source.rs"]
+mod e2e_issue_1403_document_single_source;
+
 #[path = "docs_kv_queue/e2e_issue_541_kv_namespaced_keys.rs"]
 mod e2e_issue_541_kv_namespaced_keys;
 
@@ -50,3 +53,8 @@ mod e2e_red_queue_pending;
 
 #[path = "docs_kv_queue/integration_queue_timeseries.rs"]
 mod integration_queue_timeseries;
+
+
+
+
+
