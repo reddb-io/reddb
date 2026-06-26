@@ -11,6 +11,10 @@
 //!   DST slices reuse: WAL recovers as the longest valid prefix, monotonic LSN,
 //!   no torn/partial committed record visible after recovery, intact dual
 //!   superblocks, and CRC/checksum integrity.
+//! * [`value_equivalence`] — pillar B (#1356): a seed-driven workload that
+//!   persists **typed values spanning every supported [`reddb_types::Value`]
+//!   variant** and asserts the recovered committed values equal exactly the
+//!   pre-crash committed state, layered on top of the structural `oracle`.
 //!
 //! The shim makes the real libc durability path (`write`/`pwrite`/`fsync`/
 //! `fdatasync`/`rename`) fail with `EIO` and short writes, plus a seed-driven
@@ -24,8 +28,13 @@
 pub mod oracle;
 pub mod prng;
 pub mod superblock;
+pub mod value_equivalence;
 pub mod wal_workload;
 
 pub use oracle::{recover_and_check, RecoveryError, RecoveryReport};
 pub use prng::SplitMix64;
+pub use value_equivalence::{
+    canonical_value_corpus, recover_committed_values, run_typed_workload, CommittedTx,
+    EquivalenceError, RecoveredTx, TypedModel,
+};
 pub use wal_workload::{run_wal_workload, WorkloadOutcome};
