@@ -548,9 +548,11 @@ impl LogicalChangeApplier {
         // `return Err` paths skip the counter, correctly counting only
         // successful applies).
         let payload_bytes: u64 = match record.operation {
-            ChangeOperation::Insert | ChangeOperation::Update => {
-                record.entity_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0)
-            }
+            ChangeOperation::Insert | ChangeOperation::Update => record
+                .entity_bytes
+                .as_ref()
+                .map(|b| b.len() as u64)
+                .unwrap_or(0),
             ChangeOperation::Refresh => record
                 .refresh_records
                 .as_ref()

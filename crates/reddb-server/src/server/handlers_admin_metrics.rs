@@ -618,19 +618,13 @@ impl RedDBServer {
             body,
             "# HELP reddb_replication_apply_bytes_total Entity-payload bytes applied from the primary WAL since process start (insert/update payload; refresh payload; deletes contribute 0)."
         );
-        let _ = writeln!(
-            body,
-            "# TYPE reddb_replication_apply_bytes_total counter"
-        );
+        let _ = writeln!(body, "# TYPE reddb_replication_apply_bytes_total counter");
         let _ = writeln!(body, "reddb_replication_apply_bytes_total {apply_bytes}");
         let _ = writeln!(
             body,
             "# HELP reddb_replication_apply_records_total Logical WAL records successfully applied from the primary since process start."
         );
-        let _ = writeln!(
-            body,
-            "# TYPE reddb_replication_apply_records_total counter"
-        );
+        let _ = writeln!(body, "# TYPE reddb_replication_apply_records_total counter");
         let _ = writeln!(
             body,
             "reddb_replication_apply_records_total {apply_records}"
