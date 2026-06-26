@@ -158,8 +158,14 @@ pub(super) fn execute_runtime_hash_join(
             right_table_alias.or(right_table_name),
         ));
     }
-    // Build hash table on right side
-    let mut hash_table: HashMap<String, Vec<usize>> = HashMap::new();
+    // Build hash table on right side. The build-side cardinality is the
+    // right record count, so pre-size to avoid incremental rehashing.
+    // Keys stay `String` (raw `Value::to_string()`) here to preserve this
+    // path's distinct null/empty-bucket semantics asserted by the #1339
+    // baseline tests; the prefix-namespaced typed keys live on the indexed
+    // and graph-lookup paths.
+    let mut hash_table: HashMap<String, Vec<usize>> =
+        HashMap::with_capacity(right_records.len());
     for (idx, right_record) in right_records.iter().enumerate() {
         let key = resolve_runtime_field(
             right_record,
@@ -246,7 +252,8 @@ pub(super) fn execute_runtime_graph_lookup_join(
             right_table_alias.or(right_table_name),
         ));
     }
-    let mut right_index: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut right_index: HashMap<RuntimeJoinKey, Vec<usize>> =
+        HashMap::with_capacity(right_records.len());
     for (index, right_record) in right_records.iter().enumerate() {
         let keys = runtime_graph_join_record_keys(
             right_record,
@@ -341,7 +348,8 @@ pub(super) fn execute_runtime_indexed_join(
             right_table_alias.or(right_table_name),
         ));
     }
-    let mut right_index: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut right_index: HashMap<RuntimeJoinKey, Vec<usize>> =
+        HashMap::with_capacity(right_records.len());
     for (index, right_record) in right_records.iter().enumerate() {
         let Some(value) = resolve_runtime_field(
             right_record,
@@ -423,23 +431,50 @@ pub(super) fn execute_runtime_indexed_join(
     Ok(records)
 }
 
-pub(super) fn runtime_join_lookup_key(value: &Value) -> Option<String> {
-    if let Some(number) = runtime_value_number(value) {
-        return Some(format!("n:{number}"));
-    }
-    if let Value::Boolean(boolean) = value {
-        return Some(format!("b:{boolean}"));
-    }
-    runtime_value_text(value).map(|value| format!("t:{value}"))
+/// Typed internal join key. Replaces the formatted, prefix-namespaced
+/// string keys (`"n:…"` / `"b:…"` / `"t:…"` / `"id:…"`) that the indexed
+/// and graph-lookup join paths used to build and probe their hash indexes.
+///
+/// Each variant is its own namespace, so the old prefix-collision behaviour
+/// is preserved without per-row string formatting: a numeric key never
+/// collides with a textual one, and a value key never collides with an
+/// identity key. Numeric keys hash on the `f64` bit pattern — distinct
+/// finite/infinite floats have distinct bit patterns, so this reproduces
+/// the old `format!("n:{number}")` equality for every value that can
+/// actually appear as a join key.
+///
+/// `Text` and `Identity` carry user-controlled strings, so this type is
+/// only ever indexed with the default `std` `HashMap` hasher (SipHash);
+/// no weak hasher is applied to user-controlled keys.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(super) enum RuntimeJoinKey {
+    /// Numeric key class — was `"n:{number}"`.
+    Number(u64),
+    /// Boolean key class — was `"b:{boolean}"`.
+    Boolean(bool),
+    /// Textual key class — was `"t:{text}"`.
+    Text(String),
+    /// Identity / reference key class — was `"id:{identity}"`.
+    Identity(String),
 }
 
-pub(super) fn runtime_join_lookup_keys(value: &Value) -> Vec<String> {
+pub(super) fn runtime_join_lookup_key(value: &Value) -> Option<RuntimeJoinKey> {
+    if let Some(number) = runtime_value_number(value) {
+        return Some(RuntimeJoinKey::Number(number.to_bits()));
+    }
+    if let Value::Boolean(boolean) = value {
+        return Some(RuntimeJoinKey::Boolean(*boolean));
+    }
+    runtime_value_text(value).map(RuntimeJoinKey::Text)
+}
+
+pub(super) fn runtime_join_lookup_keys(value: &Value) -> Vec<RuntimeJoinKey> {
     let mut keys = Vec::new();
     if let Some(key) = runtime_join_lookup_key(value) {
         keys.push(key);
     }
     if let Some(identity) = runtime_join_identity_key(value) {
-        keys.push(format!("id:{identity}"));
+        keys.push(RuntimeJoinKey::Identity(identity));
     }
     keys.sort();
     keys.dedup();
@@ -462,7 +497,7 @@ pub(super) fn runtime_graph_join_record_keys(
     right_join_field: &FieldRef,
     right_table_name: Option<&str>,
     right_table_alias: Option<&str>,
-) -> Vec<String> {
+) -> Vec<RuntimeJoinKey> {
     let mut keys = Vec::new();
 
     if let Some(value) = resolve_runtime_field(
@@ -499,7 +534,7 @@ pub(super) fn runtime_graph_join_probe_indexes(
     left_join_field: &FieldRef,
     left_table_name: Option<&str>,
     left_table_alias: Option<&str>,
-    right_index: &HashMap<String, Vec<usize>>,
+    right_index: &HashMap<RuntimeJoinKey, Vec<usize>>,
 ) -> Vec<usize> {
     let mut candidates = BTreeSet::new();
     if let Some(value) = resolve_runtime_field(
@@ -4311,5 +4346,139 @@ mod tests {
             println!("hash_join   n={n:>5}: avg={hj_us}µs  ({iters} iters)");
             println!("nested_loop n={n:>5}: avg={nl_us}µs  ({iters} iters)");
         }
+    }
+
+    // ── Typed internal join key + indexed-join coverage (#1345) ───────────────
+    // The indexed and graph-lookup join paths now build/probe a typed
+    // `RuntimeJoinKey` index instead of formatted, prefix-namespaced strings.
+    // These tests pin the key-class namespacing and prove the indexed join
+    // still agrees with the nested-loop reference on the key classes it covers.
+
+    fn indexed_count(
+        left: &[UnifiedRecord],
+        right: &[UnifiedRecord],
+        lf: &FieldRef,
+        rf: &FieldRef,
+        join_type: JoinType,
+    ) -> usize {
+        let tq = left_tq();
+        execute_runtime_indexed_join(
+            &tq, left, None, None, lf, right, None, None, rf, join_type,
+        )
+        .unwrap()
+        .len()
+    }
+
+    #[test]
+    fn typed_join_key_classes_are_disjoint_namespaces() {
+        // numeric 1 and textual "1" never collide (was "n:1" vs "t:1")
+        assert_ne!(
+            runtime_join_lookup_key(&Value::Integer(1)),
+            runtime_join_lookup_key(&Value::text("1".to_string()))
+        );
+        // boolean true and textual "true" never collide (was "b:true" vs "t:true")
+        assert_ne!(
+            runtime_join_lookup_key(&Value::Boolean(true)),
+            runtime_join_lookup_key(&Value::text("true".to_string()))
+        );
+        // Integer(2) and Float(2.0) share one numeric key (was both "n:2")
+        assert_eq!(
+            runtime_join_lookup_key(&Value::Integer(2)),
+            runtime_join_lookup_key(&Value::Float(2.0))
+        );
+        assert_eq!(
+            runtime_join_lookup_key(&Value::Integer(2)),
+            Some(RuntimeJoinKey::Number(2.0f64.to_bits()))
+        );
+        // null / array / blob produce no value key (unchanged)
+        assert_eq!(runtime_join_lookup_key(&Value::Null), None);
+    }
+
+    #[test]
+    fn typed_identity_key_matches_numeric_to_reference_suffix() {
+        // A numeric value's identity key collides with the trailing-segment
+        // identity of a reference string, preserving the graph-join identity
+        // match that used to compare "id:2" == "id:2".
+        let num_keys = runtime_join_lookup_keys(&Value::Integer(2));
+        let ref_keys = runtime_join_lookup_keys(&Value::NodeRef("svc:2".to_string()));
+        assert!(num_keys.contains(&RuntimeJoinKey::Identity("2".to_string())));
+        assert!(ref_keys.contains(&RuntimeJoinKey::Identity("2".to_string())));
+    }
+
+    #[test]
+    fn indexed_join_integer_inner_matches_reference() {
+        let left: Vec<_> = [1i64, 2, 3]
+            .iter()
+            .map(|v| jrec("k", Value::Integer(*v)))
+            .collect();
+        let right: Vec<_> = [2i64, 3, 4]
+            .iter()
+            .map(|v| jrec("k", Value::Integer(*v)))
+            .collect();
+        assert_eq!(
+            indexed_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::Inner),
+            2
+        );
+    }
+
+    #[test]
+    fn indexed_join_text_inner_matches_reference() {
+        let left: Vec<_> = ["alice", "bob", "carol"]
+            .iter()
+            .map(|s| jrec("name", Value::text(s.to_string())))
+            .collect();
+        let right: Vec<_> = ["bob", "dave", "carol"]
+            .iter()
+            .map(|s| jrec("name", Value::text(s.to_string())))
+            .collect();
+        assert_eq!(
+            indexed_count(
+                &left,
+                &right,
+                &jfield("name"),
+                &jfield("name"),
+                JoinType::Inner
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn indexed_join_mixed_int_float_inner() {
+        // Integer(2) key probes the same numeric bucket as Float(2.0) and the
+        // candidate is confirmed by join_condition_matches → 1 matched pair.
+        let left = vec![jrec("k", Value::Integer(2)), jrec("k", Value::Integer(3))];
+        let right = vec![jrec("k", Value::Float(2.0)), jrec("k", Value::Float(4.0))];
+        assert_eq!(
+            indexed_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::Inner),
+            1
+        );
+    }
+
+    #[test]
+    fn indexed_join_duplicate_key_many_to_many() {
+        let left = vec![jrec("k", Value::Integer(1)), jrec("k", Value::Integer(1))];
+        let right = vec![jrec("k", Value::Integer(1)), jrec("k", Value::Integer(1))];
+        assert_eq!(
+            indexed_count(&left, &right, &jfield("k"), &jfield("k"), JoinType::Inner),
+            4
+        );
+    }
+
+    #[test]
+    fn indexed_join_left_outer_pads_unmatched() {
+        // key=2 has no right candidate → padded as an unmatched left row.
+        let left = vec![jrec("k", Value::Integer(1)), jrec("k", Value::Integer(2))];
+        let right = vec![jrec("k", Value::Integer(1))];
+        assert_eq!(
+            indexed_count(
+                &left,
+                &right,
+                &jfield("k"),
+                &jfield("k"),
+                JoinType::LeftOuter
+            ),
+            2
+        );
     }
 }
