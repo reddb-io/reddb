@@ -31,10 +31,73 @@ fn selected_ids(rt: &RedDBRuntime, table: &str) -> Vec<i64> {
     .collect()
 }
 
+fn status_ids(rt: &RedDBRuntime, table: &str, status: &str) -> Vec<i64> {
+    exec(
+        rt,
+        &format!("SELECT id FROM {table} WHERE status = '{status}' ORDER BY id ASC"),
+    )
+    .result
+    .records
+    .iter()
+    .map(|record| int_field(record, "id"))
+    .collect()
+}
+
 fn err_string(rt: &RedDBRuntime, sql: &str) -> String {
     rt.execute_query(sql)
         .expect_err("query should fail")
         .to_string()
+}
+
+#[test]
+fn claim_exact_updates_requested_cardinality_when_available() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE exact_claim_success (id INT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO exact_claim_success (id, rank, status) VALUES \
+         (1, 30, 'ready'), (2, 10, 'ready'), (3, 20, 'ready')",
+    );
+
+    let updated = exec(
+        &rt,
+        "UPDATE exact_claim_success SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM EXACT 2 ORDER BY rank ASC",
+    );
+
+    assert_eq!(updated.affected_rows, 2);
+    assert_eq!(
+        status_ids(&rt, "exact_claim_success", "claimed"),
+        vec![2, 3]
+    );
+    assert_eq!(status_ids(&rt, "exact_claim_success", "ready"), vec![1]);
+}
+
+#[test]
+fn claim_exact_miss_reports_zero_and_applies_no_partial_write() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE exact_claim_miss (id INT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO exact_claim_miss (id, rank, status) VALUES \
+         (1, 10, 'ready'), (2, 20, 'ready')",
+    );
+
+    let updated = exec(
+        &rt,
+        "UPDATE exact_claim_miss SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM EXACT 3 ORDER BY rank ASC",
+    );
+
+    assert_eq!(updated.affected_rows, 0);
+    assert!(status_ids(&rt, "exact_claim_miss", "claimed").is_empty());
+    assert_eq!(status_ids(&rt, "exact_claim_miss", "ready"), vec![1, 2]);
 }
 
 #[test]
