@@ -15,6 +15,10 @@ categories = ["database-implementations", "data-structures"]
 name = "reddb_types"
 path = "src/lib.rs"
 
+[[bin]]
+name = "measure_value_layout"
+path = "src/bin/measure_value_layout.rs"
+
 [dependencies]
 zstd = { version = "0.13", default-features = false }
 
