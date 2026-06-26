@@ -608,6 +608,27 @@ impl RedDBServer {
                 sanitize_label(&health)
             );
         }
+        // Issue #1242 — WAL apply throughput counters. Both are monotonic
+        // within one process lifetime and reset to 0 on restart; readers
+        // that track rate must detect a reset (new < prior) as a restart.
+        // Bounded by replica/node identity per the Phase 0 cardinality
+        // contract (ADR 0060): single-instance counters, no per-label fan-out.
+        let (apply_bytes, apply_records) = self.runtime.replica_apply_throughput_counts();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_apply_bytes_total Entity-payload bytes applied from the primary WAL since process start (insert/update payload; refresh payload; deletes contribute 0)."
+        );
+        let _ = writeln!(body, "# TYPE reddb_replication_apply_bytes_total counter");
+        let _ = writeln!(body, "reddb_replication_apply_bytes_total {apply_bytes}");
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_apply_records_total Logical WAL records successfully applied from the primary since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_replication_apply_records_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_replication_apply_records_total {apply_records}"
+        );
 
         // PLAN.md Phase 4.4 — per-caller quota rejections. Empty
         // when the quota is unconfigured or no caller has been
@@ -1172,6 +1193,49 @@ impl RedDBServer {
                     );
                 }
             }
+        }
+
+        // Per-node load telemetry — issue #1245 (ADR 0060 §2 "node samples").
+        // `node_id` = hostname; budget = cluster member count (one per process).
+        // Gauge and counters only — no per-client, per-query, or per-collection
+        // labels (ADR 0060 §4 cardinality rule).
+        {
+            let load = self.runtime.node_load_snapshot();
+            let node_id = &runtime_stats.system.hostname;
+            let active = load.active_queries.max(0);
+            let _ = writeln!(
+                body,
+                "# HELP reddb_node_active_queries Current number of queries executing on this node."
+            );
+            let _ = writeln!(body, "# TYPE reddb_node_active_queries gauge");
+            let _ = writeln!(
+                body,
+                "reddb_node_active_queries{{node_id=\"{}\"}} {}",
+                sanitize_label(node_id),
+                active
+            );
+            let _ = writeln!(
+                body,
+                "# HELP reddb_node_connects_total Lifetime pool acquisitions on this node (connection churn numerator)."
+            );
+            let _ = writeln!(body, "# TYPE reddb_node_connects_total counter");
+            let _ = writeln!(
+                body,
+                "reddb_node_connects_total{{node_id=\"{}\"}} {}",
+                sanitize_label(node_id),
+                load.connects_total
+            );
+            let _ = writeln!(
+                body,
+                "# HELP reddb_node_disconnects_total Lifetime pool releases on this node (connection churn denominator)."
+            );
+            let _ = writeln!(body, "# TYPE reddb_node_disconnects_total counter");
+            let _ = writeln!(
+                body,
+                "reddb_node_disconnects_total{{node_id=\"{}\"}} {}",
+                sanitize_label(node_id),
+                load.disconnects_total
+            );
         }
 
         // Events outbox metrics — issue #299

@@ -40,6 +40,17 @@ pub struct ReplicaApplyMetrics {
     /// chain does not advance, so the deposed primary cannot move any
     /// watermark until it re-syncs under the new term.
     pub fenced_total: std::sync::atomic::AtomicU64,
+    /// Issue #1242 — entity-payload bytes from successfully applied WAL
+    /// records (entity_bytes for insert/update, refresh payload for
+    /// refresh; deletes carry no payload and contribute 0). Monotonic
+    /// within one process lifetime; reset-aware for readers after restart.
+    /// Surfaced via `reddb_replication_apply_bytes_total`.
+    pub bytes_applied_total: std::sync::atomic::AtomicU64,
+    /// Issue #1242 — count of WAL records successfully applied (Applied
+    /// outcome only; Idempotent and Skipped are excluded). Monotonic
+    /// within one process lifetime. Surfaced via
+    /// `reddb_replication_apply_records_total`.
+    pub records_applied_total: std::sync::atomic::AtomicU64,
 }
 
 impl ReplicaApplyMetrics {
@@ -83,6 +94,18 @@ impl ReplicaApplyMetrics {
             (ApplyErrorKind::Miss, self.apply_miss_total.load(Relaxed)),
             (ApplyErrorKind::Fenced, self.fenced_total.load(Relaxed)),
         ]
+    }
+
+    /// Issue #1242 — throughput snapshot: `(bytes_applied_total,
+    /// records_applied_total)`. Both are monotonic within a process
+    /// lifetime and zero after restart, so callers that track rate must
+    /// detect a reset (new value < prior value) and treat it as a restart.
+    pub fn snapshot_throughput(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.bytes_applied_total.load(Relaxed),
+            self.records_applied_total.load(Relaxed),
+        )
     }
 }
 
@@ -520,6 +543,23 @@ impl LogicalChangeApplier {
         _mode: ApplyMode,
         metrics: &ReplicaApplyMetrics,
     ) -> RedDBResult<()> {
+        // Issue #1242 — compute payload bytes before the apply so we can
+        // increment the throughput counter unconditionally at the end (early
+        // `return Err` paths skip the counter, correctly counting only
+        // successful applies).
+        let payload_bytes: u64 = match record.operation {
+            ChangeOperation::Insert | ChangeOperation::Update => record
+                .entity_bytes
+                .as_ref()
+                .map(|b| b.len() as u64)
+                .unwrap_or(0),
+            ChangeOperation::Refresh => record
+                .refresh_records
+                .as_ref()
+                .map(|recs| recs.iter().map(|r| r.len() as u64).sum())
+                .unwrap_or(0),
+            ChangeOperation::Delete => 0,
+        };
         let store = db.store();
         match record.operation {
             ChangeOperation::Delete => {
@@ -652,6 +692,14 @@ impl LogicalChangeApplier {
                     .index_entity(&record.collection, &entity);
             }
         }
+        // Issue #1242 — only reached on successful apply (all early `return
+        // Err` paths skip this). Fenced and error records never reach here.
+        metrics
+            .bytes_applied_total
+            .fetch_add(payload_bytes, Ordering::Relaxed);
+        metrics
+            .records_applied_total
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -878,6 +926,84 @@ mod tests {
             1,
             "a non-fatal miss still advances the LSN chain"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Issue #1242 — bytes_applied_total and records_applied_total must
+    // reflect observed apply throughput: Applied increments both, Idempotent
+    // and Skipped increment neither, and deletes contribute 0 bytes but 1
+    // record.
+    #[test]
+    fn throughput_counters_reflect_applied_bytes_and_records() {
+        let (db, path) = open_db();
+        let metrics = Arc::new(ReplicaApplyMetrics::default());
+        let applier = LogicalChangeApplier::with_metrics(0, Arc::clone(&metrics));
+
+        // Three insert records with payloads of different sizes.
+        let r1 = record(1, b"hello");
+        let r2 = record(2, b"world-longer-payload");
+        let r3 = record(3, b"x");
+
+        // Compute expected bytes from the serialized entity_bytes (not the raw
+        // payload, which goes through entity serialization before it lands in
+        // entity_bytes).
+        let expected_bytes: u64 = [&r1, &r2, &r3]
+            .iter()
+            .map(|r| r.entity_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0))
+            .sum();
+        assert!(expected_bytes > 0, "test records must carry entity payload");
+
+        for r in [&r1, &r2, &r3] {
+            assert_eq!(
+                applier.apply(&db, r, ApplyMode::Replica).unwrap(),
+                ApplyOutcome::Applied
+            );
+        }
+
+        assert_eq!(
+            metrics.records_applied_total.load(Ordering::Relaxed),
+            3,
+            "three applied records must increment records counter by 3"
+        );
+        assert_eq!(
+            metrics.bytes_applied_total.load(Ordering::Relaxed),
+            expected_bytes,
+            "bytes counter must match the sum of entity_bytes across applied records"
+        );
+
+        // Idempotent replay must not increment either counter.
+        assert_eq!(
+            applier.apply(&db, &r3, ApplyMode::Replica).unwrap(),
+            ApplyOutcome::Idempotent
+        );
+        assert_eq!(
+            metrics.records_applied_total.load(Ordering::Relaxed),
+            3,
+            "idempotent replay must not increment the records counter"
+        );
+        assert_eq!(
+            metrics.bytes_applied_total.load(Ordering::Relaxed),
+            expected_bytes,
+            "idempotent replay must not increment the bytes counter"
+        );
+
+        // A delete-miss (non-fatal) increments records by 1 but contributes
+        // 0 bytes — deletes carry no entity payload.
+        let del = delete_record(4, "ghost_collection", 999);
+        applier
+            .apply(&db, &del, ApplyMode::Replica)
+            .expect("delete miss is non-fatal and still advances the chain");
+        assert_eq!(
+            metrics.records_applied_total.load(Ordering::Relaxed),
+            4,
+            "a delete (including a miss) must increment the records counter"
+        );
+        assert_eq!(
+            metrics.bytes_applied_total.load(Ordering::Relaxed),
+            expected_bytes,
+            "a delete contributes 0 bytes to the bytes counter"
+        );
+
         let _ = std::fs::remove_file(path);
     }
 

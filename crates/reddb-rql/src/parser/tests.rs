@@ -1597,6 +1597,45 @@ fn test_parse_fusion_strategies() {
     }
 }
 
+#[test]
+fn test_parse_fusion_strategy_identifier_forms() {
+    // The keyword tokens (RERANK/RRF/...) are covered above. These spellings
+    // arrive as bare identifiers and route through the ident arm of
+    // `parse_fusion_strategy`.
+    let filter_then = parse(
+        "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION FILTER_THEN_SEARCH LIMIT 10",
+    )
+    .unwrap();
+    assert!(matches!(
+        filter_then,
+        QueryExpr::Hybrid(hq) if matches!(hq.fusion, FusionStrategy::FilterThenSearch)
+    ));
+
+    let search_then = parse(
+        "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION SEARCH_THEN_FILTER LIMIT 10",
+    )
+    .unwrap();
+    assert!(matches!(
+        search_then,
+        QueryExpr::Hybrid(hq) if matches!(hq.fusion, FusionStrategy::SearchThenFilter)
+    ));
+
+    // Identifier-spelled RERANK with an explicit weight.
+    let rerank =
+        parse("HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION RERANK(0.25) LIMIT 10")
+            .unwrap();
+    assert!(matches!(
+        rerank,
+        QueryExpr::Hybrid(hq)
+            if matches!(hq.fusion, FusionStrategy::Rerank { weight } if (weight - 0.25).abs() < 0.01)
+    ));
+
+    // Unknown identifier strategy is rejected.
+    assert!(
+        parse("HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION NOPE LIMIT 10").is_err()
+    );
+}
+
 // ========================================================================
 // DML Tests: INSERT, UPDATE, DELETE
 // ========================================================================
@@ -5535,6 +5574,9 @@ fn test_parse_migration_forms() {
     let query = parse("EXPLAIN MIGRATION m2").unwrap();
     assert!(matches!(query, QueryExpr::ExplainMigration(e) if e.name == "m2"));
 
+    let query = parse("EXPLAIN MIGRATION *").unwrap();
+    assert!(matches!(query, QueryExpr::ExplainMigration(e) if e.name == "*"));
+
     let query = parse("APPLY MIGRATION m2 FOR TENANT 'tenant-string'").unwrap();
     assert!(matches!(
         query,
@@ -5553,6 +5595,13 @@ fn test_parse_migration_forms() {
                 && !migration.no_rollback
                 && migration.body == "CREATE INDEX idx ON accounts ( id )"
     ));
+
+    let err = parse("CREATE MIGRATION m4 BATCH 0 ROWS AS UPDATE accounts SET done = true")
+        .expect_err("BATCH 0 ROWS must be rejected");
+    assert!(
+        err.to_string().contains("positive BATCH size"),
+        "unexpected error: {err}"
+    );
 
     for sql in [
         "APPLY m2",

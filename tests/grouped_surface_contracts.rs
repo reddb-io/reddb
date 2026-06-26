@@ -27,5 +27,11 @@ mod rql_conformance;
 #[path = "grouped/surface_contracts/rql_reddb_conformance.rs"]
 mod rql_reddb_conformance;
 
+#[path = "grouped/surface_contracts/rql_sqlite_equivalence.rs"]
+mod rql_sqlite_equivalence;
+
 #[path = "grouped/surface_contracts/smoke_embedded.rs"]
 mod smoke_embedded;
+
+#[path = "grouped/surface_contracts/cross_transport_result_equivalence.rs"]
+mod cross_transport_result_equivalence;

@@ -9,6 +9,9 @@ members = [
     "crates/reddb-server",
     "crates/reddb-types",
     "crates/reddb-wire",
+    # DST Fatia 0 (#1351): standalone LD_PRELOAD fault-injection shim + the
+    # shared WAL recovery-invariant oracle reused by later DST slices.
+    "crates/unreliable-libc",
 ]
 resolver = "2"
 
@@ -174,6 +177,12 @@ reddb-file = { workspace = true }
 reddb-rql = { workspace = true }
 reddb-types = { workspace = true }
 sqllogictest = "0.29"
+# Differential RQL-vs-SQLite conformance (issue #1353): the standard-SQL corpus
+# slice is replayed against a live in-memory SQLite oracle so divergence from
+# standard SQL semantics is caught continuously. `bundled` compiles the SQLite
+# amalgamation in-tree so the oracle needs no system library and the lane stays
+# self-contained in CI. Dev-only; the production crate graph never sees SQLite.
+rusqlite = { version = "0.37", features = ["bundled"] }
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"
@@ -264,3 +273,36 @@ strip = "symbols"
 debug = false
 panic = "abort"
 incremental = false
+
+# Experiment profiles for issue #1344: build/profile performance matrix.
+# These are measurement-only profiles; they are NOT used as defaults.
+# See bench/build-profile-experiment-2026-06-25.md for results.
+
+# Thin LTO: cross-CGU inlining without full bitcode merge.
+# Hypothesis: ~5-15% throughput gain, ~2x link time vs release.
+# Note: do NOT set codegen-units=1 for thin LTO — thin LTO works across
+# multiple CGUs (bitcode sharing at link time). codegen-units=1 collapses
+# everything into one module (essentially fat LTO behavior) and spikes RAM.
+[profile.release-lto-thin]
+inherits = "release"
+lto = "thin"
+
+# Fat LTO: full LLVM bitcode merge. Maximum throughput, longest link.
+# Hypothesis: ~10-20% throughput gain, ~4x link time vs release.
+# codegen-units=1 is appropriate here since fat LTO merges everything anyway.
+[profile.release-lto-fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+# Opt-level 3: more aggressive inlining + loop unrolling vs release (opt=2).
+[profile.release-opt3]
+inherits = "release"
+opt-level = 3
+
+# Bench profile with thin LTO for throughput comparison vs default bench
+# (opt=3, no LTO). Both use opt=3; the delta isolates LTO's contribution.
+# Note: original bench-lto-thin run used codegen-units=1 (incorrect; see report).
+[profile.bench-lto-thin]
+inherits = "bench"
+lto = "thin"

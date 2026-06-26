@@ -130,9 +130,9 @@ ordering with explicit `DEPENDS ON` edges after both migration definitions exist
 
 ### Multi-tenant fanout
 
-`FOR TENANT *` applies a migration to every known tenant in a single statement,
-setting the row-level-security context before each execution. Per-tenant progress
-is tracked individually so a failure in one tenant does not block the others.
+`FOR TENANT` sets the row-level-security context while the migration executes.
+Migration status is still global in `red_migrations`, so native per-tenant
+progress tracking and tenant-specific rollback are not implemented yet.
 
 ### Irreversibility is explicit
 
@@ -155,7 +155,7 @@ doing nothing or applying a broken compensating migration.
 | **Irreversible migration guard** | yes (`NO ROLLBACK`) | no | no | no | no |
 | **VCS commit per migration** | yes | no | no | no | no |
 | **Branch-scoped application** | no, definitions are global | no | no | no | no |
-| **Multi-tenant fanout** | yes (`FOR TENANT *`) | no | no | no | no |
+| **Multi-tenant fanout** | limited (`FOR TENANT` context, global status) | no | no | no | no |
 | **Stored in database** | yes (`red_migrations`) | separate table | separate table | separate table | separate table |
 | **Inspect via SQL** | yes | limited | limited | no | no |
 | **EXPLAIN before apply** | yes | no | dry-run only | no | no |
@@ -201,5 +201,5 @@ directly with `SELECT`.
 - [Data Migrations](./data-migrations.md) — `BATCH N ROWS`, checkpoint resume, `NO ROLLBACK`
 - [Dependency Graph](./dependency-graph.md) — DAG management, auto-inference, cycle detection
 - [VCS Integration](./vcs-integration.md) — commits, rollback via revert, current VCS scope
-- [Multi-Tenancy](./multi-tenancy.md) — `FOR TENANT`, RLS context, fanout patterns
+- [Multi-Tenancy](./multi-tenancy.md) — `FOR TENANT`, RLS context, current global-status limitation
 - [Cookbook](./cookbook.md) — recipes for common real-world migration patterns
