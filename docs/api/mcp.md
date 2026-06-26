@@ -76,6 +76,12 @@ is the RedDB ID and `kind` is the item kind such as `row`, `document`, `kv`,
 |:-----|:------------|
 | `reddb_health` | Check database health and runtime stats |
 
+### Type System
+
+| Tool | Description |
+|:-----|:------------|
+| `reddb_type_of` | Resolve the canonical type for a value or type name, with applicable casts and operators (answered from the generated `reddb-io-types` catalog) |
+
 ## Tool Examples
 
 ### Execute a Query
