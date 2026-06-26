@@ -24,17 +24,44 @@
 //! This codec is compiled and tested but not yet wired into any storage or
 //! query path.  Behaviour cutover happens in a later PRD-1398 slice.
 
+use crate::key_dictionary::KeyDictionary;
 use crate::types::Value;
 use crate::value_codec;
 
 /// Magic bytes at the start of every document body container.
 pub const MAGIC: &[u8; 4] = b"RDOC";
 
-/// Format version byte for this implementation.
+/// Format version byte for the plain (inline-keys-only) container.
 pub const VERSION: u8 = 0x01;
+
+/// Format version byte for the dictionary-aware container (PRD-1398).
+///
+/// Identical layout to v1 except each offset-table entry carries a key *kind*
+/// tag: a field name is either a key-id into the per-collection
+/// [`KeyDictionary`] (common keys) or stored inline (rare/unique keys).
+pub const VERSION_DICT: u8 = 0x02;
 
 /// Byte size of one entry in the offset table: u16 key_len + u32 val_offset.
 const ENTRY_SIZE: usize = 6;
+
+/// Byte size of one v2 offset-table entry: u8 key_kind + u32 key_ref + u32 val_offset.
+///
+/// The key-id is stored as a fixed `u32` (rather than a varint) so the table
+/// keeps a fixed stride and field access stays O(1); homogeneous collections
+/// never approach `u32::MAX` distinct common keys.
+const DICT_ENTRY_SIZE: usize = 9;
+
+/// `key_kind` tag: the field name is a key-id into the [`KeyDictionary`].
+const KEY_KIND_DICT: u8 = 0x00;
+
+/// `key_kind` tag: the field name is stored inline in the keys section.
+const KEY_KIND_INLINE: u8 = 0x01;
+
+/// One parsed v2 offset-table entry: `(key_kind, key_ref, val_offset)`.
+///
+/// `key_ref` is a dictionary key-id when `key_kind == KEY_KIND_DICT`, or the
+/// inline key length when `key_kind == KEY_KIND_INLINE`.
+pub type DictEntry = (u8, u32, u32);
 
 /// Errors produced by the document body codec.
 #[derive(Debug, PartialEq)]
@@ -51,6 +78,10 @@ pub enum DocBodyError {
     InvalidFieldName,
     /// The document has more than 65 535 fields, or a field name exceeds 65 535 bytes.
     FieldLimitExceeded,
+    /// A dictionary key-id in the body is absent from the supplied dictionary.
+    UnknownKeyId(u32),
+    /// A v2 offset-table entry carried an unrecognised key-kind tag.
+    BadKeyKind(u8),
     /// The underlying value codec rejected a value.
     ValueCodecError(crate::types::ValueError),
 }
@@ -72,6 +103,10 @@ impl std::fmt::Display for DocBodyError {
             Self::FieldLimitExceeded => {
                 write!(f, "document body: field or key-length limit exceeded")
             }
+            Self::UnknownKeyId(id) => {
+                write!(f, "document body: key-id {id} not found in dictionary")
+            }
+            Self::BadKeyKind(k) => write!(f, "document body: unrecognised key kind {k:#04x}"),
             Self::ValueCodecError(e) => write!(f, "document body: value codec error: {e}"),
         }
     }
@@ -238,6 +273,162 @@ pub fn parse_header(data: &[u8]) -> Result<(usize, Vec<(u16, u32)>), DocBodyErro
             data[base + 5],
         ]);
         table.push((key_len, val_offset));
+    }
+
+    Ok((n, table))
+}
+
+/// Encode `fields` as a **dictionary-aware** (v2) document body container.
+///
+/// For each field `classify(name)` decides how the key is stored:
+///
+/// * `true`  — the key is *common*: it is interned into `dict` (appending a new
+///   id transactionally if it is not already present) and the body stores the
+///   compact key-id.
+/// * `false` — the key is *rare/unique*: it is stored **inline** in the body
+///   and never enters `dict`, so a heterogeneous collection cannot bloat the
+///   shared catalogue.
+///
+/// Decode with [`decode_with_dictionary`] using the (post-encode) dictionary.
+pub fn encode_with_dictionary(
+    fields: &[(&str, &Value)],
+    dict: &mut KeyDictionary,
+    classify: impl Fn(&str) -> bool,
+    out: &mut Vec<u8>,
+) -> Result<(), DocBodyError> {
+    let n = fields.len();
+    if n > u16::MAX as usize {
+        return Err(DocBodyError::FieldLimitExceeded);
+    }
+
+    // Inline key bytes (only for rare keys) and value bytes, plus per-field
+    // table data, are staged so absolute offsets can be computed up front.
+    let mut key_buf: Vec<u8> = Vec::new();
+    let mut val_buf: Vec<u8> = Vec::new();
+    let mut kinds: Vec<u8> = Vec::with_capacity(n);
+    let mut refs: Vec<u32> = Vec::with_capacity(n);
+    let mut val_starts: Vec<u32> = Vec::with_capacity(n);
+
+    for (key, value) in fields {
+        if classify(key) {
+            let id = dict.intern(key);
+            kinds.push(KEY_KIND_DICT);
+            refs.push(id);
+        } else {
+            let kb = key.as_bytes();
+            if kb.len() > u16::MAX as usize {
+                return Err(DocBodyError::FieldLimitExceeded);
+            }
+            kinds.push(KEY_KIND_INLINE);
+            refs.push(kb.len() as u32);
+            key_buf.extend_from_slice(kb);
+        }
+        val_starts.push(val_buf.len() as u32); // relative for now
+        value_codec::encode(value, &mut val_buf);
+    }
+
+    // Absolute offset of the values section within the final container:
+    //   magic(4) + version(1) + num_fields(2) + table(n * DICT_ENTRY_SIZE) + inline keys
+    let vals_abs_start = 4 + 1 + 2 + n * DICT_ENTRY_SIZE + key_buf.len();
+
+    out.extend_from_slice(MAGIC);
+    out.push(VERSION_DICT);
+    out.extend_from_slice(&(n as u16).to_le_bytes());
+
+    for i in 0..n {
+        let abs_val_offset = vals_abs_start + val_starts[i] as usize;
+        out.push(kinds[i]);
+        out.extend_from_slice(&refs[i].to_le_bytes());
+        out.extend_from_slice(&(abs_val_offset as u32).to_le_bytes());
+    }
+
+    out.extend_from_slice(&key_buf);
+    out.extend_from_slice(&val_buf);
+
+    Ok(())
+}
+
+/// Decode all fields from a **dictionary-aware** (v2) document body container.
+///
+/// `dict` must be the per-collection dictionary that was used (and possibly
+/// extended) during [`encode_with_dictionary`]; dictionary key-ids are resolved
+/// back to field names through it, while inline keys are read straight from the
+/// body.  Fields are returned in encode order.
+pub fn decode_with_dictionary(
+    data: &[u8],
+    dict: &KeyDictionary,
+) -> Result<Vec<(String, Value)>, DocBodyError> {
+    let (n, table) = parse_dict_header(data)?;
+    let header_end = 7 + n * DICT_ENTRY_SIZE; // where the inline-keys section begins
+    let mut key_cursor = header_end;
+    let mut result = Vec::with_capacity(n);
+
+    for &(kind, key_ref, val_offset) in &table {
+        let key = match kind {
+            KEY_KIND_DICT => dict
+                .name_of(key_ref)
+                .ok_or(DocBodyError::UnknownKeyId(key_ref))?
+                .to_string(),
+            KEY_KIND_INLINE => {
+                let key_end = key_cursor + key_ref as usize;
+                if key_end > data.len() {
+                    return Err(DocBodyError::OffsetOutOfBounds);
+                }
+                let name = std::str::from_utf8(&data[key_cursor..key_end])
+                    .map_err(|_| DocBodyError::InvalidFieldName)?
+                    .to_string();
+                key_cursor = key_end;
+                name
+            }
+            other => return Err(DocBodyError::BadKeyKind(other)),
+        };
+
+        let value = decode_value_at_offset(data, val_offset)?;
+        result.push((key, value));
+    }
+
+    Ok(result)
+}
+
+/// Parse a **v2** container header, returning `(num_fields, table)` where each
+/// table entry is `(key_kind, key_ref, val_offset)`.
+///
+/// As with [`parse_header`], inline key names and values are not validated
+/// here — that is deferred to [`decode_with_dictionary`].
+pub fn parse_dict_header(data: &[u8]) -> Result<(usize, Vec<DictEntry>), DocBodyError> {
+    if data.len() < 7 {
+        return Err(DocBodyError::TruncatedData);
+    }
+    if &data[0..4] != MAGIC.as_slice() {
+        return Err(DocBodyError::BadMagic);
+    }
+    if data[4] != VERSION_DICT {
+        return Err(DocBodyError::UnsupportedVersion(data[4]));
+    }
+
+    let n = u16::from_le_bytes([data[5], data[6]]) as usize;
+    let table_end = 7 + n * DICT_ENTRY_SIZE;
+    if data.len() < table_end {
+        return Err(DocBodyError::TruncatedData);
+    }
+
+    let mut table = Vec::with_capacity(n);
+    for i in 0..n {
+        let base = 7 + i * DICT_ENTRY_SIZE;
+        let kind = data[base];
+        let key_ref = u32::from_le_bytes([
+            data[base + 1],
+            data[base + 2],
+            data[base + 3],
+            data[base + 4],
+        ]);
+        let val_offset = u32::from_le_bytes([
+            data[base + 5],
+            data[base + 6],
+            data[base + 7],
+            data[base + 8],
+        ]);
+        table.push((kind, key_ref, val_offset));
     }
 
     Ok((n, table))
@@ -416,5 +607,203 @@ mod tests {
         // The value bytes at val_offset must decode to Boolean(true)
         let (v, _) = value_codec::decode(&buf[val_offset as usize..]).expect("decode at offset");
         assert_eq!(v, Value::Boolean(true));
+    }
+
+    // ---- Dictionary-aware (v2) container ----------------------------------
+
+    /// Classify every key as common — exercises the homogeneous-collection path.
+    fn all_common(_: &str) -> bool {
+        true
+    }
+
+    /// Common field names are interned in the dictionary and the body stores
+    /// compact key-ids, not the key strings.
+    #[test]
+    fn common_keys_are_interned_as_key_ids() {
+        let fields = [
+            ("id", Value::Integer(1)),
+            ("name", Value::text("Alice")),
+            ("active", Value::Boolean(true)),
+        ];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+        let mut dict = KeyDictionary::new();
+        let mut buf = Vec::new();
+        encode_with_dictionary(&refs, &mut dict, all_common, &mut buf).expect("encode");
+
+        // All three keys entered the dictionary with dense ids.
+        assert_eq!(dict.len(), 3);
+        assert_eq!(dict.id_of("id"), Some(0));
+        assert_eq!(dict.id_of("name"), Some(1));
+        assert_eq!(dict.id_of("active"), Some(2));
+
+        // Every table entry is a dictionary reference, no inline keys.
+        let (n, table) = parse_dict_header(&buf).expect("header");
+        assert_eq!(n, 3);
+        for (kind, _key_ref, _off) in &table {
+            assert_eq!(*kind, KEY_KIND_DICT);
+        }
+        // The string "name" is not repeated in the body bytes — only its id is.
+        assert!(!buf.windows(4).any(|w| w == b"name"));
+    }
+
+    /// Encoding a second document with a new common key appends to the existing
+    /// dictionary transactionally (alongside the write), reusing prior ids.
+    #[test]
+    fn new_common_key_appends_to_dictionary() {
+        let mut dict = KeyDictionary::new();
+
+        let doc1 = [("id", Value::Integer(1)), ("name", Value::text("Alice"))];
+        let r1: Vec<(&str, &Value)> = doc1.iter().map(|(k, v)| (*k, v)).collect();
+        let mut b1 = Vec::new();
+        encode_with_dictionary(&r1, &mut dict, all_common, &mut b1).expect("encode 1");
+        assert_eq!(dict.len(), 2);
+
+        // Second document reuses id/name and introduces a brand-new common key.
+        let doc2 = [
+            ("id", Value::Integer(2)),
+            ("name", Value::text("Bob")),
+            ("email", Value::Email("bob@example.com".to_string())),
+        ];
+        let r2: Vec<(&str, &Value)> = doc2.iter().map(|(k, v)| (*k, v)).collect();
+        let mut b2 = Vec::new();
+        encode_with_dictionary(&r2, &mut dict, all_common, &mut b2).expect("encode 2");
+
+        // Only the new key appended; existing ids are stable.
+        assert_eq!(dict.len(), 3);
+        assert_eq!(dict.id_of("id"), Some(0));
+        assert_eq!(dict.id_of("name"), Some(1));
+        assert_eq!(dict.id_of("email"), Some(2));
+
+        // Both documents decode losslessly against the shared dictionary.
+        let g1 = decode_with_dictionary(&b1, &dict).expect("decode 1");
+        assert_eq!(g1[1], ("name".to_string(), Value::text("Alice")));
+        let g2 = decode_with_dictionary(&b2, &dict).expect("decode 2");
+        assert_eq!(
+            g2[2],
+            (
+                "email".to_string(),
+                Value::Email("bob@example.com".to_string())
+            )
+        );
+    }
+
+    /// A rare/unique key is stored inline and never enters the dictionary.
+    #[test]
+    fn rare_key_stays_inline_and_out_of_dictionary() {
+        // "id"/"name" are common; anything else is rare.
+        let common = |k: &str| k == "id" || k == "name";
+        let fields = [
+            ("id", Value::Integer(7)),
+            ("name", Value::text("Carol")),
+            ("x9f3_one_off_attr", Value::text("rare-value")),
+        ];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+        let mut dict = KeyDictionary::new();
+        let mut buf = Vec::new();
+        encode_with_dictionary(&refs, &mut dict, common, &mut buf).expect("encode");
+
+        // The rare key never entered the catalogue.
+        assert_eq!(dict.len(), 2);
+        assert_eq!(dict.id_of("x9f3_one_off_attr"), None);
+
+        // Its kind tag is inline and its name bytes live in the body.
+        let (_n, table) = parse_dict_header(&buf).expect("header");
+        assert_eq!(table[0].0, KEY_KIND_DICT);
+        assert_eq!(table[1].0, KEY_KIND_DICT);
+        assert_eq!(table[2].0, KEY_KIND_INLINE);
+        assert!(buf
+            .windows("x9f3_one_off_attr".len())
+            .any(|w| w == b"x9f3_one_off_attr"));
+
+        // And it round-trips losslessly.
+        let got = decode_with_dictionary(&buf, &dict).expect("decode");
+        assert_eq!(
+            got[2],
+            ("x9f3_one_off_attr".to_string(), Value::text("rare-value"))
+        );
+    }
+
+    /// Round-trip mixing dictionary keys and inline keys is lossless, including
+    /// rich semantic types and after persisting/reloading the dictionary.
+    #[test]
+    fn mixed_dictionary_and_inline_round_trip() {
+        let common = |k: &str| matches!(k, "id" | "email" | "active");
+        let fields = [
+            ("id", Value::Integer(42)),
+            ("email", Value::Email("a@example.com".to_string())),
+            ("active", Value::Boolean(true)),
+            ("one_off_color", Value::Color([0xDE, 0xAD, 0xBE])),
+            ("rare_geo", Value::GeoPoint(-23_550_520, -46_633_308)),
+        ];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+        let mut dict = KeyDictionary::new();
+        let mut buf = Vec::new();
+        encode_with_dictionary(&refs, &mut dict, common, &mut buf).expect("encode");
+
+        // Persist and reload the dictionary, then decode against the reloaded copy.
+        let mut dict_bytes = Vec::new();
+        dict.encode(&mut dict_bytes);
+        let reloaded = KeyDictionary::decode(&dict_bytes).expect("reload dict");
+
+        let got = decode_with_dictionary(&buf, &reloaded).expect("decode");
+        assert_eq!(got.len(), fields.len());
+        for (i, (k, v)) in fields.iter().enumerate() {
+            assert_eq!(got[i].0, *k, "key mismatch at {i}");
+            assert_eq!(got[i].1, *v, "value mismatch for field {k}");
+        }
+    }
+
+    #[test]
+    fn empty_dictionary_document_round_trips() {
+        let mut dict = KeyDictionary::new();
+        let mut buf = Vec::new();
+        encode_with_dictionary(&[], &mut dict, all_common, &mut buf).expect("encode");
+        let got = decode_with_dictionary(&buf, &dict).expect("decode");
+        assert!(got.is_empty());
+        assert!(dict.is_empty());
+    }
+
+    /// A v2 body decoded against a dictionary that lacks the id is rejected,
+    /// not silently mis-decoded.
+    #[test]
+    fn unknown_key_id_is_rejected() {
+        let fields = [("only_key", Value::Integer(1))];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+        let mut dict = KeyDictionary::new();
+        let mut buf = Vec::new();
+        encode_with_dictionary(&refs, &mut dict, all_common, &mut buf).expect("encode");
+
+        let empty = KeyDictionary::new();
+        assert_eq!(
+            decode_with_dictionary(&buf, &empty),
+            Err(DocBodyError::UnknownKeyId(0))
+        );
+    }
+
+    /// v1 and v2 containers are distinguished by their version byte; decoding a
+    /// v2 body with the v1 path (and vice versa) fails on the version check.
+    #[test]
+    fn v1_and_v2_versions_do_not_alias() {
+        let fields = [("k", Value::Integer(1))];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+
+        let mut v1 = Vec::new();
+        encode(&refs, &mut v1).expect("v1");
+        assert_eq!(v1[4], VERSION);
+
+        let mut dict = KeyDictionary::new();
+        let mut v2 = Vec::new();
+        encode_with_dictionary(&refs, &mut dict, all_common, &mut v2).expect("v2");
+        assert_eq!(v2[4], VERSION_DICT);
+
+        // Cross-decoding hits the version guard.
+        assert_eq!(
+            decode(&v2),
+            Err(DocBodyError::UnsupportedVersion(VERSION_DICT))
+        );
+        assert_eq!(
+            parse_dict_header(&v1),
+            Err(DocBodyError::UnsupportedVersion(VERSION))
+        );
     }
 }
