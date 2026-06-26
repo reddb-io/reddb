@@ -195,6 +195,11 @@ jobs:
           node-version: '22'
       - name: Sidecar tooling contract test
         run: node --test scripts/check-afk-validation-diff.test.mjs
+      - name: Docs-only gate shim lockstep contract test
+        # Issue #1307 — the docs-only shim (.github/workflows/ci-docs-shim.yml)
+        # must keep emitting exactly main's required status checks; this test
+        # fails the build if the shim drifts from the required set / ci.yml.
+        run: node --test scripts/ci_docs_shim_contract.test.mjs
       - name: Check supplied AFK validation sidecar against diff
         run: |
           if [ -z "${RED_AFK_VALIDATION_SIDECAR:-}" ]; then
