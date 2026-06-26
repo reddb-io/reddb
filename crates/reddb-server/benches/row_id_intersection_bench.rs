@@ -234,7 +234,11 @@ macro_rules! bench_strategies {
             &(a, b),
             |bench, &(a, b)| {
                 bench.iter(|| {
-                    black_box(intersect_hashset_siphash(black_box(a), black_box(b), usize::MAX))
+                    black_box(intersect_hashset_siphash(
+                        black_box(a),
+                        black_box(b),
+                        usize::MAX,
+                    ))
                 })
             },
         );
@@ -243,7 +247,11 @@ macro_rules! bench_strategies {
             &(a, b),
             |bench, &(a, b)| {
                 bench.iter(|| {
-                    black_box(intersect_hashset_identity(black_box(a), black_box(b), usize::MAX))
+                    black_box(intersect_hashset_identity(
+                        black_box(a),
+                        black_box(b),
+                        usize::MAX,
+                    ))
                 })
             },
         );
@@ -252,19 +260,17 @@ macro_rules! bench_strategies {
             &(a, b),
             |bench, &(a, b)| {
                 bench.iter(|| {
-                    black_box(intersect_sorted_merge(black_box(a), black_box(b), usize::MAX))
+                    black_box(intersect_sorted_merge(
+                        black_box(a),
+                        black_box(b),
+                        usize::MAX,
+                    ))
                 })
             },
         );
-        $group.bench_with_input(
-            BenchmarkId::new("gallop", $n),
-            &(a, b),
-            |bench, &(a, b)| {
-                bench.iter(|| {
-                    black_box(intersect_gallop(black_box(a), black_box(b), usize::MAX))
-                })
-            },
-        );
+        $group.bench_with_input(BenchmarkId::new("gallop", $n), &(a, b), |bench, &(a, b)| {
+            bench.iter(|| black_box(intersect_gallop(black_box(a), black_box(b), usize::MAX)))
+        });
     }};
 }
 
