@@ -42,6 +42,8 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+const TURBO_CRASH_INJECT_ENV: &str = "REDDB_TURBO_CRASH_AT";
+
 /// How a file is opened. Mirrors the subset of `OpenOptions` the durable
 /// writers actually use.
 #[derive(Debug, Clone, Copy)]
@@ -214,7 +216,10 @@ struct SimState {
 }
 
 impl SimState {
-    fn fires(&mut self, ppm: u64) -> bool {
+    fn fires(&mut self, point: &str, ppm: u64) -> bool {
+        if reddb_file::dst::is_active() {
+            return reddb_file::dst::buggify_at(TURBO_CRASH_INJECT_ENV, point, ppm);
+        }
         ppm != 0 && self.rng.below(1_000_000) < ppm
     }
 
@@ -395,7 +400,7 @@ impl VfsFile for SimFileHandle {
         let mut state = self.lock();
         state.charge()?;
         let enospc_ppm = state.cfg.enospc_ppm;
-        if state.fires(enospc_ppm) {
+        if state.fires("simvfs_enospc", enospc_ppm) {
             return Err(enospc_error());
         }
         let offset = usize::try_from(self.pos).unwrap_or(usize::MAX);
@@ -456,8 +461,8 @@ impl VfsFile for SimFileHandle {
         // meant to tolerate and that a correct writer cannot defend against.
         // Both coins are drawn so the seed stream stays stable.
         let (drop_ppm, reorder_ppm) = (state.cfg.drop_fsync_ppm, state.cfg.reorder_fsync_ppm);
-        let dropped = state.fires(drop_ppm);
-        let reordered = state.fires(reorder_ppm);
+        let dropped = state.fires("simvfs_drop_fsync", drop_ppm);
+        let reordered = state.fires("simvfs_reorder_fsync", reorder_ppm);
         if dropped || reordered {
             return Err(fsync_failed_error());
         }
@@ -505,8 +510,8 @@ impl Vfs for SimVfs {
             .remove(from)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "rename source missing"))?;
         let (revert_ppm, torn_ppm) = (state.cfg.revert_rename_ppm, state.cfg.torn_rename_ppm);
-        let revert = state.fires(revert_ppm);
-        let torn = !revert && state.fires(torn_ppm);
+        let revert = state.fires("simvfs_revert_rename", revert_ppm);
+        let torn = !revert && state.fires("simvfs_torn_rename", torn_ppm);
         // POSIX rename is atomic, so the writer's *live* view always sees the
         // full new contents at `to`. The fault only governs what survives a
         // crash before a `sync_dir`: a revert keeps the old durable target, and
