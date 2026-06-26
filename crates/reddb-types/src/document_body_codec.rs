@@ -197,6 +197,33 @@ pub fn decode(data: &[u8]) -> Result<Vec<(String, Value)>, DocBodyError> {
     Ok(result)
 }
 
+/// Return the top-level field names in encode order without decoding any value.
+///
+/// Reads only the offset table and the keys section — the values section is
+/// never touched. Used to build a field-name index/bloom over a stored body
+/// (e.g. so a `WHERE`/projection on a promoted field can route to the body)
+/// without paying the cost of a full [`decode`].
+pub fn field_names(data: &[u8]) -> Result<Vec<String>, DocBodyError> {
+    let (n, table) = parse_header(data)?;
+    let header_end = 7 + n * ENTRY_SIZE; // where the keys section begins
+    let mut key_cursor = header_end;
+    let mut names = Vec::with_capacity(n);
+
+    for &(key_len, _val_offset) in &table {
+        let key_end = key_cursor + key_len as usize;
+        if key_end > data.len() {
+            return Err(DocBodyError::OffsetOutOfBounds);
+        }
+        let key = std::str::from_utf8(&data[key_cursor..key_end])
+            .map_err(|_| DocBodyError::InvalidFieldName)?
+            .to_string();
+        key_cursor = key_end;
+        names.push(key);
+    }
+
+    Ok(names)
+}
+
 /// Read a single field by name without decoding any other value.
 ///
 /// Returns `None` when the field is absent.  Only the matching field's
@@ -534,6 +561,24 @@ mod tests {
 
         let missing = read_field_by_name(&buf, "z").expect("lookup");
         assert!(missing.is_none());
+    }
+
+    /// `field_names` lists the keys in encode order without decoding values.
+    #[test]
+    fn field_names_lists_keys_in_encode_order() {
+        let fields = [
+            ("name", Value::text("Alice")),
+            ("score", Value::Integer(30)),
+            ("active", Value::Boolean(true)),
+        ];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+        let mut buf = Vec::new();
+        encode(&refs, &mut buf).expect("encode");
+
+        let names = field_names(&buf).expect("field_names");
+        assert_eq!(names, vec!["name", "score", "active"]);
+
+        assert!(field_names(&[]).is_err());
     }
 
     /// decode_value_at_offset provides direct O(1) access given a known offset.
