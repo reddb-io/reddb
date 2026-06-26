@@ -425,6 +425,17 @@ pub(crate) fn resolve_entity_field<'a>(
         _ => {}
     }
 
+    // `id` aliases the entity's logical id, but only as a last resort:
+    // documents, KV, and named tables carry no user-defined `id` column,
+    // so `WHERE id = <v>` should match by logical id. Schema tables with a
+    // DDL `id` column — and documents whose body promotes an `id` field —
+    // resolve above via `row.get_field`, so the real value always wins.
+    if column == "id" {
+        return Some(Cow::Owned(Value::UnsignedInteger(
+            entity.logical_id().raw(),
+        )));
+    }
+
     None
 }
 
