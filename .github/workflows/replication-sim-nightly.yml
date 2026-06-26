@@ -1,0 +1,39 @@
+name: Nightly Replication Simulation
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  replication-sim:
+    name: Replication Network Simulator
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-replication-sim-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Run heavy seeded simulator profile
+        run: |
+          cargo test --locked --test grouped_replication \
+            replication_network_simulator_heavy_profile \
+            -- --ignored --nocapture
