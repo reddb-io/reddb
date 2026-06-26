@@ -41,6 +41,30 @@ branch in a permanent-pending state); the changeset-automation jobs
 (`Auto-approve patch/minor bumps`, `Verify update compiles`); and third-party
 review bots (`CodeRabbit`).
 
+### Docs-only PRs and the path-filter gap (issue #1307)
+
+`ci.yml` is path-filtered (`paths-ignore: **.md, docs/**, CHANGELOG**,
+LICENSE**`) to keep the heavy suite off doc edits. But the required contexts
+above are *produced by* `ci.yml`, so a PR that changes only those paths skips
+`ci.yml` entirely, none of the 25 contexts ever report, branch protection holds
+them pending, and the PR is **BLOCKED forever** — `gh pr merge --admin` cannot
+bypass it under `enforce_admins`. PR #1306 (issue #1247, an ADR-only change) hit
+exactly this and had to be landed by temporarily lifting protection.
+
+The fix is an **always-green shim** workflow, `.github/workflows/ci-docs.yml`,
+with **no `paths-ignore`** that triggers on exactly the ignored paths and
+re-reports every required context as a fast `echo`-only success. GitHub matches
+required checks by context **name** regardless of the producing workflow, so the
+shim satisfies the gate on doc-only PRs without running the suite or lifting
+protection. On a *mixed* PR (docs + code) both workflows run; the real `ci.yml`
+job always finishes after the shim's echo, so GitHub's most-recent-run rule keeps
+the real result authoritative and the shim never masks a failure.
+
+`.github/required-status-checks.json` is the canonical list of the 25 contexts;
+`scripts/ci-docs-shim-contract.test.mjs` (run inside the `Contract Matrix Gate`
+job) locks the manifest, `ci.yml`, and `ci-docs.yml` together so the shim cannot
+drift out of sync with the gate.
+
 ## Why
 
 The merge gate is the keystone of PRD #964: without it, AFK pushes land on `main`
