@@ -1236,9 +1236,7 @@ impl IndexStore {
                 // ensures the sorted index is actually populated for a document
                 // field, instead of silently building an empty index.
                 let derived_entities = derive_index_entities_for_column(entities, col);
-                let count = self
-                    .sorted
-                    .build_index(collection, col, &derived_entities);
+                let count = self.sorted.build_index(collection, col, &derived_entities);
                 // Also build hash index for equality lookups on same column
                 self.hash
                     .create_index(&HashIndexConfig {
@@ -1657,7 +1655,8 @@ impl IndexStore {
         // the old/new body. No-op for non-document collections, where these
         // columns resolve to nothing in both snapshots.
         for col in &indexed_cols {
-            if old_fields.iter().any(|(f, _)| f == col) || new_fields.iter().any(|(f, _)| f == col) {
+            if old_fields.iter().any(|(f, _)| f == col) || new_fields.iter().any(|(f, _)| f == col)
+            {
                 // A real stored column — already handled by the damage loop.
                 continue;
             }
