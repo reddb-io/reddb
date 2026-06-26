@@ -374,14 +374,18 @@ pub(super) fn execute_runtime_indexed_join(
             left_table_name,
             left_table_alias,
         );
-        let candidate_indexes = left_value
+        // Borrow the candidate list out of `right_index` instead of cloning
+        // it: the probe loop never mutates `right_index`, so the indexed
+        // hash bucket can be iterated in place with zero temporary allocation.
+        let lookup_key = left_value.as_ref().and_then(runtime_join_lookup_key);
+        let candidate_indexes: &[usize] = lookup_key
             .as_ref()
-            .and_then(runtime_join_lookup_key)
-            .and_then(|key| right_index.get(&key).cloned())
+            .and_then(|key| right_index.get(key))
+            .map(Vec::as_slice)
             .unwrap_or_default();
         let mut matched = false;
 
-        for index in candidate_indexes {
+        for &index in candidate_indexes {
             let right_record = &right_records[index];
             if join_condition_matches(
                 left_record,
@@ -4262,6 +4266,80 @@ mod tests {
         assert_eq!(nl[0].get("l_id"), Some(&Value::Integer(7)));
     }
 
+    #[test]
+    fn indexed_join_borrowed_candidate_list_matches_hash_join() {
+        // execute_runtime_indexed_join probes the right-side hash bucket by
+        // borrowing the candidate index list in place (no per-left-row clone,
+        // #1346). Duplicate keys force multi-element candidate lists — the exact
+        // path the borrow touches — and both inner and outer results must stay
+        // identical to the hash join over the same inputs.
+        let left: Vec<_> = [1i64, 1, 2, 3]
+            .iter()
+            .map(|v| jrec("k", Value::Integer(*v)))
+            .collect();
+        let right: Vec<_> = [1i64, 1, 2, 4]
+            .iter()
+            .map(|v| jrec("k", Value::Integer(*v)))
+            .collect();
+        let tq = left_tq();
+        let lf = jfield("k");
+        let rf = jfield("k");
+
+        let indexed_inner = execute_runtime_indexed_join(
+            &tq,
+            &left,
+            None,
+            None,
+            &lf,
+            &right,
+            None,
+            None,
+            &rf,
+            JoinType::Inner,
+        )
+        .expect("indexed inner join");
+        let hashed_inner = execute_runtime_hash_join(
+            &tq,
+            &left,
+            None,
+            None,
+            &lf,
+            &right,
+            None,
+            None,
+            &rf,
+            JoinType::Inner,
+        )
+        .expect("hash inner join");
+        // key 1: 2 left × 2 right = 4, key 2: 1 × 1 = 1, keys 3/4 unmatched → 5
+        assert_eq!(indexed_inner.len(), 5, "indexed inner many-to-many fan-out");
+        assert_eq!(
+            indexed_inner.len(),
+            hashed_inner.len(),
+            "indexed inner row count must match hash join after borrow change"
+        );
+
+        // Left outer pads the unmatched left key (3) with a null right side.
+        let indexed_left = execute_runtime_indexed_join(
+            &tq,
+            &left,
+            None,
+            None,
+            &lf,
+            &right,
+            None,
+            None,
+            &rf,
+            JoinType::LeftOuter,
+        )
+        .expect("indexed left outer join");
+        assert_eq!(
+            indexed_left.len(),
+            6,
+            "indexed left outer must pad the unmatched left row"
+        );
+    }
+
     // ── Benchmark-style timing measurement (#1339) ───────────────────────────
     // Run to capture the baseline cost of hash/nested-loop join build+probe:
     //   CARGO_BUILD_JOBS=1 RUSTFLAGS="-C debuginfo=0" \
@@ -4342,8 +4420,29 @@ mod tests {
             }
             let nl_us = t0.elapsed().as_micros() / iters as u128;
 
-            println!("hash_join   n={n:>5}: avg={hj_us}µs  ({iters} iters)");
-            println!("nested_loop n={n:>5}: avg={nl_us}µs  ({iters} iters)");
+            // Indexed join shares the hash-bucket build but now borrows the
+            // candidate list during probing instead of cloning it per left row
+            // (#1346); measured here to show the clone-reduction impact.
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                let _ = execute_runtime_indexed_join(
+                    &tq,
+                    &left,
+                    None,
+                    None,
+                    &lf,
+                    &right,
+                    None,
+                    None,
+                    &rf,
+                    JoinType::Inner,
+                );
+            }
+            let ix_us = t0.elapsed().as_micros() / iters as u128;
+
+            println!("hash_join    n={n:>5}: avg={hj_us}µs  ({iters} iters)");
+            println!("nested_loop  n={n:>5}: avg={nl_us}µs  ({iters} iters)");
+            println!("indexed_join n={n:>5}: avg={ix_us}µs  ({iters} iters)");
         }
     }
 
