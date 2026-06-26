@@ -1,0 +1,91 @@
+name: CI Docs-Only Gate Shim
+
+# Issue #1307 — make docs-only PRs satisfiable by main's merge gate.
+#
+# `main` branch protection (#975 / ADR 0059, strict + enforce_admins) requires
+# 25 status checks, all produced by `ci.yml`. But `ci.yml` is path-filtered:
+#
+#     pull_request:
+#       paths-ignore: ['**.md', 'docs/**', 'CHANGELOG**', 'LICENSE**']
+#
+# When a PR changes ONLY those paths, `ci.yml` never runs, so none of the 25
+# required checks ever report — branch protection treats them as pending and
+# the PR is BLOCKED forever (PR #1306 had to be landed by briefly lifting
+# protection). A *job* skipped by an `if:` reports "skipped" and satisfies the
+# gate; an entire *workflow* skipped by a path filter reports nothing.
+#
+# This shim is the complement of ci.yml's path filter: it triggers on EXACTLY
+# the doc paths ci.yml ignores, and reports every required context as a cheap
+# no-op success. So:
+#   - code-only PR  -> only ci.yml runs (real checks).
+#   - docs-only PR  -> only this shim runs (green checks; gate satisfied).
+#   - mixed PR      -> both run. They emit the same context names; the shim's
+#                      no-ops finish in seconds while ci.yml's real checks take
+#                      minutes, so the real result is the latest-to-complete and
+#                      is the one branch protection honors — a failing real
+#                      check is NOT masked by the shim.
+#
+# Keep the matrix below in lockstep with branch protection's required set and
+# with ci.yml's job names — scripts/ci_docs_shim_contract.test.mjs enforces it.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
+
+# Mirror ci.yml's cost guard so a follow-up push cancels stale shim runs.
+concurrency:
+  group: ci-docs-shim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Mirror of ci.yml's `gate` sentinel: short-circuit Dependabot and draft PRs.
+  # When this is skipped, the dependent `required` matrix is skipped too — and
+  # skipped jobs still satisfy required status checks, exactly like ci.yml.
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    if: |
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    steps:
+      - run: echo "docs-only PR — ci.yml is path-skipped; this shim satisfies the required gate"
+
+  required:
+    name: ${{ matrix.context }}
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        context:
+          - 'Quality (fmt, check, clippy)'
+          - 'Lint (no untyped serialization)'
+          - 'Version integrity'
+          - 'Contract Matrix Gate'
+          - 'Docs Match Contract Matrix'
+          - 'Helm Chart'
+          - 'AFK Validation Sidecar'
+          - 'RQL Conformance (sqllogictest)'
+          - 'Drivers / Python (cargo check)'
+          - 'Feature Matrix (all-features)'
+          - 'Feature Matrix (backend-d1)'
+          - 'Feature Matrix (backend-s3)'
+          - 'Feature Matrix (backend-turso)'
+          - 'Feature Matrix (no-default)'
+          - 'Feature Matrix (otel)'
+          - 'Driver Param Conformance'
+          - 'Chaos & Drill Suite'
+          - 'Fuzz Parsers'
+          - 'Container Stack'
+          - 'Publish Dry-Run (crates.io)'
+          - 'cargo package dry-run'
+          - 'Windows (build + unit tests)'
+          - 'macOS (build + unit tests)'
+          - 'Test Suite'
+    steps:
+      - run: echo "docs-only PR — required check '${{ matrix.context }}' satisfied by shim (ci.yml is path-skipped)"
