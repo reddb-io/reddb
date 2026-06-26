@@ -2169,4 +2169,86 @@ mod tests {
             .unwrap_err()
             .contains("non-hex char"));
     }
+
+    #[test]
+    fn parse_ai_policy_missing_required_fields_report_specific_errors() {
+        // Each AI clause that parses its options but lacks a required slot
+        // surfaces the dedicated `ok_or_else` / empty-collection error.
+        for (sql, needle) in [
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), model = 'm'))",
+                "MODERATE policy requires provider",
+            ),
+            (
+                "t (id INT, body TEXT) WITH (MODERATE (fields = ('body'), provider = 'o'))",
+                "MODERATE policy requires model",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (outputs = ('caption'), provider = 'o', model = 'm'))",
+                "VISION policy requires image_field",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (image_field = 'photo', provider = 'o', model = 'm'))",
+                "VISION policy requires outputs",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (image_field = 'photo', outputs = ('caption'), model = 'm'))",
+                "VISION policy requires provider",
+            ),
+            (
+                "t (id INT, photo TEXT) WITH (VISION (image_field = 'photo', outputs = ('caption'), provider = 'o'))",
+                "VISION policy requires model",
+            ),
+        ] {
+            let err = parser(sql)
+                .parse_create_table_body()
+                .expect_err("missing required AI policy field should error");
+            assert!(format!("{err}").contains(needle), "sql={sql:?} err={err}");
+        }
+    }
+
+    #[test]
+    fn parse_create_table_ttl_clause_covers_units_and_errors() {
+        // Bare `WITH TTL <n> [unit]` happy path: no unit defaults to seconds.
+        let QueryExpr::CreateTable(table) = parser("t (id INT) WITH TTL 5")
+            .parse_create_table_body()
+            .expect("ttl defaults to seconds")
+        else {
+            panic!("Expected CreateTableQuery");
+        };
+        assert_eq!(table.default_ttl_ms, Some(5_000));
+
+        // Explicit minute unit multiplies through to milliseconds.
+        let QueryExpr::CreateTable(table) = parser("t (id INT) WITH TTL 2 m")
+            .parse_create_table_body()
+            .expect("ttl with minute unit")
+        else {
+            panic!("Expected CreateTableQuery");
+        };
+        assert_eq!(table.default_ttl_ms, Some(120_000));
+
+        for (sql, needle) in [
+            (
+                "t (id INT) WITH BOGUS",
+                "unsupported CREATE TABLE option",
+            ),
+            (
+                "t (id INT) WITH TTL 30 lightyears",
+                "unsupported TTL unit",
+            ),
+            (
+                "t (id INT) WITH TTL 1.5 ms",
+                "must resolve to a whole number of milliseconds",
+            ),
+            (
+                "t (id INT) WITH TTL 1e25 d",
+                "TTL duration is too large",
+            ),
+        ] {
+            let err = parser(sql)
+                .parse_create_table_body()
+                .expect_err("malformed TTL clause should error");
+            assert!(format!("{err}").contains(needle), "sql={sql:?} err={err}");
+        }
+    }
 }
