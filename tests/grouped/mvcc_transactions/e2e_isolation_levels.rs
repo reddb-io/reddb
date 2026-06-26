@@ -180,12 +180,12 @@ fn snapshot_isolation_blocks_read_skew() {
     try_exec(&rt, "CREATE TABLE skew_check (id INT, v INT)").unwrap();
     try_exec(&rt, "INSERT INTO skew_check (id, v) VALUES (1, 10)").unwrap();
     let inserted = rt
-        .execute_query("SELECT red_entity_id FROM skew_check WHERE id = 1")
+        .execute_query("SELECT rid FROM skew_check WHERE id = 1")
         .unwrap();
-    let red_entity_id = match inserted.result.records[0].get("red_entity_id") {
+    let rid = match inserted.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
         Some(Value::Integer(id)) => *id as u64,
-        other => panic!("expected red_entity_id, got {other:?}"),
+        other => panic!("expected rid, got {other:?}"),
     };
 
     // Conn A: BEGIN — captures snapshot, sees v=10.
@@ -221,9 +221,7 @@ fn snapshot_isolation_blocks_read_skew() {
     try_exec(&rt, "COMMIT").unwrap();
 
     let res3 = rt
-        .execute_query(&format!(
-            "SELECT v FROM skew_check WHERE red_entity_id = {red_entity_id}"
-        ))
+        .execute_query(&format!("SELECT v FROM skew_check WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(res3.result.records.len(), 1, "new snapshot sees row");
     assert_eq!(
@@ -242,32 +240,28 @@ fn transaction_update_write_set_rolls_back_cleanly() {
     try_exec(&rt, "CREATE TABLE tx_update_ws (id INT, v INT)").unwrap();
     try_exec(&rt, "INSERT INTO tx_update_ws (id, v) VALUES (1, 10)").unwrap();
     let inserted = rt
-        .execute_query("SELECT red_entity_id FROM tx_update_ws WHERE id = 1")
+        .execute_query("SELECT rid FROM tx_update_ws WHERE id = 1")
         .unwrap();
-    let red_entity_id = match inserted.result.records[0].get("red_entity_id") {
+    let rid = match inserted.result.records[0].get("rid") {
         Some(Value::UnsignedInteger(id)) => *id,
         Some(Value::Integer(id)) => *id as u64,
-        other => panic!("expected red_entity_id, got {other:?}"),
+        other => panic!("expected rid, got {other:?}"),
     };
 
     try_exec(&rt, "BEGIN").unwrap();
     try_exec(
         &rt,
-        &format!("UPDATE tx_update_ws SET v = 20 WHERE red_entity_id = {red_entity_id}"),
+        &format!("UPDATE tx_update_ws SET v = 20 WHERE rid = {rid}"),
     )
     .unwrap();
     let writer = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(writer.result.records[0].get("v"), Some(&Value::Integer(20)));
 
     set_current_connection_id(9951);
     let outsider = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(
         outsider.result.records[0].get("v"),
@@ -278,9 +272,7 @@ fn transaction_update_write_set_rolls_back_cleanly() {
     set_current_connection_id(9950);
     try_exec(&rt, "ROLLBACK").unwrap();
     let after_rollback = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(
         after_rollback.result.records[0].get("v"),
@@ -291,14 +283,12 @@ fn transaction_update_write_set_rolls_back_cleanly() {
     try_exec(&rt, "BEGIN").unwrap();
     try_exec(
         &rt,
-        &format!("UPDATE tx_update_ws SET v = 30 WHERE red_entity_id = {red_entity_id}"),
+        &format!("UPDATE tx_update_ws SET v = 30 WHERE rid = {rid}"),
     )
     .unwrap();
     try_exec(&rt, "COMMIT").unwrap();
     let after_commit = rt
-        .execute_query(&format!(
-            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
-        ))
+        .execute_query(&format!("SELECT v FROM tx_update_ws WHERE rid = {rid}"))
         .unwrap();
     assert_eq!(
         after_commit.result.records[0].get("v"),

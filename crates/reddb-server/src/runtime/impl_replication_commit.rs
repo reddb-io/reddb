@@ -48,6 +48,35 @@ impl RedDBRuntime {
             .unwrap_or(0)
     }
 
+    /// Issue #1243 (PRD #1237 Phase B) — count of primary↔replica
+    /// reconnects observed by this node's replica loop since process
+    /// start. A reconnect is a link that was healthy, dropped (the pull
+    /// loop fell back to `connecting`), and recovered. The initial connect
+    /// is **not** counted. Always `0` on a node whose replica loop never
+    /// ran (e.g. a standalone or primary instance). In-memory only: resets
+    /// to `0` on process restart, like the resync counters above.
+    pub fn replication_reconnects_count(&self) -> u64 {
+        self.inner.replica_link_metrics.reconnects_total()
+    }
+
+    /// Issue #1243 — this node's persisted replica identity, read-only.
+    /// Unlike [`node_id`](Self::node_id) / `resolve_replica_id` this never
+    /// generates or persists a new id; it returns the empty string when one
+    /// has not been assigned yet. Used as the bounded `replica_id`
+    /// dimension on `reddb_replication_reconnects_total`.
+    pub fn replication_replica_id(&self) -> String {
+        self.config_string("red.replication.replica_id", "")
+    }
+
+    /// Issue #1243 — drive the reconnect tracker from a replica health
+    /// state string. Production code reaches this through the replica
+    /// loop's health-persist chokepoint; exposed on the runtime so an
+    /// integration test can drive a deterministic link drop/restore
+    /// without standing up a full gRPC link on a memory-constrained host.
+    pub fn observe_replica_link_state(&self, state: &str) {
+        self.inner.replica_link_metrics.observe_state(state);
+    }
+
     pub fn enforce_primary_replica_retention_limits(
         &self,
     ) -> Vec<(String, reddb_file::ReplicationSlotInvalidationCause)> {

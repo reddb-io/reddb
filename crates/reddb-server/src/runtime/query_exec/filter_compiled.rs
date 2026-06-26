@@ -128,7 +128,7 @@ fn classify_field_inner(
     // System fields take precedence — same order as
     // `resolve_entity_field`.
     match column {
-        "rid" | "red_entity_id" | "entity_id" => return EntityFieldKind::SystemEntityId,
+        "rid" | "entity_id" => return EntityFieldKind::SystemEntityId,
         "created_at" => return EntityFieldKind::SystemCreatedAt,
         "updated_at" => return EntityFieldKind::SystemUpdatedAt,
         "red_sequence_id" => return EntityFieldKind::SystemSequenceId,
@@ -258,6 +258,11 @@ pub(crate) fn resolve_kind<'a>(
                 if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
                 }
+                // Single-source document: a promoted field is no longer
+                // materialised as a column — offset-read it from the body.
+                if let Some(v) = document_promoted_field(row, name) {
+                    return Some(Cow::Owned(v));
+                }
             }
             // Graph node / edge property fallback for queries that
             // run against graph data with column-style references.
@@ -325,6 +330,11 @@ pub(crate) fn resolve_kind<'a>(
                 if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
                 }
+                // Single-source document: offset-read the promoted field
+                // straight from the body when it is no longer materialised.
+                if let Some(v) = document_promoted_field(row, name) {
+                    return Some(Cow::Owned(v));
+                }
             }
             if let Some(value) = resolve_timeseries_field(entity, name) {
                 return Some(value);
@@ -342,6 +352,23 @@ pub(crate) fn resolve_kind<'a>(
             None
         }
         EntityFieldKind::Unknown => None,
+    }
+}
+
+/// Offset-read a single-source document's promoted field from its body.
+///
+/// Returns the value of top-level field `name` decoded from the row's binary
+/// `body` container, or `None` when the row has no binary-container body (the
+/// common case — legacy documents keep materialised columns, non-document rows
+/// have no `body`). This is what lets a bare `WHERE field`/`SELECT field` keep
+/// resolving once promoted columns stop being materialised.
+fn document_promoted_field(
+    row: &crate::storage::unified::entity::RowData,
+    name: &str,
+) -> Option<Value> {
+    match row.get_field("body") {
+        Some(Value::Json(bytes)) => crate::document_body::read_promoted_field(bytes, name),
+        _ => None,
     }
 }
 
@@ -754,7 +781,6 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
 fn collect_required_bloom(filter: &Filter) -> u64 {
     const SYSTEM_FIELDS: &[&str] = &[
         "rid",
-        "red_entity_id",
         "entity_id",
         "created_at",
         "updated_at",
@@ -975,7 +1001,7 @@ mod tests {
     fn classify_system_entity_id() {
         let f = FieldRef::TableColumn {
             table: String::new(),
-            column: "red_entity_id".to_string(),
+            column: "rid".to_string(),
         };
         assert!(matches!(
             classify_field(&f, "users", "u"),
@@ -1129,7 +1155,7 @@ mod tests {
         let f = Filter::Compare {
             field: FieldRef::TableColumn {
                 table: String::new(),
-                column: "red_entity_id".to_string(),
+                column: "rid".to_string(),
             },
             op: CompareOp::Eq,
             value: Value::UnsignedInteger(42),

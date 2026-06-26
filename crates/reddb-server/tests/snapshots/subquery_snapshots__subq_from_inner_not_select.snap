@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"SELECT * FROM (DELETE FROM t) AS x\")"
 ---
 input: "SELECT * FROM (DELETE FROM t) AS x"
 kind:  Syntax
-error: Parse error at 1:15: Unexpected token: ( (expected: identifier)
+error: Parse error at 1:16: subquery in FROM must start with SELECT

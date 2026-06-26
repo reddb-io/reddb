@@ -1,4 +1,4 @@
 input = "FROM hosts h JOIN PATH FROM host('host:a') TO host('host:b') LIMIT 4 AS p ON h.id = p.entity_id WHERE h.status = 'active' RETURN h.id, p.entity_id"
 expected_kind = "Join"
-source = "crates/reddb-server/src/storage/query/parser/tests.rs:791"
+source = "crates/reddb-rql/src/parser/tests.rs:791"
 kind = "positive"

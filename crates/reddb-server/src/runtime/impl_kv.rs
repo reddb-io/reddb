@@ -220,8 +220,22 @@ impl<'a> KvAtomicOps<'a> {
             &value,
         ));
 
-        // Delete old entry so we can create fresh (handles TTL refresh).
-        if was_present {
+        // Versioned KV retains MVCC history: the prior visible version is
+        // tombstoned (set_xmax) *after* the new version is created, so both
+        // coexist physically — exactly like a table-row update. Non-versioned
+        // KV keeps last-writer-wins: pre-delete the old row before creating
+        // fresh (also handles TTL refresh).
+        let versioned = self.is_versioned_collection(model, collection);
+        // Capture the prior *visible* version (if any) before the write so we
+        // can tombstone it. On a re-PUT after a delete (`was_present` false)
+        // there is no visible prior, but earlier versions still exist
+        // physically — see the xmin restamp below.
+        let prior_versioned_entity = if versioned && was_present {
+            self.get_entity(model, collection, key)?
+        } else {
+            None
+        };
+        if was_present && !versioned {
             self.delete(model, collection, key)?;
         }
 
@@ -240,6 +254,55 @@ impl<'a> KvAtomicOps<'a> {
                 value,
                 metadata,
             })?;
+
+        // Every versioned PUT stamps the new version's xmin from ONE monotonic
+        // xid (begin()/commit() or the active tx xid) — NOT the autocommit
+        // pool, whose batched reservation is not monotonic against commit
+        // root_xids and would let AS OF resolve the wrong version. The prior
+        // visible version (if any) is tombstoned with that SAME xid, so
+        // old.xmax == new.xmin and exactly one version is visible to any
+        // snapshot (mirrors `apply_loaded_sql_update_row_core`). Restamping
+        // unconditionally also fixes the re-PUT-after-delete case, where no
+        // visible prior exists but the pool xmin would still scramble ordering
+        // against existing tombstoned versions.
+        if versioned {
+            let version_xid = match self.runtime.current_xid() {
+                Some(xid) => xid,
+                None => {
+                    let mgr = self.runtime.snapshot_manager();
+                    let xid = mgr.begin();
+                    mgr.commit(xid);
+                    xid
+                }
+            };
+            if let Some(new_entity) = output.entity.clone() {
+                self.restamp_xmin(collection, new_entity, version_xid)?;
+            }
+            if let Some(prior) = prior_versioned_entity {
+                // First-committer-wins (ADR 0014): inside an explicit
+                // transaction, defer the prior version's tombstone to the
+                // commit-time conflict check by recording it as a pending
+                // versioned update — exactly like a table-row versioned
+                // UPDATE (`persist_applied_entity_mutations`). The check
+                // rejects this txn's COMMIT if the prior version was
+                // already tombstoned by a concurrent committed writer.
+                // Autocommit (`current_xid()` is None) commits eagerly and
+                // records nothing, matching the table path.
+                let previous_xmax = prior.xmax;
+                let old_id = prior.id;
+                self.tombstone_version(collection, prior, version_xid)?;
+                if self.runtime.current_xid().is_some() {
+                    self.runtime.record_pending_versioned_update(
+                        crate::runtime::impl_core::current_connection_id(),
+                        collection,
+                        old_id,
+                        output.id,
+                        version_xid,
+                        previous_xmax,
+                    );
+                }
+            }
+        }
         if model == crate::catalog::CollectionModel::Kv {
             self.runtime
                 .inner
@@ -280,6 +343,56 @@ impl<'a> KvAtomicOps<'a> {
         key: &str,
     ) -> RedDBResult<bool> {
         self.ensure_declared_model(model, collection)?;
+
+        // Versioned KV deletes tombstone the prior visible version
+        // (set_xmax) instead of reclaiming it physically, so history and
+        // time-travel reads survive — VACUUM reclaims the version later.
+        if self.is_versioned_collection(model, collection) {
+            let Some(entity) = self.get_entity(model, collection, key)? else {
+                return Ok(false);
+            };
+            let id = entity.id;
+            let value = kv_value_from_entity(&entity);
+            let xid = self.runtime.current_xid().unwrap_or_else(|| {
+                let mgr = self.runtime.snapshot_manager();
+                let xid = mgr.begin();
+                mgr.commit(xid);
+                xid
+            });
+            // First-committer-wins (ADR 0014): inside an explicit
+            // transaction, defer this tombstone to the commit-time
+            // conflict check by recording it as a pending tombstone —
+            // exactly like a table-row DELETE (`delete_entities_batch`).
+            // The check rejects this txn's COMMIT if the version was
+            // already tombstoned by a concurrent committed writer.
+            // Autocommit (`current_xid()` is None) commits eagerly and
+            // records nothing, matching the table path.
+            let previous_xmax = entity.xmax;
+            self.tombstone_version(collection, entity, xid)?;
+            if self.runtime.current_xid().is_some() {
+                self.runtime.record_pending_tombstone(
+                    crate::runtime::impl_core::current_connection_id(),
+                    collection,
+                    id,
+                    xid,
+                    previous_xmax,
+                );
+            }
+            self.runtime.inner.kv_tag_index.remove(collection, key);
+            self.runtime.record_kv_watch_event(
+                crate::replication::cdc::ChangeOperation::Delete,
+                collection,
+                key,
+                id.raw(),
+                value
+                    .as_ref()
+                    .map(crate::presentation::entity_json::storage_value_to_json),
+                None,
+            );
+            self.runtime.inner.kv_stats.incr_deletes();
+            return Ok(true);
+        }
+
         let found = self.get_entry(model, collection, key)?;
         if let Some((value, id)) = found {
             let store = self.runtime.inner.db.store();
@@ -307,6 +420,60 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             Ok(false)
         }
+    }
+
+    /// Tombstone a KV version by stamping `xmax = xid` and persisting it.
+    ///
+    /// The physical row stays alive (history); VACUUM reclaims it once no
+    /// snapshot can see it. Used by versioned PUT (old version) and
+    /// versioned DELETE.
+    fn tombstone_version(
+        &self,
+        collection: &str,
+        mut entity: crate::storage::UnifiedEntity,
+        xid: crate::storage::transaction::snapshot::Xid,
+    ) -> RedDBResult<()> {
+        let store = self.runtime.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(());
+        };
+        let id = entity.id;
+        entity.set_xmax(xid);
+        manager
+            .update(entity.clone())
+            .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
+        store
+            .persist_entities_to_pager(collection, std::slice::from_ref(&entity))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // The tombstoned version drops out of the live context index but
+        // stays physically resident for AS OF reads until VACUUM.
+        store.context_index().remove_entity(id);
+        Ok(())
+    }
+
+    /// Restamp a freshly-created KV version's `xmin` to a monotonic version
+    /// xid and persist it. `create_kv` stamps a (non-monotonic) autocommit
+    /// pool xid; the versioned write path overrides it so the new version's
+    /// xmin equals the old version's xmax, preserving AS OF ordering against
+    /// commit root_xids.
+    fn restamp_xmin(
+        &self,
+        collection: &str,
+        mut entity: crate::storage::UnifiedEntity,
+        xid: crate::storage::transaction::snapshot::Xid,
+    ) -> RedDBResult<()> {
+        let store = self.runtime.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(());
+        };
+        entity.set_xmin(xid);
+        manager
+            .update(entity.clone())
+            .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
+        store
+            .persist_entities_to_pager(collection, std::slice::from_ref(&entity))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        Ok(())
     }
 
     /// Atomically increment (or decrement) a counter key. Returns the new value.
@@ -574,6 +741,25 @@ impl<'a> KvAtomicOps<'a> {
         Ok(kv_value_from_entity(&entity).map(|value| (value, entity.id)))
     }
 
+    /// Whether `collection` retains MVCC history (opted into versioning).
+    ///
+    /// Versioned KV reads must do MVCC version-selection; non-versioned
+    /// collections (config `red_config`, the secrets vault) keep the
+    /// last-writer-wins fast path. Internal `red_*` collections are
+    /// never versioned, so this stays cheap for them.
+    fn is_versioned_collection(
+        &self,
+        model: crate::catalog::CollectionModel,
+        collection: &str,
+    ) -> bool {
+        // Only plain KV ever opts into versioning; the vault and config
+        // tiers are non-versioned by construction.
+        if model != crate::catalog::CollectionModel::Kv {
+            return false;
+        }
+        self.runtime.vcs_is_versioned(collection).unwrap_or(false)
+    }
+
     fn get_entity(
         &self,
         model: crate::catalog::CollectionModel,
@@ -585,16 +771,37 @@ impl<'a> KvAtomicOps<'a> {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
         };
+
+        // Versioned KV: multiple physical versions per logical key can
+        // coexist (tombstoned + live). Select the snapshot-visible
+        // version with the greatest xmin — mirroring the table-row
+        // resolver's per-logical-id rule, keyed on the KV `key` field.
+        if self.is_versioned_collection(model, collection) {
+            let resolver =
+                crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
+            let mut best: Option<crate::storage::UnifiedEntity> = None;
+            for entity in manager.query_all(|_| true) {
+                if !kv_entity_has_key(&entity, key) {
+                    continue;
+                }
+                if resolver.resolve_read_candidate(&entity).is_none() {
+                    continue;
+                }
+                let better = match &best {
+                    Some(current) => entity.xmin >= current.xmin,
+                    None => true,
+                };
+                if better {
+                    best = Some(entity);
+                }
+            }
+            return Ok(best);
+        }
+
         let entities = manager.query_all(|_| true);
         for entity in entities {
-            if let crate::storage::EntityData::Row(ref row) = entity.data {
-                if let Some(ref named) = row.named {
-                    if let Some(crate::storage::schema::Value::Text(ref k)) = named.get("key") {
-                        if &**k == key {
-                            return Ok(Some(entity));
-                        }
-                    }
-                }
+            if kv_entity_has_key(&entity, key) {
+                return Ok(Some(entity));
             }
         }
         Ok(None)
@@ -610,6 +817,16 @@ impl<'a> KvAtomicOps<'a> {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(Vec::new());
         };
+        // Versioned KV: per logical key, keep the snapshot-visible
+        // version with the greatest xmin; keys whose every version is
+        // tombstoned (no visible version) drop out entirely. Mirrors
+        // the per-key version-selection used by `get_entity`.
+        let versioned =
+            self.is_versioned_collection(crate::catalog::CollectionModel::Kv, collection);
+        let resolver = versioned.then(|| {
+            crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
+        });
+
         let mut entries: std::collections::BTreeMap<String, crate::storage::UnifiedEntity> =
             std::collections::BTreeMap::new();
         for entity in manager.query_all(|_| true) {
@@ -630,7 +847,15 @@ impl<'a> KvAtomicOps<'a> {
             if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
                 continue;
             }
+            if let Some(resolver) = resolver.as_ref() {
+                // Skip versions not visible to the current snapshot
+                // (tombstoned by a visible deleter, or not yet created).
+                if resolver.resolve_read_candidate(&entity).is_none() {
+                    continue;
+                }
+            }
             let should_replace = match entries.get(&key) {
+                Some(existing) if versioned => entity.xmin >= existing.xmin,
                 Some(existing) => entity.id.raw() >= existing.id.raw(),
                 None => true,
             };
@@ -2623,6 +2848,18 @@ fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value>
         }
     }
     None
+}
+
+/// Whether a KV row entity carries the logical `key`.
+fn kv_entity_has_key(entity: &crate::storage::UnifiedEntity, key: &str) -> bool {
+    if let crate::storage::EntityData::Row(ref row) = entity.data {
+        if let Some(ref named) = row.named {
+            if let Some(crate::storage::schema::Value::Text(ref k)) = named.get("key") {
+                return &**k == key;
+            }
+        }
+    }
+    false
 }
 
 fn insert_kv_json_path(root: &mut crate::json::Value, path: &str, value: crate::json::Value) {

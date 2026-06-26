@@ -1,4 +1,4 @@
 input = "FROM docs d JOIN VECTOR SEARCH embeddings SIMILAR TO [0.1, 0.2] LIMIT 5 AS sim ON d.id = sim.entity_id RETURN d.id, sim.score"
 expected_kind = "Join"
-source = "crates/reddb-server/src/storage/query/parser/tests.rs:756"
+source = "crates/reddb-rql/src/parser/tests.rs:756"
 kind = "positive"

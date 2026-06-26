@@ -82,7 +82,7 @@ fn insert_graph_nodes(
         );
         assert_eq!(result.result.records.len(), end - start);
         for row in 0..result.result.records.len() {
-            ids.push(uint_at(&result, row, "red_entity_id"));
+            ids.push(uint_at(&result, row, "rid"));
         }
     }
     ids

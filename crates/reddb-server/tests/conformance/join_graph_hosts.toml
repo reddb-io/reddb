@@ -1,4 +1,4 @@
 input = "FROM hosts h JOIN GRAPH (n:Host)-[:AFFECTED_BY]->(v) AS g ON h.ip = n.id"
 expected_kind = "Join"
-source = "crates/reddb-server/src/storage/query/parser/tests.rs:639"
+source = "crates/reddb-rql/src/parser/tests.rs:639"
 kind = "positive"

@@ -34,8 +34,8 @@ Top-level SQL dispatch:
 ## Items and RedDB IDs
 
 Query results expose RedDB items with a public envelope. `rid` is the RedDB ID
-for the item; it replaces older public aliases such as `_entity_id`,
-`red_entity_id`, and `entity_id`.
+for the item; it replaces older public aliases such as `_entity_id`
+and `entity_id`.
 
 | Field | Type | Description |
 | --- | --- | --- |

@@ -1191,6 +1191,11 @@ struct RuntimeInner {
     /// loop on `Gap` / `Divergence` / `Apply` errors so /metrics
     /// surfaces them as `reddb_replica_apply_errors_total{kind}`.
     replica_apply_metrics: Arc<crate::replication::logical::ReplicaApplyMetrics>,
+    /// Issue #1243 (PRD #1237 Phase B) — primary↔replica reconnect counter
+    /// bumped by the replica loop's health-persist chokepoint when the link
+    /// drops and restores. Surfaced as `reddb_replication_reconnects_total`
+    /// and in the red-ui replica status read model.
+    replica_link_metrics: Arc<crate::replication::reconnect::ReplicaLinkMetrics>,
     /// PLAN.md Phase 4.4 — per-caller QPS quotas. Disabled (no-op)
     /// when `RED_MAX_QPS_PER_CALLER` is unset.
     quota_bucket: crate::runtime::quota_bucket::QuotaBucket,

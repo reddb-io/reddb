@@ -106,6 +106,17 @@ impl<'a> DmlTargetScan<'a> {
                 if let Some(entity) = entity {
                     return Ok(self.target_ids_from_entities([entity]));
                 }
+                // Non-table-row entities (e.g. vectors) carry their
+                // physical id as their identity and are invisible to the
+                // table-row logical-id resolver above. Fall back to a
+                // direct physical-id lookup so `DELETE FROM <vector>
+                // WHERE rid = N` actually targets the vector instead of
+                // silently matching nothing.
+                if let Some(entity) = store.get(self.table, logical_id) {
+                    if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+                        return Ok(self.target_ids_from_entities([entity]));
+                    }
+                }
                 return Ok(Vec::new());
             }
         }
