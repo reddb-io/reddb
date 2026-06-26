@@ -374,7 +374,7 @@ mod tests {
             "x"
         );
         assert!(from_value::<String>(Value::Bool(true)).is_err());
-        assert_eq!(from_value::<bool>(Value::Bool(false)).unwrap(), false);
+        assert!(!from_value::<bool>(Value::Bool(false)).unwrap());
         assert!(from_value::<bool>(Value::String("no".to_string())).is_err());
         assert_eq!(from_value::<u8>(Value::Number(255.0)).unwrap(), 255);
         assert_eq!(from_value::<u16>(Value::Number(256.0)).unwrap(), 256);
