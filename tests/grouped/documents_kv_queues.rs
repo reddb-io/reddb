@@ -6,6 +6,9 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "docs_kv_queue/e2e_issue_1363_document_where_id_and_body.rs"]
+mod e2e_issue_1363_document_where_id_and_body;
+
 #[path = "docs_kv_queue/e2e_document_kv_compound_updates.rs"]
 mod e2e_document_kv_compound_updates;
 
