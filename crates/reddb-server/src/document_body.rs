@@ -45,6 +45,46 @@ pub(crate) fn decode_container_to_json(bytes: &[u8]) -> Option<JsonValue> {
     Some(JsonValue::Object(map))
 }
 
+/// Offset-read a single promoted field from a stored document body.
+///
+/// Returns the field's storage [`Value`] decoded directly from the binary
+/// container by offset ([`document_body_codec::read_field_by_name`]) — no
+/// other field is touched. Returns `None` when `bytes` is not a binary
+/// container (legacy plain-JSON bodies still carry materialised promoted
+/// columns, so this fallback is never needed for them) or the field is absent.
+///
+/// This is the read seam that makes the body the single source of truth: with
+/// promoted columns no longer materialised on the write path, a `WHERE`/
+/// projection on a top-level field routes here to read it straight from the body.
+pub(crate) fn read_promoted_field(bytes: &[u8], name: &str) -> Option<Value> {
+    if !is_binary_container(bytes) {
+        return None;
+    }
+    document_body_codec::read_field_by_name(bytes, name)
+        .ok()
+        .flatten()
+}
+
+/// Decode every top-level field of a binary document body as storage values.
+///
+/// Returns `None` when `bytes` is not a binary container. Used to expand a
+/// `SELECT *` over a single-source document back into its promoted columns.
+pub(crate) fn promoted_fields(bytes: &[u8]) -> Option<Vec<(String, Value)>> {
+    if !is_binary_container(bytes) {
+        return None;
+    }
+    document_body_codec::decode(bytes).ok()
+}
+
+/// List the top-level field names of a binary document body (offset-read of
+/// the keys section only). Returns `None` for non-container bytes.
+pub(crate) fn container_field_names(bytes: &[u8]) -> Option<Vec<String>> {
+    if !is_binary_container(bytes) {
+        return None;
+    }
+    document_body_codec::field_names(bytes).ok()
+}
+
 /// Serialise a document body for storage in the `body` field.
 ///
 /// With `binary` set and an object body, produce the native binary container;
@@ -130,6 +170,38 @@ mod tests {
         let bytes = serialize_document_body(&original, true).expect("serialize");
         let decoded = decode_container_to_json(&bytes).expect("decode");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn read_promoted_field_offset_reads_from_binary_body() {
+        let bytes = serialize_document_body(&body(), true).expect("serialize");
+        assert_eq!(
+            read_promoted_field(&bytes, "name"),
+            Some(Value::text("Alice"))
+        );
+        assert_eq!(read_promoted_field(&bytes, "age"), Some(Value::Integer(30)));
+        assert_eq!(read_promoted_field(&bytes, "missing"), None);
+    }
+
+    #[test]
+    fn promoted_field_helpers_ignore_plain_json_bodies() {
+        // Legacy plain-JSON bodies still carry materialised promoted columns,
+        // so the body-read fallback must stay inert for them.
+        let bytes = serialize_document_body(&body(), false).expect("serialize");
+        assert_eq!(read_promoted_field(&bytes, "name"), None);
+        assert_eq!(promoted_fields(&bytes), None);
+        assert_eq!(container_field_names(&bytes), None);
+    }
+
+    #[test]
+    fn promoted_fields_and_names_cover_top_level_keys() {
+        let bytes = serialize_document_body(&body(), true).expect("serialize");
+        let names = container_field_names(&bytes).expect("names");
+        for key in ["name", "age", "email", "tags", "profile"] {
+            assert!(names.contains(&key.to_string()), "missing {key}");
+        }
+        let fields = promoted_fields(&bytes).expect("fields");
+        assert_eq!(fields.len(), names.len());
     }
 
     #[test]
