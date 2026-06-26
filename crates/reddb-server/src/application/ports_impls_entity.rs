@@ -1544,12 +1544,7 @@ impl RedDBRuntime {
                     )?;
                     if body != previous_body {
                         context_index_dirty = true;
-                        replace_document_row_body(
-                            named,
-                            body,
-                            binary_body,
-                            &mut modified_columns,
-                        )?;
+                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
                     }
                 }
 
