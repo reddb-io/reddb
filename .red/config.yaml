@@ -14,6 +14,17 @@ plugins:
 
     afk:
       # ----------------------------------------------------------------
+      # CI-aware merge (#812). On this enforce_admins base an admin-merge
+      # cannot bypass required checks, so a completed PR whose checks
+      # FAIL or stay PENDING is NOT a merge conflict: mark blocked:ci →
+      # ready-for-human with the PR LEFT OPEN, and never re-run the agent.
+      # Kills the re-claim churn where a failed-CI issue bounced back to
+      # ready-for-agent and a second worker redid the whole thing.
+      # ----------------------------------------------------------------
+      merge:
+        ci_aware: true
+
+      # ----------------------------------------------------------------
       # Backpressure — shell gates that run AFTER the agent's automatic
       # feedback loop (`pnpm test`/cargo check/etc. on touched packages)
       # and BEFORE the merge. If any command exits non-zero, the merge
