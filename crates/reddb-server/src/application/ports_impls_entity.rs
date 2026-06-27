@@ -1250,6 +1250,24 @@ fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<Json
     }
 }
 
+fn document_body_from_assignment(value: &Value) -> RedDBResult<JsonValue> {
+    match value {
+        Value::Json(bytes) | Value::Blob(bytes) => crate::json::from_slice(bytes)
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Text(text) => crate::json::from_str(text.as_ref())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Integer(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::UnsignedInteger(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Float(value) => crate::json::from_str(&value.to_string())
+            .map_err(|err| crate::RedDBError::Query(format!("invalid JSON body: {err}"))),
+        other => Err(crate::RedDBError::Query(format!(
+            "column 'body' expected JSON body, got {other:?}"
+        ))),
+    }
+}
+
 fn document_body_set_operation(column: &str, value: Value) -> PatchEntityOperation {
     PatchEntityOperation {
         op: PatchEntityOperationType::Set,
@@ -1260,7 +1278,7 @@ fn document_body_set_operation(column: &str, value: Value) -> PatchEntityOperati
     }
 }
 
-fn replace_document_row_body(
+fn replace_document_fields_body(
     fields: &mut HashMap<String, Value>,
     body: JsonValue,
     binary: bool,
@@ -1294,6 +1312,23 @@ fn replace_document_row_body(
         }
     }
 
+    Ok(())
+}
+
+fn replace_document_row_body(
+    row: &mut crate::storage::unified::entity::RowData,
+    body: JsonValue,
+    binary: bool,
+    modified_columns: &mut Vec<String>,
+) -> RedDBResult<()> {
+    let fields = row.named.get_or_insert_with(Default::default);
+    replace_document_fields_body(fields, body, binary, modified_columns)?;
+
+    // Full body replacement rebuilds the document from the canonical `body`.
+    // Stale positional/schema values would otherwise leak back through JSON
+    // presentation even after the named map was pruned.
+    row.columns.clear();
+    row.schema = None;
     Ok(())
 }
 
@@ -1468,6 +1503,7 @@ impl RedDBRuntime {
                 let mut field_ops = Vec::new();
                 let mut metadata_ops = Vec::new();
                 let mut document_body_ops = Vec::new();
+                let mut document_body_replace: Option<JsonValue> = None;
                 let has_patch_operations = !operations.is_empty();
 
                 for mut op in operations {
@@ -1479,6 +1515,27 @@ impl RedDBRuntime {
 
                     match root {
                         "body" if is_document_collection => {
+                            if op.path.len() == 1 {
+                                match op.op {
+                                    PatchEntityOperationType::Set
+                                    | PatchEntityOperationType::Replace => {
+                                        let Some(value) = op.value.take() else {
+                                            return Err(crate::RedDBError::Query(
+                                                "document body replacement requires a value"
+                                                    .to_string(),
+                                            ));
+                                        };
+                                        document_body_replace = Some(value);
+                                    }
+                                    PatchEntityOperationType::Unset => {
+                                        return Err(crate::RedDBError::Query(
+                                            "document body cannot be unset; replace it instead"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                                continue;
+                            }
                             if op.path.len() < 2 {
                                 return Err(crate::RedDBError::Query(
                                     "document body patch paths require a nested key; use payload.body for full replacement"
@@ -1525,18 +1582,22 @@ impl RedDBRuntime {
                     }
                 }
 
-                if !document_body_ops.is_empty() {
+                if document_body_replace.is_some() || !document_body_ops.is_empty() {
                     context_index_dirty = true;
-                    let named = row.named.get_or_insert_with(Default::default);
-                    let mut body = document_body_from_named(named)?;
+                    let mut body = match document_body_replace {
+                        Some(body) => body,
+                        None => document_body_from_named(
+                            row.named.get_or_insert_with(Default::default),
+                        )?,
+                    };
                     apply_patch_operations_to_json(&mut body, &document_body_ops)
                         .map_err(crate::RedDBError::Query)?;
-                    replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
+                    replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
                 }
 
                 if is_document_collection && !has_patch_operations {
-                    let named = row.named.get_or_insert_with(Default::default);
-                    let mut body = document_body_from_named(named)?;
+                    let mut body =
+                        document_body_from_named(row.named.get_or_insert_with(Default::default))?;
                     let previous_body = body.clone();
                     apply_document_json_merge_patch(
                         &mut body,
@@ -1544,7 +1605,7 @@ impl RedDBRuntime {
                     )?;
                     if body != previous_body {
                         context_index_dirty = true;
-                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
                     }
                 }
 
@@ -1560,7 +1621,7 @@ impl RedDBRuntime {
                         let mut body = document_body_from_named(named)?;
                         apply_patch_operations_to_json(&mut body, &field_ops)
                             .map_err(crate::RedDBError::Query)?;
-                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
                     } else {
                         for op in &field_ops {
                             if let Some(col) = op.path.first() {
@@ -1596,7 +1657,7 @@ impl RedDBRuntime {
                                 map.insert(key.clone(), value.clone());
                             }
                         }
-                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
                     } else {
                         for (key, value) in fields {
                             modified_columns.push(key.clone());
@@ -2085,44 +2146,71 @@ impl RedDBRuntime {
             .collection_contract(&collection)
             .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
             .unwrap_or(false);
-        let mut static_row_assignments = Vec::new();
-        let mut dynamic_row_assignments = Vec::new();
-        let mut document_body_ops = Vec::new();
         if is_document_collection {
-            for (column, value) in static_field_assignments.iter().cloned() {
-                if column == "body" {
-                    static_row_assignments.push((column, value));
-                } else {
-                    document_body_ops.push(document_body_set_operation(&column, value));
+            // #1366: when a SET assigns to `body`, treat it as a FULL REPLACE of
+            // the stored document — drop other column assignments, the new body
+            // is the single source of truth.
+            let body_assignment = static_field_assignments
+                .iter()
+                .chain(dynamic_field_assignments.iter())
+                .rev()
+                .find(|(column, _)| column == "body")
+                .cloned();
+
+            match body_assignment {
+                Some((_, value)) => {
+                    let body = document_body_from_assignment(&value)?;
+                    replace_document_row_body(
+                        row,
+                        body,
+                        self.binary_document_body_enabled(),
+                        &mut modified_columns,
+                    )?;
+                    context_index_dirty = true;
                 }
-            }
-            for (column, value) in dynamic_field_assignments {
-                if column == "body" {
-                    dynamic_row_assignments.push((column, value));
-                } else {
-                    document_body_ops.push(document_body_set_operation(&column, value));
+                None => {
+                    // #1365: no `body` assignment — fall back to nested-path
+                    // partial update via document_body_set_operation.
+                    let mut static_row_assignments = Vec::new();
+                    let mut dynamic_row_assignments = Vec::new();
+                    let mut document_body_ops = Vec::new();
+                    for (column, value) in static_field_assignments.iter().cloned() {
+                        if column == "body" {
+                            static_row_assignments.push((column, value));
+                        } else {
+                            document_body_ops.push(document_body_set_operation(&column, value));
+                        }
+                    }
+                    for (column, value) in dynamic_field_assignments {
+                        if column == "body" {
+                            dynamic_row_assignments.push((column, value));
+                        } else {
+                            document_body_ops.push(document_body_set_operation(&column, value));
+                        }
+                    }
+                    apply_row_field_assignments_raw(row, static_row_assignments);
+                    apply_row_field_assignments_raw(row, dynamic_row_assignments);
+                    if !document_body_ops.is_empty() {
+                        let mut body = document_body_from_named(
+                            row.named.get_or_insert_with(Default::default),
+                        )?;
+                        apply_patch_operations_to_json(&mut body, &document_body_ops)
+                            .map_err(crate::RedDBError::Query)?;
+                        replace_document_row_body(
+                            row,
+                            body,
+                            self.binary_document_body_enabled(),
+                            &mut modified_columns,
+                        )?;
+                        context_index_dirty = true;
+                    }
                 }
             }
         } else {
-            static_row_assignments.extend(static_field_assignments.iter().cloned());
-            dynamic_row_assignments = dynamic_field_assignments;
-        }
-
-        apply_row_field_assignments_raw(row, static_row_assignments);
-        apply_row_field_assignments_raw(row, dynamic_row_assignments);
-
-        if !document_body_ops.is_empty() {
-            let named = row.named.get_or_insert_with(Default::default);
-            let mut body = document_body_from_named(named)?;
-            apply_patch_operations_to_json(&mut body, &document_body_ops)
-                .map_err(crate::RedDBError::Query)?;
-            replace_document_row_body(
-                named,
-                body,
-                self.binary_document_body_enabled(),
-                &mut modified_columns,
-            )?;
-            context_index_dirty = true;
+            // Non-document collection: every assignment is a regular row column.
+            let mut all_assignments: Vec<(String, Value)> = static_field_assignments.to_vec();
+            all_assignments.extend(dynamic_field_assignments);
+            apply_row_field_assignments_raw(row, all_assignments);
         }
 
         for (key, value) in static_metadata_assignments

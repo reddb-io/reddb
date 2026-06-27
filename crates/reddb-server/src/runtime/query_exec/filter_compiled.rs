@@ -263,6 +263,15 @@ pub(crate) fn resolve_kind<'a>(
                 if let Some(v) = document_promoted_field(row, name) {
                     return Some(Cow::Owned(v));
                 }
+                // Document without a body-promoted `id` falls back to the
+                // entity logical id — keeps `WHERE id = <v>` matching the
+                // stable row identity (#1363) without overriding a real
+                // `id` column or a body-promoted `id` field above.
+                if name == "id" && row_has_document_body(row) {
+                    return Some(Cow::Owned(Value::UnsignedInteger(
+                        entity.logical_id().raw(),
+                    )));
+                }
             }
             // Graph node / edge property fallback for queries that
             // run against graph data with column-style references.
@@ -330,6 +339,11 @@ pub(crate) fn resolve_kind<'a>(
         }
         EntityFieldKind::RowFieldFast { name, idx } => {
             if let Some(row) = entity.data.as_row() {
+                if name == "id" && row_has_document_body(row) {
+                    return Some(Cow::Owned(Value::UnsignedInteger(
+                        entity.logical_id().raw(),
+                    )));
+                }
                 // Fast path (bulk-insert entities): columns[] in schema order, O(1).
                 if row.named.is_none() {
                     return row.columns.get(*idx as usize).map(Cow::Borrowed);
@@ -361,6 +375,15 @@ pub(crate) fn resolve_kind<'a>(
         }
         EntityFieldKind::Unknown => None,
     }
+}
+
+fn row_has_document_body(row: &crate::storage::unified::entity::RowData) -> bool {
+    row.named.as_ref().is_some_and(|named| {
+        matches!(
+            named.get("body"),
+            Some(Value::Json(_)) | Some(Value::Blob(_))
+        )
+    })
 }
 
 /// Offset-read a single-source document's promoted field from its body.
