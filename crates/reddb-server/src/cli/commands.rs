@@ -143,7 +143,7 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "mcp",
       summary: "Start MCP server for AI agent integration",
-      usage: "red mcp [--path /data]",
+      usage: "red mcp [--path /data | --url <URI>] [--token <token>]",
       flags: mcp_flags(),
     },
     CommandDef {
@@ -731,10 +731,16 @@ fn inspect_flags() -> Vec<FlagSchema> {
 }
 
 fn mcp_flags() -> Vec<FlagSchema> {
-    vec![FlagSchema::new("path")
-        .with_short('d')
-        .with_description("Data directory path (omit for in-memory)")
-        .with_default("")]
+    vec![
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Data directory path (omit for in-memory)")
+            .with_default(""),
+        FlagSchema::new("url")
+            .with_description("Remote or embedded MCP connection URI; overrides REDDB_MCP_URI"),
+        FlagSchema::new("token")
+            .with_description("Bearer token fallback when --url has no userinfo"),
+    ]
 }
 
 fn connect_flags() -> Vec<FlagSchema> {

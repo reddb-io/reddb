@@ -122,6 +122,10 @@ Recommended checked-in `.mcp.json`:
 
 Set `REDDB_MCP_URI` in the host environment for file-backed or remote targets; do not commit credentials into `.mcp.json`.
 
+### LLM reference
+
+Use `docs/llms.txt` for the generated agent-facing RedDB reference. The docs site publishes the same file at `/llms.txt`, and MCP knowledge resources serve the same generated source sections.
+
 ## Development workflow
 
 - Work in an isolated worktree; do not change the primary checkout's branch for task work.

@@ -6,6 +6,12 @@ model-checked by TLC in CI (`.github/workflows/tla-check.yml`). The models are
 deliberately small (3 nodes / 3 terms) so they exhaust their state space in
 seconds-to-minutes, not hours.
 
+The randomized executable counterpart is the
+[replication Maelstrom-style protocol model](../../docs/testing/replication-maelstrom-model.md).
+It replays the same safety envelope under deterministic message loss, delay,
+reorder, partition, crash, and restart schedules; it is not the later black-box
+Jepsen-style cluster harness.
+
 | Module | Property proved | Maps to |
 | --- | --- | --- |
 | [`ElectionSafety.tla`](ElectionSafety.tla) | No two nodes hold primary in the same term. | `replication/election.rs` (`Voter::consider`, `quorum_threshold`); ADR 0030 "no two primaries in a term" (#834). |

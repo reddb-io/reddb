@@ -69,60 +69,542 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
-const DEFAULT_MCP_URI: &str = "memory://";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum McpConnectionMode {
-    Memory,
-    File(PathBuf),
-    Remote { uri: String },
+#[derive(Clone)]
+struct McpClientOptions {
+    redacted_uri: String,
+    target: reddb_wire::ConnectionTarget,
+    auth: reddb_wire::ConnectionAuth,
+    timeout: Duration,
 }
 
-fn resolve_mcp_uri(flags: &HashMap<String, FlagValue>) -> Result<String, String> {
-    if let Some(uri) = flag_string(flags, "uri").filter(|value| !value.is_empty()) {
-        return Ok(uri);
-    }
-
-    if let Ok(uri) = std::env::var("REDDB_MCP_URI") {
-        if !uri.is_empty() {
-            return Ok(uri);
-        }
-    }
-
-    if flag_string(flags, "path")
-        .filter(|value| !value.is_empty())
-        .is_some()
-    {
-        return Ok(DEFAULT_MCP_URI.to_string());
-    }
-
-    Ok(DEFAULT_MCP_URI.to_string())
-}
-
-fn resolve_mcp_connection_mode(uri: &str) -> Result<McpConnectionMode, String> {
-    match reddb_wire::parse(uri).map_err(|err| err.to_string())? {
-        reddb_wire::ConnectionTarget::Memory => Ok(McpConnectionMode::Memory),
-        reddb_wire::ConnectionTarget::File { path } => Ok(McpConnectionMode::File(path)),
-        reddb_wire::ConnectionTarget::Grpc { .. }
-        | reddb_wire::ConnectionTarget::GrpcCluster { .. }
-        | reddb_wire::ConnectionTarget::Http { .. }
-        | reddb_wire::ConnectionTarget::RedWire { .. }
-        | reddb_wire::ConnectionTarget::WsNative { .. } => Ok(McpConnectionMode::Remote {
-            uri: uri.to_string(),
-        }),
+impl std::fmt::Debug for McpClientOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpClientOptions")
+            .field("uri", &self.redacted_uri)
+            .field("target", &self.target)
+            .field("auth", &self.auth)
+            .field("timeout", &self.timeout)
+            .finish()
     }
 }
 
-fn resolve_mcp_connection_mode_from_flags(
+fn resolve_mcp_client_options(
     flags: &HashMap<String, FlagValue>,
-) -> Result<McpConnectionMode, String> {
-    let uri = resolve_mcp_uri(flags)?;
-    if uri == DEFAULT_MCP_URI {
-        if let Some(path) = flag_string(flags, "path").filter(|value| !value.is_empty()) {
-            return Ok(McpConnectionMode::File(PathBuf::from(path)));
+) -> Result<Option<McpClientOptions>, String> {
+    let raw_uri = flag_string(flags, "uri")
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| flag_string(flags, "url").filter(|value| !value.trim().is_empty()))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| env_string("REDDB_MCP_URI"));
+    let Some(raw_uri) = raw_uri else {
+        return Ok(None);
+    };
+
+    let mut spec = reddb_wire::parse_with_auth(&raw_uri)
+        .map_err(|err| format!("mcp URI parse error: {err}"))?;
+    if matches!(spec.auth, reddb_wire::ConnectionAuth::Anonymous) {
+        if let Some(token) = flag_string(flags, "token").filter(|value| !value.trim().is_empty()) {
+            spec.auth = reddb_wire::ConnectionAuth::bearer(token);
         }
     }
-    resolve_mcp_connection_mode(&uri)
+
+    if spec.auth.is_bearer() && !mcp_uri_allows_bearer(&raw_uri) {
+        return Err(format!(
+            "bearer token requires TLS transport (reds://, https://, or red+wss://): {}",
+            spec.redacted_uri
+        ));
+    }
+
+    let timeout = resolve_mcp_timeout(&raw_uri)?;
+    Ok(Some(McpClientOptions {
+        redacted_uri: spec.redacted_uri,
+        target: spec.target,
+        auth: spec.auth,
+        timeout,
+    }))
+}
+
+fn resolve_mcp_timeout(uri: &str) -> Result<Duration, String> {
+    if let Some(value) = query_param_value(uri, "timeout") {
+        return parse_mcp_timeout_s(&value, "timeout");
+    }
+    if let Some(value) = env_string("REDDB_MCP_TIMEOUT_S") {
+        return parse_mcp_timeout_s(&value, "REDDB_MCP_TIMEOUT_S");
+    }
+    Ok(Duration::from_secs(20))
+}
+
+fn parse_mcp_timeout_s(value: &str, source: &str) -> Result<Duration, String> {
+    let secs = value
+        .parse::<u64>()
+        .map_err(|_| format!("{source} must be a positive integer number of seconds"))?;
+    if secs == 0 {
+        return Err(format!(
+            "{source} must be a positive integer number of seconds"
+        ));
+    }
+    Ok(Duration::from_secs(secs))
+}
+
+fn query_param_value(uri: &str, key: &str) -> Option<String> {
+    let query_start = uri.find('?')? + 1;
+    let query_end = uri[query_start..]
+        .find('#')
+        .map(|offset| query_start + offset)
+        .unwrap_or(uri.len());
+    uri[query_start..query_end].split('&').find_map(|part| {
+        let (name, value) = part.split_once('=').unwrap_or((part, ""));
+        if name == key {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn mcp_uri_allows_bearer(uri: &str) -> bool {
+    let Some(colon) = uri.find(':') else {
+        return false;
+    };
+    matches!(
+        uri[..colon].to_ascii_lowercase().as_str(),
+        "reds" | "https" | "red+wss"
+    )
+}
+
+fn run_mcp_remote(mut options: McpClientOptions) -> i32 {
+    if let Err(err) = validate_mcp_remote_connect(&mut options) {
+        eprintln!("red mcp: {err}");
+        return 1;
+    }
+    let mut server = RemoteMcpServer::new(options);
+    server.run_stdio();
+    0
+}
+
+fn validate_mcp_remote_connect(options: &mut McpClientOptions) -> Result<(), String> {
+    match &options.target {
+        reddb_wire::ConnectionTarget::Grpc { endpoint } => {
+            let mut client = connect_mcp_grpc(endpoint, &options.auth, options.timeout)?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| format!("build runtime: {err}"))?;
+            rt.block_on(async {
+                tokio::time::timeout(options.timeout, client.health())
+                    .await
+                    .map_err(|_| "connection timeout".to_string())?
+                    .map_err(|err| format!("connect {}: {err}", options.redacted_uri))
+            })?;
+            Ok(())
+        }
+        reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+            let host = host.clone();
+            let port = *port;
+            let auth = redwire_auth_from_connection_auth(&options.auth)?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| format!("build runtime: {err}"))?;
+            rt.block_on(async {
+                let opts = reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                tokio::time::timeout(
+                    options.timeout,
+                    reddb_client::redwire::RedWireClient::connect(opts),
+                )
+                .await
+                .map_err(|_| "connection timeout".to_string())?
+                .map(|_| ())
+                .map_err(|err| format!("connect {}: {err}", options.redacted_uri))
+            })
+        }
+        reddb_wire::ConnectionTarget::Http { .. } => Ok(()),
+        reddb_wire::ConnectionTarget::WsNative { .. } => {
+            Err("red mcp: red+ws/red+wss client connector is not implemented yet".to_string())
+        }
+        reddb_wire::ConnectionTarget::GrpcCluster { .. } => {
+            Err("red mcp: clustered MCP client URLs are not supported yet".to_string())
+        }
+        reddb_wire::ConnectionTarget::Memory | reddb_wire::ConnectionTarget::File { .. } => Ok(()),
+    }
+}
+
+fn connect_mcp_grpc(
+    endpoint: &str,
+    auth: &reddb_wire::ConnectionAuth,
+    timeout: Duration,
+) -> Result<reddb_client::RedDBClient, String> {
+    let token = match auth {
+        reddb_wire::ConnectionAuth::Anonymous => None,
+        reddb_wire::ConnectionAuth::Bearer(token) => Some(token.clone()),
+        reddb_wire::ConnectionAuth::Basic { .. } | reddb_wire::ConnectionAuth::ApiKey(_) => {
+            return Err("red mcp: gRPC basic/apikey auth codec is not implemented yet".to_string());
+        }
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("build runtime: {err}"))?;
+    rt.block_on(async {
+        tokio::time::timeout(timeout, reddb_client::RedDBClient::connect(endpoint, token))
+            .await
+            .map_err(|_| "connection timeout".to_string())?
+            .map_err(|err| format!("connect: {err}"))
+    })
+}
+
+fn redwire_auth_from_connection_auth(
+    auth: &reddb_wire::ConnectionAuth,
+) -> Result<reddb_client::redwire::Auth, String> {
+    match auth {
+        reddb_wire::ConnectionAuth::Anonymous => Ok(reddb_client::redwire::Auth::Anonymous),
+        reddb_wire::ConnectionAuth::Bearer(token) => {
+            Ok(reddb_client::redwire::Auth::Bearer(token.clone()))
+        }
+        reddb_wire::ConnectionAuth::Basic { user, pass } => {
+            Ok(reddb_client::redwire::Auth::Basic {
+                user: user.clone(),
+                pass: pass.clone(),
+            })
+        }
+        reddb_wire::ConnectionAuth::ApiKey(key) => {
+            Ok(reddb_client::redwire::Auth::ApiKey(key.clone()))
+        }
+    }
+}
+
+fn http_auth_from_connection_auth(
+    auth: &reddb_wire::ConnectionAuth,
+) -> reddb_client::connector::http::Auth {
+    match auth {
+        reddb_wire::ConnectionAuth::Anonymous => reddb_client::connector::http::Auth::Anonymous,
+        reddb_wire::ConnectionAuth::Bearer(token) => {
+            reddb_client::connector::http::Auth::Bearer(token.clone())
+        }
+        reddb_wire::ConnectionAuth::Basic { user, pass } => {
+            reddb_client::connector::http::Auth::Basic {
+                user: user.clone(),
+                pass: pass.clone(),
+            }
+        }
+        reddb_wire::ConnectionAuth::ApiKey(key) => {
+            reddb_client::connector::http::Auth::ApiKey(key.clone())
+        }
+    }
+}
+
+struct RemoteMcpServer {
+    options: McpClientOptions,
+    initialized: bool,
+}
+
+impl RemoteMcpServer {
+    fn new(options: McpClientOptions) -> Self {
+        Self {
+            options,
+            initialized: false,
+        }
+    }
+
+    fn run_stdio(&mut self) {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let mut reader = std::io::BufReader::new(stdin.lock());
+        let mut writer = std::io::BufWriter::new(stdout.lock());
+
+        loop {
+            let payload = match reddb::mcp::protocol::read_payload(&mut reader) {
+                Ok(Some(payload)) => payload,
+                Ok(None) => break,
+                Err(err) => {
+                    eprintln!("red mcp: read error: {err}");
+                    continue;
+                }
+            };
+            let request: reddb::json::Value = match reddb::json::from_str(&payload) {
+                Ok(value) => value,
+                Err(_) => {
+                    let msg =
+                        reddb::mcp::protocol::build_error_message(None, -32700, "parse error");
+                    let _ = reddb::mcp::protocol::write_message(&mut writer, &msg);
+                    continue;
+                }
+            };
+            if let Some(response) = self.handle_message(&request) {
+                if reddb::mcp::protocol::write_message(&mut writer, &response).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn handle_message(&mut self, msg: &reddb::json::Value) -> Option<String> {
+        let method = msg.get("method").and_then(|value| value.as_str())?;
+        let id = msg.get("id");
+        match method {
+            "initialize" => Some(self.handle_initialize(id)),
+            "initialized" | "notifications/initialized" => None,
+            "tools/list" => Some(self.handle_tools_list(id)),
+            "tools/call" => Some(self.handle_tools_call(id, msg.get("params"))),
+            "resources/list" => Some(self.handle_resources_list(id)),
+            "resources/read" => Some(self.handle_resources_read(id, msg.get("params"))),
+            "ping" => {
+                let mut result = reddb::json::Map::new();
+                result.insert(
+                    "status".to_string(),
+                    reddb::json::Value::String("ok".to_string()),
+                );
+                Some(reddb::mcp::protocol::build_result_message(
+                    id,
+                    reddb::json::Value::Object(result),
+                ))
+            }
+            _ => Some(reddb::mcp::protocol::build_error_message(
+                id,
+                -32601,
+                &format!("unknown method: {method}"),
+            )),
+        }
+    }
+
+    fn handle_initialize(&mut self, id: Option<&reddb::json::Value>) -> String {
+        self.initialized = true;
+        let mut capabilities = reddb::json::Map::new();
+        let mut tools_cap = reddb::json::Map::new();
+        tools_cap.insert("listChanged".to_string(), reddb::json::Value::Bool(false));
+        capabilities.insert("tools".to_string(), reddb::json::Value::Object(tools_cap));
+        let mut resources_cap = reddb::json::Map::new();
+        resources_cap.insert("subscribe".to_string(), reddb::json::Value::Bool(false));
+        resources_cap.insert("listChanged".to_string(), reddb::json::Value::Bool(false));
+        capabilities.insert(
+            "resources".to_string(),
+            reddb::json::Value::Object(resources_cap),
+        );
+
+        let mut server_info = reddb::json::Map::new();
+        server_info.insert(
+            "name".to_string(),
+            reddb::json::Value::String("reddb-mcp".to_string()),
+        );
+        server_info.insert(
+            "version".to_string(),
+            reddb::json::Value::String(env!("CARGO_PKG_VERSION").to_string()),
+        );
+
+        let mut result = reddb::json::Map::new();
+        result.insert(
+            "protocolVersion".to_string(),
+            reddb::json::Value::String("2024-11-05".to_string()),
+        );
+        result.insert(
+            "capabilities".to_string(),
+            reddb::json::Value::Object(capabilities),
+        );
+        result.insert(
+            "serverInfo".to_string(),
+            reddb::json::Value::Object(server_info),
+        );
+        reddb::mcp::protocol::build_result_message(id, reddb::json::Value::Object(result))
+    }
+
+    fn handle_tools_list(&self, id: Option<&reddb::json::Value>) -> String {
+        let mut tools_json: Vec<reddb::json::Value> = reddb::mcp::tools::all_tools()
+            .into_iter()
+            .map(|def| {
+                let mut obj = reddb::json::Map::new();
+                obj.insert(
+                    "name".to_string(),
+                    reddb::json::Value::String(def.name.to_string()),
+                );
+                obj.insert(
+                    "description".to_string(),
+                    reddb::json::Value::String(def.description.to_string()),
+                );
+                obj.insert("inputSchema".to_string(), def.input_schema);
+                reddb::json::Value::Object(obj)
+            })
+            .collect();
+        tools_json.push(reddb::runtime::ai::mcp_ask_tool::descriptor());
+
+        let mut result = reddb::json::Map::new();
+        result.insert("tools".to_string(), reddb::json::Value::Array(tools_json));
+        reddb::mcp::protocol::build_result_message(id, reddb::json::Value::Object(result))
+    }
+
+    fn handle_resources_list(&self, id: Option<&reddb::json::Value>) -> String {
+        let resources: Vec<reddb::json::Value> = reddb::mcp::tools::knowledge_resources()
+            .iter()
+            .map(|res| {
+                let mut obj = reddb::json::Map::new();
+                obj.insert(
+                    "uri".to_string(),
+                    reddb::json::Value::String(res.uri.to_string()),
+                );
+                obj.insert(
+                    "name".to_string(),
+                    reddb::json::Value::String(res.title.to_string()),
+                );
+                obj.insert(
+                    "description".to_string(),
+                    reddb::json::Value::String(res.description.to_string()),
+                );
+                obj.insert(
+                    "mimeType".to_string(),
+                    reddb::json::Value::String(res.mime_type.to_string()),
+                );
+                reddb::json::Value::Object(obj)
+            })
+            .collect();
+        let mut result = reddb::json::Map::new();
+        result.insert(
+            "resources".to_string(),
+            reddb::json::Value::Array(resources),
+        );
+        reddb::mcp::protocol::build_result_message(id, reddb::json::Value::Object(result))
+    }
+
+    fn handle_resources_read(
+        &self,
+        id: Option<&reddb::json::Value>,
+        params: Option<&reddb::json::Value>,
+    ) -> String {
+        let Some(uri) = params
+            .and_then(|p| p.get("uri"))
+            .and_then(|value| value.as_str())
+        else {
+            return reddb::mcp::protocol::build_error_message(id, -32602, "missing resource uri");
+        };
+        let resources = reddb::mcp::tools::knowledge_resources();
+        let Some(resource) = resources.iter().find(|res| res.uri == uri) else {
+            return reddb::mcp::protocol::build_error_message(
+                id,
+                -32602,
+                &format!("unknown resource: {uri}"),
+            );
+        };
+        let mut contents = reddb::json::Map::new();
+        contents.insert(
+            "uri".to_string(),
+            reddb::json::Value::String(resource.uri.to_string()),
+        );
+        contents.insert(
+            "mimeType".to_string(),
+            reddb::json::Value::String(resource.mime_type.to_string()),
+        );
+        contents.insert(
+            "text".to_string(),
+            reddb::json::Value::String((resource.body)()),
+        );
+        let mut result = reddb::json::Map::new();
+        result.insert(
+            "contents".to_string(),
+            reddb::json::Value::Array(vec![reddb::json::Value::Object(contents)]),
+        );
+        reddb::mcp::protocol::build_result_message(id, reddb::json::Value::Object(result))
+    }
+
+    fn handle_tools_call(
+        &self,
+        id: Option<&reddb::json::Value>,
+        params: Option<&reddb::json::Value>,
+    ) -> String {
+        let Some(name) = params
+            .and_then(|p| p.get("name"))
+            .and_then(|value| value.as_str())
+        else {
+            return reddb::mcp::protocol::build_error_message(id, -32602, "missing tool name");
+        };
+        let empty = reddb::json::Value::Object(reddb::json::Map::new());
+        let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
+        let result = match name {
+            "reddb_query" => self.remote_query_tool(args),
+            _ => Err(format!(
+                "remote MCP client mode currently forwards reddb_query only; tool requires embedded runtime: {name}"
+            )),
+        };
+        mcp_tool_text_result(id, result)
+    }
+
+    fn remote_query_tool(&self, args: &reddb::json::Value) -> Result<String, String> {
+        let sql = args
+            .get("sql")
+            .and_then(|value| value.as_str())
+            .ok_or("missing required field 'sql'")?;
+        if args.get("params").is_some() {
+            return Err("remote MCP client mode does not support query params yet".to_string());
+        }
+        match &self.options.target {
+            reddb_wire::ConnectionTarget::Grpc { endpoint } => {
+                let mut client =
+                    connect_mcp_grpc(endpoint, &self.options.auth, self.options.timeout)?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| format!("build runtime: {err}"))?;
+                rt.block_on(async {
+                    tokio::time::timeout(self.options.timeout, client.query(sql))
+                        .await
+                        .map_err(|_| "connection timeout".to_string())?
+                        .map_err(|err| format!("{err}"))
+                })
+            }
+            reddb_wire::ConnectionTarget::Http { base_url } => {
+                let auth = http_auth_from_connection_auth(&self.options.auth);
+                reddb_client::connector::http::query_one_shot(base_url, sql, &auth)
+                    .map_err(|err| format!("{err}"))
+            }
+            reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+                let host = host.clone();
+                let port = *port;
+                let auth = redwire_auth_from_connection_auth(&self.options.auth)?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| format!("build runtime: {err}"))?;
+                rt.block_on(async {
+                    let opts =
+                        reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                    let mut client = tokio::time::timeout(
+                        self.options.timeout,
+                        reddb_client::redwire::RedWireClient::connect(opts),
+                    )
+                    .await
+                    .map_err(|_| "connection timeout".to_string())?
+                    .map_err(|err| format!("{err}"))?;
+                    tokio::time::timeout(self.options.timeout, client.query_raw(sql))
+                        .await
+                        .map_err(|_| "query timeout".to_string())?
+                        .map_err(|err| format!("{err}"))
+                })
+            }
+            other => Err(format!(
+                "remote MCP connector unsupported for target: {other:?}"
+            )),
+        }
+    }
+}
+
+fn mcp_tool_text_result(id: Option<&reddb::json::Value>, result: Result<String, String>) -> String {
+    let (text, is_error) = match result {
+        Ok(text) => (text, false),
+        Err(err) => (err, true),
+    };
+    let mut content = reddb::json::Map::new();
+    content.insert(
+        "type".to_string(),
+        reddb::json::Value::String("text".to_string()),
+    );
+    content.insert("text".to_string(), reddb::json::Value::String(text));
+
+    let mut result_obj = reddb::json::Map::new();
+    result_obj.insert(
+        "content".to_string(),
+        reddb::json::Value::Array(vec![reddb::json::Value::Object(content)]),
+    );
+    if is_error {
+        result_obj.insert("isError".to_string(), reddb::json::Value::Bool(true));
+    }
+    reddb::mcp::protocol::build_result_message(id, reddb::json::Value::Object(result_obj))
 }
 
 fn has_cli_vault_key() -> bool {
@@ -1068,23 +1550,47 @@ fn main() {
         }
 
         "mcp" => {
-            let mode =
-                resolve_mcp_connection_mode_from_flags(&result.flags).unwrap_or_else(|err| {
-                    eprintln!("error: {err}");
-                    std::process::exit(2);
+            let mcp_client_options =
+                resolve_mcp_client_options(&result.flags).unwrap_or_else(|err| {
+                    eprintln!("red mcp: {err}");
+                    std::process::exit(1);
                 });
-            let runtime = match mode {
-                McpConnectionMode::Memory => reddb::runtime::RedDBRuntime::in_memory().unwrap(),
-                McpConnectionMode::File(path) => reddb::runtime::RedDBRuntime::with_options(
+            let url_embedded_target = if let Some(options) = mcp_client_options {
+                match &options.target {
+                    reddb_wire::ConnectionTarget::Memory => {
+                        Some(reddb_wire::ConnectionTarget::Memory)
+                    }
+                    reddb_wire::ConnectionTarget::File { path } => {
+                        Some(reddb_wire::ConnectionTarget::File { path: path.clone() })
+                    }
+                    _ => {
+                        let code = run_mcp_remote(options);
+                        std::process::exit(code);
+                    }
+                }
+            } else {
+                None
+            };
+            let path = result
+                .flags
+                .get("path")
+                .map(|v| v.as_str_value())
+                .unwrap_or_default();
+            let runtime = match url_embedded_target {
+                Some(reddb_wire::ConnectionTarget::Memory) => {
+                    reddb::runtime::RedDBRuntime::in_memory().unwrap()
+                }
+                Some(reddb_wire::ConnectionTarget::File { path }) => {
+                    reddb::runtime::RedDBRuntime::with_options(
+                        reddb::api::RedDBOptions::persistent(&path),
+                    )
+                    .unwrap()
+                }
+                _ if path.is_empty() => reddb::runtime::RedDBRuntime::in_memory().unwrap(),
+                _ => reddb::runtime::RedDBRuntime::with_options(
                     reddb::api::RedDBOptions::persistent(&path),
                 )
                 .unwrap(),
-                McpConnectionMode::Remote { uri } => {
-                    eprintln!(
-                        "error: red mcp remote URI mode is not implemented yet ({uri}); use memory:// or file://"
-                    );
-                    std::process::exit(2);
-                }
             };
             let mut server = reddb::mcp::server::McpServer::new(runtime);
             server.run_stdio();
@@ -3037,7 +3543,11 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
         Some("mcp") => {
             flags.extend(vec![
                 cli::types::FlagSchema::new("uri")
-                    .with_description("Connection URI (default: REDDB_MCP_URI or memory://)"),
+                    .with_description("Connection URI (overrides --url and REDDB_MCP_URI)"),
+                cli::types::FlagSchema::new("url")
+                    .with_description("Remote connection URL alias for --uri"),
+                cli::types::FlagSchema::new("token")
+                    .with_description("Bearer token for a remote MCP connection"),
                 cli::types::FlagSchema::new("path")
                     .with_short('d')
                     .with_description("Data directory path (omit for in-memory)")
@@ -5761,69 +6271,109 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     }
 
     #[test]
-    fn mcp_uri_defaults_to_memory() {
+    fn mcp_without_uri_or_env_uses_legacy_runtime_fallback() {
         let _lock = env_lock().lock().unwrap();
         let _clear = EnvGuard::clear(&["REDDB_MCP_URI"]);
 
-        assert_eq!(
-            resolve_mcp_uri(&HashMap::new()).unwrap(),
-            "memory://".to_string()
-        );
+        assert!(resolve_mcp_client_options(&HashMap::new())
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn mcp_uri_reads_env() {
+    fn mcp_uri_reads_env_file_target() {
         let _lock = env_lock().lock().unwrap();
         let _env = EnvGuard::set(&[("REDDB_MCP_URI", "file:///tmp/reddb-env.rdb")]);
 
-        assert_eq!(
-            resolve_mcp_uri(&HashMap::new()).unwrap(),
-            "file:///tmp/reddb-env.rdb".to_string()
-        );
+        let options = resolve_mcp_client_options(&HashMap::new())
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            options.target,
+            reddb_wire::ConnectionTarget::File { ref path }
+                if path == &PathBuf::from("/tmp/reddb-env.rdb")
+        ));
     }
 
     #[test]
-    fn mcp_uri_prefers_flag_over_env() {
+    fn mcp_uri_prefers_flag_over_url_and_env() {
         let _lock = env_lock().lock().unwrap();
         let _env = EnvGuard::set(&[("REDDB_MCP_URI", "red://env.example:5050")]);
-        let mut flags = HashMap::new();
-        flags.insert("uri".to_string(), str_flag("file:///tmp/reddb-agent.rdb"));
+        let flags = HashMap::from([
+            ("uri".to_string(), str_flag("file:///tmp/reddb-agent.rdb")),
+            ("url".to_string(), str_flag("reds://url.example:5050")),
+        ]);
 
-        assert_eq!(
-            resolve_mcp_uri(&flags).unwrap(),
-            "file:///tmp/reddb-agent.rdb".to_string()
-        );
+        let options = resolve_mcp_client_options(&flags).unwrap().unwrap();
+
+        assert!(matches!(
+            options.target,
+            reddb_wire::ConnectionTarget::File { ref path }
+                if path == &PathBuf::from("/tmp/reddb-agent.rdb")
+        ));
     }
 
     #[test]
-    fn mcp_uri_dispatches_embedded_and_remote_modes() {
-        assert_eq!(
-            resolve_mcp_connection_mode("memory://").unwrap(),
-            McpConnectionMode::Memory
-        );
-        assert_eq!(
-            resolve_mcp_connection_mode("file:///tmp/reddb-agent.rdb").unwrap(),
-            McpConnectionMode::File(PathBuf::from("/tmp/reddb-agent.rdb"))
-        );
-        assert_eq!(
-            resolve_mcp_connection_mode("reds://db.example:5050").unwrap(),
-            McpConnectionMode::Remote {
-                uri: "reds://db.example:5050".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn mcp_path_fallback_uses_file_mode() {
+    fn mcp_path_fallback_does_not_mask_uri_resolution() {
         let _lock = env_lock().lock().unwrap();
         let _clear = EnvGuard::clear(&["REDDB_MCP_URI"]);
         let mut flags = HashMap::new();
         flags.insert("path".to_string(), str_flag("/tmp/reddb-legacy.rdb"));
 
-        assert_eq!(
-            resolve_mcp_connection_mode_from_flags(&flags).unwrap(),
-            McpConnectionMode::File(PathBuf::from("/tmp/reddb-legacy.rdb"))
-        );
+        assert!(resolve_mcp_client_options(&flags).unwrap().is_none());
+    }
+
+    #[test]
+    fn mcp_url_flag_wins_over_env_and_defaults_timeout() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[("REDDB_MCP_URI", "https://env.example:443")]);
+        let flags = HashMap::from([("url".to_string(), str_flag("reds://cli.example:5050"))]);
+
+        let options = resolve_mcp_client_options(&flags).unwrap().unwrap();
+
+        assert_eq!(options.redacted_uri, "reds://cli.example:5050");
+        assert_eq!(options.timeout, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn mcp_url_env_is_used_when_flag_absent_and_timeout_env_overrides_default() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_MCP_URI", "https://env.example:443"),
+            ("REDDB_MCP_TIMEOUT_S", "7"),
+        ]);
+
+        let options = resolve_mcp_client_options(&HashMap::new())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(options.redacted_uri, "https://env.example:443");
+        assert_eq!(options.timeout, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn mcp_url_query_timeout_overrides_env_timeout() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[("REDDB_MCP_TIMEOUT_S", "7")]);
+        let flags = HashMap::from([("url".to_string(), str_flag("https://h?timeout=3"))]);
+
+        let options = resolve_mcp_client_options(&flags).unwrap().unwrap();
+
+        assert_eq!(options.timeout, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn mcp_bearer_token_rejects_cleartext_and_redacts_error() {
+        let flags = HashMap::from([
+            ("url".to_string(), str_flag("http://host:5000")),
+            ("token".to_string(), str_flag("secret-token-1")),
+        ]);
+
+        let err = resolve_mcp_client_options(&flags).unwrap_err();
+
+        assert!(err.contains("bearer token requires TLS"), "{err}");
+        assert!(!err.contains("secret-token-1"), "{err}");
     }
 
     struct EnvGuard {

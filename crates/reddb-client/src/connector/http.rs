@@ -11,12 +11,31 @@
 
 use std::fmt;
 
-use reddb_wire::auth::{bearer_authorization_value, AUTHORIZATION_HEADER};
+use reddb_wire::auth::{
+    apikey_authorization_value, bearer_authorization_value, AUTHORIZATION_HEADER,
+};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Auth {
     Anonymous,
     Bearer(String),
+    Basic { user: String, pass: String },
+    ApiKey(String),
+}
+
+impl fmt::Debug for Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Bearer(_) => f.debug_tuple("Bearer").field(&"<redacted>").finish(),
+            Self::Basic { .. } => f
+                .debug_struct("Basic")
+                .field("user", &"<redacted>")
+                .field("pass", &"<redacted>")
+                .finish(),
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -50,8 +69,15 @@ pub fn query_one_shot(base_url: &str, sql: &str, auth: &Auth) -> Result<String> 
     let url = format!("{}/query", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "query": sql }).to_string();
     let mut req = ureq::post(&url).header("content-type", "application/json");
-    if let Auth::Bearer(token) = auth {
-        req = req.header(AUTHORIZATION_HEADER, &bearer_authorization_value(token));
+    match auth {
+        Auth::Anonymous => {}
+        Auth::Bearer(token) => {
+            req = req.header(AUTHORIZATION_HEADER, &bearer_authorization_value(token));
+        }
+        Auth::ApiKey(key) => {
+            req = req.header(AUTHORIZATION_HEADER, &apikey_authorization_value(key));
+        }
+        Auth::Basic { .. } => {}
     }
     let mut resp = req
         .send(body.as_bytes())

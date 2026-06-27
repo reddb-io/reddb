@@ -29,7 +29,7 @@ pub struct ResourceDef {
 /// The static set of knowledge resources `red mcp` serves. Each domain is
 /// generated from the engine's own authorities (ADR 0061): the RQL reference
 /// from `reddb-io-rql`, and the value-type catalog + multi-model map from
-/// `reddb-io-types`.
+/// `reddb-io-types`, and the connection model from `reddb-io-wire`.
 pub fn knowledge_resources() -> Vec<ResourceDef> {
     vec![
         ResourceDef {
@@ -45,6 +45,13 @@ pub fn knowledge_resources() -> Vec<ResourceDef> {
             description: reddb_types::knowledge::RESOURCE_DESCRIPTION,
             mime_type: "text/markdown",
             body: reddb_types::knowledge::type_reference_markdown,
+        },
+        ResourceDef {
+            uri: reddb_wire::knowledge::RESOURCE_URI,
+            title: reddb_wire::knowledge::RESOURCE_TITLE,
+            description: reddb_wire::knowledge::RESOURCE_DESCRIPTION,
+            mime_type: "text/markdown",
+            body: reddb_wire::knowledge::connection_reference_markdown,
         },
     ]
 }
@@ -725,6 +732,21 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec![],
             ),
         },
+        // Connection knowledge tool (ADR 0061): project the canonical
+        // reddb-wire connection-string parser into agent-readable transport
+        // and topology facts.
+        ToolDef {
+            name: "reddb_explain_connection",
+            description: "Decode a RedDB connection URI with the canonical `reddb-io-wire` parser and return its scheme, transport, mode (`embedded` or `remote`), topology, and normalized target details. Use this to learn the scheme dispatch: `memory://` is embedded ephemeral, `file://` is embedded persisted, `red://` / `reds://` are remote RedWire, and `grpc://` / `http(s)://` are remote non-RedWire transports.",
+            input_schema: schema(
+                vec![(
+                    "uri",
+                    "string",
+                    "Connection URI to explain, e.g. memory://, file:///data.rdb, reds://host, grpc://host, or https://host",
+                )],
+                vec!["uri"],
+            ),
+        },
     ]
 }
 
@@ -773,6 +795,8 @@ mod tests {
         assert!(names.contains(&"reddb_rql_explain"));
         // Type knowledge tool (ADR 0061).
         assert!(names.contains(&"reddb_type_of"));
+        // Connection knowledge tool (ADR 0061).
+        assert!(names.contains(&"reddb_explain_connection"));
     }
 
     #[test]
