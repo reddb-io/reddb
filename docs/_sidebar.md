@@ -105,6 +105,7 @@
   - [Cluster Sharding Contract](/architecture/cluster-sharding.md)
   - [Distributed Roadmap](/architecture/distributed-roadmap.md)
   - [MVCC Read Resolver Seam](/architecture/mvcc-read-resolver.md)
+  - [Jepsen-Style Cluster Harness](/testing/jepsen-black-box-cluster.md)
 
 - **PRDs**
   - [Deepen Correctness Seams](/prd/deepen-correctness-seams.md)
