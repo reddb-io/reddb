@@ -102,6 +102,10 @@ Canonical labels include lifecycle states, `blocked:dependency`, and typed `/afk
 
 Single-context layout: `.red/CONTEXT.md` + `.red/adr/` at the repository root. See `.red/agents/domain.md`.
 
+### LLM reference
+
+Use `docs/llms.txt` for the generated agent-facing RedDB reference. The docs site publishes the same file at `/llms.txt`, and MCP knowledge resources serve the same generated source sections.
+
 ## Development workflow
 
 - Work in an isolated worktree; do not change the primary checkout's branch for task work.

@@ -56,12 +56,31 @@ use reddb_wire::redwire::{
 };
 
 /// Authentication credentials for the RedWire handshake.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Auth {
     /// Server is configured with `auth.enabled = false`.
     Anonymous,
     /// Bearer token (login-derived session token or API key).
     Bearer(String),
+    /// Username/password credentials. AuthResponse codec is follow-up work.
+    Basic { user: String, pass: String },
+    /// API key credentials. AuthResponse codec is follow-up work.
+    ApiKey(String),
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Bearer(_) => f.debug_tuple("Bearer").field(&"<redacted>").finish(),
+            Self::Basic { .. } => f
+                .debug_struct("Basic")
+                .field("user", &"<redacted>")
+                .field("pass", &"<redacted>")
+                .finish(),
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+        }
+    }
 }
 
 /// Typed value for the binary bulk-insert fast path. Encoding delegates

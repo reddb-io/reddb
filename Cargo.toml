@@ -150,7 +150,7 @@ reddb-server = { workspace = true }
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
 # via reddb-server, so this is for the bin only.
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
 [features]
 default = []

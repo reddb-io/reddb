@@ -84,6 +84,127 @@ pub const DEFAULT_PORT_GRPCS: u16 = 55555;
 pub const DEFAULT_PORT_WS: u16 = 80;
 pub const DEFAULT_PORT_WSS: u16 = 443;
 
+/// URI schemes accepted by the connection-string parser.
+///
+/// This enum is the connection-layer source for generated agent knowledge:
+/// [`crate::knowledge`] iterates [`SUPPORTED_SCHEMES`] instead of carrying a
+/// separate hand-maintained scheme list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionScheme {
+    Memory,
+    File,
+    Red,
+    Reds,
+    RedWs,
+    RedWss,
+    Grpc,
+    Grpcs,
+    Http,
+    Https,
+}
+
+/// Stable parser-owned list of supported URI schemes.
+pub const SUPPORTED_SCHEMES: &[ConnectionScheme] = &[
+    ConnectionScheme::Red,
+    ConnectionScheme::Reds,
+    ConnectionScheme::Grpc,
+    ConnectionScheme::Grpcs,
+    ConnectionScheme::Http,
+    ConnectionScheme::Https,
+    ConnectionScheme::Memory,
+    ConnectionScheme::File,
+    ConnectionScheme::RedWs,
+    ConnectionScheme::RedWss,
+];
+
+impl ConnectionScheme {
+    pub fn from_uri_scheme(scheme: &str) -> Option<Self> {
+        match scheme {
+            "memory" => Some(Self::Memory),
+            "file" => Some(Self::File),
+            "red" => Some(Self::Red),
+            "reds" => Some(Self::Reds),
+            "red+ws" => Some(Self::RedWs),
+            "red+wss" => Some(Self::RedWss),
+            "grpc" => Some(Self::Grpc),
+            "grpcs" => Some(Self::Grpcs),
+            "http" => Some(Self::Http),
+            "https" => Some(Self::Https),
+            _ => None,
+        }
+    }
+
+    pub fn uri_prefix(self) -> &'static str {
+        match self {
+            Self::Memory => "memory://",
+            Self::File => "file://",
+            Self::Red => "red://",
+            Self::Reds => "reds://",
+            Self::RedWs => "red+ws://",
+            Self::RedWss => "red+wss://",
+            Self::Grpc => "grpc://",
+            Self::Grpcs => "grpcs://",
+            Self::Http => "http://",
+            Self::Https => "https://",
+        }
+    }
+
+    pub fn transport(self) -> &'static str {
+        match self {
+            Self::Memory => "embedded in-memory engine",
+            Self::File => "embedded file-backed engine",
+            Self::Red | Self::Reds => "RedWire TCP",
+            Self::RedWs | Self::RedWss => "RedWire WebSocket",
+            Self::Grpc | Self::Grpcs => "gRPC",
+            Self::Http | Self::Https => "HTTP REST",
+        }
+    }
+
+    pub fn mode(self) -> &'static str {
+        match self {
+            Self::Memory | Self::File => "embedded",
+            Self::Red
+            | Self::Reds
+            | Self::RedWs
+            | Self::RedWss
+            | Self::Grpc
+            | Self::Grpcs
+            | Self::Http
+            | Self::Https => "remote",
+        }
+    }
+
+    pub fn example(self) -> &'static str {
+        match self {
+            Self::Memory => "memory://",
+            Self::File => "file:///var/lib/reddb/app.db",
+            Self::Red => "red://db.example.com:5050",
+            Self::Reds => "reds://db.example.com:5050",
+            Self::RedWs => "red+ws://db.example.com",
+            Self::RedWss => "red+wss://db.example.com",
+            Self::Grpc => "grpc://db.example.com:55055",
+            Self::Grpcs => "grpcs://db.example.com:55555",
+            Self::Http => "http://db.example.com:80",
+            Self::Https => "https://db.example.com:443",
+        }
+    }
+
+    pub fn notes(self) -> &'static str {
+        match self {
+            Self::Memory => "Zero-config ephemeral engine, commonly used by local MCP hosts.",
+            Self::File => "Embedded durable engine rooted at the URI path.",
+            Self::Red => "Principal RedWire transport without TLS.",
+            Self::Reds => "Principal RedWire transport with TLS.",
+            Self::RedWs => "Browser-native RedWire over WebSocket without TLS.",
+            Self::RedWss => "Browser-native RedWire over WebSocket with TLS.",
+            Self::Grpc => "Compatibility transport for existing gRPC clients.",
+            Self::Grpcs => "TLS variant of the gRPC compatibility transport.",
+            Self::Http => "REST/admin transport without TLS.",
+            Self::Https => "REST/admin transport with TLS.",
+        }
+    }
+}
+
 /// DoS guardrails applied by [`parse`] before any URI work happens.
 ///
 /// The connection-string parser is the only entry point an attacker
@@ -147,6 +268,49 @@ pub enum ConnectionTarget {
     WsNative { host: String, port: u16, tls: bool },
 }
 
+/// Authentication material derived from a connection string or adjacent CLI
+/// fallback. `Debug` deliberately redacts every caller-supplied credential.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ConnectionAuth {
+    Anonymous,
+    Bearer(String),
+    Basic { user: String, pass: String },
+    ApiKey(String),
+}
+
+impl std::fmt::Debug for ConnectionAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Bearer(_) => f.debug_tuple("Bearer").field(&"<redacted>").finish(),
+            Self::Basic { .. } => f
+                .debug_struct("Basic")
+                .field("user", &"<redacted>")
+                .field("pass", &"<redacted>")
+                .finish(),
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+        }
+    }
+}
+
+impl ConnectionAuth {
+    pub fn bearer(token: impl Into<String>) -> Self {
+        Self::Bearer(token.into())
+    }
+
+    pub fn is_bearer(&self) -> bool {
+        matches!(self, Self::Bearer(_))
+    }
+}
+
+/// Connection target plus URL-derived auth metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionSpec {
+    pub target: ConnectionTarget,
+    pub auth: ConnectionAuth,
+    pub redacted_uri: String,
+}
+
 /// Parse a connection URI into a [`ConnectionTarget`] under the
 /// default DoS limits.
 ///
@@ -159,6 +323,38 @@ pub enum ConnectionTarget {
 ///     processed.
 pub fn parse(uri: &str) -> Result<ConnectionTarget, ParseError> {
     parse_with_limits(uri, ConnStringLimits::default())
+}
+
+/// Parse a connection URI and derive auth from RFC 3986 userinfo.
+///
+/// The existing [`parse`] function remains target-only for compatibility.
+/// New client-mode entry points should use this richer shape so credentials
+/// are identified and redacted before transport connectors are built.
+pub fn parse_with_auth(uri: &str) -> Result<ConnectionSpec, ParseError> {
+    let normalised = normalise_scheme(uri);
+    let redacted_uri = redact_uri_userinfo(&normalised);
+    let target =
+        parse(uri).map_err(|err| redact_parse_error(err, uri, &normalised, &redacted_uri))?;
+    let auth = auth_from_uri_userinfo(&normalised)
+        .map_err(|err| redact_parse_error(err, uri, &normalised, &redacted_uri))?;
+    Ok(ConnectionSpec {
+        target,
+        auth,
+        redacted_uri,
+    })
+}
+
+fn redact_parse_error(
+    mut err: ParseError,
+    raw_uri: &str,
+    normalised_uri: &str,
+    redacted_uri: &str,
+) -> ParseError {
+    err.message = err
+        .message
+        .replace(raw_uri, redacted_uri)
+        .replace(normalised_uri, redacted_uri);
+    err
 }
 
 /// Return true for documented embedded aliases that must not resolve to
@@ -233,8 +429,8 @@ pub fn parse_with_limits(
 
     enforce_query_param_limit(&parsed, &limits)?;
 
-    match parsed.scheme() {
-        "red" | "reds" => {
+    match ConnectionScheme::from_uri_scheme(parsed.scheme()) {
+        Some(ConnectionScheme::Red | ConnectionScheme::Reds) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(ParseErrorKind::InvalidUri, "red:// URI is missing a host")
             })?;
@@ -245,7 +441,7 @@ pub fn parse_with_limits(
                 tls: parsed.scheme() == "reds",
             })
         }
-        "red+ws" | "red+wss" => {
+        Some(ConnectionScheme::RedWs | ConnectionScheme::RedWss) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(
                     ParseErrorKind::InvalidUri,
@@ -264,7 +460,7 @@ pub fn parse_with_limits(
                 tls,
             })
         }
-        "grpc" | "grpcs" => {
+        Some(ConnectionScheme::Grpc | ConnectionScheme::Grpcs) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(ParseErrorKind::InvalidUri, "grpc:// URI is missing a host")
             })?;
@@ -279,7 +475,7 @@ pub fn parse_with_limits(
                 endpoint: format!("http://{host}:{port}"),
             })
         }
-        "http" | "https" => {
+        Some(ConnectionScheme::Http | ConnectionScheme::Https) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(
                     ParseErrorKind::InvalidUri,
@@ -294,9 +490,9 @@ pub fn parse_with_limits(
                 base_url: format!("{scheme}://{host}:{port}"),
             })
         }
-        other => Err(ParseError::new(
+        Some(ConnectionScheme::Memory | ConnectionScheme::File) | None => Err(ParseError::new(
             ParseErrorKind::UnsupportedScheme,
-            format!("unsupported scheme: {other}"),
+            format!("unsupported scheme: {}", parsed.scheme()),
         )),
     }
 }
@@ -328,6 +524,52 @@ fn normalise_scheme(uri: &str) -> String {
         }
         None => uri.to_string(),
     }
+}
+
+fn auth_from_uri_userinfo(uri: &str) -> Result<ConnectionAuth, ParseError> {
+    if uri == "memory://" || uri == "memory:" || uri.starts_with("file://") {
+        return Ok(ConnectionAuth::Anonymous);
+    }
+    let parsed = Url::parse(uri)
+        .map_err(|e| ParseError::new(ParseErrorKind::InvalidUri, format!("{e}: {uri}")))?;
+    let username = parsed.username();
+    if username.is_empty() {
+        return Ok(ConnectionAuth::Anonymous);
+    }
+    match parsed.password() {
+        Some(pass) => Ok(ConnectionAuth::Basic {
+            user: username.to_string(),
+            pass: pass.to_string(),
+        }),
+        None => Ok(ConnectionAuth::ApiKey(username.to_string())),
+    }
+}
+
+fn redact_uri_userinfo(uri: &str) -> String {
+    let Some(scheme_end) = uri.find("://") else {
+        return uri.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = uri[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|i| authority_start + i)
+        .unwrap_or(uri.len());
+    let authority = &uri[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return uri.to_string();
+    };
+    let userinfo = &authority[..at];
+    let replacement = if userinfo.contains(':') {
+        "<redacted>:<redacted>"
+    } else {
+        "<redacted>"
+    };
+    format!(
+        "{}{}{}",
+        &uri[..authority_start],
+        replacement,
+        &uri[authority_start + at..]
+    )
 }
 
 fn enforce_query_param_limit(url: &Url, limits: &ConnStringLimits) -> Result<(), ParseError> {
