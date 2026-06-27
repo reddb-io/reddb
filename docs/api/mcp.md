@@ -255,35 +255,33 @@ tool result.
 }
 ```
 
-## Claude Desktop Configuration
+## Recommended `.mcp.json`
 
-Add RedDB to your Claude Desktop `claude_desktop_config.json`:
+Use one env-driven connection knob so committed config never contains remote
+credentials:
 
 ```json
 {
   "mcpServers": {
     "reddb": {
-      "command": "red",
-      "args": ["mcp", "--path", "/path/to/data/reddb.rdb"]
+      "command": "npx",
+      "args": ["-y", "@reddb-io/mcp"],
+      "env": {
+        "REDDB_MCP_URI": "${REDDB_MCP_URI:-memory://}"
+      }
     }
   }
 }
 ```
 
-## Cursor Configuration
+`memory://` starts an embedded ephemeral engine by default. For file-backed or
+remote operation, export `REDDB_MCP_URI` in the host environment, for example:
 
-Add to `.cursor/mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "reddb": {
-      "command": "red",
-      "args": ["mcp", "--path", "./data/reddb.rdb"]
-    }
-  }
-}
+```bash
+export REDDB_MCP_URI='file:///var/lib/reddb/agent.rdb'
+export REDDB_MCP_URI='reds://user:password@db.example:5050'
 ```
 
 > [!TIP]
-> The MCP server runs in embedded mode, so it has the same low-latency access as the Rust API. No network hop is needed.
+> Embedded `memory://` and `file://` modes run inside the `red` process. Remote
+> credentials stay in the host environment and are not written to `.mcp.json`.
