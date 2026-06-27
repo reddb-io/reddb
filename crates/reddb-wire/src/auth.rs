@@ -5,9 +5,14 @@
 
 pub const AUTHORIZATION_HEADER: &str = "authorization";
 pub const BEARER_AUTH_SCHEME: &str = "Bearer";
+pub const APIKEY_AUTH_SCHEME: &str = "ApiKey";
 
 pub fn bearer_authorization_value(token: &str) -> String {
     format!("{BEARER_AUTH_SCHEME} {token}")
+}
+
+pub fn apikey_authorization_value(key: &str) -> String {
+    format!("{APIKEY_AUTH_SCHEME} {key}")
 }
 
 pub fn login_payload_json(username: &str, password: &str) -> String {
@@ -25,6 +30,11 @@ mod tests {
     #[test]
     fn bearer_authorization_value_uses_canonical_scheme() {
         assert_eq!(bearer_authorization_value("token-1"), "Bearer token-1");
+    }
+
+    #[test]
+    fn apikey_authorization_value_uses_canonical_scheme() {
+        assert_eq!(apikey_authorization_value("key-1"), "ApiKey key-1");
     }
 
     #[test]
