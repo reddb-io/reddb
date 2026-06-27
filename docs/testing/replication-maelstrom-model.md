@@ -44,7 +44,9 @@ The later black-box cluster harness should run real `red` processes and validate
 user-visible behavior through public transports while faulting the environment.
 That harness belongs at the Jepsen-style layer: process kill, network partitions,
 disk faults, restart/rejoin, client histories, and linearizability or durability
-checking against observed database results.
+checking against observed database results. The local black-box process harness
+for that layer is documented in
+[`jepsen-black-box-cluster.md`](jepsen-black-box-cluster.md).
 
 This model is earlier and cheaper. It turns the TLA+ invariants into randomized
 distributed executions so protocol mistakes surface quickly with replayable
