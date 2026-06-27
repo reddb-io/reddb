@@ -725,6 +725,21 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec![],
             ),
         },
+        // Connection knowledge tool (ADR 0061): project the canonical
+        // reddb-wire connection-string parser into agent-readable transport
+        // and topology facts.
+        ToolDef {
+            name: "reddb_explain_connection",
+            description: "Decode a RedDB connection URI with the canonical `reddb-io-wire` parser and return its scheme, transport, mode (`embedded` or `remote`), topology, and normalized target details. Use this to learn the scheme dispatch: `memory://` is embedded ephemeral, `file://` is embedded persisted, `red://` / `reds://` are remote RedWire, and `grpc://` / `http(s)://` are remote non-RedWire transports.",
+            input_schema: schema(
+                vec![(
+                    "uri",
+                    "string",
+                    "Connection URI to explain, e.g. memory://, file:///data.rdb, reds://host, grpc://host, or https://host",
+                )],
+                vec!["uri"],
+            ),
+        },
     ]
 }
 
@@ -773,6 +788,8 @@ mod tests {
         assert!(names.contains(&"reddb_rql_explain"));
         // Type knowledge tool (ADR 0061).
         assert!(names.contains(&"reddb_type_of"));
+        // Connection knowledge tool (ADR 0061).
+        assert!(names.contains(&"reddb_explain_connection"));
     }
 
     #[test]
