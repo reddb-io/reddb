@@ -158,3 +158,52 @@ Relational tables with typed columns queried through RQL; columns bind directly 
 Type families: `Numeric`, `String`, `Boolean`, `DateTime`, `Domain`
 
 <!-- END GENERATED: types -->
+
+<!-- BEGIN GENERATED: connections -->
+# RedDB Connection & Topology Reference
+
+RedDB connection strings and topology payloads are owned by `reddb-io-wire`, the shared wire crate used by the server, client, and language drivers.
+
+This reference is generated from the connection-string parser constants and topology wire constants. Do not edit by hand -- regenerate from the engine.
+
+## Connection targets
+
+| Pattern | Target | Default port | TLS | Parser authority |
+|---------|--------|--------------|-----|------------------|
+| `red://, red://:memory:, red:///path/to/data.rdb` | Embedded memory or file target | n/a | n/a | `is_embedded_connection_uri` |
+| `red://host[:port]` | RedWire TCP | 5050 | plain | `parse -> ConnectionTarget::RedWire` |
+| `reds://host[:port]` | RedWire TLS | 5050 | TLS | `parse -> ConnectionTarget::RedWire` |
+| `grpc://host[:port]` | gRPC plain endpoint | 55055 | plain | `parse -> ConnectionTarget::Grpc` |
+| `grpcs://host[:port]` | gRPC TLS endpoint | 55555 | TLS | `parse -> ConnectionTarget::Grpc` |
+| `http://host[:port]` | HTTP REST endpoint | 80 | plain | `parse -> ConnectionTarget::Http` |
+| `https://host[:port]` | HTTPS REST endpoint | 443 | TLS | `parse -> ConnectionTarget::Http` |
+| `red+ws://host[:port]` | Browser-native WebSocket | 80 | plain | `parse -> ConnectionTarget::WsNative` |
+| `red+wss://host[:port]` | Browser-native secure WebSocket | 443 | TLS | `parse -> ConnectionTarget::WsNative` |
+
+## Routing examples
+
+- `red://` and `red:///data/prod.rdb` are embedded aliases; callers gate them with `is_embedded_connection_uri` before remote transport parsing.
+- `red://primary.svc` parses as RedWire TCP on port `5050`.
+- `reds://primary.svc` parses as RedWire TLS on port `5050`.
+- `grpc://primary.svc` parses as a gRPC endpoint on port `55055`.
+- `grpc://primary.svc,replica-a.svc,replica-b.svc?route=primary` parses as a cluster target with the first host as primary, later hosts as replicas, and `force_primary=true`.
+
+## Parser limits
+
+The parser enforces these unauthenticated-input guardrails before URI routing:
+
+- `max_uri_bytes`: `8192`
+- `max_query_params`: `32`
+- `max_cluster_hosts`: `64`
+
+## Topology advertisement
+
+The topology payload is the shared read-routing advertisement carried by RedWire HelloAck and the gRPC Topology RPC.
+
+- `TOPOLOGY_WIRE_VERSION_V1`: `0x01`
+- `MAX_KNOWN_TOPOLOGY_VERSION`: `0x01`
+- `TOPOLOGY_HEADER_SIZE`: `5` bytes (version tag + little-endian body length)
+- Unknown future version tags are ignored cleanly so clients can fall back to URI-only routing.
+- Version 1 carries `epoch`, `primary.addr`, `primary.region`, and ordered replica records: `addr`, `region`, `healthy`, `lag_ms`, `last_applied_lsn`, `rebootstrapping`.
+
+<!-- END GENERATED: connections -->

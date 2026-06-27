@@ -1773,6 +1773,36 @@ mod tests {
     }
 
     #[test]
+    fn resources_read_returns_generated_connection_reference() {
+        let mut srv = make_server();
+        let request = parse_json(
+            r#"{"jsonrpc":"2.0","id":11,"method":"resources/read","params":{"uri":"reddb://knowledge/connections"}}"#,
+        );
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let text = parsed
+            .get("result")
+            .and_then(|result| result.get("contents"))
+            .and_then(JsonValue::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("resource text");
+
+        // The body is exactly what the wire authority generates -- same source
+        // as docs/llms.txt.
+        assert_eq!(text, reddb_wire::knowledge::connection_reference_markdown());
+        assert!(
+            text.contains("`red://host[:port]`"),
+            "redwire target missing"
+        );
+        assert!(
+            text.contains("Topology advertisement"),
+            "topology section missing"
+        );
+    }
+
+    #[test]
     fn resources_read_unknown_uri_errors() {
         let mut srv = make_server();
         let request = parse_json(
