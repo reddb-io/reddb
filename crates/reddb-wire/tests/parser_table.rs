@@ -6,7 +6,10 @@
 
 use std::path::PathBuf;
 
-use reddb_wire::{is_embedded_connection_uri, parse, ConnectionTarget, ParseErrorKind};
+use reddb_wire::{
+    is_embedded_connection_uri, parse, parse_with_auth, ConnectionAuth, ConnectionTarget,
+    ParseErrorKind,
+};
 
 #[derive(Debug)]
 struct OkCase {
@@ -288,4 +291,56 @@ fn embedded_red_uri_aliases_are_centralized() {
     assert!(is_embedded_connection_uri(" red:///tmp/demo.rdb "));
     assert!(!is_embedded_connection_uri("red://primary:5050"));
     assert!(!is_embedded_connection_uri("grpc://primary:55055"));
+}
+
+#[test]
+fn connection_auth_is_derived_from_url_userinfo() {
+    let anonymous = parse_with_auth("reds://host:5050").unwrap();
+    assert_eq!(anonymous.auth, ConnectionAuth::Anonymous);
+
+    let apikey = parse_with_auth("reds://api-key-1@host:5050").unwrap();
+    assert_eq!(apikey.auth, ConnectionAuth::ApiKey("api-key-1".to_string()));
+
+    let basic = parse_with_auth("reds://alice:secret@host:5050").unwrap();
+    assert_eq!(
+        basic.auth,
+        ConnectionAuth::Basic {
+            user: "alice".to_string(),
+            pass: "secret".to_string()
+        }
+    );
+}
+
+#[test]
+fn connection_auth_debug_and_redacted_uri_do_not_leak_secret_substrings() {
+    let parsed = parse_with_auth("reds://alice:secret-token@host:5050").unwrap();
+    let debug = format!("{:?}", parsed.auth);
+    assert!(!debug.contains("alice"), "{debug}");
+    assert!(!debug.contains("secret-token"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+
+    assert!(
+        !parsed.redacted_uri.contains("alice"),
+        "{}",
+        parsed.redacted_uri
+    );
+    assert!(
+        !parsed.redacted_uri.contains("secret-token"),
+        "{}",
+        parsed.redacted_uri
+    );
+    assert!(
+        parsed.redacted_uri.contains("<redacted>"),
+        "{}",
+        parsed.redacted_uri
+    );
+}
+
+#[test]
+fn connection_auth_parse_errors_redact_userinfo() {
+    let err = parse_with_auth("reds://alice:secret-token@[bad").unwrap_err();
+    let rendered = err.to_string();
+    assert!(!rendered.contains("alice"), "{rendered}");
+    assert!(!rendered.contains("secret-token"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
 }
