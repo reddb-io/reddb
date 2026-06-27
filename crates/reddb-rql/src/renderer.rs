@@ -97,6 +97,14 @@ fn render_update(uq: &UpdateQuery) -> String {
         sql.push_str(" WHERE ");
         sql.push_str(&render_filter(filter));
     }
+    if let Some(claim_limit) = uq.claim_limit {
+        if uq.claim_exact {
+            sql.push_str(" CLAIM EXACT ");
+        } else {
+            sql.push_str(" CLAIM LIMIT ");
+        }
+        sql.push_str(&claim_limit.to_string());
+    }
     sql
 }
 
