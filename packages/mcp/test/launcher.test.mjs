@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { binaryName, tryResolveBinary, ensureBinary, DEFAULT_REPO } from '../src/binary.js'
-import { spawnMcp } from '../src/spawn.js'
+import { spawnMcp, redMcpArgs } from '../src/spawn.js'
 
 let passed = 0
 let failed = 0
@@ -191,33 +191,55 @@ const run = async () => {
   // ---- spawn -----------------------------------------------------------
 
   await test('spawnMcp execs `red mcp` over inherited stdio', () => {
-    const calls = []
-    const fakeChild = { on() {} }
-    const fakeSpawn = (bin, argv, opts) => {
-      calls.push({ bin, argv, opts })
-      return fakeChild
-    }
-    const child = spawnMcp('/abs/red', [], { spawn: fakeSpawn })
-    assertEqual(child, fakeChild, 'returns the child process')
-    assertEqual(calls.length, 1, 'spawned once')
-    assertEqual(calls[0].bin, '/abs/red', 'spawns the resolved binary')
-    assertEqual(JSON.stringify(calls[0].argv), JSON.stringify(['mcp']), 'argv is [mcp]')
-    assertEqual(calls[0].opts.stdio, 'inherit', 'stdio inherited')
+    withEnv({ REDDB_MCP_URI: undefined }, () => {
+      const calls = []
+      const fakeChild = { on() {} }
+      const fakeSpawn = (bin, argv, opts) => {
+        calls.push({ bin, argv, opts })
+        return fakeChild
+      }
+      const child = spawnMcp('/abs/red', [], { spawn: fakeSpawn })
+      assertEqual(child, fakeChild, 'returns the child process')
+      assertEqual(calls.length, 1, 'spawned once')
+      assertEqual(calls[0].bin, '/abs/red', 'spawns the resolved binary')
+      assertEqual(JSON.stringify(calls[0].argv), JSON.stringify(['mcp']), 'argv is [mcp]')
+      assertEqual(calls[0].opts.stdio, 'inherit', 'stdio inherited')
+    })
   })
 
   await test('spawnMcp forwards extra args after the mcp subcommand', () => {
-    const calls = []
-    const fakeSpawn = (bin, argv) => {
-      calls.push(argv)
-      return { on() {} }
-    }
-    spawnMcp('/abs/red', ['--url', 'tcp://127.0.0.1:6789'], { spawn: fakeSpawn })
-    assertEqual(
-      JSON.stringify(calls[0]),
-      JSON.stringify(['mcp', '--url', 'tcp://127.0.0.1:6789']),
-      'extra args forwarded after mcp',
-    )
+    withEnv({ REDDB_MCP_URI: undefined }, () => {
+      const calls = []
+      const fakeSpawn = (bin, argv) => {
+        calls.push(argv)
+        return { on() {} }
+      }
+      spawnMcp('/abs/red', ['--url', 'tcp://127.0.0.1:6789'], { spawn: fakeSpawn })
+      assertEqual(
+        JSON.stringify(calls[0]),
+        JSON.stringify(['mcp', '--url', 'tcp://127.0.0.1:6789']),
+        'extra args forwarded after mcp',
+      )
+    })
   })
+
+  await test('redMcpArgs forwards REDDB_MCP_URI as the connection URI', () =>
+    withEnv({ REDDB_MCP_URI: 'file:///tmp/reddb-agent.rdb' }, () => {
+      assertEqual(
+        JSON.stringify(redMcpArgs([], process.env)),
+        JSON.stringify(['mcp', '--uri', 'file:///tmp/reddb-agent.rdb']),
+        'env URI becomes --uri',
+      )
+    }))
+
+  await test('redMcpArgs lets explicit --uri beat REDDB_MCP_URI', () =>
+    withEnv({ REDDB_MCP_URI: 'red://env.example:5050' }, () => {
+      assertEqual(
+        JSON.stringify(redMcpArgs(['--uri', 'memory://'], process.env)),
+        JSON.stringify(['mcp', '--uri', 'memory://']),
+        'explicit URI is preserved',
+      )
+    }))
 
   await test('spawnMcp rejects an empty binary path', () => {
     let threw = false

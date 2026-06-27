@@ -102,6 +102,26 @@ Canonical labels include lifecycle states, `blocked:dependency`, and typed `/afk
 
 Single-context layout: `.red/CONTEXT.md` + `.red/adr/` at the repository root. See `.red/agents/domain.md`.
 
+### MCP config
+
+Recommended checked-in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "reddb": {
+      "command": "npx",
+      "args": ["-y", "@reddb-io/mcp"],
+      "env": {
+        "REDDB_MCP_URI": "${REDDB_MCP_URI:-memory://}"
+      }
+    }
+  }
+}
+```
+
+Set `REDDB_MCP_URI` in the host environment for file-backed or remote targets; do not commit credentials into `.mcp.json`.
+
 ### LLM reference
 
 Use `docs/llms.txt` for the generated agent-facing RedDB reference. The docs site publishes the same file at `/llms.txt`, and MCP knowledge resources serve the same generated source sections.
