@@ -1278,7 +1278,7 @@ fn document_body_set_operation(column: &str, value: Value) -> PatchEntityOperati
     }
 }
 
-fn replace_document_row_body(
+fn replace_document_fields_body(
     fields: &mut HashMap<String, Value>,
     body: JsonValue,
     binary: bool,
@@ -1312,6 +1312,23 @@ fn replace_document_row_body(
         }
     }
 
+    Ok(())
+}
+
+fn replace_document_row_body(
+    row: &mut crate::storage::unified::entity::RowData,
+    body: JsonValue,
+    binary: bool,
+    modified_columns: &mut Vec<String>,
+) -> RedDBResult<()> {
+    let fields = row.named.get_or_insert_with(Default::default);
+    replace_document_fields_body(fields, body, binary, modified_columns)?;
+
+    // Full body replacement rebuilds the document from the canonical `body`.
+    // Stale positional/schema values would otherwise leak back through JSON
+    // presentation even after the named map was pruned.
+    row.columns.clear();
+    row.schema = None;
     Ok(())
 }
 
@@ -1456,19 +1473,18 @@ impl RedDBRuntime {
 
                 if !document_body_ops.is_empty() {
                     context_index_dirty = true;
-                    let named = row.named.get_or_insert_with(Default::default);
-                    let mut body = document_body_from_named(named)?;
+                    let mut body =
+                        document_body_from_named(row.named.get_or_insert_with(Default::default))?;
                     apply_patch_operations_to_json(&mut body, &document_body_ops)
                         .map_err(crate::RedDBError::Query)?;
-                    replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
+                    replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
                 }
 
                 if is_document_collection {
                     if let Some(body) = payload.get("body") {
                         context_index_dirty = true;
-                        let named = row.named.get_or_insert_with(Default::default);
                         replace_document_row_body(
-                            named,
+                            row,
                             body.clone(),
                             binary_body,
                             &mut modified_columns,
@@ -1488,7 +1504,7 @@ impl RedDBRuntime {
                         let mut body = document_body_from_named(named)?;
                         apply_patch_operations_to_json(&mut body, &field_ops)
                             .map_err(crate::RedDBError::Query)?;
-                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
                     } else {
                         for op in &field_ops {
                             if let Some(col) = op.path.first() {
@@ -1524,7 +1540,7 @@ impl RedDBRuntime {
                                 map.insert(key.clone(), value.clone());
                             }
                         }
-                        replace_document_row_body(named, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
                     } else {
                         for (key, value) in fields {
                             modified_columns.push(key.clone());
@@ -2027,9 +2043,8 @@ impl RedDBRuntime {
             match body_assignment {
                 Some((_, value)) => {
                     let body = document_body_from_assignment(&value)?;
-                    let named = row.named.get_or_insert_with(Default::default);
                     replace_document_row_body(
-                        named,
+                        row,
                         body,
                         self.binary_document_body_enabled(),
                         &mut modified_columns,
@@ -2059,12 +2074,13 @@ impl RedDBRuntime {
                     apply_row_field_assignments_raw(row, static_row_assignments);
                     apply_row_field_assignments_raw(row, dynamic_row_assignments);
                     if !document_body_ops.is_empty() {
-                        let named = row.named.get_or_insert_with(Default::default);
-                        let mut body = document_body_from_named(named)?;
+                        let mut body = document_body_from_named(
+                            row.named.get_or_insert_with(Default::default),
+                        )?;
                         apply_patch_operations_to_json(&mut body, &document_body_ops)
                             .map_err(crate::RedDBError::Query)?;
                         replace_document_row_body(
-                            named,
+                            row,
                             body,
                             self.binary_document_body_enabled(),
                             &mut modified_columns,
