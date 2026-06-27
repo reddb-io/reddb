@@ -28,9 +28,9 @@ pub mod sanitizer;
 pub mod topology;
 
 pub use conn_string::{
-    is_embedded_connection_uri, parse, parse_with_limits, ConnStringLimits, ConnectionTarget,
-    ParseError, ParseErrorKind, DEFAULT_PORT_GRPC, DEFAULT_PORT_GRPCS, DEFAULT_PORT_RED,
-    DEFAULT_PORT_WS, DEFAULT_PORT_WSS,
+    is_embedded_connection_uri, parse, parse_with_auth, parse_with_limits, ConnStringLimits,
+    ConnectionAuth, ConnectionSpec, ConnectionTarget, ParseError, ParseErrorKind,
+    DEFAULT_PORT_GRPC, DEFAULT_PORT_GRPCS, DEFAULT_PORT_RED, DEFAULT_PORT_WS, DEFAULT_PORT_WSS,
 };
 pub use redwire::{BuildError, FrameBuilder};
 pub use sanitizer::{
