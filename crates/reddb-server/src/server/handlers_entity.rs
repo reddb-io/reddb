@@ -480,14 +480,17 @@ impl RedDBServer {
             .get("body")
             .cloned()
             .unwrap_or_else(|| payload.clone());
-        let mut replacement = Map::new();
-        replacement.insert("body".to_string(), body_value);
+        let operations = vec![PatchEntityOperation {
+            op: PatchEntityOperationType::Replace,
+            path: vec!["body".to_string()],
+            value: Some(body_value),
+        }];
 
         match self.entity_use_cases().patch(PatchEntityInput {
             collection: collection.to_string(),
             id: EntityId::new(id),
-            payload: JsonValue::Object(replacement),
-            operations: Vec::new(),
+            payload: JsonValue::Object(Map::new()),
+            operations,
         }) {
             Ok(output) => json_response(
                 200,
