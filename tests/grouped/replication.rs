@@ -54,5 +54,8 @@ mod e2e_issue_840_replication_auto_rollback;
 #[path = "replication/e2e_replica_readonly.rs"]
 mod e2e_replica_readonly;
 
+#[path = "replication/jepsen_black_box_harness.rs"]
+mod jepsen_black_box_harness;
+
 #[path = "replication/maelstrom_protocol_model.rs"]
 mod maelstrom_protocol_model;
