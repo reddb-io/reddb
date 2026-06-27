@@ -241,32 +241,44 @@ fn http_document_insert_get_scan_and_delete() {
         "array positional error should be helpful: {array_error}"
     );
 
-    let replacement = json!({
-        "body": {
-            "event_type": "replaced",
-            "details": { "ip": "127.0.0.1" }
-        }
+    let merge_patch = json!({
+        "event_type": "patched",
+        "details": { "ip": "127.0.0.1", "reviewed": null },
+        "owner": { "team": "security" }
     });
-    let (status, replaced) = http_request(
+    let (status, merged) = http_request(
         &addr,
         "PATCH",
         &format!("/collections/events/entities/{id}"),
-        Some(replacement),
+        Some(merge_patch),
     );
-    assert_eq!(status, 200, "replaced={replaced}");
+    assert_eq!(status, 200, "merged={merged}");
     assert_eq!(
-        replaced["entity"]["data"]["named"]["body"]["event_type"],
-        json!("replaced")
+        merged["entity"]["data"]["named"]["body"]["event_type"],
+        json!("patched")
     );
     assert!(
-        replaced["entity"]["data"]["named"]["body"]
-            .get("roles")
+        merged["entity"]["data"]["named"]["body"]["details"]
+            .get("reviewed")
             .is_none(),
-        "full body replacement should remove old document fields: {replaced}"
+        "RFC 7396 null values delete keys: {merged}"
     );
     assert_eq!(
-        replaced["entity"]["data"]["named"]["event_type"],
-        json!("replaced")
+        merged["entity"]["data"]["named"]["body"]["details"]["ip"],
+        json!("127.0.0.1")
+    );
+    assert_eq!(
+        merged["entity"]["data"]["named"]["body"]["owner"]["team"],
+        json!("security")
+    );
+    assert_eq!(
+        merged["entity"]["data"]["named"]["body"]["roles"],
+        json!(["reader", "ops"]),
+        "merge patch must preserve untouched sibling fields: {merged}"
+    );
+    assert_eq!(
+        merged["entity"]["data"]["named"]["event_type"],
+        json!("patched")
     );
 
     let (status, deleted) = http_request(

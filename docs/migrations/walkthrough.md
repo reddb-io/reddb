@@ -221,7 +221,7 @@ ROLLBACK MIGRATION add_verified_at;
 ```
 
 ```
-ERROR: cannot rollback 'add_verified_at' — applied migration 'backfill_verified_at' depends on it
+ERROR: cannot rollback 'add_verified_at' - applied migration 'backfill_verified_at' depends on it
 ```
 
 ---

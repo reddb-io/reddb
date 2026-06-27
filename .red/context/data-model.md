@@ -58,6 +58,18 @@ Part of the [glossary map](../CONTEXT-MAP.md). How data is shaped and accessed, 
 - **Ephemeral notification** — a lightweight pub/sub signal with no replay, ACK, consumer offset, or DLQ. Offline listeners miss it; use a queue or stream when durability matters. The RedDB-native contract is canonical; Postgres-like `LISTEN`/`NOTIFY` forms are compatibility translations rather than engine concepts. Channels are tenant-scoped by default; cross-tenant or global notification requires explicit capability.
 - **Durable stream** — a Collection model for an append-only event log with per-consumer offsets and stream-specific retention. Unlike a queue, reading does not create pending delivery state; unlike an ephemeral notification, a consumer can resume from its saved offset. First use is app-level publish/read; the event shape should remain compatible with future materialized CDC.
 
+## Coordination
+
+- **Resource reservation** — a transactional claim over finite user-domain capacity, such as stock, seats, slots, or quotas, whose availability and reservation state must share one authoritative commit boundary.
+- **Concurrent claim** — a state-changing coordination primitive where competing transactions acquire and update different eligible records instead of serializing behind the same candidate; queues participate through **Queue delivery** semantics rather than a parallel claim path.
+- **Claim lock** — a transaction-scoped record lock used by **Concurrent claim** to make an in-flight candidate temporarily unavailable to other claimers without storing lease fields in user data; ordinary DML keeps the normal MVCC conflict policy.
+- **Claim identity** — the model-owned identity used by **Claim lock**: table/document records use stable logical identity, KV uses key identity, and queues use **Queue delivery** identity.
+- **Exact claim** — a **Concurrent claim** mode that commits only if the requested claim cardinality is fully satisfied by immediately claimable records.
+- **Claim miss** — a normal **Concurrent claim** result where the requested claim cardinality cannot be satisfied immediately and the statement applies no writes.
+- **Claim authority** — the write authority allowed to decide a **Concurrent claim**; replicas replay or route the resulting write instead of choosing claim winners locally.
+- **Owner-local claim** — a **Concurrent claim** restricted to one write owner or range owner; cross-owner exactness is outside the first claim contract.
+- **Reservation idempotency key** — an application-defined key stored transactionally with a **Resource reservation** so retried requests observe the existing outcome instead of creating a duplicate claim.
+
 ## Queue modes
 
 - **`FANOUT` queue** — every consumer (or consumer group) receives every message. Equivalent to publishing across multiple Kafka consumer groups or RabbitMQ fanout exchange. Default mode for auto-event queues.

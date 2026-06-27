@@ -15,11 +15,21 @@ categories = ["database-implementations", "data-structures"]
 name = "reddb_types"
 path = "src/lib.rs"
 
+[[bin]]
+name = "measure_value_layout"
+path = "src/bin/measure_value_layout.rs"
+
 [dependencies]
 zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 proptest = "1"
+# Array display/plain-text formatting allocation benchmark (#1342).
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "array_display_bench"
+harness = false
 
 [lints]
 workspace = true

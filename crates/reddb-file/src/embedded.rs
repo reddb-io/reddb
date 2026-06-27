@@ -948,6 +948,9 @@ fn crash_inject(point: &str) {
     if std::env::var(CRASH_INJECT_ENV).ok().as_deref() == Some(point) {
         std::process::exit(173);
     }
+    if crate::buggify!(CRASH_INJECT_ENV, point) {
+        std::process::exit(173);
+    }
 }
 
 fn now_unix_ms() -> u128 {

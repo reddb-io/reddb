@@ -198,6 +198,9 @@ fn crash_inject(point: &str) {
     if std::env::var(SERVERLESS_CRASH_INJECT_ENV).ok().as_deref() == Some(point) {
         std::process::exit(173);
     }
+    if crate::buggify!(SERVERLESS_CRASH_INJECT_ENV, point) {
+        std::process::exit(173);
+    }
 }
 
 fn verify_checksum(bytes: &[u8]) -> RdbFileResult<()> {

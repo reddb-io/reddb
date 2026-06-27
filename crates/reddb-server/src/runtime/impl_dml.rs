@@ -571,16 +571,29 @@ impl RedDBRuntime {
             return Ok(());
         }
 
+        // Use the parent-expanded set so that dot-path indexes (e.g.
+        // "body.service.tier") are triggered when the root field ("body")
+        // is modified.
         let indexed_cols = self
             .index_store_ref()
-            .indexed_columns_set(&applied.collection);
+            .indexed_columns_set_with_parents(&applied.collection);
         if indexed_cols.is_empty() {
             return Ok(());
         }
 
+        // Single-source documents keep promoted index columns (`score`) in the
+        // body, not as stored fields. Resolve each indexed column from the body
+        // and fold it into the field snapshots so the diff below sees the value
+        // move — for an ordinary stored column this adds nothing.
+        let pre = self
+            .index_store_ref()
+            .augment_body_derived_index_fields(&applied.pre_mutation_fields, &indexed_cols);
+        let post = self
+            .index_store_ref()
+            .augment_body_derived_index_fields(&post, &indexed_cols);
+
         if let Some(old_version) = applied.replaced_entity.as_ref() {
-            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = applied
-                .pre_mutation_fields
+            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = pre
                 .iter()
                 .filter(|(col, _)| indexed_cols.contains(col))
                 .cloned()
@@ -603,20 +616,14 @@ impl RedDBRuntime {
             return Ok(());
         }
 
-        let damage =
-            crate::application::entity::row_damage_vector(&applied.pre_mutation_fields, &post);
+        let damage = crate::application::entity::row_damage_vector(&pre, &post);
         if damage
             .touched_columns()
             .into_iter()
             .any(|col| indexed_cols.contains(col))
         {
             self.index_store_ref()
-                .index_entity_update(
-                    &applied.collection,
-                    applied.id,
-                    &applied.pre_mutation_fields,
-                    &post,
-                )
+                .index_entity_update(&applied.collection, applied.id, &pre, &post)
                 .map_err(crate::RedDBError::Internal)?;
         }
         Ok(())
@@ -1801,6 +1808,27 @@ impl RedDBRuntime {
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let needs_rmw_lock = update_needs_rmw_lock(query);
+        let claim_lock = query.claim_limit.map(|_| {
+            self.inner
+                .rmw_locks
+                .lock_for(&query.table, "__table_claim_update__")
+        });
+        let _claim_guard = if let Some(lock) = claim_lock.as_ref() {
+            let Some(guard) = lock.try_lock() else {
+                return Ok((
+                    RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        0,
+                        "update",
+                        "runtime-dml",
+                    ),
+                    Vec::new(),
+                ));
+            };
+            Some(guard)
+        } else {
+            None
+        };
         let table_rmw_lock = if needs_rmw_lock {
             Some(
                 self.inner
@@ -1812,7 +1840,8 @@ impl RedDBRuntime {
         };
         let _table_rmw_guard = table_rmw_lock.as_ref().map(|lock| lock.lock());
         let mut touched_ids: Vec<EntityId> = Vec::new();
-        let limit_cap = query.limit.map(|l| l as usize);
+        let claim_cap = query.claim_limit.map(|limit| limit as usize);
+        let limit_cap = claim_cap.or_else(|| query.limit.map(|limit| limit as usize));
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -1837,6 +1866,14 @@ impl RedDBRuntime {
         } else {
             ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, limit_cap)
         };
+        if query.claim_exact
+            && claim_cap.is_some_and(|claim_count| ids_to_update.len() < claim_count)
+        {
+            return Ok((
+                RuntimeQueryResult::dml_result(raw_query.to_string(), 0, "update", "runtime-dml"),
+                Vec::new(),
+            ));
+        }
 
         if needs_rmw_lock {
             return self.execute_update_inner_tracked_locked(

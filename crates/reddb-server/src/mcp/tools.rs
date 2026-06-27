@@ -685,6 +685,53 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec!["name"],
             ),
         },
+        // RQL knowledge tools (ADR 0061): parse a submitted query through the
+        // real `reddb-io-rql` parser so an agent learns the dialect by
+        // submitting, not by guessing.
+        ToolDef {
+            name: "reddb_rql_validate",
+            description: "Validate an RQL (RedDB Query Language) string by parsing it with the real reddb-io-rql parser. Returns `{ valid: true, statement }` with the statement kind on success, or `{ valid: false, error }` with a structured diagnostic (message, line, column, offset, kind, expected) on failure. Submit a query to learn the dialect instead of guessing.",
+            input_schema: schema(
+                vec![("rql", "string", "RQL query string to validate")],
+                vec!["rql"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_rql_explain",
+            description: "Explain an RQL (RedDB Query Language) string: parse it with the real reddb-io-rql parser and, when valid, also return its AST and the optimizer plan (`ast`, `optimized_ast`, `applied_passes`). Invalid input returns the same structured diagnostic as reddb_rql_validate with no AST/plan.",
+            input_schema: schema(
+                vec![("rql", "string", "RQL query string to parse and explain")],
+                vec!["rql"],
+            ),
+        },
+        // Type knowledge tool (ADR 0061): answer a type/cast lookup from the
+        // generated reddb-io-types catalog.
+        ToolDef {
+            name: "reddb_type_of",
+            description: "Look up a RedDB value type from the generated `reddb-io-types` catalog. Given either a type name (`type`, e.g. \"INTEGER\" or the SQL alias \"int\") or a literal JSON value (`value`, e.g. 42 or true), returns the canonical type, its coercion category, the casts available out of it, and the operator overloads that accept it. Provide exactly one of `type` or `value`; `type` wins if both are given.\n\nThe answer is read live from the engine's function/operator/cast catalogs — it never drifts from the type system.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("type", string_field("Type name to look up: a canonical RedDB type (e.g. \"INTEGER\", \"TEXT\") or a common SQL alias (e.g. \"int\", \"string\"), case-insensitive.")),
+                    ("value", {
+                        let mut f = Map::new();
+                        f.insert("description".to_string(), JsonValue::String("A literal JSON value (null, boolean, number, string, array, or object) whose canonical type to look up. Used only when `type` is omitted.".to_string()));
+                        f.insert(
+                            "anyOf".to_string(),
+                            JsonValue::Array(vec![
+                                type_field("null"),
+                                type_field("boolean"),
+                                type_field("number"),
+                                type_field("string"),
+                                type_field("array"),
+                                type_field("object"),
+                            ]),
+                        );
+                        JsonValue::Object(f)
+                    }),
+                ],
+                vec![],
+            ),
+        },
     ]
 }
 
@@ -728,6 +775,55 @@ mod tests {
         assert!(names.contains(&"reddb_graph_clustering"));
         assert!(names.contains(&"reddb_create_collection"));
         assert!(names.contains(&"reddb_drop_collection"));
+        // RQL knowledge tools (ADR 0061).
+        assert!(names.contains(&"reddb_rql_validate"));
+        assert!(names.contains(&"reddb_rql_explain"));
+        // Type knowledge tool (ADR 0061).
+        assert!(names.contains(&"reddb_type_of"));
+    }
+
+    #[test]
+    fn test_rql_validate_tool_schema() {
+        let tools = all_tools();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "reddb_rql_validate")
+            .expect("reddb_rql_validate registered");
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert!(props.contains_key("rql"));
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_strs.contains(&"rql"));
+    }
+
+    #[test]
+    fn test_rql_explain_tool_schema() {
+        let tools = all_tools();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "reddb_rql_explain")
+            .expect("reddb_rql_explain registered");
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert!(props.contains_key("rql"));
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_strs.contains(&"rql"));
     }
 
     #[test]
@@ -968,5 +1064,26 @@ mod tests {
             .unwrap();
         let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"name"));
+    }
+
+    #[test]
+    fn test_type_of_tool_schema() {
+        let tools = all_tools();
+        let tool = tools.iter().find(|t| t.name == "reddb_type_of").unwrap();
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        // Accepts either a type name or a literal value; neither is required so
+        // the handler can validate "exactly one of" and surface a clear error.
+        assert!(props.contains_key("type"));
+        assert!(props.contains_key("value"));
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(required.is_empty());
     }
 }

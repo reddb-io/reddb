@@ -1,0 +1,40 @@
+{
+  "comment": [
+    "Single source of truth for the status-check contexts required to merge to",
+    "`main` (issue #975 / ADR 0059). These contexts are produced by ci.yml on a",
+    "normal PR. ci.yml is path-filtered (paths-ignore: **.md, docs/**, CHANGELOG**,",
+    "LICENSE**), so a docs-only PR skips ci.yml and none of these contexts ever",
+    "report -> the PR is BLOCKED forever (issue #1307). ci-docs.yml is the shim",
+    "that re-reports every one of these contexts as success on docs-only PRs so the",
+    "gate stays satisfiable without lifting branch protection.",
+    "scripts/ci-docs-shim-contract.test.mjs keeps this list, ci.yml, and",
+    "ci-docs.yml in lock-step."
+  ],
+  "required_contexts": [
+    "gate",
+    "Quality (fmt, check, clippy)",
+    "Lint (no untyped serialization)",
+    "Version integrity",
+    "Contract Matrix Gate",
+    "Docs Match Contract Matrix",
+    "Helm Chart",
+    "AFK Validation Sidecar",
+    "RQL Conformance (sqllogictest)",
+    "Drivers / Python (cargo check)",
+    "Feature Matrix (no-default)",
+    "Feature Matrix (otel)",
+    "Feature Matrix (backend-s3)",
+    "Feature Matrix (backend-turso)",
+    "Feature Matrix (backend-d1)",
+    "Feature Matrix (all-features)",
+    "Test Suite",
+    "Driver Param Conformance",
+    "Chaos & Drill Suite",
+    "Fuzz Parsers",
+    "Container Stack",
+    "Publish Dry-Run (crates.io)",
+    "cargo package dry-run",
+    "Windows (build + unit tests)",
+    "macOS (build + unit tests)"
+  ]
+}

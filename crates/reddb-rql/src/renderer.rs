@@ -11,7 +11,8 @@
 //! ```
 
 use crate::ast::{
-    CompareOp, FieldRef, Filter, InsertQuery, Projection, QueryExpr, QueueCommand, TableQuery,
+    BinOp, CompareOp, Expr, FieldRef, Filter, InsertQuery, Projection, QueryExpr, QueueCommand,
+    TableQuery, UpdateQuery, UpdateTarget,
 };
 use reddb_types::types::Value;
 
@@ -22,6 +23,7 @@ pub fn render(expr: &QueryExpr) -> String {
     match expr {
         QueryExpr::Table(tq) => render_table(tq),
         QueryExpr::Insert(iq) => render_insert(iq),
+        QueryExpr::Update(uq) => render_update(uq),
         QueryExpr::QueueCommand(qc) => render_queue_command(qc),
         _ => String::new(),
     }
@@ -67,12 +69,105 @@ fn render_insert(iq: &InsertQuery) -> String {
     )
 }
 
+fn render_update(uq: &UpdateQuery) -> String {
+    let mut sql = format!("UPDATE {}", uq.table);
+    if let Some(target) = render_update_target(uq.target) {
+        sql.push(' ');
+        sql.push_str(target);
+    }
+    sql.push_str(" SET ");
+    let assignments = uq
+        .assignment_exprs
+        .iter()
+        .enumerate()
+        .map(|(idx, (column, expr))| {
+            let op = uq
+                .compound_assignment_ops
+                .get(idx)
+                .copied()
+                .flatten()
+                .map(render_compound_assignment_op)
+                .unwrap_or("=");
+            format!("{} {} {}", column, op, render_expr_sql(expr))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    sql.push_str(&assignments);
+    if let Some(filter) = &uq.filter {
+        sql.push_str(" WHERE ");
+        sql.push_str(&render_filter(filter));
+    }
+    if let Some(claim_limit) = uq.claim_limit {
+        if uq.claim_exact {
+            sql.push_str(" CLAIM EXACT ");
+        } else {
+            sql.push_str(" CLAIM LIMIT ");
+        }
+        sql.push_str(&claim_limit.to_string());
+    }
+    sql
+}
+
+fn render_update_target(target: UpdateTarget) -> Option<&'static str> {
+    match target {
+        UpdateTarget::Rows => None,
+        UpdateTarget::Documents => Some("DOCUMENTS"),
+        UpdateTarget::Kv => Some("KV"),
+        UpdateTarget::Nodes => Some("NODES"),
+        UpdateTarget::Edges => Some("EDGES"),
+    }
+}
+
+fn render_compound_assignment_op(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+=",
+        BinOp::Sub => "-=",
+        BinOp::Mul => "*=",
+        BinOp::Div => "/=",
+        BinOp::Mod => "%=",
+        _ => "=",
+    }
+}
+
 fn render_queue_command(qc: &QueueCommand) -> String {
     match qc {
         QueueCommand::Push { queue, value, .. } => {
             format!("QUEUE PUSH {} {}", queue, render_value_sql(value))
         }
         _ => String::new(),
+    }
+}
+
+fn render_expr_sql(expr: &Expr) -> String {
+    match expr {
+        Expr::Literal { value, .. } => render_value_sql(value),
+        Expr::Column { field, .. } => render_field_ref(field),
+        Expr::BinaryOp { op, lhs, rhs, .. } => format!(
+            "{} {} {}",
+            render_expr_sql(lhs),
+            render_bin_op(*op),
+            render_expr_sql(rhs)
+        ),
+        _ => "NULL".to_string(),
+    }
+}
+
+fn render_bin_op(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Eq => "=",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::And => "AND",
+        BinOp::Or => "OR",
+        _ => "",
     }
 }
 

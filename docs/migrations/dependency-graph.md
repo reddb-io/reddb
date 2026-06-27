@@ -149,33 +149,30 @@ dependency that closes the cycle.
 
 ## `EXPLAIN MIGRATION` for dependency inspection
 
-`EXPLAIN MIGRATION <name>` shows the full dependency chain resolved at
-query time:
+`EXPLAIN MIGRATION <name>` shows the stored migration plan for one migration:
 
 ```sql
 EXPLAIN MIGRATION build_leaderboard_view;
 ```
 
 ```
-name              : build_leaderboard_view
-status            : pending
-dependency_chain  : [add_score_column, add_rank_column]
-
-dependencies:
-  - add_score_column  (applied, explicit)
-  - add_rank_column   (pending, explicit)
+migration        : build_leaderboard_view
+status           : pending
+kind             : schema
+body             : CREATE VIEW leaderboard AS ...
+estimated_rows   : null
+lock_duration_ms : 0
 ```
 
 `EXPLAIN MIGRATION *` returns the full topological ordering of all pending
-migrations:
+migrations using the same row shape:
 
 ```
-pending migrations (topological order):
-  1. add_rank_column         (no dependencies)
-  2. build_leaderboard_view  (depends on: add_score_column ✓, add_rank_column)
+migration                | status  | kind
+-------------------------+---------+-------
+add_rank_column          | pending | schema
+build_leaderboard_view   | pending | schema
 ```
-
-The `✓` marker indicates a dependency that is already applied.
 
 ---
 

@@ -23,8 +23,10 @@ pub mod backup_temp;
 pub mod blob_cache;
 pub mod bloom_segment;
 pub mod btree_value_layout;
+pub mod clock;
 pub mod column_block;
 pub mod control_store;
+pub mod dst;
 pub mod embedded;
 pub mod file_format;
 pub mod graph_label_registry;
@@ -106,6 +108,7 @@ pub use btree_value_layout::{
     encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_MAX_SIZE,
     BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
+pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
     decode_column_block_granule_index_blob, encode_column_block_frame,
@@ -118,6 +121,7 @@ pub use control_store::{
     DurableLastVote, FileLastVoteStore, FileTermStore, DEFAULT_FILE_TERM, LAST_VOTE_TEMP_EXTENSION,
     TERM_TEMP_EXTENSION,
 };
+pub use dst::SimulationContext;
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock, RdbFileError,
     RdbFileResult, DEFAULT_FORMAT_VERSION, EMBEDDED_RDB_MANIFEST_OFFSET,

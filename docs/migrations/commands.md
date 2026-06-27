@@ -30,7 +30,7 @@ rollback_migration :=
     ROLLBACK MIGRATION <name>
 
 explain_migration :=
-    EXPLAIN MIGRATION <name>
+    EXPLAIN MIGRATION ( <name> | * )
 
 name   := identifier | quoted_identifier
 dep    := identifier | quoted_identifier
@@ -88,9 +88,10 @@ ERROR: unknown migration 'add_score_column' referenced in DEPENDS ON
 #### `BATCH <n> ROWS`
 
 Marks this migration as a batched data migration. `n` must be a positive
-integer. When applied, RedDB rewrites the body's `WHERE` clause to add
-`LIMIT n` and loops until no rows remain, persisting the `rows_processed`
-checkpoint after each iteration.
+integer. The body must currently be a single idempotent `UPDATE` statement.
+When applied, RedDB appends `LIMIT n` and loops until no rows remain,
+persisting the `rows_processed` checkpoint after each iteration. Batched
+`DELETE` bodies are not supported yet.
 
 See [Data Migrations](./data-migrations.md) for full mechanics.
 
@@ -187,9 +188,11 @@ AS
 **Batched and irreversible**
 
 ```sql
-CREATE MIGRATION purge_deleted_users BATCH 1000 ROWS NO ROLLBACK
+CREATE MIGRATION redact_deleted_users BATCH 1000 ROWS NO ROLLBACK
 AS
-  DELETE FROM users WHERE deleted_at < now() - INTERVAL '2 years';
+  UPDATE users
+  SET email = NULL, display_name = NULL
+  WHERE deleted_at IS NOT NULL AND email IS NOT NULL;
 ```
 
 ---
@@ -239,19 +242,26 @@ APPLY MIGRATION backfill_scores FOR TENANT 'tenant-42';
 
 `<id>` may be a string or integer, matching the type of your RLS tenant key.
 
+Current limitation: migration status is still global in `red_migrations`.
+After a tenant-scoped apply succeeds, the migration is `status = 'applied'`
+for the whole database and later attempts for other tenants are treated as
+already applied. There is no `red_migration_tenants` per-tenant status table
+yet.
+
 ### `FOR TENANT *`
 
-Fans out the migration to every known tenant. RedDB iterates the tenant
-registry, sets the RLS context to each tenant in turn, and executes the
-migration body. Progress is tracked per tenant in `rows_processed`.
+Iterates known tenants and sets the RLS context for each tenant in turn.
+Because migration status is global today, this is not an independent
+per-tenant fanout mechanism: after the first successful tenant applies the
+migration, subsequent tenants may see the migration as already applied.
+Use this form carefully until per-tenant migration state is implemented.
 
 ```sql
 APPLY MIGRATION backfill_scores FOR TENANT *;
 ```
 
-If the migration fails for one tenant, that tenant's row is marked `failed`
-and the fanout continues to remaining tenants. A summary of failures is
-returned at the end.
+The result is a textual per-tenant summary, not a durable per-tenant progress
+table.
 
 ### Permissions
 
@@ -259,14 +269,17 @@ returned at the end.
 
 ### What happens on success
 
-- The SQL body is executed within a transaction.
+- The SQL body is executed.
 - `status` is updated to `'applied'`, `applied_at` is set.
 - A VCS commit is created. The commit message is:
-  `migration: apply <name>` (or `migration: apply <name> tenant <id>` for
-  tenant-scoped applications).
+  `migration: apply <name>`.
 - `vcs_commit_hash` is set to the new commit's hash.
 - For batched migrations, `rows_processed` is updated incrementally during
   execution.
+
+If the body succeeds but the VCS commit fails, the command returns an error,
+records the migration as `failed`, and stores the commit error in
+`red_migrations.error`.
 
 ### Examples
 
@@ -277,10 +290,11 @@ APPLY MIGRATION create_accounts_table;
 -- Apply all pending in dependency order
 APPLY MIGRATION *;
 
--- Apply to a specific tenant
+-- Apply with a specific tenant RLS context.
+-- Status is still global after success.
 APPLY MIGRATION backfill_display_name FOR TENANT 'acme-corp';
 
--- Fan out to all tenants
+-- Iterate known tenants with the same global migration status limitation.
 APPLY MIGRATION backfill_display_name FOR TENANT *;
 ```
 
@@ -316,7 +330,7 @@ If another migration depends on the target and is currently `applied`, the
 command returns:
 
 ```
-ERROR: cannot rollback 'add_score_column' — applied migration 'add_score_index' depends on it
+ERROR: cannot rollback 'add_score_column' - applied migration 'add_score_index' depends on it
 ```
 
 You must roll back dependents first, in reverse dependency order.
@@ -340,10 +354,9 @@ ROLLBACK MIGRATION add_archived_at;
 
 ## `EXPLAIN MIGRATION`
 
-Returns the full execution plan for a migration without running it. Shows the
-resolved dependency chain, the SQL that will be executed, estimated row
-counts for data migrations, inferred vs explicit dependency edges, and the
-batch strategy if applicable.
+Returns the current stored migration plan without running it. The current
+output is intentionally basic: migration name, status, kind, body, estimated
+rows, and lock duration.
 
 ```sql
 EXPLAIN MIGRATION backfill_scores;
@@ -353,15 +366,12 @@ EXPLAIN MIGRATION backfill_scores;
 
 | Field | Description |
 |---|---|
-| `name` | Migration name |
+| `migration` | Migration name |
 | `status` | Current status |
-| `no_rollback` | Whether ROLLBACK is blocked |
-| `batch_size` | Batch size, or null |
-| `dependency_chain` | Ordered list of migrations that must be applied first |
-| `dependencies` | Array of `{ name, status, inferred }` objects |
+| `kind` | `schema` or `data` |
 | `body` | The SQL that will be executed |
-| `estimated_rows` | Row count estimate from the query planner (data migrations) |
-| `execution_plan` | Query plan for each statement in the body |
+| `estimated_rows` | Reserved for future planner estimates; currently null |
+| `lock_duration_ms` | Reserved for future lock estimates; currently 0 |
 
 ### Permissions
 
@@ -379,7 +389,7 @@ EXPLAIN MIGRATION *;
 ```
 
 `EXPLAIN MIGRATION *` returns the full topological order of all pending
-migrations with their estimated execution costs.
+migrations using the same output fields.
 
 ---
 
@@ -392,7 +402,7 @@ migrations with their estimated execution costs.
 | `cycle detected: <a> → <b> → ... → <a>` | New edges would create a DAG cycle |
 | `migration '<name>' has unresolved dependency '<dep>'` | Dependency is `pending` or `failed` |
 | `migration '<name>' is marked NO ROLLBACK` | `ROLLBACK MIGRATION` on a `NO ROLLBACK` migration |
-| `cannot rollback '<name>' — applied migration '<dep>' depends on it` | Dependent migration is still applied |
+| `cannot rollback '<name>' - applied migration '<dep>' depends on it` | Dependent migration is still applied |
 | `migration '<name>' not found` | Any command referencing a non-existent migration name |
 | `insufficient privileges — Admin role required` | `APPLY` or `ROLLBACK` without Admin role |
 | `insufficient privileges — Write role required` | `CREATE MIGRATION` without Write role |

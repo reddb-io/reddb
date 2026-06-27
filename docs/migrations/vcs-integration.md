@@ -15,26 +15,26 @@ VCS layer.
 
 When `APPLY MIGRATION <name>` succeeds:
 
-1. The SQL body executes inside a transaction.
+1. The SQL body executes.
 2. On commit, the engine calls `vcs.commit` with the message:
    `migration: apply <name>`
-   (or `migration: apply <name> tenant <id>` for tenant-scoped applications).
 3. The resulting commit hash is written to `red_migrations.vcs_commit_hash`.
 4. `status` is updated to `'applied'` and `applied_at` is set.
 
-All of this happens atomically — either the SQL, the VCS commit, and the
-status update all succeed, or none of them do.
+If the VCS commit fails after the migration body has executed, the command
+returns an error, marks the migration `failed`, and records the commit error in
+`red_migrations.error`. The migration is not marked `applied` with an empty
+commit hash.
 
 ### Commit message format
 
 | Scenario | Commit message |
 |---|---|
 | Plain apply | `migration: apply add_verified_at` |
-| Tenant-scoped | `migration: apply backfill_scores tenant acme-corp` |
-| Tenant fanout (per-tenant commit) | `migration: apply backfill_scores tenant acme-corp` |
+| Apply with `FOR TENANT` context | `migration: apply backfill_scores` |
 
-Each tenant in a `FOR TENANT *` fanout gets its own commit with the
-tenant ID in the message.
+Migration status and commit hash are global today. Native per-tenant commit
+tracking is not implemented yet.
 
 ### Reading the commit hash
 
@@ -74,6 +74,9 @@ What happens:
    original commit's changes.
 3. `status` is reset to `'pending'`, `applied_at` and `vcs_commit_hash` are
    cleared.
+
+If `vcs_commit_hash` is missing or `vcs_revert` fails, rollback returns an
+error and leaves the migration status as `applied`.
 
 The revert commit is itself recorded in the VCS log, so you have full
 history: the original apply commit, then the revert commit.
@@ -178,8 +181,9 @@ APPLY MIGRATION add_score_column;
 ```
 
 The migration definition is global immediately. The apply step still creates a
-`migration: add_score_column` commit through the VCS layer, but schema state and
-data reconciliation are not isolated behind a branch-local migration registry.
+`migration: apply add_score_column` commit through the VCS layer, but schema
+state and data reconciliation are not isolated behind a branch-local migration
+registry.
 
 ### Merge and conflict detection status
 

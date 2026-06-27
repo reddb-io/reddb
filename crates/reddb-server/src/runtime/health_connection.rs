@@ -63,5 +63,8 @@ impl Drop for RuntimeConnection {
         if pool.idle.len() < self.inner.pool_config.max_idle {
             pool.idle.push(self.id);
         }
+        drop(pool);
+        // Issue #1245 — record the disconnect after releasing the pool lock.
+        self.inner.node_load_telemetry.record_disconnect();
     }
 }

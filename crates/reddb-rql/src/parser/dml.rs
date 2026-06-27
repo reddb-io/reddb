@@ -342,7 +342,7 @@ impl<'a> Parser<'a> {
         let mut assignment_exprs = Vec::new();
         let mut compound_assignment_ops = Vec::new();
         loop {
-            let col = self.expect_column_ident()?;
+            let col = self.parse_update_assignment_target(target)?;
             let compound_op = if self.consume(&Token::Eq)? {
                 None
             } else {
@@ -387,6 +387,17 @@ impl<'a> Parser<'a> {
 
         let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
+        let (claim_limit, claim_exact) = if self.consume_ident_ci("CLAIM")? {
+            if self.consume_ident_ci("EXACT")? {
+                (Some(self.parse_integer()? as u64), true)
+            } else {
+                self.expect(Token::Limit)?;
+                (Some(self.parse_integer()? as u64), false)
+            }
+        } else {
+            (None, false)
+        };
+
         let mut order_by = if self.consume(&Token::Order)? {
             self.expect(Token::By)?;
             let clauses = self.parse_order_by_list()?;
@@ -405,9 +416,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if !order_by.is_empty() && limit.is_none() {
+        // CLAIM LIMIT acts as the LIMIT for the purpose of ORDER BY semantics:
+        // a claim without a conventional LIMIT still has a deterministic bound.
+        let effective_limit = limit.is_some() || claim_limit.is_some();
+        if !order_by.is_empty() && !effective_limit {
             return Err(ParseError::new(
                 "UPDATE ORDER BY requires LIMIT",
+                self.position(),
+            ));
+        }
+        if claim_limit.is_some() && order_by.is_empty() {
+            return Err(ParseError::new(
+                "UPDATE CLAIM requires ORDER BY",
                 self.position(),
             ));
         }
@@ -444,10 +464,25 @@ impl<'a> Parser<'a> {
             expires_at_ms,
             with_metadata,
             returning,
+            claim_limit,
+            claim_exact,
             order_by,
             limit,
             suppress_events,
         }))
+    }
+
+    fn parse_update_assignment_target(
+        &mut self,
+        target: UpdateTarget,
+    ) -> Result<String, ParseError> {
+        let mut segments = vec![self.expect_column_ident()?];
+        if matches!(target, UpdateTarget::Documents) {
+            while self.consume(&Token::Dot)? {
+                segments.push(self.expect_column_ident()?);
+            }
+        }
+        Ok(segments.join("."))
     }
 
     fn parse_update_target(&mut self) -> Result<UpdateTarget, ParseError> {
@@ -1194,6 +1229,8 @@ mod tests {
         assert!(query.where_expr.is_some());
         assert_eq!(query.ttl_ms, Some(30_000));
         assert_eq!(query.with_metadata.len(), 1);
+        assert_eq!(query.claim_limit, None);
+        assert!(!query.claim_exact);
         assert_eq!(query.limit, Some(5));
         assert_eq!(query.order_by.len(), 2);
         assert!(matches!(
@@ -1211,6 +1248,41 @@ mod tests {
             )
         );
         assert!(query.suppress_events);
+    }
+
+    #[test]
+    fn update_claim_limit_requires_order_by() {
+        let query = update(
+            "UPDATE docs SET status = 'reserved' WHERE status = 'available' \
+             CLAIM LIMIT 2 ORDER BY priority ASC RETURNING id",
+        );
+        assert_eq!(query.claim_limit, Some(2));
+        assert!(!query.claim_exact);
+        assert_eq!(query.limit, None);
+        assert_eq!(query.order_by.len(), 2);
+        assert!(matches!(
+            &query.order_by[1].field,
+            FieldRef::TableColumn { column, .. } if column == "rid"
+        ));
+
+        let query = update(
+            "UPDATE docs SET status = 'reserved' WHERE status = 'available' \
+             CLAIM EXACT 2 ORDER BY priority ASC RETURNING id",
+        );
+        assert_eq!(query.claim_limit, Some(2));
+        assert!(query.claim_exact);
+        assert_eq!(query.limit, None);
+        assert_eq!(query.order_by.len(), 2);
+        assert!(matches!(
+            &query.order_by[1].field,
+            FieldRef::TableColumn { column, .. } if column == "rid"
+        ));
+
+        let mut parser = make_parser("UPDATE docs SET status = 'reserved' CLAIM LIMIT 1");
+        let err = parser
+            .parse_update_query()
+            .expect_err("claim without order should fail");
+        assert!(err.to_string().contains("CLAIM requires ORDER BY"));
     }
 
     #[test]
