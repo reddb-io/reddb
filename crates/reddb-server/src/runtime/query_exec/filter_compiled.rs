@@ -255,11 +255,6 @@ pub(crate) fn resolve_kind<'a>(
         EntityFieldKind::RowField(name) => {
             // Hot path: SQL column on a TableRow.
             if let Some(row) = entity.data.as_row() {
-                if name == "id" && row_has_document_body(row) {
-                    return Some(Cow::Owned(Value::UnsignedInteger(
-                        entity.logical_id().raw(),
-                    )));
-                }
                 if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
                 }
@@ -267,6 +262,15 @@ pub(crate) fn resolve_kind<'a>(
                 // materialised as a column — offset-read it from the body.
                 if let Some(v) = document_promoted_field(row, name) {
                     return Some(Cow::Owned(v));
+                }
+                // Document without a body-promoted `id` falls back to the
+                // entity logical id — keeps `WHERE id = <v>` matching the
+                // stable row identity (#1363) without overriding a real
+                // `id` column or a body-promoted `id` field above.
+                if name == "id" && row_has_document_body(row) {
+                    return Some(Cow::Owned(Value::UnsignedInteger(
+                        entity.logical_id().raw(),
+                    )));
                 }
             }
             // Graph node / edge property fallback for queries that
