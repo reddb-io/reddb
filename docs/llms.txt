@@ -158,3 +158,42 @@ Relational tables with typed columns queried through RQL; columns bind directly 
 Type families: `Numeric`, `String`, `Boolean`, `DateTime`, `Domain`
 
 <!-- END GENERATED: types -->
+
+<!-- BEGIN GENERATED: connections -->
+# RedDB Connection Model
+
+RedWire (`red://` / `reds://`) is RedDB's principal transport. gRPC, HTTP(S), browser WebSocket variants, `memory://`, and `file://` are supported connection surfaces, but agents should not collapse the model to "only gRPC" or "only WebSocket".
+
+## Supported URI Schemes and Transports
+
+| URI scheme | Transport | Mode | Example | Notes |
+|---|---|---|---|---|
+| `red://` | RedWire TCP | remote | `red://db.example.com:5050` | Principal RedWire transport without TLS. |
+| `reds://` | RedWire TCP | remote | `reds://db.example.com:5050` | Principal RedWire transport with TLS. |
+| `grpc://` | gRPC | remote | `grpc://db.example.com:55055` | Compatibility transport for existing gRPC clients. |
+| `grpcs://` | gRPC | remote | `grpcs://db.example.com:55555` | TLS variant of the gRPC compatibility transport. |
+| `http://` | HTTP REST | remote | `http://db.example.com:80` | REST/admin transport without TLS. |
+| `https://` | HTTP REST | remote | `https://db.example.com:443` | REST/admin transport with TLS. |
+| `memory://` | embedded in-memory engine | embedded | `memory://` | Zero-config ephemeral engine, commonly used by local MCP hosts. |
+| `file://` | embedded file-backed engine | embedded | `file:///var/lib/reddb/app.db` | Embedded durable engine rooted at the URI path. |
+| `red+ws://` | RedWire WebSocket | remote | `red+ws://db.example.com` | Browser-native RedWire over WebSocket without TLS. |
+| `red+wss://` | RedWire WebSocket | remote | `red+wss://db.example.com` | Browser-native RedWire over WebSocket with TLS. |
+
+## Deployment Topologies
+
+### Embedded / standalone
+
+`memory://` and `file://` run the engine in the caller's process; a standalone server exposes the same engine over RedWire, gRPC, and HTTP.
+
+### Serverless
+
+Serverless callers usually keep no local state and connect to a managed endpoint. Prefer `reds://` when RedWire is reachable; use HTTPS/gRPC only when the platform requires those transports.
+
+### Primary-replica
+
+A primary accepts writes while replicas serve read traffic after replication. Multi-host remote URIs express primary-first routing, with `?route=primary` available when reads must stay on the primary.
+
+### Cluster
+
+Cluster deployments coordinate multiple RedDB nodes behind the same logical database. RedWire (`red://` / `reds://`) is the principal data-plane transport; gRPC and HTTP are compatibility/admin surfaces, not the only way to connect.
+<!-- END GENERATED: connections -->

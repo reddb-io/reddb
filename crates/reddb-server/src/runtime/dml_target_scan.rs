@@ -93,9 +93,12 @@ impl<'a> DmlTargetScan<'a> {
             self.target,
             Some(UpdateTarget::Nodes) | Some(UpdateTarget::Edges)
         ) {
-            if let Some(entity_id) =
+            let entity_id = if matches!(self.target, Some(UpdateTarget::Documents)) {
+                extract_document_entity_id_from_filter(self.filter)
+            } else {
                 query_exec::extract_entity_id_from_filter(&self.filter.cloned())
-            {
+            };
+            if let Some(entity_id) = entity_id {
                 let logical_id = EntityId::new(entity_id);
                 let entity = if self.live_table_rows {
                     store.get_table_row_by_logical_id(self.table, logical_id)
@@ -387,6 +390,32 @@ fn row_item_kind(entity: &crate::storage::UnifiedEntity) -> Option<RowItemKind> 
 
 fn row_value_is_documentish(value: &Value) -> bool {
     matches!(value, Value::Json(_) | Value::Blob(_))
+}
+
+fn extract_document_entity_id_from_filter(filter: Option<&Filter>) -> Option<u64> {
+    use crate::storage::query::ast::{CompareOp, FieldRef};
+
+    let filter = filter?;
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            let field_name = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if field_name != "id" && field_name != "rid" && field_name != "entity_id" {
+                return None;
+            }
+            match value {
+                Value::Integer(n) if *n >= 0 => Some(*n as u64),
+                Value::UnsignedInteger(n) => Some(*n),
+                Value::Text(s) => s.parse::<u64>().ok(),
+                _ => None,
+            }
+        }
+        Filter::And(left, right) => extract_document_entity_id_from_filter(Some(left))
+            .or_else(|| extract_document_entity_id_from_filter(Some(right))),
+        _ => None,
+    }
 }
 
 fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(String, Value)>> {
