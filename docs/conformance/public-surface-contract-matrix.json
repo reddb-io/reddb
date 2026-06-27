@@ -56,10 +56,10 @@
       "source": "docs/query/insert.md",
       "promise": "INSERT creates rows, documents, and native timeseries points.",
       "cells": {
-        "sql": { "status": "supported", "tests": ["tests/grouped/docs_kv_queue/e2e_documents_first_class_crud.rs", "tests/grouped/timeseries_metrics/e2e_create_hypertable.rs"] },
-        "http": { "status": "supported", "tests": ["tests/grouped/cli_transport/http_batch_insert.rs"] },
+        "sql": { "status": "supported", "tests": ["tests/grouped/docs_kv_queue/e2e_documents_first_class_crud.rs", "tests/grouped/surface_contracts/cross_transport_result_equivalence.rs", "tests/grouped/timeseries_metrics/e2e_create_hypertable.rs"] },
+        "http": { "status": "supported", "tests": ["tests/grouped/cli_transport/http_batch_insert.rs", "tests/grouped/surface_contracts/cross_transport_result_equivalence.rs"] },
         "redwire": { "status": "partial", "tests": ["crates/reddb-wire/tests/params_fixtures.rs"] },
-        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs", "tests/grouped/surface_contracts/cross_transport_result_equivalence.rs"] },
         "driver_helpers": { "status": "supported", "tests": ["drivers/python/tests/test_conformance.py", "drivers/js/test/insert-ids.test.mjs"] }
       }
     },
@@ -152,10 +152,10 @@
       "source": "../feedbacks-new.md",
       "promise": "Server transports expose the same query contract as embedded (HTTP, RedWire, gRPC parity).",
       "cells": {
-        "sql": { "status": "supported", "tests": ["tests/grouped/surface_contracts/cross_binary_smoke.rs"] },
-        "http": { "status": "supported", "tests": ["tests/grouped/graph_analytics/e2e_issue_556_graph_sql_http_parity_and_limits.rs", "tests/grouped/surface_contracts/cross_binary_smoke.rs"] },
-        "redwire": { "status": "supported", "tests": ["crates/reddb-wire/tests/params_fixtures.rs", "drivers/js/test/redwire.params.test.mjs"] },
-        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs", "tests/grouped/surface_contracts/cross_binary_smoke.rs"] },
+        "sql": { "status": "supported", "tests": ["tests/grouped/surface_contracts/cross_binary_smoke.rs", "tests/grouped/surface_contracts/cross_transport_result_equivalence.rs"] },
+        "http": { "status": "supported", "tests": ["tests/grouped/graph_analytics/e2e_issue_556_graph_sql_http_parity_and_limits.rs", "tests/grouped/surface_contracts/cross_binary_smoke.rs", "tests/grouped/surface_contracts/cross_transport_result_equivalence.rs"] },
+        "redwire": { "status": "supported", "tests": ["crates/reddb-wire/tests/params_fixtures.rs", "drivers/js/test/redwire.params.test.mjs", "tests/grouped/surface_contracts/cross_transport_result_equivalence.rs"] },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs", "tests/grouped/surface_contracts/cross_binary_smoke.rs", "tests/grouped/surface_contracts/cross_transport_result_equivalence.rs"] },
         "driver_helpers": { "status": "supported", "tests": ["drivers/go/conformance_test.go", "drivers/java/src/test/java/dev/reddb/helpers/ConformanceTest.java"] }
       }
     },

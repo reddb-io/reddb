@@ -528,3 +528,77 @@ fn runtime_document_patch_updates_nested_body_and_survives_reopen() {
     );
     assert!(body["contact"].get("phone").is_none());
 }
+
+#[test]
+fn document_crud_conformance_persists_mutation_and_delete_across_reopen() {
+    let path = PersistentDbPath::new("document_crud_conformance");
+    let rt = path.open_runtime();
+
+    rt.execute_query("CREATE DOCUMENT conformance_docs")
+        .expect("CREATE DOCUMENT should succeed");
+    rt.execute_query(
+        r#"INSERT INTO conformance_docs DOCUMENT (body)
+           VALUES ('{"name":"alpha","score":10,"keep":"sibling","status":"draft"}')"#,
+    )
+    .expect("insert document");
+
+    let initial = rt
+        .execute_query(
+            "SELECT name, score, keep, status FROM conformance_docs WHERE name = 'alpha'",
+        )
+        .expect("read inserted document");
+    assert_eq!(initial.result.records.len(), 1);
+    assert_eq!(text_field(&initial.result.records[0], "name"), "alpha");
+    assert_eq!(number_field(&initial.result.records[0], "score"), 10.0);
+    assert_eq!(text_field(&initial.result.records[0], "keep"), "sibling");
+    assert_eq!(text_field(&initial.result.records[0], "status"), "draft");
+
+    rt.execute_query("UPDATE conformance_docs DOCUMENTS SET score += 5 WHERE name = 'alpha'")
+        .expect("partial update document");
+    let partial = rt
+        .execute_query("SELECT body FROM conformance_docs WHERE name = 'alpha'")
+        .expect("read partially updated document body");
+    let partial_body = json_field(&partial.result.records[0], "body");
+    assert_eq!(partial_body["score"], json!(15));
+    assert_eq!(
+        partial_body["keep"],
+        json!("sibling"),
+        "partial document update must not drop sibling fields"
+    );
+    assert_eq!(partial_body["status"], json!("draft"));
+
+    rt.execute_query(
+        "UPDATE conformance_docs DOCUMENTS \
+         SET name = 'beta', score = 99, keep = 'replacement', status = 'done' \
+         WHERE name = 'alpha'",
+    )
+    .expect("replace document fields");
+
+    let reopened = checkpoint_and_reopen(&path, rt);
+    let after_reopen = reopened
+        .execute_query("SELECT name, score, keep, status FROM conformance_docs WHERE name = 'beta'")
+        .expect("read replaced document after reopen");
+    assert_eq!(after_reopen.result.records.len(), 1);
+    assert_eq!(text_field(&after_reopen.result.records[0], "name"), "beta");
+    assert_eq!(number_field(&after_reopen.result.records[0], "score"), 99.0);
+    assert_eq!(
+        text_field(&after_reopen.result.records[0], "keep"),
+        "replacement"
+    );
+    assert_eq!(
+        text_field(&after_reopen.result.records[0], "status"),
+        "done"
+    );
+
+    reopened
+        .execute_query("DELETE FROM conformance_docs WHERE name = 'beta'")
+        .expect("delete document");
+    let reopened = checkpoint_and_reopen(&path, reopened);
+    let after_delete = reopened
+        .execute_query("SELECT COUNT(*) AS remaining FROM conformance_docs WHERE name = 'beta'")
+        .expect("read back deleted document after reopen");
+    assert_eq!(
+        number_field(&after_delete.result.records[0], "remaining"),
+        0.0
+    );
+}
