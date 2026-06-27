@@ -160,50 +160,40 @@ Type families: `Numeric`, `String`, `Boolean`, `DateTime`, `Domain`
 <!-- END GENERATED: types -->
 
 <!-- BEGIN GENERATED: connections -->
-# RedDB Connection & Topology Reference
+# RedDB Connection Model
 
-RedDB connection strings and topology payloads are owned by `reddb-io-wire`, the shared wire crate used by the server, client, and language drivers.
+RedWire (`red://` / `reds://`) is RedDB's principal transport. gRPC, HTTP(S), browser WebSocket variants, `memory://`, and `file://` are supported connection surfaces, but agents should not collapse the model to "only gRPC" or "only WebSocket".
 
-This reference is generated from the connection-string parser constants and topology wire constants. Do not edit by hand -- regenerate from the engine.
+## Supported URI Schemes and Transports
 
-## Connection targets
+| URI scheme | Transport | Mode | Example | Notes |
+|---|---|---|---|---|
+| `red://` | RedWire TCP | remote | `red://db.example.com:5050` | Principal RedWire transport without TLS. |
+| `reds://` | RedWire TCP | remote | `reds://db.example.com:5050` | Principal RedWire transport with TLS. |
+| `grpc://` | gRPC | remote | `grpc://db.example.com:55055` | Compatibility transport for existing gRPC clients. |
+| `grpcs://` | gRPC | remote | `grpcs://db.example.com:55555` | TLS variant of the gRPC compatibility transport. |
+| `http://` | HTTP REST | remote | `http://db.example.com:80` | REST/admin transport without TLS. |
+| `https://` | HTTP REST | remote | `https://db.example.com:443` | REST/admin transport with TLS. |
+| `memory://` | embedded in-memory engine | embedded | `memory://` | Zero-config ephemeral engine, commonly used by local MCP hosts. |
+| `file://` | embedded file-backed engine | embedded | `file:///var/lib/reddb/app.db` | Embedded durable engine rooted at the URI path. |
+| `red+ws://` | RedWire WebSocket | remote | `red+ws://db.example.com` | Browser-native RedWire over WebSocket without TLS. |
+| `red+wss://` | RedWire WebSocket | remote | `red+wss://db.example.com` | Browser-native RedWire over WebSocket with TLS. |
 
-| Pattern | Target | Default port | TLS | Parser authority |
-|---------|--------|--------------|-----|------------------|
-| `red://, red://:memory:, red:///path/to/data.rdb` | Embedded memory or file target | n/a | n/a | `is_embedded_connection_uri` |
-| `red://host[:port]` | RedWire TCP | 5050 | plain | `parse -> ConnectionTarget::RedWire` |
-| `reds://host[:port]` | RedWire TLS | 5050 | TLS | `parse -> ConnectionTarget::RedWire` |
-| `grpc://host[:port]` | gRPC plain endpoint | 55055 | plain | `parse -> ConnectionTarget::Grpc` |
-| `grpcs://host[:port]` | gRPC TLS endpoint | 55555 | TLS | `parse -> ConnectionTarget::Grpc` |
-| `http://host[:port]` | HTTP REST endpoint | 80 | plain | `parse -> ConnectionTarget::Http` |
-| `https://host[:port]` | HTTPS REST endpoint | 443 | TLS | `parse -> ConnectionTarget::Http` |
-| `red+ws://host[:port]` | Browser-native WebSocket | 80 | plain | `parse -> ConnectionTarget::WsNative` |
-| `red+wss://host[:port]` | Browser-native secure WebSocket | 443 | TLS | `parse -> ConnectionTarget::WsNative` |
+## Deployment Topologies
 
-## Routing examples
+### Embedded / standalone
 
-- `red://` and `red:///data/prod.rdb` are embedded aliases; callers gate them with `is_embedded_connection_uri` before remote transport parsing.
-- `red://primary.svc` parses as RedWire TCP on port `5050`.
-- `reds://primary.svc` parses as RedWire TLS on port `5050`.
-- `grpc://primary.svc` parses as a gRPC endpoint on port `55055`.
-- `grpc://primary.svc,replica-a.svc,replica-b.svc?route=primary` parses as a cluster target with the first host as primary, later hosts as replicas, and `force_primary=true`.
+`memory://` and `file://` run the engine in the caller's process; a standalone server exposes the same engine over RedWire, gRPC, and HTTP.
 
-## Parser limits
+### Serverless
 
-The parser enforces these unauthenticated-input guardrails before URI routing:
+Serverless callers usually keep no local state and connect to a managed endpoint. Prefer `reds://` when RedWire is reachable; use HTTPS/gRPC only when the platform requires those transports.
 
-- `max_uri_bytes`: `8192`
-- `max_query_params`: `32`
-- `max_cluster_hosts`: `64`
+### Primary-replica
 
-## Topology advertisement
+A primary accepts writes while replicas serve read traffic after replication. Multi-host remote URIs express primary-first routing, with `?route=primary` available when reads must stay on the primary.
 
-The topology payload is the shared read-routing advertisement carried by RedWire HelloAck and the gRPC Topology RPC.
+### Cluster
 
-- `TOPOLOGY_WIRE_VERSION_V1`: `0x01`
-- `MAX_KNOWN_TOPOLOGY_VERSION`: `0x01`
-- `TOPOLOGY_HEADER_SIZE`: `5` bytes (version tag + little-endian body length)
-- Unknown future version tags are ignored cleanly so clients can fall back to URI-only routing.
-- Version 1 carries `epoch`, `primary.addr`, `primary.region`, and ordered replica records: `addr`, `region`, `healthy`, `lag_ms`, `last_applied_lsn`, `rebootstrapping`.
-
+Cluster deployments coordinate multiple RedDB nodes behind the same logical database. RedWire (`red://` / `reds://`) is the principal data-plane transport; gRPC and HTTP are compatibility/admin surfaces, not the only way to connect.
 <!-- END GENERATED: connections -->

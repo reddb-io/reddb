@@ -1718,6 +1718,32 @@ mod tests {
     }
 
     #[test]
+    fn resources_list_includes_connection_knowledge() {
+        let mut srv = make_server();
+        let request = parse_json(r#"{"jsonrpc":"2.0","id":11,"method":"resources/list"}"#);
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let resources = parsed
+            .get("result")
+            .and_then(|result| result.get("resources"))
+            .and_then(JsonValue::as_array)
+            .expect("resources array");
+
+        let connection = resources
+            .iter()
+            .find(|res| {
+                res.get("uri").and_then(JsonValue::as_str)
+                    == Some(reddb_wire::knowledge::RESOURCE_URI)
+            })
+            .expect("connection knowledge resource listed");
+        assert_eq!(
+            connection.get("mimeType").and_then(JsonValue::as_str),
+            Some("text/markdown")
+        );
+        assert!(connection.get("name").and_then(JsonValue::as_str).is_some());
+    }
+
+    #[test]
     fn resources_read_returns_generated_rql_reference() {
         let mut srv = make_server();
         let request = parse_json(
@@ -1776,7 +1802,7 @@ mod tests {
     fn resources_read_returns_generated_connection_reference() {
         let mut srv = make_server();
         let request = parse_json(
-            r#"{"jsonrpc":"2.0","id":11,"method":"resources/read","params":{"uri":"reddb://knowledge/connections"}}"#,
+            r#"{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"reddb://knowledge/connections"}}"#,
         );
         let response = srv.handle_message(&request).expect("response");
         let parsed = parse_json(&response);
@@ -1789,17 +1815,25 @@ mod tests {
             .and_then(JsonValue::as_str)
             .expect("resource text");
 
-        // The body is exactly what the wire authority generates -- same source
-        // as docs/llms.txt.
+        // The body is exactly what the wire authority generates — same source as
+        // docs/llms.txt.
         assert_eq!(text, reddb_wire::knowledge::connection_reference_markdown());
+        assert!(text.contains("`red://`"), "red scheme missing: {text:.120}");
+        assert!(text.contains("`reds://`"), "reds scheme missing");
         assert!(
-            text.contains("`red://host[:port]`"),
-            "redwire target missing"
+            text.contains("principal transport"),
+            "principal transport narrative missing"
         );
         assert!(
-            text.contains("Topology advertisement"),
-            "topology section missing"
+            text.contains("Embedded / standalone"),
+            "embedded topology missing"
         );
+        assert!(text.contains("Serverless"), "serverless topology missing");
+        assert!(
+            text.contains("Primary-replica"),
+            "primary-replica topology missing"
+        );
+        assert!(text.contains("Cluster"), "cluster topology missing");
     }
 
     #[test]

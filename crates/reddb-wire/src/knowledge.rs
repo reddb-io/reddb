@@ -1,276 +1,151 @@
-//! Agent-facing connection and topology knowledge reference.
+//! Agent-facing connection-model knowledge reference.
 //!
-//! The volatile facts in this module are generated from the shared wire crate
-//! authorities: connection-string defaults from [`crate::conn_string`] and
-//! topology payload version/header details from [`crate::topology`]. The same
-//! generated content is served as the `reddb://knowledge/connections` MCP
-//! resource and embedded into `docs/llms.txt`.
+//! Supported URI schemes are generated from the connection layer's
+//! [`crate::conn_string::SUPPORTED_SCHEMES`] catalog. The deployment topology
+//! guidance is hand-authored narrative per ADR 0061.
 
-use crate::{
-    ConnStringLimits, DEFAULT_PORT_GRPC, DEFAULT_PORT_GRPCS, DEFAULT_PORT_RED, DEFAULT_PORT_WS,
-    DEFAULT_PORT_WSS, MAX_KNOWN_TOPOLOGY_VERSION, TOPOLOGY_HEADER_SIZE, TOPOLOGY_WIRE_VERSION_V1,
-};
+use crate::conn_string::{ConnectionScheme, SUPPORTED_SCHEMES};
 
-/// Canonical URI for the connection/topology knowledge resource served over MCP.
+/// Canonical URI for the connection-model knowledge resource served over MCP.
 pub const RESOURCE_URI: &str = "reddb://knowledge/connections";
 
-/// Short human title for the connection/topology knowledge resource.
-pub const RESOURCE_TITLE: &str = "RedDB Connection & Topology Reference";
+/// Short human title for the connection knowledge resource.
+pub const RESOURCE_TITLE: &str = "RedDB Connection Model";
 
-/// One-line description of the connection/topology knowledge resource.
+/// One-line description of the connection knowledge resource.
 pub const RESOURCE_DESCRIPTION: &str =
-    "Generated connection-string and topology reference from reddb-io-wire authorities.";
+    "Generated URI scheme/transport catalog plus the RedDB deployment topology guide.";
 
 /// Markers delimiting the generated connection block inside `docs/llms.txt`.
 pub const LLMS_BEGIN_MARKER: &str = "<!-- BEGIN GENERATED: connections -->";
 /// Closing marker for the generated connection block in `docs/llms.txt`.
 pub const LLMS_END_MARKER: &str = "<!-- END GENERATED: connections -->";
 
-struct TransportSpec {
-    pattern: &'static str,
-    target: &'static str,
-    default_port: Option<u16>,
-    tls: &'static str,
-    parser_authority: &'static str,
+struct Topology {
+    name: &'static str,
+    summary: &'static str,
 }
 
-fn transport_specs() -> Vec<TransportSpec> {
-    vec![
-        TransportSpec {
-            pattern: "red://, red://:memory:, red:///path/to/data.rdb",
-            target: "Embedded memory or file target",
-            default_port: None,
-            tls: "n/a",
-            parser_authority: "is_embedded_connection_uri",
-        },
-        TransportSpec {
-            pattern: "red://host[:port]",
-            target: "RedWire TCP",
-            default_port: Some(DEFAULT_PORT_RED),
-            tls: "plain",
-            parser_authority: "parse -> ConnectionTarget::RedWire",
-        },
-        TransportSpec {
-            pattern: "reds://host[:port]",
-            target: "RedWire TLS",
-            default_port: Some(DEFAULT_PORT_RED),
-            tls: "TLS",
-            parser_authority: "parse -> ConnectionTarget::RedWire",
-        },
-        TransportSpec {
-            pattern: "grpc://host[:port]",
-            target: "gRPC plain endpoint",
-            default_port: Some(DEFAULT_PORT_GRPC),
-            tls: "plain",
-            parser_authority: "parse -> ConnectionTarget::Grpc",
-        },
-        TransportSpec {
-            pattern: "grpcs://host[:port]",
-            target: "gRPC TLS endpoint",
-            default_port: Some(DEFAULT_PORT_GRPCS),
-            tls: "TLS",
-            parser_authority: "parse -> ConnectionTarget::Grpc",
-        },
-        TransportSpec {
-            pattern: "http://host[:port]",
-            target: "HTTP REST endpoint",
-            default_port: Some(80),
-            tls: "plain",
-            parser_authority: "parse -> ConnectionTarget::Http",
-        },
-        TransportSpec {
-            pattern: "https://host[:port]",
-            target: "HTTPS REST endpoint",
-            default_port: Some(443),
-            tls: "TLS",
-            parser_authority: "parse -> ConnectionTarget::Http",
-        },
-        TransportSpec {
-            pattern: "red+ws://host[:port]",
-            target: "Browser-native WebSocket",
-            default_port: Some(DEFAULT_PORT_WS),
-            tls: "plain",
-            parser_authority: "parse -> ConnectionTarget::WsNative",
-        },
-        TransportSpec {
-            pattern: "red+wss://host[:port]",
-            target: "Browser-native secure WebSocket",
-            default_port: Some(DEFAULT_PORT_WSS),
-            tls: "TLS",
-            parser_authority: "parse -> ConnectionTarget::WsNative",
-        },
-    ]
-}
+const TOPOLOGIES: &[Topology] = &[
+    Topology {
+        name: "Embedded / standalone",
+        summary: "`memory://` and `file://` run the engine in the caller's process; \
+a standalone server exposes the same engine over RedWire, gRPC, and HTTP.",
+    },
+    Topology {
+        name: "Serverless",
+        summary: "Serverless callers usually keep no local state and connect to a managed \
+endpoint. Prefer `reds://` when RedWire is reachable; use HTTPS/gRPC only when the platform \
+requires those transports.",
+    },
+    Topology {
+        name: "Primary-replica",
+        summary: "A primary accepts writes while replicas serve read traffic after replication. \
+Multi-host remote URIs express primary-first routing, with `?route=primary` available when reads \
+must stay on the primary.",
+    },
+    Topology {
+        name: "Cluster",
+        summary: "Cluster deployments coordinate multiple RedDB nodes behind the same logical \
+database. RedWire (`red://` / `reds://`) is the principal data-plane transport; gRPC and HTTP are \
+compatibility/admin surfaces, not the only way to connect.",
+    },
+];
 
-fn default_port_label(port: Option<u16>) -> String {
-    port.map(|p| p.to_string())
-        .unwrap_or_else(|| "n/a".to_string())
-}
-
-fn render_transport_table(out: &mut String) {
-    out.push_str("| Pattern | Target | Default port | TLS | Parser authority |\n");
-    out.push_str("|---------|--------|--------------|-----|------------------|\n");
-    for spec in transport_specs() {
-        out.push_str(&format!(
-            "| `{}` | {} | {} | {} | `{}` |\n",
-            spec.pattern,
-            spec.target,
-            default_port_label(spec.default_port),
-            spec.tls,
-            spec.parser_authority
-        ));
-    }
-}
-
-fn render_examples(out: &mut String) {
-    out.push_str("## Routing examples\n\n");
-    out.push_str(
-        "- `red://` and `red:///data/prod.rdb` are embedded aliases; callers gate them with `is_embedded_connection_uri` before remote transport parsing.\n",
-    );
-    out.push_str(&format!(
-        "- `red://primary.svc` parses as RedWire TCP on port `{DEFAULT_PORT_RED}`.\n"
-    ));
-    out.push_str(&format!(
-        "- `reds://primary.svc` parses as RedWire TLS on port `{DEFAULT_PORT_RED}`.\n"
-    ));
-    out.push_str(&format!(
-        "- `grpc://primary.svc` parses as a gRPC endpoint on port `{DEFAULT_PORT_GRPC}`.\n"
-    ));
-    out.push_str(
-        "- `grpc://primary.svc,replica-a.svc,replica-b.svc?route=primary` parses as a cluster target with the first host as primary, later hosts as replicas, and `force_primary=true`.\n",
-    );
-    out.push('\n');
-}
-
-fn render_limits(out: &mut String) {
-    let limits = ConnStringLimits::default();
-    out.push_str("## Parser limits\n\n");
-    out.push_str(
-        "The parser enforces these unauthenticated-input guardrails before URI routing:\n\n",
-    );
-    out.push_str(&format!("- `max_uri_bytes`: `{}`\n", limits.max_uri_bytes));
-    out.push_str(&format!(
-        "- `max_query_params`: `{}`\n",
-        limits.max_query_params
-    ));
-    out.push_str(&format!(
-        "- `max_cluster_hosts`: `{}`\n\n",
-        limits.max_cluster_hosts
-    ));
-}
-
-fn render_topology(out: &mut String) {
-    out.push_str("## Topology advertisement\n\n");
-    out.push_str(
-        "The topology payload is the shared read-routing advertisement carried by RedWire HelloAck and the gRPC Topology RPC.\n\n",
-    );
-    out.push_str(&format!(
-        "- `TOPOLOGY_WIRE_VERSION_V1`: `0x{TOPOLOGY_WIRE_VERSION_V1:02x}`\n"
-    ));
-    out.push_str(&format!(
-        "- `MAX_KNOWN_TOPOLOGY_VERSION`: `0x{MAX_KNOWN_TOPOLOGY_VERSION:02x}`\n"
-    ));
-    out.push_str(&format!(
-        "- `TOPOLOGY_HEADER_SIZE`: `{TOPOLOGY_HEADER_SIZE}` bytes (version tag + little-endian body length)\n",
-    ));
-    out.push_str(
-        "- Unknown future version tags are ignored cleanly so clients can fall back to URI-only routing.\n",
-    );
-    out.push_str(
-        "- Version 1 carries `epoch`, `primary.addr`, `primary.region`, and ordered replica records: `addr`, `region`, `healthy`, `lag_ms`, `last_applied_lsn`, `rebootstrapping`.\n\n",
-    );
-}
-
-/// Generate the canonical connection and topology reference as Markdown.
+/// Full Markdown body served by the MCP resource.
 pub fn connection_reference_markdown() -> String {
     let mut out = String::new();
-    out.push_str("# RedDB Connection & Topology Reference\n\n");
-    out.push_str(
-        "RedDB connection strings and topology payloads are owned by `reddb-io-wire`, the shared wire crate used by the server, client, and language drivers.\n\n",
-    );
-    out.push_str(
-        "This reference is generated from the connection-string parser constants and topology wire constants. Do not edit by hand -- regenerate from the engine.\n\n",
-    );
-    out.push_str("## Connection targets\n\n");
-    render_transport_table(&mut out);
-    out.push('\n');
-    render_examples(&mut out);
-    render_limits(&mut out);
-    render_topology(&mut out);
-
-    while out.ends_with("\n\n") {
-        out.pop();
-    }
+    push_intro(&mut out);
+    push_supported_schemes(&mut out);
+    push_topologies(&mut out);
     out
 }
 
 /// The connection block as embedded in `docs/llms.txt`.
 pub fn connection_llms_section() -> String {
     format!(
-        "{begin}\n{body}\n{end}",
-        begin = LLMS_BEGIN_MARKER,
-        body = connection_reference_markdown(),
-        end = LLMS_END_MARKER,
+        "{LLMS_BEGIN_MARKER}\n{}\n{LLMS_END_MARKER}",
+        connection_reference_markdown().trim_end()
     )
+}
+
+fn push_intro(out: &mut String) {
+    out.push_str("# RedDB Connection Model\n\n");
+    out.push_str(
+        "RedWire (`red://` / `reds://`) is RedDB's principal transport. \
+gRPC, HTTP(S), browser WebSocket variants, `memory://`, and `file://` are supported connection \
+surfaces, but agents should not collapse the model to \"only gRPC\" or \"only WebSocket\".\n\n",
+    );
+}
+
+fn push_supported_schemes(out: &mut String) {
+    out.push_str("## Supported URI Schemes and Transports\n\n");
+    out.push_str("| URI scheme | Transport | Mode | Example | Notes |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for scheme in SUPPORTED_SCHEMES {
+        push_scheme_row(out, *scheme);
+    }
+    out.push('\n');
+}
+
+fn push_scheme_row(out: &mut String, scheme: ConnectionScheme) {
+    out.push_str("| `");
+    out.push_str(scheme.uri_prefix());
+    out.push_str("` | ");
+    out.push_str(scheme.transport());
+    out.push_str(" | ");
+    out.push_str(scheme.mode());
+    out.push_str(" | `");
+    out.push_str(scheme.example());
+    out.push_str("` | ");
+    out.push_str(scheme.notes());
+    out.push_str(" |\n");
+}
+
+fn push_topologies(out: &mut String) {
+    out.push_str("## Deployment Topologies\n\n");
+    for topology in TOPOLOGIES {
+        out.push_str("### ");
+        out.push_str(topology.name);
+        out.push_str("\n\n");
+        out.push_str(topology.summary);
+        out.push_str("\n\n");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{is_embedded_connection_uri, parse, ConnectionTarget};
 
     #[test]
-    fn reference_lists_parser_default_ports() {
-        let reference = connection_reference_markdown();
-        for port in [
-            DEFAULT_PORT_RED,
-            DEFAULT_PORT_GRPC,
-            DEFAULT_PORT_GRPCS,
-            DEFAULT_PORT_WS,
-            DEFAULT_PORT_WSS,
-        ] {
-            assert!(
-                reference.contains(&port.to_string()),
-                "default port {port} missing from generated reference"
-            );
+    fn supported_scheme_examples_parse() {
+        for scheme in SUPPORTED_SCHEMES {
+            crate::conn_string::parse(scheme.example()).unwrap_or_else(|err| {
+                panic!("{} example did not parse: {err}", scheme.uri_prefix())
+            });
         }
     }
 
     #[test]
-    fn reference_examples_match_parser_contract() {
-        assert!(is_embedded_connection_uri("red:///data/prod.rdb"));
-
-        match parse("red://primary.svc").expect("redwire target parses") {
-            ConnectionTarget::RedWire { port, tls, .. } => {
-                assert_eq!(port, DEFAULT_PORT_RED);
-                assert!(!tls);
-            }
-            other => panic!("expected RedWire target, got {other:?}"),
+    fn reference_lists_supported_schemes_from_connection_layer() {
+        let markdown = connection_reference_markdown();
+        for scheme in SUPPORTED_SCHEMES {
+            let needle = format!("`{}`", scheme.uri_prefix());
+            assert!(markdown.contains(&needle), "missing {needle}");
         }
+    }
 
-        match parse("grpc://primary.svc").expect("grpc target parses") {
-            ConnectionTarget::Grpc { endpoint } => {
-                assert_eq!(endpoint, format!("http://primary.svc:{DEFAULT_PORT_GRPC}"));
-            }
-            other => panic!("expected gRPC target, got {other:?}"),
-        }
-
-        match parse("grpc://primary.svc,replica-a.svc?route=primary")
-            .expect("cluster target parses")
-        {
-            ConnectionTarget::GrpcCluster {
-                primary,
-                replicas,
-                force_primary,
-            } => {
-                assert_eq!(primary, format!("http://primary.svc:{DEFAULT_PORT_GRPC}"));
-                assert_eq!(
-                    replicas,
-                    vec![format!("http://replica-a.svc:{DEFAULT_PORT_GRPC}")]
-                );
-                assert!(force_primary);
-            }
-            other => panic!("expected cluster target, got {other:?}"),
+    #[test]
+    fn reference_covers_principal_transport_and_topologies() {
+        let markdown = connection_reference_markdown();
+        assert!(markdown.contains("principal transport"));
+        assert!(markdown.contains("RedWire (`red://` / `reds://`)"));
+        for topology in TOPOLOGIES {
+            assert!(
+                markdown.contains(topology.name),
+                "missing {}",
+                topology.name
+            );
         }
     }
 
@@ -279,6 +154,7 @@ mod tests {
         let section = connection_llms_section();
         assert!(section.starts_with(LLMS_BEGIN_MARKER));
         assert!(section.ends_with(LLMS_END_MARKER));
-        assert!(section.contains(&connection_reference_markdown()));
+        let reference = connection_reference_markdown();
+        assert!(section.contains(reference.trim_end()));
     }
 }

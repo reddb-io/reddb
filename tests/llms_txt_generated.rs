@@ -119,5 +119,6 @@ fn connection_section_matches_mcp_resource() {
     );
     // The same generated source feeds docs/llms.txt and the MCP resource.
     assert_eq!(section, reddb_wire::knowledge::connection_llms_section());
-    assert!(section.contains(&reddb_wire::knowledge::connection_reference_markdown()));
+    let reference = reddb_wire::knowledge::connection_reference_markdown();
+    assert!(section.contains(reference.trim_end()));
 }
