@@ -29,7 +29,7 @@ pub struct ResourceDef {
 /// The static set of knowledge resources `red mcp` serves. Each domain is
 /// generated from the engine's own authorities (ADR 0061): the RQL reference
 /// from `reddb-io-rql`, and the value-type catalog + multi-model map from
-/// `reddb-io-types`.
+/// `reddb-io-types`, and the connection model from `reddb-io-wire`.
 pub fn knowledge_resources() -> Vec<ResourceDef> {
     vec![
         ResourceDef {
@@ -45,6 +45,13 @@ pub fn knowledge_resources() -> Vec<ResourceDef> {
             description: reddb_types::knowledge::RESOURCE_DESCRIPTION,
             mime_type: "text/markdown",
             body: reddb_types::knowledge::type_reference_markdown,
+        },
+        ResourceDef {
+            uri: reddb_wire::knowledge::RESOURCE_URI,
+            title: reddb_wire::knowledge::RESOURCE_TITLE,
+            description: reddb_wire::knowledge::RESOURCE_DESCRIPTION,
+            mime_type: "text/markdown",
+            body: reddb_wire::knowledge::connection_reference_markdown,
         },
     ]
 }

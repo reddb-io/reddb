@@ -245,25 +245,46 @@ fn fb_old_17_affected_count_disposition_tracked() {
     assert_old_row("FB-OLD-17", "PSC-011");
 }
 
-/// FB-OLD-18 | PSC-004 | CREATE VECTOR was rejected while advertised.
+/// FB-OLD-18 | PSC-018 | CREATE VECTOR was rejected while advertised.
 #[test]
 fn fb_old_18_create_vector_disposition_tracked() {
-    let line = assert_old_row("FB-OLD-18", "PSC-004");
-    // PSC-004 is documented as `failing` for documents/vectors.
-    let psc_004 = MATRIX
+    let line = assert_old_row("FB-OLD-18", "PSC-018");
+    let psc_018 = MATRIX
         .lines()
-        .find(|l| l.trim_start().starts_with("| PSC-004 |"))
-        .expect("PSC-004 row present");
+        .find(|l| l.trim_start().starts_with("| PSC-018 |"))
+        .expect("PSC-018 row present");
     assert!(
-        psc_004.contains("failing"),
-        "PSC-004 disposition changed; review {line}"
+        psc_018.contains("failing"),
+        "PSC-018 disposition changed; review {line}"
     );
 }
 
 /// FB-OLD-19 | PSC-004 | CREATE DOCUMENT was rejected.
 #[test]
-fn fb_old_19_create_document_disposition_tracked() {
+fn fb_old_19_create_document_is_cleared() {
     assert_old_row("FB-OLD-19", "PSC-004");
+    let psc_004 = MATRIX
+        .lines()
+        .find(|l| l.trim_start().starts_with("| PSC-004 |"))
+        .expect("PSC-004 row present");
+    assert!(
+        psc_004.contains("passing"),
+        "PSC-004 should be passing after document CRUD conformance"
+    );
+
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT fb_old_19_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO fb_old_19_docs DOCUMENT (body) VALUES ('{"title":"one","keep":"sibling"}')"#,
+    );
+    let read = exec(
+        &rt,
+        "SELECT title, keep FROM fb_old_19_docs WHERE title = 'one'",
+    );
+    let row = only_record(&read);
+    assert_eq!(text(row, "title"), "one");
+    assert_eq!(text(row, "keep"), "sibling");
 }
 
 /// FB-OLD-20 | PSC-012 | HLL/SKETCH/FILTER/QUEUE/KV/TIMESERIES DDL worked.
@@ -621,10 +642,10 @@ fn fb_new_22_show_collections_probabilistic_kind_tracked() {
     assert_new_row("FB-NEW-22", "PSC-015");
 }
 
-/// FB-NEW-23 | PSC-004 | VECTOR keyword existed but CREATE VECTOR rejected.
+/// FB-NEW-23 | PSC-018 | VECTOR keyword existed but CREATE VECTOR rejected.
 #[test]
 fn fb_new_23_create_vector_tracked() {
-    assert_new_row("FB-NEW-23", "PSC-004");
+    assert_new_row("FB-NEW-23", "PSC-018");
 }
 
 /// FB-NEW-24 | PSC-017 | Official HTTP client rejected readiness.

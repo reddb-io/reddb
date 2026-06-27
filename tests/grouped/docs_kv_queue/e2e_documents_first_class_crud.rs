@@ -300,6 +300,140 @@ fn http_document_insert_get_scan_and_delete() {
 }
 
 #[test]
+fn rql_document_update_body_replaces_full_body_by_id() {
+    let rt = runtime();
+    let entity = EntityUseCases::new(&rt);
+
+    rt.execute_query("CREATE DOCUMENT issue1366_rql_replace")
+        .expect("CREATE DOCUMENT should succeed");
+    let created = entity
+        .create_document(CreateDocumentInput {
+            collection: "issue1366_rql_replace".into(),
+            body: reddb::json::from_str(
+                r#"{
+                    "event_type": "login",
+                    "success": true,
+                    "roles": ["admin", "ops"],
+                    "details": { "ip": "10.0.0.5", "agent": "cli" }
+                }"#,
+            )
+            .expect("document body JSON"),
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        })
+        .expect("create document");
+
+    let replaced = rt
+        .execute_query(&format!(
+            "UPDATE issue1366_rql_replace DOCUMENTS \
+             SET body = '{{\"event_type\":\"replaced\",\"details\":{{\"ip\":\"127.0.0.1\"}}}}' \
+             WHERE id = {}",
+            created.id.raw()
+        ))
+        .expect("UPDATE DOCUMENTS SET body should replace by id");
+    assert_eq!(replaced.affected_rows, 1);
+
+    let selected = rt
+        .execute_query(&format!(
+            "SELECT body, event_type FROM issue1366_rql_replace WHERE id = {}",
+            created.id.raw()
+        ))
+        .expect("select replaced document");
+    assert_eq!(selected.result.records.len(), 1);
+    assert_eq!(
+        text_field(&selected.result.records[0], "event_type"),
+        "replaced"
+    );
+    let body = json_field(&selected.result.records[0], "body");
+    assert_eq!(body["event_type"], json!("replaced"));
+    assert_eq!(body["details"]["ip"], json!("127.0.0.1"));
+    assert!(
+        body.get("roles").is_none(),
+        "full replacement should remove omitted body fields: {body}"
+    );
+    let stale_match = rt
+        .execute_query("SELECT event_type FROM issue1366_rql_replace WHERE success = true")
+        .expect("stale promoted field query should succeed");
+    assert_eq!(stale_match.result.records.len(), 0);
+}
+
+#[test]
+fn http_put_document_replaces_full_body_by_id() {
+    let (_db, addr) = spawn_http_server();
+
+    let payload = json!({
+        "body": {
+            "event_type": "login",
+            "success": true,
+            "roles": ["admin", "ops"],
+            "details": { "ip": "10.0.0.5", "agent": "cli" }
+        }
+    });
+    let (status, created) = http_request(
+        &addr,
+        "POST",
+        "/collections/issue1366_http_replace/documents",
+        Some(payload),
+    );
+    assert_eq!(status, 200, "created={created}");
+    let id = created["id"].as_u64().expect("created id");
+
+    let replacement = json!({
+        "body": {
+            "event_type": "replaced",
+            "details": { "ip": "127.0.0.1" }
+        }
+    });
+    let (status, replaced) = http_request(
+        &addr,
+        "PUT",
+        &format!("/collections/issue1366_http_replace/entities/{id}"),
+        Some(replacement),
+    );
+    assert_eq!(status, 200, "replaced={replaced}");
+    assert_eq!(
+        replaced["entity"]["data"]["named"]["body"]["event_type"],
+        json!("replaced")
+    );
+    assert!(
+        replaced["entity"]["data"]["named"]["body"]
+            .get("roles")
+            .is_none(),
+        "PUT replacement should remove omitted body fields: {replaced}"
+    );
+    assert!(
+        replaced["entity"]["data"]["named"].get("roles").is_none(),
+        "PUT replacement should remove stale promoted fields: {replaced}"
+    );
+
+    let (status, fetched) = http_request(
+        &addr,
+        "GET",
+        &format!("/collections/issue1366_http_replace/entities/{id}"),
+        None,
+    );
+    assert_eq!(status, 200, "fetched={fetched}");
+    assert_eq!(
+        fetched["data"]["named"]["body"]["details"]["ip"],
+        json!("127.0.0.1")
+    );
+    assert!(
+        fetched["data"]["named"]["body"].get("success").is_none(),
+        "read-back should show a full overwrite: {fetched}"
+    );
+
+    let (status, scanned) = http_request(
+        &addr,
+        "GET",
+        "/collections/issue1366_http_replace/scan?offset=0&limit=10",
+        None,
+    );
+    assert_eq!(status, 200, "scanned={scanned}");
+    assert_eq!(scanned["total"].as_u64(), Some(1));
+}
+
+#[test]
 fn runtime_document_patch_updates_nested_body_and_survives_reopen() {
     let path = PersistentDbPath::new("document_patch_runtime");
     let rt = path.open_runtime();
@@ -393,4 +527,78 @@ fn runtime_document_patch_updates_nested_body_and_survives_reopen() {
         json!("weekly")
     );
     assert!(body["contact"].get("phone").is_none());
+}
+
+#[test]
+fn document_crud_conformance_persists_mutation_and_delete_across_reopen() {
+    let path = PersistentDbPath::new("document_crud_conformance");
+    let rt = path.open_runtime();
+
+    rt.execute_query("CREATE DOCUMENT conformance_docs")
+        .expect("CREATE DOCUMENT should succeed");
+    rt.execute_query(
+        r#"INSERT INTO conformance_docs DOCUMENT (body)
+           VALUES ('{"name":"alpha","score":10,"keep":"sibling","status":"draft"}')"#,
+    )
+    .expect("insert document");
+
+    let initial = rt
+        .execute_query(
+            "SELECT name, score, keep, status FROM conformance_docs WHERE name = 'alpha'",
+        )
+        .expect("read inserted document");
+    assert_eq!(initial.result.records.len(), 1);
+    assert_eq!(text_field(&initial.result.records[0], "name"), "alpha");
+    assert_eq!(number_field(&initial.result.records[0], "score"), 10.0);
+    assert_eq!(text_field(&initial.result.records[0], "keep"), "sibling");
+    assert_eq!(text_field(&initial.result.records[0], "status"), "draft");
+
+    rt.execute_query("UPDATE conformance_docs DOCUMENTS SET score += 5 WHERE name = 'alpha'")
+        .expect("partial update document");
+    let partial = rt
+        .execute_query("SELECT body FROM conformance_docs WHERE name = 'alpha'")
+        .expect("read partially updated document body");
+    let partial_body = json_field(&partial.result.records[0], "body");
+    assert_eq!(partial_body["score"], json!(15));
+    assert_eq!(
+        partial_body["keep"],
+        json!("sibling"),
+        "partial document update must not drop sibling fields"
+    );
+    assert_eq!(partial_body["status"], json!("draft"));
+
+    rt.execute_query(
+        "UPDATE conformance_docs DOCUMENTS \
+         SET name = 'beta', score = 99, keep = 'replacement', status = 'done' \
+         WHERE name = 'alpha'",
+    )
+    .expect("replace document fields");
+
+    let reopened = checkpoint_and_reopen(&path, rt);
+    let after_reopen = reopened
+        .execute_query("SELECT name, score, keep, status FROM conformance_docs WHERE name = 'beta'")
+        .expect("read replaced document after reopen");
+    assert_eq!(after_reopen.result.records.len(), 1);
+    assert_eq!(text_field(&after_reopen.result.records[0], "name"), "beta");
+    assert_eq!(number_field(&after_reopen.result.records[0], "score"), 99.0);
+    assert_eq!(
+        text_field(&after_reopen.result.records[0], "keep"),
+        "replacement"
+    );
+    assert_eq!(
+        text_field(&after_reopen.result.records[0], "status"),
+        "done"
+    );
+
+    reopened
+        .execute_query("DELETE FROM conformance_docs WHERE name = 'beta'")
+        .expect("delete document");
+    let reopened = checkpoint_and_reopen(&path, reopened);
+    let after_delete = reopened
+        .execute_query("SELECT COUNT(*) AS remaining FROM conformance_docs WHERE name = 'beta'")
+        .expect("read back deleted document after reopen");
+    assert_eq!(
+        number_field(&after_delete.result.records[0], "remaining"),
+        0.0
+    );
 }

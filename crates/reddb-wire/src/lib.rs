@@ -20,6 +20,7 @@
 pub mod auth;
 pub mod conn_string;
 pub mod jsonrpc;
+pub mod knowledge;
 pub mod legacy;
 pub mod query_with_params;
 pub mod redwire;
@@ -28,10 +29,11 @@ pub mod sanitizer;
 pub mod topology;
 
 pub use conn_string::{
-    is_embedded_connection_uri, parse, parse_with_limits, ConnStringLimits, ConnectionTarget,
-    ParseError, ParseErrorKind, DEFAULT_PORT_GRPC, DEFAULT_PORT_GRPCS, DEFAULT_PORT_RED,
-    DEFAULT_PORT_WS, DEFAULT_PORT_WSS,
+    is_embedded_connection_uri, parse, parse_with_limits, ConnStringLimits, ConnectionScheme,
+    ConnectionTarget, ParseError, ParseErrorKind, DEFAULT_PORT_GRPC, DEFAULT_PORT_GRPCS,
+    DEFAULT_PORT_RED, DEFAULT_PORT_WS, DEFAULT_PORT_WSS, SUPPORTED_SCHEMES,
 };
+pub use knowledge::*;
 pub use redwire::{BuildError, FrameBuilder};
 pub use sanitizer::{
     audit_safe_log_field, Boundary, ConnStringSanitizer, EscapeError, EscapedFor, ParsedConnString,
