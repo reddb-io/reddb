@@ -315,6 +315,7 @@ impl McpServer {
             "reddb_rql_validate" => self.tool_rql_validate(args),
             "reddb_rql_explain" => self.tool_rql_explain(args),
             "reddb_type_of" => self.tool_type_of(args),
+            "reddb_explain_connection" => self.tool_explain_connection(args),
             "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
             "reddb_auth_create_user" => self.tool_auth_create_user(args),
             "reddb_auth_login" => self.tool_auth_login(args),
@@ -1363,6 +1364,13 @@ impl McpServer {
             )?;
         json_to_string(&facts).map_err(|e| format!("serialization error: {}", e))
     }
+
+    fn tool_explain_connection(&self, args: &JsonValue) -> Result<String, String> {
+        let uri = get_str_field(args, "uri")?;
+        let target = reddb_wire::parse(uri).map_err(|err| err.to_string())?;
+        let json = connection_explanation_json(uri, &target);
+        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1386,6 +1394,159 @@ fn format_mcp_ask_parse_error(err: crate::runtime::ai::mcp_ask_tool::ParseError)
             "options.cache and options.nocache are mutually exclusive".to_string()
         }
         ParseError::UnknownOption { path } => format!("unknown option {path}"),
+    }
+}
+
+fn connection_explanation_json(uri: &str, target: &reddb_wire::ConnectionTarget) -> JsonValue {
+    let scheme = connection_uri_scheme(uri);
+    let mut obj = Map::new();
+    obj.insert("uri".to_string(), JsonValue::String(uri.to_string()));
+    obj.insert("scheme".to_string(), JsonValue::String(scheme.clone()));
+
+    let mut target_obj = Map::new();
+    match target {
+        reddb_wire::ConnectionTarget::Memory => {
+            obj.insert(
+                "mode".to_string(),
+                JsonValue::String("embedded".to_string()),
+            );
+            obj.insert(
+                "transport".to_string(),
+                JsonValue::String("memory".to_string()),
+            );
+            obj.insert(
+                "topology".to_string(),
+                JsonValue::String("ephemeral".to_string()),
+            );
+            target_obj.insert("kind".to_string(), JsonValue::String("memory".to_string()));
+        }
+        reddb_wire::ConnectionTarget::File { path } => {
+            obj.insert(
+                "mode".to_string(),
+                JsonValue::String("embedded".to_string()),
+            );
+            obj.insert(
+                "transport".to_string(),
+                JsonValue::String("filesystem".to_string()),
+            );
+            obj.insert(
+                "topology".to_string(),
+                JsonValue::String("persisted".to_string()),
+            );
+            target_obj.insert("kind".to_string(), JsonValue::String("file".to_string()));
+            target_obj.insert(
+                "path".to_string(),
+                JsonValue::String(path.display().to_string()),
+            );
+        }
+        reddb_wire::ConnectionTarget::Grpc { endpoint } => {
+            obj.insert("mode".to_string(), JsonValue::String("remote".to_string()));
+            obj.insert(
+                "transport".to_string(),
+                JsonValue::String(
+                    if scheme == "grpcs" {
+                        "grpc_tls"
+                    } else {
+                        "grpc"
+                    }
+                    .to_string(),
+                ),
+            );
+            obj.insert(
+                "topology".to_string(),
+                JsonValue::String("single".to_string()),
+            );
+            target_obj.insert("kind".to_string(), JsonValue::String("grpc".to_string()));
+            target_obj.insert("endpoint".to_string(), JsonValue::String(endpoint.clone()));
+        }
+        reddb_wire::ConnectionTarget::GrpcCluster {
+            primary,
+            replicas,
+            force_primary,
+        } => {
+            obj.insert("mode".to_string(), JsonValue::String("remote".to_string()));
+            obj.insert(
+                "transport".to_string(),
+                JsonValue::String(cluster_transport_label(&scheme).to_string()),
+            );
+            obj.insert(
+                "topology".to_string(),
+                JsonValue::String("primary_replica".to_string()),
+            );
+            target_obj.insert(
+                "kind".to_string(),
+                JsonValue::String("primary_replica".to_string()),
+            );
+            target_obj.insert("primary".to_string(), JsonValue::String(primary.clone()));
+            target_obj.insert(
+                "replicas".to_string(),
+                JsonValue::Array(replicas.iter().cloned().map(JsonValue::String).collect()),
+            );
+            target_obj.insert("force_primary".to_string(), JsonValue::Bool(*force_primary));
+        }
+        reddb_wire::ConnectionTarget::Http { base_url } => {
+            obj.insert("mode".to_string(), JsonValue::String("remote".to_string()));
+            obj.insert(
+                "transport".to_string(),
+                JsonValue::String(if scheme == "https" { "https" } else { "http" }.to_string()),
+            );
+            obj.insert(
+                "topology".to_string(),
+                JsonValue::String("single".to_string()),
+            );
+            target_obj.insert("kind".to_string(), JsonValue::String("http".to_string()));
+            target_obj.insert("base_url".to_string(), JsonValue::String(base_url.clone()));
+        }
+        reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
+            obj.insert("mode".to_string(), JsonValue::String("remote".to_string()));
+            obj.insert(
+                "transport".to_string(),
+                JsonValue::String(if *tls { "redwire_tls" } else { "redwire" }.to_string()),
+            );
+            obj.insert(
+                "topology".to_string(),
+                JsonValue::String("single".to_string()),
+            );
+            target_obj.insert("kind".to_string(), JsonValue::String("redwire".to_string()));
+            target_obj.insert("host".to_string(), JsonValue::String(host.clone()));
+            target_obj.insert("port".to_string(), JsonValue::Number(*port as f64));
+            target_obj.insert("tls".to_string(), JsonValue::Bool(*tls));
+        }
+        reddb_wire::ConnectionTarget::WsNative { host, port, tls } => {
+            obj.insert("mode".to_string(), JsonValue::String("remote".to_string()));
+            obj.insert(
+                "transport".to_string(),
+                JsonValue::String(if *tls { "redwire_wss" } else { "redwire_ws" }.to_string()),
+            );
+            obj.insert(
+                "topology".to_string(),
+                JsonValue::String("single".to_string()),
+            );
+            target_obj.insert(
+                "kind".to_string(),
+                JsonValue::String("redwire_websocket".to_string()),
+            );
+            target_obj.insert("host".to_string(), JsonValue::String(host.clone()));
+            target_obj.insert("port".to_string(), JsonValue::Number(*port as f64));
+            target_obj.insert("tls".to_string(), JsonValue::Bool(*tls));
+        }
+    }
+    obj.insert("target".to_string(), JsonValue::Object(target_obj));
+    JsonValue::Object(obj)
+}
+
+fn connection_uri_scheme(uri: &str) -> String {
+    uri.split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn cluster_transport_label(scheme: &str) -> &'static str {
+    match scheme {
+        "red" => "redwire",
+        "reds" => "redwire_tls",
+        "grpcs" => "grpc_tls",
+        _ => "grpc",
     }
 }
 
@@ -1718,6 +1879,32 @@ mod tests {
     }
 
     #[test]
+    fn resources_list_includes_connection_knowledge() {
+        let mut srv = make_server();
+        let request = parse_json(r#"{"jsonrpc":"2.0","id":11,"method":"resources/list"}"#);
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let resources = parsed
+            .get("result")
+            .and_then(|result| result.get("resources"))
+            .and_then(JsonValue::as_array)
+            .expect("resources array");
+
+        let connection = resources
+            .iter()
+            .find(|res| {
+                res.get("uri").and_then(JsonValue::as_str)
+                    == Some(reddb_wire::knowledge::RESOURCE_URI)
+            })
+            .expect("connection knowledge resource listed");
+        assert_eq!(
+            connection.get("mimeType").and_then(JsonValue::as_str),
+            Some("text/markdown")
+        );
+        assert!(connection.get("name").and_then(JsonValue::as_str).is_some());
+    }
+
+    #[test]
     fn resources_read_returns_generated_rql_reference() {
         let mut srv = make_server();
         let request = parse_json(
@@ -1770,6 +1957,44 @@ mod tests {
             "value type missing: {text:.120}"
         );
         assert!(text.contains("Multi-model map"), "multi-model map missing");
+    }
+
+    #[test]
+    fn resources_read_returns_generated_connection_reference() {
+        let mut srv = make_server();
+        let request = parse_json(
+            r#"{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"reddb://knowledge/connections"}}"#,
+        );
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let text = parsed
+            .get("result")
+            .and_then(|result| result.get("contents"))
+            .and_then(JsonValue::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("resource text");
+
+        // The body is exactly what the wire authority generates — same source as
+        // docs/llms.txt.
+        assert_eq!(text, reddb_wire::knowledge::connection_reference_markdown());
+        assert!(text.contains("`red://`"), "red scheme missing: {text:.120}");
+        assert!(text.contains("`reds://`"), "reds scheme missing");
+        assert!(
+            text.contains("principal transport"),
+            "principal transport narrative missing"
+        );
+        assert!(
+            text.contains("Embedded / standalone"),
+            "embedded topology missing"
+        );
+        assert!(text.contains("Serverless"), "serverless topology missing");
+        assert!(
+            text.contains("Primary-replica"),
+            "primary-replica topology missing"
+        );
+        assert!(text.contains("Cluster"), "cluster topology missing");
     }
 
     #[test]
@@ -2286,6 +2511,96 @@ mod tests {
         let result = parsed.get("result").expect("result");
         assert_eq!(
             result.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+    }
+
+    fn call_explain_connection(srv: &mut McpServer, uri: &str) -> JsonValue {
+        let request = parse_json(
+            &json_to_string(&{
+                let mut request = Map::new();
+                request.insert("jsonrpc".to_string(), JsonValue::String("2.0".to_string()));
+                request.insert("id".to_string(), JsonValue::Number(31.0));
+                request.insert(
+                    "method".to_string(),
+                    JsonValue::String("tools/call".to_string()),
+                );
+
+                let mut args = Map::new();
+                args.insert("uri".to_string(), JsonValue::String(uri.to_string()));
+
+                let mut params = Map::new();
+                params.insert(
+                    "name".to_string(),
+                    JsonValue::String("reddb_explain_connection".to_string()),
+                );
+                params.insert("arguments".to_string(), JsonValue::Object(args));
+                request.insert("params".to_string(), JsonValue::Object(params));
+                JsonValue::Object(request)
+            })
+            .expect("serialize request"),
+        );
+        let response = srv.handle_message(&request).expect("response");
+        let parsed = parse_json(&response);
+        let result = parsed.get("result").expect("result");
+        assert_ne!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true),
+            "tool returned error: {parsed:?}"
+        );
+        parse_json(&tool_result_text(&parsed))
+    }
+
+    #[test]
+    fn tools_call_explain_connection_maps_supported_schemes() {
+        let mut srv = make_server();
+        for (uri, mode, transport, topology) in [
+            ("memory://", "embedded", "memory", "ephemeral"),
+            (
+                "file:///tmp/reddb/data.rdb",
+                "embedded",
+                "filesystem",
+                "persisted",
+            ),
+            ("red://db.example:5050", "remote", "redwire", "single"),
+            ("reds://db.example", "remote", "redwire_tls", "single"),
+            ("grpc://db.example", "remote", "grpc", "single"),
+            ("http://db.example", "remote", "http", "single"),
+            ("https://db.example", "remote", "https", "single"),
+        ] {
+            let envelope = call_explain_connection(&mut srv, uri);
+            assert_eq!(envelope.get("uri").and_then(JsonValue::as_str), Some(uri));
+            assert_eq!(
+                envelope.get("mode").and_then(JsonValue::as_str),
+                Some(mode),
+                "{uri}: {envelope:?}"
+            );
+            assert_eq!(
+                envelope.get("transport").and_then(JsonValue::as_str),
+                Some(transport),
+                "{uri}: {envelope:?}"
+            );
+            assert_eq!(
+                envelope.get("topology").and_then(JsonValue::as_str),
+                Some(topology),
+                "{uri}: {envelope:?}"
+            );
+        }
+
+        let cluster = call_explain_connection(&mut srv, "grpc://primary,replica?route=primary");
+        assert_eq!(
+            cluster.get("topology").and_then(JsonValue::as_str),
+            Some("primary_replica")
+        );
+        assert_eq!(
+            cluster.get("transport").and_then(JsonValue::as_str),
+            Some("grpc")
+        );
+        assert_eq!(
+            cluster
+                .get("target")
+                .and_then(|target| target.get("force_primary"))
+                .and_then(JsonValue::as_bool),
             Some(true)
         );
     }

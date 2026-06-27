@@ -1860,6 +1860,16 @@ impl RedDBServer {
                         return self.handle_patch_entity(collection, id, body);
                     }
                 }
+                if method == "PUT" {
+                    if let Some((collection, id)) = collection_entity_path(&path) {
+                        if let Some(deny) =
+                            self.check_collection_http_policy(&headers, "update", collection)
+                        {
+                            return deny;
+                        }
+                        return self.handle_replace_document(collection, id, body);
+                    }
+                }
                 if method == "DELETE" {
                     if let Some((collection, tree_name, node_id)) = collection_tree_node_path(&path)
                     {

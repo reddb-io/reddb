@@ -84,6 +84,127 @@ pub const DEFAULT_PORT_GRPCS: u16 = 55555;
 pub const DEFAULT_PORT_WS: u16 = 80;
 pub const DEFAULT_PORT_WSS: u16 = 443;
 
+/// URI schemes accepted by the connection-string parser.
+///
+/// This enum is the connection-layer source for generated agent knowledge:
+/// [`crate::knowledge`] iterates [`SUPPORTED_SCHEMES`] instead of carrying a
+/// separate hand-maintained scheme list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionScheme {
+    Memory,
+    File,
+    Red,
+    Reds,
+    RedWs,
+    RedWss,
+    Grpc,
+    Grpcs,
+    Http,
+    Https,
+}
+
+/// Stable parser-owned list of supported URI schemes.
+pub const SUPPORTED_SCHEMES: &[ConnectionScheme] = &[
+    ConnectionScheme::Red,
+    ConnectionScheme::Reds,
+    ConnectionScheme::Grpc,
+    ConnectionScheme::Grpcs,
+    ConnectionScheme::Http,
+    ConnectionScheme::Https,
+    ConnectionScheme::Memory,
+    ConnectionScheme::File,
+    ConnectionScheme::RedWs,
+    ConnectionScheme::RedWss,
+];
+
+impl ConnectionScheme {
+    pub fn from_uri_scheme(scheme: &str) -> Option<Self> {
+        match scheme {
+            "memory" => Some(Self::Memory),
+            "file" => Some(Self::File),
+            "red" => Some(Self::Red),
+            "reds" => Some(Self::Reds),
+            "red+ws" => Some(Self::RedWs),
+            "red+wss" => Some(Self::RedWss),
+            "grpc" => Some(Self::Grpc),
+            "grpcs" => Some(Self::Grpcs),
+            "http" => Some(Self::Http),
+            "https" => Some(Self::Https),
+            _ => None,
+        }
+    }
+
+    pub fn uri_prefix(self) -> &'static str {
+        match self {
+            Self::Memory => "memory://",
+            Self::File => "file://",
+            Self::Red => "red://",
+            Self::Reds => "reds://",
+            Self::RedWs => "red+ws://",
+            Self::RedWss => "red+wss://",
+            Self::Grpc => "grpc://",
+            Self::Grpcs => "grpcs://",
+            Self::Http => "http://",
+            Self::Https => "https://",
+        }
+    }
+
+    pub fn transport(self) -> &'static str {
+        match self {
+            Self::Memory => "embedded in-memory engine",
+            Self::File => "embedded file-backed engine",
+            Self::Red | Self::Reds => "RedWire TCP",
+            Self::RedWs | Self::RedWss => "RedWire WebSocket",
+            Self::Grpc | Self::Grpcs => "gRPC",
+            Self::Http | Self::Https => "HTTP REST",
+        }
+    }
+
+    pub fn mode(self) -> &'static str {
+        match self {
+            Self::Memory | Self::File => "embedded",
+            Self::Red
+            | Self::Reds
+            | Self::RedWs
+            | Self::RedWss
+            | Self::Grpc
+            | Self::Grpcs
+            | Self::Http
+            | Self::Https => "remote",
+        }
+    }
+
+    pub fn example(self) -> &'static str {
+        match self {
+            Self::Memory => "memory://",
+            Self::File => "file:///var/lib/reddb/app.db",
+            Self::Red => "red://db.example.com:5050",
+            Self::Reds => "reds://db.example.com:5050",
+            Self::RedWs => "red+ws://db.example.com",
+            Self::RedWss => "red+wss://db.example.com",
+            Self::Grpc => "grpc://db.example.com:55055",
+            Self::Grpcs => "grpcs://db.example.com:55555",
+            Self::Http => "http://db.example.com:80",
+            Self::Https => "https://db.example.com:443",
+        }
+    }
+
+    pub fn notes(self) -> &'static str {
+        match self {
+            Self::Memory => "Zero-config ephemeral engine, commonly used by local MCP hosts.",
+            Self::File => "Embedded durable engine rooted at the URI path.",
+            Self::Red => "Principal RedWire transport without TLS.",
+            Self::Reds => "Principal RedWire transport with TLS.",
+            Self::RedWs => "Browser-native RedWire over WebSocket without TLS.",
+            Self::RedWss => "Browser-native RedWire over WebSocket with TLS.",
+            Self::Grpc => "Compatibility transport for existing gRPC clients.",
+            Self::Grpcs => "TLS variant of the gRPC compatibility transport.",
+            Self::Http => "REST/admin transport without TLS.",
+            Self::Https => "REST/admin transport with TLS.",
+        }
+    }
+}
+
 /// DoS guardrails applied by [`parse`] before any URI work happens.
 ///
 /// The connection-string parser is the only entry point an attacker
@@ -233,8 +354,8 @@ pub fn parse_with_limits(
 
     enforce_query_param_limit(&parsed, &limits)?;
 
-    match parsed.scheme() {
-        "red" | "reds" => {
+    match ConnectionScheme::from_uri_scheme(parsed.scheme()) {
+        Some(ConnectionScheme::Red | ConnectionScheme::Reds) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(ParseErrorKind::InvalidUri, "red:// URI is missing a host")
             })?;
@@ -245,7 +366,7 @@ pub fn parse_with_limits(
                 tls: parsed.scheme() == "reds",
             })
         }
-        "red+ws" | "red+wss" => {
+        Some(ConnectionScheme::RedWs | ConnectionScheme::RedWss) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(
                     ParseErrorKind::InvalidUri,
@@ -264,7 +385,7 @@ pub fn parse_with_limits(
                 tls,
             })
         }
-        "grpc" | "grpcs" => {
+        Some(ConnectionScheme::Grpc | ConnectionScheme::Grpcs) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(ParseErrorKind::InvalidUri, "grpc:// URI is missing a host")
             })?;
@@ -279,7 +400,7 @@ pub fn parse_with_limits(
                 endpoint: format!("http://{host}:{port}"),
             })
         }
-        "http" | "https" => {
+        Some(ConnectionScheme::Http | ConnectionScheme::Https) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(
                     ParseErrorKind::InvalidUri,
@@ -294,9 +415,9 @@ pub fn parse_with_limits(
                 base_url: format!("{scheme}://{host}:{port}"),
             })
         }
-        other => Err(ParseError::new(
+        Some(ConnectionScheme::Memory | ConnectionScheme::File) | None => Err(ParseError::new(
             ParseErrorKind::UnsupportedScheme,
-            format!("unsupported scheme: {other}"),
+            format!("unsupported scheme: {}", parsed.scheme()),
         )),
     }
 }

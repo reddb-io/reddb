@@ -8,6 +8,9 @@ name: TLA+ Model Check
 #   * Durability      -- a write at/below the commit watermark is never
 #                        rolled back (CommittedNeverRolledBack +
 #                        LeaderCompleteness).
+#   * ReplicationSafetyEnvelope
+#                     -- single-writer fencing, election safety, partitions,
+#                        and crash/recovery durability in one bounded model.
 #   * SafeReconfig    -- every membership change preserves quorum overlap.
 #
 # TLC exits non-zero on a violated invariant, which fails the job (and so
@@ -44,6 +47,7 @@ jobs:
         spec:
           - ElectionSafety
           - Durability
+          - ReplicationSafetyEnvelope
           - SafeReconfig
     name: model-check (${{ matrix.spec }})
     steps:
