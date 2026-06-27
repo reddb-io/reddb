@@ -23,7 +23,10 @@ fn jepsen_black_box_harness_self_test_exercises_replay_artifacts_and_checkers() 
     assert!(stdout.contains("schedule_json="), "{stdout}");
     assert!(stdout.contains("process_kill_restart=true"), "{stdout}");
     assert!(stdout.contains("message_isolation=true"), "{stdout}");
-    assert!(stdout.contains("committed_write_loss_checker=true"), "{stdout}");
+    assert!(
+        stdout.contains("committed_write_loss_checker=true"),
+        "{stdout}"
+    );
     assert!(stdout.contains("stale_leader_checker=true"), "{stdout}");
     assert!(stdout.contains("single_writer_checker=true"), "{stdout}");
 }
