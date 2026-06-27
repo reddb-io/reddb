@@ -27,6 +27,8 @@ where
     // 1. Send Hello.
     let methods: Vec<&str> = match &opts.auth {
         Auth::Bearer(_) => vec!["bearer"],
+        Auth::Basic { .. } => vec!["basic"],
+        Auth::ApiKey(_) => vec!["apikey"],
         Auth::Anonymous => vec!["anonymous", "bearer"],
     };
     let hello = build_client_hello_frame(1, methods, 0, opts.client_name.as_deref())
@@ -58,6 +60,12 @@ where
             return Err(ClientError::new(
                 ErrorCode::AuthRefused,
                 "server demanded bearer auth but no token was supplied",
+            ));
+        }
+        ("basic", Auth::Basic { .. }) | ("apikey", Auth::ApiKey(_)) => {
+            return Err(ClientError::new(
+                ErrorCode::Protocol,
+                format!("client auth response codec is not implemented for {chosen_auth}"),
             ));
         }
         (other, _) => {
