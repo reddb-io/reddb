@@ -25,17 +25,25 @@ Point your agent host at the launcher as a stdio MCP server:
   "mcpServers": {
     "reddb": {
       "command": "npx",
-      "args": ["-y", "@reddb-io/mcp"]
+      "args": ["-y", "@reddb-io/mcp"],
+      "env": {
+        "REDDB_MCP_URI": "${REDDB_MCP_URI:-memory://}"
+      }
     }
   }
 }
 ```
 
-Extra arguments are forwarded to `red mcp` after the subcommand, e.g. remote
-client mode:
+The default `memory://` URI starts an embedded ephemeral engine. To use a
+file-backed or remote database, export `REDDB_MCP_URI` in the host environment
+before your MCP host starts. Keep credentials in the host environment, not in
+the committed `.mcp.json`.
+
+Extra arguments are forwarded to `red mcp` after the subcommand, e.g. an
+explicit connection URI:
 
 ```bash
-npx -y @reddb-io/mcp --url tcp://127.0.0.1:6789
+npx -y @reddb-io/mcp --uri file:///var/lib/reddb/agent.rdb
 ```
 
 ## Binary resolution
@@ -52,6 +60,7 @@ the same precedence as the SDK (PATH is never consulted, per ADR 0006):
 | Variable            | Effect                                              |
 | ------------------- | --------------------------------------------------- |
 | `REDDB_BIN`         | Use this binary; skip all download logic.           |
+| `REDDB_MCP_URI`     | Connection URI forwarded to `red mcp --uri`.        |
 | `REDDB_MCP_VERSION` | Pull a specific release tag instead of the default. |
 | `REDDB_MCP_REPO`    | Fetch from a fork (default: `reddb-io/reddb`).       |
 
