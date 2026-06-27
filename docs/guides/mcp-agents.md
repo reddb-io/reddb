@@ -8,40 +8,34 @@ MCP (Model Context Protocol) is an open standard for connecting AI models to ext
 
 ## Setup
 
-### 1. Start the MCP Server
+### 1. Add `.mcp.json`
+
+Commit this project-local config so agents can start RedDB with no local install:
+
+```json
+{
+  "mcpServers": {
+    "reddb": {
+      "command": "npx",
+      "args": ["-y", "@reddb-io/mcp"],
+      "env": {
+        "REDDB_MCP_URI": "${REDDB_MCP_URI:-memory://}"
+      }
+    }
+  }
+}
+```
+
+The default is embedded `memory://`. To connect to a persistent local database
+or remote deployment, set `REDDB_MCP_URI` in the host environment before the MCP
+host starts, for example `file:///var/lib/reddb/agent.rdb` or
+`reds://user:password@db.example:5050`. Keep credentials in the host
+environment, not in `.mcp.json`.
+
+### 2. Direct CLI usage
 
 ```bash
-red mcp --path ./data/agent.rdb
-```
-
-### 2. Configure Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `~/.config/Claude/claude_desktop_config.json` (Linux):
-
-```json
-{
-  "mcpServers": {
-    "reddb": {
-      "command": "red",
-      "args": ["mcp", "--path", "/path/to/data/agent.rdb"]
-    }
-  }
-}
-```
-
-### 3. Configure Cursor
-
-Add to `.cursor/mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "reddb": {
-      "command": "red",
-      "args": ["mcp", "--path", "./data/agent.rdb"]
-    }
-  }
-}
+red mcp --uri "${REDDB_MCP_URI:-memory://}"
 ```
 
 ## What Can Agents Do?

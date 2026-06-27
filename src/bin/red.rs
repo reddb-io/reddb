@@ -91,7 +91,9 @@ impl std::fmt::Debug for McpClientOptions {
 fn resolve_mcp_client_options(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<Option<McpClientOptions>, String> {
-    let raw_uri = flag_string(flags, "url")
+    let raw_uri = flag_string(flags, "uri")
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| flag_string(flags, "url").filter(|value| !value.trim().is_empty()))
         .filter(|value| !value.trim().is_empty())
         .or_else(|| env_string("REDDB_MCP_URI"));
     let Some(raw_uri) = raw_uri else {
@@ -99,7 +101,7 @@ fn resolve_mcp_client_options(
     };
 
     let mut spec = reddb_wire::parse_with_auth(&raw_uri)
-        .map_err(|err| format!("mcp url parse error: {err}"))?;
+        .map_err(|err| format!("mcp URI parse error: {err}"))?;
     if matches!(spec.auth, reddb_wire::ConnectionAuth::Anonymous) {
         if let Some(token) = flag_string(flags, "token").filter(|value| !value.trim().is_empty()) {
             spec.auth = reddb_wire::ConnectionAuth::bearer(token);
@@ -3539,12 +3541,18 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
             ]);
         }
         Some("mcp") => {
-            flags.push(
+            flags.extend(vec![
+                cli::types::FlagSchema::new("uri")
+                    .with_description("Connection URI (overrides --url and REDDB_MCP_URI)"),
+                cli::types::FlagSchema::new("url")
+                    .with_description("Remote connection URL alias for --uri"),
+                cli::types::FlagSchema::new("token")
+                    .with_description("Bearer token for a remote MCP connection"),
                 cli::types::FlagSchema::new("path")
                     .with_short('d')
                     .with_description("Data directory path (omit for in-memory)")
                     .with_default(""),
-            );
+            ]);
         }
         Some("query") | Some("insert") | Some("get") | Some("delete") | Some("status") => {
             flags.push(
@@ -6260,6 +6268,60 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "/tmp/data.rdb"
         );
         assert_eq!(result.flags.get("param").unwrap().as_str_value(), "42");
+    }
+
+    #[test]
+    fn mcp_without_uri_or_env_uses_legacy_runtime_fallback() {
+        let _lock = env_lock().lock().unwrap();
+        let _clear = EnvGuard::clear(&["REDDB_MCP_URI"]);
+
+        assert!(resolve_mcp_client_options(&HashMap::new())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn mcp_uri_reads_env_file_target() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::set(&[("REDDB_MCP_URI", "file:///tmp/reddb-env.rdb")]);
+
+        let options = resolve_mcp_client_options(&HashMap::new())
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            options.target,
+            reddb_wire::ConnectionTarget::File { ref path }
+                if path == &PathBuf::from("/tmp/reddb-env.rdb")
+        ));
+    }
+
+    #[test]
+    fn mcp_uri_prefers_flag_over_url_and_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::set(&[("REDDB_MCP_URI", "red://env.example:5050")]);
+        let flags = HashMap::from([
+            ("uri".to_string(), str_flag("file:///tmp/reddb-agent.rdb")),
+            ("url".to_string(), str_flag("reds://url.example:5050")),
+        ]);
+
+        let options = resolve_mcp_client_options(&flags).unwrap().unwrap();
+
+        assert!(matches!(
+            options.target,
+            reddb_wire::ConnectionTarget::File { ref path }
+                if path == &PathBuf::from("/tmp/reddb-agent.rdb")
+        ));
+    }
+
+    #[test]
+    fn mcp_path_fallback_does_not_mask_uri_resolution() {
+        let _lock = env_lock().lock().unwrap();
+        let _clear = EnvGuard::clear(&["REDDB_MCP_URI"]);
+        let mut flags = HashMap::new();
+        flags.insert("path".to_string(), str_flag("/tmp/reddb-legacy.rdb"));
+
+        assert!(resolve_mcp_client_options(&flags).unwrap().is_none());
     }
 
     #[test]
