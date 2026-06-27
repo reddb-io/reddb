@@ -19,6 +19,7 @@ use crate::application::ports::{
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
+use crate::runtime::mvcc::current_connection_id;
 use crate::storage::query::ast::{BinOp, Expr, FieldRef, ReturningItem, UpdateTarget};
 use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
@@ -1861,11 +1862,24 @@ impl RedDBRuntime {
             target_scan = target_scan.with_live_table_rows();
         }
         let ids_to_update = target_scan.find_target_ids()?;
+        let order_limit = if query.claim_limit.is_some() {
+            None
+        } else {
+            limit_cap
+        };
         let ids_to_update = if query.order_by.is_empty() {
             ids_to_update
         } else {
-            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, limit_cap)
+            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)
         };
+        let mut ids_to_update = if query.claim_limit.is_some() {
+            self.filter_claim_locked_target_ids(&query.table, ids_to_update)
+        } else {
+            ids_to_update
+        };
+        if let Some(claim_cap) = claim_cap {
+            ids_to_update.truncate(claim_cap);
+        }
         if query.claim_exact
             && claim_cap.is_some_and(|claim_count| ids_to_update.len() < claim_count)
         {
@@ -1876,13 +1890,17 @@ impl RedDBRuntime {
         }
 
         if needs_rmw_lock {
-            return self.execute_update_inner_tracked_locked(
+            let result = self.execute_update_inner_tracked_locked(
                 raw_query,
                 query,
                 &compiled_plan,
                 &ids_to_update,
                 effective_filter.as_ref(),
-            );
+            )?;
+            if query.claim_limit.is_some() {
+                self.record_pending_claim_locks_for_touched_ids(&query.table, &result.1);
+            }
+            return Ok(result);
         }
 
         let mut affected: u64 = 0;
@@ -1911,6 +1929,9 @@ impl RedDBRuntime {
         if affected > 0 {
             self.note_table_write(&query.table);
         }
+        if query.claim_limit.is_some() {
+            self.record_pending_claim_locks_for_touched_ids(&query.table, &touched_ids);
+        }
 
         Ok((
             RuntimeQueryResult::dml_result(
@@ -1921,6 +1942,38 @@ impl RedDBRuntime {
             ),
             touched_ids,
         ))
+    }
+
+    fn filter_claim_locked_target_ids(&self, table: &str, ids: Vec<EntityId>) -> Vec<EntityId> {
+        let conn_id = current_connection_id();
+        let locks = self.inner.pending_claim_locks.read();
+        ids.into_iter()
+            .filter(|id| {
+                let Some(entity) = self.inner.db.store().get(table, *id) else {
+                    return false;
+                };
+                let key = (table.to_string(), entity.logical_id());
+                locks
+                    .get(&key)
+                    .is_none_or(|owner_conn_id| *owner_conn_id == conn_id)
+            })
+            .collect()
+    }
+
+    fn record_pending_claim_locks_for_touched_ids(&self, table: &str, ids: &[EntityId]) {
+        if self.current_xid().is_none() || ids.is_empty() {
+            return;
+        }
+
+        let conn_id = current_connection_id();
+        let store = self.inner.db.store();
+        let mut locks = self.inner.pending_claim_locks.write();
+        for id in ids {
+            let Some(entity) = store.get(table, *id) else {
+                continue;
+            };
+            locks.insert((table.to_string(), entity.logical_id()), conn_id);
+        }
     }
 
     fn execute_update_inner_tracked_locked(
