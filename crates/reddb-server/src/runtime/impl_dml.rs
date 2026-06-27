@@ -1808,6 +1808,27 @@ impl RedDBRuntime {
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let needs_rmw_lock = update_needs_rmw_lock(query);
+        let claim_lock = query.claim_limit.map(|_| {
+            self.inner
+                .rmw_locks
+                .lock_for(&query.table, "__table_claim_update__")
+        });
+        let _claim_guard = if let Some(lock) = claim_lock.as_ref() {
+            let Some(guard) = lock.try_lock() else {
+                return Ok((
+                    RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        0,
+                        "update",
+                        "runtime-dml",
+                    ),
+                    Vec::new(),
+                ));
+            };
+            Some(guard)
+        } else {
+            None
+        };
         let table_rmw_lock = if needs_rmw_lock {
             Some(
                 self.inner
@@ -1819,7 +1840,8 @@ impl RedDBRuntime {
         };
         let _table_rmw_guard = table_rmw_lock.as_ref().map(|lock| lock.lock());
         let mut touched_ids: Vec<EntityId> = Vec::new();
-        let limit_cap = query.limit.map(|l| l as usize);
+        let claim_cap = query.claim_limit.map(|limit| limit as usize);
+        let limit_cap = claim_cap.or_else(|| query.limit.map(|limit| limit as usize));
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -1844,6 +1866,14 @@ impl RedDBRuntime {
         } else {
             ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, limit_cap)
         };
+        if query.claim_exact
+            && claim_cap.is_some_and(|claim_count| ids_to_update.len() < claim_count)
+        {
+            return Ok((
+                RuntimeQueryResult::dml_result(raw_query.to_string(), 0, "update", "runtime-dml"),
+                Vec::new(),
+            ));
+        }
 
         if needs_rmw_lock {
             return self.execute_update_inner_tracked_locked(
