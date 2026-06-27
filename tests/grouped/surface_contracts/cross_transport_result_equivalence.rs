@@ -55,6 +55,7 @@ const SELECT_SQL_REDWIRE: &str = "SELECT id, label FROM xport_equiv_1354 WHERE i
 
 /// Transport-independent normalized result: (column names, rows-as-strings).
 type NormResult = (Vec<String>, Vec<Vec<String>>);
+type DocumentCrudTrace = Vec<(&'static str, NormResult)>;
 
 fn pick_free_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("port pick bind");
@@ -124,15 +125,7 @@ fn norm_from_query_result(qr: &QueryResult) -> NormResult {
     (cols, rows)
 }
 
-// ---------------------------------------------------------------------------
-// Transport drivers
-// ---------------------------------------------------------------------------
-
-/// Embedded: direct synchronous call into the shared runtime.
-fn drive_embedded(runtime: &RedDBRuntime) -> NormResult {
-    let qr = runtime
-        .execute_query(SELECT_SQL)
-        .expect("embedded execute_query");
+fn norm_from_runtime_query_result(qr: reddb::runtime::RuntimeQueryResult) -> NormResult {
     let cols = qr.result.columns.clone();
     let rows = qr
         .result
@@ -143,6 +136,7 @@ fn drive_embedded(runtime: &RedDBRuntime) -> NormResult {
                 .map(|col| match rec.get(col) {
                     None | Some(StorageValue::Null) => "null".to_string(),
                     Some(StorageValue::Integer(n)) => n.to_string(),
+                    Some(StorageValue::UnsignedInteger(n)) => n.to_string(),
                     Some(StorageValue::Text(s)) => s.to_string(),
                     Some(StorageValue::Boolean(b)) => b.to_string(),
                     Some(StorageValue::Float(f)) => format!("{f}"),
@@ -154,9 +148,26 @@ fn drive_embedded(runtime: &RedDBRuntime) -> NormResult {
     (cols, rows)
 }
 
+// ---------------------------------------------------------------------------
+// Transport drivers
+// ---------------------------------------------------------------------------
+
+/// Embedded: direct synchronous call into the shared runtime.
+fn drive_embedded(runtime: &RedDBRuntime) -> NormResult {
+    drive_embedded_sql(runtime, SELECT_SQL)
+}
+
+fn drive_embedded_sql(runtime: &RedDBRuntime, sql: &str) -> NormResult {
+    norm_from_runtime_query_result(runtime.execute_query(sql).expect("embedded execute_query"))
+}
+
 /// HTTP: raw HTTP/1.1 POST to `/query`, parse JSON response envelope.
 fn drive_http(addr: SocketAddr) -> NormResult {
-    let body = json!({ "query": SELECT_SQL }).to_string();
+    drive_http_sql(addr, SELECT_SQL)
+}
+
+fn drive_http_sql(addr: SocketAddr, sql: &str) -> NormResult {
+    let body = json!({ "query": sql }).to_string();
     let envelope = http_post_json(addr, "/query", &body);
     let qr = QueryResult::from_envelope(envelope);
     norm_from_query_result(&qr)
@@ -164,6 +175,10 @@ fn drive_http(addr: SocketAddr) -> NormResult {
 
 /// gRPC: tonic client, synthesise an HTTP-style envelope from the reply.
 async fn drive_grpc(port: u16) -> NormResult {
+    drive_grpc_sql(port, SELECT_SQL).await
+}
+
+async fn drive_grpc_sql(port: u16, sql: &str) -> NormResult {
     await_tcp(port).await;
     let ep = Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
         .expect("grpc endpoint")
@@ -173,7 +188,7 @@ async fn drive_grpc(port: u16) -> NormResult {
     let mut client = RedDbClient::new(ch);
     let reply = client
         .query(QueryRequest {
-            query: SELECT_SQL.to_string(),
+            query: sql.to_string(),
             entity_types: vec![],
             capabilities: vec![],
             params: vec![],
@@ -200,22 +215,40 @@ async fn drive_grpc(port: u16) -> NormResult {
 /// so we pass `WHERE id > $1` with `$1 = 0` — semantically identical to the
 /// unfiltered SELECT since all rows have id ∈ {1, 2, 3}.
 async fn drive_redwire(addr: SocketAddr) -> NormResult {
+    drive_redwire_sql(addr, SELECT_SQL_REDWIRE).await
+}
+
+async fn drive_redwire_sql(addr: SocketAddr, sql: &str) -> NormResult {
     let mut c = RedWireClient::connect(
         ConnectOptions::new(addr.ip().to_string(), addr.port()).with_auth(Auth::Anonymous),
     )
     .await
     .expect("redwire connect");
     let qr = c
-        .query_with(SELECT_SQL_REDWIRE, &[ClientValue::Int(0)])
+        .query_with(sql, &[ClientValue::Int(0)])
         .await
         .expect("redwire query_with");
     let _ = c.close().await;
     norm_from_query_result(&qr)
 }
 
+async fn drive_redwire_command_sql(addr: SocketAddr, sql: &str) {
+    let mut c = RedWireClient::connect(
+        ConnectOptions::new(addr.ip().to_string(), addr.port()).with_auth(Auth::Anonymous),
+    )
+    .await
+    .expect("redwire connect");
+    c.query(sql).await.expect("redwire query");
+    let _ = c.close().await;
+}
+
 /// PG-wire: raw TCP with the PostgreSQL frontend/backend protocol.
 /// Uses the simple-query flow (Q frame) and text-format row values.
 async fn drive_pgwire(addr: SocketAddr) -> NormResult {
+    drive_pgwire_sql(addr, SELECT_SQL).await
+}
+
+async fn drive_pgwire_sql(addr: SocketAddr, sql: &str) -> NormResult {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(addr)
         .await
@@ -244,7 +277,7 @@ async fn drive_pgwire(addr: SocketAddr) -> NormResult {
     }
 
     // --- Simple Query ('Q')
-    let sql = format!("{SELECT_SQL}\0");
+    let sql = format!("{sql}\0");
     let qmsg_len = (sql.len() + 4) as u32;
     s.write_all(&[b'Q']).await.expect("pg Q tag");
     s.write_all(&qmsg_len.to_be_bytes())
@@ -255,6 +288,7 @@ async fn drive_pgwire(addr: SocketAddr) -> NormResult {
     // --- Parse response frames
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut error: Option<String> = None;
 
     loop {
         let tag = s.read_u8().await.expect("pg response tag");
@@ -308,6 +342,9 @@ async fn drive_pgwire(addr: SocketAddr) -> NormResult {
                 }
                 rows.push(row);
             }
+            b'E' => {
+                error = Some(String::from_utf8_lossy(&body).to_string());
+            }
             b'Z' => break, // ReadyForQuery — response complete
             _ => {}        // CommandComplete, Notice, Error, etc.
         }
@@ -316,7 +353,193 @@ async fn drive_pgwire(addr: SocketAddr) -> NormResult {
     // Terminate cleanly
     let _ = s.write_all(&[b'X', 0, 0, 0, 4]).await;
 
+    if let Some(error) = error {
+        panic!(
+            "pgwire query failed for `{}`: {error}",
+            sql.trim_end_matches('\0')
+        );
+    }
+
     (columns, rows)
+}
+
+fn create_document_sql(collection: &str) -> String {
+    format!("CREATE DOCUMENT {collection}")
+}
+
+fn insert_document_sql(collection: &str) -> String {
+    format!(
+        "INSERT INTO {collection} DOCUMENT (body) VALUES \
+         ('{{\"name\":\"alpha\",\"score\":10,\"keep\":\"sibling\",\"status\":\"draft\"}}')"
+    )
+}
+
+fn partial_update_document_sql(collection: &str) -> String {
+    format!("UPDATE {collection} DOCUMENTS SET score += 5 WHERE name = 'alpha'")
+}
+
+fn replace_document_sql(collection: &str) -> String {
+    format!(
+        "UPDATE {collection} DOCUMENTS \
+         SET name = 'beta', score = 99, keep = 'replacement', status = 'done' \
+         WHERE name = 'alpha'"
+    )
+}
+
+fn delete_document_sql(collection: &str) -> String {
+    format!("DELETE FROM {collection} WHERE name = 'beta'")
+}
+
+fn select_document_sql(collection: &str, name: &str) -> String {
+    format!("SELECT name, score, keep, status FROM {collection} WHERE name = '{name}'")
+}
+
+fn select_document_sql_redwire(collection: &str, name: &str) -> String {
+    format!("SELECT name, score, keep, status FROM {collection} WHERE name = '{name}' AND $1 = 0")
+}
+
+fn count_document_sql(collection: &str) -> String {
+    format!("SELECT COUNT(*) AS remaining FROM {collection} WHERE name = 'beta'")
+}
+
+fn count_document_sql_redwire(collection: &str) -> String {
+    format!("SELECT COUNT(*) AS remaining FROM {collection} WHERE name = 'beta' AND $1 = 0")
+}
+
+fn assert_document_crud_trace_shape(trace: &DocumentCrudTrace) {
+    let expected_columns = vec![
+        "name".to_string(),
+        "score".to_string(),
+        "keep".to_string(),
+        "status".to_string(),
+    ];
+    let expected_insert = vec![vec![
+        "alpha".to_string(),
+        "10".to_string(),
+        "sibling".to_string(),
+        "draft".to_string(),
+    ]];
+    let expected_partial = vec![vec![
+        "alpha".to_string(),
+        "15".to_string(),
+        "sibling".to_string(),
+        "draft".to_string(),
+    ]];
+    let expected_replace = vec![vec![
+        "beta".to_string(),
+        "99".to_string(),
+        "replacement".to_string(),
+        "done".to_string(),
+    ]];
+
+    assert_eq!(trace[0].0, "after_insert");
+    assert_eq!(trace[0].1 .0, expected_columns);
+    assert_eq!(trace[0].1 .1, expected_insert);
+    assert_eq!(trace[1].0, "after_partial_update");
+    assert_eq!(trace[1].1 .0, expected_columns);
+    assert_eq!(
+        trace[1].1 .1, expected_partial,
+        "partial document update must preserve sibling fields"
+    );
+    assert_eq!(trace[2].0, "after_replace");
+    assert_eq!(trace[2].1 .0, expected_columns);
+    assert_eq!(trace[2].1 .1, expected_replace);
+    assert_eq!(trace[3].0, "after_delete");
+    assert_eq!(trace[3].1 .0, vec!["remaining".to_string()]);
+    assert_eq!(trace[3].1 .1, vec![vec!["0".to_string()]]);
+}
+
+fn run_embedded_document_crud(runtime: &RedDBRuntime, collection: &str) -> DocumentCrudTrace {
+    drive_embedded_sql(runtime, &create_document_sql(collection));
+    drive_embedded_sql(runtime, &insert_document_sql(collection));
+    let after_insert = drive_embedded_sql(runtime, &select_document_sql(collection, "alpha"));
+    drive_embedded_sql(runtime, &partial_update_document_sql(collection));
+    let after_partial = drive_embedded_sql(runtime, &select_document_sql(collection, "alpha"));
+    drive_embedded_sql(runtime, &replace_document_sql(collection));
+    let after_replace = drive_embedded_sql(runtime, &select_document_sql(collection, "beta"));
+    drive_embedded_sql(runtime, &delete_document_sql(collection));
+    let after_delete = drive_embedded_sql(runtime, &count_document_sql(collection));
+    vec![
+        ("after_insert", after_insert),
+        ("after_partial_update", after_partial),
+        ("after_replace", after_replace),
+        ("after_delete", after_delete),
+    ]
+}
+
+fn run_http_document_crud(addr: SocketAddr, collection: &str) -> DocumentCrudTrace {
+    drive_http_sql(addr, &create_document_sql(collection));
+    drive_http_sql(addr, &insert_document_sql(collection));
+    let after_insert = drive_http_sql(addr, &select_document_sql(collection, "alpha"));
+    drive_http_sql(addr, &partial_update_document_sql(collection));
+    let after_partial = drive_http_sql(addr, &select_document_sql(collection, "alpha"));
+    drive_http_sql(addr, &replace_document_sql(collection));
+    let after_replace = drive_http_sql(addr, &select_document_sql(collection, "beta"));
+    drive_http_sql(addr, &delete_document_sql(collection));
+    let after_delete = drive_http_sql(addr, &count_document_sql(collection));
+    vec![
+        ("after_insert", after_insert),
+        ("after_partial_update", after_partial),
+        ("after_replace", after_replace),
+        ("after_delete", after_delete),
+    ]
+}
+
+async fn run_grpc_document_crud(port: u16, collection: &str) -> DocumentCrudTrace {
+    drive_grpc_sql(port, &create_document_sql(collection)).await;
+    drive_grpc_sql(port, &insert_document_sql(collection)).await;
+    let after_insert = drive_grpc_sql(port, &select_document_sql(collection, "alpha")).await;
+    drive_grpc_sql(port, &partial_update_document_sql(collection)).await;
+    let after_partial = drive_grpc_sql(port, &select_document_sql(collection, "alpha")).await;
+    drive_grpc_sql(port, &replace_document_sql(collection)).await;
+    let after_replace = drive_grpc_sql(port, &select_document_sql(collection, "beta")).await;
+    drive_grpc_sql(port, &delete_document_sql(collection)).await;
+    let after_delete = drive_grpc_sql(port, &count_document_sql(collection)).await;
+    vec![
+        ("after_insert", after_insert),
+        ("after_partial_update", after_partial),
+        ("after_replace", after_replace),
+        ("after_delete", after_delete),
+    ]
+}
+
+async fn run_redwire_document_crud(addr: SocketAddr, collection: &str) -> DocumentCrudTrace {
+    drive_redwire_command_sql(addr, &create_document_sql(collection)).await;
+    drive_redwire_command_sql(addr, &insert_document_sql(collection)).await;
+    let after_insert =
+        drive_redwire_sql(addr, &select_document_sql_redwire(collection, "alpha")).await;
+    drive_redwire_command_sql(addr, &partial_update_document_sql(collection)).await;
+    let after_partial =
+        drive_redwire_sql(addr, &select_document_sql_redwire(collection, "alpha")).await;
+    drive_redwire_command_sql(addr, &replace_document_sql(collection)).await;
+    let after_replace =
+        drive_redwire_sql(addr, &select_document_sql_redwire(collection, "beta")).await;
+    drive_redwire_command_sql(addr, &delete_document_sql(collection)).await;
+    let after_delete = drive_redwire_sql(addr, &count_document_sql_redwire(collection)).await;
+    vec![
+        ("after_insert", after_insert),
+        ("after_partial_update", after_partial),
+        ("after_replace", after_replace),
+        ("after_delete", after_delete),
+    ]
+}
+
+async fn run_pgwire_document_crud(addr: SocketAddr, collection: &str) -> DocumentCrudTrace {
+    drive_pgwire_sql(addr, &create_document_sql(collection)).await;
+    drive_pgwire_sql(addr, &insert_document_sql(collection)).await;
+    let after_insert = drive_pgwire_sql(addr, &select_document_sql(collection, "alpha")).await;
+    drive_pgwire_sql(addr, &partial_update_document_sql(collection)).await;
+    let after_partial = drive_pgwire_sql(addr, &select_document_sql(collection, "alpha")).await;
+    drive_pgwire_sql(addr, &replace_document_sql(collection)).await;
+    let after_replace = drive_pgwire_sql(addr, &select_document_sql(collection, "beta")).await;
+    drive_pgwire_sql(addr, &delete_document_sql(collection)).await;
+    let after_delete = drive_pgwire_sql(addr, &count_document_sql(collection)).await;
+    vec![
+        ("after_insert", after_insert),
+        ("after_partial_update", after_partial),
+        ("after_replace", after_replace),
+        ("after_delete", after_delete),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -451,4 +674,78 @@ async fn cross_transport_select_results_are_equivalent() {
         vec!["3".to_string(), "gamma".to_string()],
         "row 2 sanity"
     );
+}
+
+#[tokio::test]
+async fn cross_transport_document_crud_results_are_equivalent() {
+    let runtime =
+        Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"));
+
+    // --- HTTP
+    let http_listener = TcpListener::bind("127.0.0.1:0").expect("http bind");
+    let http_addr = http_listener.local_addr().expect("http addr");
+    RedDBServer::new(runtime.as_ref().clone()).serve_in_background_on(http_listener);
+
+    // --- gRPC
+    let grpc_port = pick_free_port();
+    let grpc_opts = GrpcServerOptions {
+        bind_addr: format!("127.0.0.1:{grpc_port}"),
+        tls: None,
+    };
+    let grpc_auth = Arc::new(AuthStore::new(AuthConfig::default()));
+    let grpc_server = RedDBGrpcServer::with_options(runtime.as_ref().clone(), grpc_opts, grpc_auth);
+    tokio::spawn(async move {
+        let _ = grpc_server.serve().await;
+    });
+    await_tcp(grpc_port).await;
+
+    // --- RedWire
+    let wire_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("redwire bind");
+    let wire_addr = wire_listener.local_addr().expect("redwire addr");
+    tokio::spawn({
+        let rt = Arc::clone(&runtime);
+        async move {
+            let _ = start_redwire_listener_on(wire_listener, rt).await;
+        }
+    });
+    await_tcp(wire_addr.port()).await;
+
+    // --- PG-wire
+    let pg_port = pick_free_port();
+    let pg_cfg = PgWireConfig {
+        bind_addr: format!("127.0.0.1:{pg_port}"),
+        ..PgWireConfig::default()
+    };
+    tokio::spawn({
+        let rt = Arc::clone(&runtime);
+        async move {
+            let _ = start_pg_wire_listener(pg_cfg, rt).await;
+        }
+    });
+    await_tcp(pg_port).await;
+    let pg_addr: SocketAddr = format!("127.0.0.1:{pg_port}")
+        .parse()
+        .expect("pg addr parse");
+
+    let embedded = run_embedded_document_crud(&runtime, "doc_crud_embedded");
+    let http = run_http_document_crud(http_addr, "doc_crud_http");
+    let grpc = run_grpc_document_crud(grpc_port, "doc_crud_grpc").await;
+    let redwire = run_redwire_document_crud(wire_addr, "doc_crud_redwire").await;
+    let pgwire = run_pgwire_document_crud(pg_addr, "doc_crud_pgwire").await;
+
+    for (name, trace) in [
+        ("embedded", &embedded),
+        ("http", &http),
+        ("grpc", &grpc),
+        ("redwire", &redwire),
+        ("pgwire", &pgwire),
+    ] {
+        assert_document_crud_trace_shape(trace);
+        assert_eq!(
+            &embedded, trace,
+            "document CRUD trace diverged for {name}; embedded={embedded:?}, {name}={trace:?}",
+        );
+    }
 }
