@@ -69,6 +69,62 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
+const DEFAULT_MCP_URI: &str = "memory://";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum McpConnectionMode {
+    Memory,
+    File(PathBuf),
+    Remote { uri: String },
+}
+
+fn resolve_mcp_uri(flags: &HashMap<String, FlagValue>) -> Result<String, String> {
+    if let Some(uri) = flag_string(flags, "uri").filter(|value| !value.is_empty()) {
+        return Ok(uri);
+    }
+
+    if let Ok(uri) = std::env::var("REDDB_MCP_URI") {
+        if !uri.is_empty() {
+            return Ok(uri);
+        }
+    }
+
+    if flag_string(flags, "path")
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return Ok(DEFAULT_MCP_URI.to_string());
+    }
+
+    Ok(DEFAULT_MCP_URI.to_string())
+}
+
+fn resolve_mcp_connection_mode(uri: &str) -> Result<McpConnectionMode, String> {
+    match reddb_wire::parse(uri).map_err(|err| err.to_string())? {
+        reddb_wire::ConnectionTarget::Memory => Ok(McpConnectionMode::Memory),
+        reddb_wire::ConnectionTarget::File { path } => Ok(McpConnectionMode::File(path)),
+        reddb_wire::ConnectionTarget::Grpc { .. }
+        | reddb_wire::ConnectionTarget::GrpcCluster { .. }
+        | reddb_wire::ConnectionTarget::Http { .. }
+        | reddb_wire::ConnectionTarget::RedWire { .. }
+        | reddb_wire::ConnectionTarget::WsNative { .. } => Ok(McpConnectionMode::Remote {
+            uri: uri.to_string(),
+        }),
+    }
+}
+
+fn resolve_mcp_connection_mode_from_flags(
+    flags: &HashMap<String, FlagValue>,
+) -> Result<McpConnectionMode, String> {
+    let uri = resolve_mcp_uri(flags)?;
+    if uri == DEFAULT_MCP_URI {
+        if let Some(path) = flag_string(flags, "path").filter(|value| !value.is_empty()) {
+            return Ok(McpConnectionMode::File(PathBuf::from(path)));
+        }
+    }
+    resolve_mcp_connection_mode(&uri)
+}
+
 fn has_cli_vault_key() -> bool {
     reddb::utils::env_with_file_fallback("REDDB_CERTIFICATE").is_some()
 }
@@ -1012,18 +1068,23 @@ fn main() {
         }
 
         "mcp" => {
-            let path = result
-                .flags
-                .get("path")
-                .map(|v| v.as_str_value())
-                .unwrap_or_default();
-            let runtime = if path.is_empty() {
-                reddb::runtime::RedDBRuntime::in_memory().unwrap()
-            } else {
-                reddb::runtime::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(
-                    &path,
-                ))
-                .unwrap()
+            let mode =
+                resolve_mcp_connection_mode_from_flags(&result.flags).unwrap_or_else(|err| {
+                    eprintln!("error: {err}");
+                    std::process::exit(2);
+                });
+            let runtime = match mode {
+                McpConnectionMode::Memory => reddb::runtime::RedDBRuntime::in_memory().unwrap(),
+                McpConnectionMode::File(path) => reddb::runtime::RedDBRuntime::with_options(
+                    reddb::api::RedDBOptions::persistent(&path),
+                )
+                .unwrap(),
+                McpConnectionMode::Remote { uri } => {
+                    eprintln!(
+                        "error: red mcp remote URI mode is not implemented yet ({uri}); use memory:// or file://"
+                    );
+                    std::process::exit(2);
+                }
             };
             let mut server = reddb::mcp::server::McpServer::new(runtime);
             server.run_stdio();
@@ -2974,12 +3035,14 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
             ]);
         }
         Some("mcp") => {
-            flags.push(
+            flags.extend(vec![
+                cli::types::FlagSchema::new("uri")
+                    .with_description("Connection URI (default: REDDB_MCP_URI or memory://)"),
                 cli::types::FlagSchema::new("path")
                     .with_short('d')
                     .with_description("Data directory path (omit for in-memory)")
                     .with_default(""),
-            );
+            ]);
         }
         Some("query") | Some("insert") | Some("get") | Some("delete") | Some("status") => {
             flags.push(
@@ -5695,6 +5758,72 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "/tmp/data.rdb"
         );
         assert_eq!(result.flags.get("param").unwrap().as_str_value(), "42");
+    }
+
+    #[test]
+    fn mcp_uri_defaults_to_memory() {
+        let _lock = env_lock().lock().unwrap();
+        let _clear = EnvGuard::clear(&["REDDB_MCP_URI"]);
+
+        assert_eq!(
+            resolve_mcp_uri(&HashMap::new()).unwrap(),
+            "memory://".to_string()
+        );
+    }
+
+    #[test]
+    fn mcp_uri_reads_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::set(&[("REDDB_MCP_URI", "file:///tmp/reddb-env.rdb")]);
+
+        assert_eq!(
+            resolve_mcp_uri(&HashMap::new()).unwrap(),
+            "file:///tmp/reddb-env.rdb".to_string()
+        );
+    }
+
+    #[test]
+    fn mcp_uri_prefers_flag_over_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::set(&[("REDDB_MCP_URI", "red://env.example:5050")]);
+        let mut flags = HashMap::new();
+        flags.insert("uri".to_string(), str_flag("file:///tmp/reddb-agent.rdb"));
+
+        assert_eq!(
+            resolve_mcp_uri(&flags).unwrap(),
+            "file:///tmp/reddb-agent.rdb".to_string()
+        );
+    }
+
+    #[test]
+    fn mcp_uri_dispatches_embedded_and_remote_modes() {
+        assert_eq!(
+            resolve_mcp_connection_mode("memory://").unwrap(),
+            McpConnectionMode::Memory
+        );
+        assert_eq!(
+            resolve_mcp_connection_mode("file:///tmp/reddb-agent.rdb").unwrap(),
+            McpConnectionMode::File(PathBuf::from("/tmp/reddb-agent.rdb"))
+        );
+        assert_eq!(
+            resolve_mcp_connection_mode("reds://db.example:5050").unwrap(),
+            McpConnectionMode::Remote {
+                uri: "reds://db.example:5050".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn mcp_path_fallback_uses_file_mode() {
+        let _lock = env_lock().lock().unwrap();
+        let _clear = EnvGuard::clear(&["REDDB_MCP_URI"]);
+        let mut flags = HashMap::new();
+        flags.insert("path".to_string(), str_flag("/tmp/reddb-legacy.rdb"));
+
+        assert_eq!(
+            resolve_mcp_connection_mode_from_flags(&flags).unwrap(),
+            McpConnectionMode::File(PathBuf::from("/tmp/reddb-legacy.rdb"))
+        );
     }
 
     struct EnvGuard {
