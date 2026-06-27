@@ -347,12 +347,13 @@ red replica --primary-addr http://primary:55055 [--grpc-bind 127.0.0.1:55055] [-
 Start the MCP server for AI agent integration.
 
 ```bash
-red mcp [--path /data]
+red mcp [--uri memory://]
 ```
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
-| `--path` | `-d` | (in-memory) | Data directory path |
+| `--uri` | | `REDDB_MCP_URI` or `memory://` | Connection URI; `memory://` and `file://` run embedded, remote schemes are selected by URI scheme |
+| `--path` | `-d` | (in-memory) | Legacy file-backed embedded path when `--uri`/`REDDB_MCP_URI` is not set |
 
 ## red auth
 
