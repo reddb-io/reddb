@@ -1129,6 +1129,12 @@ struct RuntimeInner {
         parking_lot::RwLock<HashMap<u64, Vec<crate::replication::cdc::KvWatchEvent>>>,
     pending_store_wal_actions:
         parking_lot::RwLock<HashMap<u64, crate::storage::unified::DeferredStoreWalActions>>,
+    /// Transaction-scoped table UPDATE CLAIM ownership.
+    ///
+    /// Keyed by `(collection, logical_row_id)` and valued by connection id.
+    /// Only claim selection consults this map: ordinary DML still follows
+    /// MVCC first-committer-wins instead of waiting on claim locks.
+    pending_claim_locks: parking_lot::RwLock<HashMap<(String, EntityId), u64>>,
     /// Table-scoped tenancy registry (Phase 2.5.4).
     ///
     /// Maps `table_name → tenant_column`. DML auto-fill looks here to
