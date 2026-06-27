@@ -37,6 +37,8 @@ emitted from source so it cannot drift from the engine.\n\n",
     out.push_str(&reddb_rql::knowledge::rql_llms_section());
     out.push_str("\n\n");
     out.push_str(&reddb_types::knowledge::type_llms_section());
+    out.push_str("\n\n");
+    out.push_str(&reddb_wire::knowledge::connection_llms_section());
     out.push('\n');
     out
 }
@@ -104,4 +106,19 @@ fn types_section_matches_mcp_resource() {
     // The same generated source feeds docs/llms.txt and the MCP resource.
     assert_eq!(section, reddb_types::knowledge::type_llms_section());
     assert!(section.contains(&reddb_types::knowledge::type_reference_markdown()));
+}
+
+#[test]
+fn connection_section_matches_mcp_resource() {
+    let path = llms_txt_path();
+    let on_disk = fs::read_to_string(&path).expect("read docs/llms.txt");
+    let section = extract_section(
+        &on_disk,
+        reddb_wire::knowledge::LLMS_BEGIN_MARKER,
+        reddb_wire::knowledge::LLMS_END_MARKER,
+    );
+    // The same generated source feeds docs/llms.txt and the MCP resource.
+    assert_eq!(section, reddb_wire::knowledge::connection_llms_section());
+    let reference = reddb_wire::knowledge::connection_reference_markdown();
+    assert!(section.contains(reference.trim_end()));
 }
