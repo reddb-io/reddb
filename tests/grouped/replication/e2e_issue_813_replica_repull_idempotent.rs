@@ -275,3 +275,32 @@ fn repull_with_updates_converges_to_primary_live_set() {
 
     drop(replica);
 }
+
+#[test]
+fn claim_update_replay_applies_primary_winner_not_replica_candidate() {
+    let primary_path = temp_path("primary-claim");
+    let replica_path = temp_path("replica-claim");
+
+    let (records, primary_live) = drive_primary(
+        &primary_path,
+        "claim_jobs",
+        &[
+            "CREATE TABLE claim_jobs (id INTEGER, rank INTEGER, status TEXT)",
+            "INSERT INTO claim_jobs (id, rank, status) VALUES (1, 10, 'ready')",
+            "INSERT INTO claim_jobs (id, rank, status) VALUES (2, 20, 'ready')",
+            "UPDATE claim_jobs SET status = 'claimed' WHERE status = 'ready' \
+             CLAIM LIMIT 1 ORDER BY rank ASC",
+        ],
+    );
+
+    let replica = RedDB::open(&replica_path).expect("open replica");
+    replay_from_zero(&replica, &records);
+
+    assert_eq!(
+        live_rows(&replica.store(), "claim_jobs"),
+        primary_live,
+        "replica replay must materialize the primary's claimed row instead of re-running candidate selection locally"
+    );
+
+    drop(replica);
+}

@@ -95,6 +95,11 @@ fn replica_rejects_sql_ddl_and_dml_on_every_surface() {
         "replica",
     );
     assert_read_only_err(
+        rt.execute_query("UPDATE accounts SET name = 'claimed' CLAIM LIMIT 1 ORDER BY id"),
+        "SQL DML UPDATE CLAIM",
+        "replica",
+    );
+    assert_read_only_err(
         rt.execute_query("DELETE FROM accounts WHERE id = 1"),
         "SQL DML DELETE",
         "replica",
