@@ -1905,6 +1905,13 @@ impl<'a> Parser<'a> {
 
     /// Parse any top-level frontend statement through a single shared surface.
     pub fn parse_frontend_statement(&mut self) -> Result<FrontendStatement, ParseError> {
+        self.enter_depth()?;
+        let result = self.parse_frontend_statement_inner();
+        self.exit_depth();
+        result
+    }
+
+    fn parse_frontend_statement_inner(&mut self) -> Result<FrontendStatement, ParseError> {
         match self.peek() {
             Token::Select => match self.parse_select_query()? {
                 QueryExpr::Table(query) => Ok(FrontendStatement::Sql(SqlStatement::Query(
@@ -3037,6 +3044,13 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_sql_command(&mut self) -> Result<SqlCommand, ParseError> {
+        self.enter_depth()?;
+        let result = self.parse_sql_command_inner();
+        self.exit_depth();
+        result
+    }
+
+    fn parse_sql_command_inner(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {
             Token::Select => match self.parse_select_query()? {
                 QueryExpr::Table(query) => Ok(SqlCommand::Select(query)),

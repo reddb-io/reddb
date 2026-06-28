@@ -3,4 +3,4 @@ source: crates/reddb-server/tests/parser_snapshots.rs
 expression: formatted
 ---
 kind:  DepthLimit { limit_name: "max_depth", value: 4 }
-error: Parse error at 1:11: recursion depth limit exceeded (max_depth = 4)
+error: Parse error at 1:10: recursion depth limit exceeded (max_depth = 4)

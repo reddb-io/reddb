@@ -9,7 +9,7 @@
 //!
 //! | Limit                 | Default | Rationale                                       |
 //! |-----------------------|---------|-------------------------------------------------|
-//! | `max_depth`           | 32      | Recursive descent + Pratt; above typical        |
+//! | `max_depth`           | 16      | Recursive descent + Pratt; above typical        |
 //! |                       |         | hand-written queries (≤ 12).                     |
 //! | `max_input_bytes`     | 1 MiB   | Hard cap on the token stream input.              |
 //! | `max_identifier_chars`| 256     | Long enough for legitimate UUID-tagged names,    |
