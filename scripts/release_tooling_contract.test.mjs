@@ -9,6 +9,11 @@ function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
+function workflowJob(workflow, name) {
+  const job = workflow.match(new RegExp(`\\n  ${name}:[\\s\\S]*?(?=\\n  [a-zA-Z0-9_-]+:|\\n$)`));
+  return job?.[0] ?? "";
+}
+
 test("red_client size guard is wired to a documented local and CI budget check", () => {
   const budget = read("crates/reddb-client/SIZE_BUDGET").trim();
   const sizeScript = read("scripts/check-red-client-size.sh");
@@ -135,7 +140,7 @@ test("nightly DR drill workflow uses the current-shell runner and public make ta
 
 test("changesets checkout uses the default token before release PAT handoff", () => {
   const workflow = read(".github/workflows/changesets.yml");
-  const checkoutStep = workflow.match(/- uses: actions\/checkout@v6[\s\S]*?(?=\n\n      - uses: pnpm\/action-setup@v6)/)?.[0] ?? "";
+  const checkoutStep = workflow.match(/- uses: actions\/checkout@v\d+[\s\S]*?(?=\n\n      - uses: pnpm\/action-setup@v\d+)/)?.[0] ?? "";
 
   assert.match(checkoutStep, /fetch-depth: 0/);
   assert.doesNotMatch(checkoutStep, /\n\s+token:/);
@@ -160,12 +165,53 @@ test("parser fuzz nightly installs protoc before fuzz builds", () => {
   );
 });
 
-test("per-PR parser fuzz job has enough timeout for three fixed fuzz windows", () => {
-  const workflow = read(".github/workflows/ci.yml");
-  const job = workflow.match(/\n  fuzz-parsers:[\s\S]*?(?=\n  package:)/)?.[0] ?? "";
+test("chaos and DST workflows use least-privilege GitHub token scopes", () => {
+  const ciWorkflow = read(".github/workflows/ci.yml");
+  const dstWorkflow = read(".github/workflows/dst-nightly.yml");
+  const seedSweep = workflowJob(dstWorkflow, "dst-seed-sweep");
+  const storageFaultRecovery = workflowJob(dstWorkflow, "storage-fault-recovery");
 
-  assert.match(job, /timeout-minutes: 40/);
-  assert.match(job, /cargo \+nightly fuzz run sql_parser -- -max_total_time=300/);
-  assert.match(job, /cargo \+nightly fuzz run migration_parser -- -max_total_time=300/);
-  assert.match(job, /cargo \+nightly fuzz run conn_string_parser -- -max_total_time=300/);
+  assert.match(seedSweep, /\n  dst-seed-sweep:/);
+  assert.match(storageFaultRecovery, /\n  storage-fault-recovery:/);
+  assert.match(ciWorkflow, /\npermissions:\n  contents: read\n\n/);
+  assert.match(dstWorkflow, /\npermissions:\n  contents: read\n\n/);
+  assert.doesNotMatch(seedSweep, /issues: write/);
+  assert.match(storageFaultRecovery, /\n    permissions:\n      contents: read\n      issues: write\n/);
+});
+
+test("DST storage fault issue creation deduplicates open release blockers", () => {
+  const workflow = read(".github/workflows/dst-nightly.yml");
+  const storageFaultRecovery = workflowJob(workflow, "storage-fault-recovery");
+
+  assert.match(storageFaultRecovery, /const marker = 'nightly-storage-fault-recovery';/);
+  assert.match(storageFaultRecovery, /`Marker: \$\{marker\}`/);
+  assert.match(storageFaultRecovery, /github\.paginate\(github\.rest\.issues\.listForRepo/);
+  assert.match(storageFaultRecovery, /labels: 'release-blocker'/);
+  assert.match(storageFaultRecovery, /issue\.body\?\.includes\(`Marker: \$\{marker\}`\)/);
+  assert.match(storageFaultRecovery, /github\.rest\.issues\.create/);
+
+  const existingGuard = storageFaultRecovery.indexOf("if (existing) {");
+  const existingReturn = storageFaultRecovery.indexOf("return;", existingGuard);
+  const createCall = storageFaultRecovery.indexOf("github.rest.issues.create");
+
+  assert.ok(existingGuard >= 0, "existing issue guard must be present");
+  assert.ok(existingReturn > existingGuard, "existing issue branch must return");
+  assert.ok(createCall > existingReturn, "issue creation must happen after existing issue guard");
+});
+
+test("per-PR parser fuzz matrix has bounded fixed fuzz windows", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const fuzzTargets = workflowJob(workflow, "fuzz-targets");
+  const fuzzParsers = workflowJob(workflow, "fuzz-parsers");
+
+  assert.match(fuzzTargets, /timeout-minutes: 20/);
+  for (const target of ["sql_parser", "migration_parser", "conn_string_parser", "query_with_params"]) {
+    assert.match(fuzzTargets, new RegExp(`- ${target}`));
+  }
+  assert.match(
+    fuzzTargets,
+    /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} -- -max_total_time=300 -rss_limit_mb=4096 -malloc_limit_mb=2048/,
+  );
+  assert.match(fuzzParsers, /name: Fuzz Parsers/);
+  assert.match(fuzzParsers, /needs: \[fuzz-targets\]/);
 });
