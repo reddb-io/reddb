@@ -141,6 +141,11 @@ fn test_queue_group_pending_claim_and_ack_flow() {
     );
     assert_eq!(text(&claimed.result.records[0], "message_id"), message_id);
     assert_eq!(text(&claimed.result.records[0], "consumer"), "worker2");
+    let claimed_delivery_id = text(&claimed.result.records[0], "delivery_id");
+    assert!(
+        !claimed_delivery_id.is_empty(),
+        "queue claim must return the lifecycle delivery identity"
+    );
 
     let pending_after_claim = exec(&rt, "QUEUE PENDING tasks GROUP workers");
     assert_eq!(pending_after_claim.result.records.len(), 1);
@@ -151,7 +156,7 @@ fn test_queue_group_pending_claim_and_ack_flow() {
 
     exec(
         &rt,
-        &format!("QUEUE ACK tasks GROUP workers '{}'", message_id),
+        &format!("QUEUE ACK tasks WITH delivery_id = '{claimed_delivery_id}'"),
     );
 
     let pending_after_ack = exec(&rt, "QUEUE PENDING tasks GROUP workers");
@@ -165,6 +170,56 @@ fn test_queue_group_pending_claim_and_ack_flow() {
         uint(&len.result.records[0], "len"),
         0,
         "single-group ack should remove the message from the queue"
+    );
+}
+
+#[test]
+fn test_queue_claim_delivery_id_nack_routes_retry_budget_to_dlq() {
+    let rt = rt();
+
+    exec(
+        &rt,
+        "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 3 LOCK_DEADLINE_MS 1",
+    );
+    exec(&rt, "QUEUE GROUP CREATE tasks workers");
+    exec(&rt, "QUEUE PUSH tasks 'job-claim-dlq'");
+
+    let read = exec(
+        &rt,
+        "QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1",
+    );
+    assert_eq!(read.result.records.len(), 1);
+
+    sleep(Duration::from_millis(5));
+    let claimed = exec(
+        &rt,
+        "QUEUE CLAIM tasks GROUP workers CONSUMER worker2 MIN_IDLE 0",
+    );
+    assert_eq!(claimed.result.records.len(), 1);
+    assert_eq!(uint(&claimed.result.records[0], "delivery_count"), 2);
+    let delivery_id = text(&claimed.result.records[0], "delivery_id");
+
+    exec(
+        &rt,
+        &format!("QUEUE NACK tasks WITH delivery_id = '{delivery_id}'"),
+    );
+
+    let pending_after_nack = exec(&rt, "QUEUE PENDING tasks GROUP workers");
+    assert!(
+        pending_after_nack.result.records.is_empty(),
+        "over-budget claim NACK must retire the lifecycle pending row"
+    );
+
+    let main_len = exec(&rt, "QUEUE LEN tasks");
+    assert_eq!(uint(&main_len.result.records[0], "len"), 0);
+
+    let dlq_len = exec(&rt, "QUEUE LEN failed_tasks");
+    assert_eq!(uint(&dlq_len.result.records[0], "len"), 1);
+
+    let dlq_peek = exec(&rt, "QUEUE PEEK failed_tasks");
+    assert_eq!(
+        text(&dlq_peek.result.records[0], "payload"),
+        "job-claim-dlq"
     );
 }
 
