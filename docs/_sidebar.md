@@ -233,6 +233,7 @@
   - [Limitations](/reference/limitations.md)
 
 - **Release Notes**
+  - [Release Policy](/release-policy.md)
   - [2026-06-20 (AI Multimodality + TigerStyle + Crate Split)](/release-notes-2026-06-20.md)
   - [2026-04-26 (RedWire + Auth)](/release-notes-2026-04-26.md)
   - [2026-04-17 (Multi-tenancy + Perf)](/release-notes-2026-04-17.md)

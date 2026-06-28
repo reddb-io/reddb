@@ -47,6 +47,7 @@ SUFFIXES=(
 )
 EXTRA_ASSETS=(
   checksums.txt
+  SHA256SUMS
 )
 
 echo "verify-release-assets: checking ${REPO}@${TAG}"
@@ -74,7 +75,7 @@ if (( ${#MISSING[@]} > 0 )); then
     echo "ERROR: release ${TAG} is missing ${#MISSING[@]} required asset(s):"
     for m in "${MISSING[@]}"; do echo "  - $m"; done
     echo
-    echo "These assets back the SDK postinstall, checksum verification, and curl-based installer."
+    echo "These assets back the SDK postinstall, checksum verification, artifact attestations, and curl-based installer."
     echo "Do NOT publish to npm without them — see docs/release-runbook.md"
     echo "(\"Release asset contract\")."
   } >&2

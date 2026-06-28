@@ -344,11 +344,30 @@ The musl variant (`linux-aarch64-static`) is built but **not** part of
 the contract — it backs the thin `Dockerfile.client` image, not npm
 postinstall.
 
-Every stable release also publishes `checksums.txt`, an aggregate SHA-256
-manifest for the downloadable binaries. Automatic installers should fetch
-this manifest and verify the selected binary before execution. The per-asset
-`.sha256` files remain published for compatibility; `artifact-sizes.md` is
-release evidence for the binary/image size gate, not an installer contract.
+Every stable release also publishes two aggregate SHA-256 manifests for the
+downloadable binaries:
+
+- `checksums.txt` is the installer-facing contract. Automatic installers should
+  fetch this manifest and verify the selected binary before execution.
+- `SHA256SUMS` carries the same content under the conventional ecosystem name
+  used by manual verification and release-attestation examples.
+
+The per-asset `.sha256` files remain published for compatibility;
+`artifact-sizes.md` is release evidence for the binary/image size gate, not an
+installer contract.
+
+Stable release artifacts are also attested through GitHub Artifact
+Attestations from the aggregate checksum manifest. A downloaded binary can be
+verified back to the official workflow run with:
+
+```bash
+gh attestation verify red-linux-x86_64 --repo reddb-io/reddb
+```
+
+GHCR server and thin-client images are published as multi-arch images for
+`linux/amd64` and `linux/arm64` with BuildKit provenance and SBOM attestations.
+The release workflow publishes immutable `vX.Y.Z` and `X.Y.Z` tags, moving
+`X.Y`, `X`, and `latest` tags for stable releases, and `next` for prereleases.
 
 The release workflow enforces the contract automatically:
 
@@ -359,7 +378,8 @@ The release workflow enforces the contract automatically:
   `publish-npm` (`@reddb-io/cli`) depends on it, so a missing asset
   blocks every Node-side publish at the gate.
 - `scripts/verify-release-assets.sh` queries `gh release view --json
-  assets`, asserts each `(bin, suffix)` pair and `checksums.txt` are
+  assets`, asserts each `(bin, suffix)` pair plus `checksums.txt` and
+  `SHA256SUMS` are
   present, and exits 1 with the explicit missing list on failure. Run it
   locally against any past tag to audit:
 
