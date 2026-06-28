@@ -1730,12 +1730,12 @@ impl RedDBRuntime {
         let rls_gated = crate::runtime::impl_core::rls_is_enabled(self, &query.table);
         let augmented_query: UpdateQuery;
         let effective_query: &UpdateQuery = if rls_gated {
-            let rls_filter = crate::runtime::impl_core::rls_policy_filter(
+            let update_filter = crate::runtime::impl_core::rls_policy_filter(
                 self,
                 &query.table,
                 crate::storage::query::ast::PolicyAction::Update,
             );
-            let Some(policy) = rls_filter else {
+            let Some(mut policy) = update_filter else {
                 // No admitting policy: zero rows affected, empty
                 // RETURNING (never leak rows the caller can't touch).
                 let mut response = RuntimeQueryResult::dml_result(
@@ -1749,6 +1749,29 @@ impl RedDBRuntime {
                 }
                 return Ok(response);
             };
+            if query.claim_limit.is_some() {
+                let read_filter = crate::runtime::impl_core::rls_policy_filter(
+                    self,
+                    &query.table,
+                    crate::storage::query::ast::PolicyAction::Select,
+                );
+                let Some(read_policy) = read_filter else {
+                    let mut response = RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        0,
+                        "update",
+                        "runtime-dml-rls",
+                    );
+                    if let Some(items) = query.returning.clone() {
+                        response.result = build_returning_result(&items, &[], None);
+                    }
+                    return Ok(response);
+                };
+                policy = crate::storage::query::ast::Filter::And(
+                    Box::new(read_policy),
+                    Box::new(policy),
+                );
+            }
             let mut augmented = query.clone();
             augmented.filter = Some(match augmented.filter.take() {
                 Some(existing) => {

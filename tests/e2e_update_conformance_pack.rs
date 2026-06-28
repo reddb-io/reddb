@@ -268,6 +268,151 @@ fn update_returning_obeys_rls_and_column_policy() {
 }
 
 #[test]
+fn claim_candidate_selection_requires_read_visibility() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE claim_read_tasks (id INT, tenant_id TEXT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO claim_read_tasks (id, tenant_id, rank, status) VALUES \
+         (1, 'globex', 10, 'ready'), (2, 'acme', 20, 'ready')",
+    );
+    exec(
+        &rt,
+        "CREATE POLICY claim_read_visible ON claim_read_tasks FOR SELECT \
+         USING (tenant_id = CURRENT_TENANT())",
+    );
+    exec(
+        &rt,
+        "CREATE POLICY claim_read_update_all ON claim_read_tasks FOR UPDATE USING (status = 'ready')",
+    );
+    exec(
+        &rt,
+        "ALTER TABLE claim_read_tasks ENABLE ROW LEVEL SECURITY",
+    );
+
+    let claimed = {
+        set_current_tenant("acme".to_string());
+        let result = exec(
+            &rt,
+            "UPDATE claim_read_tasks SET status = 'claimed' WHERE status = 'ready' \
+             CLAIM LIMIT 2 ORDER BY rank ASC RETURNING id, tenant_id",
+        );
+        clear_current_tenant();
+        result
+    };
+
+    assert_eq!(claimed.affected_rows, 1);
+    let row = only_record(&claimed);
+    assert_eq!(int_field(row, "id"), 2);
+    assert_eq!(text_field(row, "tenant_id"), "acme");
+    set_current_tenant("globex".to_string());
+    let hidden = exec(&rt, "SELECT status FROM claim_read_tasks WHERE id = 1");
+    clear_current_tenant();
+    assert_eq!(text_field(only_record(&hidden), "status"), "ready");
+}
+
+#[test]
+fn claim_exact_miss_counts_only_read_visible_candidates() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE claim_exact_read_tasks (id INT, tenant_id TEXT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO claim_exact_read_tasks (id, tenant_id, rank, status) VALUES \
+         (1, 'globex', 10, 'ready'), (2, 'acme', 20, 'ready')",
+    );
+    exec(
+        &rt,
+        "CREATE POLICY claim_exact_read_visible ON claim_exact_read_tasks FOR SELECT \
+         USING (tenant_id = CURRENT_TENANT())",
+    );
+    exec(
+        &rt,
+        "CREATE POLICY claim_exact_update_all ON claim_exact_read_tasks FOR UPDATE USING (status = 'ready')",
+    );
+    exec(
+        &rt,
+        "ALTER TABLE claim_exact_read_tasks ENABLE ROW LEVEL SECURITY",
+    );
+
+    let claimed = {
+        set_current_tenant("acme".to_string());
+        let result = exec(
+            &rt,
+            "UPDATE claim_exact_read_tasks SET status = 'claimed' WHERE status = 'ready' \
+             CLAIM EXACT 2 ORDER BY rank ASC RETURNING id, tenant_id",
+        );
+        clear_current_tenant();
+        result
+    };
+
+    assert_eq!(claimed.affected_rows, 0);
+    assert!(claimed.result.records.is_empty());
+    set_current_tenant("acme".to_string());
+    let acme = exec(
+        &rt,
+        "SELECT status FROM claim_exact_read_tasks WHERE id = 2",
+    );
+    clear_current_tenant();
+    assert_eq!(text_field(only_record(&acme), "status"), "ready");
+    set_current_tenant("globex".to_string());
+    let globex = exec(
+        &rt,
+        "SELECT status FROM claim_exact_read_tasks WHERE id = 1",
+    );
+    clear_current_tenant();
+    assert_eq!(text_field(only_record(&globex), "status"), "ready");
+}
+
+#[test]
+fn claim_state_transition_requires_update_policy() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE claim_update_tasks (id INT, tenant_id TEXT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO claim_update_tasks (id, tenant_id, rank, status) VALUES \
+         (1, 'globex', 10, 'ready'), (2, 'acme', 20, 'ready')",
+    );
+    exec(
+        &rt,
+        "CREATE POLICY claim_update_read_all ON claim_update_tasks FOR SELECT USING (status = 'ready')",
+    );
+    exec(
+        &rt,
+        "CREATE POLICY claim_update_mutable ON claim_update_tasks FOR UPDATE \
+         USING (tenant_id = CURRENT_TENANT())",
+    );
+    exec(
+        &rt,
+        "ALTER TABLE claim_update_tasks ENABLE ROW LEVEL SECURITY",
+    );
+
+    let claimed = {
+        set_current_tenant("acme".to_string());
+        let result = exec(
+            &rt,
+            "UPDATE claim_update_tasks SET status = 'claimed' WHERE status = 'ready' \
+             CLAIM LIMIT 2 ORDER BY rank ASC RETURNING id, tenant_id",
+        );
+        clear_current_tenant();
+        result
+    };
+
+    assert_eq!(claimed.affected_rows, 1);
+    let row = only_record(&claimed);
+    assert_eq!(int_field(row, "id"), 2);
+    assert_eq!(text_field(row, "tenant_id"), "acme");
+}
+
+#[test]
 fn explicit_document_update_emits_event_and_cdc_identity() {
     let rt = runtime();
     exec(&rt, "CREATE DOCUMENT conformance_docs");
