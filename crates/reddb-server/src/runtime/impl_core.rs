@@ -2563,6 +2563,9 @@ impl RedDBRuntime {
                 metrics_ingest_stats: crate::runtime::MetricsIngestCounters::default(),
                 metrics_tenant_activity_stats:
                     crate::runtime::MetricsTenantActivityCounters::default(),
+                claim_telemetry: Arc::new(
+                    crate::runtime::claim_telemetry::ClaimTelemetryCounters::default(),
+                ),
                 queue_telemetry: Arc::new(
                     crate::runtime::queue_telemetry::QueueTelemetryCounters::default(),
                 ),
@@ -3725,6 +3728,11 @@ impl RedDBRuntime {
             wait_cancelled: self.inner.queue_telemetry.wait_cancelled_snapshot(),
             wait_duration: self.inner.queue_telemetry.wait_duration_snapshot(),
         }
+    }
+
+    /// Snapshots of Concurrent claim counters in label-deterministic order.
+    pub fn claim_telemetry_snapshot(&self) -> crate::runtime::ClaimTelemetrySnapshot {
+        self.inner.claim_telemetry.snapshot()
     }
 
     /// Per-`kind` query latency histograms for `/metrics` (only kinds with
