@@ -124,7 +124,7 @@ test("nightly DR drill workflow uses the current-shell runner and public make ta
   const workflow = read(".github/workflows/drill-nightly.yml");
 
   assert.match(makefile, /\ndrill-nightly:\n\t@\.\/scripts\/drill-nightly\.sh/);
-  assert.match(script, /CMD="cargo test --locked --test grouped_pitr_drills --no-fail-fast"/);
+  assert.match(script, /CMD="cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast drill_"/);
   assert.match(script, /mktemp -t drill-nightly\.XXXXXX\.log/);
   assert.doesNotMatch(script, /mktemp -t reddb-drill-nightly/);
   assert.match(script, /eval "\$CMD" >"\$LOG" 2>&1/);

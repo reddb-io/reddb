@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-full test-nextest test-nextest-lib test-nextest-e2e test-persistent test-persistent-grimms drill-nightly clean run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
+.PHONY: help build build-fast release warm test test-fast test-full test-nextest test-nextest-lib test-nextest-e2e test-persistent test-persistent-grimms test-chaos test-chaos-drills test-chaos-replication test-chaos-all test-dst-storage test-dst-sweep drill-nightly clean run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -22,6 +22,10 @@ help:
 	@echo "  make test-nextest-e2e - Run the e2e (integration) lane under cargo-nextest"
 	@echo "  make test-persistent - Run the persistent multimodel integration layer"
 	@echo "  make test-persistent-grimms - Run the Grimms-scale persistent storage fixture"
+	@echo "  make test-chaos    - Run local chaos tests"
+	@echo "  make test-chaos-all - Run local chaos, drill, replication harness, and storage fault tests"
+	@echo "  make test-dst-storage - Run seeded storage fault recovery tests"
+	@echo "  make test-dst-sweep - Run ignored DST replication seed sweep"
 	@echo "  make drill-nightly - Run backup/restore drill tests and append drill history"
 	@echo "  make test-env PROFILE=replica - Bring up a dedicated test environment and run shell + Rust external-env tests"
 	@echo "  make test-env-shell PROFILE=replica - Bring up a dedicated test environment and run shell checks only"
@@ -99,6 +103,26 @@ test-persistent:
 
 test-persistent-grimms:
 	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test grouped_runtime_persistence integration_persistent_grimms_scale -- --ignored --nocapture
+
+test-chaos:
+	cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast chaos_
+
+test-chaos-drills:
+	cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast drill_
+
+test-chaos-replication:
+	cargo test --locked --test grouped_replication jepsen_black_box_harness_self_test_exercises_replay_artifacts_and_checkers
+
+test-chaos-all:
+	cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast
+	$(MAKE) test-chaos-replication
+	$(MAKE) test-dst-storage
+
+test-dst-storage:
+	cargo test --locked -p unreliable-libc --test sim_power_cut_recovery --test value_equivalence_recovery --test power_cut_recovery
+
+test-dst-sweep:
+	cargo test --locked -p reddb-io-server replication::dst::tests::dst_seed_sweep -- --ignored
 
 drill-nightly:
 	@./scripts/drill-nightly.sh

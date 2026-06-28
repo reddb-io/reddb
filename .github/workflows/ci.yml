@@ -561,10 +561,8 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
-      - name: Run chaos tests
-        run: cargo test --locked --test grouped_chaos --no-fail-fast
-      - name: Run drill tests
-        run: cargo test --locked --test grouped_pitr_drills --no-fail-fast
+      - name: Run chaos, drill, and persistence tests
+        run: cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast
 
   chaos-floci:
     # PLAN.md Phase 8.4 — chaos suite against an S3-compatible
@@ -629,7 +627,7 @@ jobs:
             docker logs reddb-ci-floci || true
             exit 1
           fi
-      - run: cargo test --locked --test grouped_chaos --no-fail-fast
+      - run: cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast chaos_
       - name: Stop Floci
         if: always()
         run: docker rm -f reddb-ci-floci || true

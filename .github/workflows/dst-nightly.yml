@@ -5,6 +5,13 @@ on:
     - cron: "23 7 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
   dst-seed-sweep:
     name: DST seed sweep
@@ -21,4 +28,57 @@ jobs:
           shared-key: dst-nightly-rust-1.91.0
           cache-on-failure: "true"
       - name: Run DST heavy seed sweep
-        run: cargo test --locked -p reddb-server replication::dst::tests::dst_seed_sweep -- --ignored
+        run: cargo test --locked -p reddb-io-server replication::dst::tests::dst_seed_sweep -- --ignored
+
+  storage-fault-recovery:
+    name: Storage fault recovery
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: "28.3"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dst-storage-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Run storage fault recovery tests
+        id: storage_faults
+        run: |
+          mkdir -p target/dst-storage
+          set -o pipefail
+          make test-dst-storage 2>&1 | tee target/dst-storage/test-dst-storage.log
+      - name: Upload storage fault report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dst-storage-fault-report
+          path: target/dst-storage/test-dst-storage.log
+      - name: Open issue on storage fault failure
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = `Nightly storage fault recovery failed: ${new Date().toISOString().slice(0, 10)}`;
+            const body = [
+              'The scheduled storage fault recovery lane failed.',
+              '',
+              `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Triage checklist:',
+              '- Inspect the `dst-storage-fault-report` artifact.',
+              '- Find the failing `SEED=<n>` line in the test output.',
+              '- Re-run `SEED=<n> make test-dst-storage` locally before closing.'
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['release-blocker']
+            });
