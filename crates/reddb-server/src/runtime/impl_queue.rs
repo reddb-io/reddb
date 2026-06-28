@@ -1321,6 +1321,7 @@ impl RedDBRuntime {
 
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
+                    "delivery_id".into(),
                     "payload".into(),
                     "consumer".into(),
                     "delivery_count".into(),
@@ -1332,6 +1333,7 @@ impl RedDBRuntime {
                         "message_id",
                         Value::text(message_id_string(EntityId::new(message.message_id))),
                     );
+                    record.set("delivery_id", Value::text(message.delivery_id));
                     record.set("payload", message.payload);
                     record.set("consumer", Value::text(message.consumer));
                     record.set(
