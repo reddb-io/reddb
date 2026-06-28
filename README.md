@@ -572,6 +572,7 @@ npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1
 ```bash
 # Install
 curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
+# The installer verifies the selected release asset against SHA256SUMS before install.
 
 # Start the server (wire: 5050, gRPC: 55055, HTTP: 5000)
 red server --wire-bind 127.0.0.1:5050 --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000 --path ./data.rdb

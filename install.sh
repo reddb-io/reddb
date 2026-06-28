@@ -5,9 +5,9 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --channel next
-#   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --version v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --version v1.17.0
 #
-set -e
+set -euo pipefail
 
 REPO="reddb-io/reddb"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
@@ -15,20 +15,53 @@ BINARY_NAME="red"
 CHANNEL="stable"
 VERSION=""
 STATIC=""
+MODE="server"
+UNINSTALL="false"
+TMP_DIR=""
+CHECKSUM_FILE=""
+
+cleanup() {
+  if [[ -n "$TMP_DIR" ]]; then
+    rm -rf "$TMP_DIR"
+  fi
+}
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --channel)
+      [[ $# -ge 2 ]] || { echo "--channel requires a value"; exit 1; }
       CHANNEL="$2"
       shift 2
       ;;
     --version)
+      [[ $# -ge 2 ]] || { echo "--version requires a value"; exit 1; }
       VERSION="$2"
       shift 2
       ;;
     --install-dir)
+      [[ $# -ge 2 ]] || { echo "--install-dir requires a value"; exit 1; }
       INSTALL_DIR="$2"
       shift 2
+      ;;
+    --prefix)
+      [[ $# -ge 2 ]] || { echo "--prefix requires a value"; exit 1; }
+      INSTALL_DIR="${2%/}/bin"
+      shift 2
+      ;;
+    --client-only)
+      MODE="client"
+      BINARY_NAME="red_client"
+      shift
+      ;;
+    --server)
+      MODE="server"
+      BINARY_NAME="red"
+      shift
+      ;;
+    --uninstall)
+      UNINSTALL="true"
+      shift
       ;;
     --static)
       STATIC="true"
@@ -41,9 +74,13 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --channel <stable|next|latest>  Release channel (default: stable)"
-      echo "  --version <version>             Install specific version (e.g., v0.1.0)"
+      echo "  --version <version>             Install specific version (e.g., v1.17.0)"
       echo "  --install-dir <path>            Installation directory (default: ~/.local/bin)"
-      echo "  --static                        Use static aarch64 build when available"
+      echo "  --prefix <path>                 Install into <path>/bin"
+      echo "  --client-only                   Install the thin red_client binary"
+      echo "  --server                        Install the full red server/CLI binary (default)"
+      echo "  --uninstall                     Remove the selected binary from the install dir"
+      echo "  --static                        Prefer a static Linux build when available"
       echo "  -h, --help                      Show this help message"
       exit 0
       ;;
@@ -84,7 +121,10 @@ detect_platform() {
   # a fallback for releases/arches that don't publish a static asset yet
   # (resolved in download_binary). macOS/Windows ship a single asset each.
   PLATFORM_FALLBACK=""
-  if [[ "$OS" == "linux" ]] && { [[ "$ARCH" == "x86_64" ]] || [[ "$ARCH" == "aarch64" ]]; }; then
+  if [[ "$OS" == "linux" ]] && [[ "$STATIC" == "true" ]]; then
+    PLATFORM="${OS}-${ARCH}-static"
+    PLATFORM_FALLBACK="${OS}-${ARCH}"
+  elif [[ "$OS" == "linux" ]] && { [[ "$ARCH" == "x86_64" ]] || [[ "$ARCH" == "aarch64" ]]; }; then
     PLATFORM="${OS}-${ARCH}-static"
     PLATFORM_FALLBACK="${OS}-${ARCH}"
   else
@@ -117,6 +157,34 @@ extract_release_tag() {
   fi
 }
 
+download_to_file() {
+  local url="$1"
+  local output="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$output" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$output" "$url"
+  else
+    echo "curl or wget is required"
+    exit 1
+  fi
+}
+
+download_asset_to_file() {
+  local url="$1"
+  local output="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL -o "$output" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$output" "$url"
+  else
+    echo "curl or wget is required"
+    exit 1
+  fi
+}
+
 fetch_release_info() {
   local api_url
   local releases_json
@@ -129,14 +197,7 @@ fetch_release_info() {
     api_url="https://api.github.com/repos/$REPO/releases"
   fi
 
-  if command -v curl >/dev/null 2>&1; then
-    releases_json=$(curl -fsSL "$api_url" 2>/dev/null)
-  elif command -v wget >/dev/null 2>&1; then
-    releases_json=$(wget -qO- "$api_url" 2>/dev/null)
-  else
-    echo "curl or wget is required"
-    exit 1
-  fi
+  releases_json=$(download_to_file "$api_url" - 2>/dev/null || true)
 
   if [[ -z "$releases_json" ]]; then
     echo "Could not fetch release data"
@@ -160,6 +221,21 @@ fetch_release_info() {
   fi
 }
 
+download_checksum_manifest() {
+  local url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/SHA256SUMS"
+
+  CHECKSUM_FILE="${TMP_DIR}/SHA256SUMS"
+  echo "Downloading checksum manifest from ${url}"
+  if ! download_to_file "$url" "$CHECKSUM_FILE"; then
+    echo "Failed to download SHA256SUMS for ${RELEASE_TAG}"
+    exit 1
+  fi
+  if [[ ! -s "$CHECKSUM_FILE" ]]; then
+    echo "Checksum manifest is empty for ${RELEASE_TAG}"
+    exit 1
+  fi
+}
+
 download_binary() {
   local name="$1"
   local ext=""
@@ -173,13 +249,13 @@ download_binary() {
   local platform binary_name tmp_file url
   for platform in "${platforms[@]}"; do
     binary_name="${name}-${platform}${ext}"
-    tmp_file="/tmp/${binary_name}"
+    tmp_file="${TMP_DIR}/${binary_name}"
     url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${binary_name}"
     echo "Downloading ${name} from ${url}"
-    if command -v curl >/dev/null 2>&1; then
-      if curl -fL -o "$tmp_file" "$url"; then DOWNLOADED_FILES+=("${name}:${tmp_file}"); return 0; fi
-    else
-      if wget -O "$tmp_file" "$url"; then DOWNLOADED_FILES+=("${name}:${tmp_file}"); return 0; fi
+    if download_asset_to_file "$url" "$tmp_file"; then
+      verify_checksum "$tmp_file"
+      DOWNLOADED_FILES+=("${name}:${tmp_file}")
+      return 0
     fi
     if [[ -n "$PLATFORM_FALLBACK" && "$platform" != "$PLATFORM_FALLBACK" ]]; then
       echo "  ${name}-${platform} not found in ${RELEASE_TAG}; trying ${PLATFORM_FALLBACK}"
@@ -195,23 +271,20 @@ verify_checksum() {
   local actual_hash=""
   local asset_file
   asset_file="$(basename "$asset_path")"
-  local checksum_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset_file}.sha256"
-  local checksum_file="/tmp/${asset_file}.sha256"
 
-  if command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL -o "$checksum_file" "$checksum_url" 2>/dev/null; then
-      return 0
-    fi
-  else
-    if ! wget -qO "$checksum_file" "$checksum_url" 2>/dev/null; then
-      return 0
-    fi
+  if [[ ! -s "$CHECKSUM_FILE" ]]; then
+    echo "Checksum manifest is missing; refusing to install ${asset_file}"
+    exit 1
   fi
 
-  expected_hash=$(cat "$checksum_file" | awk '{print $1}' | tr -d '[:space:]')
-  rm -f "$checksum_file"
+  expected_hash=$(awk -v asset="$asset_file" '$2 == asset { print $1; found=1; exit } END { if (!found) exit 1 }' "$CHECKSUM_FILE" || true)
   if [[ -z "$expected_hash" ]]; then
-    return 0
+    echo "Checksum manifest does not contain ${asset_file}"
+    exit 1
+  fi
+  if ! printf '%s' "$expected_hash" | grep -Eq '^[[:xdigit:]]{64}$'; then
+    echo "Invalid checksum entry for ${asset_file}"
+    exit 1
   fi
 
   if command -v sha256sum >/dev/null 2>&1; then
@@ -219,13 +292,17 @@ verify_checksum() {
   elif command -v shasum >/dev/null 2>&1; then
     actual_hash=$(shasum -a 256 "$asset_path" | awk '{print $1}')
   else
-    return 0
+    echo "sha256sum or shasum is required to verify ${asset_file}"
+    exit 1
   fi
 
+  expected_hash=$(printf '%s' "$expected_hash" | tr 'A-F' 'a-f')
+  actual_hash=$(printf '%s' "$actual_hash" | tr 'A-F' 'a-f')
   if [[ "$expected_hash" != "$actual_hash" ]]; then
     echo "Checksum mismatch for ${asset_file}"
     exit 1
   fi
+  echo "Verified checksum for ${asset_file}"
 }
 
 install_file() {
@@ -241,6 +318,18 @@ install_file() {
   fi
 
   echo "Installed: ${binary_path}"
+}
+
+uninstall_file() {
+  local name="$1"
+  local binary_path="${INSTALL_DIR}/${name}"
+
+  if [[ -e "$binary_path" ]]; then
+    rm -f "$binary_path"
+    echo "Removed: ${binary_path}"
+  else
+    echo "Not installed: ${binary_path}"
+  fi
 }
 
 # The static `red` has no hard runtime deps. The one optional dep is a CA-cert
@@ -269,7 +358,15 @@ check_optional_runtime_deps() {
 
 main() {
   detect_platform
+
+  if [[ "$UNINSTALL" == "true" ]]; then
+    uninstall_file "$BINARY_NAME"
+    exit 0
+  fi
+
   fetch_release_info
+  TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/reddb-install.XXXXXX")"
+  download_checksum_manifest
 
   declare -a DOWNLOADED_FILES
 
@@ -278,15 +375,22 @@ main() {
   for entry in "${DOWNLOADED_FILES[@]}"; do
     name="${entry%%:*}"
     file="${entry#*:}"
-    verify_checksum "$file"
     install_file "$name" "$file"
   done
 
-  echo "✅ RedDB installed."
+  if [[ "$MODE" == "client" ]]; then
+    echo "✅ RedDB thin client installed."
+  else
+    echo "✅ RedDB installed."
+  fi
   check_optional_runtime_deps
   echo ""
   echo "Quick start:"
-  echo "  red --help"
+  if [[ "$MODE" == "client" ]]; then
+    echo "  red_client --help"
+  else
+    echo "  red --help"
+  fi
 }
 
 main

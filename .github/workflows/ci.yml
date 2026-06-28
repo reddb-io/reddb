@@ -148,6 +148,8 @@ jobs:
         run: node scripts/verify-contract-matrix.mjs
       - name: Contract-matrix tooling contract test
         run: node --test scripts/contract_matrix_contract.test.mjs
+      - name: Installer checksum contract test
+        run: node --test scripts/install_script_contract.test.mjs
       - name: Docs-shim ⇔ required-checks ⇔ ci.yml lock-step (#1307)
         run: node --test scripts/ci-docs-shim-contract.test.mjs
 

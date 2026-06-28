@@ -14,9 +14,11 @@ If you want the terminology first, read [Modes and Transports](/getting-started/
 
 ## Install from GitHub Releases
 
-### Recommended: installer script
+### Recommended: verified installer script
 
-The installer resolves the correct GitHub Release asset for your platform:
+The installer resolves the correct GitHub Release asset for your platform,
+downloads the release `SHA256SUMS` manifest, and refuses to install if the
+selected binary does not match the published SHA-256 checksum:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
@@ -38,6 +40,25 @@ Change the install location:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
+```
+
+Install under a prefix:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --prefix "$HOME/.local"
+```
+
+Install only the thin remote client:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --client-only
+```
+
+Remove the selected binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --client-only --uninstall
 ```
 
 Verify:
