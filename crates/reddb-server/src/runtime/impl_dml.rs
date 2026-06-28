@@ -1832,6 +1832,12 @@ impl RedDBRuntime {
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let needs_rmw_lock = update_needs_rmw_lock(query);
+        let claim_model = update_model_name(update_target_model(query.target));
+        if query.claim_limit.is_some() {
+            self.inner
+                .claim_telemetry
+                .record_attempt(&query.table, claim_model);
+        }
         let claim_lock = query.claim_limit.map(|_| {
             self.inner
                 .rmw_locks
@@ -1839,6 +1845,19 @@ impl RedDBRuntime {
         });
         let _claim_guard = if let Some(lock) = claim_lock.as_ref() {
             let Some(guard) = lock.try_lock() else {
+                let skipped_locked = query.claim_limit.unwrap_or(1);
+                self.inner.claim_telemetry.record_skipped_locked(
+                    &query.table,
+                    claim_model,
+                    skipped_locked,
+                );
+                tracing::debug!(
+                    target: "reddb::claim",
+                    collection = %query.table,
+                    model = claim_model,
+                    skipped_locked,
+                    "concurrent claim skipped locked candidates"
+                );
                 return Ok((
                     RuntimeQueryResult::dml_result(
                         raw_query.to_string(),
@@ -1906,6 +1925,9 @@ impl RedDBRuntime {
         if query.claim_exact
             && claim_cap.is_some_and(|claim_count| ids_to_update.len() < claim_count)
         {
+            self.inner
+                .claim_telemetry
+                .record_miss(&query.table, claim_model);
             return Ok((
                 RuntimeQueryResult::dml_result(raw_query.to_string(), 0, "update", "runtime-dml"),
                 Vec::new(),
@@ -1923,6 +1945,13 @@ impl RedDBRuntime {
             if query.claim_limit.is_some() {
                 self.record_pending_claim_locks_for_touched_ids(&query.table, &result.1);
             }
+            record_claim_outcome(
+                &self.inner.claim_telemetry,
+                query.claim_limit,
+                &query.table,
+                claim_model,
+                result.0.affected_rows,
+            );
             return Ok(result);
         }
 
@@ -1955,6 +1984,13 @@ impl RedDBRuntime {
         if query.claim_limit.is_some() {
             self.record_pending_claim_locks_for_touched_ids(&query.table, &touched_ids);
         }
+        record_claim_outcome(
+            &self.inner.claim_telemetry,
+            query.claim_limit,
+            &query.table,
+            claim_model,
+            affected,
+        );
 
         Ok((
             RuntimeQueryResult::dml_result(
@@ -3010,6 +3046,36 @@ fn update_needs_rmw_lock(query: &UpdateQuery) -> bool {
                 .is_some_and(|op| op.is_some())
                 || expr_references_update_column(expr, &query.table, column)
         })
+}
+
+fn record_claim_outcome(
+    telemetry: &crate::runtime::claim_telemetry::ClaimTelemetryCounters,
+    claim_limit: Option<u64>,
+    table: &str,
+    model: &str,
+    affected: u64,
+) {
+    if claim_limit.is_none() {
+        return;
+    }
+    if affected == 0 {
+        telemetry.record_miss(table, model);
+        tracing::debug!(
+            target: "reddb::claim",
+            collection = table,
+            model,
+            "concurrent claim missed"
+        );
+    } else {
+        telemetry.record_successful(table, model, affected);
+        tracing::debug!(
+            target: "reddb::claim",
+            collection = table,
+            model,
+            successful = affected,
+            "concurrent claim succeeded"
+        );
+    }
 }
 
 fn evaluate_compound_update_assignment(
@@ -4372,6 +4438,27 @@ mod tests {
             .any(|window| window == needle.as_bytes())
     }
 
+    fn claim_metric_count(
+        snapshot: &crate::runtime::ClaimTelemetrySnapshot,
+        metric: &str,
+        collection: &str,
+        model: &str,
+    ) -> u64 {
+        let rows = match metric {
+            "attempts" => &snapshot.attempts,
+            "successful" => &snapshot.successful,
+            "misses" => &snapshot.misses,
+            "skipped_locked" => &snapshot.skipped_locked,
+            other => panic!("unknown claim metric {other}"),
+        };
+        rows.iter()
+            .find(|((actual_collection, actual_model), _)| {
+                actual_collection == collection && actual_model == model
+            })
+            .map(|(_, count)| *count)
+            .unwrap_or(0)
+    }
+
     fn assert_statement_writes_collections_in_one_new_wal_batch(
         rt: &RedDBRuntime,
         wal_path: &Path,
@@ -4808,6 +4895,50 @@ mod tests {
                 Some(expected_id)
             );
         }
+    }
+
+    #[test]
+    fn claim_metrics_increment_skipped_locked_without_counting_miss() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        rt.execute_query("CREATE TABLE claim_metric_locked (id INT, rank INT, status TEXT)")
+            .expect("create table");
+        rt.execute_query(
+            "INSERT INTO claim_metric_locked (id, rank, status) VALUES \
+             (1, 10, 'ready'), (2, 20, 'ready')",
+        )
+        .expect("insert rows");
+
+        let claim_lock = rt
+            .inner
+            .rmw_locks
+            .lock_for("claim_metric_locked", "__table_claim_update__");
+        let _guard = claim_lock.lock();
+        let updated = rt
+            .execute_query(
+                "UPDATE claim_metric_locked SET status = 'claimed' WHERE status = 'ready' \
+                 CLAIM LIMIT 2 ORDER BY rank ASC",
+            )
+            .expect("claim skips locked candidates");
+
+        assert_eq!(updated.affected_rows, 0);
+        let snapshot = rt.claim_telemetry_snapshot();
+        assert_eq!(
+            claim_metric_count(&snapshot, "attempts", "claim_metric_locked", "table"),
+            1
+        );
+        assert_eq!(
+            claim_metric_count(&snapshot, "skipped_locked", "claim_metric_locked", "table"),
+            2
+        );
+        assert_eq!(
+            claim_metric_count(&snapshot, "misses", "claim_metric_locked", "table"),
+            0
+        );
+        assert_eq!(
+            snapshot.skipped_locked.len(),
+            1,
+            "skipped-lock labels stay bounded to collection/model"
+        );
     }
 
     fn queue_payloads(rt: &RedDBRuntime, queue: &str) -> Vec<crate::json::Value> {

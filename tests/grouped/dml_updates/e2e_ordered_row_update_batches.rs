@@ -50,6 +50,27 @@ fn err_string(rt: &RedDBRuntime, sql: &str) -> String {
         .to_string()
 }
 
+fn claim_metric_count(
+    snapshot: &reddb::runtime::ClaimTelemetrySnapshot,
+    metric: &str,
+    collection: &str,
+    model: &str,
+) -> u64 {
+    let rows = match metric {
+        "attempts" => &snapshot.attempts,
+        "successful" => &snapshot.successful,
+        "misses" => &snapshot.misses,
+        "skipped_locked" => &snapshot.skipped_locked,
+        other => panic!("unknown claim metric {other}"),
+    };
+    rows.iter()
+        .find(|((actual_collection, actual_model), _)| {
+            actual_collection == collection && actual_model == model
+        })
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+}
+
 #[test]
 fn claim_exact_updates_requested_cardinality_when_available() {
     let rt = runtime();
@@ -248,6 +269,64 @@ fn ordinary_dml_against_claimed_row_keeps_mvcc_conflict_behavior() {
     set_current_connection_id(145208);
     assert_eq!(status_ids(&rt, "tx_claim_dml", "ready"), vec![1]);
     clear_current_connection_id();
+}
+
+#[test]
+fn claim_metrics_increment_for_success_and_miss_with_bounded_labels() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE claim_metric_jobs (id INT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO claim_metric_jobs (id, rank, status) VALUES \
+         (1, 10, 'ready'), (2, 20, 'ready')",
+    );
+
+    let claimed = exec(
+        &rt,
+        "UPDATE claim_metric_jobs SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 2 ORDER BY rank ASC",
+    );
+    let missed = exec(
+        &rt,
+        "UPDATE claim_metric_jobs SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY rank ASC",
+    );
+
+    assert_eq!(claimed.affected_rows, 2);
+    assert_eq!(missed.affected_rows, 0);
+    let snapshot = rt.claim_telemetry_snapshot();
+    assert_eq!(
+        claim_metric_count(&snapshot, "attempts", "claim_metric_jobs", "table"),
+        2
+    );
+    assert_eq!(
+        claim_metric_count(&snapshot, "successful", "claim_metric_jobs", "table"),
+        2
+    );
+    assert_eq!(
+        claim_metric_count(&snapshot, "misses", "claim_metric_jobs", "table"),
+        1
+    );
+    assert_eq!(
+        claim_metric_count(&snapshot, "skipped_locked", "claim_metric_jobs", "table"),
+        0
+    );
+    assert_eq!(
+        snapshot.attempts.len(),
+        1,
+        "collection/model labels stay bounded"
+    );
+    assert_eq!(
+        snapshot
+            .attempts
+            .iter()
+            .map(|((collection, model), _)| (collection.as_str(), model.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("claim_metric_jobs", "table")]
+    );
 }
 
 #[test]
