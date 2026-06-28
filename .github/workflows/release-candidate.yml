@@ -222,12 +222,10 @@ jobs:
           node-version: '22'
 
       - name: Update crate package versions for RC
-        # sync-version.js updates dep version requirements in per-crate Cargo.toml
-        # table-format entries (e.g. [dependencies.reddb-io-*]\nversion = "...") to
-        # the RC version, which does not exist on crates.io yet and breaks cargo
-        # publish. Use a targeted Python script that touches only [package] version,
-        # leaving all dep requirements pointing to stable siblings on crates.io.
-        # cargo publish does not consult Cargo.lock, so no generate-lockfile needed.
+        # sync-version.js updates npm/package metadata too broadly for the cargo-only
+        # RC publish job. Touch only crate [package] versions here; the next step pins
+        # internal workspace dependency requirements so path package versions still
+        # satisfy Cargo's publish-time validation.
         env:
           RC_VERSION: ${{ needs.plan.outputs.rc_version }}
         run: |
@@ -246,6 +244,13 @@ jobs:
                   out.append(l)
               open(path, 'w').writelines(out)
           PYEOF
+
+      - name: Patch workspace dep version requirements for RC
+        # Cargo does not match pre-release versions against range requirements like "^1.0".
+        # Pin every internal workspace dep to the exact RC version so cargo publish resolves.
+        run: |
+          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
+          sed -i -E "s/(package = \"reddb-io-[^\"]+\", version = \")[^\"]+(\")/\1=${RC_VERSION}\2/" Cargo.toml
 
       - name: Publish workspace crates
         env:
