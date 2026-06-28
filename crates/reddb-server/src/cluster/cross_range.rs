@@ -172,6 +172,25 @@ impl WriteTransactionPlan {
     }
 }
 
+/// An admitted exact claim: every candidate key resolves to one writer, so that
+/// owner is the only member allowed to choose the winners.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactClaimPlan {
+    participation: WriterParticipation,
+}
+
+impl ExactClaimPlan {
+    /// The single writer that owns every candidate range.
+    pub fn writer(&self) -> &NodeIdentity {
+        self.participation.writer()
+    }
+
+    /// The distinct ranges (with fencing epochs) the claim may inspect.
+    pub fn ranges(&self) -> &[RangeParticipant] {
+        self.participation.ranges()
+    }
+}
+
 /// Why a write transaction could not be planned in the first multi-writer cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteTransactionReject {
@@ -224,6 +243,57 @@ impl std::fmt::Display for WriteTransactionReject {
 }
 
 impl std::error::Error for WriteTransactionReject {}
+
+/// Why an exact claim could not be planned in the first cluster contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactClaimReject {
+    /// The claim named no candidate keys.
+    Empty,
+    /// A candidate key resolves to no range of its collection.
+    Unroutable {
+        collection: CollectionId,
+        key: Vec<u8>,
+    },
+    /// Candidate keys span ranges owned by different writers. Exact claim needs
+    /// one authority to decide all winners, so this is explicitly unsupported in
+    /// the first cluster contract.
+    CrossOwner { writers: Vec<WriterParticipation> },
+}
+
+impl std::fmt::Display for ExactClaimReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "exact claim names no candidate targets"),
+            Self::Unroutable { collection, key } => write!(
+                f,
+                "no range of collection {collection} covers claim candidate key {} — re-resolve routing",
+                DisplayKey(key)
+            ),
+            Self::CrossOwner { writers } => {
+                write!(
+                    f,
+                    "cross-owner exact claim spans {} writers and is unsupported in the first cluster contract: ",
+                    writers.len()
+                )?;
+                for (i, w) in writers.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} owns ", w.writer())?;
+                    for (j, r) in w.ranges().iter().enumerate() {
+                        if j > 0 {
+                            write!(f, "+")?;
+                        }
+                        write!(f, "{}/{}", r.collection(), r.range_id())?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExactClaimReject {}
 
 /// One owner's leg of a read: the owner and the resolved targets to read there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,6 +576,40 @@ impl ShardOwnershipCatalog {
             })
         } else {
             Err(WriteTransactionReject::CrossRange {
+                writers: writers
+                    .into_iter()
+                    .map(|(writer, ranges)| WriterParticipation { writer, ranges })
+                    .collect(),
+            })
+        }
+    }
+
+    /// Plan an exact claim over `targets` in the first cluster contract.
+    ///
+    /// A claim winner is a non-deterministic write decision, so only one write
+    /// authority may inspect the candidate set and choose winners. Claims whose
+    /// candidates all route to one owner are admitted for that owner. Claims
+    /// whose candidates require multiple owners are rejected explicitly; later
+    /// cluster contracts can add coordinated claims without weakening this one.
+    pub fn plan_exact_claim(
+        &self,
+        targets: &[KeyTarget],
+    ) -> Result<ExactClaimPlan, ExactClaimReject> {
+        if targets.is_empty() {
+            return Err(ExactClaimReject::Empty);
+        }
+        let resolved = self
+            .resolve_targets(targets)
+            .map_err(|(collection, key)| ExactClaimReject::Unroutable { collection, key })?;
+
+        let writers = group_by_owner(&resolved);
+        if writers.len() == 1 {
+            let (writer, ranges) = writers.into_iter().next().expect("exactly one writer");
+            Ok(ExactClaimPlan {
+                participation: WriterParticipation { writer, ranges },
+            })
+        } else {
+            Err(ExactClaimReject::CrossOwner {
                 writers: writers
                     .into_iter()
                     .map(|(writer, ranges)| WriterParticipation { writer, ranges })
@@ -905,5 +1009,38 @@ mod tests {
         assert!(msg.contains("cross-range write transaction"));
         assert!(msg.contains("CN=node-a"));
         assert!(msg.contains("CN=node-b"));
+    }
+
+    #[test]
+    fn exact_claim_confined_to_one_owner_is_admitted() {
+        let (catalog, orders) = two_range_catalog();
+
+        let plan = catalog
+            .plan_exact_claim(&[target(&orders, b"alice"), target(&orders, b"bob")])
+            .expect("owner-local exact claim is admitted");
+
+        assert_eq!(plan.writer(), &ident("CN=node-a"));
+        assert_eq!(plan.ranges().len(), 1);
+        assert_eq!(plan.ranges()[0].range_id(), RangeId::new(1));
+    }
+
+    #[test]
+    fn cross_owner_exact_claim_is_rejected_explicitly() {
+        let (catalog, orders) = two_range_catalog();
+
+        let err = catalog
+            .plan_exact_claim(&[target(&orders, b"alice"), target(&orders, b"zeb")])
+            .expect_err("cross-owner exact claim is outside the first cluster contract");
+
+        match &err {
+            ExactClaimReject::CrossOwner { writers } => {
+                assert_eq!(writers.len(), 2);
+                assert_eq!(writers[0].writer(), &ident("CN=node-a"));
+                assert_eq!(writers[1].writer(), &ident("CN=node-b"));
+            }
+            other => panic!("expected CrossOwner, got {other:?}"),
+        }
+        assert!(err.to_string().contains("cross-owner exact claim"));
+        assert!(err.to_string().contains("first cluster contract"));
     }
 }
