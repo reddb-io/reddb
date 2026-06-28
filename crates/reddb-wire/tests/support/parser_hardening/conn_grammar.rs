@@ -21,7 +21,9 @@ use reddb_wire::{
 /// generator never produces hosts that `url::Url` would reject
 /// for stricter reasons (e.g. all-numeric labels, leading hyphen).
 pub fn host_label() -> impl Strategy<Value = String> {
-    "[a-z][a-z0-9-]{0,10}[a-z0-9]".prop_map(|s| s)
+    "[a-z][a-z0-9-]{0,10}[a-z0-9]"
+        .prop_filter("avoid IDNA punycode prefixes", |s| !s.starts_with("xn--"))
+        .prop_map(|s| s)
 }
 
 /// Multi-label hostname: 1..=3 labels joined by `.`.
