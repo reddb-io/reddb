@@ -143,6 +143,9 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -161,8 +164,14 @@ jobs:
               | sed 's#  \./#  #'
           ) > release/checksums.txt
           test -s release/checksums.txt
+          cp release/checksums.txt release/SHA256SUMS
           echo "---- checksums.txt ----"
           cat release/checksums.txt
+
+      - name: Attest release candidate artifacts
+        uses: actions/attest@v4
+        with:
+          subject-checksums: release/SHA256SUMS
 
       - name: Create pre-release
         uses: softprops/action-gh-release@v3
@@ -177,14 +186,16 @@ jobs:
 
             ```bash
             # Server + embedded engine
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/red-linux-x86_64 -o red && chmod +x red
+            curl -fsSLO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/red-linux-x86_64
+            chmod +x red-linux-x86_64
 
             # Thin remote-only client
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/red_client-linux-x86_64 -o red_client && chmod +x red_client
+            curl -fsSLO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/red_client-linux-x86_64
+            chmod +x red_client-linux-x86_64
 
             # Verify downloaded binaries against the aggregate checksum manifest.
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/checksums.txt -o checksums.txt
-            grep -E '  (red|red_client)-linux-x86_64$' checksums.txt | sha256sum -c -
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/SHA256SUMS -o SHA256SUMS
+            grep -E '  (red|red_client)-linux-x86_64$' SHA256SUMS | sha256sum -c -
             ```
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}

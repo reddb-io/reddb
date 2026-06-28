@@ -626,6 +626,9 @@ gRPC stubs, and wire vocabulary live in sibling crates.
 - [npm driver package](https://www.npmjs.com/package/reddb)
 - [npm CLI launcher](https://www.npmjs.com/package/@reddb-io/cli)
 - [Releases](https://github.com/reddb-io/reddb/releases)
+- [Release Policy](./docs/release-policy.md)
+- [Support Policy](./SUPPORT.md)
+- [Security Policy](./SECURITY.md)
 - [Public Contract Matrix](./docs/reference/contract-matrix.md) — every doc'd promise mapped to a test or a planned-status note
 
 ---
