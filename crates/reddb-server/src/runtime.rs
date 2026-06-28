@@ -1226,6 +1226,9 @@ struct RuntimeInner {
     kv_stats: KvStatsCounters,
     metrics_ingest_stats: MetricsIngestCounters,
     metrics_tenant_activity_stats: MetricsTenantActivityCounters,
+    /// Issue #1457 — Concurrent claim counters rendered onto `/metrics`.
+    /// Process-local; counters reset on restart by design.
+    claim_telemetry: std::sync::Arc<claim_telemetry::ClaimTelemetryCounters>,
     /// Slice 10 of issue #527 — Prometheus counters for the queue
     /// lifecycle (delivered/acked/nacked) rendered onto `/metrics`.
     /// Process-local; counters reset on restart by design.
@@ -1390,6 +1393,7 @@ pub mod impl_queue;
 mod impl_replica_loop;
 mod impl_replication_commit;
 pub(crate) use impl_queue::RedwireWaitOutcome;
+pub(crate) mod claim_telemetry;
 mod impl_search;
 mod impl_serverless;
 mod impl_timeseries;
@@ -1445,6 +1449,7 @@ pub(crate) mod window_phase;
 pub mod within_clause;
 pub mod write_gate;
 
+pub use self::claim_telemetry::ClaimTelemetrySnapshot;
 pub use self::graph_dsl::*;
 use self::join_filter::*;
 use self::query_exec::*;
