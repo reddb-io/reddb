@@ -1147,6 +1147,52 @@ impl RedDBServer {
             }
         }
 
+        // Concurrent claim counters — issue #1457. Labels are bounded to
+        // collection + model; no predicate values, ids, or query text enter
+        // metric cardinality.
+        {
+            let claim_telemetry = self.runtime.claim_telemetry_snapshot();
+            let render_claim_counter =
+                |body: &mut String, name: &str, help: &str, samples: &[((String, String), u64)]| {
+                    let _ = writeln!(body, "# HELP {} {}", name, help);
+                    let _ = writeln!(body, "# TYPE {} counter", name);
+                    for ((collection, model), n) in samples {
+                        let _ = writeln!(
+                            body,
+                            "{}{{collection=\"{}\",model=\"{}\"}} {}",
+                            name,
+                            sanitize_label(collection),
+                            sanitize_label(model),
+                            n
+                        );
+                    }
+                };
+            render_claim_counter(
+                &mut body,
+                "reddb_claim_attempts_total",
+                "UPDATE ... CLAIM statements attempted since process start.",
+                &claim_telemetry.attempts,
+            );
+            render_claim_counter(
+                &mut body,
+                "reddb_claim_successful_total",
+                "Rows successfully claimed by UPDATE ... CLAIM since process start.",
+                &claim_telemetry.successful,
+            );
+            render_claim_counter(
+                &mut body,
+                "reddb_claim_misses_total",
+                "UPDATE ... CLAIM statements that found no claimable rows since process start.",
+                &claim_telemetry.misses,
+            );
+            render_claim_counter(
+                &mut body,
+                "reddb_claim_skipped_locked_candidates_total",
+                "UPDATE ... CLAIM candidates skipped because another claim held the lock.",
+                &claim_telemetry.skipped_locked,
+            );
+        }
+
         // Query latency histogram — issue #1241. Bounded to the `kind`
         // dimension (ADR 0060 §4); no SQL/collection/tenant/user labels.
         // Only kinds with a real sample are emitted (honesty rule §6).
