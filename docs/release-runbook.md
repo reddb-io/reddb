@@ -344,6 +344,12 @@ The musl variant (`linux-aarch64-static`) is built but **not** part of
 the contract — it backs the thin `Dockerfile.client` image, not npm
 postinstall.
 
+Every stable release also publishes `checksums.txt`, an aggregate SHA-256
+manifest for the downloadable binaries. Automatic installers should fetch
+this manifest and verify the selected binary before execution. The per-asset
+`.sha256` files remain published for compatibility; `artifact-sizes.md` is
+release evidence for the binary/image size gate, not an installer contract.
+
 The release workflow enforces the contract automatically:
 
 - `.github/workflows/release.yml` → job `verify-release-assets` runs
@@ -353,9 +359,9 @@ The release workflow enforces the contract automatically:
   `publish-npm` (`@reddb-io/cli`) depends on it, so a missing asset
   blocks every Node-side publish at the gate.
 - `scripts/verify-release-assets.sh` queries `gh release view --json
-  assets`, asserts each `(bin, suffix)` pair is present, and exits 1
-  with the explicit missing list on failure. Run it locally against any
-  past tag to audit:
+  assets`, asserts each `(bin, suffix)` pair and `checksums.txt` are
+  present, and exits 1 with the explicit missing list on failure. Run it
+  locally against any past tag to audit:
 
   ```bash
   GH_TOKEN="$(gh auth token)" scripts/verify-release-assets.sh v1.0.5

@@ -376,6 +376,21 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Generate checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd release
+            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' \) ! -name '*.sha256' -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              | sed 's#  \./#  #'
+          ) > release/checksums.txt
+          test -s release/checksums.txt
+          echo "---- checksums.txt ----"
+          cat release/checksums.txt
+
       - name: Generate changelog from commits
         uses: orhun/git-cliff-action@v4
         id: changelog
@@ -419,6 +434,9 @@ jobs:
           curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/red-linux-x86_64 -o red && chmod +x red
           # Thin remote-only client (~2 MB)
           curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/red_client-linux-x86_64 -o red_client && chmod +x red_client
+          # Verify downloaded binaries against the aggregate checksum manifest.
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/checksums.txt -o checksums.txt
+          grep -E '  (red|red_client)-linux-x86_64$' checksums.txt | sha256sum -c -
           \`\`\`
 
           **Docker:**

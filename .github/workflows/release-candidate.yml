@@ -149,6 +149,21 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Generate checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd release
+            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' \) ! -name '*.sha256' -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              | sed 's#  \./#  #'
+          ) > release/checksums.txt
+          test -s release/checksums.txt
+          echo "---- checksums.txt ----"
+          cat release/checksums.txt
+
       - name: Create pre-release
         uses: softprops/action-gh-release@v3
         with:
@@ -166,6 +181,10 @@ jobs:
 
             # Thin remote-only client
             curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/red_client-linux-x86_64 -o red_client && chmod +x red_client
+
+            # Verify downloaded binaries against the aggregate checksum manifest.
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.rc_tag }}/checksums.txt -o checksums.txt
+            grep -E '  (red|red_client)-linux-x86_64$' checksums.txt | sha256sum -c -
             ```
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
