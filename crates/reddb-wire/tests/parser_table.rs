@@ -211,6 +211,33 @@ fn ok_cases() -> Vec<OkCase> {
                 tls: true,
             },
         },
+        OkCase {
+            name: "wss:// default port 443 tls",
+            input: "wss://mydb.db.reddb.io",
+            expect: ConnectionTarget::WsNative {
+                host: "mydb.db.reddb.io".into(),
+                port: 443,
+                tls: true,
+            },
+        },
+        OkCase {
+            name: "ws:// default port 80 plaintext",
+            input: "ws://host",
+            expect: ConnectionTarget::WsNative {
+                host: "host".into(),
+                port: 80,
+                tls: false,
+            },
+        },
+        OkCase {
+            name: "wss:// explicit port",
+            input: "wss://host:55055",
+            expect: ConnectionTarget::WsNative {
+                host: "host".into(),
+                port: 55055,
+                tls: true,
+            },
+        },
     ]
 }
 

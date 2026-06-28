@@ -170,10 +170,25 @@ test('redwire-ws: multiplexes several queries over one connection', async () => 
   await client.close()
 })
 
-test('redwire-ws: requires a wss:// url', async () => {
+test('redwire-ws: accepts a ws:// url for plaintext browser/dev endpoints', async () => {
+  const ws = new MockRedWireWebSocket()
+  const client = await connectRedwireWs({
+    url: 'ws://localhost:80/redwire',
+    WebSocketImpl: function () {
+      return ws
+    },
+  })
+
+  const result = await client.call('query', { sql: 'SELECT n FROM t' })
+  assert.deepEqual(result.rows, [{ n: 42 }])
+
+  await client.close()
+})
+
+test('redwire-ws: requires a ws:// or wss:// url', async () => {
   await assert.rejects(
-    connectRedwireWs({ url: 'ws://app.example.com/redwire', WebSocketImpl: () => ({}) }),
-    (err) => err.code === 'WSS_REQUIRED',
+    connectRedwireWs({ url: 'https://app.example.com/redwire', WebSocketImpl: () => ({}) }),
+    (err) => err.code === 'WEBSOCKET_URL_REQUIRED',
   )
 })
 

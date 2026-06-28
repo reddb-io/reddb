@@ -128,7 +128,7 @@ function waitOpen(ws) {
  * Open a RedWire connection over a binary WebSocket.
  *
  * @param {object} opts
- * @param {string} [opts.url] `wss://host:port/redwire` endpoint.
+ * @param {string} [opts.url] `ws(s)://host:port/redwire` endpoint.
  * @param {{ kind: 'anonymous' } | { kind: 'bearer', token: string }} [opts.auth]
  * @param {string} [opts.clientName]
  * @param {string} [opts.subprotocol] Override the advertised subprotocol.
@@ -153,10 +153,10 @@ export async function connectRedwireWs(opts = {}) {
       'no global WebSocket in this runtime; pass opts.WebSocketImpl',
     )
   }
-  if (typeof url !== 'string' || !url.startsWith('wss://')) {
+  if (typeof url !== 'string' || !(url.startsWith('wss://') || url.startsWith('ws://'))) {
     throw new RedDBError(
-      'WSS_REQUIRED',
-      `redwire websocket requires a wss:// url, got '${url}'`,
+      'WEBSOCKET_URL_REQUIRED',
+      `redwire websocket requires a ws:// or wss:// url, got '${url}'`,
     )
   }
 

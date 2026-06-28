@@ -78,7 +78,7 @@ impl std::error::Error for ParseError {}
 pub const DEFAULT_PORT_RED: u16 = 5050;
 pub const DEFAULT_PORT_GRPC: u16 = 55055;
 pub const DEFAULT_PORT_GRPCS: u16 = 55555;
-/// Default ports for `red+ws://` and `red+wss://` — align with the
+/// Default ports for `ws://` / `red+ws://` and `wss://` / `red+wss://` — align with the
 /// standard WS / WSS browser defaults (80 and 443) so a hosted endpoint
 /// like `*.db.reddb.io` works without an explicit port.
 pub const DEFAULT_PORT_WS: u16 = 80;
@@ -97,6 +97,8 @@ pub enum ConnectionScheme {
     Reds,
     RedWs,
     RedWss,
+    Ws,
+    Wss,
     Grpc,
     Grpcs,
     Http,
@@ -115,6 +117,8 @@ pub const SUPPORTED_SCHEMES: &[ConnectionScheme] = &[
     ConnectionScheme::File,
     ConnectionScheme::RedWs,
     ConnectionScheme::RedWss,
+    ConnectionScheme::Ws,
+    ConnectionScheme::Wss,
 ];
 
 impl ConnectionScheme {
@@ -126,6 +130,8 @@ impl ConnectionScheme {
             "reds" => Some(Self::Reds),
             "red+ws" => Some(Self::RedWs),
             "red+wss" => Some(Self::RedWss),
+            "ws" => Some(Self::Ws),
+            "wss" => Some(Self::Wss),
             "grpc" => Some(Self::Grpc),
             "grpcs" => Some(Self::Grpcs),
             "http" => Some(Self::Http),
@@ -142,6 +148,8 @@ impl ConnectionScheme {
             Self::Reds => "reds://",
             Self::RedWs => "red+ws://",
             Self::RedWss => "red+wss://",
+            Self::Ws => "ws://",
+            Self::Wss => "wss://",
             Self::Grpc => "grpc://",
             Self::Grpcs => "grpcs://",
             Self::Http => "http://",
@@ -154,7 +162,7 @@ impl ConnectionScheme {
             Self::Memory => "embedded in-memory engine",
             Self::File => "embedded file-backed engine",
             Self::Red | Self::Reds => "RedWire TCP",
-            Self::RedWs | Self::RedWss => "RedWire WebSocket",
+            Self::RedWs | Self::RedWss | Self::Ws | Self::Wss => "RedWire WebSocket",
             Self::Grpc | Self::Grpcs => "gRPC",
             Self::Http | Self::Https => "HTTP REST",
         }
@@ -167,6 +175,8 @@ impl ConnectionScheme {
             | Self::Reds
             | Self::RedWs
             | Self::RedWss
+            | Self::Ws
+            | Self::Wss
             | Self::Grpc
             | Self::Grpcs
             | Self::Http
@@ -182,6 +192,8 @@ impl ConnectionScheme {
             Self::Reds => "reds://db.example.com:5050",
             Self::RedWs => "red+ws://db.example.com",
             Self::RedWss => "red+wss://db.example.com",
+            Self::Ws => "ws://db.example.com",
+            Self::Wss => "wss://db.example.com",
             Self::Grpc => "grpc://db.example.com:55055",
             Self::Grpcs => "grpcs://db.example.com:55555",
             Self::Http => "http://db.example.com:80",
@@ -197,6 +209,8 @@ impl ConnectionScheme {
             Self::Reds => "Principal RedWire transport with TLS.",
             Self::RedWs => "Browser-native RedWire over WebSocket without TLS.",
             Self::RedWss => "Browser-native RedWire over WebSocket with TLS.",
+            Self::Ws => "Browser-friendly alias for RedWire over WebSocket without TLS.",
+            Self::Wss => "Browser-friendly alias for RedWire over WebSocket with TLS.",
             Self::Grpc => "Compatibility transport for existing gRPC clients.",
             Self::Grpcs => "TLS variant of the gRPC compatibility transport.",
             Self::Http => "REST/admin transport without TLS.",
@@ -262,7 +276,8 @@ pub enum ConnectionTarget {
     /// speaks framed binary directly; it does NOT route through
     /// tonic.
     RedWire { host: String, port: u16, tls: bool },
-    /// `red+ws://host:port` (plain WS) or `red+wss://host:port` (WSS).
+    /// `red+ws://host:port` / `ws://host:port` (plain WS) or
+    /// `red+wss://host:port` / `wss://host:port` (WSS).
     /// Browser-native WebSocket transport (ADR 0047 direct-when-reachable).
     /// The UI connects directly — no local RedWire-over-TCP bridge needed.
     WsNative { host: String, port: u16, tls: bool },
@@ -441,14 +456,19 @@ pub fn parse_with_limits(
                 tls: parsed.scheme() == "reds",
             })
         }
-        Some(ConnectionScheme::RedWs | ConnectionScheme::RedWss) => {
+        Some(
+            ConnectionScheme::RedWs
+            | ConnectionScheme::RedWss
+            | ConnectionScheme::Ws
+            | ConnectionScheme::Wss,
+        ) => {
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(
                     ParseErrorKind::InvalidUri,
-                    "red+ws(s):// URI is missing a host",
+                    "RedWire WebSocket URI is missing a host",
                 )
             })?;
-            let tls = parsed.scheme() == "red+wss";
+            let tls = parsed.scheme() == "red+wss" || parsed.scheme() == "wss";
             let port = parsed.port().unwrap_or(if tls {
                 DEFAULT_PORT_WSS
             } else {

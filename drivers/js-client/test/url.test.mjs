@@ -66,3 +66,37 @@ test('red:// canonical with userinfo still parses (regression lock)', () => {
   assert.equal(p.username, 'admin')
   assert.equal(p.password, 'pw')
 })
+
+test('wss:// parses as browser RedWire WebSocket with TLS defaults', () => {
+  const p = parseUri('wss://admin:s3cr%40t@mydb.db.reddb.io?token=sk-abc&api_key=ak-xyz')
+  assert.equal(p.kind, 'redwss')
+  assert.equal(p.host, 'mydb.db.reddb.io')
+  assert.equal(p.port, 443)
+  assert.equal(p.tls, true)
+  assert.equal(p.username, 'admin')
+  assert.equal(p.password, 's3cr@t')
+  assert.equal(p.token, 'sk-abc')
+  assert.equal(p.apiKey, 'ak-xyz')
+})
+
+test('ws:// parses as browser RedWire WebSocket with plaintext defaults', () => {
+  const p = parseUri('ws://localhost')
+  assert.equal(p.kind, 'redws')
+  assert.equal(p.host, 'localhost')
+  assert.equal(p.port, 80)
+  assert.equal(p.tls, false)
+})
+
+test('red+ws:// and red+wss:// remain supported aliases', () => {
+  const ws = parseUri('red+ws://dev.example:8080')
+  assert.equal(ws.kind, 'redws')
+  assert.equal(ws.host, 'dev.example')
+  assert.equal(ws.port, 8080)
+  assert.equal(ws.tls, false)
+
+  const wss = parseUri('red+wss://prod.example')
+  assert.equal(wss.kind, 'redwss')
+  assert.equal(wss.host, 'prod.example')
+  assert.equal(wss.port, 443)
+  assert.equal(wss.tls, true)
+})

@@ -37,6 +37,8 @@ Every driver accepts the same URI shapes (where the transport applies):
 ```
 red://host:5050                       # RedWire TCP (default port)
 reds://host:5050                      # RedWire over TLS, ALPN redwire/1
+wss://host                            # RedWire over WebSocket for browsers
+ws://localhost                        # RedWire over WebSocket for local browser dev
 http://host:5000                      # HTTP REST
 https://host:55555                     # HTTPS REST
 grpc://host:55055                      # gRPC

@@ -178,6 +178,8 @@ RedWire (`red://` / `reds://`) is RedDB's principal transport. gRPC, HTTP(S), br
 | `file://` | embedded file-backed engine | embedded | `file:///var/lib/reddb/app.db` | Embedded durable engine rooted at the URI path. |
 | `red+ws://` | RedWire WebSocket | remote | `red+ws://db.example.com` | Browser-native RedWire over WebSocket without TLS. |
 | `red+wss://` | RedWire WebSocket | remote | `red+wss://db.example.com` | Browser-native RedWire over WebSocket with TLS. |
+| `ws://` | RedWire WebSocket | remote | `ws://db.example.com` | Browser-friendly alias for RedWire over WebSocket without TLS. |
+| `wss://` | RedWire WebSocket | remote | `wss://db.example.com` | Browser-friendly alias for RedWire over WebSocket with TLS. |
 
 ## Deployment Topologies
 
