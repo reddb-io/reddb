@@ -204,13 +204,12 @@ jobs:
           done
 
   publish-cargo:
-    name: Publish crates @rc
+    name: Skip crates @rc
     needs: [plan, build-linux]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Cargo workspace pre-release publishing is best-effort: cargo resolves path
-    # deps locally and rejects RC versions against range requirements (^1.0 excludes
-    # pre-release). Failures here do not block the GitHub binary or npm @rc publish.
-    continue-on-error: true
+    # Cargo pre-release publishing is intentionally skipped. The Rust workspace has
+    # internal path dependency cycles (notably wire <-> grpc-proto) that make exact
+    # RC version rewriting unsafe; stable release publishing remains authoritative.
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
@@ -221,67 +220,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Update crate package versions for RC
-        # sync-version.js updates npm/package metadata too broadly for the cargo-only
-        # RC publish job. Touch only crate [package] versions here; the next step pins
-        # internal workspace dependency requirements so path package versions still
-        # satisfy Cargo's publish-time validation.
-        env:
-          RC_VERSION: ${{ needs.plan.outputs.rc_version }}
+      - name: Skip crates.io RC publish
         run: |
-          python3 - << 'PYEOF'
-          import os, re, glob
-          rc = os.environ['RC_VERSION']
-          for path in ['Cargo.toml'] + glob.glob('crates/*/Cargo.toml'):
-              lines = open(path).readlines()
-              in_pkg, replaced, out = False, False, []
-              for l in lines:
-                  if l.strip() == '[package]': in_pkg = True
-                  elif l.startswith('[') and l.strip() != '[package]': in_pkg = False
-                  if in_pkg and not replaced and re.match(r'^\s*version\s*=\s*"', l):
-                      l = re.sub(r'(version\s*=\s*")[^"]*"', f'\\g<1>{rc}"', l, count=1)
-                      replaced = True
-                  out.append(l)
-              open(path, 'w').writelines(out)
-          PYEOF
-
-      - name: Patch workspace dep version requirements for RC
-        # Cargo does not match pre-release versions against range requirements like "^1.0".
-        # Pin every internal workspace dep to the exact RC version so cargo publish resolves.
-        run: |
-          RC_VERSION="${{ needs.plan.outputs.rc_version }}"
-          sed -i -E "s/(package = \"reddb-io-[^\"]+\", version = \")[^\"]+(\")/\1=${RC_VERSION}\2/" Cargo.toml
-
-      - name: Publish workspace crates
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
-            echo "::warning::CARGO_REGISTRY_TOKEN not set — skipping crates.io @rc publish."
-            exit 0
-          fi
-
-          publish_one() {
-            local crate="$1"
-            echo "==> publish ${crate}@${{ needs.plan.outputs.rc_version }}"
-            local out
-            out=$(cargo publish --allow-dirty --no-verify -p "$crate" 2>&1) && { echo "$out"; return 0; }
-            if echo "$out" | grep -qE "already uploaded|already exists"; then
-              echo "  ${crate} already on crates.io — skipping"
-            else
-              echo "$out" >&2
-              return 1
-            fi
-          }
-
-          publish_one reddb-io-types
-          publish_one reddb-io-crypto
-          publish_one reddb-io-file
-          publish_one reddb-io-rql
-          publish_one reddb-io-wire
-          publish_one reddb-io-grpc-proto
-          publish_one reddb-io-client-connector
-          publish_one reddb-io-server
-          publish_one reddb-io-client
-          publish_one reddb-io
+          echo "::notice::Skipping crates.io @rc publish for ${{ needs.plan.outputs.rc_version }}."
+          echo "::notice::Stable release publishing is still verified by the Release workflow."
