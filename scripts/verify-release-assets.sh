@@ -45,6 +45,9 @@ SUFFIXES=(
   linux-armv7
   windows-x86_64.exe
 )
+EXTRA_ASSETS=(
+  checksums.txt
+)
 
 echo "verify-release-assets: checking ${REPO}@${TAG}"
 ASSETS_JSON="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '[.assets[].name]')"
@@ -59,6 +62,11 @@ for bin in "${BINS[@]}"; do
     fi
   done
 done
+for name in "${EXTRA_ASSETS[@]}"; do
+  if ! jq -e --arg n "$name" 'index($n)' <<<"$ASSETS_JSON" >/dev/null; then
+    MISSING+=("$name")
+  fi
+done
 
 if (( ${#MISSING[@]} > 0 )); then
   {
@@ -66,7 +74,7 @@ if (( ${#MISSING[@]} > 0 )); then
     echo "ERROR: release ${TAG} is missing ${#MISSING[@]} required asset(s):"
     for m in "${MISSING[@]}"; do echo "  - $m"; done
     echo
-    echo "These assets back the SDK postinstall and curl-based installer."
+    echo "These assets back the SDK postinstall, checksum verification, and curl-based installer."
     echo "Do NOT publish to npm without them — see docs/release-runbook.md"
     echo "(\"Release asset contract\")."
   } >&2

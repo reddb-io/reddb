@@ -105,6 +105,7 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
     assert.ok(assetName.includes(suffix), `asset-name.js still maps optional ${suffix}`);
   }
   assert.match(script, /BINS=\(red red_client\)/);
+  assert.match(script, /EXTRA_ASSETS=\(\s+checksums\.txt\s+\)/);
   assert.match(script, /gh release view "\$TAG" --repo "\$REPO" --json assets/);
 
   assert.match(workflow, /verify-release-assets:/);
@@ -120,7 +121,28 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
   }
 
   assert.match(runbook, /Release asset contract/);
+  assert.match(runbook, /checksums\.txt/);
   assert.match(runbook, /verify-release-assets\.sh/);
+});
+
+test("release workflows publish aggregate checksum manifests for installers", () => {
+  const releaseWorkflow = read(".github/workflows/release.yml");
+  const rcWorkflow = read(".github/workflows/release-candidate.yml");
+
+  for (const workflow of [releaseWorkflow, rcWorkflow]) {
+    assert.match(workflow, /name: Generate checksum manifest/);
+    assert.match(workflow, /find \. -maxdepth 1 -type f/);
+    assert.match(workflow, /-name 'red-\*'/);
+    assert.match(workflow, /-name 'red_client-\*'/);
+    assert.match(workflow, /! -name '\*\.sha256'/);
+    assert.match(workflow, /sort -z/);
+    assert.match(workflow, /sha256sum/);
+    assert.match(workflow, /> release\/checksums\.txt/);
+    assert.match(workflow, /test -s release\/checksums\.txt/);
+    assert.match(workflow, /files: release\/\*/);
+    assert.match(workflow, /releases\/download\/.+\/checksums\.txt/);
+    assert.match(workflow, /grep -E '  \(red\|red_client\)-linux-x86_64\$' checksums\.txt \| sha256sum -c -/);
+  }
 });
 
 test("nightly DR drill workflow uses the current-shell runner and public make target", () => {
