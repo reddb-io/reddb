@@ -33,9 +33,9 @@ pub use control_plane::{
     SingleNodeControlPlane,
 };
 pub use cross_range::{
-    ConsistentReadLeg, ConsistentReadPlan, ConsistentReadReject, GlobalReadWatermark, KeyTarget,
-    PinnedTarget, RangeParticipant, ReadFanout, ReadFanoutReject, ReadLeg, ResolvedTarget,
-    WriteTransactionPlan, WriteTransactionReject, WriterParticipation,
+    ConsistentReadLeg, ConsistentReadPlan, ConsistentReadReject, ExactClaimPlan, ExactClaimReject,
+    GlobalReadWatermark, KeyTarget, PinnedTarget, RangeParticipant, ReadFanout, ReadFanoutReject,
+    ReadLeg, ResolvedTarget, WriteTransactionPlan, WriteTransactionReject, WriterParticipation,
 };
 pub use drain::{
     drain_status, plan_drain, plan_force_remove, run_drain, run_force_remove, DrainBlock,
