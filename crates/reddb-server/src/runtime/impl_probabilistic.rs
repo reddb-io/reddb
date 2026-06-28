@@ -52,6 +52,18 @@ fn probabilistic_collection_contract(
     }
 }
 
+fn hll_precision_mismatch_error(
+    operation: &str,
+    expected_name: &str,
+    expected_precision: u8,
+    actual_name: &str,
+    actual_precision: u8,
+) -> RedDBError {
+    RedDBError::Query(format!(
+        "HLL {operation} requires matching precision; '{expected_name}' uses precision {expected_precision}, but '{actual_name}' uses precision {actual_precision}"
+    ))
+}
+
 enum ProbabilisticReadProjection {
     Cardinality { label: String },
     Freq { element: String, label: String },
@@ -382,6 +394,11 @@ impl RedDBRuntime {
             ProbabilisticCommand::HllCount { names } => {
                 let hlls =
                     probabilistic_read(&self.inner.probabilistic.hlls, "probabilistic HLL store");
+                if names.is_empty() {
+                    return Err(RedDBError::Query(
+                        "HLL COUNT requires at least one HLL name".to_string(),
+                    ));
+                }
                 if names.len() == 1 {
                     let hll = hlls.get(&names[0]).ok_or_else(|| {
                         RedDBError::NotFound(format!("HLL '{}' not found", names[0]))
@@ -403,11 +420,29 @@ impl RedDBRuntime {
                     })
                 } else {
                     // Multi-HLL count = union count
-                    let mut merged = crate::storage::primitives::hyperloglog::HyperLogLog::new();
+                    let first_name = &names[0];
+                    let first = hlls.get(first_name).ok_or_else(|| {
+                        RedDBError::NotFound(format!("HLL '{}' not found", first_name))
+                    })?;
+                    let expected_precision = first.precision();
+                    let mut merged =
+                        crate::storage::primitives::hyperloglog::HyperLogLog::with_precision(
+                            expected_precision,
+                        )
+                        .expect("loaded HLL precision is valid");
                     for name in names {
                         let hll = hlls.get(name).ok_or_else(|| {
                             RedDBError::NotFound(format!("HLL '{}' not found", name))
                         })?;
+                        if hll.precision() != expected_precision {
+                            return Err(hll_precision_mismatch_error(
+                                "COUNT",
+                                first_name,
+                                expected_precision,
+                                name,
+                                hll.precision(),
+                            ));
+                        }
                         merged.merge(hll);
                     }
                     let count = merged.count();
@@ -430,11 +465,31 @@ impl RedDBRuntime {
             ProbabilisticCommand::HllMerge { dest, sources } => {
                 let mut hlls =
                     probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
-                let mut merged = crate::storage::primitives::hyperloglog::HyperLogLog::new();
+                let first_src = sources.first().ok_or_else(|| {
+                    RedDBError::Query("HLL MERGE requires at least one source HLL".to_string())
+                })?;
+                let first = hlls.get(first_src).ok_or_else(|| {
+                    RedDBError::NotFound(format!("HLL '{}' not found", first_src))
+                })?;
+                let expected_precision = first.precision();
+                let mut merged =
+                    crate::storage::primitives::hyperloglog::HyperLogLog::with_precision(
+                        expected_precision,
+                    )
+                    .expect("loaded HLL precision is valid");
                 for src in sources {
                     let hll = hlls
                         .get(src)
                         .ok_or_else(|| RedDBError::NotFound(format!("HLL '{}' not found", src)))?;
+                    if hll.precision() != expected_precision {
+                        return Err(hll_precision_mismatch_error(
+                            "MERGE",
+                            first_src,
+                            expected_precision,
+                            src,
+                            hll.precision(),
+                        ));
+                    }
                     merged.merge(hll);
                 }
                 self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, dest, merged.as_bytes())?;
