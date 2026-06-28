@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,12 +28,15 @@ jobs:
           shared-key: dst-nightly-rust-1.91.0
           cache-on-failure: "true"
       - name: Run DST heavy seed sweep
-        run: cargo test --locked -p reddb-server replication::dst::tests::dst_seed_sweep -- --ignored
+        run: cargo test --locked -p reddb-io-server replication::dst::tests::dst_seed_sweep -- --ignored
 
   storage-fault-recovery:
     name: Storage fault recovery
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.91.0
