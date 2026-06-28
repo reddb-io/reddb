@@ -1,3 +1,4 @@
+use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
@@ -98,6 +99,155 @@ fn claim_exact_miss_reports_zero_and_applies_no_partial_write() {
     assert_eq!(updated.affected_rows, 0);
     assert!(status_ids(&rt, "exact_claim_miss", "claimed").is_empty());
     assert_eq!(status_ids(&rt, "exact_claim_miss", "ready"), vec![1, 2]);
+}
+
+#[test]
+fn claim_inside_transaction_publishes_on_commit() {
+    let rt = runtime();
+    set_current_connection_id(145201);
+    exec(
+        &rt,
+        "CREATE TABLE tx_claim_commit (id INT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO tx_claim_commit (id, rank, status) VALUES \
+         (1, 10, 'ready'), (2, 20, 'ready')",
+    );
+
+    exec(&rt, "BEGIN");
+    let claimed = exec(
+        &rt,
+        "UPDATE tx_claim_commit SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY rank ASC",
+    );
+    assert_eq!(claimed.affected_rows, 1);
+
+    set_current_connection_id(145202);
+    assert_eq!(status_ids(&rt, "tx_claim_commit", "ready"), vec![1, 2]);
+
+    set_current_connection_id(145201);
+    exec(&rt, "COMMIT");
+
+    set_current_connection_id(145202);
+    assert_eq!(status_ids(&rt, "tx_claim_commit", "claimed"), vec![1]);
+    assert_eq!(status_ids(&rt, "tx_claim_commit", "ready"), vec![2]);
+    clear_current_connection_id();
+}
+
+#[test]
+fn claim_inside_transaction_releases_on_rollback() {
+    let rt = runtime();
+    set_current_connection_id(145203);
+    exec(
+        &rt,
+        "CREATE TABLE tx_claim_rollback (id INT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO tx_claim_rollback (id, rank, status) VALUES \
+         (1, 10, 'ready'), (2, 20, 'ready')",
+    );
+
+    exec(&rt, "BEGIN");
+    let claimed = exec(
+        &rt,
+        "UPDATE tx_claim_rollback SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY rank ASC",
+    );
+    assert_eq!(claimed.affected_rows, 1);
+    exec(&rt, "ROLLBACK");
+
+    set_current_connection_id(145204);
+    assert!(status_ids(&rt, "tx_claim_rollback", "claimed").is_empty());
+    assert_eq!(status_ids(&rt, "tx_claim_rollback", "ready"), vec![1, 2]);
+    let claimed_after_rollback = exec(
+        &rt,
+        "UPDATE tx_claim_rollback SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY rank ASC",
+    );
+    assert_eq!(claimed_after_rollback.affected_rows, 1);
+    assert_eq!(status_ids(&rt, "tx_claim_rollback", "claimed"), vec![1]);
+    clear_current_connection_id();
+}
+
+#[test]
+fn competing_claim_skips_uncommitted_claim_lock() {
+    let rt = runtime();
+    set_current_connection_id(145205);
+    exec(
+        &rt,
+        "CREATE TABLE tx_claim_skip (id INT, rank INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO tx_claim_skip (id, rank, status) VALUES \
+         (1, 10, 'ready'), (2, 20, 'ready'), (3, 30, 'ready')",
+    );
+
+    exec(&rt, "BEGIN");
+    let first = exec(
+        &rt,
+        "UPDATE tx_claim_skip SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY rank ASC",
+    );
+    assert_eq!(first.affected_rows, 1);
+
+    set_current_connection_id(145206);
+    let second = exec(
+        &rt,
+        "UPDATE tx_claim_skip SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY rank ASC",
+    );
+    assert_eq!(second.affected_rows, 1);
+    assert_eq!(status_ids(&rt, "tx_claim_skip", "claimed"), vec![2]);
+
+    set_current_connection_id(145205);
+    exec(&rt, "ROLLBACK");
+
+    set_current_connection_id(145206);
+    assert_eq!(status_ids(&rt, "tx_claim_skip", "ready"), vec![1, 3]);
+    clear_current_connection_id();
+}
+
+#[test]
+fn ordinary_dml_against_claimed_row_keeps_mvcc_conflict_behavior() {
+    let rt = runtime();
+    set_current_connection_id(145207);
+    exec(
+        &rt,
+        "CREATE TABLE tx_claim_dml (id INT, rank INT, status TEXT, note TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO tx_claim_dml (id, rank, status, note) VALUES \
+         (1, 10, 'ready', 'seed')",
+    );
+
+    exec(&rt, "BEGIN");
+    let claimed = exec(
+        &rt,
+        "UPDATE tx_claim_dml SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY rank ASC",
+    );
+    assert_eq!(claimed.affected_rows, 1);
+
+    set_current_connection_id(145208);
+    let ordinary = exec(
+        &rt,
+        "UPDATE tx_claim_dml SET note = 'ordinary' WHERE id = 1",
+    );
+    assert_eq!(
+        ordinary.affected_rows, 0,
+        "ordinary DML keeps the existing MVCC visibility behavior while the claim update is open"
+    );
+
+    set_current_connection_id(145207);
+    exec(&rt, "ROLLBACK");
+
+    set_current_connection_id(145208);
+    assert_eq!(status_ids(&rt, "tx_claim_dml", "ready"), vec![1]);
+    clear_current_connection_id();
 }
 
 #[test]

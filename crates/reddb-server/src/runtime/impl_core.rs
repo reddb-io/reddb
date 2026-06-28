@@ -2425,6 +2425,7 @@ impl RedDBRuntime {
                 pending_versioned_updates: parking_lot::RwLock::new(HashMap::new()),
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
+                pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),
                 queue_wait_registry: std::sync::Arc::new(
                     crate::runtime::queue_wait_registry::QueueWaitRegistry::new(),
                 ),
@@ -5375,6 +5376,7 @@ impl RedDBRuntime {
                                     self.discard_pending_kv_watch_events(conn_id);
                                     self.discard_pending_queue_wakes(conn_id);
                                     self.discard_pending_store_wal_actions(conn_id);
+                                    self.release_pending_claim_locks(conn_id);
                                     return Err(err);
                                 }
                                 self.restore_pending_write_stamps(conn_id);
@@ -5389,6 +5391,8 @@ impl RedDBRuntime {
                                     self.revive_pending_versioned_updates(conn_id);
                                     self.revive_pending_tombstones(conn_id);
                                     self.discard_pending_kv_watch_events(conn_id);
+                                    self.discard_pending_queue_wakes(conn_id);
+                                    self.release_pending_claim_locks(conn_id);
                                     return Err(err);
                                 }
                                 // Phase 2.3.2e: commit every open sub-xid
@@ -5407,6 +5411,7 @@ impl RedDBRuntime {
                                 self.finalize_pending_tombstones(conn_id);
                                 self.finalize_pending_kv_watch_events(conn_id);
                                 self.finalize_pending_queue_wakes(conn_id);
+                                self.release_pending_claim_locks(conn_id);
                                 ("commit", format!("COMMIT — xid={} committed", ctx.xid))
                             }
                             None => (
@@ -5437,6 +5442,7 @@ impl RedDBRuntime {
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
+                                self.release_pending_claim_locks(conn_id);
                                 ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
                             }
                             None => (
@@ -8794,6 +8800,13 @@ impl RedDBRuntime {
 
     pub(crate) fn discard_pending_queue_wakes(&self, conn_id: u64) {
         self.inner.pending_queue_wakes.write().remove(&conn_id);
+    }
+
+    pub(crate) fn release_pending_claim_locks(&self, conn_id: u64) {
+        self.inner
+            .pending_claim_locks
+            .write()
+            .retain(|_, owner| *owner != conn_id);
     }
 
     pub(crate) fn finalize_pending_kv_watch_events(&self, conn_id: u64) {
