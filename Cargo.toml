@@ -126,6 +126,10 @@ name = "grouped_materialized_views_events_config_audit"
 path = "tests/grouped/materialized_views_events_config_audit.rs"
 
 [[test]]
+name = "grouped_probabilistic"
+path = "tests/grouped_probabilistic.rs"
+
+[[test]]
 name = "grouped_replication"
 path = "tests/grouped/replication.rs"
 
