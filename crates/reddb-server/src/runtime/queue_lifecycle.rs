@@ -94,20 +94,20 @@ pub(crate) struct QueueMessageView {
 }
 
 /// Result of a delivering lifecycle method ([`QueueLifecycle::group_read`],
-/// [`QueueLifecycle::claim_delivering`]) — the exact column projection the
-/// legacy `GROUP READ` / `CLAIM` commands return to clients today
-/// (`message_id, payload, consumer, delivery_count`). Unlike [`Delivery`],
-/// which exposes only the opaque `delivery_id` + payload, this surfaces:
+/// [`QueueLifecycle::claim_delivering`]). Carries the opaque
+/// `delivery_id` used by ACK/NACK plus the consumer-facing projection:
 ///
+/// - the opaque `delivery_id` that identifies the pending delivery,
 /// - the entity `message_id` clients key on (NOT the opaque `delivery_id`),
 /// - the `consumer` echoed back (the lifecycle store keys pending by
 ///   consumer *group*, not consumer, so the value is the caller-supplied
 ///   consumer threaded straight through — matching the legacy projection),
 /// - the `delivery_count` after this delivery's bump.
 ///
-/// Preserves the client-visible columns from the pre-lifecycle read path.
+/// Runtime call sites decide which fields to expose on each public surface.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DeliveredMessage {
+    pub(crate) delivery_id: DeliveryId,
     pub(crate) message_id: MessageId,
     pub(crate) payload: Value,
     pub(crate) consumer: String,
@@ -291,6 +291,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 .read_message(queue, message_id)
                 .ok_or_else(|| QueueStoreError::UnknownQueue(queue.to_string()))?;
             out.push(DeliveredMessage {
+                delivery_id,
                 message_id,
                 payload,
                 consumer: consumer.to_string(),
@@ -433,12 +434,11 @@ impl<S: QueueStore> QueueLifecycle<S> {
     }
 
     /// Delivering counterpart to [`claim`]: identical steal-after-min-idle
-    /// semantics, but returns the legacy `CLAIM` projection
-    /// (`message_id, payload, consumer, delivery_count`) instead of opaque
-    /// delivery handles. `new_consumer` is echoed into each returned
-    /// `consumer` field (the lifecycle store keys pending by group, not
-    /// consumer, so the value is threaded straight through — matching the
-    /// legacy `CLAIM` projection). The
+    /// semantics, but returns delivery-shaped rows with the opaque
+    /// `delivery_id` plus the `CLAIM` projection fields. `new_consumer`
+    /// is echoed into each returned `consumer` field (the lifecycle store
+    /// keys pending by group, not consumer, so the value is threaded
+    /// straight through — matching the legacy `CLAIM` projection). The
     /// `delivery_count` is the attempt counter after the claim's bump.
     ///
     /// [`claim`]: Self::claim
@@ -510,8 +510,9 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 new_deadline,
             )?;
             claimed.push(ClaimedDelivery {
-                delivery_id: entry.delivery_id,
+                delivery_id: entry.delivery_id.clone(),
                 message: DeliveredMessage {
+                    delivery_id: entry.delivery_id,
                     message_id: entry.message_id,
                     payload,
                     consumer: new_consumer.to_string(),
@@ -1731,16 +1732,20 @@ mod tests {
 
     #[test]
     fn group_read_returns_legacy_projection_in_work_mode() {
-        // Field set must equal the legacy GROUP READ projection:
-        // message_id, payload, consumer, delivery_count.
+        // The lifecycle projection carries the opaque delivery handle
+        // alongside the legacy GROUP READ columns.
         let lc = lifecycle(store_with(&[(1, "first"), (2, "second")]));
         let got = lc
             .group_read(&QueueTxn::new(), "q", "workers", "consumer-1", 2)
             .expect("group_read");
         assert_eq!(got.len(), 2);
+        assert!(!got[0].delivery_id.is_empty());
+        assert!(!got[1].delivery_id.is_empty());
+        assert_ne!(got[0].delivery_id, got[1].delivery_id);
         assert_eq!(
             got[0],
             DeliveredMessage {
+                delivery_id: got[0].delivery_id.clone(),
                 message_id: 1,
                 payload: Value::text("first"),
                 consumer: "consumer-1".to_string(),
@@ -1750,6 +1755,7 @@ mod tests {
         assert_eq!(
             got[1],
             DeliveredMessage {
+                delivery_id: got[1].delivery_id.clone(),
                 message_id: 2,
                 payload: Value::text("second"),
                 consumer: "consumer-1".to_string(),
@@ -1902,9 +1908,14 @@ mod tests {
             .claim_delivering("q", "consumer-z", 100, &QueueTxn::new())
             .expect("claim_delivering");
         assert_eq!(claimed.len(), 1);
+        assert!(
+            !claimed[0].delivery_id.is_empty(),
+            "claim_delivering must preserve the lifecycle delivery identity",
+        );
         assert_eq!(
             claimed[0],
             DeliveredMessage {
+                delivery_id: claimed[0].delivery_id.clone(),
                 message_id: 1,
                 payload: Value::text("payload"),
                 consumer: "consumer-z".to_string(),
