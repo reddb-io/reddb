@@ -7,6 +7,7 @@
  *
  *   - 'http://host:port'   — HTTP JSON-RPC over `fetch`
  *   - 'https://host:port'  — HTTPS JSON-RPC over `fetch`
+ *   - 'ws(s)://host:port'  — RedWire over binary WebSocket
  *
  * Streaming is the Web-streams implementation (`./streaming-web.js`), so the
  * full transport-agnostic surface works client-side: query, execute, insert,
@@ -72,18 +73,18 @@ function browserTransportError(scheme) {
     `'${scheme}' connections are not available in the browser: the `
       + `browser sandbox exposes no raw TCP socket (red://, reds://, pg) or `
       + `HTTP/2 client (grpc://, grpcs://) to JavaScript. Connect to an `
-      + `HTTP(S) endpoint instead — e.g. 'http://host:port' / `
-      + `'https://host:port' — by running RedDB's HTTP JSON-RPC listener or `
-      + `an HTTP gateway in front of the server, then call `
-      + `connect('https://…').`,
+      + `HTTP(S) endpoint or RedWire WebSocket endpoint instead — e.g. `
+      + `'http://host:port' / 'https://host:port' / 'wss://host' — by running `
+      + `RedDB's HTTP JSON-RPC listener, its WebSocket edge, or an HTTP gateway `
+      + `in front of the server.`,
   )
 }
 
 /**
  * Connect to a remote RedDB instance from a browser.
  *
- * @param {string} uri Connection URI. Only `http(s)://` is reachable from a
- *   browser; other schemes raise `BROWSER_TRANSPORT_UNSUPPORTED`.
+ * @param {string} uri Connection URI. `http(s)://` and `ws(s)://` are
+ *   reachable from a browser; other schemes raise `BROWSER_TRANSPORT_UNSUPPORTED`.
  * @param {object} [options]
  * @param {object} [options.auth] Authentication credentials.
  * @param {string} [options.auth.token] Bearer / API-key token.
@@ -128,11 +129,12 @@ export async function connect(uri, options = {}) {
   // a WSS the sandbox can open. The TLS edge enforces the Origin allowlist
   // and WSS-only on its side; here we just open the socket and run the
   // standard RedWire handshake over it.
-  if (parsed.kind === 'redwss') {
+  if (parsed.kind === 'redws' || parsed.kind === 'redwss') {
     const merged = mergeAuthFromUri(parsed, options.auth)
     let token = merged.token
     if (!token && merged.username && merged.password) {
-      const loginUrl = merged.loginUrl ?? `https://${parsed.host}:${parsed.port}/auth/login`
+      const httpScheme = parsed.tls === false ? 'http' : 'https'
+      const loginUrl = merged.loginUrl ?? `${httpScheme}://${parsed.host}:${parsed.port}/auth/login`
       const session = await login(loginUrl, {
         username: merged.username,
         password: merged.password,
@@ -140,7 +142,8 @@ export async function connect(uri, options = {}) {
       token = session.token
     }
     const auth = token ? { kind: 'bearer', token } : { kind: 'anonymous' }
-    const url = `wss://${parsed.host}:${parsed.port}${REDWIRE_WS_PATH}`
+    const wsScheme = parsed.tls === false ? 'ws' : 'wss'
+    const url = `${wsScheme}://${parsed.host}:${parsed.port}${REDWIRE_WS_PATH}`
     const client = await connectRedwireWs({ url, auth })
     return new RedDB(client)
   }

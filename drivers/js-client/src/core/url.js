@@ -20,7 +20,7 @@ import { RedDBError } from './errors.js'
 
 /**
  * @typedef {object} ParsedUri
- * @property {'embedded' | 'http' | 'https' | 'red' | 'reds' | 'redwss' | 'grpc' | 'grpcs' | 'pg'} kind
+ * @property {'embedded' | 'http' | 'https' | 'red' | 'reds' | 'redws' | 'redwss' | 'grpc' | 'grpcs' | 'pg'} kind
  * @property {string} [host]
  * @property {number} [port]
  * @property {string} [path]            // for embedded `file://`-equivalent
@@ -35,8 +35,8 @@ import { RedDBError } from './errors.js'
 
 /**
  * Parse any URI string into a normalised `ParsedUri`.
- * Accepts `red://`, `memory://`, `file://`, `grpc://` (the latter
- * three for backwards compat).
+ * Accepts `red://`, `ws(s)://`, `memory://`, `file://`, `grpc://`
+ * (the latter three for backwards compat).
  *
  * @param {string} uri
  * @returns {ParsedUri}
@@ -48,7 +48,16 @@ export function parseUri(uri) {
     )
   }
   if (uri.startsWith('red+wss://')) {
-    return parseRedWssUrl(uri)
+    return parseRedWebSocketUrl(uri, 'red+wss')
+  }
+  if (uri.startsWith('red+ws://')) {
+    return parseRedWebSocketUrl(uri, 'red+ws')
+  }
+  if (uri.startsWith('wss://')) {
+    return parseRedWebSocketUrl(uri, 'wss')
+  }
+  if (uri.startsWith('ws://')) {
+    return parseRedWebSocketUrl(uri, 'ws')
   }
   if (uri.startsWith('red://') || uri === 'red:' || uri === 'red:/') {
     return parseRedUrl(uri)
@@ -57,28 +66,35 @@ export function parseUri(uri) {
 }
 
 /**
- * Parse `red+wss://[user:pass@]host:port[?token=...]` — RedWire framing
+ * Parse `ws(s)://[user:pass@]host:port[?token=...]` — RedWire framing
  * tunneled over a binary WebSocket (the browser transport; #937, ADR
- * 0036). Resolves to a `wss://host:port/redwire` endpoint downstream.
- * Default port is 443 (the TLS edge).
+ * 0036). Resolves to a `ws(s)://host:port/redwire` endpoint downstream.
+ * TLS defaults to port 443; plaintext defaults to port 80.
  */
 export function parseRedWssUrl(uri) {
+  return parseRedWebSocketUrl(uri, 'red+wss')
+}
+
+function parseRedWebSocketUrl(uri, scheme) {
+  const tls = scheme === 'red+wss' || scheme === 'wss'
+  const prefix = `${scheme}://`
   let parsed
   try {
     // Borrow the URL parser via an `https://` authority so user / pass /
     // host / port / query all decode with the standard rules.
-    parsed = new URL('https://' + uri.slice('red+wss://'.length))
+    parsed = new URL('https://' + uri.slice(prefix.length))
   } catch (err) {
     throw new RedDBError('UNPARSEABLE_URI', `failed to parse '${uri}': ${err.message}`)
   }
   if (!parsed.hostname) {
-    throw new TypeError(`invalid red+wss:// URI: missing host in '${uri}'`)
+    throw new TypeError(`invalid ${prefix} URI: missing host in '${uri}'`)
   }
   const params = parsed.searchParams
   return {
-    kind: 'redwss',
+    kind: tls ? 'redwss' : 'redws',
     host: parsed.hostname,
-    port: parsed.port ? Number(parsed.port) : 443,
+    port: parsed.port ? Number(parsed.port) : (tls ? 443 : 80),
+    tls,
     username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
     password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
     token: params.get('token') ?? undefined,
@@ -239,7 +255,7 @@ export function parseLegacyUrl(uri) {
   }
   throw new RedDBError(
     'UNSUPPORTED_SCHEME',
-    `unsupported URI: '${uri}'. Use 'red://...' or one of memory://, file://, grpc://, http(s)://`,
+    `unsupported URI: '${uri}'. Use 'red://...' or one of memory://, file://, grpc://, http(s)://, ws(s)://`,
   )
 }
 
@@ -280,6 +296,10 @@ function defaultPortFor(kind) {
     case 'reds':
     case 'redwire':
       return 5050
+    case 'redws':
+      return 80
+    case 'redwss':
+      return 443
     case 'grpc':
       return 55055
     case 'grpcs':

@@ -122,7 +122,7 @@ pub const DEFAULT_REDWIRE_PORT: u16 = 5050;
 /// defining its own.
 pub const REDWIRE_WS_SUBPROTOCOL: &str = "reddb.redwire.v1";
 
-/// HTTP path the browser client (`red+wss://host:port`) upgrades on to
+/// HTTP path the browser client (`wss://host:port` / `red+wss://host:port`) upgrades on to
 /// reach the RedWire-over-WebSocket edge (ADR 0036).
 pub const REDWIRE_WS_PATH: &str = "/redwire";
 

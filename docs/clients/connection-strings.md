@@ -17,6 +17,8 @@ the URL or via the `options.tls` object.
 | `red://host:55555?proto=grpcs` / `grpcs://host:55555`                   | gRPC + TLS         | HTTP/2 + TLS                | bearer / mTLS / OAuth-JWT |
 | `red://host:5050` / `red://host:5050` / `grpc://host:5050`          | RedWire plain      | TCP framed binary           | bearer / anonymous       |
 | `reds://host:5443` / `red://host:5443?proto=redwires`                | RedWire + TLS      | TLS-wrapped framed binary   | bearer / mTLS            |
+| `ws://host` / `red+ws://host`                                        | RedWire WebSocket  | WS binary frames            | bearer / anonymous       |
+| `wss://host` / `red+wss://host`                                      | RedWire WebSocket + TLS | WSS binary frames       | bearer / login           |
 | `red://host:5443?tls=true&cert=/c.pem&key=/k.pem&ca=/ca.pem`             | RedWire + mTLS     | TLS + client cert           | mTLS (CN→user) + bearer  |
 | `red://host:5432?proto=pg`                                              | PostgreSQL wire    | PG F+B v3 (via psql / node-pg) | SCRAM/MD5/cleartext   |
 
@@ -52,6 +54,24 @@ const db = await connect('red://reddb.example.com:5050', {
 // Or anonymous (server has auth.enabled=false):
 const db = await connect('red://reddb.example.com:5050')
 ```
+
+### RedWire over WebSocket (browser)
+
+Browsers cannot open raw TCP sockets, so browser bundles use RedWire over a
+binary WebSocket. Use `wss://` for production browser clients; `ws://` is for
+plaintext local development origins.
+
+```js
+import { connect } from '@reddb-io/client/browser'
+
+const db = await connect('wss://reddb.example.com', {
+  auth: { token: 'sk-abc' },
+})
+```
+
+`wss://reddb.example.com` is equivalent to `red+wss://reddb.example.com` and
+upgrades to `/redwire` internally. The plaintext aliases are `ws://host` and
+`red+ws://host`.
 
 ### RedWire + mTLS (production)
 

@@ -147,6 +147,14 @@ The client follows the SDK Helper Spec for the shared JS/TS surface:
 | `grpcs://`     | gRPC over TLS                 | 55555         |
 | `http://`      | HTTP JSON                     | 5000         |
 | `https://`     | HTTPS JSON                    | 55555         |
+| `ws://`        | RedWire over WebSocket        | 80           |
+| `wss://`       | RedWire over WebSocket + TLS  | 443          |
+| `red+ws://`    | RedWire over WebSocket        | 80           |
+| `red+wss://`   | RedWire over WebSocket + TLS  | 443          |
+
+Browser bundles cannot open raw TCP, so use `wss://host` (or `ws://host`
+for plaintext development origins) when connecting directly from browser
+JavaScript.
 
 ## Rejected URI schemes
 
