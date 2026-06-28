@@ -60,9 +60,22 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
   assert.doesNotMatch(releaseWorkflow, legacyPersonalGhcrNamespace);
 
   const publishDocker = releaseWorkflow.match(/publish-docker:[\s\S]*?(?=\n  publish-client-image:)/)?.[0] ?? "";
+  const publishClient = releaseWorkflow.match(/publish-client-image:[\s\S]*?(?=\n  publish-python-wheels:)/)?.[0] ?? "";
   assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-x86_64/);
   assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-aarch64/);
   assert.match(publishDocker, /file: docker\/Dockerfile\.release/);
+
+  for (const [jobName, job, imagePattern] of [
+    ["publish-docker", publishDocker, /IMAGE: ghcr\.io\/\$\{\{ github\.repository \}\}/],
+    ["publish-client-image", publishClient, /IMAGE: ghcr\.io\/\$\{\{ github\.repository \}\}-client/],
+  ]) {
+    assert.match(job, /id-token: write/, `${jobName} must allow keyless signing`);
+    assert.match(job, /uses: sigstore\/cosign-installer@v4\.1\.2/, `${jobName} installs Cosign`);
+    assert.match(job, /id: build[\s\S]*uses: docker\/build-push-action@v7/, `${jobName} exposes build digest`);
+    assert.match(job, imagePattern, `${jobName} signs the expected GHCR image`);
+    assert.match(job, /DIGEST: \$\{\{ steps\.build\.outputs\.digest \}\}/, `${jobName} signs by digest`);
+    assert.match(job, /cosign sign --yes "\$\{IMAGE\}@\$\{DIGEST\}"/, `${jobName} signs with Cosign`);
+  }
 });
 
 test("release workflow uses runnable toolchain and pack commands", () => {
@@ -105,7 +118,7 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
     assert.ok(assetName.includes(suffix), `asset-name.js still maps optional ${suffix}`);
   }
   assert.match(script, /BINS=\(red red_client\)/);
-  assert.match(script, /EXTRA_ASSETS=\(\s+checksums\.txt\s+\)/);
+  assert.match(script, /EXTRA_ASSETS=\(\s+checksums\.txt\s+SHA256SUMS\s+\)/);
   assert.match(script, /gh release view "\$TAG" --repo "\$REPO" --json assets/);
 
   assert.match(workflow, /verify-release-assets:/);
@@ -139,9 +152,10 @@ test("release workflows publish aggregate checksum manifests for installers", ()
     assert.match(workflow, /sha256sum/);
     assert.match(workflow, /> release\/checksums\.txt/);
     assert.match(workflow, /test -s release\/checksums\.txt/);
+    assert.match(workflow, /cp release\/checksums\.txt release\/SHA256SUMS/);
     assert.match(workflow, /files: release\/\*/);
-    assert.match(workflow, /releases\/download\/.+\/checksums\.txt/);
-    assert.match(workflow, /grep -E '  \(red\|red_client\)-linux-x86_64\$' checksums\.txt \| sha256sum -c -/);
+    assert.match(workflow, /releases\/download\/.+\/SHA256SUMS/);
+    assert.match(workflow, /grep -E '  \(red\|red_client\)-linux-x86_64\$' SHA256SUMS \| sha256sum -c -/);
   }
 });
 

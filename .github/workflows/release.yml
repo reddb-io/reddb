@@ -534,9 +534,11 @@ jobs:
 
           gh attestation verify red-linux-x86_64 --repo ${REPO}
           gh attestation verify red_client-linux-x86_64 --repo ${REPO}
+
+          cosign verify ghcr.io/${REPO}:${TAG} --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${TAG}" --certificate-oidc-issuer https://token.actions.githubusercontent.com
           \`\`\`
 
-          Docker images are published as multi-arch GHCR images for linux/amd64 and linux/arm64 with BuildKit provenance and SBOM attestations.
+          Docker images are published as multi-arch GHCR images for linux/amd64 and linux/arm64 with Cosign keyless signatures, BuildKit provenance, and SBOM attestations.
 
           \`\`\`bash
           docker buildx imagetools inspect ghcr.io/${REPO}:${TAG}
@@ -833,6 +835,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
+      id-token: write
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
@@ -869,6 +872,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -895,6 +901,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.package_version }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -908,6 +915,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Sign published image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
   publish-client-image:
     # ADR 0004 — thin red_client container, parallel to publish-docker.
     # Built from the release matrix artifact so Docker publishing does not
@@ -918,6 +933,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
+      id-token: write
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
@@ -954,6 +970,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -980,6 +999,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.package_version }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -990,6 +1010,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
           sbom: true
+
+      - name: Sign published image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}-client
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   # ===========================================================================
   # publish-python — Build and upload reddb wheels to PyPI.

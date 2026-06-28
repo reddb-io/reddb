@@ -365,9 +365,18 @@ gh attestation verify red-linux-x86_64 --repo reddb-io/reddb
 ```
 
 GHCR server and thin-client images are published as multi-arch images for
-`linux/amd64` and `linux/arm64` with BuildKit provenance and SBOM attestations.
-The release workflow publishes immutable `vX.Y.Z` and `X.Y.Z` tags, moving
-`X.Y`, `X`, and `latest` tags for stable releases, and `next` for prereleases.
+`linux/amd64` and `linux/arm64` with Cosign keyless signatures, BuildKit
+provenance, and SBOM attestations. The release workflow publishes immutable
+`vX.Y.Z` and `X.Y.Z` tags, moving `X.Y`, `X`, and `latest` tags for stable
+releases, and `next` for prereleases.
+
+Stable server-image signatures can be verified with:
+
+```bash
+cosign verify ghcr.io/reddb-io/reddb:vX.Y.Z \
+  --certificate-identity "https://github.com/reddb-io/reddb/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 The release workflow enforces the contract automatically:
 
