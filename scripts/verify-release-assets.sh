@@ -48,6 +48,8 @@ SUFFIXES=(
 EXTRA_ASSETS=(
   checksums.txt
   SHA256SUMS
+  "red-${TAG}.spdx.json"
+  "red-${TAG}.cyclonedx.json"
 )
 
 echo "verify-release-assets: checking ${REPO}@${TAG}"

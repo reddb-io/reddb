@@ -39,12 +39,13 @@ Stable GitHub Releases publish:
 - Per-asset `.sha256` files for compatibility.
 - `checksums.txt` for automatic installers.
 - `SHA256SUMS` for standard manual verification.
+- `red-vX.Y.Z.spdx.json` and `red-vX.Y.Z.cyclonedx.json` source SBOMs.
 - `artifact-sizes.md` as release-gate evidence.
 
 Official JavaScript package publication is gated on the GitHub Release carrying
 the postinstall-required binary assets and checksum manifests. Release artifacts
-are attested with GitHub Artifact Attestations from the aggregate checksum
-manifest.
+and SBOMs are attested with GitHub Artifact Attestations from the aggregate
+checksum manifest.
 
 ## Container Tags
 
@@ -70,6 +71,8 @@ curl -fsSLO https://github.com/reddb-io/reddb/releases/download/vX.Y.Z/red-linux
 curl -fsSL https://github.com/reddb-io/reddb/releases/download/vX.Y.Z/SHA256SUMS -o SHA256SUMS
 grep -E '  red-linux-x86_64$' SHA256SUMS | sha256sum -c -
 gh attestation verify red-linux-x86_64 --repo reddb-io/reddb
+gh attestation verify red-vX.Y.Z.spdx.json --repo reddb-io/reddb
+gh attestation verify red-vX.Y.Z.cyclonedx.json --repo reddb-io/reddb
 ```
 
 Container inspection:

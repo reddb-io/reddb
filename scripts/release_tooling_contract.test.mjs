@@ -118,7 +118,10 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
     assert.ok(assetName.includes(suffix), `asset-name.js still maps optional ${suffix}`);
   }
   assert.match(script, /BINS=\(red red_client\)/);
-  assert.match(script, /EXTRA_ASSETS=\(\s+checksums\.txt\s+SHA256SUMS\s+\)/);
+  assert.match(
+    script,
+    /EXTRA_ASSETS=\(\s+checksums\.txt\s+SHA256SUMS\s+"red-\$\{TAG\}\.spdx\.json"\s+"red-\$\{TAG\}\.cyclonedx\.json"\s+\)/,
+  );
   assert.match(script, /gh release view "\$TAG" --repo "\$REPO" --json assets/);
 
   assert.match(workflow, /verify-release-assets:/);
@@ -144,6 +147,17 @@ test("release workflows publish aggregate checksum manifests for installers", ()
 
   for (const workflow of [releaseWorkflow, rcWorkflow]) {
     assert.match(workflow, /name: Generate checksum manifest/);
+    assert.match(workflow, /uses: anchore\/sbom-action\/download-syft@v0\.24\.0/);
+    assert.match(workflow, /syft-version: v1\.46\.0/);
+    assert.match(workflow, /name: Generate source SBOMs/);
+    assert.match(workflow, /--exclude '\.\/\.git\/\*\*'/);
+    assert.match(workflow, /--exclude '\.\/release\/\*\*'/);
+    assert.match(workflow, /--exclude '\.\/release-sbom\/\*\*'/);
+    assert.match(workflow, /--source-name RedDB\s+--source-version "\$\{VERSION\}"/);
+    assert.match(workflow, /red-\$\{RELEASE_TAG\}\.spdx\.json/);
+    assert.match(workflow, /red-\$\{RELEASE_TAG\}\.cyclonedx\.json/);
+    assert.match(workflow, /name: Add SBOMs to release assets/);
+    assert.match(workflow, /cp release-sbom\/\* release\//);
     assert.match(workflow, /find \. -maxdepth 1 -type f/);
     assert.match(workflow, /-name 'red-\*'/);
     assert.match(workflow, /-name 'red_client-\*'/);

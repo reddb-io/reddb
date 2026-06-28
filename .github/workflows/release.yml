@@ -374,10 +374,41 @@ jobs:
         with:
           # git-cliff walks the full commit history to build the changelog.
           fetch-depth: 0
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@v0.24.0
+        with:
+          syft-version: v1.46.0
+
+      - name: Generate source SBOMs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-sbom
+          VERSION="${RELEASE_TAG#v}"
+          syft_args=(
+            scan dir:.
+            --exclude './.git/**'
+            --exclude './release/**'
+            --exclude './release-sbom/**'
+            --source-name RedDB
+            --source-version "${VERSION}"
+          )
+          "${SYFT}" "${syft_args[@]}" -o spdx-json > "release-sbom/red-${RELEASE_TAG}.spdx.json"
+          "${SYFT}" "${syft_args[@]}" -o cyclonedx-json > "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
+          test -s "release-sbom/red-${RELEASE_TAG}.spdx.json"
+          test -s "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
+
       - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
+
+      - name: Add SBOMs to release assets
+        run: cp release-sbom/* release/
 
       - name: Generate checksum manifest
         shell: bash
@@ -532,8 +563,14 @@ jobs:
           curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/SHA256SUMS -o SHA256SUMS
           grep -E '  (red|red_client)-linux-x86_64$' SHA256SUMS | sha256sum -c -
 
+          curl -fsSLO https://github.com/${REPO}/releases/download/${TAG}/red-${TAG}.spdx.json
+          curl -fsSLO https://github.com/${REPO}/releases/download/${TAG}/red-${TAG}.cyclonedx.json
+          grep -E "  red-${TAG}\\.(spdx|cyclonedx)\\.json$" SHA256SUMS | sha256sum -c -
+
           gh attestation verify red-linux-x86_64 --repo ${REPO}
           gh attestation verify red_client-linux-x86_64 --repo ${REPO}
+          gh attestation verify red-${TAG}.spdx.json --repo ${REPO}
+          gh attestation verify red-${TAG}.cyclonedx.json --repo ${REPO}
 
           cosign verify ghcr.io/${REPO}:${TAG} --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${TAG}" --certificate-oidc-issuer https://token.actions.githubusercontent.com
           \`\`\`
@@ -547,7 +584,8 @@ jobs:
 
           ## Release Assets
 
-          - \`checksums.txt\` / \`SHA256SUMS\`: aggregate SHA-256 manifest for all release binaries.
+          - \`checksums.txt\` / \`SHA256SUMS\`: aggregate SHA-256 manifest for release binaries and SBOMs.
+          - \`red-${TAG}.spdx.json\` / \`red-${TAG}.cyclonedx.json\`: source SBOMs for the release.
           - \`artifact-sizes.md\`: release evidence from the binary/container size gate, not an installer input.
           MARKDOWN
           echo "---- composed body ----"

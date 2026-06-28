@@ -147,10 +147,43 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@v0.24.0
+        with:
+          syft-version: v1.46.0
+
+      - name: Generate source SBOMs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.rc_tag }}
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-sbom
+          VERSION="${RELEASE_TAG#v}"
+          syft_args=(
+            scan dir:.
+            --exclude './.git/**'
+            --exclude './release/**'
+            --exclude './release-sbom/**'
+            --source-name RedDB
+            --source-version "${VERSION}"
+          )
+          "${SYFT}" "${syft_args[@]}" -o spdx-json > "release-sbom/red-${RELEASE_TAG}.spdx.json"
+          "${SYFT}" "${syft_args[@]}" -o cyclonedx-json > "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
+          test -s "release-sbom/red-${RELEASE_TAG}.spdx.json"
+          test -s "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
+
       - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
+
+      - name: Add SBOMs to release assets
+        run: cp release-sbom/* release/
 
       - name: Generate checksum manifest
         shell: bash
