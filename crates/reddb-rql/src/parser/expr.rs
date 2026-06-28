@@ -180,6 +180,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr_suffix(&mut self, mut left: Expr, min_prec: u8) -> Result<Expr, ParseError> {
+        let max_infix_chain = self.depth.max_depth.saturating_mul(8).max(1);
+        let mut infix_chain = 0usize;
         loop {
             let Some((op, prec)) = self.peek_binop() else {
                 // Not a standard infix op — check for postfix forms.
@@ -193,6 +195,14 @@ impl<'a> Parser<'a> {
             };
             if prec < min_prec {
                 break;
+            }
+            infix_chain += 1;
+            if infix_chain > max_infix_chain {
+                return Err(ParseError::token_limit(
+                    "max_tokens",
+                    self.max_tokens,
+                    self.position(),
+                ));
             }
             self.advance()?; // consume the operator token
             let start_span = self.span_start_of(&left);

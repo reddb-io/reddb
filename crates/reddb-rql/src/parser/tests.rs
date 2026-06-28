@@ -6644,6 +6644,67 @@ fn fuzz_regression_migration_body_token_budget_is_not_swallowed() {
     );
 }
 
+fn decode_hex_fixture(hex: &str) -> Vec<u8> {
+    let hex = hex.trim();
+    assert_eq!(hex.len() % 2, 0, "hex fixture must contain whole bytes");
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let hi = (chunk[0] as char)
+                .to_digit(16)
+                .expect("hex fixture contains only hex digits");
+            let lo = (chunk[1] as char)
+                .to_digit(16)
+                .expect("hex fixture contains only hex digits");
+            ((hi << 4) | lo) as u8
+        })
+        .collect()
+}
+
+#[test]
+fn fuzz_regression_issue_1479_migration_seed_terminates() {
+    let bytes = decode_hex_fixture(include_str!("fuzz_seeds/issue_1479_migration_parser.hex"));
+    let raw = std::str::from_utf8(&bytes).expect("fuzz seed is utf-8");
+
+    let (prefix_byte, tail) = raw.as_bytes().split_first().expect("non-empty fuzz seed");
+    let prefixes = [
+        "CREATE MIGRATION ",
+        "APPLY MIGRATION ",
+        "ROLLBACK MIGRATION ",
+        "EXPLAIN MIGRATION ",
+    ];
+    let tail = std::str::from_utf8(tail).expect("fuzz seed tail is utf-8");
+    let prefixed = format!(
+        "{}{}",
+        prefixes[*prefix_byte as usize % prefixes.len()],
+        tail
+    );
+
+    let _ = super::parse(&prefixed);
+    let _ = super::parse(raw);
+}
+
+#[test]
+fn fuzz_regression_issue_1479_sql_seed_terminates() {
+    let bytes = decode_hex_fixture(include_str!("fuzz_seeds/issue_1479_sql_parser.hex"));
+    let input = std::str::from_utf8(&bytes).expect("fuzz seed is utf-8");
+
+    let err = super::parse(input)
+        .err()
+        .expect("fuzz seed must hit a bounded parser error");
+    assert!(
+        matches!(
+            err.kind,
+            super::ParseErrorKind::DepthLimit {
+                limit_name: "max_depth",
+                value: 16,
+            }
+        ),
+        "kind: {:?}",
+        err.kind
+    );
+}
+
 #[test]
 fn fuzz_regression_nested_select_kv_shape_hits_default_depth_limit() {
     let levels = super::ParserLimits::default().max_depth + 8;
@@ -7468,7 +7529,7 @@ fn test_parse_vault_list_and_watch() {
 //
 // Expression and subquery nesting paths are depth-bounded through the
 // shared `Parser::enter_depth` / `Parser::exit_depth` mechanism and
-// `ParserLimits::max_depth` (default 32).  Feeding input nested past
+// `ParserLimits::max_depth` (default 16).  Feeding input nested past
 // that cap must return a bounded `ParseError` mentioning "max_depth" —
 // never a panic or stack overflow.  Mirrors the `json_literal_table`
 // DoS tests as prior art.
@@ -7476,7 +7537,7 @@ fn test_parse_vault_list_and_watch() {
 
 #[test]
 fn dos_expr_paren_nesting_depth_exceeded() {
-    // 200 layers of parentheses — exceeds the default max_depth (32).
+    // 200 layers of parentheses — exceeds the default max_depth (16).
     let open: String = "(".repeat(200);
     let close: String = ")".repeat(200);
     let sql = format!("SELECT * FROM t WHERE x = {}1{}", open, close);
@@ -7490,7 +7551,7 @@ fn dos_expr_paren_nesting_depth_exceeded() {
 
 #[test]
 fn dos_expr_paren_nesting_at_cap_passes() {
-    // 10 layers — well under the default max_depth cap of 32.
+    // 10 layers — well under the default max_depth cap of 16.
     let open: String = "(".repeat(10);
     let close: String = ")".repeat(10);
     let sql = format!("SELECT * FROM t WHERE x = {}1{}", open, close);
@@ -7500,7 +7561,7 @@ fn dos_expr_paren_nesting_at_cap_passes() {
 #[test]
 fn dos_filter_not_nesting_depth_exceeded() {
     // 200 chained NOTs — each recurse through `parse_not_expr` which
-    // calls `enter_depth`, so this hits the default max_depth (32) cap.
+    // calls `enter_depth`, so this hits the default max_depth (16) cap.
     let nots: String = "NOT ".repeat(200);
     let sql = format!("SELECT * FROM t WHERE {}x = 1", nots);
     let err = parse(&sql).expect_err("expected depth-limit error for NOT nesting");
@@ -7513,7 +7574,7 @@ fn dos_filter_not_nesting_depth_exceeded() {
 
 #[test]
 fn dos_filter_not_nesting_at_cap_passes() {
-    // 5 levels of NOT — well under the default max_depth cap of 32.
+    // 5 levels of NOT — well under the default max_depth cap of 16.
     let nots: String = "NOT ".repeat(5);
     let sql = format!("SELECT * FROM t WHERE {}x = 1", nots);
     parse(&sql).expect("5 levels of NOT nesting must parse");

@@ -10,7 +10,7 @@ errors instead of process panics or OOM.
 
 | Limit                  | Default | Configured by               |
 |------------------------|---------|-----------------------------|
-| `max_depth`            | 32      | `ParserLimits::max_depth`   |
+| `max_depth`            | 16      | `ParserLimits::max_depth`   |
 | `max_input_bytes`      | 1 MiB   | `ParserLimits::max_input_bytes` |
 | `max_identifier_chars` | 256     | `ParserLimits::max_identifier_chars` |
 | `max_tokens`           | 8192    | `ParserLimits::max_tokens`  |
@@ -19,10 +19,12 @@ Source: `crates/reddb-rql/src/limits.rs`.
 
 ## Rationale
 
-- **`max_depth = 32`**. Hand-written queries top out around
-  10–12 levels (CTE → subquery → expression). 32 leaves headroom
-  for generated queries while keeping nested SELECT/function-call
-  payloads below the default test/fuzz thread stack.
+- **`max_depth = 16`**. Hand-written queries top out around
+  10–12 levels (CTE → subquery → expression). 16 leaves focused
+  headroom for generated queries while keeping nested
+  SELECT/function-call payloads below the default test/fuzz
+  thread stack, including the stack-sensitive fuzz seed from
+  issue #1479.
 - **`max_input_bytes = 1 MiB`**. Queries that exceed 1 MiB are
   almost always tooling regressions — even bulk INSERT statements
   belong on the binary `INSERT … VALUES (?, ?, ?)` path, not as a
