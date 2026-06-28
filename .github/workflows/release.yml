@@ -400,16 +400,41 @@ jobs:
         with:
           subject-checksums: release/SHA256SUMS
 
+      - name: Resolve stable changelog range
+        id: changelog_range
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.plan.outputs.release_tag }}"
+          TARGET_REF="$TAG"
+          if ! git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
+            TARGET_REF="HEAD"
+          fi
+
+          PREVIOUS_TAG="$(git tag --merged "$TARGET_REF" --list 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vx "$TAG" \
+            | head -n 1 || true)"
+
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "range=${PREVIOUS_TAG}..${TARGET_REF}" >> "$GITHUB_OUTPUT"
+            echo "Release changelog range: ${PREVIOUS_TAG}..${TARGET_REF}"
+          else
+            echo "range=${TARGET_REF}" >> "$GITHUB_OUTPUT"
+            echo "Release changelog range: ${TARGET_REF}"
+          fi
+
       - name: Generate changelog from commits
         uses: orhun/git-cliff-action@v4
         id: changelog
         with:
           config: cliff.toml
-          # --unreleased: commits since the most recent tag
+          # The explicit range uses the previous stable tag, so RC tags do not
+          # become the public release-notes baseline.
           # --tag: label the rendered block with this version even though
           #        the tag isn't pushed yet (workflow_dispatch path)
           # --strip header: drop the top-level Changelog title; we wrap it
-          args: --unreleased --tag ${{ needs.plan.outputs.release_tag }} --strip header
+          args: ${{ steps.changelog_range.outputs.range }} --tag ${{ needs.plan.outputs.release_tag }} --strip header
         env:
           OUTPUT: release-changelog.md
           GITHUB_REPO: ${{ github.repository }}
