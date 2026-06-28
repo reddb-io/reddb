@@ -58,7 +58,8 @@ Stable GHCR images publish immutable and moving tags:
 Prerelease images publish `next`.
 
 Server and thin-client images are multi-arch for `linux/amd64` and
-`linux/arm64`, with BuildKit provenance and SBOM attestations.
+`linux/arm64`, with Cosign keyless signatures, BuildKit provenance, and SBOM
+attestations.
 
 ## Verification
 
@@ -76,4 +77,7 @@ Container inspection:
 ```bash
 docker buildx imagetools inspect ghcr.io/reddb-io/reddb:vX.Y.Z
 docker buildx imagetools inspect ghcr.io/reddb-io/reddb-client:vX.Y.Z
+cosign verify ghcr.io/reddb-io/reddb:vX.Y.Z \
+  --certificate-identity "https://github.com/reddb-io/reddb/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
