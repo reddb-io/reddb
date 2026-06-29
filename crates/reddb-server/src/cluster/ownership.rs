@@ -43,7 +43,7 @@
 //! Everything here is a pure data model with no I/O, so the routing, versioning,
 //! and replication story is exercised deterministically.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::identity::NodeIdentity;
 use super::slot::hash_shard_key_to_range_key;
@@ -87,6 +87,190 @@ impl CollectionId {
 impl std::fmt::Display for CollectionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Stable identity for the collection group that one Placement Authority owns.
+///
+/// A group is the control-plane sharding unit for placement decisions. Related
+/// collections can share a group so they stay in one authority domain; a large
+/// collection can instead be the group's only member when it needs isolated
+/// placement policy.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CollectionGroupId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionGroupIdError;
+
+impl std::fmt::Display for CollectionGroupIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "collection group id is empty")
+    }
+}
+
+impl std::error::Error for CollectionGroupIdError {}
+
+impl CollectionGroupId {
+    /// Build a collection group id from a non-empty name.
+    pub fn new(value: impl AsRef<str>) -> Result<Self, CollectionGroupIdError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(CollectionGroupIdError);
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CollectionGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One Placement Authority assignment for a non-overlapping collection-catalog
+/// slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionGroupAuthority {
+    group: CollectionGroupId,
+    authority: NodeIdentity,
+    collections: BTreeSet<CollectionId>,
+}
+
+impl CollectionGroupAuthority {
+    /// Assign `collections` to one group owned by `authority`.
+    pub fn new(
+        group: CollectionGroupId,
+        authority: NodeIdentity,
+        collections: impl IntoIterator<Item = CollectionId>,
+    ) -> Result<Self, PlacementAuthorityError> {
+        let collections = collections.into_iter().collect::<BTreeSet<_>>();
+        if collections.is_empty() {
+            return Err(PlacementAuthorityError::EmptyCatalogSlice { group });
+        }
+        Ok(Self {
+            group,
+            authority,
+            collections,
+        })
+    }
+
+    pub fn group(&self) -> &CollectionGroupId {
+        &self.group
+    }
+
+    pub fn authority(&self) -> &NodeIdentity {
+        &self.authority
+    }
+
+    pub fn collections(&self) -> impl Iterator<Item = &CollectionId> {
+        self.collections.iter()
+    }
+
+    fn overlaps(&self, other: &CollectionGroupAuthority) -> Option<CollectionId> {
+        self.collections
+            .intersection(&other.collections)
+            .next()
+            .cloned()
+    }
+}
+
+/// Why a Placement Authority assignment was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementAuthorityError {
+    /// A group assignment must publish at least one collection in its catalog
+    /// slice.
+    EmptyCatalogSlice { group: CollectionGroupId },
+    /// The group already has exactly one Placement Authority.
+    DuplicateCollectionGroup { group: CollectionGroupId },
+    /// Two Placement Authority assignments would own the same collection-catalog
+    /// slice.
+    OverlappingCatalogSlice {
+        collection: CollectionId,
+        existing_group: CollectionGroupId,
+        attempted_group: CollectionGroupId,
+    },
+}
+
+impl std::fmt::Display for PlacementAuthorityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyCatalogSlice { group } => {
+                write!(f, "collection group {group} has an empty catalog slice")
+            }
+            Self::DuplicateCollectionGroup { group } => {
+                write!(
+                    f,
+                    "collection group {group} already has a placement authority"
+                )
+            }
+            Self::OverlappingCatalogSlice {
+                collection,
+                existing_group,
+                attempted_group,
+            } => write!(
+                f,
+                "collection {collection} is already in group {existing_group}, so group {attempted_group} would overlap its catalog slice"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlacementAuthorityError {}
+
+/// Placement Authority assignments keyed by Collection group.
+#[derive(Debug, Clone, Default)]
+pub struct PlacementAuthorityCatalog {
+    assignments: BTreeMap<CollectionGroupId, CollectionGroupAuthority>,
+}
+
+impl PlacementAuthorityCatalog {
+    /// An empty Placement Authority catalog.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish one group-owned, non-overlapping collection-catalog slice.
+    pub fn assign(
+        &mut self,
+        assignment: CollectionGroupAuthority,
+    ) -> Result<(), PlacementAuthorityError> {
+        if self.assignments.contains_key(assignment.group()) {
+            return Err(PlacementAuthorityError::DuplicateCollectionGroup {
+                group: assignment.group().clone(),
+            });
+        }
+        for existing in self.assignments.values() {
+            if let Some(collection) = existing.overlaps(&assignment) {
+                return Err(PlacementAuthorityError::OverlappingCatalogSlice {
+                    collection,
+                    existing_group: existing.group().clone(),
+                    attempted_group: assignment.group().clone(),
+                });
+            }
+        }
+        self.assignments
+            .insert(assignment.group().clone(), assignment);
+        Ok(())
+    }
+
+    pub fn authority_for_group(
+        &self,
+        group: &CollectionGroupId,
+    ) -> Option<&CollectionGroupAuthority> {
+        self.assignments.get(group)
+    }
+
+    pub fn authority_for_collection(
+        &self,
+        collection: &CollectionId,
+    ) -> Option<&CollectionGroupAuthority> {
+        self.assignments
+            .values()
+            .find(|assignment| assignment.collections.contains(collection))
     }
 }
 
@@ -1348,6 +1532,111 @@ mod tests {
                 .version()
                 .value(),
             2
+        );
+    }
+
+    #[test]
+    fn collection_group_scope_is_owned_by_one_placement_authority() {
+        let group = CollectionGroupId::new("commerce").unwrap();
+        let assignment = CollectionGroupAuthority::new(
+            group.clone(),
+            ident("CN=placement-authority-a"),
+            [collection("orders"), collection("order_items")],
+        )
+        .unwrap();
+        let mut catalog = PlacementAuthorityCatalog::new();
+
+        catalog.assign(assignment.clone()).unwrap();
+
+        assert_eq!(
+            catalog.authority_for_group(&group).unwrap().authority(),
+            &ident("CN=placement-authority-a")
+        );
+        assert_eq!(
+            catalog
+                .authority_for_collection(&collection("orders"))
+                .unwrap(),
+            &assignment
+        );
+
+        let err = catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    group.clone(),
+                    ident("CN=placement-authority-b"),
+                    [collection("invoices")],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PlacementAuthorityError::DuplicateCollectionGroup {
+                group: group.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn collection_group_catalog_slices_do_not_overlap() {
+        let commerce = CollectionGroupId::new("commerce").unwrap();
+        let analytics = CollectionGroupId::new("analytics-events").unwrap();
+        let support = CollectionGroupId::new("support").unwrap();
+        let orders = collection("orders");
+        let order_items = collection("order_items");
+        let events = collection("events");
+        let tickets = collection("tickets");
+        let mut catalog = PlacementAuthorityCatalog::new();
+
+        // Related collections intentionally share one authority domain.
+        catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [orders.clone(), order_items],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog.authority_for_collection(&orders).unwrap().group(),
+            &commerce
+        );
+
+        // A large collection can be isolated as its own group.
+        catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    analytics.clone(),
+                    ident("CN=placement-authority-b"),
+                    [events.clone()],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog.authority_for_collection(&events).unwrap().group(),
+            &analytics
+        );
+
+        let err = catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    support.clone(),
+                    ident("CN=placement-authority-c"),
+                    [tickets, events.clone()],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PlacementAuthorityError::OverlappingCatalogSlice {
+                collection: events,
+                existing_group: analytics,
+                attempted_group: support,
+            }
         );
     }
 
