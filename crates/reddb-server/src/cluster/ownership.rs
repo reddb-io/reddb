@@ -381,6 +381,7 @@ pub struct RangeOwnership {
     bounds: RangeBounds,
     owner: NodeIdentity,
     replicas: Vec<NodeIdentity>,
+    archive_replicas: Vec<NodeIdentity>,
     epoch: OwnershipEpoch,
     version: CatalogVersion,
     placement: PlacementMetadata,
@@ -406,6 +407,7 @@ impl RangeOwnership {
             bounds,
             owner,
             replicas: replicas.into_iter().collect(),
+            archive_replicas: Vec::new(),
             epoch: OwnershipEpoch::initial(),
             version: CatalogVersion::initial(),
             placement,
@@ -434,6 +436,10 @@ impl RangeOwnership {
 
     pub fn replicas(&self) -> &[NodeIdentity] {
         &self.replicas
+    }
+
+    pub fn archive_replicas(&self) -> &[NodeIdentity] {
+        &self.archive_replicas
     }
 
     pub fn epoch(&self) -> OwnershipEpoch {
@@ -480,6 +486,20 @@ impl RangeOwnership {
         }
     }
 
+    /// A transition that changes only the compressed archive replica set.
+    /// Advances the version but not the epoch: archive copies are recovery
+    /// sources, not live write authority.
+    pub fn update_archive_replicas(
+        &self,
+        new_archive_replicas: impl IntoIterator<Item = NodeIdentity>,
+    ) -> Self {
+        Self {
+            archive_replicas: new_archive_replicas.into_iter().collect(),
+            version: self.version.next(),
+            ..self.clone()
+        }
+    }
+
     /// A transition that changes only placement metadata. Advances the version
     /// but not the epoch.
     pub fn update_placement(&self, placement: PlacementMetadata) -> Self {
@@ -517,6 +537,12 @@ impl RangeOwnership {
             RangeRole::Owner
         } else if self.replicas.iter().any(|replica| replica == node) {
             RangeRole::Replica
+        } else if self
+            .archive_replicas
+            .iter()
+            .any(|archive_replica| archive_replica == node)
+        {
+            RangeRole::ArchiveReplica
         } else {
             RangeRole::NoCopy
         }
@@ -543,6 +569,9 @@ pub enum RangeRole {
     /// rejected and routed to the owner; replicated changes still flow in via
     /// the privileged internal apply path.
     Replica,
+    /// Holds a compressed archive copy. Archive replicas are recovery sources
+    /// only after restore, checksum validation, and watermark validation.
+    ArchiveReplica,
     /// Holds no copy of the range at all.
     NoCopy,
 }
@@ -554,10 +583,15 @@ impl RangeRole {
         matches!(self, RangeRole::Owner)
     }
 
+    pub fn is_direct_promotion_candidate(self) -> bool {
+        matches!(self, RangeRole::Replica)
+    }
+
     fn label(self) -> &'static str {
         match self {
             RangeRole::Owner => "owner",
             RangeRole::Replica => "replica",
+            RangeRole::ArchiveReplica => "archive-replica",
             RangeRole::NoCopy => "no-copy",
         }
     }
