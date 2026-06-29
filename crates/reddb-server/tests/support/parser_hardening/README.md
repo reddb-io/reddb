@@ -84,8 +84,8 @@ single unmasked match.
   back to `*.snap` files)
 - Fuzz smoke: `cargo fuzz run sql_parser -- -max_total_time=10`
 - Fuzz smoke (migration): `cargo fuzz run migration_parser -- -max_total_time=10`
-- Fuzz CI run: `cargo fuzz run sql_parser -- -max_total_time=300`
-  and `cargo fuzz run migration_parser -- -max_total_time=300`
+- Fuzz CI smoke: `cargo fuzz run sql_parser -- -max_total_time=30`
+  and `cargo fuzz run migration_parser -- -max_total_time=30`
 
 ## Limit defaults
 

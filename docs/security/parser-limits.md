@@ -90,19 +90,22 @@ unbounded recursion and time out before reporting useful coverage.
 cargo +nightly fuzz run sql_parser -- -max_total_time=10
 ```
 
-### CI run (per-PR, 5 minutes)
+### CI run (per-PR smoke)
 
-The `Fuzz Parsers` job in `.github/workflows/ci.yml` runs the
-target with `-max_total_time=300`. A panic, ASAN finding, or
-out-of-memory abort fails the job; libFuzzer's evolved corpus is
-uploaded as an artifact for triage.
+The `Fuzz Parsers` job in `.github/workflows/ci.yml` runs every
+parser fuzz target in one required check with a `--dev` fuzz build
+and `-max_total_time=30` per target. This keeps pull-request cost
+bounded while still replaying seed corpora and catching deterministic
+panics, ASAN findings, and out-of-memory aborts. Crash artifacts are
+uploaded for triage.
 
 ### Nightly long-window run
 
-A 1-hour scheduled run lives outside the per-PR job to keep PR
-latency tight. To set up, copy `.github/workflows/ci.yml`'s
-`fuzz-parsers` job into a new scheduled workflow with
-`-max_total_time=3600` and a `cron: '0 4 * * *'` schedule.
+A 1-hour scheduled run lives in
+`.github/workflows/parser-fuzz-nightly.yml` outside the per-PR job
+to keep PR latency tight. It runs the same parser fuzz targets with
+`-max_total_time=3600` and preserves the evolved corpus between
+runs.
 
 ### Reproducing a crash
 

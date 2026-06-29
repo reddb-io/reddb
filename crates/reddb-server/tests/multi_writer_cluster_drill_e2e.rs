@@ -40,8 +40,8 @@ use reddb_server::cluster::{
     KeyTarget, LeasedOwner, MemberCapacity, MemberKind, MemberSignals, MembershipCatalog,
     NodeIdentity, OperatorReason, OwnerWriteMode, OwnershipEpoch, OwnershipLease,
     PlacementMetadata, PlacementPolicy, PlacementSignals, RangeBound, RangeBounds, RangeId,
-    RangeLoad, RangeOwnership, RangeRole, RangeWriteReject, RedirectReason, RequestOperation,
-    RouteDecision, RoutedRequest, RoutingPolicy, SeedAuthority, ShardKeyMode,
+    RangeLoad, RangeOwnership, RangeRequest, RangeRole, RangeWriteReject, RedirectReason,
+    RequestOperation, RouteDecision, RoutedRequest, RoutingPolicy, SeedAuthority, ShardKeyMode,
     ShardOwnershipCatalog, SupervisorTerm, TransitionKind, WeightedPlacementPlanner,
     WriteTransactionReject,
 };
@@ -450,6 +450,132 @@ fn stale_client_is_corrected_by_redirect_and_safe_reads_are_forwarded() {
     }
 }
 
+#[test]
+fn stale_topology_targeting_old_owner_cannot_create_split_brain_writes() {
+    let (mut catalog, orders) = ownership_two_ranges();
+    let mut client =
+        reddb_server::cluster::ClientTopology::from_snapshot(catalog.topology_snapshot());
+    let term = SupervisorTerm::genesis();
+
+    let before = catalog.range(&orders, RangeId::new(1)).unwrap().clone();
+    let old_epoch = before.epoch();
+    let old_owner_lease = OwnershipLease::grant(
+        term,
+        orders.clone(),
+        RangeId::new(1),
+        ident(NODE_A),
+        old_epoch,
+        0,
+        10_000,
+    );
+    let old_owner = LeasedOwner::with_lease(old_owner_lease);
+
+    catalog
+        .apply_update(before.transfer_to(ident(NODE_B), [ident(NODE_A), ident(NODE_C)]))
+        .expect("ownership transition applied");
+    let after = catalog.range(&orders, RangeId::new(1)).unwrap();
+    let new_epoch = after.epoch();
+    assert!(
+        new_epoch.value() > old_epoch.value(),
+        "ownership transition bumped the fencing epoch"
+    );
+
+    // The cached topology is stale and still targets the old owner.
+    let stale_owner = client
+        .resolve(&orders, &KEY_LOW)
+        .expect("stale topology resolves low key")
+        .clone();
+    assert_eq!(
+        stale_owner,
+        ident(NODE_A),
+        "stale topology targets old owner"
+    );
+
+    // Routing through the live cluster seam returns a refreshable correction.
+    let write = RoutedRequest::new(
+        orders.clone(),
+        KEY_LOW.to_vec(),
+        RequestOperation::Transaction,
+    );
+    let hint = match catalog.plan_route(&stale_owner, &write, &RoutingPolicy::forwarding()) {
+        RouteDecision::Redirect { hint, reason } => {
+            assert_eq!(reason, RedirectReason::Transaction);
+            hint
+        }
+        other => panic!("expected stale topology to redirect, got {other:?}"),
+    };
+    assert_eq!(hint.owner(), &ident(NODE_B));
+    assert_eq!(hint.epoch(), new_epoch);
+    assert_eq!(client.apply_hint(&hint), HintOutcome::Corrected);
+    assert!(client.needs_refresh(), "hint is enough to trigger refresh");
+
+    // Even if the stale topology sends the write to the old owner, the old
+    // owner's lease is behind the current epoch and fences durable writes.
+    match old_owner.admit_request(RangeRequest::DurableWrite, term, new_epoch, 500) {
+        Err(err) => match err.reason {
+            FenceReason::EpochSuperseded {
+                lease_epoch,
+                current_epoch,
+            } => {
+                assert_eq!(lease_epoch, old_epoch);
+                assert_eq!(current_epoch, new_epoch);
+            }
+            other => panic!("expected epoch fence, got {other:?}"),
+        },
+        Ok(()) => panic!("old owner accepted a durable write after epoch bump"),
+    }
+
+    // The combined durable-write gate also rejects the old owner and carries the
+    // current owner/epoch/version facts needed for safe retry.
+    match admit_durable_write(
+        &catalog,
+        &old_owner,
+        &stale_owner,
+        &orders,
+        &KEY_LOW,
+        term,
+        500,
+    ) {
+        Err(DurableWriteReject::StaleOwnership {
+            attempted_owner,
+            current_owner,
+            attempted_epoch,
+            current_epoch,
+            ..
+        }) => {
+            assert_eq!(attempted_owner, stale_owner);
+            assert_eq!(current_owner, ident(NODE_B));
+            assert_eq!(attempted_epoch, old_epoch);
+            assert_eq!(current_epoch, new_epoch);
+        }
+        other => panic!("expected stale owner durable-write rejection, got {other:?}"),
+    }
+
+    // The new owner, holding a lease for the bumped epoch, is the only node that
+    // can accept the durable write.
+    let new_owner = LeasedOwner::with_lease(OwnershipLease::grant(
+        term,
+        orders.clone(),
+        RangeId::new(1),
+        ident(NODE_B),
+        new_epoch,
+        0,
+        10_000,
+    ));
+    let admitted = admit_durable_write(
+        &catalog,
+        &new_owner,
+        &ident(NODE_B),
+        &orders,
+        &KEY_LOW,
+        term,
+        500,
+    )
+    .expect("new owner accepts durable write at the bumped epoch");
+    assert_eq!(admitted.owner(), &ident(NODE_B));
+    assert_eq!(admitted.epoch(), new_epoch);
+}
+
 // --- criterion 4: failover only when commit watermark is covered --------------
 
 #[test]
@@ -764,16 +890,23 @@ fn cross_range_writes_are_rejected_and_read_fanout_spans_owners() {
     // A best-effort cross-range read fanout over the same two keys succeeds,
     // with one leg per owner.
     let fanout = catalog
-        .plan_read_fanout(&[
-            KeyTarget::new(orders.clone(), KEY_LOW.to_vec()),
-            KeyTarget::new(orders.clone(), KEY_HIGH.to_vec()),
-        ])
-        .expect("cross-range read fanout is plannable");
+        .plan_read_fanout(
+            &[
+                KeyTarget::new(orders.clone(), KEY_LOW.to_vec()),
+                KeyTarget::new(orders.clone(), KEY_HIGH.to_vec()),
+            ],
+            reddb_server::cluster::ReadFanoutPolicy::explicit(
+                reddb_server::cluster::ReadFanoutBudget::default(),
+            ),
+        )
+        .expect("explicit cross-range read fanout is plannable");
     assert!(
         fanout.is_cross_range(),
         "the read spans more than one owner"
     );
     assert_eq!(fanout.legs().len(), 2, "one leg per range owner");
+    assert_eq!(fanout.trace().owner_count(), 2);
+    assert_eq!(fanout.trace().range_count(), 2);
     let leg_owners: Vec<_> = fanout.legs().iter().map(|l| l.owner().clone()).collect();
     assert!(leg_owners.contains(&ident(NODE_A)) && leg_owners.contains(&ident(NODE_B)));
 }

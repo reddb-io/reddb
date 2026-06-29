@@ -43,7 +43,7 @@
 //! Everything here is a pure data model with no I/O, so the routing, versioning,
 //! and replication story is exercised deterministically.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::identity::NodeIdentity;
 use super::slot::hash_shard_key_to_range_key;
@@ -85,6 +85,233 @@ impl CollectionId {
 }
 
 impl std::fmt::Display for CollectionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Stable identity for the collection group that one Placement Authority owns.
+///
+/// A group is the control-plane sharding unit for placement decisions. Related
+/// collections can share a group so they stay in one authority domain; a large
+/// collection can instead be the group's only member when it needs isolated
+/// placement policy.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CollectionGroupId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionGroupIdError;
+
+impl std::fmt::Display for CollectionGroupIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "collection group id is empty")
+    }
+}
+
+impl std::error::Error for CollectionGroupIdError {}
+
+impl CollectionGroupId {
+    /// Build a collection group id from a non-empty name.
+    pub fn new(value: impl AsRef<str>) -> Result<Self, CollectionGroupIdError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(CollectionGroupIdError);
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn for_collection(collection: &CollectionId) -> Self {
+        Self(collection.as_str().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CollectionGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One Placement Authority assignment for a non-overlapping collection-catalog
+/// slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionGroupAuthority {
+    group: CollectionGroupId,
+    authority: NodeIdentity,
+    collections: BTreeSet<CollectionId>,
+}
+
+impl CollectionGroupAuthority {
+    /// Assign `collections` to one group owned by `authority`.
+    pub fn new(
+        group: CollectionGroupId,
+        authority: NodeIdentity,
+        collections: impl IntoIterator<Item = CollectionId>,
+    ) -> Result<Self, PlacementAuthorityError> {
+        let collections = collections.into_iter().collect::<BTreeSet<_>>();
+        if collections.is_empty() {
+            return Err(PlacementAuthorityError::EmptyCatalogSlice { group });
+        }
+        Ok(Self {
+            group,
+            authority,
+            collections,
+        })
+    }
+
+    pub fn group(&self) -> &CollectionGroupId {
+        &self.group
+    }
+
+    pub fn authority(&self) -> &NodeIdentity {
+        &self.authority
+    }
+
+    pub fn collections(&self) -> impl Iterator<Item = &CollectionId> {
+        self.collections.iter()
+    }
+
+    fn overlaps(&self, other: &CollectionGroupAuthority) -> Option<CollectionId> {
+        self.collections
+            .intersection(&other.collections)
+            .next()
+            .cloned()
+    }
+}
+
+/// Why a Placement Authority assignment was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementAuthorityError {
+    /// A group assignment must publish at least one collection in its catalog
+    /// slice.
+    EmptyCatalogSlice { group: CollectionGroupId },
+    /// The group already has exactly one Placement Authority.
+    DuplicateCollectionGroup { group: CollectionGroupId },
+    /// Two Placement Authority assignments would own the same collection-catalog
+    /// slice.
+    OverlappingCatalogSlice {
+        collection: CollectionId,
+        existing_group: CollectionGroupId,
+        attempted_group: CollectionGroupId,
+    },
+}
+
+impl std::fmt::Display for PlacementAuthorityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyCatalogSlice { group } => {
+                write!(f, "collection group {group} has an empty catalog slice")
+            }
+            Self::DuplicateCollectionGroup { group } => {
+                write!(
+                    f,
+                    "collection group {group} already has a placement authority"
+                )
+            }
+            Self::OverlappingCatalogSlice {
+                collection,
+                existing_group,
+                attempted_group,
+            } => write!(
+                f,
+                "collection {collection} is already in group {existing_group}, so group {attempted_group} would overlap its catalog slice"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlacementAuthorityError {}
+
+/// Placement Authority assignments keyed by Collection group.
+#[derive(Debug, Clone, Default)]
+pub struct PlacementAuthorityCatalog {
+    assignments: BTreeMap<CollectionGroupId, CollectionGroupAuthority>,
+}
+
+impl PlacementAuthorityCatalog {
+    /// An empty Placement Authority catalog.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish one group-owned, non-overlapping collection-catalog slice.
+    pub fn assign(
+        &mut self,
+        assignment: CollectionGroupAuthority,
+    ) -> Result<(), PlacementAuthorityError> {
+        if self.assignments.contains_key(assignment.group()) {
+            return Err(PlacementAuthorityError::DuplicateCollectionGroup {
+                group: assignment.group().clone(),
+            });
+        }
+        for existing in self.assignments.values() {
+            if let Some(collection) = existing.overlaps(&assignment) {
+                return Err(PlacementAuthorityError::OverlappingCatalogSlice {
+                    collection,
+                    existing_group: existing.group().clone(),
+                    attempted_group: assignment.group().clone(),
+                });
+            }
+        }
+        self.assignments
+            .insert(assignment.group().clone(), assignment);
+        Ok(())
+    }
+
+    pub fn authority_for_group(
+        &self,
+        group: &CollectionGroupId,
+    ) -> Option<&CollectionGroupAuthority> {
+        self.assignments.get(group)
+    }
+
+    pub fn authority_for_collection(
+        &self,
+        collection: &CollectionId,
+    ) -> Option<&CollectionGroupAuthority> {
+        self.assignments
+            .values()
+            .find(|assignment| assignment.collections.contains(collection))
+    }
+}
+
+/// Stable identity of the Placement Authority that publishes a collection group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PlacementAuthorityId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementAuthorityIdError;
+
+impl std::fmt::Display for PlacementAuthorityIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "placement authority id is empty")
+    }
+}
+
+impl std::error::Error for PlacementAuthorityIdError {}
+
+impl PlacementAuthorityId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, PlacementAuthorityIdError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(PlacementAuthorityIdError);
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn default_global() -> Self {
+        Self("global-placement-authority".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PlacementAuthorityId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -376,14 +603,65 @@ impl PlacementMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeOwnership {
     collection: CollectionId,
+    collection_group: CollectionGroupId,
+    placement_authority: PlacementAuthorityId,
     range_id: RangeId,
     shard_key_mode: ShardKeyMode,
     bounds: RangeBounds,
     owner: NodeIdentity,
     replicas: Vec<NodeIdentity>,
+    compressed_archive_replicas: Vec<NodeIdentity>,
     epoch: OwnershipEpoch,
     version: CatalogVersion,
     placement: PlacementMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotMirrorCandidate {
+    node: NodeIdentity,
+    durable_lsn: u64,
+}
+
+impl HotMirrorCandidate {
+    pub fn new(node: NodeIdentity, durable_lsn: u64) -> Self {
+        Self { node, durable_lsn }
+    }
+
+    pub fn node(&self) -> &NodeIdentity {
+        &self.node
+    }
+
+    pub fn durable_lsn(&self) -> u64 {
+        self.durable_lsn
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotMirrorPromotionRefusal {
+    NotReplica {
+        candidate: NodeIdentity,
+        role: RangeRole,
+    },
+    WatermarkNotCovered {
+        candidate_lsn: u64,
+        watermark: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotMirrorPromotion {
+    previous: RangeOwnership,
+    promoted: RangeOwnership,
+}
+
+impl HotMirrorPromotion {
+    pub fn previous(&self) -> &RangeOwnership {
+        &self.previous
+    }
+
+    pub fn promoted(&self) -> &RangeOwnership {
+        &self.promoted
+    }
 }
 
 impl RangeOwnership {
@@ -399,13 +677,17 @@ impl RangeOwnership {
         replicas: impl IntoIterator<Item = NodeIdentity>,
         placement: PlacementMetadata,
     ) -> Self {
+        let collection_group = CollectionGroupId::for_collection(&collection);
         Self {
             collection,
+            collection_group,
+            placement_authority: PlacementAuthorityId::default_global(),
             range_id,
             shard_key_mode,
             bounds,
             owner,
             replicas: replicas.into_iter().collect(),
+            compressed_archive_replicas: Vec::new(),
             epoch: OwnershipEpoch::initial(),
             version: CatalogVersion::initial(),
             placement,
@@ -414,6 +696,14 @@ impl RangeOwnership {
 
     pub fn collection(&self) -> &CollectionId {
         &self.collection
+    }
+
+    pub fn collection_group(&self) -> &CollectionGroupId {
+        &self.collection_group
+    }
+
+    pub fn placement_authority(&self) -> &PlacementAuthorityId {
+        &self.placement_authority
     }
 
     pub fn range_id(&self) -> RangeId {
@@ -436,6 +726,20 @@ impl RangeOwnership {
         &self.replicas
     }
 
+    /// Promotable hot mirrors for this range. These are caught-up copies that
+    /// may become owner through a fenced promotion; they are not write
+    /// authorities while listed here.
+    pub fn hot_mirror_replicas(&self) -> &[NodeIdentity] {
+        &self.replicas
+    }
+
+    /// Restore-only compressed archive replicas. These copies are retained for
+    /// recovery and must not be treated as promotion candidates until a later
+    /// validation step proves them usable.
+    pub fn compressed_archive_replicas(&self) -> &[NodeIdentity] {
+        &self.compressed_archive_replicas
+    }
+
     pub fn epoch(&self) -> OwnershipEpoch {
         self.epoch
     }
@@ -451,6 +755,16 @@ impl RangeOwnership {
     /// The catalog key for this entry: `(collection, range_id)`.
     fn key(&self) -> (CollectionId, RangeId) {
         (self.collection.clone(), self.range_id)
+    }
+
+    pub fn with_collection_group(mut self, collection_group: CollectionGroupId) -> Self {
+        self.collection_group = collection_group;
+        self
+    }
+
+    pub fn with_placement_authority(mut self, placement_authority: PlacementAuthorityId) -> Self {
+        self.placement_authority = placement_authority;
+        self
     }
 
     /// A transition that moves write authority to `new_owner` with `new_replicas`.
@@ -470,11 +784,75 @@ impl RangeOwnership {
         }
     }
 
+    /// Promote a hot mirror only if it is a current replica and its durable
+    /// frontier covers the range commit watermark. The accepted path delegates
+    /// to [`transfer_to`](Self::transfer_to), so publishing the promotion bumps
+    /// the ownership epoch before the new owner can pass the write gate.
+    pub fn promote_hot_mirror(
+        &self,
+        candidate: &HotMirrorCandidate,
+        commit_watermark: u64,
+    ) -> Result<HotMirrorPromotion, HotMirrorPromotionRefusal> {
+        let role = self.role_of(candidate.node());
+        if role != RangeRole::Replica {
+            return Err(HotMirrorPromotionRefusal::NotReplica {
+                candidate: candidate.node().clone(),
+                role,
+            });
+        }
+        if candidate.durable_lsn() < commit_watermark {
+            return Err(HotMirrorPromotionRefusal::WatermarkNotCovered {
+                candidate_lsn: candidate.durable_lsn(),
+                watermark: commit_watermark,
+            });
+        }
+
+        let new_replicas = std::iter::once(self.owner().clone())
+            .chain(
+                self.replicas()
+                    .iter()
+                    .filter(|replica| *replica != candidate.node())
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+        Ok(HotMirrorPromotion {
+            previous: self.clone(),
+            promoted: self.transfer_to(candidate.node().clone(), new_replicas),
+        })
+    }
+
     /// A transition that changes only the replica set. Advances the version but
     /// **not** the epoch: write authority did not move, so no owner is fenced.
     pub fn update_replicas(&self, new_replicas: impl IntoIterator<Item = NodeIdentity>) -> Self {
         Self {
             replicas: new_replicas.into_iter().collect(),
+            version: self.version.next(),
+            ..self.clone()
+        }
+    }
+
+    /// A transition that changes the restore-only archive replica set. Advances
+    /// the version but not the epoch because write authority did not move.
+    pub fn with_compressed_archive_replicas(
+        &self,
+        archive_replicas: impl IntoIterator<Item = NodeIdentity>,
+    ) -> Self {
+        Self {
+            compressed_archive_replicas: archive_replicas.into_iter().collect(),
+            version: self.version.next(),
+            ..self.clone()
+        }
+    }
+
+    /// A transition that changes both non-owner replica roles together.
+    pub fn update_replica_roles(
+        &self,
+        hot_mirror_replicas: impl IntoIterator<Item = NodeIdentity>,
+        compressed_archive_replicas: impl IntoIterator<Item = NodeIdentity>,
+    ) -> Self {
+        Self {
+            replicas: hot_mirror_replicas.into_iter().collect(),
+            compressed_archive_replicas: compressed_archive_replicas.into_iter().collect(),
             version: self.version.next(),
             ..self.clone()
         }
@@ -517,9 +895,72 @@ impl RangeOwnership {
             RangeRole::Owner
         } else if self.replicas.iter().any(|replica| replica == node) {
             RangeRole::Replica
+        } else if self
+            .compressed_archive_replicas
+            .iter()
+            .any(|archive_replica| archive_replica == node)
+        {
+            RangeRole::ArchiveReplica
         } else {
             RangeRole::NoCopy
         }
+    }
+
+    /// This node's non-owner replica role for this range, if it has one.
+    pub fn replica_role_of(&self, node: &NodeIdentity) -> Option<ReplicaRole> {
+        if self.replicas.iter().any(|replica| replica == node) {
+            Some(ReplicaRole::HotMirror)
+        } else if self
+            .compressed_archive_replicas
+            .iter()
+            .any(|replica| replica == node)
+        {
+            Some(ReplicaRole::CompressedArchive)
+        } else {
+            None
+        }
+    }
+
+    fn validate_replica_roles(&self) -> Result<(), CatalogError> {
+        let mut seen = BTreeSet::new();
+        for replica in &self.replicas {
+            if replica == &self.owner || !seen.insert(replica) {
+                return Err(CatalogError::InvalidReplicaRoles {
+                    collection: self.collection.clone(),
+                    range_id: self.range_id,
+                });
+            }
+        }
+        for replica in &self.compressed_archive_replicas {
+            if replica == &self.owner || !seen.insert(replica) {
+                return Err(CatalogError::InvalidReplicaRoles {
+                    collection: self.collection.clone(),
+                    range_id: self.range_id,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The explicit role of a non-owner range replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaRole {
+    /// A caught-up copy that can be considered for fenced promotion. It is not a
+    /// write authority until promotion installs it as owner.
+    HotMirror,
+    /// A compressed restore copy. It is restore-only until separate validation
+    /// proves it can safely rejoin the hot set.
+    CompressedArchive,
+}
+
+impl ReplicaRole {
+    pub fn is_promotion_candidate(self) -> bool {
+        matches!(self, ReplicaRole::HotMirror)
+    }
+
+    pub fn is_restore_only(self) -> bool {
+        matches!(self, ReplicaRole::CompressedArchive)
     }
 }
 
@@ -543,6 +984,9 @@ pub enum RangeRole {
     /// rejected and routed to the owner; replicated changes still flow in via
     /// the privileged internal apply path.
     Replica,
+    /// Holds a compressed archive copy. Archive replicas are recovery sources
+    /// only after restore, checksum validation, and watermark validation.
+    ArchiveReplica,
     /// Holds no copy of the range at all.
     NoCopy,
 }
@@ -554,10 +998,15 @@ impl RangeRole {
         matches!(self, RangeRole::Owner)
     }
 
+    pub fn is_direct_promotion_candidate(self) -> bool {
+        matches!(self, RangeRole::Replica)
+    }
+
     fn label(self) -> &'static str {
         match self {
             RangeRole::Owner => "owner",
             RangeRole::Replica => "replica",
+            RangeRole::ArchiveReplica => "archive-replica",
             RangeRole::NoCopy => "no-copy",
         }
     }
@@ -598,6 +1047,12 @@ pub enum CatalogError {
         existing: RangeId,
         attempted: RangeId,
     },
+    /// The owner was also listed as a non-owner replica, or one node appeared in
+    /// more than one replica role. That would blur the single-writer invariant.
+    InvalidReplicaRoles {
+        collection: CollectionId,
+        range_id: RangeId,
+    },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -627,6 +1082,13 @@ impl std::fmt::Display for CatalogError {
             } => write!(
                 f,
                 "range {attempted} overlaps existing range {existing} of collection {collection}"
+            ),
+            Self::InvalidReplicaRoles {
+                collection,
+                range_id,
+            } => write!(
+                f,
+                "range {range_id} of collection {collection} has invalid replica role metadata"
             ),
         }
     }
@@ -772,6 +1234,8 @@ impl ShardOwnershipCatalog {
     /// catalog untouched. Either way the entry's mode must match the collection's
     /// declared mode.
     pub fn apply_update(&mut self, entry: RangeOwnership) -> Result<UpdateOutcome, CatalogError> {
+        entry.validate_replica_roles()?;
+
         // Mode must agree with the collection (auto-declared on first range).
         match self.collections.get(entry.collection()) {
             Some(&declared) if declared != entry.shard_key_mode() => {
@@ -992,6 +1456,94 @@ mod tests {
             _ => RangeBound::Max,
         };
         RangeBounds::new(lower, upper).unwrap()
+    }
+
+    #[test]
+    fn hot_mirror_behind_commit_watermark_cannot_be_promoted() {
+        let orders = collection("orders");
+        let current = hash_range(&orders, 1, RangeBounds::full(), "CN=owner-a");
+        let candidate = HotMirrorCandidate::new(ident("CN=replica-1"), 99);
+
+        assert_eq!(
+            current.promote_hot_mirror(&candidate, 100),
+            Err(HotMirrorPromotionRefusal::WatermarkNotCovered {
+                candidate_lsn: 99,
+                watermark: 100,
+            }),
+        );
+    }
+
+    #[test]
+    fn hot_mirror_covering_watermark_can_be_selected_for_promotion() {
+        let orders = collection("orders");
+        let current = hash_range(&orders, 1, RangeBounds::full(), "CN=owner-a");
+        let candidate = HotMirrorCandidate::new(ident("CN=replica-1"), 100);
+
+        let promotion = current.promote_hot_mirror(&candidate, 100).unwrap();
+
+        assert_eq!(promotion.previous(), &current);
+        assert_eq!(promotion.promoted().owner(), &ident("CN=replica-1"));
+        assert_eq!(promotion.promoted().epoch(), current.epoch().next());
+        assert_eq!(
+            promotion.promoted().role_of(&ident("CN=owner-a")),
+            RangeRole::Replica,
+        );
+    }
+
+    #[test]
+    fn hot_mirror_promotion_publishes_epoch_before_durable_writes() {
+        let orders = collection("orders");
+        let key = b"order-7";
+        let current = hash_range(&orders, 1, single_hash_slot_bounds(key), "CN=owner-a");
+        let old_epoch = current.epoch();
+        let promotion = current
+            .promote_hot_mirror(&HotMirrorCandidate::new(ident("CN=replica-1"), 120), 100)
+            .unwrap();
+        let new_epoch = promotion.promoted().epoch();
+        let mut catalog = ShardOwnershipCatalog::new();
+        catalog.apply_update(current).unwrap();
+        catalog.apply_update(promotion.promoted().clone()).unwrap();
+
+        assert_eq!(
+            catalog
+                .admit_public_write(&ident("CN=replica-1"), &orders, key, old_epoch)
+                .unwrap_err(),
+            RangeWriteReject::StaleEpoch {
+                collection: orders.clone(),
+                range_id: RangeId::new(1),
+                expected: old_epoch,
+                current: new_epoch,
+            },
+        );
+        assert!(catalog
+            .admit_public_write(&ident("CN=replica-1"), &orders, key, new_epoch)
+            .is_ok());
+    }
+
+    #[test]
+    fn hot_mirror_promotion_fences_old_owner_by_epoch() {
+        let orders = collection("orders");
+        let key = b"order-7";
+        let current = hash_range(&orders, 1, single_hash_slot_bounds(key), "CN=owner-a");
+        let old_epoch = current.epoch();
+        let promotion = current
+            .promote_hot_mirror(&HotMirrorCandidate::new(ident("CN=replica-1"), 120), 100)
+            .unwrap();
+        let mut catalog = ShardOwnershipCatalog::new();
+        catalog.apply_update(current).unwrap();
+        catalog.apply_update(promotion.promoted().clone()).unwrap();
+
+        assert_eq!(
+            catalog
+                .admit_public_write(&ident("CN=owner-a"), &orders, key, old_epoch)
+                .unwrap_err(),
+            RangeWriteReject::NotOwner {
+                collection: orders,
+                range_id: RangeId::new(1),
+                role: RangeRole::Replica,
+                owner: ident("CN=replica-1"),
+            },
+        );
     }
 
     #[test]
@@ -1352,6 +1904,111 @@ mod tests {
     }
 
     #[test]
+    fn collection_group_scope_is_owned_by_one_placement_authority() {
+        let group = CollectionGroupId::new("commerce").unwrap();
+        let assignment = CollectionGroupAuthority::new(
+            group.clone(),
+            ident("CN=placement-authority-a"),
+            [collection("orders"), collection("order_items")],
+        )
+        .unwrap();
+        let mut catalog = PlacementAuthorityCatalog::new();
+
+        catalog.assign(assignment.clone()).unwrap();
+
+        assert_eq!(
+            catalog.authority_for_group(&group).unwrap().authority(),
+            &ident("CN=placement-authority-a")
+        );
+        assert_eq!(
+            catalog
+                .authority_for_collection(&collection("orders"))
+                .unwrap(),
+            &assignment
+        );
+
+        let err = catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    group.clone(),
+                    ident("CN=placement-authority-b"),
+                    [collection("invoices")],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PlacementAuthorityError::DuplicateCollectionGroup {
+                group: group.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn collection_group_catalog_slices_do_not_overlap() {
+        let commerce = CollectionGroupId::new("commerce").unwrap();
+        let analytics = CollectionGroupId::new("analytics-events").unwrap();
+        let support = CollectionGroupId::new("support").unwrap();
+        let orders = collection("orders");
+        let order_items = collection("order_items");
+        let events = collection("events");
+        let tickets = collection("tickets");
+        let mut catalog = PlacementAuthorityCatalog::new();
+
+        // Related collections intentionally share one authority domain.
+        catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [orders.clone(), order_items],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog.authority_for_collection(&orders).unwrap().group(),
+            &commerce
+        );
+
+        // A large collection can be isolated as its own group.
+        catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    analytics.clone(),
+                    ident("CN=placement-authority-b"),
+                    [events.clone()],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog.authority_for_collection(&events).unwrap().group(),
+            &analytics
+        );
+
+        let err = catalog
+            .assign(
+                CollectionGroupAuthority::new(
+                    support.clone(),
+                    ident("CN=placement-authority-c"),
+                    [tickets, events.clone()],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PlacementAuthorityError::OverlappingCatalogSlice {
+                collection: events,
+                existing_group: analytics,
+                attempted_group: support,
+            }
+        );
+    }
+
+    #[test]
     fn range_bounds_reject_empty_or_inverted() {
         assert!(RangeBounds::new(RangeBound::key([0x10]), RangeBound::key([0x10])).is_err());
         assert!(RangeBounds::new(RangeBound::key([0x20]), RangeBound::key([0x10])).is_err());
@@ -1393,6 +2050,55 @@ mod tests {
         assert!(RangeRole::Owner.may_write_public());
         assert!(!RangeRole::Replica.may_write_public());
         assert!(!RangeRole::NoCopy.may_write_public());
+    }
+
+    #[test]
+    fn replica_role_metadata_distinguishes_hot_mirror_and_archive() {
+        let orders = collection("orders");
+        let range = range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-b"])
+            .with_compressed_archive_replicas([ident("CN=node-c")]);
+
+        assert_eq!(range.hot_mirror_replicas(), &[ident("CN=node-b")]);
+        assert_eq!(range.compressed_archive_replicas(), &[ident("CN=node-c")]);
+        assert_eq!(
+            range.replica_role_of(&ident("CN=node-b")),
+            Some(ReplicaRole::HotMirror)
+        );
+        assert_eq!(
+            range.replica_role_of(&ident("CN=node-c")),
+            Some(ReplicaRole::CompressedArchive)
+        );
+        assert!(ReplicaRole::HotMirror.is_promotion_candidate());
+        assert!(!ReplicaRole::CompressedArchive.is_promotion_candidate());
+        assert!(ReplicaRole::CompressedArchive.is_restore_only());
+    }
+
+    #[test]
+    fn catalog_rejects_owner_or_duplicate_replica_roles() {
+        let orders = collection("orders");
+        let mut catalog = ShardOwnershipCatalog::new();
+
+        let owner_also_hot =
+            range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-a"]);
+        assert!(matches!(
+            catalog.apply_update(owner_also_hot).unwrap_err(),
+            CatalogError::InvalidReplicaRoles { .. }
+        ));
+
+        let owner_also_archive = range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &[])
+            .with_compressed_archive_replicas([ident("CN=node-a")]);
+        assert!(matches!(
+            catalog.apply_update(owner_also_archive).unwrap_err(),
+            CatalogError::InvalidReplicaRoles { .. }
+        ));
+
+        let duplicate_hot_and_archive =
+            range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-b"])
+                .with_compressed_archive_replicas([ident("CN=node-b")]);
+        assert!(matches!(
+            catalog.apply_update(duplicate_hot_and_archive).unwrap_err(),
+            CatalogError::InvalidReplicaRoles { .. }
+        ));
     }
 
     #[test]

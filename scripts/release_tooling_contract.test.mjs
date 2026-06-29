@@ -60,9 +60,22 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
   assert.doesNotMatch(releaseWorkflow, legacyPersonalGhcrNamespace);
 
   const publishDocker = releaseWorkflow.match(/publish-docker:[\s\S]*?(?=\n  publish-client-image:)/)?.[0] ?? "";
+  const publishClient = releaseWorkflow.match(/publish-client-image:[\s\S]*?(?=\n  publish-python-wheels:)/)?.[0] ?? "";
   assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-x86_64/);
   assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-aarch64/);
   assert.match(publishDocker, /file: docker\/Dockerfile\.release/);
+
+  for (const [jobName, job, imagePattern] of [
+    ["publish-docker", publishDocker, /IMAGE: ghcr\.io\/\$\{\{ github\.repository \}\}/],
+    ["publish-client-image", publishClient, /IMAGE: ghcr\.io\/\$\{\{ github\.repository \}\}-client/],
+  ]) {
+    assert.match(job, /id-token: write/, `${jobName} must allow keyless signing`);
+    assert.match(job, /uses: sigstore\/cosign-installer@v4\.1\.2/, `${jobName} installs Cosign`);
+    assert.match(job, /id: build[\s\S]*uses: docker\/build-push-action@v7/, `${jobName} exposes build digest`);
+    assert.match(job, imagePattern, `${jobName} signs the expected GHCR image`);
+    assert.match(job, /DIGEST: \$\{\{ steps\.build\.outputs\.digest \}\}/, `${jobName} signs by digest`);
+    assert.match(job, /cosign sign --yes "\$\{IMAGE\}@\$\{DIGEST\}"/, `${jobName} signs with Cosign`);
+  }
 });
 
 test("release workflow uses runnable toolchain and pack commands", () => {
@@ -105,6 +118,10 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
     assert.ok(assetName.includes(suffix), `asset-name.js still maps optional ${suffix}`);
   }
   assert.match(script, /BINS=\(red red_client\)/);
+  assert.match(
+    script,
+    /EXTRA_ASSETS=\(\s+checksums\.txt\s+SHA256SUMS\s+"red-\$\{TAG\}\.spdx\.json"\s+"red-\$\{TAG\}\.cyclonedx\.json"\s+\)/,
+  );
   assert.match(script, /gh release view "\$TAG" --repo "\$REPO" --json assets/);
 
   assert.match(workflow, /verify-release-assets:/);
@@ -120,7 +137,40 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
   }
 
   assert.match(runbook, /Release asset contract/);
+  assert.match(runbook, /checksums\.txt/);
   assert.match(runbook, /verify-release-assets\.sh/);
+});
+
+test("release workflows publish aggregate checksum manifests for installers", () => {
+  const releaseWorkflow = read(".github/workflows/release.yml");
+  const rcWorkflow = read(".github/workflows/release-candidate.yml");
+
+  for (const workflow of [releaseWorkflow, rcWorkflow]) {
+    assert.match(workflow, /name: Generate checksum manifest/);
+    assert.match(workflow, /uses: anchore\/sbom-action\/download-syft@v0\.24\.0/);
+    assert.match(workflow, /syft-version: v1\.46\.0/);
+    assert.match(workflow, /name: Generate source SBOMs/);
+    assert.match(workflow, /--exclude '\.\/\.git\/\*\*'/);
+    assert.match(workflow, /--exclude '\.\/release\/\*\*'/);
+    assert.match(workflow, /--exclude '\.\/release-sbom\/\*\*'/);
+    assert.match(workflow, /--source-name RedDB\s+--source-version "\$\{VERSION\}"/);
+    assert.match(workflow, /red-\$\{RELEASE_TAG\}\.spdx\.json/);
+    assert.match(workflow, /red-\$\{RELEASE_TAG\}\.cyclonedx\.json/);
+    assert.match(workflow, /name: Add SBOMs to release assets/);
+    assert.match(workflow, /cp release-sbom\/\* release\//);
+    assert.match(workflow, /find \. -maxdepth 1 -type f/);
+    assert.match(workflow, /-name 'red-\*'/);
+    assert.match(workflow, /-name 'red_client-\*'/);
+    assert.match(workflow, /! -name '\*\.sha256'/);
+    assert.match(workflow, /sort -z/);
+    assert.match(workflow, /sha256sum/);
+    assert.match(workflow, /> release\/checksums\.txt/);
+    assert.match(workflow, /test -s release\/checksums\.txt/);
+    assert.match(workflow, /cp release\/checksums\.txt release\/SHA256SUMS/);
+    assert.match(workflow, /files: release\/\*/);
+    assert.match(workflow, /releases\/download\/.+\/SHA256SUMS/);
+    assert.match(workflow, /grep -E '  \(red\|red_client\)-linux-x86_64\$' SHA256SUMS \| sha256sum -c -/);
+  }
 });
 
 test("nightly DR drill workflow uses the current-shell runner and public make target", () => {
@@ -199,19 +249,33 @@ test("DST storage fault issue creation deduplicates open release blockers", () =
   assert.ok(createCall > existingReturn, "issue creation must happen after existing issue guard");
 });
 
-test("per-PR parser fuzz matrix has bounded fixed fuzz windows", () => {
+test("per-PR parser fuzz runs as one bounded required smoke check", () => {
   const workflow = read(".github/workflows/ci.yml");
-  const fuzzTargets = workflowJob(workflow, "fuzz-targets");
   const fuzzParsers = workflowJob(workflow, "fuzz-parsers");
 
-  assert.match(fuzzTargets, /timeout-minutes: 20/);
+  assert.equal(workflowJob(workflow, "fuzz-targets"), "", "per-PR fuzz must not fan out into separate runners");
+  assert.match(fuzzParsers, /name: Fuzz Parsers/);
+  assert.match(fuzzParsers, /needs: gate/);
+  assert.match(fuzzParsers, /timeout-minutes: 15/);
+  assert.match(fuzzParsers, /FUZZ_PR_TIME_SECONDS: 30/);
+  assert.match(fuzzParsers, /shared-key: ubuntu-fuzz-pr-smoke/);
+  assert.match(fuzzParsers, /cargo \+nightly fuzz build --dev/);
   for (const target of ["sql_parser", "migration_parser", "conn_string_parser", "query_with_params"]) {
-    assert.match(fuzzTargets, new RegExp(`- ${target}`));
+    assert.match(fuzzParsers, new RegExp(`for target in[\\s\\S]*${target}`));
   }
   assert.match(
-    fuzzTargets,
-    /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} -- -max_total_time=300 -rss_limit_mb=4096 -malloc_limit_mb=2048/,
+    fuzzParsers,
+    /cargo \+nightly fuzz run --dev "\$target" -- -max_total_time="\$\{FUZZ_PR_TIME_SECONDS\}" -rss_limit_mb=4096 -malloc_limit_mb=2048/,
   );
-  assert.match(fuzzParsers, /name: Fuzz Parsers/);
-  assert.match(fuzzParsers, /needs: \[fuzz-targets\]/);
+});
+
+test("nightly parser fuzz keeps the long-window coverage for every PR target", () => {
+  const workflow = read(".github/workflows/parser-fuzz-nightly.yml");
+  const fuzz = workflowJob(workflow, "fuzz");
+
+  assert.match(fuzz, /timeout-minutes: 90/);
+  for (const target of ["sql_parser", "migration_parser", "conn_string_parser", "query_with_params"]) {
+    assert.match(fuzz, new RegExp(`- ${target}`));
+  }
+  assert.match(fuzz, /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} -- -max_total_time=3600/);
 });

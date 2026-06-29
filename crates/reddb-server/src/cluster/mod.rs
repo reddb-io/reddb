@@ -6,6 +6,7 @@ pub mod commit_resolution;
 pub mod control_plane;
 pub mod cross_range;
 pub mod drain;
+pub mod hot_mirror_failover;
 pub mod identity;
 pub mod join;
 pub mod membership;
@@ -40,14 +41,20 @@ pub use control_plane::{
 };
 pub use cross_range::{
     ConsistentReadLeg, ConsistentReadPlan, ConsistentReadReject, ExactClaimPlan, ExactClaimReject,
-    GlobalReadWatermark, KeyTarget, PinnedTarget, RangeParticipant, ReadFanout, ReadFanoutReject,
-    ReadLeg, ResolvedTarget, WriteTransactionPlan, WriteTransactionReject, WriterParticipation,
+    GlobalReadWatermark, KeyTarget, PinnedTarget, RangeParticipant, ReadFanout, ReadFanoutBudget,
+    ReadFanoutPolicy, ReadFanoutReject, ReadFanoutTrace, ReadLeg, ResolvedTarget,
+    WriteTransactionPlan, WriteTransactionReject, WriterParticipation,
 };
 pub use drain::{
     drain_status, plan_drain, plan_force_remove, run_drain, run_force_remove, DrainBlock,
     DrainBlockReason, DrainOutcome, DrainPlan, DrainStatus, DrainStep, ForceCapability,
     ForceRemoveAudit, ForceRemoveOrder, ForceRemoveOrderError, ForceRemovePlan, ForceRemoveResult,
     ForcedBlock, ForcedPromotion, OwnedHandoff, RemovalRejection, ReplicaEvacuation,
+};
+pub use hot_mirror_failover::{
+    execute_hot_mirror_failover, plan_hot_mirror_failover, HotMirrorEpochEvidence,
+    HotMirrorFailoverCandidate, HotMirrorFailoverError, HotMirrorFailoverEvidence,
+    HotMirrorFailoverPlan, HotMirrorInputs, HotMirrorRangeEvidence, WatermarkOutcome,
 };
 pub use identity::{
     ClusterVoterIdentity, NodeIdentity, NodeIdentityError, ReplicationPeerIdentity,
@@ -62,9 +69,12 @@ pub use move_range::{
     MoveRange, MoveRecovery, RangeSplit, SplitError, SplitPolicy, SplitSide,
 };
 pub use ownership::{
-    CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
-    PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership,
-    RangeRole, RangeWriteReject, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
+    CatalogError, CatalogVersion, CollectionGroupAuthority, CollectionGroupId,
+    CollectionGroupIdError, CollectionId, CollectionIdError, HotMirrorCandidate,
+    HotMirrorPromotion, HotMirrorPromotionRefusal, OwnershipEpoch, PlacementAuthorityCatalog,
+    PlacementAuthorityError, PlacementAuthorityId, PlacementAuthorityIdError, PlacementMetadata,
+    RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership, RangeRole,
+    RangeWriteReject, ReplicaRole, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
 };
 pub use ownership_force::{
     force_transition, EmptyOperatorReason, ForceDenial, ForceFailure, ForceTransitionCapability,
@@ -75,7 +85,8 @@ pub use ownership_lease::{
     OwnerWriteMode, OwnershipLease, RangeRequest, SupervisorTerm,
 };
 pub use ownership_transition::{
-    prepare, run_transition, CatchUpEvidence, CommitWatermark, InvalidCandidateReason,
+    prepare, run_transition, validate_archive_recovery_source, ArchiveRecoveryEvidence,
+    ArchiveRecoveryRejection, CatchUpEvidence, CommitWatermark, InvalidCandidateReason,
     PreparedTransition, TransitionError, TransitionKind, TransitionOutcome, TransitionRejection,
     TransitionRequest,
 };
@@ -96,5 +107,6 @@ pub use supervisor::{
     HealthPolicy, HealthScore, MemberSignals, PlannedPromotion,
 };
 pub use topology::{
-    ClientTopology, HintOutcome, RefreshOutcome, TopologyRange, TopologySnapshot, TopologyUpdate,
+    ClientTopology, HintOutcome, RefreshOutcome, TopologyAuthority, TopologyRange,
+    TopologySnapshot, TopologyUpdate,
 };

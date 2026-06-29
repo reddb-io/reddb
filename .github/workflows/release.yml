@@ -363,6 +363,9 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -371,21 +374,98 @@ jobs:
         with:
           # git-cliff walks the full commit history to build the changelog.
           fetch-depth: 0
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@v0.24.0
+        with:
+          syft-version: v1.46.0
+
+      - name: Generate source SBOMs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-sbom
+          VERSION="${RELEASE_TAG#v}"
+          syft_args=(
+            scan dir:.
+            --exclude './.git/**'
+            --exclude './release/**'
+            --exclude './release-sbom/**'
+            --source-name RedDB
+            --source-version "${VERSION}"
+          )
+          "${SYFT}" "${syft_args[@]}" -o spdx-json > "release-sbom/red-${RELEASE_TAG}.spdx.json"
+          "${SYFT}" "${syft_args[@]}" -o cyclonedx-json > "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
+          test -s "release-sbom/red-${RELEASE_TAG}.spdx.json"
+          test -s "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
+
       - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
+
+      - name: Add SBOMs to release assets
+        run: cp release-sbom/* release/
+
+      - name: Generate checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd release
+            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' \) ! -name '*.sha256' -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              | sed 's#  \./#  #'
+          ) > release/checksums.txt
+          test -s release/checksums.txt
+          cp release/checksums.txt release/SHA256SUMS
+          echo "---- checksums.txt ----"
+          cat release/checksums.txt
+
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Resolve stable changelog range
+        id: changelog_range
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.plan.outputs.release_tag }}"
+          TARGET_REF="$TAG"
+          if ! git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
+            TARGET_REF="HEAD"
+          fi
+
+          PREVIOUS_TAG="$(git tag --merged "$TARGET_REF" --list 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vx "$TAG" \
+            | head -n 1 || true)"
+
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "range=${PREVIOUS_TAG}..${TARGET_REF}" >> "$GITHUB_OUTPUT"
+            echo "Release changelog range: ${PREVIOUS_TAG}..${TARGET_REF}"
+          else
+            echo "range=${TARGET_REF}" >> "$GITHUB_OUTPUT"
+            echo "Release changelog range: ${TARGET_REF}"
+          fi
 
       - name: Generate changelog from commits
         uses: orhun/git-cliff-action@v4
         id: changelog
         with:
           config: cliff.toml
-          # --unreleased: commits since the most recent tag
+          # The explicit range uses the previous stable tag, so RC tags do not
+          # become the public release-notes baseline.
           # --tag: label the rendered block with this version even though
           #        the tag isn't pushed yet (workflow_dispatch path)
           # --strip header: drop the top-level Changelog title; we wrap it
-          args: --unreleased --tag ${{ needs.plan.outputs.release_tag }} --strip header
+          args: ${{ steps.changelog_range.outputs.range }} --tag ${{ needs.plan.outputs.release_tag }} --strip header
         env:
           OUTPUT: release-changelog.md
           GITHUB_REPO: ${{ github.repository }}
@@ -396,6 +476,9 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          VERSION="${TAG#v}"
+          MINOR_TAG="${VERSION%.*}"
+          MAJOR_TAG="${VERSION%%.*}"
           CHANGELOG="$(cat release-changelog.md)"
           cat > release-body.md <<MARKDOWN
           # RedDB ${TAG}
@@ -404,7 +487,17 @@ jobs:
 
           ---
 
-          ## Install
+          ## Upgrade Notes
+
+          Review the changelog above before upgrading. Storage-format, wire-protocol, or API breaking changes must appear in the changelog as breaking changes; if none are listed, this release is intended to be a standard same-major upgrade.
+
+          ## Compatibility
+
+          - Server, CLI, client packages, crates, and container images are published from the same tag: \`${TAG}\`.
+          - Official JavaScript packages are published only after the GitHub Release carries every postinstall-required binary asset and checksum manifest.
+          - Client/transport compatibility details live in [SDK & Client Compatibility](https://github.com/${REPO}/blob/${TAG}/docs/clients/sdk-compatibility.md).
+
+          ## Installation
 
           **npm / pnpm:**
           \`\`\`bash
@@ -413,18 +506,42 @@ jobs:
           pnpm add @reddb-io/client # Thin remote-only client
           \`\`\`
 
-          **Binaries (Linux x86_64):**
+          **Prebuilt binaries:**
+
+          | Platform | Server asset | Thin client asset |
+          | --- | --- | --- |
+          | Linux x86_64 (glibc) | \`red-linux-x86_64\` | \`red_client-linux-x86_64\` |
+          | Linux x86_64 (static musl) | \`red-linux-x86_64-static\` | \`red_client-linux-x86_64-static\` |
+          | Linux aarch64 (glibc) | \`red-linux-aarch64\` | \`red_client-linux-aarch64\` |
+          | Linux aarch64 (static musl) | \`red-linux-aarch64-static\` | \`red_client-linux-aarch64-static\` |
+          | Linux armv7 | \`red-linux-armv7\` | \`red_client-linux-armv7\` |
+          | macOS Intel | \`red-macos-x86_64\` | \`red_client-macos-x86_64\` |
+          | macOS Apple Silicon | \`red-macos-aarch64\` | \`red_client-macos-aarch64\` |
+          | Windows x86_64 | \`red-windows-x86_64.exe\` | \`red_client-windows-x86_64.exe\` |
+
+          Example for Linux x86_64:
           \`\`\`bash
           # Full server + embedded engine
-          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/red-linux-x86_64 -o red && chmod +x red
+          curl -fsSLO https://github.com/${REPO}/releases/download/${TAG}/red-linux-x86_64
+          chmod +x red-linux-x86_64
+
           # Thin remote-only client (~2 MB)
-          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/red_client-linux-x86_64 -o red_client && chmod +x red_client
+          curl -fsSLO https://github.com/${REPO}/releases/download/${TAG}/red_client-linux-x86_64
+          chmod +x red_client-linux-x86_64
           \`\`\`
 
           **Docker:**
           \`\`\`bash
           docker run --rm ghcr.io/${REPO}:${TAG} version
           \`\`\`
+
+          Stable image tags:
+
+          - \`${TAG}\` and \`${VERSION}\` are immutable release tags.
+          - \`${VERSION}\` is also published without the leading \`v\` for Docker-native workflows.
+          - \`${MINOR_TAG}\` moves to the latest patch in this minor line.
+          - \`${MAJOR_TAG}\` moves to the latest minor in this major line.
+          - \`latest\` moves to the latest stable release.
 
           **Or via Docker (thin client, ~7 MB):**
           \`\`\`bash
@@ -435,8 +552,41 @@ jobs:
 
           \`\`\`toml
           [dependencies]
-          reddb-io = "${TAG#v}"
+          reddb-io = "${VERSION}"
           \`\`\`
+
+          ## Verification
+
+          Every stable release publishes both \`checksums.txt\` for installers and \`SHA256SUMS\` for standard manual verification. They contain the same SHA-256 manifest.
+
+          \`\`\`bash
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/SHA256SUMS -o SHA256SUMS
+          grep -E '  (red|red_client)-linux-x86_64$' SHA256SUMS | sha256sum -c -
+
+          curl -fsSLO https://github.com/${REPO}/releases/download/${TAG}/red-${TAG}.spdx.json
+          curl -fsSLO https://github.com/${REPO}/releases/download/${TAG}/red-${TAG}.cyclonedx.json
+          grep -E "  red-${TAG}\\.(spdx|cyclonedx)\\.json$" SHA256SUMS | sha256sum -c -
+
+          gh attestation verify red-linux-x86_64 --repo ${REPO}
+          gh attestation verify red_client-linux-x86_64 --repo ${REPO}
+          gh attestation verify red-${TAG}.spdx.json --repo ${REPO}
+          gh attestation verify red-${TAG}.cyclonedx.json --repo ${REPO}
+
+          cosign verify ghcr.io/${REPO}:${TAG} --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${TAG}" --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          \`\`\`
+
+          Docker images are published as multi-arch GHCR images for linux/amd64 and linux/arm64 with Cosign keyless signatures, BuildKit provenance, and SBOM attestations.
+
+          \`\`\`bash
+          docker buildx imagetools inspect ghcr.io/${REPO}:${TAG}
+          docker buildx imagetools inspect ghcr.io/${REPO}-client:${TAG}
+          \`\`\`
+
+          ## Release Assets
+
+          - \`checksums.txt\` / \`SHA256SUMS\`: aggregate SHA-256 manifest for release binaries and SBOMs.
+          - \`red-${TAG}.spdx.json\` / \`red-${TAG}.cyclonedx.json\`: source SBOMs for the release.
+          - \`artifact-sizes.md\`: release evidence from the binary/container size gate, not an installer input.
           MARKDOWN
           echo "---- composed body ----"
           cat release-body.md
@@ -723,6 +873,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
+      id-token: write
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
@@ -759,6 +910,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -775,6 +929,8 @@ jobs:
           tags: |
             type=raw,value=${{ needs.plan.outputs.release_tag }}
             type=raw,value=${{ needs.plan.outputs.package_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
+            type=semver,pattern={{major}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
             type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' }}
             type=raw,value=next,enable=${{ needs.plan.outputs.release_channel == 'next' }}
           labels: |
@@ -783,6 +939,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.package_version }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -791,9 +948,18 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Sign published image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   publish-client-image:
     # ADR 0004 — thin red_client container, parallel to publish-docker.
@@ -805,6 +971,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
+      id-token: write
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
@@ -841,6 +1008,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -857,6 +1027,8 @@ jobs:
           tags: |
             type=raw,value=${{ needs.plan.outputs.release_tag }}
             type=raw,value=${{ needs.plan.outputs.package_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
+            type=semver,pattern={{major}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
             type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' }}
             type=raw,value=next,enable=${{ needs.plan.outputs.release_channel == 'next' }}
           labels: |
@@ -865,6 +1037,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.package_version }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -873,7 +1046,16 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
+          provenance: mode=max
+          sbom: true
+
+      - name: Sign published image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}-client
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   # ===========================================================================
   # publish-python — Build and upload reddb wheels to PyPI.

@@ -572,6 +572,7 @@ npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1
 ```bash
 # Install
 curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
+# The installer verifies the selected release asset against SHA256SUMS before install.
 
 # Start the server (wire: 5050, gRPC: 55055, HTTP: 5000)
 red server --wire-bind 127.0.0.1:5050 --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000 --path ./data.rdb
@@ -626,6 +627,9 @@ gRPC stubs, and wire vocabulary live in sibling crates.
 - [npm driver package](https://www.npmjs.com/package/reddb)
 - [npm CLI launcher](https://www.npmjs.com/package/@reddb-io/cli)
 - [Releases](https://github.com/reddb-io/reddb/releases)
+- [Release Policy](./docs/release-policy.md)
+- [Support Policy](./SUPPORT.md)
+- [Security Policy](./SECURITY.md)
 - [Public Contract Matrix](./docs/reference/contract-matrix.md) — every doc'd promise mapped to a test or a planned-status note
 
 ---

@@ -58,7 +58,7 @@
 
 use super::identity::NodeIdentity;
 use super::ownership::{
-    CatalogError, CatalogVersion, CollectionId, OwnershipEpoch, RangeId, RangeOwnership,
+    CatalogError, CatalogVersion, CollectionId, OwnershipEpoch, RangeId, RangeOwnership, RangeRole,
     ShardOwnershipCatalog,
 };
 
@@ -113,6 +113,58 @@ impl CatchUpEvidence {
         self.applied_term > watermark.term
             || (self.applied_term == watermark.term && self.applied_lsn >= watermark.lsn)
     }
+}
+
+/// Validation receipts required before a compressed archive copy may be used as
+/// a restored recovery source. This is deliberately separate from
+/// [`CatchUpEvidence`]: hot mirror promotion needs live catch-up evidence, while
+/// archive recovery must first prove restore integrity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveRecoveryEvidence {
+    pub restore_validated: bool,
+    pub checksum_validated: bool,
+    pub watermark_validated: bool,
+}
+
+impl ArchiveRecoveryEvidence {
+    pub fn new(
+        restore_validated: bool,
+        checksum_validated: bool,
+        watermark_validated: bool,
+    ) -> Self {
+        Self {
+            restore_validated,
+            checksum_validated,
+            watermark_validated,
+        }
+    }
+}
+
+/// Why a compressed archive copy is not eligible to be used as a recovery
+/// source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchiveRecoveryRejection {
+    NotArchiveReplica {
+        collection: CollectionId,
+        range_id: RangeId,
+        candidate: NodeIdentity,
+        role: RangeRole,
+    },
+    MissingRestoreValidation {
+        collection: CollectionId,
+        range_id: RangeId,
+        candidate: NodeIdentity,
+    },
+    MissingChecksumValidation {
+        collection: CollectionId,
+        range_id: RangeId,
+        candidate: NodeIdentity,
+    },
+    MissingWatermarkValidation {
+        collection: CollectionId,
+        range_id: RangeId,
+        candidate: NodeIdentity,
+    },
 }
 
 /// Whether a transition is a failover promote or a move-range handoff. Both run
@@ -224,6 +276,10 @@ pub enum InvalidCandidateReason {
     /// been receiving the range's stream can cover the commit watermark, so an
     /// arbitrary node is never a valid promotion target.
     NotAReplica,
+    /// The target is a compressed archive replica. Archive data may be a
+    /// recovery source only after restore, checksum validation, and watermark
+    /// validation prove the recovered range is safe.
+    ArchiveReplicaRequiresRestoreValidation,
     /// The target is already the current owner — a transition to the incumbent is
     /// a no-op and almost always a planner bug, so it is rejected.
     AlreadyOwner,
@@ -233,6 +289,9 @@ impl InvalidCandidateReason {
     fn label(self) -> &'static str {
         match self {
             InvalidCandidateReason::NotAReplica => "candidate is not a replica of the range",
+            InvalidCandidateReason::ArchiveReplicaRequiresRestoreValidation => {
+                "archive replica requires restore, checksum, and watermark validation"
+            }
             InvalidCandidateReason::AlreadyOwner => "candidate is already the current owner",
         }
     }
@@ -538,23 +597,35 @@ pub fn prepare(
         });
     }
 
-    // Candidate eligibility: a valid target is a current replica of the range
-    // and not the incumbent owner.
-    if request.target == *current.owner() {
-        return Err(TransitionRejection::InvalidCandidate {
-            collection: request.collection.clone(),
-            range_id: request.range_id,
-            candidate: request.target.clone(),
-            reason: InvalidCandidateReason::AlreadyOwner,
-        });
-    }
-    if !current.replicas().contains(&request.target) {
-        return Err(TransitionRejection::InvalidCandidate {
-            collection: request.collection.clone(),
-            range_id: request.range_id,
-            candidate: request.target.clone(),
-            reason: InvalidCandidateReason::NotAReplica,
-        });
+    // Candidate eligibility: a valid target is a hot replica of the range and
+    // not the incumbent owner. Compressed archive replicas are recovery sources,
+    // not direct promotion candidates.
+    match current.role_of(&request.target) {
+        RangeRole::Owner => {
+            return Err(TransitionRejection::InvalidCandidate {
+                collection: request.collection.clone(),
+                range_id: request.range_id,
+                candidate: request.target.clone(),
+                reason: InvalidCandidateReason::AlreadyOwner,
+            });
+        }
+        RangeRole::Replica => {}
+        RangeRole::ArchiveReplica => {
+            return Err(TransitionRejection::InvalidCandidate {
+                collection: request.collection.clone(),
+                range_id: request.range_id,
+                candidate: request.target.clone(),
+                reason: InvalidCandidateReason::ArchiveReplicaRequiresRestoreValidation,
+            });
+        }
+        RangeRole::NoCopy => {
+            return Err(TransitionRejection::InvalidCandidate {
+                collection: request.collection.clone(),
+                range_id: request.range_id,
+                candidate: request.target.clone(),
+                reason: InvalidCandidateReason::NotAReplica,
+            });
+        }
     }
 
     // Safety gate: evidence must exist, vouch for the target, and cover the
@@ -614,6 +685,51 @@ pub fn run_transition(
     prepared.activate(catalog).map_err(TransitionError::Catalog)
 }
 
+/// Validate that a compressed archive copy may be used as a recovery source.
+/// This never prepares a direct ownership transition; a recovered range must be
+/// restored and then enter the ordinary hot-replica path before promotion.
+pub fn validate_archive_recovery_source(
+    catalog: &ShardOwnershipCatalog,
+    collection: &CollectionId,
+    range_id: RangeId,
+    candidate: &NodeIdentity,
+    evidence: ArchiveRecoveryEvidence,
+) -> Result<(), ArchiveRecoveryRejection> {
+    let role = catalog
+        .role_at(candidate, collection, range_id)
+        .unwrap_or(RangeRole::NoCopy);
+    if role != RangeRole::ArchiveReplica {
+        return Err(ArchiveRecoveryRejection::NotArchiveReplica {
+            collection: collection.clone(),
+            range_id,
+            candidate: candidate.clone(),
+            role,
+        });
+    }
+    if !evidence.restore_validated {
+        return Err(ArchiveRecoveryRejection::MissingRestoreValidation {
+            collection: collection.clone(),
+            range_id,
+            candidate: candidate.clone(),
+        });
+    }
+    if !evidence.checksum_validated {
+        return Err(ArchiveRecoveryRejection::MissingChecksumValidation {
+            collection: collection.clone(),
+            range_id,
+            candidate: candidate.clone(),
+        });
+    }
+    if !evidence.watermark_validated {
+        return Err(ArchiveRecoveryRejection::MissingWatermarkValidation {
+            collection: collection.clone(),
+            range_id,
+            candidate: candidate.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// The error of an end-to-end [`run_transition`]: either the safety gate refused
 /// the transition, or the catalog rejected the activation write.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,6 +787,21 @@ mod tests {
                 PlacementMetadata::with_replication_factor(3),
             ))
             .unwrap();
+        (catalog, orders)
+    }
+
+    fn catalog_with_archive(
+        owner: &str,
+        replicas: &[&str],
+        archive_replicas: &[&str],
+    ) -> (ShardOwnershipCatalog, CollectionId) {
+        let (mut catalog, orders) = catalog_with(owner, replicas);
+        let range = catalog.range(&orders, RangeId::new(1)).unwrap();
+        let archived = range.update_replica_roles(
+            range.replicas().iter().cloned(),
+            archive_replicas.iter().map(|r| ident(r)),
+        );
+        catalog.apply_update(archived).unwrap();
         (catalog, orders)
     }
 
@@ -875,6 +1006,117 @@ mod tests {
             }
             other => panic!("expected InvalidCandidate(NotAReplica), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn archive_replica_is_not_a_direct_promotion_candidate() {
+        let (catalog, orders) =
+            catalog_with_archive("CN=node-a", &["CN=node-b"], &["CN=archive-a"]);
+        let version = catalog.range(&orders, RangeId::new(1)).unwrap().version();
+        let req = TransitionRequest::new(
+            TransitionKind::Promote,
+            orders.clone(),
+            RangeId::new(1),
+            ident("CN=node-a"),
+            OwnershipEpoch::initial(),
+            version,
+            ident("CN=archive-a"),
+            CommitWatermark::new(1, 10),
+        )
+        .with_evidence(CatchUpEvidence::new(ident("CN=archive-a"), 1, 10));
+
+        let err = prepare(&catalog, &req).unwrap_err();
+        match err {
+            TransitionRejection::InvalidCandidate { reason, .. } => {
+                assert_eq!(
+                    reason,
+                    InvalidCandidateReason::ArchiveReplicaRequiresRestoreValidation
+                );
+            }
+            other => panic!("expected archive replica rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn archive_recovery_rejects_missing_restore_validation() {
+        let (catalog, orders) = catalog_with_archive("CN=node-a", &[], &["CN=archive-a"]);
+        let err = validate_archive_recovery_source(
+            &catalog,
+            &orders,
+            RangeId::new(1),
+            &ident("CN=archive-a"),
+            ArchiveRecoveryEvidence::new(false, true, true),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ArchiveRecoveryRejection::MissingRestoreValidation { .. }
+        ));
+    }
+
+    #[test]
+    fn archive_recovery_rejects_missing_checksum_validation() {
+        let (catalog, orders) = catalog_with_archive("CN=node-a", &[], &["CN=archive-a"]);
+        let err = validate_archive_recovery_source(
+            &catalog,
+            &orders,
+            RangeId::new(1),
+            &ident("CN=archive-a"),
+            ArchiveRecoveryEvidence::new(true, false, true),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ArchiveRecoveryRejection::MissingChecksumValidation { .. }
+        ));
+    }
+
+    #[test]
+    fn archive_recovery_rejects_missing_watermark_validation() {
+        let (catalog, orders) = catalog_with_archive("CN=node-a", &[], &["CN=archive-a"]);
+        let err = validate_archive_recovery_source(
+            &catalog,
+            &orders,
+            RangeId::new(1),
+            &ident("CN=archive-a"),
+            ArchiveRecoveryEvidence::new(true, true, false),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ArchiveRecoveryRejection::MissingWatermarkValidation { .. }
+        ));
+    }
+
+    #[test]
+    fn archive_recovery_and_hot_mirror_promotion_use_different_paths() {
+        let (mut catalog, orders) =
+            catalog_with_archive("CN=node-a", &["CN=node-b"], &["CN=archive-a"]);
+        let version = catalog.range(&orders, RangeId::new(1)).unwrap().version();
+
+        let hot_mirror = TransitionRequest::new(
+            TransitionKind::Promote,
+            orders.clone(),
+            RangeId::new(1),
+            ident("CN=node-a"),
+            OwnershipEpoch::initial(),
+            version,
+            ident("CN=node-b"),
+            CommitWatermark::new(1, 10),
+        )
+        .with_evidence(CatchUpEvidence::new(ident("CN=node-b"), 1, 10));
+        run_transition(&mut catalog, &hot_mirror).expect("hot mirror promotion succeeds");
+
+        let (catalog, orders) =
+            catalog_with_archive("CN=node-a", &["CN=node-b"], &["CN=archive-a"]);
+        validate_archive_recovery_source(
+            &catalog,
+            &orders,
+            RangeId::new(1),
+            &ident("CN=archive-a"),
+            ArchiveRecoveryEvidence::new(true, true, true),
+        )
+        .expect("archive recovery accepts only after restore integrity validation");
     }
 
     #[test]
