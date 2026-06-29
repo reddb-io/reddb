@@ -12,11 +12,12 @@ use aes_gcm::{
 
 /// Encrypt `plaintext` with AES-256-GCM. Returns `ciphertext ‖ tag`.
 pub fn aes256_gcm_encrypt(key: &[u8; 32], iv: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(iv);
+    let key = Key::<Aes256Gcm>::try_from(&key[..]).expect("AES-256-GCM key is 32 bytes");
+    let nonce = Nonce::try_from(&iv[..]).expect("AES-256-GCM nonce is 12 bytes");
+    let cipher = Aes256Gcm::new(&key);
     cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -32,11 +33,12 @@ pub fn aes256_gcm_decrypt(
     aad: &[u8],
     ciphertext_with_tag: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(iv);
+    let key = Key::<Aes256Gcm>::try_from(&key[..]).expect("AES-256-GCM key is 32 bytes");
+    let nonce = Nonce::try_from(&iv[..]).expect("AES-256-GCM nonce is 12 bytes");
+    let cipher = Aes256Gcm::new(&key);
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext_with_tag,
                 aad,
