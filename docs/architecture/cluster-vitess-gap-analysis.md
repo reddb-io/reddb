@@ -8,7 +8,7 @@ RedDB owns its storage engine. The useful comparison is the maturity of the
 cluster product surface: routing, topology, failover, resharding, operator
 workflow, and test coverage.
 
-Official Vitess sources used:
+Official sources used:
 
 - Vitess architecture: https://vitess.io/docs/24.0/overview/architecture/
 - VTGate: https://vitess.io/docs/24.0/reference/programs/vtgate/
@@ -17,6 +17,8 @@ Official Vitess sources used:
 - Reshard: https://vitess.io/docs/25.0/reference/vreplication/reshard/
 - VTOrc architecture: https://vitess.io/docs/24.0/reference/vtorc/architecture/
 - vtctldclient: https://vitess.io/docs/24.0/reference/programs/vtctldclient/
+- Slack Vitess migration: https://slack.engineering/scaling-datastores-at-slack-with-vitess/
+- Slack 2022 incident: https://slack.engineering/slacks-incident-on-2-22-22/
 
 ## Executive Summary
 
@@ -45,6 +47,15 @@ module-shaped:
 5. keep the current discipline that user writes do not flow through the
    control-plane consensus log.
 
+Slack is the best production proof point for taking Vitess seriously. Slack
+Engineering describes Vitess as the present and future of their datastore layer
+at the time of their 2020 write-up, with most MySQL traffic already migrated.
+The same public corpus is also a warning: Slack's 2022 incident report describes
+a Vitess keyspace overload caused by cache churn exposing an inefficient scatter
+query pattern. For RedDB, that means the cluster roadmap must include not only
+routing and resharding, but also explicit fanout budgets, throttling, stale-read
+policy, and overload tests.
+
 ## Comparison Matrix
 
 | Area | Vitess pattern | RedDB state | Gap |
@@ -57,7 +68,40 @@ module-shaped:
 | Resharding/range movement | Reshard is a workflow: create, show/status, VDiff, SwitchTraffic, ReverseTraffic, cancel, complete. | `cluster/move_range.rs`, placement, split, catch-up, and cutover state machines exist as pure models. | Need an operator workflow around move/split/cutover with status, validation, rollback/reverse, and dry-run. |
 | Control/data separation | Topology is metadata/locks, not RPC/log storage or per-query dependency. | ADR 0052 explicitly keeps user writes out of the control-plane consensus log. | Preserve this; do not "fix" clustering by pushing data writes through consensus. |
 | Operator surface | vtctldclient and VTAdmin expose broad cluster inspection and mutation. | RedDB has status JSON and deployment JSON surfaces plus individual docs. | Need one cluster operator surface with topology, health, ownership, failover, and movement commands. |
+| Fanout and overload | Vitess supports scatter queries, but Slack's incident report shows broad fanout under cache churn can overload a keyspace. | ADR 0055 already says cross-shard reads must be explicit and bounded. | Need enforcement, tracing, throttling, and chaos tests for cold-cache fanout. |
 | Testing | Vitess documents operational behaviors and has mature workflow surfaces to exercise. | RedDB has Maelstrom-style protocol model and Jepsen-style black-box harness docs, plus chaos replication tests. | Need public workflow E2E tests: planned failover, emergency failover, stale route, move range, and interrupted move. |
+
+## Slack Production Signal
+
+Slack's Vitess adoption is useful because it is both successful and sober. The
+migration write-up says Slack wanted to keep MySQL because of existing query
+semantics, operational practice, durability, backup, ETL, and compliance
+investment. Vitess fit because it moved flexible sharding, topology metadata,
+failover, and backup operations into an infrastructure layer instead of forcing
+application code to own shard routing.
+
+The same write-up also says adoption required real engineering around Vitess:
+provisioning, service discovery, backup/restore, topology management,
+credentials, backfill, double-writes, double-read diffing, load testing, and
+introspection. That matters for RedDB because a strong architecture doc is not a
+production cluster. Production maturity is the combination of runtime, operator
+workflow, migration workflow, observability, and test harnesses.
+
+Slack's 2022 incident is the matching negative example. A cache/service-discovery
+interaction lowered cache hit rates, which exposed a query path that had to touch
+every shard because it did not include the sharding key. Slack mitigated by
+throttling client boot traffic, changing the query to reduce broad shard reads,
+using replicas where staleness was acceptable, and refactoring toward a better
+sharding layout.
+
+That should shape RedDB's cluster priorities:
+
+- unbounded scatter-gather must not be transparent magic;
+- cross-range reads need explicit opt-in and budgets;
+- every fanout query should surface shard count, partial status, timeout, and
+  retry information;
+- cold-cache and cache-churn scenarios need chaos coverage;
+- replica-read fallback must be tied to a declared freshness/staleness policy.
 
 ## What RedDB Already Gets Right
 
@@ -180,6 +224,27 @@ red cluster placement plan
 The matching HTTP/gRPC/RedWire APIs should be stable enough for drivers, tests,
 and future dashboards.
 
+### 6. Make Fanout Explicit, Budgeted, And Throttleable
+
+Slack's 2022 incident is a concrete warning for RedDB's future cross-range read
+surface: a query that is cheap under a hot cache can become a keyspace-wide
+load amplifier when cache hit rates collapse. ADR 0055 already takes the right
+position by making cross-shard reads explicit and bounded. The missing maturity
+work is enforcement and operational behavior.
+
+Minimum contract:
+
+- reject unbounded cross-range reads by default;
+- require an explicit fanout mode or API flag when a query cannot prove a shard
+  key predicate;
+- enforce per-request shard-count, timeout, row, byte, and coordinator-memory
+  budgets;
+- report participating ranges, partial status, retries, and timeout causes in
+  traces and response metadata;
+- expose router/server metrics for fanout count, fanout latency, rejected fanout,
+  partial results, retry storms, and overload throttling;
+- define which replica-read or stale-read modes are legal during cache refill.
+
 ## Test Maturity Opportunities
 
 The right next tests are workflow tests. RedDB already has useful lower-level
@@ -196,6 +261,7 @@ Add these end-to-end scenarios:
 | Interrupted move range | Crash source/target/supervisor during copy or catch-up. | Catalog stays on old owner unless target covers watermark. |
 | Cutover under traffic | Writes continue while target catches up. | Cutover only happens when target reaches watermark; no double writer. |
 | Topology service outage | Topology refresh unavailable while cached routes exist. | Existing cached routes continue until stale; unsafe mutations fail closed. |
+| Cold-cache fanout | Drop cache hit rate while a query misses the shard key. | Fanout stays within budget or is rejected/throttled; traces show participating ranges. |
 | Clock/timezone chaos | Change wall clock/timezone during leases and deadlines. | Monotonic deadlines hold; wall-clock metadata may change but safety does not. |
 | Filesystem faults | Inject write/fsync/rename failures during control-plane state writes. | Vote/log/ownership state fails closed and remains recoverable. |
 
@@ -239,6 +305,13 @@ attached to named cluster workflows.
    - Document the operator workflow names before the runtime is complete.
    - Mark each as implemented, modeled, or roadmap to avoid overclaiming.
 
+9. **Bounded fanout and overload guardrails**
+   - Enforce explicit fanout opt-in and per-request budgets for cross-range
+     reads.
+   - Add metrics/traces for fanout, partial results, retry storms, and overload
+     throttling.
+   - Add cold-cache fanout scenarios to the chaos harness.
+
 ## Non-Goals
 
 Do not put user writes through the control-plane consensus log. That would erase
@@ -264,5 +337,6 @@ following should be true:
 - range movement has status, validation, cutover, abort/reverse, and recovery;
 - cluster bootstrap authority is enforced by the reserved global system range;
 - process-level chaos tests cover failover, routing, and range movement;
+- fanout queries are explicit, budgeted, observable, and throttleable;
 - storage-fault tests cover control-plane vote/log/ownership persistence;
 - docs distinguish implemented, modeled, and roadmap behavior.
