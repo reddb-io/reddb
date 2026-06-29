@@ -536,9 +536,32 @@ mod tests {
     use super::*;
     use crate::runtime::audit_log::AuditLogger;
 
-    fn make_logger() -> (AuditLogger, std::path::PathBuf) {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
+    struct TempAuditPath(std::path::PathBuf);
+
+    impl std::ops::Deref for TempAuditPath {
+        type Target = std::path::PathBuf;
+
+        fn deref(&self) -> &std::path::PathBuf {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TempAuditPath {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempAuditPath {
+        fn drop(&mut self) {
+            if let Some(parent) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
+    }
+
+    fn make_logger() -> (AuditLogger, TempAuditPath) {
+        let dir = std::env::temp_dir().join(format!(
             "reddb-op-event-{}-{}",
             std::process::id(),
             crate::utils::now_unix_nanos()
@@ -546,7 +569,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".audit.log");
         let logger = AuditLogger::with_path(path.clone());
-        (logger, path)
+        (logger, TempAuditPath(path))
     }
 
     fn drain(logger: &AuditLogger) {
