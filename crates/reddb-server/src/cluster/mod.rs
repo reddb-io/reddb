@@ -5,6 +5,7 @@ pub mod commit_resolution;
 pub mod control_plane;
 pub mod cross_range;
 pub mod drain;
+pub mod hot_mirror_failover;
 pub mod identity;
 pub mod join;
 pub mod membership;
@@ -43,6 +44,11 @@ pub use drain::{
     DrainBlockReason, DrainOutcome, DrainPlan, DrainStatus, DrainStep, ForceCapability,
     ForceRemoveAudit, ForceRemoveOrder, ForceRemoveOrderError, ForceRemovePlan, ForceRemoveResult,
     ForcedBlock, ForcedPromotion, OwnedHandoff, RemovalRejection, ReplicaEvacuation,
+};
+pub use hot_mirror_failover::{
+    execute_hot_mirror_failover, plan_hot_mirror_failover, HotMirrorEpochEvidence,
+    HotMirrorFailoverCandidate, HotMirrorFailoverError, HotMirrorFailoverEvidence,
+    HotMirrorFailoverPlan, HotMirrorInputs, HotMirrorRangeEvidence, WatermarkOutcome,
 };
 pub use identity::{
     ClusterVoterIdentity, NodeIdentity, NodeIdentityError, ReplicationPeerIdentity,
