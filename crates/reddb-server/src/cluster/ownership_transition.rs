@@ -796,10 +796,11 @@ mod tests {
         archive_replicas: &[&str],
     ) -> (ShardOwnershipCatalog, CollectionId) {
         let (mut catalog, orders) = catalog_with(owner, replicas);
-        let archived = catalog
-            .range(&orders, RangeId::new(1))
-            .unwrap()
-            .update_archive_replicas(archive_replicas.iter().map(|r| ident(r)));
+        let range = catalog.range(&orders, RangeId::new(1)).unwrap();
+        let archived = range.update_replica_roles(
+            range.replicas().iter().cloned(),
+            archive_replicas.iter().map(|r| ident(r)),
+        );
         catalog.apply_update(archived).unwrap();
         (catalog, orders)
     }
