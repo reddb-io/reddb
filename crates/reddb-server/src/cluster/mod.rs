@@ -58,10 +58,11 @@ pub use move_range::{
 };
 pub use ownership::{
     CatalogError, CatalogVersion, CollectionGroupAuthority, CollectionGroupId,
-    CollectionGroupIdError, CollectionId, CollectionIdError, OwnershipEpoch,
-    PlacementAuthorityCatalog, PlacementAuthorityError, PlacementMetadata, RangeBound, RangeBounds,
-    RangeBoundsError, RangeId, RangeOwnership, RangeRole, RangeWriteReject, ReplicaRole,
-    ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
+    CollectionGroupIdError, CollectionId, CollectionIdError, HotMirrorCandidate,
+    HotMirrorPromotion, HotMirrorPromotionRefusal, OwnershipEpoch, PlacementAuthorityCatalog,
+    PlacementAuthorityError, PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId,
+    RangeOwnership, RangeRole, RangeWriteReject, ReplicaRole, ShardKeyMode, ShardOwnershipCatalog,
+    UpdateOutcome,
 };
 pub use ownership_force::{
     force_transition, EmptyOperatorReason, ForceDenial, ForceFailure, ForceTransitionCapability,
