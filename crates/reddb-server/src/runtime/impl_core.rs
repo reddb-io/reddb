@@ -5035,7 +5035,8 @@ impl RedDBRuntime {
             QueryExpr::AlterQueue(ref q) => self.execute_alter_queue(query, q),
             QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
             QueryExpr::QueueSelect(ref q) => self.execute_queue_select(query, q),
-            QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
+            QueryExpr::QueueCommand(ref cmd) => self
+                .with_deferred_store_wal_if_transaction(|| self.execute_queue_command(query, cmd)),
             QueryExpr::EventsBackfill(ref backfill) => {
                 self.execute_events_backfill(query, backfill)
             }

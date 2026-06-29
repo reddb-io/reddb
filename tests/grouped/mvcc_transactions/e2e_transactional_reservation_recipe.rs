@@ -1,0 +1,339 @@
+//! Canonical transactional reservation recipe.
+//!
+//! The recipe is intentionally expressed through public SQL. It combines
+//! `UPDATE ... CLAIM`, an application-owned idempotency table, and queue work
+//! inside one explicit transaction boundary.
+
+#[path = "../../support/mod.rs"]
+mod support;
+
+use std::path::Path;
+
+use reddb::api::DurabilityMode;
+use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+use reddb::storage::schema::Value;
+use reddb::storage::wal::{WalReader, WalRecord};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+
+const TRANSACTIONS_DOC: &str = include_str!("../../../docs/query/transactions.md");
+
+#[derive(Debug, PartialEq)]
+enum ReservationAttempt {
+    Created {
+        reservation_id: String,
+        units_claimed: i64,
+    },
+    Existing {
+        reservation_id: String,
+        units_claimed: i64,
+    },
+}
+
+fn in_memory_runtime() -> RedDBRuntime {
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
+}
+
+fn persistent_runtime(db: &support::TempDbFile) -> RedDBRuntime {
+    RedDBRuntime::with_options(
+        RedDBOptions::persistent(db.path())
+            .with_durability_mode(DurabilityMode::WalDurableGrouped)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+            .expect("primary-replica operational profile"),
+    )
+    .expect("persistent runtime")
+}
+
+fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
+    rt.execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
+}
+
+fn setup_reservation_schema(rt: &RedDBRuntime) {
+    exec(
+        rt,
+        "CREATE TABLE inventory_units \
+         (sku TEXT, unit_id INT PRIMARY KEY, status TEXT, reservation_key TEXT)",
+    );
+    exec(
+        rt,
+        "CREATE TABLE reservation_idempotency \
+         (idempotency_key TEXT PRIMARY KEY, reservation_id TEXT, units_claimed INT)",
+    );
+    exec(rt, "CREATE QUEUE reservation_work");
+    exec(
+        rt,
+        "INSERT INTO inventory_units (sku, unit_id, status, reservation_key) VALUES \
+         ('sku-1', 1, 'available', ''), \
+         ('sku-1', 2, 'available', ''), \
+         ('sku-1', 3, 'available', '')",
+    );
+}
+
+fn text(record: &reddb::storage::query::UnifiedRecord, column: &str) -> String {
+    match record.get(column) {
+        Some(Value::Text(value)) => value.to_string(),
+        other => panic!("expected text for {column}, got {other:?}"),
+    }
+}
+
+fn int(record: &reddb::storage::query::UnifiedRecord, column: &str) -> i64 {
+    match record.get(column) {
+        Some(Value::Integer(value)) => *value,
+        Some(Value::UnsignedInteger(value)) => *value as i64,
+        other => panic!("expected integer for {column}, got {other:?}"),
+    }
+}
+
+fn row_count(rt: &RedDBRuntime, sql: &str) -> usize {
+    exec(rt, sql).result.records.len()
+}
+
+fn existing_reservation(rt: &RedDBRuntime, key: &str) -> Option<(String, i64)> {
+    let existing = exec(
+        rt,
+        &format!(
+            "SELECT reservation_id, units_claimed FROM reservation_idempotency \
+             WHERE idempotency_key = '{key}'"
+        ),
+    );
+    existing
+        .result
+        .records
+        .first()
+        .map(|record| (text(record, "reservation_id"), int(record, "units_claimed")))
+}
+
+fn reserve_units(rt: &RedDBRuntime, key: &str, requested: i64) -> ReservationAttempt {
+    if let Some((reservation_id, units_claimed)) = existing_reservation(rt, key) {
+        return ReservationAttempt::Existing {
+            reservation_id,
+            units_claimed,
+        };
+    }
+
+    let reservation_id = format!("resv-{key}");
+    exec(rt, "BEGIN");
+    let claimed = exec(
+        rt,
+        &format!(
+            "UPDATE inventory_units \
+             SET status = 'claimed', reservation_key = '{key}' \
+             WHERE sku = 'sku-1' AND status = 'available' \
+             CLAIM EXACT {requested} ORDER BY unit_id ASC RETURNING unit_id"
+        ),
+    );
+    assert_eq!(
+        claimed.affected_rows, requested as u64,
+        "recipe should use CLAIM EXACT so partial reservations are not committed"
+    );
+    exec(
+        rt,
+        &format!(
+            "INSERT INTO reservation_idempotency \
+             (idempotency_key, reservation_id, units_claimed) \
+             VALUES ('{key}', '{reservation_id}', {requested})"
+        ),
+    );
+    exec(
+        rt,
+        &format!(
+            "QUEUE PUSH reservation_work \
+             {{kind: 'reservation_claimed', reservation_id: '{reservation_id}'}}"
+        ),
+    );
+    exec(rt, "COMMIT");
+
+    ReservationAttempt::Created {
+        reservation_id,
+        units_claimed: requested,
+    }
+}
+
+fn store_commit_batches(wal_path: &Path) -> Vec<Vec<Vec<u8>>> {
+    WalReader::open(wal_path)
+        .expect("wal opens")
+        .iter()
+        .map(|record| record.expect("wal record decodes").1)
+        .filter_map(|record| match record {
+            WalRecord::TxCommitBatch { actions, .. } => Some(actions),
+            _ => None,
+        })
+        .collect()
+}
+
+fn action_contains_text(action: &[u8], needle: &str) -> bool {
+    action
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+fn batch_contains_text(actions: &[Vec<u8>], needle: &str) -> bool {
+    actions
+        .iter()
+        .any(|action| action_contains_text(action, needle))
+}
+
+#[test]
+fn transactions_doc_includes_canonical_reservation_recipe_without_external_coordinator() {
+    assert!(
+        TRANSACTIONS_DOC.contains("## Canonical reservation recipe"),
+        "transactions docs must include the canonical reservation recipe"
+    );
+    assert!(
+        TRANSACTIONS_DOC.contains("idempotency key"),
+        "recipe must name the application-defined idempotency key"
+    );
+    assert!(
+        !TRANSACTIONS_DOC.contains("Redis"),
+        "recipe must not present Redis as required coordination infrastructure"
+    );
+}
+
+#[test]
+fn reservation_recipe_claims_units_key_and_queue_work_in_one_transaction() {
+    let rt = in_memory_runtime();
+    setup_reservation_schema(&rt);
+
+    set_current_connection_id(145601);
+    let first = reserve_units(&rt, "reserve-1", 2);
+    assert_eq!(
+        first,
+        ReservationAttempt::Created {
+            reservation_id: "resv-reserve-1".to_string(),
+            units_claimed: 2,
+        }
+    );
+
+    let retry = reserve_units(&rt, "reserve-1", 2);
+    assert_eq!(
+        retry,
+        ReservationAttempt::Existing {
+            reservation_id: "resv-reserve-1".to_string(),
+            units_claimed: 2,
+        }
+    );
+
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT unit_id FROM inventory_units WHERE reservation_key = 'reserve-1'"
+        ),
+        2,
+        "retry must not claim duplicate resource units"
+    );
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT reservation_id FROM reservation_idempotency \
+             WHERE idempotency_key = 'reserve-1'"
+        ),
+        1,
+        "retry must not create a duplicate idempotency outcome"
+    );
+    assert_eq!(
+        exec(&rt, "QUEUE PEEK reservation_work 10")
+            .result
+            .records
+            .len(),
+        1,
+        "retry must not enqueue duplicate downstream work"
+    );
+    clear_current_connection_id();
+}
+
+#[test]
+fn reservation_rollback_discards_claim_key_and_queue_work() {
+    let rt = in_memory_runtime();
+    setup_reservation_schema(&rt);
+
+    set_current_connection_id(145602);
+    exec(&rt, "BEGIN");
+    exec(
+        &rt,
+        "UPDATE inventory_units \
+         SET status = 'claimed', reservation_key = 'rollback-key' \
+         WHERE sku = 'sku-1' AND status = 'available' \
+         CLAIM EXACT 1 ORDER BY unit_id ASC RETURNING unit_id",
+    );
+    exec(
+        &rt,
+        "INSERT INTO reservation_idempotency \
+         (idempotency_key, reservation_id, units_claimed) \
+         VALUES ('rollback-key', 'resv-rollback-key', 1)",
+    );
+    exec(
+        &rt,
+        "QUEUE PUSH reservation_work \
+         {kind: 'reservation_claimed', reservation_id: 'resv-rollback-key'}",
+    );
+    exec(&rt, "ROLLBACK");
+
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT unit_id FROM inventory_units WHERE reservation_key = 'rollback-key'"
+        ),
+        0,
+        "rollback must remove claimed resource state"
+    );
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT reservation_id FROM reservation_idempotency \
+             WHERE idempotency_key = 'rollback-key'"
+        ),
+        0,
+        "rollback must remove the idempotency outcome"
+    );
+    assert_eq!(
+        exec(&rt, "QUEUE PEEK reservation_work 10")
+            .result
+            .records
+            .len(),
+        0,
+        "rollback must remove queued downstream work"
+    );
+    clear_current_connection_id();
+}
+
+#[test]
+fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
+    let db = support::temp_db_file("transactional-reservation-recipe");
+    let wal_path = reddb_file::unified_wal_path(db.path());
+
+    let rt = persistent_runtime(&db);
+    setup_reservation_schema(&rt);
+    let before_batches = store_commit_batches(&wal_path).len();
+
+    set_current_connection_id(145603);
+    let outcome = reserve_units(&rt, "reserve-wal", 1);
+    assert_eq!(
+        outcome,
+        ReservationAttempt::Created {
+            reservation_id: "resv-reserve-wal".to_string(),
+            units_claimed: 1,
+        }
+    );
+    clear_current_connection_id();
+
+    let batches = store_commit_batches(&wal_path);
+    let new_batches = &batches[before_batches..];
+    assert_eq!(
+        new_batches.len(),
+        1,
+        "one reservation transaction should append exactly one durable commit batch"
+    );
+    let reservation_batch = &new_batches[0];
+    assert!(
+        batch_contains_text(reservation_batch, "inventory_units"),
+        "commit batch must include the claimed resource table"
+    );
+    assert!(
+        batch_contains_text(reservation_batch, "reservation_idempotency"),
+        "commit batch must include the idempotency key table"
+    );
+    assert!(
+        batch_contains_text(reservation_batch, "reservation_work"),
+        "commit batch must include downstream queue work"
+    );
+}

@@ -87,6 +87,9 @@ mod e2e_statement_execution_contract;
 #[path = "../e2e_txcommitbatch_explicit_tx.rs"]
 mod e2e_txcommitbatch_explicit_tx;
 
+#[path = "mvcc_transactions/e2e_transactional_reservation_recipe.rs"]
+mod e2e_transactional_reservation_recipe;
+
 #[path = "../e2e_update_conformance_pack.rs"]
 mod e2e_update_conformance_pack;
 
