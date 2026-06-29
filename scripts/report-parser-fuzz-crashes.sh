@@ -16,9 +16,10 @@ gh label create "release-blocker" \
 body="$(mktemp)"
 tmin_log="$(mktemp)"
 b64_file="$(mktemp)"
+title_suffix="crash"
 trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
 {
-  echo "Nightly parser fuzz found a crash in \`${target}\`."
+  echo "Nightly parser fuzz found a failure in \`${target}\`."
   echo
   echo "- Workflow run: ${GITHUB_RUN_URL:-unknown}"
   echo "- Target: \`${target}\`"
@@ -36,6 +37,11 @@ trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
 while IFS= read -r artifact; do
   minimized="${RUNNER_TEMP:-/tmp}/${target}-$(basename "${artifact}").min"
   cp "${artifact}" "${minimized}"
+  artifact_kind="crash"
+  if [[ "$(basename "${artifact}")" == oom-* ]]; then
+    artifact_kind="out-of-memory"
+    title_suffix="out-of-memory"
+  fi
 
   # Best effort: cargo-fuzz/libFuzzer usually leaves a small reproducer already,
   # but try tmin so the issue body carries the smallest input this runner can find.
@@ -43,6 +49,8 @@ while IFS= read -r artifact; do
 
   {
     echo "Artifact: \`${artifact}\`"
+    echo
+    echo "- Failure kind: ${artifact_kind}"
     echo
     echo "- Bytes: $(wc -c < "${minimized}")"
     echo "- Base64:"
@@ -60,6 +68,6 @@ while IFS= read -r artifact; do
 done < <(find "${artifact_dir}" -type f | sort)
 
 gh issue create \
-  --title "release-blocker: parser fuzz crash in ${target}" \
+  --title "release-blocker: parser fuzz ${title_suffix} in ${target}" \
   --label "release-blocker" \
   --body-file "${body}"
