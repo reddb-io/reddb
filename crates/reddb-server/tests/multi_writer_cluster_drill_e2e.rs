@@ -33,17 +33,19 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use reddb_server::cluster::{
-    admit_durable_write, force_transition, plan_drain, run_drain, AdmissionOutcome,
+    admit_durable_write, execute_hot_mirror_failover, force_transition, plan_drain,
+    plan_hot_mirror_failover, recover_archive_replica, run_drain, AdmissionOutcome,
+    ArchiveRecoveryError, ArchiveRecoveryMode, ArchiveRecoveryRequest, ArchivedRangeReplica,
     CatchUpEvidence, ClusterId, ClusterMember, ClusterSignals, ClusterSupervisor, CollectionId,
     CommitWatermark, DurableWriteReject, FenceReason, ForceTransitionCapability,
-    ForcedTransitionDisposition, ForcedTransitionRequest, HealthPolicy, HintOutcome, JoinRequest,
-    KeyTarget, LeasedOwner, MemberCapacity, MemberKind, MemberSignals, MembershipCatalog,
-    NodeIdentity, OperatorReason, OwnerWriteMode, OwnershipEpoch, OwnershipLease,
-    PlacementMetadata, PlacementPolicy, PlacementSignals, RangeBound, RangeBounds, RangeId,
-    RangeLoad, RangeOwnership, RangeRequest, RangeRole, RangeWriteReject, RedirectReason,
-    RequestOperation, RouteDecision, RoutedRequest, RoutingPolicy, SeedAuthority, ShardKeyMode,
-    ShardOwnershipCatalog, SupervisorTerm, TransitionKind, WeightedPlacementPlanner,
-    WriteTransactionReject,
+    ForcedTransitionDisposition, ForcedTransitionRequest, HealthPolicy, HintOutcome,
+    HotMirrorFailoverError, HotMirrorInputs, JoinRequest, KeyTarget, LeasedOwner, MemberCapacity,
+    MemberKind, MemberSignals, MembershipCatalog, NodeIdentity, OperatorReason, OwnerWriteMode,
+    OwnershipEpoch, OwnershipLease, PlacementMetadata, PlacementPolicy, PlacementSignals,
+    RangeBound, RangeBounds, RangeId, RangeLoad, RangeOwnership, RangeRequest, RangeRole,
+    RangeWriteReject, RedirectReason, RequestOperation, RouteDecision, RoutedRequest,
+    RoutingPolicy, SeedAuthority, ShardKeyMode, ShardOwnershipCatalog, SupervisorTerm,
+    TransitionKind, WatermarkOutcome, WeightedPlacementPlanner, WriteTransactionReject,
 };
 
 // --- shared cluster vocabulary ------------------------------------------------
@@ -195,6 +197,23 @@ fn failed_health() -> MemberSignals {
         recent_errors: 100,
         unhealthy_for: Duration::from_secs(60),
     }
+}
+
+fn compressed_archive(
+    collection: &CollectionId,
+    payload: &[u8],
+    expected_checksum: u32,
+    covered_watermark: CommitWatermark,
+) -> ArchivedRangeReplica {
+    let compressed = zstd::stream::encode_all(payload, 0).expect("compress range archive");
+    ArchivedRangeReplica::new(
+        collection.clone(),
+        RangeId::new(1),
+        "archive-1539-chaos",
+        compressed,
+        expected_checksum,
+        covered_watermark,
+    )
 }
 
 // --- shared cluster builders --------------------------------------------------
@@ -1087,6 +1106,411 @@ fn whole_drill_records_membership_epoch_lease_and_catchup_diagnostics() {
         "commit watermark is recorded:\n{}",
         diag.dump()
     );
+}
+
+#[test]
+fn issue_1539_killed_owner_fails_over_with_epoch_fence_and_evidence() {
+    let membership = join_three_member_cluster();
+    let (mut catalog, orders) = ownership_two_ranges();
+    let term = SupervisorTerm::genesis();
+    let old_epoch = catalog.range(&orders, RangeId::new(1)).unwrap().epoch();
+    let old_owner = LeasedOwner::with_lease(OwnershipLease::grant(
+        term,
+        orders.clone(),
+        RangeId::new(1),
+        ident(NODE_A),
+        old_epoch,
+        0,
+        10_000,
+    ));
+    let watermark = CommitWatermark::new(4, 1_500);
+    let mut signals = DrillSignals::new();
+    let mut diag = DrillDiagnostics::new_default();
+
+    signals.set_health(NODE_A, failed_health());
+    signals.set_watermark(&orders, RangeId::new(1), watermark);
+    signals.set_catch_up(&orders, RangeId::new(1), NODE_B, 4, 1_500);
+    signals.set_catch_up(&orders, RangeId::new(1), NODE_C, 3, 900);
+    diag.record(
+        "chaos-owner-death",
+        format!(
+            "killed={} range=1 epoch={} watermark=(term={},lsn={}) data-b=(4,1500)->covers data-c=(3,900)->behind",
+            ident(NODE_A).as_str(),
+            old_epoch.value(),
+            watermark.term,
+            watermark.lsn
+        ),
+    );
+
+    let supervisor = ClusterSupervisor::new(HealthPolicy::default());
+    let (outcomes, plan) = supervisor.run_failovers(&membership, &mut catalog, &signals);
+    assert_eq!(plan.promotions.len(), 1, "one covered mirror is promotable");
+    assert!(
+        plan.blocked.is_empty(),
+        "covered mirror keeps failover unblocked"
+    );
+    let outcome = outcomes[0].as_ref().expect("promotion activates");
+    assert_eq!(outcome.previous_owner, ident(NODE_A));
+    assert_eq!(outcome.new_owner, ident(NODE_B));
+    assert!(outcome.fenced_old_owner());
+    assert_eq!(outcome.watermark, watermark);
+    diag.record(
+        "chaos-owner-death",
+        format!(
+            "outcome=promoted owner={} epoch {}->{} watermark=(term={},lsn={})",
+            outcome.new_owner.as_str(),
+            outcome.previous_epoch.value(),
+            outcome.new_epoch.value(),
+            outcome.watermark.term,
+            outcome.watermark.lsn
+        ),
+    );
+
+    match old_owner.admit_request(RangeRequest::DurableWrite, term, outcome.new_epoch, 1_000) {
+        Err(err) => match err.reason {
+            FenceReason::EpochSuperseded {
+                lease_epoch,
+                current_epoch,
+            } => {
+                assert_eq!(lease_epoch, old_epoch);
+                assert_eq!(current_epoch, outcome.new_epoch);
+                diag.record(
+                    "chaos-owner-death",
+                    format!(
+                        "old-owner-write=rejected reason=EpochSuperseded lease_epoch={} current_epoch={}",
+                        lease_epoch.value(),
+                        current_epoch.value()
+                    ),
+                );
+            }
+            other => panic!("expected stale epoch fence, got {other:?}"),
+        },
+        Ok(()) => panic!("killed old owner accepted a durable write after failover"),
+    }
+
+    let dump = diag.dump();
+    for needle in [
+        "killed=",
+        "outcome=promoted",
+        "watermark=(term=4,lsn=1500)",
+        "old-owner-write=rejected",
+    ] {
+        assert!(dump.contains(needle), "missing {needle} in:\n{dump}");
+    }
+}
+
+#[test]
+fn issue_1539_stale_cache_redirects_and_stale_owner_write_is_rejected() {
+    let (mut catalog, orders) = ownership_two_ranges();
+    let mut client =
+        reddb_server::cluster::ClientTopology::from_snapshot(catalog.topology_snapshot());
+    let term = SupervisorTerm::genesis();
+    let before = catalog.range(&orders, RangeId::new(1)).unwrap().clone();
+    let old_epoch = before.epoch();
+    let stale_owner = LeasedOwner::with_lease(OwnershipLease::grant(
+        term,
+        orders.clone(),
+        RangeId::new(1),
+        ident(NODE_A),
+        old_epoch,
+        0,
+        10_000,
+    ));
+    let mut diag = DrillDiagnostics::new_default();
+
+    catalog
+        .apply_update(before.transfer_to(ident(NODE_B), [ident(NODE_A), ident(NODE_C)]))
+        .expect("ownership transfer applied");
+    let current = catalog.range(&orders, RangeId::new(1)).unwrap();
+    let new_epoch = current.epoch();
+
+    let cached_owner = client.resolve(&orders, &KEY_LOW).unwrap().clone();
+    assert_eq!(cached_owner, ident(NODE_A), "cache targets stale owner");
+    let write = RoutedRequest::new(
+        orders.clone(),
+        KEY_LOW.to_vec(),
+        RequestOperation::Transaction,
+    );
+    let hint = match catalog.plan_route(&cached_owner, &write, &RoutingPolicy::forwarding()) {
+        RouteDecision::Redirect { hint, reason } => {
+            assert_eq!(reason, RedirectReason::Transaction);
+            hint
+        }
+        other => panic!("expected stale cache redirect, got {other:?}"),
+    };
+    assert_eq!(hint.owner(), &ident(NODE_B));
+    assert_eq!(hint.epoch(), new_epoch);
+    assert_eq!(client.apply_hint(&hint), HintOutcome::Corrected);
+    diag.record(
+        "chaos-stale-cache",
+        format!(
+            "cached_owner={} redirect_owner={} epoch {}->{} refresh={}",
+            cached_owner.as_str(),
+            hint.owner().as_str(),
+            old_epoch.value(),
+            hint.epoch().value(),
+            client.needs_refresh()
+        ),
+    );
+
+    match admit_durable_write(
+        &catalog,
+        &stale_owner,
+        &cached_owner,
+        &orders,
+        &KEY_LOW,
+        term,
+        500,
+    ) {
+        Err(DurableWriteReject::StaleOwnership {
+            attempted_owner,
+            current_owner,
+            attempted_epoch,
+            current_epoch,
+            ..
+        }) => {
+            assert_eq!(attempted_owner, ident(NODE_A));
+            assert_eq!(current_owner, ident(NODE_B));
+            assert_eq!(attempted_epoch, old_epoch);
+            assert_eq!(current_epoch, new_epoch);
+            diag.record(
+                "chaos-stale-cache",
+                format!(
+                    "stale-write=rejected attempted_owner={} current_owner={} attempted_epoch={} current_epoch={}",
+                    attempted_owner.as_str(),
+                    current_owner.as_str(),
+                    attempted_epoch.value(),
+                    current_epoch.value()
+                ),
+            );
+        }
+        other => panic!("expected stale ownership rejection, got {other:?}"),
+    }
+
+    let dump = diag.dump();
+    for needle in [
+        "cached_owner=",
+        "redirect_owner=",
+        "refresh=true",
+        "stale-write=rejected",
+    ] {
+        assert!(dump.contains(needle), "missing {needle} in:\n{dump}");
+    }
+}
+
+#[test]
+fn issue_1539_lagging_or_broken_hot_mirror_is_not_promoted() {
+    let (mut catalog, orders) = ownership_two_ranges();
+    let watermark = CommitWatermark::new(5, 2_000);
+    let inputs = HotMirrorInputs::new(&catalog, orders.clone(), RangeId::new(1), watermark)
+        .with_catch_up(CatchUpEvidence::new(ident(NODE_B), 5, 1_999));
+    let mut diag = DrillDiagnostics::new_default();
+
+    let plan = plan_hot_mirror_failover(&inputs).expect("known range");
+
+    assert!(
+        plan.eligible_candidates().is_empty(),
+        "no mirror covers the watermark"
+    );
+    assert_eq!(
+        plan.ineligible_candidates().len(),
+        2,
+        "lagging mirror and broken local copy are both refused"
+    );
+    let lagging = plan
+        .ineligible_candidates()
+        .iter()
+        .find(|candidate| candidate.candidate == ident(NODE_B))
+        .expect("node-b considered");
+    assert_eq!(
+        lagging.watermark_outcome,
+        WatermarkOutcome::Behind {
+            applied_term: 5,
+            applied_lsn: 1_999
+        }
+    );
+    let broken = plan
+        .ineligible_candidates()
+        .iter()
+        .find(|candidate| candidate.candidate == ident(NODE_C))
+        .expect("node-c considered without trustworthy catch-up evidence");
+    assert_eq!(
+        broken.watermark_outcome,
+        WatermarkOutcome::Behind {
+            applied_term: 0,
+            applied_lsn: 0
+        }
+    );
+    diag.record(
+        "chaos-hot-mirror",
+        format!(
+            "range=1 owner={} watermark=(term={},lsn={}) data-b=(5,1999)->behind data-c=missing-evidence->broken",
+            plan.previous_owner().as_str(),
+            watermark.term,
+            watermark.lsn
+        ),
+    );
+
+    let err = execute_hot_mirror_failover(&mut catalog, &plan, &ident(NODE_B)).unwrap_err();
+    assert!(matches!(
+        err,
+        HotMirrorFailoverError::CandidateNotEligible { .. }
+    ));
+    assert_eq!(
+        catalog.range(&orders, RangeId::new(1)).unwrap().owner(),
+        &ident(NODE_A),
+        "owner remains unchanged when mirrors are unsafe"
+    );
+    diag.record(
+        "chaos-hot-mirror",
+        "outcome=refused owner=unchanged reason=watermark-not-covered",
+    );
+
+    let dump = diag.dump();
+    for needle in [
+        "watermark=(term=5,lsn=2000)",
+        "data-b=(5,1999)->behind",
+        "data-c=missing-evidence->broken",
+        "outcome=refused",
+    ] {
+        assert!(dump.contains(needle), "missing {needle} in:\n{dump}");
+    }
+}
+
+#[test]
+fn issue_1539_archive_restore_requires_checksum_and_watermark_evidence() {
+    let (mut catalog, orders) = ownership_two_ranges();
+    let latest = CommitWatermark::new(9, 4_000);
+    let payload = b"range-1 archive seed";
+    let mut diag = DrillDiagnostics::new_default();
+
+    let corrupt = compressed_archive(
+        &orders,
+        payload,
+        crc32fast::hash(b"different range seed"),
+        latest,
+    );
+    match corrupt.restore() {
+        Err(ArchiveRecoveryError::ChecksumMismatch {
+            archive_id,
+            expected,
+            computed,
+        }) => {
+            assert_eq!(archive_id, "archive-1539-chaos");
+            assert_eq!(expected, crc32fast::hash(b"different range seed"));
+            assert_eq!(computed, crc32fast::hash(payload));
+            diag.record(
+                "chaos-archive-restore",
+                format!(
+                    "archive={} checksum=rejected expected={expected:#010x} computed={computed:#010x}",
+                    archive_id
+                ),
+            );
+        }
+        other => panic!("expected checksum mismatch, got {other:?}"),
+    }
+    assert_eq!(
+        catalog.range(&orders, RangeId::new(1)).unwrap().owner(),
+        &ident(NODE_A),
+        "checksum failure cannot move ownership"
+    );
+
+    let behind = compressed_archive(
+        &orders,
+        payload,
+        crc32fast::hash(payload),
+        CommitWatermark::new(9, 3_900),
+    )
+    .restore()
+    .expect("checksum-valid archive restores");
+    let request = ArchiveRecoveryRequest::new(
+        orders.clone(),
+        RangeId::new(1),
+        ident(NODE_C),
+        latest,
+        ArchiveRecoveryMode::RequireFullWatermark,
+        ForceTransitionCapability::granted_to(ident("CN=operator,O=reddb")),
+        OperatorReason::new("issue 1539 archive recovery drill").unwrap(),
+    )
+    .with_replicas([ident(NODE_B)])
+    .with_restored_archive(behind);
+
+    match recover_archive_replica(&mut catalog, &request, 10_000) {
+        Err(ArchiveRecoveryError::WatermarkGap {
+            restored_watermark,
+            latest_commit_watermark,
+            skipped_lsn,
+        }) => {
+            assert_eq!(restored_watermark, CommitWatermark::new(9, 3_900));
+            assert_eq!(latest_commit_watermark, latest);
+            assert_eq!(skipped_lsn, 100);
+            diag.record(
+                "chaos-archive-restore",
+                format!(
+                    "watermark=rejected restored=(term={},lsn={}) latest=(term={},lsn={}) skipped_lsn={skipped_lsn}",
+                    restored_watermark.term,
+                    restored_watermark.lsn,
+                    latest_commit_watermark.term,
+                    latest_commit_watermark.lsn
+                ),
+            );
+        }
+        other => panic!("expected watermark gap, got {other:?}"),
+    }
+    assert_eq!(
+        catalog.range(&orders, RangeId::new(1)).unwrap().owner(),
+        &ident(NODE_A),
+        "watermark failure cannot move ownership"
+    );
+
+    let covered = compressed_archive(&orders, payload, crc32fast::hash(payload), latest)
+        .restore()
+        .expect("checksum-valid archive restores");
+    let request = ArchiveRecoveryRequest::new(
+        orders.clone(),
+        RangeId::new(1),
+        ident(NODE_C),
+        latest,
+        ArchiveRecoveryMode::RequireFullWatermark,
+        ForceTransitionCapability::granted_to(ident("CN=operator,O=reddb")),
+        OperatorReason::new("issue 1539 archive recovery drill").unwrap(),
+    )
+    .with_replicas([ident(NODE_B)])
+    .with_restored_archive(covered);
+    let outcome = recover_archive_replica(&mut catalog, &request, 11_000)
+        .expect("checksum and watermark validated recovery can proceed");
+
+    assert!(outcome.is_zero_rpo());
+    assert_eq!(outcome.seed.checksum(), crc32fast::hash(payload));
+    assert_eq!(outcome.evidence.latest_commit_watermark, latest);
+    assert_eq!(
+        catalog.range(&orders, RangeId::new(1)).unwrap().owner(),
+        &ident(NODE_C)
+    );
+    diag.record(
+        "chaos-archive-restore",
+        format!(
+            "outcome=recovered owner={} checksum={:#010x} restored_watermark=(term={},lsn={}) latest=(term={},lsn={}) rpo_lsn={}",
+            catalog.range(&orders, RangeId::new(1)).unwrap().owner().as_str(),
+            outcome.seed.checksum(),
+            outcome.evidence.restored_watermark.term,
+            outcome.evidence.restored_watermark.lsn,
+            outcome.evidence.latest_commit_watermark.term,
+            outcome.evidence.latest_commit_watermark.lsn,
+            outcome.rpo_lsn()
+        ),
+    );
+
+    let dump = diag.dump();
+    for needle in [
+        "checksum=rejected",
+        "watermark=rejected",
+        "skipped_lsn=100",
+        "outcome=recovered",
+        "rpo_lsn=0",
+    ] {
+        assert!(dump.contains(needle), "missing {needle} in:\n{dump}");
+    }
 }
 
 impl DrillDiagnostics {
