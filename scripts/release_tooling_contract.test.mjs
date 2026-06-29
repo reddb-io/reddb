@@ -249,19 +249,33 @@ test("DST storage fault issue creation deduplicates open release blockers", () =
   assert.ok(createCall > existingReturn, "issue creation must happen after existing issue guard");
 });
 
-test("per-PR parser fuzz matrix has bounded fixed fuzz windows", () => {
+test("per-PR parser fuzz runs as one bounded required smoke check", () => {
   const workflow = read(".github/workflows/ci.yml");
-  const fuzzTargets = workflowJob(workflow, "fuzz-targets");
   const fuzzParsers = workflowJob(workflow, "fuzz-parsers");
 
-  assert.match(fuzzTargets, /timeout-minutes: 20/);
+  assert.equal(workflowJob(workflow, "fuzz-targets"), "", "per-PR fuzz must not fan out into separate runners");
+  assert.match(fuzzParsers, /name: Fuzz Parsers/);
+  assert.match(fuzzParsers, /needs: gate/);
+  assert.match(fuzzParsers, /timeout-minutes: 15/);
+  assert.match(fuzzParsers, /FUZZ_PR_TIME_SECONDS: 30/);
+  assert.match(fuzzParsers, /shared-key: ubuntu-fuzz-pr-smoke/);
+  assert.match(fuzzParsers, /cargo \+nightly fuzz build --dev/);
   for (const target of ["sql_parser", "migration_parser", "conn_string_parser", "query_with_params"]) {
-    assert.match(fuzzTargets, new RegExp(`- ${target}`));
+    assert.match(fuzzParsers, new RegExp(`for target in[\\s\\S]*${target}`));
   }
   assert.match(
-    fuzzTargets,
-    /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} -- -max_total_time=300 -rss_limit_mb=4096 -malloc_limit_mb=2048/,
+    fuzzParsers,
+    /cargo \+nightly fuzz run --dev "\$target" -- -max_total_time="\$\{FUZZ_PR_TIME_SECONDS\}" -rss_limit_mb=4096 -malloc_limit_mb=2048/,
   );
-  assert.match(fuzzParsers, /name: Fuzz Parsers/);
-  assert.match(fuzzParsers, /needs: \[fuzz-targets\]/);
+});
+
+test("nightly parser fuzz keeps the long-window coverage for every PR target", () => {
+  const workflow = read(".github/workflows/parser-fuzz-nightly.yml");
+  const fuzz = workflowJob(workflow, "fuzz");
+
+  assert.match(fuzz, /timeout-minutes: 90/);
+  for (const target of ["sql_parser", "migration_parser", "conn_string_parser", "query_with_params"]) {
+    assert.match(fuzz, new RegExp(`- ${target}`));
+  }
+  assert.match(fuzz, /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} -- -max_total_time=3600/);
 });

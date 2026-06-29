@@ -686,29 +686,17 @@ jobs:
       - name: Unit tests
         run: cargo test --locked --lib
 
-  fuzz-targets:
-    # Issue #87 — short-window cargo-fuzz run on every PR.
-    # Catches panics introduced by grammar changes; the long-window
-    # nightly run lives in a separate scheduled workflow.
-    #
-    # Each parser fuzzes in its own parallel job. The aggregate
-    # required status check lives in the `fuzz-parsers` job below
-    # (name: "Fuzz Parsers"), which is what main's branch protection
-    # gates on — keep that name in lockstep with branch protection.
-    name: Fuzz ${{ matrix.target }}
+  fuzz-parsers:
+    # Required status-check name expected by main's branch protection.
+    # Keep the per-PR path as a bounded smoke window; the long exploration
+    # window lives in parser-fuzz-nightly.yml.
+    name: Fuzz Parsers
     needs: gate
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - sql_parser
-          - migration_parser
-          - conn_string_parser
-          - query_with_params
+    timeout-minutes: 15
     env:
+      FUZZ_PR_TIME_SECONDS: 30
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
@@ -721,18 +709,16 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
-          # Per-target cache key so parallel jobs don't thrash a
-          # shared cache entry.
-          shared-key: ubuntu-fuzz-nightly-${{ matrix.target }}
+          shared-key: ubuntu-fuzz-pr-smoke
           cache-on-failure: "true"
           workspaces: |
             . -> target
             fuzz -> fuzz/target
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-      - name: Build fuzz target
-        run: cargo +nightly fuzz build ${{ matrix.target }}
-      - name: Run fuzz target (5 min)
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build --dev
+      - name: Run fuzz targets (30s each)
         # Issue #90 — conn_string_parser is a pre-auth parser, panic-
         # resistance is the only invariant; conn-string sees attacker-
         # controlled bytes before any handshake completes, so we bake
@@ -743,33 +729,20 @@ jobs:
         # as an actionable crash finding instead of a silent runner
         # OOM/timeout. scripts/fuzz-local.sh mirrors these limits (plus a
         # systemd memory cgroup) for safe fuzzing on a dev box.
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096 -malloc_limit_mb=2048
+        run: |
+          set -euo pipefail
+          for target in sql_parser migration_parser conn_string_parser query_with_params; do
+            cargo +nightly fuzz run --dev "$target" -- -max_total_time="${FUZZ_PR_TIME_SECONDS}" -rss_limit_mb=4096 -malloc_limit_mb=2048
+          done
       - name: Upload fuzz crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-crashes-${{ matrix.target }}
+          name: fuzz-crashes
           path: |
             fuzz/artifacts/
             fuzz/corpus/
           retention-days: 14
-
-  fuzz-parsers:
-    # Aggregator that preserves the EXACT required status-check name
-    # "Fuzz Parsers" expected by main's branch protection. It succeeds
-    # iff every matrix job in fuzz-targets succeeded. Do not rename.
-    name: Fuzz Parsers
-    needs: [fuzz-targets]
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Verify all fuzz targets passed
-        run: |
-          if [ "${{ needs.fuzz-targets.result }}" != "success" ]; then
-            echo "a fuzz target failed"
-            exit 1
-          fi
 
   package:
     name: cargo package dry-run
