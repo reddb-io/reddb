@@ -1019,6 +1019,22 @@ fn build_update_after_json(
                     object.insert(key.clone(), storage_value_to_json(value));
                 }
             }
+            // Post-cutover (PRD-1398) a document's canonical data lives only in
+            // the binary `body` container, so a document UPDATE reports `body`
+            // as the changed column. Surface the body's top-level fields into
+            // the event `after` image — mirroring the GET presentation derive —
+            // so subscribers see the document projections (e.g. `score`).
+            if changed.contains("body") {
+                if let Some(Value::Json(bytes)) = named.get("body") {
+                    if let Some(body_fields) = crate::document_body::body_fields(bytes) {
+                        for (name, value) in body_fields {
+                            object
+                                .entry(name)
+                                .or_insert_with(|| storage_value_to_json(&value));
+                        }
+                    }
+                }
+            }
         } else if let Some(schema) = &row.schema {
             for (idx, column) in schema.iter().enumerate() {
                 if changed.contains(column.as_str()) {
