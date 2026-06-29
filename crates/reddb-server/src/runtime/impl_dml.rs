@@ -3495,7 +3495,18 @@ fn update_order_value(entity: &UnifiedEntity, field: &FieldRef) -> Option<Value>
         return Some(Value::UnsignedInteger(entity.logical_id().raw()));
     }
     match &entity.data {
-        EntityData::Row(row) => row.get_field(column).cloned(),
+        // After the single-source binary-body cutover (ADR 0063) a DOCUMENT's
+        // top-level fields live only inside the binary `body` container, not as
+        // promoted row fields, so a direct `get_field` misses them and the
+        // claim/UPDATE `ORDER BY <body-field>` would silently fall back to
+        // insertion order. Mirror the filter read-seam: when the field isn't a
+        // direct row field, offset-read it from the binary body.
+        EntityData::Row(row) => row.get_field(column).cloned().or_else(|| {
+            match row.get_field("body") {
+                Some(Value::Json(bytes)) => crate::document_body::read_body_field(bytes, column),
+                _ => None,
+            }
+        }),
         EntityData::Node(_) | EntityData::Edge(_) => runtime_any_record_from_entity_ref(entity)
             .and_then(|record| record.get(column).cloned()),
         _ => None,
