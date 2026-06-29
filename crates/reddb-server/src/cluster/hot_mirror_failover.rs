@@ -374,6 +374,6 @@ mod tests {
             1,
         )
         .unwrap_err();
-        assert!(matches!(reject, DurableWriteReject::NotOwner { .. }));
+        assert!(matches!(reject, DurableWriteReject::StaleOwnership { .. }));
     }
 }
