@@ -1720,6 +1720,7 @@ impl RedDBRuntime {
             crate::runtime::collection_contract::MutationKind::Update,
         )?;
         ensure_update_target_contract(self, &query.table, query.target)?;
+        ensure_kv_key_update_target_allowed(query)?;
         ensure_graph_identity_update_target_allowed(query)?;
 
         // Apply RLS augmentation first so every downstream path — plain
@@ -1795,7 +1796,7 @@ impl RedDBRuntime {
             let (mut response, touched_ids) =
                 self.execute_update_inner_tracked(raw_query, &inner_query)?;
 
-            let snapshots = if matches!(
+            let mut snapshots = if matches!(
                 effective_query.target,
                 UpdateTarget::Nodes | UpdateTarget::Edges
             ) {
@@ -1804,6 +1805,14 @@ impl RedDBRuntime {
                 super::dml_target_scan::DmlTargetScan::new(self, &effective_query.table, None, None)
                     .row_snapshots(&touched_ids)
             };
+            if matches!(effective_query.target, UpdateTarget::Kv) {
+                restore_kv_returning_keys(
+                    self,
+                    &effective_query.table,
+                    &touched_ids,
+                    &mut snapshots,
+                );
+            }
 
             response.result = build_returning_result(&items, &snapshots, None);
             response.engine = "runtime-dml-returning";
@@ -1962,7 +1971,7 @@ impl RedDBRuntime {
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
                 let applied = self.apply_materialized_update_for_entity(
-                    query.table.clone(),
+                    query,
                     entity,
                     &compiled_plan,
                     assignments,
@@ -2082,7 +2091,7 @@ impl RedDBRuntime {
             let assignments =
                 self.materialize_update_assignments_for_entity(query, &entity, compiled_plan)?;
             let applied = self.apply_materialized_update_for_entity(
-                query.table.clone(),
+                query,
                 entity,
                 compiled_plan,
                 assignments,
@@ -2299,14 +2308,32 @@ impl RedDBRuntime {
 
     fn apply_materialized_update_for_entity(
         &self,
-        collection: String,
+        query: &UpdateQuery,
         entity: UnifiedEntity,
         compiled_plan: &CompiledUpdatePlan,
-        assignments: MaterializedUpdateAssignments,
+        mut assignments: MaterializedUpdateAssignments,
     ) -> RedDBResult<AppliedEntityMutation> {
+        if matches!(query.target, UpdateTarget::Kv)
+            && !compiled_plan
+                .static_field_assignments
+                .iter()
+                .any(|(column, _)| column.eq_ignore_ascii_case("key"))
+            && !assignments
+                .dynamic_field_assignments
+                .iter()
+                .any(|(column, _)| column.eq_ignore_ascii_case("key"))
+        {
+            if let Some(key) = runtime_any_record_from_entity_ref(&entity)
+                .and_then(|record| record.get("key").cloned())
+            {
+                assignments
+                    .dynamic_field_assignments
+                    .push(("key".to_string(), key));
+            }
+        }
         if matches!(entity.data, EntityData::Row(_)) {
             return self.apply_loaded_sql_update_row_core(
-                collection,
+                query.table.clone(),
                 entity,
                 &compiled_plan.static_field_assignments,
                 assignments.dynamic_field_assignments,
@@ -2326,7 +2353,7 @@ impl RedDBRuntime {
             assignments,
         );
         self.apply_loaded_patch_entity_core(
-            collection,
+            query.table.clone(),
             entity,
             crate::json::Value::Null,
             operations,
@@ -2507,6 +2534,20 @@ fn ensure_graph_identity_update_target_allowed(query: &UpdateQuery) -> RedDBResu
             return Err(RedDBError::Query(format!(
                 "immutable graph field '{column}' cannot be updated"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_kv_key_update_target_allowed(query: &UpdateQuery) -> RedDBResult<()> {
+    if !matches!(query.target, UpdateTarget::Kv) {
+        return Ok(());
+    }
+    for (column, _) in &query.assignment_exprs {
+        if column.eq_ignore_ascii_case("key") {
+            return Err(RedDBError::Query(
+                "KV key cannot be updated; delete and insert a new key instead".to_string(),
+            ));
         }
     }
     Ok(())
@@ -2904,6 +2945,46 @@ fn graph_update_returning_snapshots(
                 .collect()
         })
         .collect()
+}
+
+fn restore_kv_returning_keys(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    ids: &[EntityId],
+    snapshots: &mut [Vec<(String, Value)>],
+) {
+    if ids.is_empty() || snapshots.is_empty() {
+        return;
+    }
+
+    let store = runtime.db().store();
+    for (idx, id) in ids.iter().enumerate() {
+        let Some(snapshot) = snapshots.get_mut(idx) else {
+            continue;
+        };
+        if snapshot.iter().any(|(name, _)| name == "key") {
+            continue;
+        }
+        let Some(entity) = store.get(collection, *id) else {
+            continue;
+        };
+        let logical_id = entity.logical_id();
+        let key = store
+            .table_row_versions_by_logical_id(collection, logical_id)
+            .into_iter()
+            .find_map(kv_key_value_from_entity)
+            .or_else(|| kv_key_value_from_entity(entity));
+        if let Some(key) = key {
+            snapshot.push(("key".to_string(), key));
+        }
+    }
+}
+
+fn kv_key_value_from_entity(entity: UnifiedEntity) -> Option<Value> {
+    let row = entity.data.as_row()?;
+    row.get_field("key")
+        .cloned()
+        .or_else(|| row.columns.first().cloned())
 }
 
 fn ensure_update_target_contract(
