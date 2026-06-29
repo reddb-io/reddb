@@ -72,7 +72,7 @@ use super::ownership_transition::{
     run_transition, CatchUpEvidence, CommitWatermark, TransitionError, TransitionKind,
     TransitionOutcome, TransitionRequest,
 };
-use super::placement::RangeLoad;
+use super::placement::{CollectionGroupId, CollectionGroupPlacementAuthority, RangeLoad};
 
 /// The thresholds that decide whether a range is small enough to move whole or
 /// must be split first.
@@ -307,6 +307,9 @@ pub struct MoveRange {
     /// The target's range-indexed catch-up position over the shared WAL, once the
     /// snapshot is installed and catch-up begins.
     position: Option<RangeStreamPosition>,
+    /// The Collection group Placement Authority that scoped this movement, when
+    /// the caller uses the authority-checked workflow.
+    placement_authority: Option<CollectionGroupPlacementAuthority>,
 }
 
 impl MoveRange {
@@ -365,7 +368,25 @@ impl MoveRange {
             phase: MovePhase::CopyingSnapshot,
             snapshot_watermark: None,
             position: None,
+            placement_authority: None,
         })
+    }
+
+    /// Start a move under the Collection group Placement Authority responsible
+    /// for this range's collection. The authority scopes the operational move;
+    /// the later cutover still transitions only this range's owner and epoch.
+    pub fn begin_authorized(
+        catalog: &mut ShardOwnershipCatalog,
+        collection: CollectionId,
+        range_id: RangeId,
+        target: NodeIdentity,
+        placement_authority: CollectionGroupPlacementAuthority,
+        caller: &NodeIdentity,
+    ) -> Result<Self, MoveError> {
+        validate_placement_authority(&collection, &placement_authority, caller)?;
+        let mut movement = Self::begin(catalog, collection, range_id, target)?;
+        movement.placement_authority = Some(placement_authority);
+        Ok(movement)
     }
 
     pub fn phase(&self) -> MovePhase {
@@ -496,6 +517,25 @@ impl MoveRange {
         Ok(outcome)
     }
 
+    /// Cut over under the same Collection group Placement Authority that planned
+    /// the move. The authority check gates the workflow, then the catalog update
+    /// remains the same per-range fenced handoff as [`cut_over`](Self::cut_over).
+    pub fn cut_over_authorized(
+        &mut self,
+        catalog: &mut ShardOwnershipCatalog,
+        live: CommitWatermark,
+        caller: &NodeIdentity,
+    ) -> Result<TransitionOutcome, MoveError> {
+        let placement_authority = self.placement_authority.as_ref().ok_or_else(|| {
+            MoveError::MissingPlacementAuthority {
+                collection: self.collection.clone(),
+                range_id: self.range_id,
+            }
+        })?;
+        validate_placement_authority(&self.collection, placement_authority, caller)?;
+        self.cut_over(catalog, live)
+    }
+
     /// Abandon the move. The catalog is untouched (the old owner remains owner);
     /// the target keeps whatever copy it has but is never promoted.
     pub fn abort(&mut self) {
@@ -512,6 +552,28 @@ impl MoveRange {
             })
         }
     }
+}
+
+fn validate_placement_authority(
+    collection: &CollectionId,
+    placement_authority: &CollectionGroupPlacementAuthority,
+    caller: &NodeIdentity,
+) -> Result<(), MoveError> {
+    if !placement_authority.covers(collection) {
+        return Err(MoveError::CollectionOutsidePlacementAuthority {
+            collection: collection.clone(),
+            collection_group: placement_authority.collection_group().clone(),
+            authority: placement_authority.authority().clone(),
+        });
+    }
+    if placement_authority.authority() != caller {
+        return Err(MoveError::WrongPlacementAuthority {
+            collection_group: placement_authority.collection_group().clone(),
+            expected: placement_authority.authority().clone(),
+            actual: caller.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Resume an interrupted move and decide its fate from the target's persisted
@@ -658,6 +720,23 @@ pub enum MoveError {
         applied_term: u64,
         applied_lsn: u64,
     },
+    /// The scoped workflow was used without an authority token.
+    MissingPlacementAuthority {
+        collection: CollectionId,
+        range_id: RangeId,
+    },
+    /// The authority token does not cover this range's collection.
+    CollectionOutsidePlacementAuthority {
+        collection: CollectionId,
+        collection_group: CollectionGroupId,
+        authority: NodeIdentity,
+    },
+    /// A different Placement Authority attempted the scoped transition.
+    WrongPlacementAuthority {
+        collection_group: CollectionGroupId,
+        expected: NodeIdentity,
+        actual: NodeIdentity,
+    },
     /// A catalog write (replica enlistment) was rejected.
     Catalog(CatalogError),
     /// The fenced handoff transition was rejected (a CAS or safety failure) or the
@@ -697,6 +776,29 @@ impl std::fmt::Display for MoveError {
                 "cannot cut over {collection}/{range_id} to {target}: applied term {applied_term} lsn {applied_lsn} is behind the commit watermark term {} lsn {}",
                 watermark.term, watermark.lsn
             ),
+            Self::MissingPlacementAuthority {
+                collection,
+                range_id,
+            } => write!(
+                f,
+                "move-range {collection}/{range_id} has no collection group placement authority"
+            ),
+            Self::CollectionOutsidePlacementAuthority {
+                collection,
+                collection_group,
+                authority,
+            } => write!(
+                f,
+                "placement authority {authority} for collection group {collection_group} does not cover collection {collection}"
+            ),
+            Self::WrongPlacementAuthority {
+                collection_group,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "placement authority {actual} cannot transition collection group {collection_group}; expected {expected}"
+            ),
             Self::Catalog(err) => write!(f, "{err}"),
             Self::Transition(err) => write!(f, "{err}"),
         }
@@ -711,6 +813,7 @@ mod tests {
     use crate::cluster::ownership::{
         PlacementMetadata, RangeBound, RangeBounds, RangeRole, RangeWriteReject, ShardKeyMode,
     };
+    use crate::cluster::{CollectionGroupId, CollectionGroupPlacementAuthority};
     use crate::replication::cdc::ChangeOperation;
 
     fn collection(name: &str) -> CollectionId {
@@ -1007,6 +1110,52 @@ mod tests {
             catalog.range(&orders, RangeId::new(1)).unwrap().owner(),
             &ident("CN=node-a")
         );
+    }
+
+    #[test]
+    fn authorized_cutover_rejects_the_wrong_collection_group_authority() {
+        let (mut catalog, orders) = catalog_with("CN=node-a", &[]);
+        let authority = CollectionGroupPlacementAuthority::new(
+            CollectionGroupId::new("commerce").unwrap(),
+            ident("CN=pa-commerce"),
+            [orders.clone()],
+        )
+        .unwrap();
+        let mut mv = MoveRange::begin_authorized(
+            &mut catalog,
+            orders.clone(),
+            RangeId::new(1),
+            ident("CN=node-b"),
+            authority,
+            &ident("CN=pa-commerce"),
+        )
+        .unwrap();
+        mv.complete_snapshot(CommitWatermark::new(1, 10)).unwrap();
+        mv.record_catch_up(&[record(1, 1, 20, 1)]).unwrap();
+
+        let err = mv
+            .cut_over_authorized(
+                &mut catalog,
+                CommitWatermark::new(1, 20),
+                &ident("CN=pa-analytics"),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, MoveError::WrongPlacementAuthority { .. }));
+        assert_eq!(
+            catalog.range(&orders, RangeId::new(1)).unwrap().owner(),
+            &ident("CN=node-a")
+        );
+
+        mv.cut_over_authorized(
+            &mut catalog,
+            CommitWatermark::new(1, 20),
+            &ident("CN=pa-commerce"),
+        )
+        .unwrap();
+        let moved = catalog.range(&orders, RangeId::new(1)).unwrap();
+        assert_eq!(moved.owner(), &ident("CN=node-b"));
+        assert!(moved.epoch().value() > OwnershipEpoch::initial().value());
     }
 
     // --- split-and-move end to end ---------------------------------------
