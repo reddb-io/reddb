@@ -3501,12 +3501,16 @@ fn update_order_value(entity: &UnifiedEntity, field: &FieldRef) -> Option<Value>
         // claim/UPDATE `ORDER BY <body-field>` would silently fall back to
         // insertion order. Mirror the filter read-seam: when the field isn't a
         // direct row field, offset-read it from the binary body.
-        EntityData::Row(row) => row.get_field(column).cloned().or_else(|| {
-            match row.get_field("body") {
-                Some(Value::Json(bytes)) => crate::document_body::read_body_field(bytes, column),
-                _ => None,
-            }
-        }),
+        EntityData::Row(row) => {
+            row.get_field(column)
+                .cloned()
+                .or_else(|| match row.get_field("body") {
+                    Some(Value::Json(bytes)) => {
+                        crate::document_body::read_body_field(bytes, column)
+                    }
+                    _ => None,
+                })
+        }
         EntityData::Node(_) | EntityData::Edge(_) => runtime_any_record_from_entity_ref(entity)
             .and_then(|record| record.get(column).cloned()),
         _ => None,
