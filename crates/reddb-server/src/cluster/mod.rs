@@ -69,7 +69,8 @@ pub use ownership_lease::{
     OwnerWriteMode, OwnershipLease, RangeRequest, SupervisorTerm,
 };
 pub use ownership_transition::{
-    prepare, run_transition, CatchUpEvidence, CommitWatermark, InvalidCandidateReason,
+    prepare, run_transition, validate_archive_recovery_source, ArchiveRecoveryEvidence,
+    ArchiveRecoveryRejection, CatchUpEvidence, CommitWatermark, InvalidCandidateReason,
     PreparedTransition, TransitionError, TransitionKind, TransitionOutcome, TransitionRejection,
     TransitionRequest,
 };
