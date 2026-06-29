@@ -22,9 +22,9 @@ pub mod supervisor;
 pub mod topology;
 
 pub use archive_recovery::{
-    recover_archive_replica, ArchiveRecoveryError, ArchiveRecoveryEvidence, ArchiveRecoveryMode,
-    ArchiveRecoveryOutcome, ArchiveRecoveryRequest, ArchivedRangeReplica, RestoredArchiveReplica,
-    SkippedDataEvidence,
+    recover_archive_replica, ArchiveRecoveryError, ArchiveRecoveryMode, ArchiveRecoveryOutcome,
+    ArchiveRecoveryRequest, ArchiveRecoveryRpoEvidence, ArchivedRangeReplica,
+    RestoredArchiveReplica, SkippedDataEvidence,
 };
 pub use bootstrap_authority::{
     authorize as authorize_cluster_bootstrap, authorize_vault_bootstrap, is_cluster_shaped,

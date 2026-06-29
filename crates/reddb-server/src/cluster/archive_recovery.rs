@@ -168,16 +168,16 @@ pub struct SkippedDataEvidence {
     pub skipped_lsn: u64,
 }
 
-/// Operator-facing recovery evidence: the restored archive watermark, latest
-/// known committed watermark, and any forced RPO gap.
+/// Operator-facing RPO evidence: the restored archive watermark, latest known
+/// committed watermark, and any forced recovery gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ArchiveRecoveryEvidence {
+pub struct ArchiveRecoveryRpoEvidence {
     pub restored_watermark: CommitWatermark,
     pub latest_commit_watermark: CommitWatermark,
     pub skipped: Option<SkippedDataEvidence>,
 }
 
-impl ArchiveRecoveryEvidence {
+impl ArchiveRecoveryRpoEvidence {
     pub fn is_zero_rpo(&self) -> bool {
         self.skipped.is_none()
     }
@@ -193,7 +193,7 @@ impl ArchiveRecoveryEvidence {
 pub struct ArchiveRecoveryOutcome {
     pub seed: RestoredArchiveReplica,
     pub audit: ForcedTransitionAudit,
-    pub evidence: ArchiveRecoveryEvidence,
+    pub evidence: ArchiveRecoveryRpoEvidence,
 }
 
 impl ArchiveRecoveryOutcome {
@@ -342,7 +342,7 @@ pub fn recover_archive_replica(
     Ok(ArchiveRecoveryOutcome {
         seed: restored.clone(),
         audit,
-        evidence: ArchiveRecoveryEvidence {
+        evidence: ArchiveRecoveryRpoEvidence {
             restored_watermark: restored.covered_watermark,
             latest_commit_watermark: request.latest_commit_watermark,
             skipped,
