@@ -268,19 +268,41 @@ mod tests {
     use crate::runtime::EffectiveScope;
     use crate::storage::transaction::snapshot::Snapshot;
 
-    fn tmp_dir() -> PathBuf {
+    struct TempSlowDir(PathBuf);
+
+    impl std::ops::Deref for TempSlowDir {
+        type Target = PathBuf;
+
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TempSlowDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempSlowDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmp_dir() -> TempSlowDir {
         let mut d = std::env::temp_dir();
         d.push(format!(
             "reddb-slow-{}-{}",
             std::process::id(),
             crate::utils::now_unix_nanos()
         ));
-        d
+        TempSlowDir(d)
     }
 
-    fn logger(dir: &PathBuf, threshold_ms: u64, sample_pct: u8) -> Arc<SlowQueryLogger> {
+    fn logger(dir: &TempSlowDir, threshold_ms: u64, sample_pct: u8) -> Arc<SlowQueryLogger> {
         SlowQueryLogger::new(SlowQueryOpts {
-            log_dir: dir.clone(),
+            log_dir: dir.0.clone(),
             threshold_ms,
             sample_pct,
         })
@@ -304,7 +326,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    fn read_log_lines(dir: &PathBuf) -> Vec<crate::json::Value> {
+    fn read_log_lines(dir: &TempSlowDir) -> Vec<crate::json::Value> {
         let path = reddb_file::layout::legacy_slow_query_log_path(dir);
         let body = std::fs::read_to_string(&path).unwrap_or_default();
         body.lines()
