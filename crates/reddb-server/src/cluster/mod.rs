@@ -91,6 +91,7 @@ pub use ownership_transition::{
     TransitionRequest,
 };
 pub use placement::{
+    AuthorityScopedPlannedMove, AuthorityScopedRebalancePlan, CollectionGroupPlacementAuthority,
     HotspotRange, MemberCapacity, MoveReason, PlacementPolicy, PlacementSignals, PlannedMove,
     RangeLoad, RebalancePlan, WeightedPlacementPlanner, NEUTRAL_OPERATOR_WEIGHT,
 };
