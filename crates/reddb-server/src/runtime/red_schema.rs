@@ -1320,12 +1320,10 @@ fn hash_filter(query: &TableQuery) -> Option<String> {
     fn visit(filter: &Filter) -> Option<String> {
         match filter {
             Filter::Compare {
-                field,
+                field: FieldRef::TableColumn { column, .. },
                 op: CompareOp::Eq,
                 value: Value::Text(hash),
-            } if matches!(field, FieldRef::TableColumn { column, .. } if column == "hash") => {
-                Some(hash.to_string())
-            }
+            } if column == "hash" => Some(hash.to_string()),
             Filter::And(left, right) => visit(left).or_else(|| visit(right)),
             _ => None,
         }
