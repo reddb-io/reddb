@@ -2552,6 +2552,14 @@ impl RedDBRuntime {
     }
 }
 
+/// Shape the canonical binary-body document into the public response entity.
+/// The stored `body` is the single source of truth (RDOC binary container),
+/// but callers read the returned entity two ways, so the response satisfies
+/// both: top-level body fields are surfaced into `named` (mirroring the GET
+/// presentation derive in `named_fields_json`), and `body` itself is decoded
+/// back to plain JSON. Derivation runs against the binary container first,
+/// then `body` is replaced with its JSON form. This only reshapes the
+/// returned copy — persistence already happened against the binary body.
 fn public_document_entity(
     mut entity: crate::storage::UnifiedEntity,
 ) -> crate::storage::UnifiedEntity {
@@ -2564,11 +2572,16 @@ fn public_document_entity(
     let Some(Value::Json(bytes)) = named.get("body") else {
         return entity;
     };
-    let Some(body_json) = crate::document_body::decode_container_to_json(bytes) else {
-        return entity;
-    };
-    if let Ok(json_bytes) = crate::json::to_vec(&body_json) {
-        named.insert("body".to_string(), Value::Json(json_bytes));
+    let bytes = bytes.clone();
+    if let Some(fields) = crate::document_body::body_fields(&bytes) {
+        for (name, value) in fields {
+            named.entry(name).or_insert(value);
+        }
+    }
+    if let Some(body_json) = crate::document_body::decode_container_to_json(&bytes) {
+        if let Ok(json_bytes) = crate::json::to_vec(&body_json) {
+            named.insert("body".to_string(), Value::Json(json_bytes));
+        }
     }
     entity
 }
