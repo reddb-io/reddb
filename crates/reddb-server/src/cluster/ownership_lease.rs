@@ -69,7 +69,8 @@
 
 use super::identity::NodeIdentity;
 use super::ownership::{
-    CollectionId, OwnershipEpoch, RangeId, RangeOwnership, RangeRole, ShardOwnershipCatalog,
+    CatalogVersion, CollectionId, OwnershipEpoch, RangeId, RangeOwnership, RangeRole,
+    ShardOwnershipCatalog,
 };
 
 /// The Cluster Supervisor term an ownership lease is granted under.
@@ -471,6 +472,8 @@ pub enum DurableWriteReject {
         range_id: RangeId,
         role: RangeRole,
         owner: NodeIdentity,
+        epoch: OwnershipEpoch,
+        version: CatalogVersion,
     },
     /// This node *is* the catalog owner, but it is self-fenced: it holds no valid
     /// lease for the range. Carries the [`FenceReason`].
@@ -503,10 +506,12 @@ impl std::fmt::Display for DurableWriteReject {
                 collection,
                 range_id,
                 owner,
+                epoch,
+                version,
                 ..
             } => write!(
                 f,
-                "this node does not own {collection}/{range_id} — route the durable write to {owner}"
+                "this node does not own {collection}/{range_id} — route the durable write to {owner} at epoch {epoch} (catalog version {version})"
             ),
             Self::Fenced {
                 collection,
@@ -576,6 +581,8 @@ pub fn admit_durable_write<'c>(
             range_id: range.range_id(),
             role,
             owner: range.owner().clone(),
+            epoch: range.epoch(),
+            version: range.version(),
         });
     }
 
