@@ -460,11 +460,14 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            // Qualified column: IDENT.IDENT[.IDENT …]
+            // Qualified column or dotted function: IDENT.IDENT[.IDENT …]
             if matches!(self.peek(), Token::Dot) {
                 let mut segments = vec![saved_name];
                 while self.consume(&Token::Dot)? {
                     segments.push(self.expect_ident_or_keyword()?);
+                }
+                if matches!(self.peek(), Token::LParen) {
+                    return self.parse_function_call_expr_with_name(start, segments.join("."));
                 }
                 let field = FieldRef::TableColumn {
                     table: segments.remove(0),
