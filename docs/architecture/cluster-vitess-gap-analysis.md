@@ -68,7 +68,7 @@ policy, and overload tests.
 | Resharding/range movement | Reshard is a workflow: create, show/status, VDiff, SwitchTraffic, ReverseTraffic, cancel, complete. | `cluster/move_range.rs`, placement, split, catch-up, and cutover state machines exist as pure models. | Need an operator workflow around move/split/cutover with status, validation, rollback/reverse, and dry-run. |
 | Control/data separation | Topology is metadata/locks, not RPC/log storage or per-query dependency. | ADR 0052 explicitly keeps user writes out of the control-plane consensus log. | Preserve this; do not "fix" clustering by pushing data writes through consensus. |
 | Operator surface | vtctldclient and VTAdmin expose broad cluster inspection and mutation. | RedDB has status JSON and deployment JSON surfaces plus individual docs. | Need one cluster operator surface with topology, health, ownership, failover, and movement commands. |
-| Fanout and overload | Vitess supports scatter queries, but Slack's incident report shows broad fanout under cache churn can overload a keyspace. | ADR 0055 already says cross-shard reads must be explicit and bounded. | Need enforcement, tracing, throttling, and chaos tests for cold-cache fanout. |
+| Fanout and overload | Vitess supports scatter queries, but Slack's incident report shows broad fanout under cache churn can overload a keyspace. | ADR 0055 says cross-shard reads must be explicit and bounded; the pure planner now enforces explicit cross-owner fanout budgets and returns trace metadata. | Need executor/transport wiring, runtime metrics, throttling, and chaos tests for cold-cache fanout. |
 | Testing | Vitess documents operational behaviors and has mature workflow surfaces to exercise. | RedDB has Maelstrom-style protocol model and Jepsen-style black-box harness docs, plus chaos replication tests. | Need public workflow E2E tests: planned failover, emergency failover, stale route, move range, and interrupted move. |
 
 ## Slack Production Signal
@@ -229,16 +229,18 @@ and future dashboards.
 Slack's 2022 incident is a concrete warning for RedDB's future cross-range read
 surface: a query that is cheap under a hot cache can become a keyspace-wide
 load amplifier when cache hit rates collapse. ADR 0055 already takes the right
-position by making cross-shard reads explicit and bounded. The missing maturity
-work is enforcement and operational behavior.
+position by making cross-shard reads explicit and bounded. The pure planning
+model now enforces explicit cross-owner fanout budgets and emits trace metadata;
+the remaining maturity work is wiring that contract into executor/transport
+behavior, runtime metrics, and overload handling.
 
 Minimum contract:
 
-- reject unbounded cross-range reads by default;
-- require an explicit fanout mode or API flag when a query cannot prove a shard
-  key predicate;
-- enforce per-request shard-count, timeout, row, byte, and coordinator-memory
-  budgets;
+- wire planner rejections into public API errors;
+- require the public request surface to set explicit fanout mode when a query
+  cannot prove a shard key predicate;
+- extend current owner/range/target budgets with timeout, row, byte, and
+  coordinator-memory budgets;
 - report participating ranges, partial status, retries, and timeout causes in
   traces and response metadata;
 - expose router/server metrics for fanout count, fanout latency, rejected fanout,
@@ -306,8 +308,8 @@ attached to named cluster workflows.
    - Mark each as implemented, modeled, or roadmap to avoid overclaiming.
 
 9. **Bounded fanout and overload guardrails**
-   - Enforce explicit fanout opt-in and per-request budgets for cross-range
-     reads.
+   - Wire explicit fanout opt-in and planner budgets into the executor and
+     public APIs.
    - Add metrics/traces for fanout, partial results, retry storms, and overload
      throttling.
    - Add cold-cache fanout scenarios to the chaos harness.

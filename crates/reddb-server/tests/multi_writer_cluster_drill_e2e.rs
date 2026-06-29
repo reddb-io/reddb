@@ -764,16 +764,23 @@ fn cross_range_writes_are_rejected_and_read_fanout_spans_owners() {
     // A best-effort cross-range read fanout over the same two keys succeeds,
     // with one leg per owner.
     let fanout = catalog
-        .plan_read_fanout(&[
-            KeyTarget::new(orders.clone(), KEY_LOW.to_vec()),
-            KeyTarget::new(orders.clone(), KEY_HIGH.to_vec()),
-        ])
-        .expect("cross-range read fanout is plannable");
+        .plan_read_fanout(
+            &[
+                KeyTarget::new(orders.clone(), KEY_LOW.to_vec()),
+                KeyTarget::new(orders.clone(), KEY_HIGH.to_vec()),
+            ],
+            reddb_server::cluster::ReadFanoutPolicy::explicit(
+                reddb_server::cluster::ReadFanoutBudget::default(),
+            ),
+        )
+        .expect("explicit cross-range read fanout is plannable");
     assert!(
         fanout.is_cross_range(),
         "the read spans more than one owner"
     );
     assert_eq!(fanout.legs().len(), 2, "one leg per range owner");
+    assert_eq!(fanout.trace().owner_count(), 2);
+    assert_eq!(fanout.trace().range_count(), 2);
     let leg_owners: Vec<_> = fanout.legs().iter().map(|l| l.owner().clone()).collect();
     assert!(leg_owners.contains(&ident(NODE_A)) && leg_owners.contains(&ident(NODE_B)));
 }

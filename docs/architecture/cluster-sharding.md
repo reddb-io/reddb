@@ -27,7 +27,7 @@ The implementation lives under `crates/reddb-server/src/cluster/`, especially:
 | Any-node routing decisions | Landed as pure routing decisions |
 | Public write fencing by owner epoch | Landed in the catalog model |
 | Cross-range write transaction guardrails | Landed as pure planning decisions |
-| Best-effort read fanout plan | Landed as pure planning decisions |
+| Explicit, budgeted best-effort read fanout plan | Landed as pure planning decisions |
 | Consistent cross-range read watermark contract | Landed as pure planning decisions |
 | Weighted placement and hotspot-aware rebalance plan | Landed as pure planning decisions |
 | Full transport/storage integration for cluster mode | In progress |
@@ -202,7 +202,7 @@ The current contract is deliberately conservative.
 | Single-key point read/write | Route to one range owner; may be forwarded from a non-owner when safe |
 | Write transaction touching one writer's ranges | Admitted to that writer, even if it touches several ranges owned by that writer |
 | Write transaction touching multiple writers | Rejected as unsupported; there is no hidden two-phase commit |
-| Best-effort multi-key read | Planned as one read leg per owner; not a global snapshot |
+| Best-effort multi-key read | Requires explicit fanout when it crosses owners, enforces owner/range/target budgets, and is not a global snapshot |
 | Consistent multi-key read | Requires a global safe watermark covering every touched range |
 | Distributed SQL plan, shard execution, and merge | Roadmap |
 
@@ -210,6 +210,13 @@ This means cross-writer ACID is not part of the current cluster contract. If an
 application needs a business workflow that spans writers, the first expected
 pattern is a saga or another explicit compensating workflow above RedDB, not an
 implicit distributed transaction in the engine.
+
+Best-effort fanout is deliberately not transparent magic. The planning model
+admits same-owner reads by default, but a read that would scatter across owners
+must opt into fanout and fit within caller-supplied owner, range, and target
+budgets. The plan also carries trace metadata — target count, owner count, range
+count, and whether partial results are allowed — so the transport/executor layer
+can expose scatter behavior instead of hiding it behind a normal-looking query.
 
 ## Caching
 

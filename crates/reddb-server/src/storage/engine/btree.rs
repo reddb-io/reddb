@@ -1555,7 +1555,7 @@ mod overflow_pipeline_tests {
 
             // xorshift produces incompressible bytes deterministically
             // so the test never flakes on the codec's heuristic.
-            let mut state: u64 = 0xC0FFEE_DEAD_F00D;
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
             let value: Vec<u8> = (0..5 * 1024 * 1024)
                 .map(|_| {
                     state ^= state << 13;
