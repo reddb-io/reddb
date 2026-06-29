@@ -17,6 +17,8 @@
 //!   to Expr for scalar projection bodies.
 
 use super::join_filter::{compare_runtime_values, resolve_runtime_field};
+use std::collections::{HashMap, HashSet};
+
 use crate::storage::query::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value;
@@ -213,6 +215,12 @@ pub(super) fn evaluate_runtime_expr_with_db(
             if matches!(upper.as_str(), "MODEL_REGISTER" | "MODEL_DROP") {
                 if let Some(db) = db {
                     return dispatch_model_function(db, &upper, &arg_values);
+                }
+                return None;
+            }
+            if upper == "RED.LCA" {
+                if let Some(db) = db {
+                    return dispatch_vcs_lca_function(db, &arg_values);
                 }
                 return None;
             }
@@ -1273,6 +1281,135 @@ fn dispatch_ca_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value>
 /// disappears.
 pub(super) fn scalar_dispatch_builtin(name: &str, args: &[Value]) -> Option<Value> {
     dispatch_builtin_function(name, args)
+}
+
+fn dispatch_vcs_lca_function(db: &RedDB, args: &[Value]) -> Option<Value> {
+    if args.len() != 2 {
+        return Some(Value::Null);
+    }
+    let a = text_arg(args.first()?)?;
+    let b = text_arg(args.get(1)?)?;
+    vcs_lca_from_store(db, a, b)
+        .map(Value::text)
+        .or(Some(Value::Null))
+}
+
+pub(super) fn dispatch_vcs_lca_function_public(db: &RedDB, args: &[Value]) -> Option<Value> {
+    dispatch_vcs_lca_function(db, args)
+}
+
+fn text_arg(value: &Value) -> Option<&str> {
+    match value {
+        Value::Text(text) => Some(text.as_ref()),
+        _ => None,
+    }
+}
+
+fn vcs_lca_from_store(db: &RedDB, a: &str, b: &str) -> Option<String> {
+    let commits = vcs_commit_index(db);
+    let mut a_ancestors = HashSet::new();
+    collect_vcs_ancestors(a, &commits, &mut a_ancestors);
+
+    let mut visited = HashSet::new();
+    let mut stack = vec![b.to_string()];
+    let mut best: Option<(u64, String)> = None;
+    while let Some(hash) = stack.pop() {
+        if !visited.insert(hash.clone()) {
+            continue;
+        }
+        if a_ancestors.contains(&hash) {
+            let height = commits.get(&hash).map(|commit| commit.height).unwrap_or(0);
+            match &best {
+                Some((best_height, _)) if *best_height >= height => {}
+                _ => best = Some((height, hash.clone())),
+            }
+            continue;
+        }
+        if let Some(commit) = commits.get(&hash) {
+            for parent in &commit.parents {
+                if !visited.contains(parent) {
+                    stack.push(parent.clone());
+                }
+            }
+        }
+    }
+    best.map(|(_, hash)| hash)
+}
+
+#[derive(Clone)]
+struct VcsCommitNode {
+    parents: Vec<String>,
+    height: u64,
+}
+
+fn vcs_commit_index(db: &RedDB) -> HashMap<String, VcsCommitNode> {
+    let Some(manager) = db
+        .store()
+        .get_collection(crate::application::vcs_collections::COMMITS)
+    else {
+        return HashMap::new();
+    };
+    manager
+        .query_all(|_| true)
+        .into_iter()
+        .filter_map(|entity| {
+            let row = entity.data.as_row()?;
+            let hash = row_text_field(row, "id")?;
+            Some((
+                hash,
+                VcsCommitNode {
+                    parents: row_string_list_field(row, "parents"),
+                    height: row_u64_field(row, "height").unwrap_or(0),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn collect_vcs_ancestors(
+    hash: &str,
+    commits: &HashMap<String, VcsCommitNode>,
+    out: &mut HashSet<String>,
+) {
+    if !out.insert(hash.to_string()) {
+        return;
+    }
+    if let Some(commit) = commits.get(hash) {
+        for parent in &commit.parents {
+            collect_vcs_ancestors(parent, commits, out);
+        }
+    }
+}
+
+fn row_text_field(row: &crate::storage::unified::entity::RowData, field: &str) -> Option<String> {
+    match row.get_field(field)? {
+        Value::Text(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn row_u64_field(row: &crate::storage::unified::entity::RowData, field: &str) -> Option<u64> {
+    match row.get_field(field)? {
+        Value::UnsignedInteger(value) => Some(*value),
+        Value::Integer(value) if *value >= 0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
+fn row_string_list_field(
+    row: &crate::storage::unified::entity::RowData,
+    field: &str,
+) -> Vec<String> {
+    match row.get_field(field) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|value| match value {
+                Value::Text(text) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
