@@ -1035,6 +1035,12 @@ fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolSt
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn json_runtime_value(value: crate::json::Value) -> Value {
+    crate::json::to_vec(&value)
+        .map(Value::Json)
+        .unwrap_or(Value::Null)
+}
+
 /// The graph-analytics table-valued functions recognized in FROM position.
 /// Both the graph-collection form and the inline `nodes => / edges =>` form
 /// (issue #799) accept these names.
@@ -7431,6 +7437,9 @@ impl RedDBRuntime {
         args: &[String],
         named_args: &[(String, f64)],
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        if name.eq_ignore_ascii_case("red.diff") {
+            return self.execute_vcs_diff_tvf(args, named_args);
+        }
         if !is_graph_tvf_name(name) {
             return Err(RedDBError::Query(format!("unknown table function: {name}")));
         }
@@ -7448,6 +7457,67 @@ impl RedDBRuntime {
         // argument value. Materialization never mutates any store.
         let (nodes, edges) = self.materialize_whole_graph_abstract()?;
         self.dispatch_graph_algorithm(name, nodes, edges, named_args)
+    }
+
+    fn execute_vcs_diff_tvf(
+        &self,
+        args: &[String],
+        named_args: &[(String, f64)],
+    ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
+        use crate::application::vcs::{DiffChange, DiffInput};
+        use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+        use crate::storage::schema::Value;
+
+        if !named_args.is_empty() {
+            return Err(RedDBError::Query(
+                "red.diff takes only positional commit arguments".to_string(),
+            ));
+        }
+        if args.len() != 2 {
+            return Err(RedDBError::Query(format!(
+                "red.diff takes exactly 2 commit arguments, got {}",
+                args.len()
+            )));
+        }
+
+        let diff = self.vcs_diff(DiffInput {
+            from: args[0].clone(),
+            to: args[1].clone(),
+            collection: None,
+            summary_only: false,
+        })?;
+        let mut result = UnifiedResult::with_columns(vec![
+            "from".into(),
+            "to".into(),
+            "collection".into(),
+            "entity_id".into(),
+            "change".into(),
+            "before".into(),
+            "after".into(),
+        ]);
+        for entry in diff.entries {
+            let (change, before, after) = match entry.change {
+                DiffChange::Added { after } => ("added", Value::Null, json_runtime_value(after)),
+                DiffChange::Removed { before } => {
+                    ("removed", json_runtime_value(before), Value::Null)
+                }
+                DiffChange::Modified { before, after } => (
+                    "modified",
+                    json_runtime_value(before),
+                    json_runtime_value(after),
+                ),
+            };
+            let mut record = UnifiedRecord::new();
+            record.set("from", Value::text(diff.from.clone()));
+            record.set("to", Value::text(diff.to.clone()));
+            record.set("collection", Value::text(entry.collection));
+            record.set("entity_id", Value::text(entry.entity_id));
+            record.set("change", Value::text(change));
+            record.set("before", before);
+            record.set("after", after);
+            result.push(record);
+        }
+        Ok(result)
     }
 
     /// Dispatch an inline-graph table-valued function call in FROM position
