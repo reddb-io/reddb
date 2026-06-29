@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.0
+
+### Minor Changes
+
+- minor release
+
 ## 1.17.0
 
 ### Minor Changes
