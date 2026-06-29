@@ -829,6 +829,12 @@ impl RangeOwnership {
             RangeRole::Owner
         } else if self.replicas.iter().any(|replica| replica == node) {
             RangeRole::Replica
+        } else if self
+            .compressed_archive_replicas
+            .iter()
+            .any(|archive_replica| archive_replica == node)
+        {
+            RangeRole::ArchiveReplica
         } else {
             RangeRole::NoCopy
         }
@@ -912,6 +918,9 @@ pub enum RangeRole {
     /// rejected and routed to the owner; replicated changes still flow in via
     /// the privileged internal apply path.
     Replica,
+    /// Holds a compressed archive copy. Archive replicas are recovery sources
+    /// only after restore, checksum validation, and watermark validation.
+    ArchiveReplica,
     /// Holds no copy of the range at all.
     NoCopy,
 }
@@ -923,10 +932,15 @@ impl RangeRole {
         matches!(self, RangeRole::Owner)
     }
 
+    pub fn is_direct_promotion_candidate(self) -> bool {
+        matches!(self, RangeRole::Replica)
+    }
+
     fn label(self) -> &'static str {
         match self {
             RangeRole::Owner => "owner",
             RangeRole::Replica => "replica",
+            RangeRole::ArchiveReplica => "archive-replica",
             RangeRole::NoCopy => "no-copy",
         }
     }
