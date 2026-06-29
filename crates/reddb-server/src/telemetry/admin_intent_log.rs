@@ -599,7 +599,29 @@ mod tests {
     use super::*;
     use crate::json::Value as JsonValue;
 
-    fn tmp_path(label: &str) -> PathBuf {
+    struct TempLogPath(PathBuf);
+
+    impl std::ops::Deref for TempLogPath {
+        type Target = PathBuf;
+
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TempLogPath {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempLogPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn tmp_path(label: &str) -> TempLogPath {
         let mut p = std::env::temp_dir();
         p.push(format!(
             "reddb-intent-{}-{}-{}.log",
@@ -607,7 +629,7 @@ mod tests {
             std::process::id(),
             crate::utils::now_unix_nanos()
         ));
-        p
+        TempLogPath(p)
     }
 
     fn last_line_json(path: &Path) -> JsonValue {
