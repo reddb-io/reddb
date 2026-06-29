@@ -20,11 +20,13 @@
 //!   involved — a clear "unsupported" contract rather than a silent partial
 //!   commit.
 //!
-//! * **Simple read fanout** ([`plan_read_fanout`]). A best-effort read may span
-//!   any number of range owners; the plan collects one [`ReadLeg`] per owner so
-//!   the caller can scatter the read and gather the results. This is explicitly
-//!   *not* a globally consistent snapshot — each leg observes its owner at
-//!   whatever point it happens to be at — and the type name says so.
+//! * **Explicit bounded read fanout** ([`plan_read_fanout`]). A best-effort read
+//!   may span range owners only when the caller opts into fanout and supplies a
+//!   budget. The plan collects one [`ReadLeg`] per owner and returns
+//!   [`ReadFanoutTrace`] metadata so the transport can expose participating
+//!   owners/ranges instead of hiding a scatter query. This is explicitly *not* a
+//!   globally consistent snapshot — each leg observes its owner at whatever point
+//!   it happens to be at — and the type name says so.
 //!
 //! * **Consistent / transactional reads** ([`plan_consistent_read`]). A read that
 //!   must look globally consistent needs a safe snapshot point that covers every
@@ -312,6 +314,117 @@ impl ReadLeg {
     }
 }
 
+/// The explicit policy a caller supplies before a read may fan out.
+///
+/// The default posture is [`SingleOwnerOnly`](Self::SingleOwnerOnly): a read that
+/// would cross owners is rejected before execution. To scatter, a caller must
+/// choose [`ExplicitFanout`](Self::ExplicitFanout) and provide a
+/// [`ReadFanoutBudget`]. That is the ADR 0055 contract in code: no hidden,
+/// unbounded fanout path for cold-cache or missing-shard-key query shapes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReadFanoutPolicy {
+    /// Only reads that resolve to one owner are admitted.
+    #[default]
+    SingleOwnerOnly,
+    /// Cross-owner fanout is allowed, bounded, and marked with partial-result
+    /// policy for the executor/transport.
+    ExplicitFanout {
+        budget: ReadFanoutBudget,
+        allow_partial: bool,
+    },
+}
+
+impl ReadFanoutPolicy {
+    pub fn single_owner_only() -> Self {
+        Self::SingleOwnerOnly
+    }
+
+    pub fn explicit(budget: ReadFanoutBudget) -> Self {
+        Self::ExplicitFanout {
+            budget,
+            allow_partial: false,
+        }
+    }
+
+    pub fn allowing_partial(mut self) -> Self {
+        if let Self::ExplicitFanout {
+            ref mut allow_partial,
+            ..
+        } = self
+        {
+            *allow_partial = true;
+        }
+        self
+    }
+}
+
+/// Hard caps for one explicit best-effort read fanout plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadFanoutBudget {
+    max_owners: usize,
+    max_ranges: usize,
+    max_targets: usize,
+}
+
+impl ReadFanoutBudget {
+    pub fn new(max_owners: usize, max_ranges: usize, max_targets: usize) -> Self {
+        Self {
+            max_owners,
+            max_ranges,
+            max_targets,
+        }
+    }
+
+    pub fn max_owners(&self) -> usize {
+        self.max_owners
+    }
+
+    pub fn max_ranges(&self) -> usize {
+        self.max_ranges
+    }
+
+    pub fn max_targets(&self) -> usize {
+        self.max_targets
+    }
+}
+
+impl Default for ReadFanoutBudget {
+    fn default() -> Self {
+        Self {
+            max_owners: 8,
+            max_ranges: 64,
+            max_targets: 512,
+        }
+    }
+}
+
+/// Observable metadata for a best-effort fanout plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadFanoutTrace {
+    target_count: usize,
+    owner_count: usize,
+    range_count: usize,
+    partial_allowed: bool,
+}
+
+impl ReadFanoutTrace {
+    pub fn target_count(&self) -> usize {
+        self.target_count
+    }
+
+    pub fn owner_count(&self) -> usize {
+        self.owner_count
+    }
+
+    pub fn range_count(&self) -> usize {
+        self.range_count
+    }
+
+    pub fn partial_allowed(&self) -> bool {
+        self.partial_allowed
+    }
+}
+
 /// A simple, best-effort cross-range read split into one [`ReadLeg`] per owner.
 ///
 /// **Not** a globally consistent snapshot: each leg observes its owner at
@@ -321,6 +434,7 @@ impl ReadLeg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadFanout {
     legs: Vec<ReadLeg>,
+    trace: ReadFanoutTrace,
 }
 
 impl ReadFanout {
@@ -329,9 +443,14 @@ impl ReadFanout {
         &self.legs
     }
 
-    /// Whether the read fans out to more than one owner.
+    /// Observable fanout metadata the executor/transport should trace.
+    pub fn trace(&self) -> ReadFanoutTrace {
+        self.trace
+    }
+
+    /// Whether the read touches more than one range.
     pub fn is_cross_range(&self) -> bool {
-        self.legs.len() > 1
+        self.trace.range_count > 1
     }
 }
 
@@ -345,6 +464,15 @@ pub enum ReadFanoutReject {
         collection: CollectionId,
         key: Vec<u8>,
     },
+    /// The read would cross owners, but the caller did not explicitly opt into
+    /// fanout.
+    FanoutNotExplicit { owners: Vec<NodeIdentity> },
+    /// The request named more targets than the fanout budget permits.
+    TargetBudgetExceeded { requested: usize, max: usize },
+    /// The plan would contact more owners than the fanout budget permits.
+    OwnerBudgetExceeded { requested: usize, max: usize },
+    /// The plan would touch more ranges than the fanout budget permits.
+    RangeBudgetExceeded { requested: usize, max: usize },
 }
 
 impl std::fmt::Display for ReadFanoutReject {
@@ -355,6 +483,32 @@ impl std::fmt::Display for ReadFanoutReject {
                 f,
                 "no range of collection {collection} covers key {} — re-resolve routing",
                 DisplayKey(key)
+            ),
+            Self::FanoutNotExplicit { owners } => {
+                write!(
+                    f,
+                    "read would fan out to {} owners but fanout was not explicit: ",
+                    owners.len()
+                )?;
+                for (i, owner) in owners.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{owner}")?;
+                }
+                Ok(())
+            }
+            Self::TargetBudgetExceeded { requested, max } => write!(
+                f,
+                "read fanout targets {requested} keys, exceeding budget {max}"
+            ),
+            Self::OwnerBudgetExceeded { requested, max } => write!(
+                f,
+                "read fanout would contact {requested} owners, exceeding budget {max}"
+            ),
+            Self::RangeBudgetExceeded { requested, max } => write!(
+                f,
+                "read fanout would touch {requested} ranges, exceeding budget {max}"
             ),
         }
     }
@@ -618,24 +772,73 @@ impl ShardOwnershipCatalog {
         }
     }
 
-    /// Plan a simple, best-effort cross-range read fanout over `targets`
-    /// (issue #1002).
+    /// Plan a simple, best-effort read over `targets` (issue #1002, ADR 0055).
     ///
-    /// Collects the resolved targets into one [`ReadLeg`] per owner so the caller
-    /// can scatter the read across every range owner and gather the results. This
-    /// is *not* a consistent snapshot — see [`ReadFanout`]. `Err` only when the
-    /// read is empty or a target routes nowhere; spanning many owners is the
-    /// expected, successful case.
-    pub fn plan_read_fanout(&self, targets: &[KeyTarget]) -> Result<ReadFanout, ReadFanoutReject> {
+    /// A read that resolves to one owner is admitted under
+    /// [`ReadFanoutPolicy::SingleOwnerOnly`]. A read that would contact multiple
+    /// owners must use [`ReadFanoutPolicy::ExplicitFanout`] and fit inside the
+    /// supplied budget. The returned [`ReadFanoutTrace`] records target, owner,
+    /// range, and partial-result policy so a later executor can surface fanout
+    /// rather than making it invisible.
+    pub fn plan_read_fanout(
+        &self,
+        targets: &[KeyTarget],
+        policy: ReadFanoutPolicy,
+    ) -> Result<ReadFanout, ReadFanoutReject> {
         if targets.is_empty() {
             return Err(ReadFanoutReject::Empty);
+        }
+        if let ReadFanoutPolicy::ExplicitFanout { budget, .. } = policy {
+            if targets.len() > budget.max_targets() {
+                return Err(ReadFanoutReject::TargetBudgetExceeded {
+                    requested: targets.len(),
+                    max: budget.max_targets(),
+                });
+            }
         }
         let resolved = self
             .resolve_targets(targets)
             .map_err(|(collection, key)| ReadFanoutReject::Unroutable { collection, key })?;
 
+        let owner_count = distinct_owner_count(&resolved);
+        let range_count = distinct_range_count(&resolved);
+        let partial_allowed = match policy {
+            ReadFanoutPolicy::SingleOwnerOnly => {
+                if owner_count > 1 {
+                    return Err(ReadFanoutReject::FanoutNotExplicit {
+                        owners: distinct_owners(&resolved),
+                    });
+                }
+                false
+            }
+            ReadFanoutPolicy::ExplicitFanout {
+                budget,
+                allow_partial,
+            } => {
+                if owner_count > budget.max_owners() {
+                    return Err(ReadFanoutReject::OwnerBudgetExceeded {
+                        requested: owner_count,
+                        max: budget.max_owners(),
+                    });
+                }
+                if range_count > budget.max_ranges() {
+                    return Err(ReadFanoutReject::RangeBudgetExceeded {
+                        requested: range_count,
+                        max: budget.max_ranges(),
+                    });
+                }
+                allow_partial
+            }
+        };
+
         Ok(ReadFanout {
             legs: group_targets_by_owner(resolved),
+            trace: ReadFanoutTrace {
+                target_count: targets.len(),
+                owner_count,
+                range_count,
+                partial_allowed,
+            },
         })
     }
 
@@ -718,6 +921,27 @@ fn group_targets_by_owner(resolved: Vec<ResolvedTarget>) -> Vec<ReadLeg> {
         .into_iter()
         .map(|(owner, targets)| ReadLeg { owner, targets })
         .collect()
+}
+
+fn distinct_owners(resolved: &[ResolvedTarget]) -> Vec<NodeIdentity> {
+    resolved
+        .iter()
+        .map(|target| target.owner().clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn distinct_owner_count(resolved: &[ResolvedTarget]) -> usize {
+    distinct_owners(resolved).len()
+}
+
+fn distinct_range_count(resolved: &[ResolvedTarget]) -> usize {
+    resolved
+        .iter()
+        .map(|target| (target.collection().clone(), target.range_id()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// Group pinned targets into one [`ConsistentReadLeg`] per owner, in identity
@@ -879,17 +1103,24 @@ mod tests {
 
     // AC #3: a simple read fanout collects one leg per owner across ranges.
     #[test]
-    fn read_fanout_collects_per_owner_legs() {
+    fn explicit_read_fanout_collects_per_owner_legs() {
         let (catalog, orders) = two_range_catalog();
         let fanout = catalog
-            .plan_read_fanout(&[
-                target(&orders, b"alice"),
-                target(&orders, b"zeb"),
-                target(&orders, b"bob"),
-            ])
+            .plan_read_fanout(
+                &[
+                    target(&orders, b"alice"),
+                    target(&orders, b"zeb"),
+                    target(&orders, b"bob"),
+                ],
+                ReadFanoutPolicy::explicit(ReadFanoutBudget::default()).allowing_partial(),
+            )
             .expect("fanout planned");
         assert!(fanout.is_cross_range());
         assert_eq!(fanout.legs().len(), 2);
+        assert_eq!(fanout.trace().target_count(), 3);
+        assert_eq!(fanout.trace().owner_count(), 2);
+        assert_eq!(fanout.trace().range_count(), 2);
+        assert!(fanout.trace().partial_allowed());
         // node-a leg gets alice + bob (range 1); node-b leg gets zeb (range 2).
         let a = &fanout.legs()[0];
         assert_eq!(a.owner(), &ident("CN=node-a"));
@@ -901,20 +1132,115 @@ mod tests {
     }
 
     #[test]
+    fn cross_owner_read_requires_explicit_fanout() {
+        let (catalog, orders) = two_range_catalog();
+        match catalog.plan_read_fanout(
+            &[target(&orders, b"alice"), target(&orders, b"zeb")],
+            ReadFanoutPolicy::single_owner_only(),
+        ) {
+            Err(ReadFanoutReject::FanoutNotExplicit { owners }) => {
+                assert_eq!(owners, vec![ident("CN=node-a"), ident("CN=node-b")]);
+            }
+            other => panic!("expected FanoutNotExplicit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_read_fanout_enforces_owner_budget() {
+        let (catalog, orders) = two_range_catalog();
+        match catalog.plan_read_fanout(
+            &[target(&orders, b"alice"), target(&orders, b"zeb")],
+            ReadFanoutPolicy::explicit(ReadFanoutBudget::new(1, 2, 8)),
+        ) {
+            Err(ReadFanoutReject::OwnerBudgetExceeded { requested, max }) => {
+                assert_eq!(requested, 2);
+                assert_eq!(max, 1);
+            }
+            other => panic!("expected OwnerBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_read_fanout_enforces_range_budget() {
+        let (catalog, orders) = two_range_catalog();
+        match catalog.plan_read_fanout(
+            &[target(&orders, b"alice"), target(&orders, b"zeb")],
+            ReadFanoutPolicy::explicit(ReadFanoutBudget::new(2, 1, 8)),
+        ) {
+            Err(ReadFanoutReject::RangeBudgetExceeded { requested, max }) => {
+                assert_eq!(requested, 2);
+                assert_eq!(max, 1);
+            }
+            other => panic!("expected RangeBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_read_fanout_enforces_target_budget_before_routing() {
+        let (catalog, orders) = two_range_catalog();
+        match catalog.plan_read_fanout(
+            &[target(&orders, b"alice"), target(&orders, b"bob")],
+            ReadFanoutPolicy::explicit(ReadFanoutBudget::new(2, 2, 1)),
+        ) {
+            Err(ReadFanoutReject::TargetBudgetExceeded { requested, max }) => {
+                assert_eq!(requested, 2);
+                assert_eq!(max, 1);
+            }
+            other => panic!("expected TargetBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn single_owner_read_is_not_cross_range() {
         let (catalog, orders) = two_range_catalog();
         let fanout = catalog
-            .plan_read_fanout(&[target(&orders, b"alice"), target(&orders, b"bob")])
+            .plan_read_fanout(
+                &[target(&orders, b"alice"), target(&orders, b"bob")],
+                ReadFanoutPolicy::single_owner_only(),
+            )
             .expect("fanout planned");
         assert!(!fanout.is_cross_range());
         assert_eq!(fanout.legs().len(), 1);
+        assert_eq!(fanout.trace().owner_count(), 1);
+        assert_eq!(fanout.trace().range_count(), 1);
+        assert!(!fanout.trace().partial_allowed());
+    }
+
+    #[test]
+    fn single_owner_multi_range_read_is_cross_range_but_not_cross_owner() {
+        let orders = collection("orders");
+        let mut catalog = ShardOwnershipCatalog::new();
+        catalog
+            .apply_update(range(&orders, 1, bounds(b"a", b"m"), "CN=node-a"))
+            .unwrap();
+        catalog
+            .apply_update(range(
+                &orders,
+                2,
+                RangeBounds::new(RangeBound::key(b"m"), RangeBound::Max).unwrap(),
+                "CN=node-a",
+            ))
+            .unwrap();
+
+        let fanout = catalog
+            .plan_read_fanout(
+                &[target(&orders, b"alice"), target(&orders, b"zeb")],
+                ReadFanoutPolicy::single_owner_only(),
+            )
+            .expect("same-owner multi-range read is admitted");
+        assert!(fanout.is_cross_range());
+        assert_eq!(fanout.trace().owner_count(), 1);
+        assert_eq!(fanout.trace().range_count(), 2);
     }
 
     #[test]
     fn unroutable_read_fanout_is_rejected() {
         let catalog = ShardOwnershipCatalog::new();
         let orders = collection("orders");
-        match catalog.plan_read_fanout(&[target(&orders, b"x")]) {
+        match catalog.plan_read_fanout(
+            &[target(&orders, b"x")],
+            ReadFanoutPolicy::single_owner_only(),
+        ) {
             Err(ReadFanoutReject::Unroutable { collection, .. }) => {
                 assert_eq!(collection, orders)
             }
