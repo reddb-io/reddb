@@ -59,6 +59,61 @@ Logical partitioning is a separate schema/query concept documented in
 physical placement and failover concept; the Cluster Supervisor owns live
 placement state, not ordinary table DDL.
 
+## Placement Authority And Range Owner
+
+The operating model uses two accepted authority terms:
+
+- **Placement Authority** is the control-plane authority for the ownership
+  catalog slice of one collection group. It decides and publishes range owners,
+  hot replicas, archive replicas, ownership epochs, catalog versions, and
+  placement transitions for that collection group.
+- **Range Owner** is the data-plane writer for one range at one ownership epoch.
+  It accepts durable writes only while the current catalog assigns that exact
+  `(collection, range_id, ownership_epoch)` to it.
+
+A collection group is the Placement Authority scope. Small related collections
+may share one collection group; a large collection may use its own collection
+group as its operational domain. Move-range, split, rebalance, and promote
+requests are planned within that collection group scope, then executed as
+per-range, per-epoch handoffs. A Placement Authority is never a data file and is
+not the writer for the user records in the ranges it governs.
+
+Production clustered ranges use triple range replication in the placement model:
+
+- the current Range Owner;
+- at least one hot mirror that can become Range Owner after it proves it covers
+  the range commit watermark and wins the ownership transition;
+- an archive replica optimized for restore, compression, or long-retention
+  recovery.
+
+Archive replicas cannot promote directly. They are recovery sources, not hot
+write-ready mirrors. Before an archive-sourced copy can become owner, recovery
+must restore the bytes, validate checksums, validate the covered commit
+watermark, and record the evidence. If the archive does not cover the latest
+committed watermark, forced recovery must expose the resulting skipped-data or
+RPO evidence instead of silently publishing a new owner.
+
+Routers, drivers, and data members may hold routing caches or serving-graph
+projections produced from Placement Authority state. Those caches are stale by
+default: a move, split, failover, or catalog-version advance can invalidate
+them. Stale topology is corrected by redirect/routing hints and topology
+refresh, but those are repair and latency mechanisms, not write authority.
+Correctness comes from owner-side epoch fencing: every public write still lands
+on the Range Owner, and the Range Owner rejects the write if its expected
+ownership epoch is no longer current.
+
+Hot mirror failover follows the same boundary. The Placement Authority publishes
+an ownership transition with a bumped epoch only after the chosen hot mirror has
+the required range data evidence, especially commit-watermark coverage. The new
+Range Owner then accepts writes under the new epoch; the old owner is fenced
+from public writes even if some client or router still has stale topology.
+
+This preserves the control-plane/data-plane split: control-plane consensus and
+Placement Authority logs carry membership, ownership, placement, and recovery
+decisions. User-data writes do not enter that log and are not authorized by a
+routing cache. Durable user writes remain on the Range Owner data path, guarded
+by the range commit policy, replication stream, and owner-side epoch fence.
+
 ## Hash Vs Ordered Ranges
 
 There are two collection-level sharding modes:
