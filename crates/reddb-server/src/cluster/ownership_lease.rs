@@ -452,6 +452,18 @@ impl LeasedOwner {
 pub enum DurableWriteReject {
     /// No range of the collection covers the routed key — re-resolve routing.
     NoRange { collection: CollectionId },
+    /// This node previously held ownership for the range, but the catalog has
+    /// advanced to a newer owner/epoch. Carries both ownership identities and
+    /// epochs so callers can distinguish stale ownership from an ordinary
+    /// non-owner write.
+    StaleOwnership {
+        collection: CollectionId,
+        range_id: RangeId,
+        attempted_owner: NodeIdentity,
+        current_owner: NodeIdentity,
+        attempted_epoch: OwnershipEpoch,
+        current_epoch: OwnershipEpoch,
+    },
     /// This node is not the catalog owner of the routed range (it is a replica or
     /// holds no copy). The write must be routed to `owner`.
     NotOwner {
@@ -475,6 +487,17 @@ impl std::fmt::Display for DurableWriteReject {
             Self::NoRange { collection } => write!(
                 f,
                 "no range of collection {collection} covers the routed key — re-resolve routing"
+            ),
+            Self::StaleOwnership {
+                collection,
+                range_id,
+                attempted_owner,
+                current_owner,
+                attempted_epoch,
+                current_epoch,
+            } => write!(
+                f,
+                "stale ownership for {collection}/{range_id}: {attempted_owner} tried epoch {attempted_epoch}, current owner is {current_owner} at epoch {current_epoch}"
             ),
             Self::NotOwner {
                 collection,
@@ -530,7 +553,24 @@ pub fn admit_durable_write<'c>(
             })?;
 
     let role = range.role_of(node);
+    let held_lease = holder.lease().filter(|lease| {
+        lease.collection() == collection
+            && lease.range_id() == range.range_id()
+            && lease.owner() == node
+    });
     if !role.may_write_public() {
+        if let Some(lease) = held_lease {
+            if lease.epoch() < range.epoch() {
+                return Err(DurableWriteReject::StaleOwnership {
+                    collection: collection.clone(),
+                    range_id: range.range_id(),
+                    attempted_owner: node.clone(),
+                    current_owner: range.owner().clone(),
+                    attempted_epoch: lease.epoch(),
+                    current_epoch: range.epoch(),
+                });
+            }
+        }
         return Err(DurableWriteReject::NotOwner {
             collection: collection.clone(),
             range_id: range.range_id(),
@@ -542,9 +582,7 @@ pub fn admit_durable_write<'c>(
     // The lease must cover *this* range and *this* owner; a held lease for a
     // different range or owner does not authorise the write (treated as unleased
     // for this range).
-    let covered = holder
-        .lease()
-        .is_some_and(|lease| lease.covers(collection, range.range_id(), node));
+    let covered = held_lease.is_some();
 
     let mode = if covered {
         holder.evaluate(current_term, range.epoch(), now_ms)
@@ -968,6 +1006,68 @@ mod tests {
             } => assert_eq!(lease_epoch, OwnershipEpoch::initial()),
             other => panic!("expected Fenced(EpochSuperseded), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stale_owner_rejects_durable_write_after_epoch_bump() {
+        let (mut catalog, orders) = catalog_with("CN=node-a", &["CN=node-b"]);
+        let old_owner = LeasedOwner::with_lease(lease_for(&orders, "CN=node-a", 100_000));
+
+        let v1 = catalog.range(&orders, RangeId::new(1)).unwrap().clone();
+        let v2 = v1.transfer_to(ident("CN=node-b"), [ident("CN=node-a")]);
+        catalog.apply_update(v2).unwrap();
+        let current = catalog.range(&orders, RangeId::new(1)).unwrap();
+        assert_eq!(current.owner(), &ident("CN=node-b"));
+        assert_eq!(current.epoch().value(), 2);
+
+        let new_owner = LeasedOwner::with_lease(OwnershipLease::grant(
+            SupervisorTerm::genesis(),
+            orders.clone(),
+            RangeId::new(1),
+            ident("CN=node-b"),
+            current.epoch(),
+            0,
+            100_000,
+        ));
+
+        let err = admit_durable_write(
+            &catalog,
+            &old_owner,
+            &ident("CN=node-a"),
+            &orders,
+            b"k",
+            SupervisorTerm::genesis(),
+            500,
+        )
+        .unwrap_err();
+        match err {
+            DurableWriteReject::StaleOwnership {
+                attempted_owner,
+                current_owner,
+                attempted_epoch,
+                current_epoch,
+                ..
+            } => {
+                assert_eq!(attempted_owner, ident("CN=node-a"));
+                assert_eq!(current_owner, ident("CN=node-b"));
+                assert_eq!(attempted_epoch, OwnershipEpoch::initial());
+                assert_eq!(current_epoch, current.epoch());
+            }
+            other => panic!("expected StaleOwnership, got {other:?}"),
+        }
+
+        let admitted = admit_durable_write(
+            &catalog,
+            &new_owner,
+            &ident("CN=node-b"),
+            &orders,
+            b"k",
+            SupervisorTerm::genesis(),
+            500,
+        )
+        .expect("new owner at the current epoch may write");
+        assert_eq!(admitted.owner(), &ident("CN=node-b"));
+        assert_eq!(admitted.epoch(), current.epoch());
     }
 
     #[test]
