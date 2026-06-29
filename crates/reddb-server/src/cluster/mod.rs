@@ -58,7 +58,7 @@ pub use move_range::{
 pub use ownership::{
     CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
     PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership,
-    RangeRole, RangeWriteReject, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
+    RangeRole, RangeWriteReject, ReplicaRole, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
 };
 pub use ownership_force::{
     force_transition, EmptyOperatorReason, ForceDenial, ForceFailure, ForceTransitionCapability,
