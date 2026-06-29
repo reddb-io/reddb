@@ -60,9 +60,9 @@ pub use ownership::{
     CatalogError, CatalogVersion, CollectionGroupAuthority, CollectionGroupId,
     CollectionGroupIdError, CollectionId, CollectionIdError, HotMirrorCandidate,
     HotMirrorPromotion, HotMirrorPromotionRefusal, OwnershipEpoch, PlacementAuthorityCatalog,
-    PlacementAuthorityError, PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId,
-    RangeOwnership, RangeRole, RangeWriteReject, ReplicaRole, ShardKeyMode, ShardOwnershipCatalog,
-    UpdateOutcome,
+    PlacementAuthorityError, PlacementAuthorityId, PlacementAuthorityIdError, PlacementMetadata,
+    RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership, RangeRole,
+    RangeWriteReject, ReplicaRole, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
 };
 pub use ownership_force::{
     force_transition, EmptyOperatorReason, ForceDenial, ForceFailure, ForceTransitionCapability,
@@ -95,5 +95,6 @@ pub use supervisor::{
     HealthPolicy, HealthScore, MemberSignals, PlannedPromotion,
 };
 pub use topology::{
-    ClientTopology, HintOutcome, RefreshOutcome, TopologyRange, TopologySnapshot, TopologyUpdate,
+    ClientTopology, HintOutcome, RefreshOutcome, TopologyAuthority, TopologyRange,
+    TopologySnapshot, TopologyUpdate,
 };
