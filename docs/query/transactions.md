@@ -54,6 +54,69 @@ If the application crashes or the connection drops before `COMMIT`,
 in-flight transaction state is discarded because the WAL never sees a
 complete commit record.
 
+## Canonical reservation recipe
+
+Use a transaction when a workflow must claim resource units, remember an
+application-defined idempotency key, and enqueue downstream work as one
+logical outcome. The application owns the reservation schema; RedDB supplies
+the transaction boundary, `UPDATE ... CLAIM`, primary-key enforcement for the
+idempotency key, and durable queue write.
+
+```sql
+CREATE TABLE inventory_units (
+  sku TEXT,
+  unit_id INT PRIMARY KEY,
+  status TEXT,
+  reservation_key TEXT
+);
+
+CREATE TABLE reservation_idempotency (
+  idempotency_key TEXT PRIMARY KEY,
+  reservation_id TEXT,
+  units_claimed INT
+);
+
+CREATE QUEUE reservation_work;
+```
+
+On every request, first look up the caller's idempotency key. If a row already
+exists, return that stored outcome instead of running the claim again:
+
+```sql
+SELECT reservation_id, units_claimed
+FROM reservation_idempotency
+WHERE idempotency_key = 'reserve-1';
+```
+
+If no outcome exists, claim the units, store the idempotency key, and enqueue
+the follow-up work before `COMMIT`:
+
+```sql
+BEGIN;
+
+UPDATE inventory_units
+SET status = 'claimed', reservation_key = 'reserve-1'
+WHERE sku = 'sku-1' AND status = 'available'
+CLAIM EXACT 2 ORDER BY unit_id ASC
+RETURNING unit_id;
+
+INSERT INTO reservation_idempotency
+  (idempotency_key, reservation_id, units_claimed)
+VALUES
+  ('reserve-1', 'resv-reserve-1', 2);
+
+QUEUE PUSH reservation_work
+  {kind: 'reservation_claimed', reservation_id: 'resv-reserve-1'};
+
+COMMIT;
+```
+
+`CLAIM EXACT` makes a short reservation fail without committing a partial
+claim. If any step fails, issue `ROLLBACK`; the claimed resource rows,
+idempotency outcome, and queued work are discarded together. After `COMMIT`,
+a retry of `reserve-1` reads `reservation_idempotency` and observes the
+existing outcome, so it does not claim more units or enqueue duplicate work.
+
 ## Isolation
 
 Each `BEGIN` captures a snapshot — a frozen view of the database that
