@@ -1,5 +1,6 @@
 //! Shared cluster identity and membership model.
 
+pub mod archive_recovery;
 pub mod bootstrap_authority;
 pub mod commit_resolution;
 pub mod control_plane;
@@ -20,6 +21,11 @@ pub mod slot;
 pub mod supervisor;
 pub mod topology;
 
+pub use archive_recovery::{
+    recover_archive_replica, ArchiveRecoveryError, ArchiveRecoveryMode, ArchiveRecoveryOutcome,
+    ArchiveRecoveryRequest, ArchiveRecoveryRpoEvidence, ArchivedRangeReplica,
+    RestoredArchiveReplica, SkippedDataEvidence,
+};
 pub use bootstrap_authority::{
     authorize as authorize_cluster_bootstrap, authorize_vault_bootstrap, is_cluster_shaped,
     plan_vault_bootstrap, AuthBootstrapInput, BootstrapDisposition, VaultBootstrapPlan,
