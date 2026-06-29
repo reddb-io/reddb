@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use reddb::application::{Author, CreateCommitInput, VcsUseCases};
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::schema::Value;
-use reddb::storage::EntityData;
+use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, RedDBRuntime};
 
 /// In-memory runtime with the single-source binary body enabled.
@@ -78,9 +78,40 @@ fn texts(rt: &RedDBRuntime, sql: &str, col: &str) -> Vec<String> {
         .collect()
 }
 
+fn body_bytes(rt: &RedDBRuntime, collection: &str) -> Vec<u8> {
+    let page = rt
+        .scan_collection(collection, None, 1)
+        .expect("scan_collection");
+    let row = page.items[0].data.as_row().expect("row");
+    match row.get_field("body") {
+        Some(Value::Json(bytes)) => bytes.clone(),
+        other => panic!("expected document body bytes, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance: writes no longer materialise promoted columns.
 // ---------------------------------------------------------------------------
+
+#[test]
+fn default_writes_binary_single_source_documents() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    rt.execute_query("CREATE DOCUMENT docs").expect("create");
+    insert(&rt, "docs", r#"{"name":"alice","score":30,"city":"SP"}"#);
+
+    let cols = stored_columns(&rt, "docs");
+    assert!(cols.contains("body"), "the body is always stored: {cols:?}");
+    for promoted in ["name", "score", "city"] {
+        assert!(
+            !cols.contains(promoted),
+            "default document write must not materialise `{promoted}`: {cols:?}"
+        );
+    }
+    assert_eq!(
+        texts(&rt, "SELECT name FROM docs WHERE score = 30", "name"),
+        vec!["alice"],
+    );
+}
 
 #[test]
 fn writes_do_not_materialise_promoted_columns() {
@@ -97,6 +128,44 @@ fn writes_do_not_materialise_promoted_columns() {
             "promoted column `{promoted}` must NOT be materialised: {cols:?}"
         );
     }
+}
+
+#[test]
+fn live_predicates_read_binary_body_not_stale_materialised_columns() {
+    let rt = binary_runtime();
+    rt.execute_query("CREATE DOCUMENT source")
+        .expect("create source");
+    insert(&rt, "source", r#"{"name":"body","score":7}"#);
+    let body = body_bytes(&rt, "source");
+
+    rt.execute_query("CREATE DOCUMENT stale_docs")
+        .expect("create stale_docs");
+    let row = RowData::with_names(
+        vec![Value::Json(body), Value::text("stale"), Value::Integer(7)],
+        vec!["body".to_string(), "name".to_string(), "score".to_string()],
+    );
+    let entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TableRow {
+            table: "stale_docs".into(),
+            row_id: 0,
+        },
+        EntityData::Row(row),
+    );
+    rt.db()
+        .store()
+        .insert("stale_docs", entity)
+        .expect("insert stale-shaped row");
+
+    assert_eq!(
+        texts(
+            &rt,
+            "SELECT name FROM stale_docs WHERE name = 'body'",
+            "name"
+        ),
+        vec!["body"],
+        "live predicates and projections must source document fields from the body"
+    );
 }
 
 // ---------------------------------------------------------------------------

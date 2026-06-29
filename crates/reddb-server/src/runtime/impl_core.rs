@@ -3378,12 +3378,11 @@ impl RedDBRuntime {
     }
 
     /// Whether DOCUMENT writes should store the body as the native binary
-    /// container (PRD-1398, ADR-0063). Off by default; flip via
-    /// `SET CONFIG storage.binary_document_body = true` or the
-    /// `REDDB_STORAGE_BINARY_DOCUMENT_BODY` env var. Reads decode the container
-    /// transparently regardless of this flag.
+    /// container (PRD-1398, ADR-0063). On by default after the production
+    /// cutover. Reads decode the container transparently regardless of this
+    /// flag.
     pub(crate) fn binary_document_body_enabled(&self) -> bool {
-        self.config_bool("storage.binary_document_body", false)
+        self.config_bool("storage.binary_document_body", true)
     }
 
     pub(crate) fn config_u64(&self, key: &str, default: u64) -> u64 {

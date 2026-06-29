@@ -494,8 +494,8 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         record.set_arc(sys_key_tenant(), tenant);
         record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        // Lean SELECT * over a single-source document — expand promoted columns.
-        fill_document_promoted_columns(&mut record, None, doc_body.as_deref());
+        // Lean SELECT * over a single-source document — expand body fields.
+        fill_document_body_fields(&mut record, None, doc_body.as_deref());
         Some(record)
     } else if let Some(ref schema) = row.schema {
         let mut record = UnifiedRecord::with_capacity(6 + schema.len());
@@ -551,14 +551,12 @@ fn document_row_body_bytes(row: &crate::storage::unified::entity::RowData) -> Op
     }
 }
 
-/// Fill a single-source document's promoted columns into `record` by reading
+/// Fill a single-source document's top-level fields into `record` by reading
 /// them from the binary `body` (`body` = the row's container bytes).
 ///
 /// `columns = None` expands every top-level body field (SELECT *); `Some(cols)`
-/// offset-reads only the requested fields. A no-op when `body` is `None` (legacy
-/// plain-JSON documents still carry materialised promoted columns, and
-/// non-document rows have no container body), so existing behaviour is untouched.
-pub(super) fn fill_document_promoted_columns(
+/// offset-reads only the requested fields. A no-op when `body` is `None`.
+pub(super) fn fill_document_body_fields(
     record: &mut UnifiedRecord,
     columns: Option<&[String]>,
     body: Option<&[u8]>,
@@ -566,20 +564,24 @@ pub(super) fn fill_document_promoted_columns(
     let Some(bytes) = body else {
         return;
     };
-    let promoted: Vec<(String, Value)> = match columns {
-        None => match crate::document_body::promoted_fields(bytes) {
+    if let Some(body_json) = crate::document_body::decode_container_to_json(bytes) {
+        if let Ok(json_bytes) = crate::json::to_vec(&body_json) {
+            record.set("body", Value::Json(json_bytes));
+        }
+    }
+    let fields: Vec<(String, Value)> = match columns {
+        None => match crate::document_body::body_fields(bytes) {
             Some(fields) => fields,
             None => return,
         },
         Some(cols) => cols
             .iter()
             .filter_map(|col| {
-                crate::document_body::read_promoted_field(bytes, col)
-                    .map(|value| (col.clone(), value))
+                crate::document_body::read_body_field(bytes, col).map(|value| (col.clone(), value))
             })
             .collect(),
     };
-    for (name, value) in promoted {
+    for (name, value) in fields {
         record.set(&name, value);
     }
 }
@@ -632,9 +634,8 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
                 Value::UnsignedInteger(entity.updated_at),
             );
 
-            // SELECT * over a single-source document: expand the promoted
-            // columns back out of the body (no-op for legacy/non-document rows).
-            fill_document_promoted_columns(&mut record, None, doc_body.as_deref());
+            // SELECT * over a single-source document: expand fields from the body.
+            fill_document_body_fields(&mut record, None, doc_body.as_deref());
 
             Some(record)
         }
@@ -717,12 +718,8 @@ pub(super) fn runtime_table_record_from_entity_ref_with_schema(
             }
             set_public_row_envelope(&mut record, entity, row);
 
-            // SELECT * over a single-source document — expand promoted columns.
-            fill_document_promoted_columns(
-                &mut record,
-                None,
-                document_row_body_bytes(row).as_deref(),
-            );
+            // SELECT * over a single-source document — expand body fields.
+            fill_document_body_fields(&mut record, None, document_row_body_bytes(row).as_deref());
 
             Some(record)
         }
@@ -835,9 +832,9 @@ pub(super) fn runtime_table_record_from_entity_projected(
                 Value::UnsignedInteger(entity.updated_at),
             );
 
-            // Single-source document: offset-read just the projected promoted
-            // fields from the body (no-op for legacy/non-document rows).
-            fill_document_promoted_columns(&mut record, Some(columns), doc_body.as_deref());
+            // Single-source document: offset-read just the projected fields
+            // from the body.
+            fill_document_body_fields(&mut record, Some(columns), doc_body.as_deref());
 
             Some(record)
         }
@@ -946,8 +943,8 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
         }
     }
     set_public_row_envelope(&mut record, entity, row);
-    // Single-source document: offset-read the projected promoted fields.
-    fill_document_promoted_columns(
+    // Single-source document: offset-read the projected body fields.
+    fill_document_body_fields(
         &mut record,
         Some(columns),
         document_row_body_bytes(row).as_deref(),
@@ -970,6 +967,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         (EntityKind::TableRow { row_id, .. }, EntityData::Row(row)) => {
             let capabilities = runtime_row_capabilities(&row);
             let entity_type = runtime_row_entity_type(&row);
+            let doc_body = document_row_body_bytes(&row);
             let mut record = UnifiedRecord::new();
             record.set_arc(sys_key_row_id(), Value::UnsignedInteger(row_id));
             if let Some(named) = row.named {
@@ -981,6 +979,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
                     record.set(&format!("c{index}"), value);
                 }
             }
+            fill_document_body_fields(&mut record, None, doc_body.as_deref());
             (entity_type, capabilities, record)
         }
         (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
@@ -1101,6 +1100,7 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         (EntityKind::TableRow { row_id, .. }, EntityData::Row(row)) => {
             let capabilities = runtime_row_capabilities(row);
             let entity_type = runtime_row_entity_type(row);
+            let doc_body = document_row_body_bytes(row);
             let mut record = UnifiedRecord::new();
             record.set_arc(sys_key_row_id(), Value::UnsignedInteger(*row_id));
             if let Some(named) = row.named.as_ref() {
@@ -1116,6 +1116,7 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
                     record.set(&format!("c{index}"), value.clone());
                 }
             }
+            fill_document_body_fields(&mut record, None, doc_body.as_deref());
             (entity_type, capabilities, record)
         }
         (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {

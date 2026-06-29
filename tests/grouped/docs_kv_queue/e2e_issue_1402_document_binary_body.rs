@@ -1,11 +1,11 @@
 // Issue #1402 — DOCUMENT: binary body write + binary→JSON read decode
-// (flag-gated, PRD-1398 / ADR-0063).
+// (PRD-1398 / ADR-0063).
 //
 // Acceptance bullets:
-//   1. With the flag on, a written document is stored as a binary body
+//   1. By default, a written document is stored as a binary body
 //      container (the stored `body` bytes start with the `RDOC` magic).
 //   2. `SELECT body` and field projection return JSON equal to today's
-//      behaviour (flag-on results match flag-off results).
+//      behaviour.
 //   3. Rich types (Email, Ipv4, Subnet, Color, …) survive write→read.
 //   4. Existing document RQL behaviour (json_extract, body.field, UPDATE SET,
 //      PATCH, reopen) is unchanged with the flag on.
@@ -49,13 +49,14 @@ fn body_json_extract(rt: &RedDBRuntime, collection: &str, field: &str) -> String
     }
 }
 
-/// The single in-memory record `body` field as raw stored bytes.
+/// The single stored record `body` field as raw storage bytes.
 fn body_bytes(rt: &RedDBRuntime, collection: &str) -> Vec<u8> {
-    let out = rt
-        .execute_query(&format!("SELECT body FROM {collection}"))
-        .expect("SELECT body");
-    assert_eq!(out.result.records.len(), 1, "exactly one document");
-    match out.result.records[0].get("body") {
+    let page = rt
+        .scan_collection(collection, None, 1)
+        .expect("scan_collection");
+    assert_eq!(page.items.len(), 1, "exactly one document");
+    let row = page.items[0].data.as_row().expect("row");
+    match row.get_field("body") {
         Some(Value::Json(bytes)) => bytes.clone(),
         other => panic!("expected body Json, got {other:?}"),
     }
@@ -82,7 +83,7 @@ fn flag_on_stores_body_as_binary_container() {
 }
 
 #[test]
-fn flag_off_keeps_plain_json_body() {
+fn default_stores_body_as_binary_container() {
     let rt = runtime();
     rt.execute_query("CREATE DOCUMENT events").expect("create");
     rt.execute_query(
@@ -91,18 +92,22 @@ fn flag_off_keeps_plain_json_body() {
     .expect("insert");
 
     let bytes = body_bytes(&rt, "events");
-    assert_ne!(&bytes[..4], RDOC_MAGIC, "flag off stays JSON");
-    assert_eq!(bytes.first(), Some(&b'{'), "JSON object body");
+    assert_eq!(
+        &bytes[..4],
+        RDOC_MAGIC,
+        "default must store the native binary container"
+    );
 }
 
-/// Run the same document script with and without the flag and assert every
-/// observable RQL result matches — `SELECT body.field`, `json_extract`,
-/// promoted-column projection, and a tag-array CONTAINS predicate.
+/// Run the same document script with the default and with the flag explicitly
+/// set to true, and assert every observable RQL result matches — `SELECT
+/// body.field`, `json_extract`, bare-field projection, and a tag-array CONTAINS
+/// predicate.
 #[test]
-fn flag_on_observable_behaviour_matches_flag_off() {
-    fn observe(binary: bool) -> Vec<(String, String, String, usize)> {
+fn explicit_true_observable_behaviour_matches_default() {
+    fn observe(explicit_true: bool) -> Vec<(String, String, String, usize)> {
         let rt = runtime();
-        if binary {
+        if explicit_true {
             enable_binary_body(&rt);
         }
         rt.execute_query("CREATE DOCUMENT docs").expect("create");
@@ -117,7 +122,7 @@ fn flag_on_observable_behaviour_matches_flag_off() {
             .expect("insert");
         }
 
-        // body.field access + json_extract + promoted column projection.
+        // body.field access + json_extract + bare-field projection.
         let rows = rt
             .execute_query(
                 "SELECT level, body.level, json_extract(body, '$.level') \
@@ -151,9 +156,9 @@ fn flag_on_observable_behaviour_matches_flag_off() {
     }
 
     assert_eq!(
-        observe(true),
         observe(false),
-        "binary-body reads must match plain-JSON reads"
+        observe(true),
+        "explicit true reads must match default reads"
     );
 }
 
@@ -188,8 +193,8 @@ fn rich_types_survive_write_then_read() {
     }
 }
 
-/// UPDATE SET on a promoted column keeps `body` and the column in sync (#1394)
-/// even when the body is stored as a binary container.
+/// UPDATE SET on a bare document field keeps `body` in sync when the body is
+/// stored as a binary container.
 #[test]
 fn update_set_keeps_binary_body_in_sync() {
     let rt = runtime();
@@ -206,7 +211,7 @@ fn update_set_keeps_binary_body_in_sync() {
     // Still binary on disk after the update.
     assert_eq!(&body_bytes(&rt, "users")[..4], RDOC_MAGIC);
 
-    // Promoted column and body agree (#1394 invariant under binary storage).
+    // Bare-field projection and body agree under binary storage.
     let col = rt
         .execute_query("SELECT tier FROM users")
         .expect("select tier");

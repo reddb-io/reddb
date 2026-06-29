@@ -124,7 +124,9 @@ impl<'a> DmlTargetScan<'a> {
             }
         }
 
-        if !crate::runtime::impl_core::current_snapshot_requires_index_fallback() {
+        if !matches!(self.target, Some(UpdateTarget::Documents))
+            && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
+        {
             if let Some(filter) = self.filter {
                 if let Some(ids) = query_exec::try_hash_eq_lookup(
                     filter,
@@ -148,7 +150,9 @@ impl<'a> DmlTargetScan<'a> {
         let mut ids = Vec::new();
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
-            query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
+            if !matches!(self.target, Some(UpdateTarget::Documents)) {
+                query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
+            }
             let zone_preds: Vec<_> = owned_zone_preds
                 .iter()
                 .map(|(column, value, kind)| {
@@ -421,17 +425,10 @@ fn extract_document_entity_id_from_filter(filter: Option<&Filter>) -> Option<u64
 fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(String, Value)>> {
     match &entity.data {
         EntityData::Row(row) => {
-            let mut snapshot: Vec<(String, Value)> = if let Some(named) = &row.named {
-                named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-            } else {
-                row.schema.as_ref().map(|schema| {
-                    schema
-                        .iter()
-                        .cloned()
-                        .zip(row.columns.iter().cloned())
-                        .collect()
-                })?
-            };
+            let mut snapshot = crate::application::ports::entity_row_fields_snapshot(entity);
+            if snapshot.is_empty() {
+                return None;
+            }
             let tenant = row.get_field("tenant_id").cloned().unwrap_or(Value::Null);
             let kind = match row_item_kind(entity) {
                 Some(RowItemKind::Kv) => "kv",

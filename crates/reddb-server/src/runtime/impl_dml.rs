@@ -3824,8 +3824,14 @@ fn find_document_body_json(
 ) -> RedDBResult<crate::json::Value> {
     let val = find_column_value(columns, values, "body")?;
     match val {
-        Value::Json(bytes) | Value::Blob(bytes) => crate::json::from_slice(&bytes)
-            .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Json(bytes) | Value::Blob(bytes) => {
+            if let Some(body) = crate::document_body::decode_container_to_json(&bytes) {
+                Ok(body)
+            } else {
+                crate::json::from_slice(&bytes)
+                    .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}")))
+            }
+        }
         Value::Text(text) => crate::json::from_str(text.as_ref())
             .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
         Value::Integer(value) => crate::json::from_str(&value.to_string())
