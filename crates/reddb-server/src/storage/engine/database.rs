@@ -461,18 +461,43 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_db_path() -> PathBuf {
+    struct TempDbPath(PathBuf);
+
+    impl std::ops::Deref for TempDbPath {
+        type Target = PathBuf;
+
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TempDbPath {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDbPath {
+        fn drop(&mut self) {
+            cleanup(&self.0);
+        }
+    }
+
+    fn temp_db_path() -> TempDbPath {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("reddb_engine_test_{}.rdb", timestamp))
+        TempDbPath(std::env::temp_dir().join(format!("reddb_engine_test_{}.rdb", timestamp)))
     }
 
     fn cleanup(path: &Path) {
         let _ = fs::remove_file(path);
         let wal_path = reddb_file::layout::engine_wal_path(path);
         let _ = fs::remove_file(wal_path);
+        for sidecar in reddb_file::layout::pager_shadow_sidecar_paths(path) {
+            let _ = fs::remove_file(sidecar);
+        }
     }
 
     #[test]
