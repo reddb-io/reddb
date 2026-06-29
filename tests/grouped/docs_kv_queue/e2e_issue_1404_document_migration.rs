@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use reddb::document_migration::migrate_store_to_binary_body;
 use reddb::storage::schema::Value;
-use reddb::storage::EntityData;
+use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, RedDBRuntime};
 
 const DATA_FILE: &str = "db.rdb";
@@ -45,11 +45,43 @@ fn open(store_dir: &Path) -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::persistent(store_dir.join(DATA_FILE))).expect("open")
 }
 
-fn insert(rt: &RedDBRuntime, collection: &str, body_json: &str) {
-    rt.execute_query(&format!(
-        "INSERT INTO {collection} DOCUMENT (body) VALUES ('{body_json}')"
-    ))
-    .unwrap_or_else(|err| panic!("insert {body_json}: {err:?}"));
+fn json_field_to_storage(value: &reddb::json::Value) -> Value {
+    match value {
+        reddb::json::Value::String(text) => Value::text(text.clone()),
+        reddb::json::Value::Number(number) => {
+            if number.fract() == 0.0 && *number >= i64::MIN as f64 && *number <= i64::MAX as f64 {
+                Value::Integer(*number as i64)
+            } else {
+                Value::Float(*number)
+            }
+        }
+        reddb::json::Value::Bool(value) => Value::Boolean(*value),
+        other => Value::Json(reddb::json::to_vec(other).expect("encode JSON field")),
+    }
+}
+
+fn insert_legacy_document(rt: &RedDBRuntime, collection: &str, body_json: &str) {
+    let body: reddb::json::Value = reddb::json::from_str(body_json).expect("valid fixture JSON");
+    let object = body.as_object().expect("fixture document object");
+    let mut names = vec!["body".to_string()];
+    let mut values = vec![Value::Json(body_json.as_bytes().to_vec())];
+    for (key, value) in object {
+        names.push(key.clone());
+        values.push(json_field_to_storage(value));
+    }
+    let row = RowData::with_names(values, names);
+    let entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TableRow {
+            table: collection.into(),
+            row_id: 0,
+        },
+        EntityData::Row(row),
+    );
+    rt.db()
+        .store()
+        .insert(collection, entity)
+        .unwrap_or_else(|err| panic!("insert legacy {collection}: {err:?}"));
 }
 
 /// The set of distinct stored column names across every row of `collection`.
@@ -108,18 +140,17 @@ fn read_fingerprint(rt: &RedDBRuntime, collection: &str) -> Vec<(String, i64, St
 /// materialised) with two document collections.
 fn build_fixture(store_dir: &Path) {
     let rt = open(store_dir);
-    // Default is binary body OFF; documents materialise promoted columns.
     rt.execute_query("CREATE DOCUMENT users")
         .expect("create users");
-    insert(&rt, "users", r#"{"name":"alice","score":30,"city":"SP"}"#);
-    insert(&rt, "users", r#"{"name":"bob","score":10,"city":"RJ"}"#);
-    insert(&rt, "users", r#"{"name":"carol","score":50,"city":"SP"}"#);
-    insert(&rt, "users", r#"{"name":"dave","score":20,"city":"BH"}"#);
+    insert_legacy_document(&rt, "users", r#"{"name":"alice","score":30,"city":"SP"}"#);
+    insert_legacy_document(&rt, "users", r#"{"name":"bob","score":10,"city":"RJ"}"#);
+    insert_legacy_document(&rt, "users", r#"{"name":"carol","score":50,"city":"SP"}"#);
+    insert_legacy_document(&rt, "users", r#"{"name":"dave","score":20,"city":"BH"}"#);
 
     rt.execute_query("CREATE DOCUMENT orders")
         .expect("create orders");
-    insert(&rt, "orders", r#"{"name":"o1","score":5,"city":"SP"}"#);
-    insert(&rt, "orders", r#"{"name":"o2","score":7,"city":"RJ"}"#);
+    insert_legacy_document(&rt, "orders", r#"{"name":"o1","score":5,"city":"SP"}"#);
+    insert_legacy_document(&rt, "orders", r#"{"name":"o2","score":7,"city":"RJ"}"#);
 
     rt.flush().expect("flush");
     rt.checkpoint().expect("checkpoint");

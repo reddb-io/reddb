@@ -3488,6 +3488,16 @@ fn document_counts(runtime: &RedDBRuntime, collection: &str) -> (u64, u64) {
         for (name, _) in row.iter_fields() {
             field_names.insert(name.to_string());
         }
+        // Post-cutover (PRD-1398) the canonical document lives only in the
+        // binary `body` container; offset-read its top-level fields so the
+        // count matches the columns surfaced by `infer_document_columns`.
+        if let Some(Value::Json(bytes)) = row.get_field("body") {
+            if let Some(body_fields) = crate::document_body::body_fields(bytes) {
+                for (name, _) in body_fields {
+                    field_names.insert(name);
+                }
+            }
+        }
     }
     (document_count, field_names.len() as u64)
 }
@@ -4162,8 +4172,25 @@ fn infer_document_columns(
         }
 
         document_count += 1;
-        for (name, value) in row.iter_fields() {
-            let entry = fields.entry(name.to_string()).or_insert(InferredColumn {
+
+        // Record every stored row field, plus the top-level fields derived
+        // from the binary document body. Post-cutover (PRD-1398) documents
+        // store the canonical document only inside the binary `body`
+        // container and no longer promote top-level columns onto the row, so
+        // schema inference must offset-read the body's top-level fields —
+        // mirroring the GET presentation derive in `named_fields_json`.
+        let mut recorded: Vec<(String, Value)> = row
+            .iter_fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        if let Some(Value::Json(bytes)) = row.get_field("body") {
+            if let Some(body_fields) = crate::document_body::body_fields(bytes) {
+                recorded.extend(body_fields);
+            }
+        }
+
+        for (name, value) in recorded {
+            let entry = fields.entry(name).or_insert(InferredColumn {
                 data_type: None,
                 seen: 0,
                 saw_null: false,

@@ -255,13 +255,12 @@ pub(crate) fn resolve_kind<'a>(
         EntityFieldKind::RowField(name) => {
             // Hot path: SQL column on a TableRow.
             if let Some(row) = entity.data.as_row() {
+                // Single-source document: bare fields offset-read from the body.
+                if let Some(v) = document_body_field(row, name) {
+                    return Some(Cow::Owned(v));
+                }
                 if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
-                }
-                // Single-source document: a promoted field is no longer
-                // materialised as a column — offset-read it from the body.
-                if let Some(v) = document_promoted_field(row, name) {
-                    return Some(Cow::Owned(v));
                 }
                 // Document without a body-promoted `id` falls back to the
                 // entity logical id — keeps `WHERE id = <v>` matching the
@@ -339,10 +338,10 @@ pub(crate) fn resolve_kind<'a>(
         }
         EntityFieldKind::RowFieldFast { name, idx } => {
             if let Some(row) = entity.data.as_row() {
-                if name == "id" && row_has_document_body(row) {
-                    return Some(Cow::Owned(Value::UnsignedInteger(
-                        entity.logical_id().raw(),
-                    )));
+                // Single-source document: offset-read the promoted field
+                // straight from the body when it is no longer materialised.
+                if let Some(v) = document_body_field(row, name) {
+                    return Some(Cow::Owned(v));
                 }
                 // Fast path (bulk-insert entities): columns[] in schema order, O(1).
                 if row.named.is_none() {
@@ -352,10 +351,10 @@ pub(crate) fn resolve_kind<'a>(
                 if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
                 }
-                // Single-source document: offset-read the promoted field
-                // straight from the body when it is no longer materialised.
-                if let Some(v) = document_promoted_field(row, name) {
-                    return Some(Cow::Owned(v));
+                if name == "id" && row_has_document_body(row) {
+                    return Some(Cow::Owned(Value::UnsignedInteger(
+                        entity.logical_id().raw(),
+                    )));
                 }
             }
             if let Some(value) = resolve_timeseries_field(entity, name) {
@@ -386,19 +385,16 @@ fn row_has_document_body(row: &crate::storage::unified::entity::RowData) -> bool
     })
 }
 
-/// Offset-read a single-source document's promoted field from its body.
+/// Offset-read a single-source document's top-level field from its body.
 ///
 /// Returns the value of top-level field `name` decoded from the row's binary
-/// `body` container, or `None` when the row has no binary-container body (the
-/// common case — legacy documents keep materialised columns, non-document rows
-/// have no `body`). This is what lets a bare `WHERE field`/`SELECT field` keep
-/// resolving once promoted columns stop being materialised.
-fn document_promoted_field(
+/// `body` container, or `None` when the row has no binary-container body.
+fn document_body_field(
     row: &crate::storage::unified::entity::RowData,
     name: &str,
 ) -> Option<Value> {
     match row.get_field("body") {
-        Some(Value::Json(bytes)) => crate::document_body::read_promoted_field(bytes, name),
+        Some(Value::Json(bytes)) => crate::document_body::read_body_field(bytes, name),
         _ => None,
     }
 }

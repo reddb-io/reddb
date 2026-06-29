@@ -12,6 +12,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  FUZZ_RSS_LIMIT_MB: 4096
+  FUZZ_MALLOC_LIMIT_MB: 2048
 
 jobs:
   fuzz:
@@ -61,7 +63,11 @@ jobs:
         run: python3 scripts/seed-parser-fuzz-corpus.py
 
       - name: Run ${{ matrix.target }}
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=3600
+        run: >
+          cargo +nightly fuzz run ${{ matrix.target }} --
+          -max_total_time=3600
+          -rss_limit_mb="${FUZZ_RSS_LIMIT_MB}"
+          -malloc_limit_mb="${FUZZ_MALLOC_LIMIT_MB}"
 
       - name: Upload evolved corpus
         if: always()

@@ -77,7 +77,7 @@ struct SourceCollection {
     bodies: Vec<crate::json::Value>,
     /// Previously-promoted top-level fields (materialised as columns), sorted
     /// and de-duplicated across every document.
-    promoted_fields: Vec<String>,
+    legacy_fields: Vec<String>,
 }
 
 /// Migrate the DOCUMENT collections of the store in `store_dir` to the native
@@ -143,7 +143,7 @@ fn read_source_collections(store_dir: &Path) -> RedDBResult<Vec<SourceCollection
     let mut out = Vec::with_capacity(document_collections.len());
     for name in document_collections {
         let mut bodies = Vec::new();
-        let mut promoted: BTreeSet<String> = BTreeSet::new();
+        let mut legacy_fields: BTreeSet<String> = BTreeSet::new();
         let mut cursor = None;
         loop {
             let page = source.scan_collection(&name, cursor, 1_000)?;
@@ -157,7 +157,7 @@ fn read_source_collections(store_dir: &Path) -> RedDBResult<Vec<SourceCollection
                     if field != "body"
                         && !crate::reserved_fields::is_reserved_public_item_field(field)
                     {
-                        promoted.insert(field.to_string());
+                        legacy_fields.insert(field.to_string());
                     }
                 }
                 bodies.push(decode_body(row)?);
@@ -170,7 +170,7 @@ fn read_source_collections(store_dir: &Path) -> RedDBResult<Vec<SourceCollection
         out.push(SourceCollection {
             name,
             bodies,
-            promoted_fields: promoted.into_iter().collect(),
+            legacy_fields: legacy_fields.into_iter().collect(),
         });
     }
 
@@ -224,7 +224,7 @@ fn build_migrated_store(
 
         // Auto-`CREATE INDEX` for every previously-promoted field so queries
         // that relied on the implicit promoted-column filter stay fast.
-        for field in &collection.promoted_fields {
+        for field in &collection.legacy_fields {
             target.execute_query(&format!(
                 "CREATE INDEX {index} ON {collection} ({field}) USING BTREE",
                 index = auto_index_name(&collection.name, field),
@@ -243,7 +243,7 @@ fn build_migrated_store(
             name: collection.name.clone(),
             source_documents: source,
             migrated_documents: migrated,
-            auto_indexed_fields: collection.promoted_fields.clone(),
+            auto_indexed_fields: collection.legacy_fields.clone(),
         });
     }
 

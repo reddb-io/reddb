@@ -65,17 +65,42 @@ pub(crate) fn entity_row_fields_snapshot(
     let crate::storage::EntityData::Row(row) = &entity.data else {
         return Vec::new();
     };
-    if let Some(named) = &row.named {
-        return named.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    }
-    if let Some(schema) = &row.schema {
-        return schema
+    let mut fields = if let Some(named) = &row.named {
+        named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    } else if let Some(schema) = &row.schema {
+        schema
             .iter()
             .zip(row.columns.iter())
             .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
+            .collect()
+    } else {
+        Vec::new()
+    };
+    expand_binary_document_body_snapshot(&mut fields);
+    fields
+}
+
+fn expand_binary_document_body_snapshot(fields: &mut Vec<(String, Value)>) {
+    let Some(body_idx) = fields.iter().position(|(name, _)| name == "body") else {
+        return;
+    };
+    let Value::Json(bytes) = &fields[body_idx].1 else {
+        return;
+    };
+    let body_fields = crate::document_body::body_fields(bytes);
+    if let Some(body_json) = crate::document_body::decode_container_to_json(bytes) {
+        if let Ok(json_bytes) = crate::json::to_vec(&body_json) {
+            fields[body_idx].1 = Value::Json(json_bytes);
+        }
     }
-    Vec::new()
+    let Some(body_fields) = body_fields else {
+        return;
+    };
+    for (name, value) in body_fields {
+        if fields.iter().all(|(existing, _)| existing != &name) {
+            fields.push((name, value));
+        }
+    }
 }
 
 fn ensure_collection_model_contract(
@@ -1299,19 +1324,6 @@ fn replace_document_fields_body(
     let body_bytes = crate::document_body::serialize_document_body(&body, binary)?;
     fields.insert("body".to_string(), Value::Json(body_bytes));
 
-    // Single source of truth (PRD-1398): with the binary body on, the body is
-    // the only stored representation — don't re-promote top-level keys into
-    // columns (the loop above already dropped any stale ones). With the flag
-    // off (legacy) keep the promoted columns in sync with the body (#1394).
-    if !binary {
-        if let JsonValue::Object(map) = &body {
-            for (key, value) in map {
-                fields.insert(key.clone(), json_to_storage_value(value)?);
-                modified_columns.push(key.clone());
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -1613,11 +1625,9 @@ impl RedDBRuntime {
                     context_index_dirty = true;
                     let named = row.named.get_or_insert_with(Default::default);
                     if is_document_collection {
-                        // Document fields are projections of the canonical `body`
-                        // JSON. Apply the assignment to the body so the stored
-                        // document and its promoted columns stay in sync, then
-                        // re-promote every top-level key. Patching only the
-                        // promoted column would leave `SELECT body` stale (#1394).
+                        // Document fields are projections of the canonical
+                        // `body` JSON. Apply the assignment to the body so the
+                        // stored document remains single-source.
                         let mut body = document_body_from_named(named)?;
                         apply_patch_operations_to_json(&mut body, &field_ops)
                             .map_err(crate::RedDBError::Query)?;
@@ -1650,7 +1660,7 @@ impl RedDBRuntime {
                     let named = row.named.get_or_insert_with(Default::default);
                     if is_document_collection {
                         // Mirror the `field_ops` path above: keep the canonical
-                        // `body` JSON in sync with its promoted columns (#1394).
+                        // `body` JSON as the single stored representation.
                         let mut body = document_body_from_named(named)?;
                         if let JsonValue::Object(map) = &mut body {
                             for (key, value) in fields {
@@ -2146,6 +2156,13 @@ impl RedDBRuntime {
             .collection_contract(&collection)
             .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
             .unwrap_or(false);
+        let kv_key = if row.get_field("value").is_some() || row.columns.len() >= 2 {
+            row.get_field("key")
+                .cloned()
+                .or_else(|| row.columns.first().cloned())
+        } else {
+            None
+        };
         if is_document_collection {
             // #1366: when a SET assigns to `body`, treat it as a FULL REPLACE of
             // the stored document — drop other column assignments, the new body
@@ -2211,6 +2228,9 @@ impl RedDBRuntime {
             let mut all_assignments: Vec<(String, Value)> = static_field_assignments.to_vec();
             all_assignments.extend(dynamic_field_assignments);
             apply_row_field_assignments_raw(row, all_assignments);
+            if let Some(key) = kv_key {
+                set_row_field(row, "key", key);
+            }
         }
 
         for (key, value) in static_metadata_assignments
@@ -2527,9 +2547,43 @@ impl RedDBRuntime {
         self.flush_applied_entity_mutation(&applied)?;
         Ok(CreateEntityOutput {
             id: applied.id,
-            entity: Some(applied.entity),
+            entity: Some(public_document_entity(applied.entity)),
         })
     }
+}
+
+/// Shape the canonical binary-body document into the public response entity.
+/// The stored `body` is the single source of truth (RDOC binary container),
+/// but callers read the returned entity two ways, so the response satisfies
+/// both: top-level body fields are surfaced into `named` (mirroring the GET
+/// presentation derive in `named_fields_json`), and `body` itself is decoded
+/// back to plain JSON. Derivation runs against the binary container first,
+/// then `body` is replaced with its JSON form. This only reshapes the
+/// returned copy — persistence already happened against the binary body.
+fn public_document_entity(
+    mut entity: crate::storage::UnifiedEntity,
+) -> crate::storage::UnifiedEntity {
+    let crate::storage::EntityData::Row(row) = &mut entity.data else {
+        return entity;
+    };
+    let Some(named) = row.named.as_mut() else {
+        return entity;
+    };
+    let Some(Value::Json(bytes)) = named.get("body") else {
+        return entity;
+    };
+    let bytes = bytes.clone();
+    if let Some(fields) = crate::document_body::body_fields(&bytes) {
+        for (name, value) in fields {
+            named.entry(name).or_insert(value);
+        }
+    }
+    if let Some(body_json) = crate::document_body::decode_container_to_json(&bytes) {
+        if let Ok(json_bytes) = crate::json::to_vec(&body_json) {
+            named.insert("body".to_string(), Value::Json(json_bytes));
+        }
+    }
+    entity
 }
 
 fn ensure_non_tree_reserved_metadata_patch_paths(
@@ -3148,24 +3202,10 @@ impl RuntimeEntityPort for RedDBRuntime {
         // container; otherwise plain JSON. Reads decode either form to JSON.
         let binary_body = self.binary_document_body_enabled();
         let body_bytes = crate::document_body::serialize_document_body(&input.body, binary_body)?;
-        let mut fields: Vec<(String, crate::storage::schema::Value)> = vec![(
+        let fields: Vec<(String, crate::storage::schema::Value)> = vec![(
             "body".to_string(),
             crate::storage::schema::Value::Json(body_bytes),
         )];
-
-        // Single source of truth (PRD-1398): when the binary body is on, the
-        // body IS the document — promoted columns are no longer materialised.
-        // Filters resolve via the index, projections offset-read the body. With
-        // the flag off (legacy) we still flatten top-level keys into named
-        // columns for filtering.
-        if !binary_body {
-            if let JsonValue::Object(ref map) = input.body {
-                for (key, value) in map {
-                    let storage_value = json_to_storage_value(value)?;
-                    fields.push((key.clone(), storage_value));
-                }
-            }
-        }
 
         let mut metadata = input.metadata;
         apply_collection_default_ttl(&db, &input.collection, &mut metadata);

@@ -3,6 +3,8 @@ set -euo pipefail
 
 target="${1:?usage: report-parser-fuzz-crashes.sh <target>}"
 artifact_dir="fuzz/artifacts/${target}"
+fuzz_rss_limit_mb="${FUZZ_RSS_LIMIT_MB:-4096}"
+fuzz_malloc_limit_mb="${FUZZ_MALLOC_LIMIT_MB:-2048}"
 
 if [ ! -d "${artifact_dir}" ] || ! find "${artifact_dir}" -type f | grep -q .; then
   echo "No fuzz artifacts found for ${target}; skipping issue creation."
@@ -16,9 +18,10 @@ gh label create "release-blocker" \
 body="$(mktemp)"
 tmin_log="$(mktemp)"
 b64_file="$(mktemp)"
+title_suffix="crash"
 trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
 {
-  echo "Nightly parser fuzz found a crash in \`${target}\`."
+  echo "Nightly parser fuzz found a failure in \`${target}\`."
   echo
   echo "- Workflow run: ${GITHUB_RUN_URL:-unknown}"
   echo "- Target: \`${target}\`"
@@ -26,7 +29,7 @@ trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
   echo
   echo '```bash'
   echo "cargo +nightly install cargo-fuzz --locked"
-  echo "cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<artifact>"
+  echo "cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<artifact> -- -rss_limit_mb=${fuzz_rss_limit_mb} -malloc_limit_mb=${fuzz_malloc_limit_mb}"
   echo '```'
   echo
   echo "## Minimized input"
@@ -36,6 +39,11 @@ trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
 while IFS= read -r artifact; do
   minimized="${RUNNER_TEMP:-/tmp}/${target}-$(basename "${artifact}").min"
   cp "${artifact}" "${minimized}"
+  artifact_kind="crash"
+  if [[ "$(basename "${artifact}")" == oom-* ]]; then
+    artifact_kind="out-of-memory"
+    title_suffix="out-of-memory"
+  fi
 
   # Best effort: cargo-fuzz/libFuzzer usually leaves a small reproducer already,
   # but try tmin so the issue body carries the smallest input this runner can find.
@@ -43,6 +51,8 @@ while IFS= read -r artifact; do
 
   {
     echo "Artifact: \`${artifact}\`"
+    echo
+    echo "- Failure kind: ${artifact_kind}"
     echo
     echo "- Bytes: $(wc -c < "${minimized}")"
     echo "- Base64:"
@@ -60,6 +70,6 @@ while IFS= read -r artifact; do
 done < <(find "${artifact_dir}" -type f | sort)
 
 gh issue create \
-  --title "release-blocker: parser fuzz crash in ${target}" \
+  --title "release-blocker: parser fuzz ${title_suffix} in ${target}" \
   --label "release-blocker" \
   --body-file "${body}"
