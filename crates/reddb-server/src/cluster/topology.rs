@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 use super::identity::NodeIdentity;
 use super::ownership::{
     CatalogVersion, CollectionId, OwnershipEpoch, RangeBounds, RangeId, RangeOwnership,
-    ShardKeyMode, ShardOwnershipCatalog,
+    ReplicaRole, ShardKeyMode, ShardOwnershipCatalog,
 };
 use super::routing::RoutingHint;
 use super::slot::hash_shard_key_to_range_key;
@@ -61,6 +61,7 @@ pub struct TopologyRange {
     bounds: RangeBounds,
     owner: NodeIdentity,
     replicas: Vec<NodeIdentity>,
+    compressed_archive_replicas: Vec<NodeIdentity>,
     epoch: OwnershipEpoch,
     version: CatalogVersion,
 }
@@ -73,7 +74,8 @@ impl TopologyRange {
             shard_key_mode: range.shard_key_mode(),
             bounds: range.bounds().clone(),
             owner: range.owner().clone(),
-            replicas: range.replicas().to_vec(),
+            replicas: range.hot_mirror_replicas().to_vec(),
+            compressed_archive_replicas: range.compressed_archive_replicas().to_vec(),
             epoch: range.epoch(),
             version: range.version(),
         }
@@ -100,6 +102,32 @@ impl TopologyRange {
     }
 
     pub fn replicas(&self) -> &[NodeIdentity] {
+        &self.replicas
+    }
+
+    pub fn hot_mirror_replicas(&self) -> &[NodeIdentity] {
+        &self.replicas
+    }
+
+    pub fn compressed_archive_replicas(&self) -> &[NodeIdentity] {
+        &self.compressed_archive_replicas
+    }
+
+    pub fn replica_role_of(&self, node: &NodeIdentity) -> Option<ReplicaRole> {
+        if self.replicas.iter().any(|replica| replica == node) {
+            Some(ReplicaRole::HotMirror)
+        } else if self
+            .compressed_archive_replicas
+            .iter()
+            .any(|replica| replica == node)
+        {
+            Some(ReplicaRole::CompressedArchive)
+        } else {
+            None
+        }
+    }
+
+    pub fn promotion_candidates(&self) -> &[NodeIdentity] {
         &self.replicas
     }
 
@@ -542,6 +570,31 @@ mod tests {
         assert_eq!(range.replicas(), &[ident("CN=node-b")]);
         assert_eq!(range.epoch(), OwnershipEpoch::initial());
         assert_eq!(range.range_id(), RangeId::new(1));
+    }
+
+    #[test]
+    fn snapshot_exposes_explicit_replica_roles() {
+        let orders = collection("orders");
+        let catalog = catalog_with([full_range(&orders, 1, "CN=node-a", &["CN=node-b"])
+            .with_compressed_archive_replicas([ident("CN=node-c")])]);
+
+        let snapshot = catalog.topology_snapshot();
+        let range = snapshot
+            .route(&orders, b"any-key")
+            .expect("full range covers all keys");
+
+        assert_eq!(range.owner(), &ident("CN=node-a"));
+        assert_eq!(range.hot_mirror_replicas(), &[ident("CN=node-b")]);
+        assert_eq!(range.compressed_archive_replicas(), &[ident("CN=node-c")]);
+        assert_eq!(range.promotion_candidates(), &[ident("CN=node-b")]);
+        assert_eq!(
+            range.replica_role_of(&ident("CN=node-b")),
+            Some(ReplicaRole::HotMirror)
+        );
+        assert_eq!(
+            range.replica_role_of(&ident("CN=node-c")),
+            Some(ReplicaRole::CompressedArchive)
+        );
     }
 
     // AC #1: an ordered, multi-range collection routes keys to distinct owners

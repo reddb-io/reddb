@@ -565,6 +565,7 @@ pub struct RangeOwnership {
     bounds: RangeBounds,
     owner: NodeIdentity,
     replicas: Vec<NodeIdentity>,
+    compressed_archive_replicas: Vec<NodeIdentity>,
     epoch: OwnershipEpoch,
     version: CatalogVersion,
     placement: PlacementMetadata,
@@ -590,6 +591,7 @@ impl RangeOwnership {
             bounds,
             owner,
             replicas: replicas.into_iter().collect(),
+            compressed_archive_replicas: Vec::new(),
             epoch: OwnershipEpoch::initial(),
             version: CatalogVersion::initial(),
             placement,
@@ -618,6 +620,20 @@ impl RangeOwnership {
 
     pub fn replicas(&self) -> &[NodeIdentity] {
         &self.replicas
+    }
+
+    /// Promotable hot mirrors for this range. These are caught-up copies that
+    /// may become owner through a fenced promotion; they are not write
+    /// authorities while listed here.
+    pub fn hot_mirror_replicas(&self) -> &[NodeIdentity] {
+        &self.replicas
+    }
+
+    /// Restore-only compressed archive replicas. These copies are retained for
+    /// recovery and must not be treated as promotion candidates until a later
+    /// validation step proves them usable.
+    pub fn compressed_archive_replicas(&self) -> &[NodeIdentity] {
+        &self.compressed_archive_replicas
     }
 
     pub fn epoch(&self) -> OwnershipEpoch {
@@ -664,6 +680,33 @@ impl RangeOwnership {
         }
     }
 
+    /// A transition that changes the restore-only archive replica set. Advances
+    /// the version but not the epoch because write authority did not move.
+    pub fn with_compressed_archive_replicas(
+        &self,
+        archive_replicas: impl IntoIterator<Item = NodeIdentity>,
+    ) -> Self {
+        Self {
+            compressed_archive_replicas: archive_replicas.into_iter().collect(),
+            version: self.version.next(),
+            ..self.clone()
+        }
+    }
+
+    /// A transition that changes both non-owner replica roles together.
+    pub fn update_replica_roles(
+        &self,
+        hot_mirror_replicas: impl IntoIterator<Item = NodeIdentity>,
+        compressed_archive_replicas: impl IntoIterator<Item = NodeIdentity>,
+    ) -> Self {
+        Self {
+            replicas: hot_mirror_replicas.into_iter().collect(),
+            compressed_archive_replicas: compressed_archive_replicas.into_iter().collect(),
+            version: self.version.next(),
+            ..self.clone()
+        }
+    }
+
     /// A transition that changes only placement metadata. Advances the version
     /// but not the epoch.
     pub fn update_placement(&self, placement: PlacementMetadata) -> Self {
@@ -704,6 +747,63 @@ impl RangeOwnership {
         } else {
             RangeRole::NoCopy
         }
+    }
+
+    /// This node's non-owner replica role for this range, if it has one.
+    pub fn replica_role_of(&self, node: &NodeIdentity) -> Option<ReplicaRole> {
+        if self.replicas.iter().any(|replica| replica == node) {
+            Some(ReplicaRole::HotMirror)
+        } else if self
+            .compressed_archive_replicas
+            .iter()
+            .any(|replica| replica == node)
+        {
+            Some(ReplicaRole::CompressedArchive)
+        } else {
+            None
+        }
+    }
+
+    fn validate_replica_roles(&self) -> Result<(), CatalogError> {
+        let mut seen = BTreeSet::new();
+        for replica in &self.replicas {
+            if replica == &self.owner || !seen.insert(replica) {
+                return Err(CatalogError::InvalidReplicaRoles {
+                    collection: self.collection.clone(),
+                    range_id: self.range_id,
+                });
+            }
+        }
+        for replica in &self.compressed_archive_replicas {
+            if replica == &self.owner || !seen.insert(replica) {
+                return Err(CatalogError::InvalidReplicaRoles {
+                    collection: self.collection.clone(),
+                    range_id: self.range_id,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The explicit role of a non-owner range replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaRole {
+    /// A caught-up copy that can be considered for fenced promotion. It is not a
+    /// write authority until promotion installs it as owner.
+    HotMirror,
+    /// A compressed restore copy. It is restore-only until separate validation
+    /// proves it can safely rejoin the hot set.
+    CompressedArchive,
+}
+
+impl ReplicaRole {
+    pub fn is_promotion_candidate(self) -> bool {
+        matches!(self, ReplicaRole::HotMirror)
+    }
+
+    pub fn is_restore_only(self) -> bool {
+        matches!(self, ReplicaRole::CompressedArchive)
     }
 }
 
@@ -782,6 +882,12 @@ pub enum CatalogError {
         existing: RangeId,
         attempted: RangeId,
     },
+    /// The owner was also listed as a non-owner replica, or one node appeared in
+    /// more than one replica role. That would blur the single-writer invariant.
+    InvalidReplicaRoles {
+        collection: CollectionId,
+        range_id: RangeId,
+    },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -811,6 +917,13 @@ impl std::fmt::Display for CatalogError {
             } => write!(
                 f,
                 "range {attempted} overlaps existing range {existing} of collection {collection}"
+            ),
+            Self::InvalidReplicaRoles {
+                collection,
+                range_id,
+            } => write!(
+                f,
+                "range {range_id} of collection {collection} has invalid replica role metadata"
             ),
         }
     }
@@ -956,6 +1069,8 @@ impl ShardOwnershipCatalog {
     /// catalog untouched. Either way the entry's mode must match the collection's
     /// declared mode.
     pub fn apply_update(&mut self, entry: RangeOwnership) -> Result<UpdateOutcome, CatalogError> {
+        entry.validate_replica_roles()?;
+
         // Mode must agree with the collection (auto-declared on first range).
         match self.collections.get(entry.collection()) {
             Some(&declared) if declared != entry.shard_key_mode() => {
@@ -1682,6 +1797,55 @@ mod tests {
         assert!(RangeRole::Owner.may_write_public());
         assert!(!RangeRole::Replica.may_write_public());
         assert!(!RangeRole::NoCopy.may_write_public());
+    }
+
+    #[test]
+    fn replica_role_metadata_distinguishes_hot_mirror_and_archive() {
+        let orders = collection("orders");
+        let range = range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-b"])
+            .with_compressed_archive_replicas([ident("CN=node-c")]);
+
+        assert_eq!(range.hot_mirror_replicas(), &[ident("CN=node-b")]);
+        assert_eq!(range.compressed_archive_replicas(), &[ident("CN=node-c")]);
+        assert_eq!(
+            range.replica_role_of(&ident("CN=node-b")),
+            Some(ReplicaRole::HotMirror)
+        );
+        assert_eq!(
+            range.replica_role_of(&ident("CN=node-c")),
+            Some(ReplicaRole::CompressedArchive)
+        );
+        assert!(ReplicaRole::HotMirror.is_promotion_candidate());
+        assert!(!ReplicaRole::CompressedArchive.is_promotion_candidate());
+        assert!(ReplicaRole::CompressedArchive.is_restore_only());
+    }
+
+    #[test]
+    fn catalog_rejects_owner_or_duplicate_replica_roles() {
+        let orders = collection("orders");
+        let mut catalog = ShardOwnershipCatalog::new();
+
+        let owner_also_hot =
+            range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-a"]);
+        assert!(matches!(
+            catalog.apply_update(owner_also_hot).unwrap_err(),
+            CatalogError::InvalidReplicaRoles { .. }
+        ));
+
+        let owner_also_archive = range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &[])
+            .with_compressed_archive_replicas([ident("CN=node-a")]);
+        assert!(matches!(
+            catalog.apply_update(owner_also_archive).unwrap_err(),
+            CatalogError::InvalidReplicaRoles { .. }
+        ));
+
+        let duplicate_hot_and_archive =
+            range_with(&orders, 1, RangeBounds::full(), "CN=node-a", &["CN=node-b"])
+                .with_compressed_archive_replicas([ident("CN=node-b")]);
+        assert!(matches!(
+            catalog.apply_update(duplicate_hot_and_archive).unwrap_err(),
+            CatalogError::InvalidReplicaRoles { .. }
+        ));
     }
 
     #[test]
