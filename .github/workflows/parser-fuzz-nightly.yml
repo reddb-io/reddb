@@ -28,6 +28,7 @@ jobs:
           - sql_parser
           - migration_parser
           - conn_string_parser
+          - query_with_params
     steps:
       - uses: actions/checkout@v7
 
