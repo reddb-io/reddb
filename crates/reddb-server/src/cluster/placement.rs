@@ -56,7 +56,7 @@
 //! balancing, and hotspot story is exercised deterministically — no disk, no
 //! clock, no network.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::identity::NodeIdentity;
 use super::membership::MembershipCatalog;
@@ -67,6 +67,153 @@ use super::ownership::{CollectionId, RangeId, ShardOwnershipCatalog};
 /// multiplier; `200` doubles a member's placement weight and `50` halves it. An
 /// operator nudges placement without lying about disk by tuning this.
 pub const NEUTRAL_OPERATOR_WEIGHT: u32 = 100;
+
+/// Authority-sharding unit for placement. Related small collections may share a
+/// group; a large collection can be isolated in its own group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CollectionGroupId(String);
+
+impl CollectionGroupId {
+    pub fn new(value: impl Into<String>) -> Result<Self, PlacementAuthorityError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(PlacementAuthorityError::EmptyCollectionGroup);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl std::fmt::Display for CollectionGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The Placement Authority responsible for one Collection group and the
+/// collections whose ownership-catalog slice belongs to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionGroupPlacementAuthority {
+    collection_group: CollectionGroupId,
+    authority: NodeIdentity,
+    collections: BTreeSet<CollectionId>,
+}
+
+impl CollectionGroupPlacementAuthority {
+    pub fn new(
+        collection_group: CollectionGroupId,
+        authority: NodeIdentity,
+        collections: impl IntoIterator<Item = CollectionId>,
+    ) -> Result<Self, PlacementAuthorityError> {
+        let collections: BTreeSet<_> = collections.into_iter().collect();
+        if collections.is_empty() {
+            return Err(PlacementAuthorityError::EmptyCollectionSet {
+                collection_group,
+                authority,
+            });
+        }
+        Ok(Self {
+            collection_group,
+            authority,
+            collections,
+        })
+    }
+
+    pub fn collection_group(&self) -> &CollectionGroupId {
+        &self.collection_group
+    }
+
+    pub fn authority(&self) -> &NodeIdentity {
+        &self.authority
+    }
+
+    pub fn covers(&self, collection: &CollectionId) -> bool {
+        self.collections.contains(collection)
+    }
+}
+
+/// Pure in-memory authority index used by placement planning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacementAuthorityCatalog {
+    by_collection: BTreeMap<CollectionId, CollectionGroupPlacementAuthority>,
+}
+
+impl PlacementAuthorityCatalog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &mut self,
+        authority: CollectionGroupPlacementAuthority,
+    ) -> Result<(), PlacementAuthorityError> {
+        for collection in &authority.collections {
+            if let Some(existing) = self.by_collection.get(collection) {
+                return Err(PlacementAuthorityError::OverlappingCollection {
+                    collection: collection.clone(),
+                    existing_group: existing.collection_group.clone(),
+                    new_group: authority.collection_group.clone(),
+                });
+            }
+        }
+        for collection in &authority.collections {
+            self.by_collection
+                .insert(collection.clone(), authority.clone());
+        }
+        Ok(())
+    }
+
+    pub fn authority_for(
+        &self,
+        collection: &CollectionId,
+    ) -> Option<&CollectionGroupPlacementAuthority> {
+        self.by_collection.get(collection)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementAuthorityError {
+    EmptyCollectionGroup,
+    EmptyCollectionSet {
+        collection_group: CollectionGroupId,
+        authority: NodeIdentity,
+    },
+    OverlappingCollection {
+        collection: CollectionId,
+        existing_group: CollectionGroupId,
+        new_group: CollectionGroupId,
+    },
+    MissingCollectionAuthority {
+        collection: CollectionId,
+    },
+}
+
+impl std::fmt::Display for PlacementAuthorityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyCollectionGroup => write!(f, "collection group id must not be empty"),
+            Self::EmptyCollectionSet {
+                collection_group,
+                authority,
+            } => write!(
+                f,
+                "placement authority {authority} for collection group {collection_group} has no collections"
+            ),
+            Self::OverlappingCollection {
+                collection,
+                existing_group,
+                new_group,
+            } => write!(
+                f,
+                "collection {collection} is already assigned to collection group {existing_group}, cannot also assign it to {new_group}"
+            ),
+            Self::MissingCollectionAuthority { collection } => {
+                write!(f, "no placement authority for collection {collection}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlacementAuthorityError {}
 
 /// A member's advertised placement capacity: how much usable disk it offers and
 /// the operator's weight multiplier on top of it.
@@ -235,6 +382,18 @@ pub struct RebalancePlan {
     pub hotspots: Vec<HotspotRange>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityScopedPlannedMove {
+    pub movement: PlannedMove,
+    pub placement_authority: CollectionGroupPlacementAuthority,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthorityScopedRebalancePlan {
+    pub moves: Vec<AuthorityScopedPlannedMove>,
+    pub hotspots: Vec<HotspotRange>,
+}
+
 impl RebalancePlan {
     /// Nothing to schedule *and* nothing hot — a fully balanced, evenly-loaded
     /// cluster. Distinct from [`no_moves`](Self::no_moves): a balanced cluster can
@@ -339,6 +498,33 @@ impl WeightedPlacementPlanner {
         let (hotspots, hotspot_moves) = state.plan_hotspot_moves(&self.policy);
         moves.extend(hotspot_moves);
         RebalancePlan { moves, hotspots }
+    }
+
+    pub fn plan_rebalance_scoped(
+        &self,
+        membership: &MembershipCatalog,
+        ownership: &ShardOwnershipCatalog,
+        signals: &impl PlacementSignals,
+        authorities: &PlacementAuthorityCatalog,
+    ) -> Result<AuthorityScopedRebalancePlan, PlacementAuthorityError> {
+        let plan = self.plan_rebalance(membership, ownership, signals);
+        let mut moves = Vec::with_capacity(plan.moves.len());
+        for movement in plan.moves {
+            let placement_authority = authorities
+                .authority_for(&movement.collection)
+                .ok_or_else(|| PlacementAuthorityError::MissingCollectionAuthority {
+                    collection: movement.collection.clone(),
+                })?
+                .clone();
+            moves.push(AuthorityScopedPlannedMove {
+                movement,
+                placement_authority,
+            });
+        }
+        Ok(AuthorityScopedRebalancePlan {
+            moves,
+            hotspots: plan.hotspots,
+        })
     }
 }
 
@@ -825,6 +1011,40 @@ mod tests {
         let targets: std::collections::BTreeSet<_> =
             plan.capacity_moves().map(|m| m.to.clone()).collect();
         assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn scoped_plan_identifies_the_collection_group_placement_authority() {
+        let planner = WeightedPlacementPlanner::default();
+        let members = membership(&["CN=node-a", "CN=node-b"]);
+        let (catalog, _orders) = catalog(&["CN=node-a", "CN=node-a", "CN=node-a"]);
+        let signals = FakeSignals::uniform(1_000, 100);
+        let mut authorities = PlacementAuthorityCatalog::new();
+        let group = CollectionGroupId::new("commerce").unwrap();
+        let authority = CollectionGroupPlacementAuthority::new(
+            group.clone(),
+            ident("CN=pa-commerce"),
+            [collection("orders"), collection("payments")],
+        )
+        .unwrap();
+        authorities.register(authority).unwrap();
+
+        let plan = planner
+            .plan_rebalance_scoped(&members, &catalog, &signals, &authorities)
+            .unwrap();
+
+        assert!(
+            !plan.moves.is_empty(),
+            "skewed ownership should plan movement"
+        );
+        for planned in &plan.moves {
+            assert_eq!(planned.placement_authority.collection_group(), &group);
+            assert_eq!(
+                planned.placement_authority.authority(),
+                &ident("CN=pa-commerce")
+            );
+            assert_eq!(planned.movement.collection, collection("orders"));
+        }
     }
 
     // --- acceptance scenario: heterogeneous disk weights -----------------
