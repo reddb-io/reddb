@@ -2300,6 +2300,12 @@ pub(super) fn evaluate_scalar_function_with_db(
             &resolved,
         );
     }
+    if func_name.eq_ignore_ascii_case("red.lca") {
+        let resolved: Vec<Value> = (0..args.len())
+            .map(|i| resolve_scalar_arg(args, i, source).unwrap_or(Value::Null))
+            .collect();
+        return super::expr_eval::dispatch_vcs_lca_function_public(db?, &resolved);
+    }
     evaluate_scalar_function_legacy(name, args, source)
 }
 

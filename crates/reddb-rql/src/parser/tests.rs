@@ -628,6 +628,23 @@ fn test_parse_table_function_multiple_args() {
 }
 
 #[test]
+fn test_parse_red_diff_tvf_with_string_commitish_args() {
+    use crate::ast::TableSource;
+    let query = parse("SELECT * FROM red.diff('a', 'b')").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    assert_eq!(tq.table, "red.diff");
+    match tq.source {
+        Some(TableSource::Function { name, args, .. }) => {
+            assert_eq!(name, "red.diff");
+            assert_eq!(args, vec!["a".to_string(), "b".to_string()]);
+        }
+        other => panic!("expected TableSource::Function, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_parse_table_function_rejects_zero_args() {
     let err = parse("SELECT * FROM components()").unwrap_err();
     assert!(
@@ -2372,6 +2389,23 @@ fn test_parse_show_queues_including_internal_omits_internal_filter() {
         );
     } else {
         panic!("Expected Table for SHOW QUEUES INCLUDING INTERNAL");
+    }
+}
+
+#[test]
+fn test_parse_show_branches_and_tags_desugar_to_vcs_virtual_tables() {
+    let branches = parse("SHOW BRANCHES").unwrap();
+    if let QueryExpr::Table(tq) = branches {
+        assert_eq!(tq.table, "red.branches");
+    } else {
+        panic!("Expected Table for SHOW BRANCHES");
+    }
+
+    let tags = parse("SHOW TAGS").unwrap();
+    if let QueryExpr::Table(tq) = tags {
+        assert_eq!(tq.table, "red.tags");
+    } else {
+        panic!("Expected Table for SHOW TAGS");
     }
 }
 

@@ -156,11 +156,11 @@ impl<'a> Parser<'a> {
             // the centrality TVFs (issue #797) can name them, mapping the token
             // back to its lowercase identifier spelling.
             let ident = match self.advance()? {
-                Token::Ident(arg) => arg,
+                Token::Ident(arg) | Token::String(arg) => arg,
                 Token::MaxIterations => "max_iterations".to_string(),
                 other => {
                     return Err(ParseError::expected(
-                        vec!["table function argument identifier"],
+                        vec!["table function argument identifier or string literal"],
                         &other,
                         self.position(),
                     ));
@@ -415,33 +415,27 @@ impl<'a> Parser<'a> {
                 name
             } else {
                 let ident = self.expect_ident()?;
+                let mut name = ident;
+                while matches!(self.peek(), Token::Dot) {
+                    self.advance()?; // consume '.'
+                    let segment = self.parse_table_name_segment()?;
+                    name.push('.');
+                    name.push_str(&segment);
+                }
                 // Table-valued function call: `ident(arg, ...)` (issue #795).
                 if matches!(self.peek(), Token::LParen) {
                     self.advance()?; // consume '('
                     let (args, named_args, subquery_args) =
-                        self.parse_table_function_args(&ident)?;
+                        self.parse_table_function_args(&name)?;
                     self.expect(Token::RParen)?;
                     table_source = Some(self.build_table_function_source(
-                        ident.clone(),
+                        name.clone(),
                         args,
                         named_args,
                         subquery_args,
                     )?);
-                    ident
+                    name
                 } else {
-                    // Dotted table name, e.g. the `<graph>.<output>` analytics
-                    // virtual view `g.communities` (issue #800) or a schema-
-                    // qualified virtual table such as `red.collections`. The
-                    // dotted form is kept verbatim in `table`; the runtime
-                    // resolves a real collection of that exact name first, then
-                    // falls back to analytics-view resolution.
-                    let mut name = ident;
-                    while matches!(self.peek(), Token::Dot) {
-                        self.advance()?; // consume '.'
-                        let segment = self.parse_table_name_segment()?;
-                        name.push('.');
-                        name.push_str(&segment);
-                    }
                     name
                 }
             }
