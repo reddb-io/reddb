@@ -56,7 +56,8 @@ pub use move_range::{
     MoveRange, MoveRecovery, RangeSplit, SplitError, SplitPolicy, SplitSide,
 };
 pub use ownership::{
-    CatalogError, CatalogVersion, CollectionId, CollectionIdError, OwnershipEpoch,
+    CatalogError, CatalogVersion, CollectionGroupId, CollectionGroupIdError, CollectionId,
+    CollectionIdError, OwnershipEpoch, PlacementAuthorityId, PlacementAuthorityIdError,
     PlacementMetadata, RangeBound, RangeBounds, RangeBoundsError, RangeId, RangeOwnership,
     RangeRole, RangeWriteReject, ShardKeyMode, ShardOwnershipCatalog, UpdateOutcome,
 };
@@ -90,5 +91,6 @@ pub use supervisor::{
     HealthPolicy, HealthScore, MemberSignals, PlannedPromotion,
 };
 pub use topology::{
-    ClientTopology, HintOutcome, RefreshOutcome, TopologyRange, TopologySnapshot, TopologyUpdate,
+    ClientTopology, HintOutcome, RefreshOutcome, TopologyAuthority, TopologyRange,
+    TopologySnapshot, TopologyUpdate,
 };
