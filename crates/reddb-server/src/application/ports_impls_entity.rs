@@ -2146,6 +2146,13 @@ impl RedDBRuntime {
             .collection_contract(&collection)
             .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
             .unwrap_or(false);
+        let kv_key = if row.get_field("value").is_some() || row.columns.len() >= 2 {
+            row.get_field("key")
+                .cloned()
+                .or_else(|| row.columns.first().cloned())
+        } else {
+            None
+        };
         if is_document_collection {
             // #1366: when a SET assigns to `body`, treat it as a FULL REPLACE of
             // the stored document — drop other column assignments, the new body
@@ -2211,6 +2218,9 @@ impl RedDBRuntime {
             let mut all_assignments: Vec<(String, Value)> = static_field_assignments.to_vec();
             all_assignments.extend(dynamic_field_assignments);
             apply_row_field_assignments_raw(row, all_assignments);
+            if let Some(key) = kv_key {
+                set_row_field(row, "key", key);
+            }
         }
 
         for (key, value) in static_metadata_assignments

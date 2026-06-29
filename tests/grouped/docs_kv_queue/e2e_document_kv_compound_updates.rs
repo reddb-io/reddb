@@ -1,3 +1,4 @@
+use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
@@ -36,10 +37,207 @@ fn text_field(record: &UnifiedRecord, field: &str) -> String {
     }
 }
 
+fn returned_texts(result: &reddb::runtime::RuntimeQueryResult, field: &str) -> Vec<String> {
+    result
+        .result
+        .records
+        .iter()
+        .map(|record| text_field(record, field))
+        .collect()
+}
+
 fn err_string(rt: &RedDBRuntime, sql: &str) -> String {
     rt.execute_query(sql)
         .expect_err("query should fail")
         .to_string()
+}
+
+#[test]
+fn document_claim_updates_ordered_subset_with_returning() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT doc_claim_tasks");
+    exec(
+        &rt,
+        r#"INSERT INTO doc_claim_tasks DOCUMENT (body) VALUES ('{"name":"slow","priority":30,"status":"ready"}')"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO doc_claim_tasks DOCUMENT (body) VALUES ('{"name":"fast","priority":10,"status":"ready"}')"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO doc_claim_tasks DOCUMENT (body) VALUES ('{"name":"middle","priority":20,"status":"ready"}')"#,
+    );
+
+    let claimed = exec(
+        &rt,
+        "UPDATE doc_claim_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 2 ORDER BY priority ASC RETURNING name, status",
+    );
+
+    assert_eq!(claimed.affected_rows, 2);
+    assert_eq!(returned_texts(&claimed, "name"), vec!["fast", "middle"]);
+    assert_eq!(
+        returned_texts(&claimed, "status"),
+        vec!["claimed", "claimed"]
+    );
+    let remaining = exec(
+        &rt,
+        "SELECT name FROM doc_claim_tasks WHERE status = 'ready' ORDER BY priority ASC",
+    );
+    assert_eq!(returned_texts(&remaining, "name"), vec!["slow"]);
+}
+
+#[test]
+fn kv_claim_uses_key_identity_for_ordered_subset_with_returning() {
+    let rt = runtime();
+    exec(&rt, "CREATE KV kv_claim_tasks");
+    exec(
+        &rt,
+        "INSERT INTO kv_claim_tasks KV (key, value) VALUES ('slow', 30)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO kv_claim_tasks KV (key, value) VALUES ('fast', 10)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO kv_claim_tasks KV (key, value) VALUES ('middle', 20)",
+    );
+    let inserted = exec(&rt, "SELECT key FROM kv_claim_tasks ORDER BY value ASC");
+    assert_eq!(
+        returned_texts(&inserted, "key"),
+        vec!["fast", "middle", "slow"]
+    );
+
+    let claimed = exec(
+        &rt,
+        "UPDATE kv_claim_tasks KV SET value += 100 WHERE value >= 10 \
+         CLAIM LIMIT 2 ORDER BY value ASC RETURNING value",
+    );
+
+    assert_eq!(claimed.affected_rows, 2);
+    let values = claimed
+        .result
+        .records
+        .iter()
+        .map(|record| int_field(record, "value"))
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![110, 120]);
+    let updated = exec(
+        &rt,
+        "SELECT key FROM kv_claim_tasks WHERE value >= 100 ORDER BY value ASC",
+    );
+    let mut updated_keys = returned_texts(&updated, "key");
+    updated_keys.sort();
+    assert_eq!(updated_keys, vec!["fast", "middle"]);
+    let remaining = exec(
+        &rt,
+        "SELECT key FROM kv_claim_tasks WHERE value < 100 ORDER BY value ASC",
+    );
+    assert_eq!(returned_texts(&remaining, "key"), vec!["slow"]);
+}
+
+#[test]
+fn document_claim_locks_skip_and_release_on_rollback() {
+    let rt = runtime();
+    set_current_connection_id(145401);
+    exec(&rt, "CREATE DOCUMENT doc_claim_lock_tasks");
+    exec(
+        &rt,
+        r#"INSERT INTO doc_claim_lock_tasks DOCUMENT (body) VALUES ('{"name":"a","priority":10,"status":"ready"}')"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO doc_claim_lock_tasks DOCUMENT (body) VALUES ('{"name":"b","priority":20,"status":"ready"}')"#,
+    );
+
+    exec(&rt, "BEGIN");
+    let first = exec(
+        &rt,
+        "UPDATE doc_claim_lock_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY priority ASC RETURNING name",
+    );
+    assert_eq!(returned_texts(&first, "name"), vec!["a"]);
+
+    set_current_connection_id(145402);
+    let second = exec(
+        &rt,
+        "UPDATE doc_claim_lock_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY priority ASC RETURNING name",
+    );
+    assert_eq!(second.affected_rows, 1);
+    assert_eq!(returned_texts(&second, "name"), vec!["b"]);
+
+    set_current_connection_id(145401);
+    exec(&rt, "ROLLBACK");
+
+    set_current_connection_id(145402);
+    let after_rollback = exec(
+        &rt,
+        "UPDATE doc_claim_lock_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+         CLAIM LIMIT 1 ORDER BY priority ASC RETURNING name",
+    );
+    assert_eq!(after_rollback.affected_rows, 1);
+    assert_eq!(returned_texts(&after_rollback, "name"), vec!["a"]);
+    clear_current_connection_id();
+}
+
+#[test]
+fn kv_claim_locks_skip_and_release_on_rollback_by_key() {
+    let rt = runtime();
+    set_current_connection_id(145403);
+    exec(&rt, "CREATE KV kv_claim_lock_tasks");
+    exec(
+        &rt,
+        "INSERT INTO kv_claim_lock_tasks KV (key, value) VALUES ('a', 10)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO kv_claim_lock_tasks KV (key, value) VALUES ('b', 20)",
+    );
+
+    exec(&rt, "BEGIN");
+    let first = exec(
+        &rt,
+        "UPDATE kv_claim_lock_tasks KV SET value += 100 WHERE value >= 10 \
+         CLAIM LIMIT 1 ORDER BY value ASC RETURNING value",
+    );
+    assert_eq!(int_field(only_record(&first), "value"), 110);
+
+    set_current_connection_id(145404);
+    let second = exec(
+        &rt,
+        "UPDATE kv_claim_lock_tasks KV SET value += 100 WHERE value >= 10 \
+         CLAIM LIMIT 1 ORDER BY value ASC RETURNING value",
+    );
+    assert_eq!(second.affected_rows, 1);
+    assert_eq!(int_field(only_record(&second), "value"), 120);
+    let visible_claimed = exec(
+        &rt,
+        "SELECT key FROM kv_claim_lock_tasks WHERE value >= 100 ORDER BY value ASC",
+    );
+    assert_eq!(returned_texts(&visible_claimed, "key"), vec!["b"]);
+
+    set_current_connection_id(145403);
+    exec(&rt, "ROLLBACK");
+
+    set_current_connection_id(145404);
+    let after_rollback = exec(
+        &rt,
+        "UPDATE kv_claim_lock_tasks KV SET value += 100 WHERE value >= 10 \
+         CLAIM LIMIT 1 ORDER BY value ASC RETURNING value",
+    );
+    assert_eq!(after_rollback.affected_rows, 1);
+    assert_eq!(int_field(only_record(&after_rollback), "value"), 110);
+    let claimed_after_rollback = exec(
+        &rt,
+        "SELECT key FROM kv_claim_lock_tasks WHERE value >= 100 ORDER BY value ASC",
+    );
+    let mut claimed_after_rollback_keys = returned_texts(&claimed_after_rollback, "key");
+    claimed_after_rollback_keys.sort();
+    assert_eq!(claimed_after_rollback_keys, vec!["a", "b"]);
+    clear_current_connection_id();
 }
 
 #[test]
