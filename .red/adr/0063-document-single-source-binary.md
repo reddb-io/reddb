@@ -2,7 +2,8 @@
 
 Status: accepted
 
-Date: 2026-06-25
+Date: 2026-06-28
+Implemented: 2026-06-28
 
 ## Context
 

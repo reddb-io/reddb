@@ -3495,7 +3495,22 @@ fn update_order_value(entity: &UnifiedEntity, field: &FieldRef) -> Option<Value>
         return Some(Value::UnsignedInteger(entity.logical_id().raw()));
     }
     match &entity.data {
-        EntityData::Row(row) => row.get_field(column).cloned(),
+        // After the single-source binary-body cutover (ADR 0063) a DOCUMENT's
+        // top-level fields live only inside the binary `body` container, not as
+        // promoted row fields, so a direct `get_field` misses them and the
+        // claim/UPDATE `ORDER BY <body-field>` would silently fall back to
+        // insertion order. Mirror the filter read-seam: when the field isn't a
+        // direct row field, offset-read it from the binary body.
+        EntityData::Row(row) => {
+            row.get_field(column)
+                .cloned()
+                .or_else(|| match row.get_field("body") {
+                    Some(Value::Json(bytes)) => {
+                        crate::document_body::read_body_field(bytes, column)
+                    }
+                    _ => None,
+                })
+        }
         EntityData::Node(_) | EntityData::Edge(_) => runtime_any_record_from_entity_ref(entity)
             .and_then(|record| record.get(column).cloned()),
         _ => None,
@@ -3824,8 +3839,14 @@ fn find_document_body_json(
 ) -> RedDBResult<crate::json::Value> {
     let val = find_column_value(columns, values, "body")?;
     match val {
-        Value::Json(bytes) | Value::Blob(bytes) => crate::json::from_slice(&bytes)
-            .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        Value::Json(bytes) | Value::Blob(bytes) => {
+            if let Some(body) = crate::document_body::decode_container_to_json(&bytes) {
+                Ok(body)
+            } else {
+                crate::json::from_slice(&bytes)
+                    .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}")))
+            }
+        }
         Value::Text(text) => crate::json::from_str(text.as_ref())
             .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
         Value::Integer(value) => crate::json::from_str(&value.to_string())

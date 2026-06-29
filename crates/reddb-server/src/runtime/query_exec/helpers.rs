@@ -347,6 +347,11 @@ pub(crate) fn resolve_entity_field<'a>(
 
     // User fields — row data (named HashMap or columnar schema)
     if let Some(row) = entity.data.as_row() {
+        if let Some(Value::Json(bytes)) = row.get_field("body") {
+            if let Some(value) = crate::document_body::read_body_field(bytes, column) {
+                return Some(Cow::Owned(value));
+            }
+        }
         if let Some(value) = row.get_field(column) {
             return Some(Cow::Borrowed(value));
         }

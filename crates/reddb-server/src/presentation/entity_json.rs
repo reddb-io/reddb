@@ -259,12 +259,7 @@ fn append_compact_entity_fields(object: &mut Map<String, JsonValue>, data: &Enti
             if let Some(named) = &row.named {
                 object.insert(
                     "row".to_string(),
-                    JsonValue::Object(
-                        named
-                            .iter()
-                            .map(|(key, value)| (key.clone(), storage_value_to_json(value)))
-                            .collect(),
-                    ),
+                    JsonValue::Object(named_fields_json(named)),
                 );
             }
         }
@@ -450,12 +445,7 @@ fn entity_data_json(data: &EntityData) -> JsonValue {
             object.insert(
                 "named".to_string(),
                 match &row.named {
-                    Some(named) => JsonValue::Object(
-                        named
-                            .iter()
-                            .map(|(key, value)| (key.clone(), storage_value_to_json(value)))
-                            .collect(),
-                    ),
+                    Some(named) => JsonValue::Object(named_fields_json(named)),
                     None => JsonValue::Null,
                 },
             );
@@ -574,7 +564,24 @@ fn entity_data_json(data: &EntityData) -> JsonValue {
             object.insert("acked".to_string(), JsonValue::Bool(msg.acked));
         }
     }
+
     JsonValue::Object(object)
+}
+
+fn named_fields_json(named: &std::collections::HashMap<String, Value>) -> Map<String, JsonValue> {
+    let mut out: Map<String, JsonValue> = named
+        .iter()
+        .map(|(key, value)| (key.clone(), storage_value_to_json(value)))
+        .collect();
+    if let Some(Value::Json(bytes)) = named.get("body") {
+        if let Some(fields) = crate::document_body::body_fields(bytes) {
+            for (key, value) in fields {
+                out.entry(key)
+                    .or_insert_with(|| storage_value_to_json(&value));
+            }
+        }
+    }
+    out
 }
 
 fn cross_ref_json(cross_ref: &CrossRef) -> JsonValue {

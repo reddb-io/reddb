@@ -1891,16 +1891,18 @@ impl IndexStore {
 }
 
 fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<Cow<'a, Value>> {
+    if !column.contains('.') {
+        // Single-source document: an index on a bare document field (`score`)
+        // is backed by the body.
+        // Offset-read it from the binary `body` container (inert otherwise).
+        if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
+            return crate::document_body::read_body_field(bytes, column).map(Cow::Owned);
+        }
+    }
     if let Some((_, value)) = fields.iter().find(|(field, _)| field == column) {
         return Some(Cow::Borrowed(value));
     }
     if !column.contains('.') {
-        // Single-source document: an index on a bare promoted field (`score`)
-        // is backed by the body, since the column is no longer materialised.
-        // Offset-read it from the binary `body` container (inert otherwise).
-        if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
-            return crate::document_body::read_promoted_field(bytes, column).map(Cow::Owned);
-        }
         return None;
     }
 
