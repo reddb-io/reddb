@@ -3786,6 +3786,14 @@ impl<'a> Parser<'a> {
                         add_table_filter(&mut query, hide_internal);
                     }
                     Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("BRANCHES")? {
+                    let mut query = TableQuery::new("red.branches");
+                    self.parse_table_clauses(&mut query)?;
+                    Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("TAGS")? {
+                    let mut query = TableQuery::new("red.tags");
+                    self.parse_table_clauses(&mut query)?;
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume(&Token::Vectors)? || self.consume_ident_ci("VECTORS")? {
                     Ok(SqlCommand::Select(parse_show_collections_by_model(
                         self, "vector",
