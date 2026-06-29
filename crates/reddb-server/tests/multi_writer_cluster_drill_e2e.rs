@@ -536,15 +536,17 @@ fn stale_topology_targeting_old_owner_cannot_create_split_brain_writes() {
         term,
         500,
     ) {
-        Err(DurableWriteReject::NotOwner {
-            owner,
-            epoch,
-            version,
+        Err(DurableWriteReject::StaleOwnership {
+            attempted_owner,
+            current_owner,
+            attempted_epoch,
+            current_epoch,
             ..
         }) => {
-            assert_eq!(owner, ident(NODE_B));
-            assert_eq!(epoch, new_epoch);
-            assert_eq!(version, after.version());
+            assert_eq!(attempted_owner, stale_owner);
+            assert_eq!(current_owner, ident(NODE_B));
+            assert_eq!(attempted_epoch, old_epoch);
+            assert_eq!(current_epoch, new_epoch);
         }
         other => panic!("expected stale owner durable-write rejection, got {other:?}"),
     }
