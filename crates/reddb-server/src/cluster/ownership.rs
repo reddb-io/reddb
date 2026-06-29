@@ -386,6 +386,54 @@ pub struct RangeOwnership {
     placement: PlacementMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotMirrorCandidate {
+    node: NodeIdentity,
+    durable_lsn: u64,
+}
+
+impl HotMirrorCandidate {
+    pub fn new(node: NodeIdentity, durable_lsn: u64) -> Self {
+        Self { node, durable_lsn }
+    }
+
+    pub fn node(&self) -> &NodeIdentity {
+        &self.node
+    }
+
+    pub fn durable_lsn(&self) -> u64 {
+        self.durable_lsn
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotMirrorPromotionRefusal {
+    NotReplica {
+        candidate: NodeIdentity,
+        role: RangeRole,
+    },
+    WatermarkNotCovered {
+        candidate_lsn: u64,
+        watermark: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotMirrorPromotion {
+    previous: RangeOwnership,
+    promoted: RangeOwnership,
+}
+
+impl HotMirrorPromotion {
+    pub fn previous(&self) -> &RangeOwnership {
+        &self.previous
+    }
+
+    pub fn promoted(&self) -> &RangeOwnership {
+        &self.promoted
+    }
+}
+
 impl RangeOwnership {
     /// The initial ownership state for a freshly created range: version and
     /// epoch both at their [`initial`](CatalogVersion::initial) values.
@@ -468,6 +516,43 @@ impl RangeOwnership {
             version: self.version.next(),
             ..self.clone()
         }
+    }
+
+    /// Promote a hot mirror only if it is a current replica and its durable
+    /// frontier covers the range commit watermark. The accepted path delegates
+    /// to [`transfer_to`](Self::transfer_to), so publishing the promotion bumps
+    /// the ownership epoch before the new owner can pass the write gate.
+    pub fn promote_hot_mirror(
+        &self,
+        candidate: &HotMirrorCandidate,
+        commit_watermark: u64,
+    ) -> Result<HotMirrorPromotion, HotMirrorPromotionRefusal> {
+        let role = self.role_of(candidate.node());
+        if role != RangeRole::Replica {
+            return Err(HotMirrorPromotionRefusal::NotReplica {
+                candidate: candidate.node().clone(),
+                role,
+            });
+        }
+        if candidate.durable_lsn() < commit_watermark {
+            return Err(HotMirrorPromotionRefusal::WatermarkNotCovered {
+                candidate_lsn: candidate.durable_lsn(),
+                watermark: commit_watermark,
+            });
+        }
+
+        let new_replicas = std::iter::once(self.owner().clone())
+            .chain(
+                self.replicas()
+                    .iter()
+                    .filter(|replica| *replica != candidate.node())
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+        Ok(HotMirrorPromotion {
+            previous: self.clone(),
+            promoted: self.transfer_to(candidate.node().clone(), new_replicas),
+        })
     }
 
     /// A transition that changes only the replica set. Advances the version but
@@ -992,6 +1077,94 @@ mod tests {
             _ => RangeBound::Max,
         };
         RangeBounds::new(lower, upper).unwrap()
+    }
+
+    #[test]
+    fn hot_mirror_behind_commit_watermark_cannot_be_promoted() {
+        let orders = collection("orders");
+        let current = hash_range(&orders, 1, RangeBounds::full(), "CN=owner-a");
+        let candidate = HotMirrorCandidate::new(ident("CN=replica-1"), 99);
+
+        assert_eq!(
+            current.promote_hot_mirror(&candidate, 100),
+            Err(HotMirrorPromotionRefusal::WatermarkNotCovered {
+                candidate_lsn: 99,
+                watermark: 100,
+            }),
+        );
+    }
+
+    #[test]
+    fn hot_mirror_covering_watermark_can_be_selected_for_promotion() {
+        let orders = collection("orders");
+        let current = hash_range(&orders, 1, RangeBounds::full(), "CN=owner-a");
+        let candidate = HotMirrorCandidate::new(ident("CN=replica-1"), 100);
+
+        let promotion = current.promote_hot_mirror(&candidate, 100).unwrap();
+
+        assert_eq!(promotion.previous(), &current);
+        assert_eq!(promotion.promoted().owner(), &ident("CN=replica-1"));
+        assert_eq!(promotion.promoted().epoch(), current.epoch().next());
+        assert_eq!(
+            promotion.promoted().role_of(&ident("CN=owner-a")),
+            RangeRole::Replica,
+        );
+    }
+
+    #[test]
+    fn hot_mirror_promotion_publishes_epoch_before_durable_writes() {
+        let orders = collection("orders");
+        let key = b"order-7";
+        let current = hash_range(&orders, 1, single_hash_slot_bounds(key), "CN=owner-a");
+        let old_epoch = current.epoch();
+        let promotion = current
+            .promote_hot_mirror(&HotMirrorCandidate::new(ident("CN=replica-1"), 120), 100)
+            .unwrap();
+        let new_epoch = promotion.promoted().epoch();
+        let mut catalog = ShardOwnershipCatalog::new();
+        catalog.apply_update(current).unwrap();
+        catalog.apply_update(promotion.promoted().clone()).unwrap();
+
+        assert_eq!(
+            catalog
+                .admit_public_write(&ident("CN=replica-1"), &orders, key, old_epoch)
+                .unwrap_err(),
+            RangeWriteReject::StaleEpoch {
+                collection: orders.clone(),
+                range_id: RangeId::new(1),
+                expected: old_epoch,
+                current: new_epoch,
+            },
+        );
+        assert!(catalog
+            .admit_public_write(&ident("CN=replica-1"), &orders, key, new_epoch)
+            .is_ok());
+    }
+
+    #[test]
+    fn hot_mirror_promotion_fences_old_owner_by_epoch() {
+        let orders = collection("orders");
+        let key = b"order-7";
+        let current = hash_range(&orders, 1, single_hash_slot_bounds(key), "CN=owner-a");
+        let old_epoch = current.epoch();
+        let promotion = current
+            .promote_hot_mirror(&HotMirrorCandidate::new(ident("CN=replica-1"), 120), 100)
+            .unwrap();
+        let mut catalog = ShardOwnershipCatalog::new();
+        catalog.apply_update(current).unwrap();
+        catalog.apply_update(promotion.promoted().clone()).unwrap();
+
+        assert_eq!(
+            catalog
+                .admit_public_write(&ident("CN=owner-a"), &orders, key, old_epoch)
+                .unwrap_err(),
+            RangeWriteReject::NotOwner {
+                collection: orders,
+                range_id: RangeId::new(1),
+                role: RangeRole::Replica,
+                owner: ident("CN=replica-1"),
+            },
+        );
     }
 
     #[test]
