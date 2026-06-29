@@ -104,10 +104,36 @@ mod tests {
     use super::*;
     use crate::storage::engine::PagerConfig;
 
+    struct TempPagerPath(std::path::PathBuf);
+
+    impl std::ops::Deref for TempPagerPath {
+        type Target = std::path::PathBuf;
+
+        fn deref(&self) -> &std::path::PathBuf {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TempPagerPath {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempPagerPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            for sidecar in reddb_file::layout::pager_shadow_sidecar_paths(&self.0) {
+                let _ = std::fs::remove_file(sidecar);
+            }
+        }
+    }
+
     #[test]
     fn turbo_extent_reads_across_page_boundaries() {
-        let path =
-            std::env::temp_dir().join(format!("reddb-turbo-extent-{}.db", std::process::id()));
+        let path = TempPagerPath(
+            std::env::temp_dir().join(format!("reddb-turbo-extent-{}.db", std::process::id())),
+        );
         let _ = std::fs::remove_file(&path);
         let pager = Arc::new(Pager::open(&path, PagerConfig::default()).unwrap());
         let mut extent = TurboExtent::new(pager).unwrap();
@@ -115,6 +141,5 @@ mod tests {
         extent.ensure_capacity(PAYLOAD_BYTES_PER_PAGE + 2).unwrap();
         let offset = extent.append(&[1, 2, 3, 4]).unwrap();
         assert_eq!(extent.read(offset, 4).unwrap(), vec![1, 2, 3, 4]);
-        let _ = std::fs::remove_file(path);
     }
 }
