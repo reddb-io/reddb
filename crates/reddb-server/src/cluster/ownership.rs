@@ -120,6 +120,10 @@ impl CollectionGroupId {
         Ok(Self(value.to_string()))
     }
 
+    pub fn for_collection(collection: &CollectionId) -> Self {
+        Self(collection.as_str().to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -271,6 +275,45 @@ impl PlacementAuthorityCatalog {
         self.assignments
             .values()
             .find(|assignment| assignment.collections.contains(collection))
+    }
+}
+
+/// Stable identity of the Placement Authority that publishes a collection group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PlacementAuthorityId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementAuthorityIdError;
+
+impl std::fmt::Display for PlacementAuthorityIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "placement authority id is empty")
+    }
+}
+
+impl std::error::Error for PlacementAuthorityIdError {}
+
+impl PlacementAuthorityId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, PlacementAuthorityIdError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(PlacementAuthorityIdError);
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn default_global() -> Self {
+        Self("global-placement-authority".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PlacementAuthorityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -560,6 +603,8 @@ impl PlacementMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeOwnership {
     collection: CollectionId,
+    collection_group: CollectionGroupId,
+    placement_authority: PlacementAuthorityId,
     range_id: RangeId,
     shard_key_mode: ShardKeyMode,
     bounds: RangeBounds,
@@ -632,8 +677,11 @@ impl RangeOwnership {
         replicas: impl IntoIterator<Item = NodeIdentity>,
         placement: PlacementMetadata,
     ) -> Self {
+        let collection_group = CollectionGroupId::for_collection(&collection);
         Self {
             collection,
+            collection_group,
+            placement_authority: PlacementAuthorityId::default_global(),
             range_id,
             shard_key_mode,
             bounds,
@@ -648,6 +696,14 @@ impl RangeOwnership {
 
     pub fn collection(&self) -> &CollectionId {
         &self.collection
+    }
+
+    pub fn collection_group(&self) -> &CollectionGroupId {
+        &self.collection_group
+    }
+
+    pub fn placement_authority(&self) -> &PlacementAuthorityId {
+        &self.placement_authority
     }
 
     pub fn range_id(&self) -> RangeId {
@@ -699,6 +755,16 @@ impl RangeOwnership {
     /// The catalog key for this entry: `(collection, range_id)`.
     fn key(&self) -> (CollectionId, RangeId) {
         (self.collection.clone(), self.range_id)
+    }
+
+    pub fn with_collection_group(mut self, collection_group: CollectionGroupId) -> Self {
+        self.collection_group = collection_group;
+        self
+    }
+
+    pub fn with_placement_authority(mut self, placement_authority: PlacementAuthorityId) -> Self {
+        self.placement_authority = placement_authority;
+        self
     }
 
     /// A transition that moves write authority to `new_owner` with `new_replicas`.
