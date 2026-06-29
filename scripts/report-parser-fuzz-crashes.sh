@@ -3,6 +3,8 @@ set -euo pipefail
 
 target="${1:?usage: report-parser-fuzz-crashes.sh <target>}"
 artifact_dir="fuzz/artifacts/${target}"
+fuzz_rss_limit_mb="${FUZZ_RSS_LIMIT_MB:-4096}"
+fuzz_malloc_limit_mb="${FUZZ_MALLOC_LIMIT_MB:-2048}"
 
 if [ ! -d "${artifact_dir}" ] || ! find "${artifact_dir}" -type f | grep -q .; then
   echo "No fuzz artifacts found for ${target}; skipping issue creation."
@@ -27,7 +29,7 @@ trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
   echo
   echo '```bash'
   echo "cargo +nightly install cargo-fuzz --locked"
-  echo "cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<artifact>"
+  echo "cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<artifact> -- -rss_limit_mb=${fuzz_rss_limit_mb} -malloc_limit_mb=${fuzz_malloc_limit_mb}"
   echo '```'
   echo
   echo "## Minimized input"
