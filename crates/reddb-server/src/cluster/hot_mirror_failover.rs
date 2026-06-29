@@ -55,7 +55,7 @@ pub enum WatermarkOutcome {
 
 /// A hot mirror considered by the failover planner.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HotMirrorCandidate {
+pub struct HotMirrorFailoverCandidate {
     pub candidate: NodeIdentity,
     pub watermark_outcome: WatermarkOutcome,
 }
@@ -118,7 +118,7 @@ pub struct HotMirrorFailoverPlan {
     current_replicas: Vec<NodeIdentity>,
     eligible_candidates: Vec<NodeIdentity>,
     eligible_evidence: Vec<CatchUpEvidence>,
-    ineligible_candidates: Vec<HotMirrorCandidate>,
+    ineligible_candidates: Vec<HotMirrorFailoverCandidate>,
 }
 
 impl HotMirrorFailoverPlan {
@@ -130,7 +130,7 @@ impl HotMirrorFailoverPlan {
         &self.eligible_candidates
     }
 
-    pub fn ineligible_candidates(&self) -> &[HotMirrorCandidate] {
+    pub fn ineligible_candidates(&self) -> &[HotMirrorFailoverCandidate] {
         &self.ineligible_candidates
     }
 
@@ -205,7 +205,7 @@ pub fn plan_hot_mirror_failover(
             .iter()
             .find(|evidence| evidence.candidate == *replica)
         else {
-            ineligible_candidates.push(HotMirrorCandidate {
+            ineligible_candidates.push(HotMirrorFailoverCandidate {
                 candidate: replica.clone(),
                 watermark_outcome: WatermarkOutcome::Behind {
                     applied_term: 0,
@@ -219,7 +219,7 @@ pub fn plan_hot_mirror_failover(
             eligible_candidates.push(replica.clone());
             eligible_evidence.push(evidence.clone());
         } else {
-            ineligible_candidates.push(HotMirrorCandidate {
+            ineligible_candidates.push(HotMirrorFailoverCandidate {
                 candidate: replica.clone(),
                 watermark_outcome: WatermarkOutcome::Behind {
                     applied_term: evidence.applied_term,

@@ -46,8 +46,8 @@ pub use drain::{
     ForcedBlock, ForcedPromotion, OwnedHandoff, RemovalRejection, ReplicaEvacuation,
 };
 pub use hot_mirror_failover::{
-    execute_hot_mirror_failover, plan_hot_mirror_failover, HotMirrorCandidate,
-    HotMirrorEpochEvidence, HotMirrorFailoverError, HotMirrorFailoverEvidence,
+    execute_hot_mirror_failover, plan_hot_mirror_failover, HotMirrorEpochEvidence,
+    HotMirrorFailoverCandidate, HotMirrorFailoverError, HotMirrorFailoverEvidence,
     HotMirrorFailoverPlan, HotMirrorInputs, HotMirrorRangeEvidence, WatermarkOutcome,
 };
 pub use identity::{
