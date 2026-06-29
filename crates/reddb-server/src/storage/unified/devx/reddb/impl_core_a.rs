@@ -1281,6 +1281,9 @@ mod ephemeral_cleanup_tests {
         let path = options.data_path.as_ref().expect("in-memory data path");
 
         assert!(should_cleanup_ephemeral_data_path(&options, path));
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 
     #[test]
