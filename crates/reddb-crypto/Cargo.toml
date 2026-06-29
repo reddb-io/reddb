@@ -16,7 +16,7 @@ name = "reddb_crypto"
 path = "src/lib.rs"
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 
 [lints]
 workspace = true

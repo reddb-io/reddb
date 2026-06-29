@@ -34,7 +34,7 @@ reddb-crypto = { workspace = true }
 # `red` binary uses for the `red rpc` subcommand. Single-direction
 # dep — the client crate does not depend on the server.
 reddb-client-connector = { workspace = true }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 blake3 = "1"
 # SIMD/PCLMULQDQ CRC32 (IEEE 802.3 polynomial) for WAL/page record
 # checksums (issue #883 / PRD #882). Runtime CPU feature detection
