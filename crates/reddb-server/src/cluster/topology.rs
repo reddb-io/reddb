@@ -39,11 +39,19 @@ use std::collections::BTreeMap;
 
 use super::identity::NodeIdentity;
 use super::ownership::{
-    CatalogVersion, CollectionId, OwnershipEpoch, RangeBounds, RangeId, RangeOwnership,
-    ReplicaRole, ShardKeyMode, ShardOwnershipCatalog,
+    CatalogVersion, CollectionGroupId, CollectionId, OwnershipEpoch, PlacementAuthorityId,
+    RangeBounds, RangeId, RangeOwnership, ReplicaRole, ShardKeyMode, ShardOwnershipCatalog,
 };
 use super::routing::RoutingHint;
 use super::slot::hash_shard_key_to_range_key;
+
+/// What authority a topology/serving-graph projection carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopologyAuthority {
+    /// Consumable by routers and drivers, but never sufficient to authorize a
+    /// durable write without the owner-side epoch fence.
+    RoutingMetadataOnly,
+}
 
 /// One range's routing metadata as a driver sees it.
 ///
@@ -56,6 +64,8 @@ use super::slot::hash_shard_key_to_range_key;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopologyRange {
     collection: CollectionId,
+    collection_group: CollectionGroupId,
+    placement_authority: PlacementAuthorityId,
     range_id: RangeId,
     shard_key_mode: ShardKeyMode,
     bounds: RangeBounds,
@@ -70,6 +80,8 @@ impl TopologyRange {
     fn from_ownership(range: &RangeOwnership) -> Self {
         Self {
             collection: range.collection().clone(),
+            collection_group: range.collection_group().clone(),
+            placement_authority: range.placement_authority().clone(),
             range_id: range.range_id(),
             shard_key_mode: range.shard_key_mode(),
             bounds: range.bounds().clone(),
@@ -85,6 +97,14 @@ impl TopologyRange {
         &self.collection
     }
 
+    pub fn collection_group(&self) -> &CollectionGroupId {
+        &self.collection_group
+    }
+
+    pub fn placement_authority(&self) -> &PlacementAuthorityId {
+        &self.placement_authority
+    }
+
     pub fn range_id(&self) -> RangeId {
         self.range_id
     }
@@ -98,6 +118,10 @@ impl TopologyRange {
     }
 
     pub fn owner(&self) -> &NodeIdentity {
+        &self.owner
+    }
+
+    pub fn range_owner(&self) -> &NodeIdentity {
         &self.owner
     }
 
@@ -163,6 +187,11 @@ pub struct TopologySnapshot {
 }
 
 impl TopologySnapshot {
+    /// The authority level carried by this serving graph projection.
+    pub fn authority(&self) -> TopologyAuthority {
+        TopologyAuthority::RoutingMetadataOnly
+    }
+
     /// The snapshot generation — the high-water catalog version across its ranges.
     pub fn version(&self) -> CatalogVersion {
         self.version
@@ -576,14 +605,26 @@ mod tests {
     fn snapshot_exposes_explicit_replica_roles() {
         let orders = collection("orders");
         let catalog = catalog_with([full_range(&orders, 1, "CN=node-a", &["CN=node-b"])
+            .with_collection_group(CollectionGroupId::new("commerce").unwrap())
+            .with_placement_authority(PlacementAuthorityId::new("pa-commerce-1").unwrap())
             .with_compressed_archive_replicas([ident("CN=node-c")])]);
 
         let snapshot = catalog.topology_snapshot();
+        assert_eq!(snapshot.authority(), TopologyAuthority::RoutingMetadataOnly);
         let range = snapshot
             .route(&orders, b"any-key")
             .expect("full range covers all keys");
 
         assert_eq!(range.owner(), &ident("CN=node-a"));
+        assert_eq!(range.range_owner(), &ident("CN=node-a"));
+        assert_eq!(
+            range.collection_group(),
+            &CollectionGroupId::new("commerce").unwrap()
+        );
+        assert_eq!(
+            range.placement_authority(),
+            &PlacementAuthorityId::new("pa-commerce-1").unwrap()
+        );
         assert_eq!(range.hot_mirror_replicas(), &[ident("CN=node-b")]);
         assert_eq!(range.compressed_archive_replicas(), &[ident("CN=node-c")]);
         assert_eq!(range.promotion_candidates(), &[ident("CN=node-b")]);
@@ -594,6 +635,42 @@ mod tests {
         assert_eq!(
             range.replica_role_of(&ident("CN=node-c")),
             Some(ReplicaRole::CompressedArchive)
+        );
+    }
+
+    #[test]
+    fn serving_graph_reflects_ownership_transitions_and_replica_roles() {
+        let orders = collection("orders");
+        let range = full_range(&orders, 1, "CN=node-a", &["CN=node-b"])
+            .with_collection_group(CollectionGroupId::new("commerce").unwrap())
+            .with_placement_authority(PlacementAuthorityId::new("pa-commerce-1").unwrap())
+            .with_compressed_archive_replicas([ident("CN=node-c")]);
+        let mut catalog = catalog_with([range]);
+
+        let current = catalog.range(&orders, RangeId::new(1)).unwrap().clone();
+        catalog
+            .apply_update(current.transfer_to(ident("CN=node-b"), [ident("CN=node-a")]))
+            .unwrap();
+        let current = catalog.range(&orders, RangeId::new(1)).unwrap().clone();
+        catalog
+            .apply_update(current.update_replica_roles([ident("CN=node-a")], [ident("CN=node-d")]))
+            .unwrap();
+
+        let projected = catalog
+            .topology_snapshot()
+            .range(&orders, RangeId::new(1))
+            .unwrap()
+            .clone();
+
+        assert_eq!(projected.range_owner(), &ident("CN=node-b"));
+        assert_eq!(projected.hot_mirror_replicas(), &[ident("CN=node-a")]);
+        assert_eq!(
+            projected.compressed_archive_replicas(),
+            &[ident("CN=node-d")]
+        );
+        assert_eq!(
+            projected.placement_authority(),
+            &PlacementAuthorityId::new("pa-commerce-1").unwrap()
         );
     }
 
