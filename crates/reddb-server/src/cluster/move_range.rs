@@ -813,7 +813,6 @@ mod tests {
     use crate::cluster::ownership::{
         PlacementMetadata, RangeBound, RangeBounds, RangeRole, RangeWriteReject, ShardKeyMode,
     };
-    use crate::cluster::{CollectionGroupId, CollectionGroupPlacementAuthority};
     use crate::replication::cdc::ChangeOperation;
 
     fn collection(name: &str) -> CollectionId {
