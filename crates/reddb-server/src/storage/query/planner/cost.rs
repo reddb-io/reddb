@@ -369,6 +369,7 @@ impl CostEstimator {
             | QueryExpr::ExplainMigration(_)
             | QueryExpr::EventsBackfill(_)
             | QueryExpr::EventsBackfillStatus { .. } => PlanCost::new(1.0, 1.0, 0.0),
+            _ => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
 
@@ -463,6 +464,7 @@ impl CostEstimator {
             | QueryExpr::ExplainMigration(_)
             | QueryExpr::EventsBackfill(_)
             | QueryExpr::EventsBackfillStatus { .. } => CardinalityEstimate::new(1.0, 1.0),
+            _ => CardinalityEstimate::new(1.0, 1.0),
         }
     }
 
