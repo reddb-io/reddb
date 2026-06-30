@@ -801,6 +801,19 @@ impl RedDBRuntime {
         Ok(r)
     }
 
+    pub fn vcs_tag_delete(&self, name: &str) -> RedDBResult<()> {
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+        let full = normalize_tag_name(name);
+        let existing = load_ref(store, &full)
+            .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
+        if existing.protected {
+            return Err(RedDBError::ReadOnly(format!("tag `{full}` is protected")));
+        }
+        delete_ref(store, &full)?;
+        Ok(())
+    }
+
     pub fn vcs_list_refs(&self, prefix: Option<&str>) -> RedDBResult<Vec<Ref>> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;

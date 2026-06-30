@@ -4,9 +4,9 @@ use super::error::ParseError;
 use super::Parser;
 use crate::ast::{
     AlterOperation, AlterTableQuery, CreateCollectionQuery, CreateColumnDef, CreateTableQuery,
-    CreateVectorQuery, DropCollectionQuery, DropDocumentQuery, DropGraphQuery, DropKvQuery,
-    DropTableQuery, DropVectorQuery, ExplainAlterQuery, ExplainFormat, PartitionKind,
-    PartitionSpec, QueryExpr, TruncateQuery,
+    CreateVcsRefQuery, CreateVectorQuery, DropCollectionQuery, DropDocumentQuery, DropGraphQuery,
+    DropKvQuery, DropTableQuery, DropVcsRefQuery, DropVectorQuery, ExplainAlterQuery,
+    ExplainFormat, PartitionKind, PartitionSpec, QueryExpr, TruncateQuery, VcsRefKind,
 };
 use crate::lexer::Token;
 use reddb_types::catalog::{CollectionModel, SubscriptionDescriptor, SubscriptionOperation};
@@ -94,6 +94,36 @@ impl<'a> Parser<'a> {
         self.expect(Token::Drop)?;
         self.expect(Token::Table)?;
         self.parse_drop_table_body()
+    }
+
+    pub fn parse_create_vcs_ref_body(&mut self, kind: VcsRefKind) -> Result<QueryExpr, ParseError> {
+        let name = self.expect_string_or_ident()?;
+        let target = match kind {
+            VcsRefKind::Branch => {
+                if self.consume(&Token::From)? {
+                    Some(self.expect_string_or_ident()?)
+                } else {
+                    None
+                }
+            }
+            VcsRefKind::Tag => {
+                if self.consume_ident_ci("AT")? {
+                    Some(self.expect_string_or_ident()?)
+                } else {
+                    None
+                }
+            }
+        };
+        Ok(QueryExpr::CreateVcsRef(CreateVcsRefQuery {
+            kind,
+            name,
+            target,
+        }))
+    }
+
+    pub fn parse_drop_vcs_ref_body(&mut self, kind: VcsRefKind) -> Result<QueryExpr, ParseError> {
+        let name = self.expect_string_or_ident()?;
+        Ok(QueryExpr::DropVcsRef(DropVcsRefQuery { kind, name }))
     }
 
     /// Parse the body of CREATE TABLE after CREATE TABLE has been consumed

@@ -278,6 +278,8 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::DropCollection(_)
         | QueryExpr::Truncate(_)
         | QueryExpr::AlterTable(_)
+        | QueryExpr::CreateVcsRef(_)
+        | QueryExpr::DropVcsRef(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
         | QueryExpr::CreateIndex(_)

@@ -454,6 +454,8 @@ pub trait RuntimeVcsPort {
         input: crate::application::vcs::CreateTagInput,
     ) -> RedDBResult<crate::application::vcs::Ref>;
 
+    fn vcs_tag_delete(&self, name: &str) -> RedDBResult<()>;
+
     fn vcs_list_refs(&self, prefix: Option<&str>)
         -> RedDBResult<Vec<crate::application::vcs::Ref>>;
 

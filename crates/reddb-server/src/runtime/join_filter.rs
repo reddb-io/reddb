@@ -2136,6 +2136,8 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropCollection(_) => "drop_collection",
         QueryExpr::Truncate(_) => "truncate",
         QueryExpr::AlterTable(_) => "alter_table",
+        QueryExpr::CreateVcsRef(_) => "create_vcs_ref",
+        QueryExpr::DropVcsRef(_) => "drop_vcs_ref",
         QueryExpr::GraphCommand(_) => "graph_command",
         QueryExpr::SearchCommand(_) => "search_command",
         QueryExpr::CreateIndex(_) => "create_index",

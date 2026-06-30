@@ -293,7 +293,7 @@ pub(crate) fn handle_tag_delete(runtime: &RedDBRuntime, name: &str) -> HttpRespo
         format!("refs/tags/{name}")
     };
     match runtime.vcs_list_refs(Some(&full)) {
-        Ok(refs) if refs.iter().any(|r| r.name == full) => match runtime.vcs_branch_delete(&full) {
+        Ok(refs) if refs.iter().any(|r| r.name == full) => match runtime.vcs_tag_delete(&full) {
             Ok(()) => json_response(204, JsonValue::Null),
             Err(e) => map_err_response(e),
         },

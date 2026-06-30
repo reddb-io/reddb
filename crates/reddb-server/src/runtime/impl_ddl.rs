@@ -9,6 +9,7 @@ use super::*;
 use crate::catalog::CollectionModel;
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::runtime::ddl::polymorphic_resolver;
+use crate::storage::query::ast::{CreateVcsRefQuery, DropVcsRefQuery, VcsRefKind};
 use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -1282,6 +1283,73 @@ impl RedDBRuntime {
             raw_query.to_string(),
             &message,
             "alter",
+        ))
+    }
+
+    pub fn execute_create_vcs_ref(
+        &self,
+        raw_query: &str,
+        query: &CreateVcsRefQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let connection_id = crate::runtime::impl_core::current_connection_id();
+        match query.kind {
+            VcsRefKind::Branch => {
+                self.vcs_branch_create(crate::application::vcs::CreateBranchInput {
+                    name: query.name.clone(),
+                    from: query.target.clone(),
+                    connection_id,
+                })?;
+            }
+            VcsRefKind::Tag => {
+                let target = match &query.target {
+                    Some(target) => target.clone(),
+                    None => self
+                        .vcs_status(crate::application::vcs::StatusInput { connection_id })?
+                        .head_commit
+                        .filter(|head| !head.is_empty())
+                        .ok_or_else(|| {
+                            RedDBError::InvalidConfig(
+                                "cannot create tag: HEAD has no commits".to_string(),
+                            )
+                        })?,
+                };
+                self.vcs_tag_create(crate::application::vcs::CreateTagInput {
+                    name: query.name.clone(),
+                    target,
+                    annotation: None,
+                })?;
+            }
+        }
+        let kind = match query.kind {
+            VcsRefKind::Branch => "branch",
+            VcsRefKind::Tag => "tag",
+        };
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("{kind} '{}' created", query.name),
+            "create",
+        ))
+    }
+
+    pub fn execute_drop_vcs_ref(
+        &self,
+        raw_query: &str,
+        query: &DropVcsRefQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        match query.kind {
+            VcsRefKind::Branch => self.vcs_branch_delete(&query.name)?,
+            VcsRefKind::Tag => self.vcs_tag_delete(&query.name)?,
+        }
+        let kind = match query.kind {
+            VcsRefKind::Branch => "branch",
+            VcsRefKind::Tag => "tag",
+        };
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("{kind} '{}' dropped", query.name),
+            "drop",
         ))
     }
 

@@ -4,16 +4,16 @@ use crate::ast::{
     CreateForeignTableQuery, CreateIndexQuery, CreateMetricQuery, CreateMigrationQuery,
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
     CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateUserStmt,
-    CreateVectorQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery,
-    DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery, DropPolicyQuery,
-    DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery, DropTableQuery,
-    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, DropViewQuery, EventsBackfillQuery,
-    ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt,
-    GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery, KvCommand, MaintenanceCommand,
-    PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery,
-    RankOfQuery, RankRangeQuery, RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery,
-    SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery,
-    VectorQuery,
+    CreateVcsRefQuery, CreateVectorQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery,
+    DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery,
+    DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery,
+    DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVcsRefQuery, DropVectorQuery,
+    DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef,
+    Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
+    JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand,
+    QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
+    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
+    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VcsRefKind, VectorQuery,
 };
 use crate::lexer::Token;
 use crate::parser::{ParseError, Parser, SafeTokenDisplay};
@@ -74,6 +74,8 @@ pub enum SqlCommand {
     DropCollection(DropCollectionQuery),
     Truncate(TruncateQuery),
     AlterTable(AlterTableQuery),
+    CreateVcsRef(CreateVcsRefQuery),
+    DropVcsRef(DropVcsRefQuery),
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
     CreateTimeSeries(CreateTimeSeriesQuery),
@@ -1324,6 +1326,8 @@ pub enum SqlSchemaCommand {
     DropCollection(DropCollectionQuery),
     Truncate(TruncateQuery),
     AlterTable(AlterTableQuery),
+    CreateVcsRef(CreateVcsRefQuery),
+    DropVcsRef(DropVcsRefQuery),
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
     CreateTimeSeries(CreateTimeSeriesQuery),
@@ -1428,6 +1432,12 @@ impl SqlStatement {
             SqlStatement::Schema(SqlSchemaCommand::Truncate(query)) => SqlCommand::Truncate(query),
             SqlStatement::Schema(SqlSchemaCommand::AlterTable(query)) => {
                 SqlCommand::AlterTable(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateVcsRef(query)) => {
+                SqlCommand::CreateVcsRef(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropVcsRef(query)) => {
+                SqlCommand::DropVcsRef(query)
             }
             SqlStatement::Schema(SqlSchemaCommand::CreateIndex(query)) => {
                 SqlCommand::CreateIndex(query)
@@ -1598,6 +1608,8 @@ impl SqlCommand {
             SqlCommand::DropCollection(query) => QueryExpr::DropCollection(query),
             SqlCommand::Truncate(query) => QueryExpr::Truncate(query),
             SqlCommand::AlterTable(query) => QueryExpr::AlterTable(query),
+            SqlCommand::CreateVcsRef(query) => QueryExpr::CreateVcsRef(query),
+            SqlCommand::DropVcsRef(query) => QueryExpr::DropVcsRef(query),
             SqlCommand::CreateIndex(query) => QueryExpr::CreateIndex(query),
             SqlCommand::DropIndex(query) => QueryExpr::DropIndex(query),
             SqlCommand::CreateTimeSeries(query) => QueryExpr::CreateTimeSeries(query),
@@ -1684,6 +1696,12 @@ impl SqlCommand {
             SqlCommand::Truncate(query) => SqlStatement::Schema(SqlSchemaCommand::Truncate(query)),
             SqlCommand::AlterTable(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::AlterTable(query))
+            }
+            SqlCommand::CreateVcsRef(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateVcsRef(query))
+            }
+            SqlCommand::DropVcsRef(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropVcsRef(query))
             }
             SqlCommand::CreateIndex(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::CreateIndex(query))
@@ -2650,6 +2668,10 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("USER")) {
             let stmt = self.parse_create_user_statement()?;
             Ok(SqlCommand::CreateUser(stmt))
+        } else if self.consume_ident_ci("BRANCH")? {
+            self.parse_create_vcs_ref(VcsRefKind::Branch)
+        } else if self.consume_ident_ci("TAG")? {
+            self.parse_create_vcs_ref(VcsRefKind::Tag)
         } else if self.check(&Token::Index) || self.check(&Token::Unique) {
             match self.parse_create_index_query()? {
                 QueryExpr::CreateIndex(query) => Ok(SqlCommand::CreateIndex(query)),
@@ -3035,6 +3057,8 @@ impl<'a> Parser<'a> {
                     "SCHEMA",
                     "SEQUENCE",
                     "USER",
+                    "BRANCH",
+                    "TAG",
                     "MIGRATION",
                 ],
                 self.peek(),
@@ -3060,6 +3084,48 @@ impl<'a> Parser<'a> {
         let mut query = TableQuery::new(table);
         self.parse_table_clauses(&mut query)?;
         Ok(SqlCommand::Select(query))
+    }
+
+    /// Parse the body of a `CREATE BRANCH` / `CREATE TAG` statement.
+    /// Kept out of `parse_create_command`/`parse_sql_command_inner` and marked
+    /// `#[inline(never)]` so its `QueryExpr`/`SqlCommand` locals do not inflate
+    /// those already-huge match frames, which are paid twice on the nested
+    /// `CREATE MATERIALIZED VIEW ... AS SELECT` parse path (issue #1570).
+    #[inline(never)]
+    fn parse_create_vcs_ref(&mut self, kind: VcsRefKind) -> Result<SqlCommand, ParseError> {
+        match self.parse_create_vcs_ref_body(kind)? {
+            QueryExpr::CreateVcsRef(query) => Ok(SqlCommand::CreateVcsRef(query)),
+            other => {
+                let noun = match kind {
+                    VcsRefKind::Branch => "BRANCH",
+                    VcsRefKind::Tag => "TAG",
+                };
+                Err(ParseError::new(
+                    format!("internal: CREATE {noun} produced unexpected kind {other:?}"),
+                    self.position(),
+                ))
+            }
+        }
+    }
+
+    /// Parse the body of a `DROP BRANCH` / `DROP TAG` statement.
+    /// Kept out of `parse_sql_command_inner` and marked `#[inline(never)]` for
+    /// the same stack-frame reason as [`Self::parse_create_vcs_ref`] (#1570).
+    #[inline(never)]
+    fn parse_drop_vcs_ref(&mut self, kind: VcsRefKind) -> Result<SqlCommand, ParseError> {
+        match self.parse_drop_vcs_ref_body(kind)? {
+            QueryExpr::DropVcsRef(query) => Ok(SqlCommand::DropVcsRef(query)),
+            other => {
+                let noun = match kind {
+                    VcsRefKind::Branch => "BRANCH",
+                    VcsRefKind::Tag => "TAG",
+                };
+                Err(ParseError::new(
+                    format!("internal: DROP {noun} produced unexpected kind {other:?}"),
+                    self.position(),
+                ))
+            }
+        }
     }
 
     fn parse_sql_command_inner(&mut self) -> Result<SqlCommand, ParseError> {
@@ -3207,7 +3273,11 @@ impl<'a> Parser<'a> {
                     ));
                 }
 
-                if self.check(&Token::Index) {
+                if self.consume_ident_ci("BRANCH")? {
+                    self.parse_drop_vcs_ref(VcsRefKind::Branch)
+                } else if self.consume_ident_ci("TAG")? {
+                    self.parse_drop_vcs_ref(VcsRefKind::Tag)
+                } else if self.check(&Token::Index) {
                     match self.parse_drop_index_query()? {
                         QueryExpr::DropIndex(query) => Ok(SqlCommand::DropIndex(query)),
                         other => Err(ParseError::new(
@@ -3425,6 +3495,8 @@ impl<'a> Parser<'a> {
                             "FILTER",
                             "SCHEMA",
                             "SEQUENCE",
+                            "BRANCH",
+                            "TAG",
                         ],
                         self.peek(),
                         pos,
