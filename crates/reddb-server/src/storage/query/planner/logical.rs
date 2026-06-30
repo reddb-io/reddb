@@ -699,5 +699,19 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 children: Vec::new(),
             }
         }
+        _ => {
+            let mut details = BTreeMap::new();
+            details.insert("type".to_string(), "dml_ddl".to_string());
+            CanonicalLogicalNode {
+                operator: "dml_ddl".to_string(),
+                source: None,
+                details,
+                estimated_rows: 0.0,
+                estimated_selectivity: 1.0,
+                estimated_confidence: 1.0,
+                operator_cost: 1.0,
+                children: Vec::new(),
+            }
+        }
     }
 }
