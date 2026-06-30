@@ -507,6 +507,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::ExplainMigration(_)
         | QueryExpr::EventsBackfill(_)
         | QueryExpr::EventsBackfillStatus { .. } => false,
+        _ => false,
     }
 }
 
@@ -885,6 +886,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::ExplainMigration(_) => "explain_migration",
         QueryExpr::EventsBackfill(_) => "events_backfill",
         QueryExpr::EventsBackfillStatus { .. } => "events_backfill_status",
+        _ => "command",
     }
 }
 
