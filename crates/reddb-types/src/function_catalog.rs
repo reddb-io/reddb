@@ -117,6 +117,10 @@ const ARGS_FOUR_FLOATS: &[DataType] = &[
     DataType::Float,
 ];
 const ARGS_TIME_BUCKET: &[DataType] = &[DataType::Text, DataType::Timestamp];
+// H3 hexagonal index scalars (#1575). Cell ids are u64.
+const ARGS_H3_INDEX: &[DataType] = &[DataType::Float, DataType::Float, DataType::Integer];
+const ARGS_H3_CELL: &[DataType] = &[DataType::UnsignedInteger];
+const ARGS_H3_RING: &[DataType] = &[DataType::UnsignedInteger, DataType::Integer];
 const ARGS_VERIFY_PWD: &[DataType] = &[DataType::Password, DataType::Text];
 const ARGS_MONEY: &[DataType] = &[DataType::Money];
 const ARGS_ONE_TEXT: &[DataType] = &[DataType::Text];
@@ -774,6 +778,31 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "VINCENTY",
         ARGS_FOUR_FLOATS,
         DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // H3 hexagonal index scalars (PRD #1574 slice 1, #1575). Pure
+    // wrappers over `crate::geo::h3`. H3_INDEX returns a u64 cell id;
+    // H3_TO_LATLNG returns a [lat, lon] array; H3_RING returns the
+    // kRing as an array of cell ids.
+    entry(
+        "H3_INDEX",
+        ARGS_H3_INDEX,
+        DataType::UnsignedInteger,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "H3_TO_LATLNG",
+        ARGS_H3_CELL,
+        DataType::Array,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "H3_RING",
+        ARGS_H3_RING,
+        DataType::Array,
         FunctionKind::Scalar,
         false,
     ),
