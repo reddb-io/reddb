@@ -585,6 +585,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::AlterTable(_) => "alter_table",
         QueryExpr::CreateVcsRef(_) => "create_vcs_ref",
         QueryExpr::DropVcsRef(_) => "drop_vcs_ref",
+        QueryExpr::VcsCommand(_) => "vcs_command",
         QueryExpr::GraphCommand(_) => "graph_command",
         QueryExpr::SearchCommand(_) => "search_command",
         QueryExpr::Ask(_) => "ask",

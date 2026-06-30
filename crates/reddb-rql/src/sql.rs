@@ -2621,6 +2621,7 @@ impl<'a> Parser<'a> {
             .map_err(|_| ParseError::value_out_of_range(field, "must be an unsigned integer", pos))
     }
 
+    #[inline(never)]
     fn parse_vcs_atom(&mut self, field: &'static str) -> Result<String, ParseError> {
         match self.peek().clone() {
             Token::Ident(value) | Token::String(value) => {
@@ -2635,6 +2636,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    #[inline(never)]
     fn parse_vcs_command(&mut self) -> Result<VcsCommand, ParseError> {
         let head = self.expect_ident()?;
         if head.eq_ignore_ascii_case("CHECKPOINT") {

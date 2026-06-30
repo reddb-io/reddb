@@ -621,6 +621,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::AlterTable(_)
         | QueryExpr::CreateVcsRef(_)
         | QueryExpr::DropVcsRef(_)
+        | QueryExpr::VcsCommand(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
         | QueryExpr::CreateIndex(_)

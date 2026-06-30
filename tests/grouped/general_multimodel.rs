@@ -90,6 +90,9 @@ mod e2e_vcs_phase5;
 #[path = "vcs/e2e_vcs_rql_read_surface.rs"]
 mod e2e_vcs_rql_read_surface;
 
+#[path = "vcs/e2e_vcs_rql_working_set.rs"]
+mod e2e_vcs_rql_working_set;
+
 #[path = "ai_local_vector/integration_external_env.rs"]
 mod integration_external_env;
 
