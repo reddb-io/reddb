@@ -395,6 +395,49 @@ impl ServerCommandConfig {
                 .insert(NO_AUTH_META.to_string(), "true".to_string());
         }
 
+        // Issue #1587 — first-boot self-bootstrap. A single distroless
+        // `red server` must be able to create the paged vault in place and
+        // serve in one process. The default embedded single-file packaging
+        // routes storage through `UnifiedStore::with_config`, which exposes no
+        // pager, so the vault gate in `build_runtime_with_bootstrap` aborts
+        // with "vault requires a paged database (persistent mode)". The
+        // separate `red bootstrap` subcommand escapes this by opening with the
+        // operational-directory packaging; compose the same storage selection
+        // here so the fresh database is paged, the vault pages exist, and the
+        // existing preset machinery (`ProceedLocal` → `apply_preset_from_config`)
+        // can mint the admins + certificate before listeners come up.
+        //
+        // Gated on (path absent AND a bootstrap intent is present AND the vault
+        // is enabled): an existing database keeps whatever packaging is already
+        // on disk (so a re-boot just serves — no re-bootstrap, no cert churn),
+        // and a fresh path with no intent keeps today's behaviour (a clear
+        // "vault requires a paged database" error rather than a silently
+        // created empty vault). `--no-auth` / `--dev` cleared `vault_enabled`
+        // above, so the development carveout never triggers first-boot either.
+        let bootstrap_intent_present = !matches!(
+            self.bootstrap.auth_bootstrap_input(),
+            crate::cluster::AuthBootstrapInput::None
+        );
+        let path_absent = self.path.as_ref().is_some_and(|path| !path.exists());
+        // Mirrors `embedded_single_file_selected`: only this profile lacks a
+        // pager, so it is the only one that needs promotion to create a vault.
+        let embedded_single_file = options.storage_profile.deploy_profile
+            == crate::storage::DeployProfile::Embedded
+            && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile;
+        if options.auth.vault_enabled
+            && bootstrap_intent_present
+            && path_absent
+            && embedded_single_file
+        {
+            options.storage_profile.packaging =
+                crate::storage::StoragePackaging::OperationalDirectory;
+            options.create_if_missing = true;
+            tracing::info!(
+                target: "reddb::bootstrap",
+                "first-boot self-bootstrap: creating paged vault in place for a fresh database with a bootstrap intent"
+            );
+        }
+
         // Issue #652 — Control Event Ledger Compliance Mode.
         // `REDDB_COMPLIANCE_MODE=true|1|yes|on` makes the producer
         // slices (652b/c/d) fail-closed on ledger persistence
