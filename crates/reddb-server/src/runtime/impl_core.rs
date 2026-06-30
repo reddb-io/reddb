@@ -54,6 +54,10 @@ struct RankedHeadEntry {
     record: crate::storage::query::unified::UnifiedRecord,
 }
 
+fn show_secrets_allows_key(key: &str) -> bool {
+    !key.starts_with("red.secret.") && !key.starts_with("red.config.")
+}
+
 fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
     match value {
         Value::Text(s) => Ok(s.to_string()),
@@ -73,6 +77,21 @@ fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
             "SET SECRET does not support value type {:?} yet",
             value.data_type()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_secrets_allows_only_user_managed_keys() {
+        assert!(!show_secrets_allows_key("red.secret.aes_key"));
+        assert!(!show_secrets_allows_key(
+            "red.secret.ai.anthropic.default.api_key"
+        ));
+        assert!(!show_secrets_allows_key("red.config.ai.default.provider"));
+        assert!(show_secrets_allows_key("acme.key"));
     }
 }
 
@@ -5564,6 +5583,9 @@ impl RedDBRuntime {
                     "status".into(),
                 ]);
                 for key in keys {
+                    if !show_secrets_allows_key(&key) {
+                        continue;
+                    }
                     if let Some(ref pfx) = prefix {
                         if !key.starts_with(pfx) {
                             continue;
