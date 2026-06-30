@@ -185,6 +185,9 @@ CREATE TABLE integrations (
   name Text NOT NULL,
   api_key Secret NOT NULL
 )
+
+INSERT INTO integrations (name, api_key)
+VALUES ('stripe', SECRET('sk_live_abc'));
 ```
 
 ```rust
@@ -192,5 +195,7 @@ CREATE TABLE integrations (
 Value::Secret(ciphertext_bytes)
 ```
 
-> [!NOTE]
-> The type layer, binary format, and output masking are already in place — sealed secrets always render as `"***"`. Auto-encryption on INSERT via `SECRET('...')` is pending the runtime → vault wiring. Until then, `INSERT ... VALUES (SECRET('...'))` returns an error and pre-encrypted bytes must be inserted directly via the embedded API.
+Notes:
+- `SECRET('...')` marks plaintext for encryption on `INSERT` or `UPDATE`.
+- Encryption requires a bootstrapped vault AES key and is controlled by `red.config.secret.auto_encrypt` (default `true`).
+- Reads stay masked as `"***"` unless the runtime has the vault AES key and `red.config.secret.auto_decrypt` is enabled.
