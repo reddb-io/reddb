@@ -11577,7 +11577,7 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
 
-        let (_gname, grole) = current_auth_identity().ok_or_else(|| {
+        let (gname, grole) = current_auth_identity().ok_or_else(|| {
             RedDBError::Query("ALTER USER requires an authenticated principal".to_string())
         })?;
         if grole != crate::auth::Role::Admin {
@@ -11587,6 +11587,20 @@ impl RedDBRuntime {
         }
 
         let target = UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
+        let actor_tenant = current_tenant();
+        let actor = UserId::from_parts(actor_tenant.as_deref(), &gname);
+        for attr in &stmt.attributes {
+            let action = match attr {
+                AlterUserAttribute::Disable => "user:disable",
+                AlterUserAttribute::Password(_) => "user:password:change",
+                _ => "user:update",
+            };
+            if auth_store.has_explicit_user_lifecycle_deny(&actor, grole, action, &target) {
+                return Err(RedDBError::Query(format!(
+                    "ALTER USER denied by IAM policy: action `{action}` resource `user:{target}`"
+                )));
+            }
+        }
 
         // Apply attributes incrementally — each one reads the current
         // record, mutates the relevant field, writes back.
