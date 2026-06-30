@@ -19,6 +19,7 @@ use crate::auth::store::{AuthStore, PrincipalRef};
 use crate::auth::{Role, User, UserId};
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::{Map as JsonMap, Value as JsonValue};
+use crate::service_cli::BootstrapConfig;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 
@@ -35,6 +36,14 @@ pub fn apply_manifest_file(
         .map_err(|err| format!("read {MANIFEST_ENV} {}: {err}", path.display()))?;
     let manifest = BootstrapManifest::parse(&raw)?;
     manifest.apply(runtime, auth_store, registry)
+}
+
+pub(crate) fn bootstrap_config_from_manifest_file(
+    path: &Path,
+) -> Result<Option<BootstrapConfig>, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|err| format!("read {MANIFEST_ENV} {}: {err}", path.display()))?;
+    bootstrap_config_from_manifest_json(&raw)
 }
 
 pub fn rehydrate_manifest_registry(
@@ -65,6 +74,99 @@ pub fn rehydrate_manifest_registry(
             .map_err(|err| format!("restore bootstrap registry entry {idx}: {err}"))?;
     }
     Ok(())
+}
+
+fn bootstrap_config_from_manifest_json(raw: &str) -> Result<Option<BootstrapConfig>, String> {
+    let root: JsonValue =
+        crate::serde_json::from_str(raw).map_err(|err| format!("parse manifest JSON: {err}"))?;
+    let obj = root
+        .as_object()
+        .ok_or_else(|| "bootstrap manifest must be a JSON object".to_string())?;
+    let intent = obj
+        .get("bootstrap")
+        .and_then(|value| value.as_object())
+        .unwrap_or(obj);
+
+    let has_intent = intent.contains_key("preset")
+        || intent.contains_key("bootstrap_preset")
+        || intent.contains_key("admin")
+        || intent.contains_key("bootstrap_admin")
+        || intent.contains_key("cloud_head_admin")
+        || intent.contains_key("customer_admin");
+    if !has_intent {
+        return Ok(None);
+    }
+
+    let admin = parse_bootstrap_principal(intent, "admin", "bootstrap_admin")?;
+    let cloud_head = parse_bootstrap_principal(intent, "cloud_head_admin", "cloud_head_admin")?;
+    let customer = parse_bootstrap_principal(intent, "customer_admin", "customer_admin")?;
+
+    Ok(Some(BootstrapConfig {
+        preset: optional_string(intent, "preset")
+            .or_else(|| optional_string(intent, "bootstrap_preset")),
+        manifest: None,
+        admin_username: admin.as_ref().map(|principal| principal.username.clone()),
+        admin_password: admin.map(|principal| principal.password),
+        cloud_head_admin: cloud_head
+            .as_ref()
+            .map(|principal| principal.username.clone()),
+        cloud_head_admin_password: cloud_head.map(|principal| principal.password),
+        customer_admin: customer
+            .as_ref()
+            .map(|principal| principal.username.clone()),
+        customer_admin_password: customer.map(|principal| principal.password),
+        ..BootstrapConfig::default()
+    }))
+}
+
+struct BootstrapPrincipal {
+    username: String,
+    password: String,
+}
+
+fn parse_bootstrap_principal(
+    obj: &JsonMap<String, JsonValue>,
+    field: &str,
+    alias: &str,
+) -> Result<Option<BootstrapPrincipal>, String> {
+    let Some(value) = obj.get(field).or_else(|| obj.get(alias)) else {
+        return Ok(None);
+    };
+    let principal = value
+        .as_object()
+        .ok_or_else(|| format!("bootstrap manifest `{field}` must be an object"))?;
+    if principal.contains_key("password") || principal.contains_key("secret") {
+        return Err(format!(
+            "bootstrap manifest `{field}` must use password_file, not inline plaintext"
+        ));
+    }
+    let username = optional_string(principal, "username")
+        .or_else(|| optional_string(principal, "name"))
+        .ok_or_else(|| format!("bootstrap manifest `{field}` requires username"))?;
+    let password_file = optional_string(principal, "password_file")
+        .or_else(|| optional_string(principal, "password_path"))
+        .ok_or_else(|| format!("bootstrap manifest `{field}` requires password_file"))?;
+    let password = read_secret_file(&password_file, field)?;
+    Ok(Some(BootstrapPrincipal { username, password }))
+}
+
+fn read_secret_file(path: &str, field: &str) -> Result<String, String> {
+    let trimmed_path = path.trim();
+    if trimmed_path.is_empty() {
+        return Err(format!(
+            "bootstrap manifest `{field}` password_file is empty"
+        ));
+    }
+    let value = std::fs::read_to_string(trimmed_path)
+        .map_err(|err| format!("read bootstrap manifest `{field}` password_file: {err}"))?
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
+    if value.is_empty() {
+        return Err(format!(
+            "bootstrap manifest `{field}` password_file produced an empty secret"
+        ));
+    }
+    Ok(value)
 }
 
 struct BootstrapManifest {
@@ -344,7 +446,16 @@ fn parse_users(values: &[JsonValue]) -> Result<Vec<ManifestUser>, String> {
         .map(|(idx, value)| {
             let obj = object_at(value, "users", idx)?;
             let username = required_string(obj, "username", "users", idx)?;
-            let password = required_string(obj, "password", "users", idx)?;
+            if obj.contains_key("password") && obj.contains_key("password_file") {
+                return Err(format!(
+                    "users[{idx}] must specify only one of password or password_file"
+                ));
+            }
+            let password = if let Some(path) = optional_string(obj, "password_file") {
+                read_secret_file(&path, "users.password_file")?
+            } else {
+                required_string(obj, "password", "users", idx)?
+            };
             if password.is_empty() {
                 return Err(format!("users[{idx}].password is required"));
             }
@@ -956,6 +1067,83 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_intent_manifest_reads_password_files() {
+        let (_runtime, _auth, path) = manifest_test_env();
+        let dir = path.parent().expect("manifest parent");
+        let head_password = dir.join(format!("head-secret-{}", std::process::id()));
+        let customer_password = dir.join(format!("customer-secret-{}", std::process::id()));
+        std::fs::write(&head_password, "head-pass\n").expect("write head secret");
+        std::fs::write(&customer_password, "customer-pass\r\n").expect("write customer secret");
+
+        write_manifest(
+            &path,
+            &format!(
+                r#"{{
+                    "bootstrap": {{
+                        "preset": "cloud",
+                        "cloud_head_admin": {{
+                            "username": "head",
+                            "password_file": "{}"
+                        }},
+                        "customer_admin": {{
+                            "username": "customer",
+                            "password_file": "{}"
+                        }}
+                    }}
+                }}"#,
+                head_password.display(),
+                customer_password.display()
+            ),
+        );
+
+        let config = super::bootstrap_config_from_manifest_file(&path)
+            .expect("parse intent manifest")
+            .expect("intent present");
+        assert_eq!(config.preset.as_deref(), Some("cloud"));
+        assert_eq!(config.cloud_head_admin.as_deref(), Some("head"));
+        assert_eq!(
+            config.cloud_head_admin_password.as_deref(),
+            Some("head-pass")
+        );
+        assert_eq!(config.customer_admin.as_deref(), Some("customer"));
+        assert_eq!(
+            config.customer_admin_password.as_deref(),
+            Some("customer-pass")
+        );
+        assert!(
+            config.manifest.is_none(),
+            "intent manifests must not recurse back into manifest apply"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&head_password);
+        let _ = std::fs::remove_file(&customer_password);
+    }
+
+    #[test]
+    fn bootstrap_intent_manifest_rejects_inline_plaintext_secret() {
+        let (_runtime, _auth, path) = manifest_test_env();
+        write_manifest(
+            &path,
+            r#"{
+                "bootstrap": {
+                    "preset": "production",
+                    "admin": {
+                        "username": "ops",
+                        "password": "inline"
+                    }
+                }
+            }"#,
+        );
+
+        let err = super::bootstrap_config_from_manifest_file(&path)
+            .expect_err("inline manifest secret must be rejected");
+        assert!(err.contains("password_file"), "got: {err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn owner_apply_creates_user_and_initial_config() {
         // Acceptance #1/#4: the fenced owner applies the manifest, creating the
         // initial admin and writing initial config.
@@ -982,6 +1170,35 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn owner_apply_reads_user_password_file() {
+        let (runtime, auth, path) = manifest_test_env();
+        let password_path = path.with_extension("secret");
+        std::fs::write(&password_path, "hunter2\n").expect("write secret");
+        write_manifest(
+            &path,
+            &format!(
+                r#"{{
+                    "users": [
+                        {{
+                            "username": "ops",
+                            "password_file": "{}",
+                            "role": "admin"
+                        }}
+                    ]
+                }}"#,
+                password_path.display()
+            ),
+        );
+
+        apply_manifest_file(&runtime, &auth, &runtime.config_registry(), &path).expect("apply");
+        auth.authenticate("ops", "hunter2")
+            .expect("password must come from mounted file");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&password_path);
     }
 
     #[test]

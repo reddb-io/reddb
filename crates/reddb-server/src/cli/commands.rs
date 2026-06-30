@@ -376,8 +376,9 @@ fn server_flags() -> Vec<FlagSchema> {
                  vault just serves (idempotent — no re-bootstrap, no new certificate).",
             )
             .with_choices(&["simple", "production", "regulated", "cloud"]),
-        FlagSchema::new("bootstrap-manifest")
-            .with_description("Path to first-boot bootstrap manifest JSON"),
+        FlagSchema::new("bootstrap-manifest").with_description(
+            "Path to first-boot bootstrap manifest JSON (preset/admins; secrets via password_file)",
+        ),
         FlagSchema::new("bootstrap-admin")
             .with_description("First admin username for production/cloud bootstrap"),
         FlagSchema::new("bootstrap-admin-password").with_description(

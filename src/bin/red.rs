@@ -3409,7 +3409,9 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     )
                     .with_choices(&["simple", "production", "regulated", "cloud"]),
                 cli::types::FlagSchema::new("bootstrap-manifest")
-                    .with_description("Path to first-boot bootstrap manifest JSON"),
+                    .with_description(
+                        "Path to first-boot bootstrap manifest JSON (preset/admins; secrets via password_file)",
+                    ),
                 cli::types::FlagSchema::new("bootstrap-admin")
                     .with_description("First admin username for production/cloud bootstrap"),
                 cli::types::FlagSchema::new("bootstrap-admin-password").with_description(
