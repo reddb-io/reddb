@@ -47,7 +47,6 @@ mod tests {
         assert!(route_ids.contains(&"ops.cluster.status"));
         assert!(route_ids.contains(&"catalog.snapshot"));
         assert!(route_ids.contains(&"graph.neighborhood"));
-        assert!(route_ids.contains(&"repo.commits.diff"));
         assert!(route_ids.contains(&"physical.metadata"));
     }
 
@@ -107,15 +106,6 @@ mod tests {
             .aliases
             .iter()
             .any(|alias| alias.pattern == "/v1/graph/jobs/queue"));
-
-        let repo_diff = catalog
-            .routes()
-            .find(|route| route.id == "repo.commits.diff")
-            .expect("repo diff route is discovered");
-        assert!(repo_diff
-            .aliases
-            .iter()
-            .any(|alias| alias.pattern == "/v1/repo/commits/:a/diff/:b"));
     }
 
     #[test]

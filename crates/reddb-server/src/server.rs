@@ -155,7 +155,6 @@ pub mod ui_deeplink;
 pub(crate) mod handlers_query;
 mod handlers_replication;
 mod handlers_topology;
-mod handlers_vcs;
 mod handlers_vector;
 pub mod header_escape_guard;
 pub mod http_connection_limiter;
