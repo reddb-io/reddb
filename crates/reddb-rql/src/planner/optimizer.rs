@@ -328,6 +328,7 @@ impl JoinReorderingPass {
             | QueryExpr::ExplainAlter(_)
             | QueryExpr::TransactionControl(_)
             | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::VcsCommand(_)
             | QueryExpr::CreateSchema(_)
             | QueryExpr::DropSchema(_)
             | QueryExpr::CreateSequence(_)
