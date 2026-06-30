@@ -326,6 +326,10 @@ impl<'a, P: RuntimeVcsPort + ?Sized> VcsUseCases<'a, P> {
         self.runtime.vcs_tag_create(input)
     }
 
+    pub fn tag_delete(&self, name: &str) -> RedDBResult<()> {
+        self.runtime.vcs_tag_delete(name)
+    }
+
     pub fn tag_list(&self) -> RedDBResult<Vec<Ref>> {
         self.runtime.vcs_list_refs(Some("refs/tags/"))
     }
