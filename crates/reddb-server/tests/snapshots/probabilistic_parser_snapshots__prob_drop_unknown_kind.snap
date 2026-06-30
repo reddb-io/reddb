@@ -1,7 +1,8 @@
 ---
 source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+assertion_line: 103
 expression: "fmt_parse_error(\"DROP BLOOM b1\")"
 ---
 input: "DROP BLOOM b1"
 kind:  Syntax
-error: Parse error at 1:1: Unexpected token: BLOOM (expected: TABLE, INDEX, TIMESERIES, QUEUE, TREE, HLL, SKETCH, FILTER, SCHEMA, SEQUENCE)
+error: Parse error at 1:1: Unexpected token: BLOOM (expected: TABLE, INDEX, TIMESERIES, QUEUE, TREE, HLL, SKETCH, FILTER, SCHEMA, SEQUENCE, BRANCH, TAG)
