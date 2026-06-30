@@ -2669,21 +2669,9 @@ impl<'a> Parser<'a> {
             let stmt = self.parse_create_user_statement()?;
             Ok(SqlCommand::CreateUser(stmt))
         } else if self.consume_ident_ci("BRANCH")? {
-            match self.parse_create_vcs_ref_body(VcsRefKind::Branch)? {
-                QueryExpr::CreateVcsRef(query) => Ok(SqlCommand::CreateVcsRef(query)),
-                other => Err(ParseError::new(
-                    format!("internal: CREATE BRANCH produced unexpected kind {other:?}"),
-                    self.position(),
-                )),
-            }
+            self.parse_create_vcs_ref(VcsRefKind::Branch)
         } else if self.consume_ident_ci("TAG")? {
-            match self.parse_create_vcs_ref_body(VcsRefKind::Tag)? {
-                QueryExpr::CreateVcsRef(query) => Ok(SqlCommand::CreateVcsRef(query)),
-                other => Err(ParseError::new(
-                    format!("internal: CREATE TAG produced unexpected kind {other:?}"),
-                    self.position(),
-                )),
-            }
+            self.parse_create_vcs_ref(VcsRefKind::Tag)
         } else if self.check(&Token::Index) || self.check(&Token::Unique) {
             match self.parse_create_index_query()? {
                 QueryExpr::CreateIndex(query) => Ok(SqlCommand::CreateIndex(query)),
@@ -3098,6 +3086,48 @@ impl<'a> Parser<'a> {
         Ok(SqlCommand::Select(query))
     }
 
+    /// Parse the body of a `CREATE BRANCH` / `CREATE TAG` statement.
+    /// Kept out of `parse_create_command`/`parse_sql_command_inner` and marked
+    /// `#[inline(never)]` so its `QueryExpr`/`SqlCommand` locals do not inflate
+    /// those already-huge match frames, which are paid twice on the nested
+    /// `CREATE MATERIALIZED VIEW ... AS SELECT` parse path (issue #1570).
+    #[inline(never)]
+    fn parse_create_vcs_ref(&mut self, kind: VcsRefKind) -> Result<SqlCommand, ParseError> {
+        match self.parse_create_vcs_ref_body(kind)? {
+            QueryExpr::CreateVcsRef(query) => Ok(SqlCommand::CreateVcsRef(query)),
+            other => {
+                let noun = match kind {
+                    VcsRefKind::Branch => "BRANCH",
+                    VcsRefKind::Tag => "TAG",
+                };
+                Err(ParseError::new(
+                    format!("internal: CREATE {noun} produced unexpected kind {other:?}"),
+                    self.position(),
+                ))
+            }
+        }
+    }
+
+    /// Parse the body of a `DROP BRANCH` / `DROP TAG` statement.
+    /// Kept out of `parse_sql_command_inner` and marked `#[inline(never)]` for
+    /// the same stack-frame reason as [`Self::parse_create_vcs_ref`] (#1570).
+    #[inline(never)]
+    fn parse_drop_vcs_ref(&mut self, kind: VcsRefKind) -> Result<SqlCommand, ParseError> {
+        match self.parse_drop_vcs_ref_body(kind)? {
+            QueryExpr::DropVcsRef(query) => Ok(SqlCommand::DropVcsRef(query)),
+            other => {
+                let noun = match kind {
+                    VcsRefKind::Branch => "BRANCH",
+                    VcsRefKind::Tag => "TAG",
+                };
+                Err(ParseError::new(
+                    format!("internal: DROP {noun} produced unexpected kind {other:?}"),
+                    self.position(),
+                ))
+            }
+        }
+    }
+
     fn parse_sql_command_inner(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {
             Token::Select => match self.parse_select_query()? {
@@ -3244,21 +3274,9 @@ impl<'a> Parser<'a> {
                 }
 
                 if self.consume_ident_ci("BRANCH")? {
-                    match self.parse_drop_vcs_ref_body(VcsRefKind::Branch)? {
-                        QueryExpr::DropVcsRef(query) => Ok(SqlCommand::DropVcsRef(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: DROP BRANCH produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
+                    self.parse_drop_vcs_ref(VcsRefKind::Branch)
                 } else if self.consume_ident_ci("TAG")? {
-                    match self.parse_drop_vcs_ref_body(VcsRefKind::Tag)? {
-                        QueryExpr::DropVcsRef(query) => Ok(SqlCommand::DropVcsRef(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: DROP TAG produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
+                    self.parse_drop_vcs_ref(VcsRefKind::Tag)
                 } else if self.check(&Token::Index) {
                     match self.parse_drop_index_query()? {
                         QueryExpr::DropIndex(query) => Ok(SqlCommand::DropIndex(query)),
