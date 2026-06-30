@@ -1842,6 +1842,16 @@ fn value_as_i64(value: &Value) -> Option<i64> {
     }
 }
 
+/// Coerce a value to `u64` — used by the H3 scalars whose cell ids are
+/// full 64-bit unsigned (#1575).
+fn value_as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::UnsignedInteger(value) => Some(*value),
+        Value::Integer(value) | Value::BigInt(value) => u64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
 pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
     match value {
         Value::Text(value) => Some(value.to_string()),
@@ -2406,6 +2416,32 @@ fn evaluate_scalar_function_legacy(
         "GEO_BEARING" => {
             let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
             Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
+        }
+        // H3 hexagonal index scalars (PRD #1574 slice 1, #1575). Mirror
+        // of the `expr_eval::dispatch_builtin_function` arms for the
+        // legacy projection / WHERE-clause path.
+        "H3_INDEX" => {
+            let lat = value_as_number(&resolve_scalar_arg(args, 0, source)?)?.as_f64();
+            let lon = value_as_number(&resolve_scalar_arg(args, 1, source)?)?.as_f64();
+            let res = value_as_i64(&resolve_scalar_arg(args, 2, source)?)?.clamp(0, 15) as u8;
+            Some(Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(
+                lat, lon, res,
+            )))
+        }
+        "H3_TO_LATLNG" => {
+            let cell = value_as_u64(&resolve_scalar_arg(args, 0, source)?)?;
+            let (lat, lon) = crate::geo::h3::cell_to_lat_lng(cell);
+            Some(Value::Array(vec![Value::Float(lat), Value::Float(lon)]))
+        }
+        "H3_RING" => {
+            let cell = value_as_u64(&resolve_scalar_arg(args, 0, source)?)?;
+            let k = value_as_i64(&resolve_scalar_arg(args, 1, source)?)?.max(0) as u32;
+            Some(Value::Array(
+                crate::geo::h3::grid_disk(cell, k)
+                    .into_iter()
+                    .map(Value::UnsignedInteger)
+                    .collect(),
+            ))
         }
         "GEO_MIDPOINT" => {
             let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;

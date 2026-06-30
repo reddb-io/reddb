@@ -2576,3 +2576,65 @@ fn graph_shortest_path_limit_zero_returns_no_rows() {
         .expect("shortest path limit parses+executes");
     assert_eq!(res.result.records.len(), 0, "LIMIT 0 returns zero rows");
 }
+
+// ── H3 spatial scalar functions (PRD #1574 slice 1, #1575) ──────────
+
+#[test]
+fn h3_index_encodes_paris_to_known_cell() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    // Paris (Notre-Dame) at resolution 9. The expected cell id is the
+    // value h3o produces for these coordinates — pinned here so a codec
+    // change is caught.
+    let res = rt
+        .execute_query("SELECT h3_index(48.8566, 2.3522, 9) AS cell")
+        .expect("h3_index executes");
+    assert_eq!(uint_at(&res, 0, "cell"), 617_550_903_642_685_439);
+}
+
+#[test]
+fn h3_to_latlng_round_trips_the_cell_center() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let res = rt
+        .execute_query("SELECT h3_to_latlng(h3_index(48.8566, 2.3522, 9)) AS center")
+        .expect("h3_to_latlng executes");
+    match res.result.records[0].get("center") {
+        Some(Value::Array(elems)) => {
+            assert_eq!(elems.len(), 2, "expected [lat, lon] pair, got {elems:?}");
+            let lat = match &elems[0] {
+                Value::Float(v) => *v,
+                other => panic!("lat not float: {other:?}"),
+            };
+            let lon = match &elems[1] {
+                Value::Float(v) => *v,
+                other => panic!("lon not float: {other:?}"),
+            };
+            assert!(
+                (lat - 48.8566).abs() < 0.05 && (lon - 2.3522).abs() < 0.05,
+                "cell center drifted: ({lat}, {lon})"
+            );
+        }
+        other => panic!("expected Array center, got {other:?}"),
+    }
+}
+
+#[test]
+fn h3_ring_k1_returns_self_plus_six_neighbors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let res = rt
+        .execute_query("SELECT h3_ring(h3_index(48.8566, 2.3522, 9), 1) AS ring")
+        .expect("h3_ring executes");
+    match res.result.records[0].get("ring") {
+        Some(Value::Array(cells)) => {
+            assert_eq!(cells.len(), 7, "k=1 kRing over a hexagon is self + 6");
+            assert!(
+                cells.contains(&Value::UnsignedInteger(617_550_903_642_685_439)),
+                "ring must include the center cell: {cells:?}"
+            );
+            assert!(
+                cells.iter().all(|c| matches!(c, Value::UnsignedInteger(_))),
+                "every ring entry is a u64 cell id"
+            );
+        }
+        other => panic!("expected Array ring, got {other:?}"),
+    }
+}

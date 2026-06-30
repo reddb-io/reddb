@@ -5,6 +5,8 @@
 
 use std::f64::consts::PI;
 
+pub mod h3;
+
 const EARTH_RADIUS_KM: f64 = 6_371.0;
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
 

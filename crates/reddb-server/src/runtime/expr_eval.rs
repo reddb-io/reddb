@@ -1665,6 +1665,32 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             let (lat1, lon1, lat2, lon2) = geo_args(args)?;
             Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
         }
+        // ── H3 hexagonal index scalars (PRD #1574 slice 1, #1575) ──
+        // Pure wrappers over `crate::geo::h3`; the engine stays
+        // h3o-agnostic. Cell ids are u64 → Value::UnsignedInteger.
+        "H3_INDEX" => {
+            let lat = value_as_f64(args.first()?)?;
+            let lon = value_as_f64(args.get(1)?)?;
+            let res = value_as_i64(args.get(2)?)?.clamp(0, 15) as u8;
+            Some(Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(
+                lat, lon, res,
+            )))
+        }
+        "H3_TO_LATLNG" => {
+            let cell = value_as_u64(args.first()?)?;
+            let (lat, lon) = crate::geo::h3::cell_to_lat_lng(cell);
+            Some(Value::Array(vec![Value::Float(lat), Value::Float(lon)]))
+        }
+        "H3_RING" => {
+            let cell = value_as_u64(args.first()?)?;
+            let k = value_as_i64(args.get(1)?)?.max(0) as u32;
+            Some(Value::Array(
+                crate::geo::h3::grid_disk(cell, k)
+                    .into_iter()
+                    .map(Value::UnsignedInteger)
+                    .collect(),
+            ))
+        }
         "POWER" => {
             let base = value_as_f64(args.first()?)?;
             let exp = value_as_f64(args.get(1)?)?;
@@ -2119,6 +2145,18 @@ fn value_as_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Integer(value) | Value::BigInt(value) => Some(*value),
         Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+/// Coerce a value to a `u64` — used by the H3 scalars whose cell ids
+/// are full 64-bit unsigned. Accepts the native `UnsignedInteger`
+/// produced by `H3_INDEX` as well as non-negative signed integers
+/// supplied as literals.
+fn value_as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::UnsignedInteger(value) => Some(*value),
+        Value::Integer(value) | Value::BigInt(value) => u64::try_from(*value).ok(),
         _ => None,
     }
 }
