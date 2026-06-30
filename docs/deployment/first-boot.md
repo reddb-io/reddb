@@ -28,6 +28,69 @@ allow-all policy, attaches it to that admin, and persists the bootstrap-complete
 marker. When vault-backed, the preset prints the newly issued certificate to
 stderr; save it and update the runtime secret before any restart.
 
+## Single-Process Bootstrap Then Serve
+
+Distroless images, Fly Machines, and Kubernetes pods without a bootstrap
+sidecar can run one `red server` process that bootstraps the real database
+volume and then continues serving from it. The boot needs an explicit
+first-boot intent: either a preset such as `cloud` / `production` or a
+manifest.
+
+```bash
+red server \
+  --path /data/reddb.rdb \
+  --http \
+  --http-bind 0.0.0.0:5000 \
+  --vault true \
+  --bootstrap-preset cloud \
+  --cloud-head-admin red_admin \
+  --cloud-head-admin-password-file /run/secrets/red_admin_password \
+  --customer-admin app_admin \
+  --customer-admin-password-file /run/secrets/app_admin_password \
+  --bootstrap-cert-out /run/reddb/bootstrap/certificate
+```
+
+On a fresh `--path`, `red server` creates the paged vault in place, applies the
+bootstrap intent, writes `system.bootstrap.completed`, opens listeners, and
+keeps serving. `--bootstrap-cert-out` writes the minted 64-hex unseal
+certificate to a file as well as emitting it on stderr. Before the next restart,
+copy that file into your secret store and mount it back with:
+
+```bash
+REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate
+```
+
+Re-booting the same database is idempotent. When `system.bootstrap.completed`
+is present, the server skips the preset or manifest, does not create another
+admin, and does not mint or rewrite the certificate. The certificate file is an
+unseal secret for an already-bootstrapped vault; it is not a bootstrap intent by
+itself.
+
+For manifest-driven first boot, replace the preset credentials with a mounted
+manifest:
+
+```bash
+red server \
+  --path /data/reddb.rdb \
+  --vault true \
+  --bootstrap-manifest /run/secrets/reddb-bootstrap-manifest.json \
+  --bootstrap-cert-out /run/reddb/bootstrap/certificate
+```
+
+The manifest path is read only while applying the first boot. After the
+completion marker is durable, a restart can run with the same manifest still
+mounted, a different manifest mounted, or no manifest mounted; it will not
+re-apply bootstrap state.
+
+Prefer file-backed secrets for unattended containers:
+
+- `--bootstrap-admin-password-file` / `REDDB_PASSWORD_FILE`
+- `--cloud-head-admin-password-file` / `REDDB_CLOUD_HEAD_ADMIN_PASSWORD_FILE`
+- `--customer-admin-password-file` / `REDDB_CUSTOMER_ADMIN_PASSWORD_FILE`
+- `REDDB_CERTIFICATE_FILE` for restarts after bootstrap
+
+Do not bake bootstrap passwords, manifests, or certificates into an image.
+
 ## Bootstrap Presets
 
 Presets are policy-first: every user a preset creates is an ordinary,
@@ -165,14 +228,18 @@ RedDB Cloud should use a bootstrap manifest instead of a special
 `system_owned` flag. The cloud/head admin and the customer admin are ordinary
 platform users. Protection is policy-derived:
 
-- `cloud-admin` receives an allow-all policy.
+- `red_admin` (or the configured cloud/head admin username) receives an
+  allow-all policy.
 - `customer-admin` receives an allow-all policy.
 - `customer-admin` also receives an explicit deny policy on
-  `user:cloud-admin` for:
+  `user:red_admin` for:
   - `user:delete`
   - `user:disable`
   - `user:password:change`
   - `user:role:update`
+- The protective policy also denies dropping or detaching the guardrail policy
+  itself, and denies replacing or reattaching it, so the customer admin cannot
+  remove the policy before deleting the head admin.
 
 Policy manifests can also seed explicit users, policies, attachments, managed
 guardrails, and config. Prefer `password_file` for users so mounted manifests do
@@ -194,7 +261,7 @@ not contain plaintext secrets:
   ],
   "policies": [
     {
-      "id": "cloud-admin-allow-all",
+      "id": "red-admin-allow-all",
       "version": 1,
       "statements": [
         { "effect": "allow", "actions": ["*"], "resources": ["*"] }
@@ -208,9 +275,14 @@ not contain plaintext secrets:
       ]
     },
     {
-      "id": "protect-cloud-admin",
+      "id": "system.cloud.protect-managed",
       "version": 1,
       "statements": [
+        {
+          "effect": "deny",
+          "actions": ["policy:put", "policy:drop", "policy:attach", "policy:detach"],
+          "resources": ["policy:system.cloud.protect-managed"]
+        },
         {
           "effect": "deny",
           "actions": [
@@ -219,17 +291,17 @@ not contain plaintext secrets:
             "user:password:change",
             "user:role:update"
           ],
-          "resources": ["user:cloud-admin"]
+          "resources": ["user:red_admin"]
         }
       ]
     }
   ],
   "attachments": [
-    { "user": "cloud-admin", "policy": "cloud-admin-allow-all" },
+    { "user": "red_admin", "policy": "red-admin-allow-all" },
     { "user": "customer-admin", "policy": "customer-admin-allow-all" },
-    { "user": "customer-admin", "policy": "protect-cloud-admin" }
+    { "user": "customer-admin", "policy": "system.cloud.protect-managed" }
   ],
-  "actor": "cloud-admin"
+  "actor": "red_admin"
 }
 ```
 
