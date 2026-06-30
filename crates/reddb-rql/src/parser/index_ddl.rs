@@ -76,7 +76,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse index method identifier: HASH | BTREE | BITMAP | RTREE | H3.
+    /// Parse index method identifier: HASH | BTREE | BITMAP | RTREE | SPATIAL | H3.
     /// `HASH` is also a reserved keyword token, so we match both the
     /// keyword form and the ident form — otherwise `USING HASH`
     /// fails with "Unexpected token: HASH" even though the parser
@@ -106,10 +106,11 @@ impl<'a> Parser<'a> {
                     "BTREE" => IndexMethod::BTree,
                     "BITMAP" => IndexMethod::Bitmap,
                     "RTREE" => IndexMethod::RTree,
+                    "SPATIAL" => IndexMethod::Spatial,
                     _ => {
                         return Err(ParseError::new(
                             format!(
-                                "unknown index method '{}', expected HASH, BTREE, BITMAP, RTREE, or H3",
+                                "unknown index method '{}', expected HASH, BTREE, BITMAP, RTREE, SPATIAL, or H3",
                                 name
                             ),
                             self.position(),
@@ -120,7 +121,7 @@ impl<'a> Parser<'a> {
                 Ok(method)
             }
             other => Err(ParseError::expected(
-                vec!["HASH", "BTREE", "BITMAP", "RTREE", "H3"],
+                vec!["HASH", "BTREE", "BITMAP", "RTREE", "SPATIAL", "H3"],
                 &other,
                 self.position(),
             )),
@@ -303,5 +304,17 @@ mod tests {
                 .contains("expected: HASH, BTREE, BITMAP, RTREE"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parse_create_index_using_spatial_is_generic_spatial_method() {
+        // `USING SPATIAL` is the generic spatial request; the engine maps
+        // it to the default spatial backend (H3 as of #1578). The parser
+        // only needs to surface the generic `Spatial` method here.
+        let query = parse_create_index("CREATE INDEX gix ON places (loc) USING SPATIAL");
+        assert_eq!(query.method, IndexMethod::Spatial);
+        // Lowercase ident is accepted too.
+        let query = parse_create_index("CREATE INDEX gix ON places (loc) USING spatial");
+        assert_eq!(query.method, IndexMethod::Spatial);
     }
 }

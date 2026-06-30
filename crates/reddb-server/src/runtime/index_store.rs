@@ -1144,6 +1144,27 @@ pub enum IndexMethodKind {
     },
 }
 
+impl IndexMethodKind {
+    /// Resolve a *generic* spatial index request (RQL `USING SPATIAL`, or a
+    /// bare spatial index) to the engine's default spatial backend.
+    ///
+    /// As of PRD #1574 slice 4 (#1578) the default is the disk-resident
+    /// [`IndexMethodKind::H3`] index: `(lat, lon)` is encoded to a single
+    /// H3 cell-id `u64` and stored in the existing paged B-tree, so RAM
+    /// stays O(working set) rather than O(total points). The in-RAM
+    /// `rstar` R-tree ([`IndexMethodKind::Spatial`]) is no longer the
+    /// default — it is reachable only via the explicit `USING RTREE` opt-in
+    /// and is memory-capped (see `storage::unified::spatial_index`).
+    ///
+    /// Trade-off: R-tree = arbitrary shapes / exact small sets, held in
+    /// RAM (now capped); H3 = points at scale, on disk, the default.
+    pub fn default_spatial() -> Self {
+        IndexMethodKind::H3 {
+            resolution: DEFAULT_H3_RESOLUTION,
+        }
+    }
+}
+
 /// Default H3 resolution used when reconstructing an H3 index kind from
 /// the incremental-maintainer mirror, which does not carry the
 /// resolution. Mirrors `reddb_rql::ast::DEFAULT_H3_RESOLUTION`; the

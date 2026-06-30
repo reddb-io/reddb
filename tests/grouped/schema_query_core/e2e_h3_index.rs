@@ -320,6 +320,84 @@ fn h3_bbox_parity_with_full_scan() {
     assert_h3_parity("CREATE INDEX idx ON places (loc) USING H3", &queries);
 }
 
+// ── Slice 4 (PRD #1574 / #1578): H3 is the DEFAULT spatial index ─────────────
+//
+// A generic spatial index request (`USING SPATIAL`) resolves to the
+// disk-resident H3 index, NOT the unbounded in-RAM rstar R-tree. The R-tree is
+// reachable only via the explicit `USING RTREE` opt-in (and is memory-capped).
+
+#[test]
+fn bare_spatial_index_defaults_to_h3() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_places(&rt);
+
+    // Generic spatial request — no explicit backend named.
+    rt.execute_query("CREATE INDEX idx_loc ON places (loc) USING SPATIAL")
+        .unwrap();
+
+    // It resolves to the H3 disk index, not the rstar R-tree.
+    let (kind, entries) = show_index(&rt, "places", "idx_loc")
+        .expect("generic spatial index must appear in red.show_indexes");
+    assert_eq!(
+        kind, "H3",
+        "a bare/generic spatial index must default to H3"
+    );
+    assert_eq!(
+        entries, 3,
+        "the H3 default must build over all existing rows"
+    );
+
+    // No resident rstar R-tree is allocated for the column.
+    assert!(
+        rt.index_store_ref()
+            .spatial
+            .index_stats("places", "loc")
+            .is_err(),
+        "the default spatial index must NOT allocate an in-RAM rstar R-tree"
+    );
+
+    // SEARCH SPATIAL works unchanged against the defaulted index: a radius
+    // centred on Paris finds the Paris row (an exact 0-km hit). `entity_id`
+    // is the engine's internal id, so we assert on the zero distance of the
+    // centre point rather than the user `id` column.
+    let hits = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 48.8566 2.3522 5.0 COLLECTION places COLUMN loc",
+    );
+    assert!(
+        !hits.is_empty(),
+        "SEARCH SPATIAL must return hits through the defaulted H3 index"
+    );
+    assert!(
+        hits.iter().any(|(_, dist)| *dist == 0.0_f64.to_bits()),
+        "SEARCH SPATIAL must find the Paris centre point (0 km) via the H3 default"
+    );
+}
+
+#[test]
+fn explicit_rtree_is_opt_in_and_allocates_resident_rtree() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_places(&rt);
+
+    // The in-RAM rstar R-tree is reachable ONLY via the explicit opt-in.
+    rt.execute_query("CREATE INDEX idx_r ON places (loc) USING RTREE")
+        .unwrap();
+
+    let (kind, _entries) =
+        show_index(&rt, "places", "idx_r").expect("RTREE index must appear in introspection");
+    assert_eq!(kind, "RTREE", "USING RTREE must stay the rstar R-tree");
+
+    // The opt-in path is the one (and only) path that allocates the
+    // resident rstar structure for the column.
+    assert!(
+        rt.index_store_ref()
+            .spatial
+            .index_stats("places", "loc")
+            .is_ok(),
+        "USING RTREE must allocate the resident rstar R-tree it opts into"
+    );
+}
+
 #[test]
 fn h3_radius_uses_disk_btree_not_rtree() {
     // The H3 radius path must run off the sorted disk B-tree cell index and
