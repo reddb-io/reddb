@@ -705,6 +705,20 @@ fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
                 }
             }
         }
+        QueryExpr::CreateVcsRef(q) => {
+            let kind = match q.kind {
+                crate::storage::query::ast::VcsRefKind::Branch => "branch",
+                crate::storage::query::ast::VcsRefKind::Tag => "tag",
+            };
+            schema("create_vcs_ref", Some(format!("{kind}:{}", q.name)));
+        }
+        QueryExpr::DropVcsRef(q) => {
+            let kind = match q.kind {
+                crate::storage::query::ast::VcsRefKind::Branch => "branch",
+                crate::storage::query::ast::VcsRefKind::Tag => "tag",
+            };
+            schema("drop_vcs_ref", Some(format!("{kind}:{}", q.name)));
+        }
         QueryExpr::CreateIndex(q) => {
             schema(
                 "create_index",
@@ -1402,6 +1416,9 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::DropCollection(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::Truncate(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::AlterTable(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::CreateVcsRef(_) | QueryExpr::DropVcsRef(_) => {
+            cache_scope_insert(scopes, crate::application::vcs_collections::REFS)
+        }
         QueryExpr::CreateIndex(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::DropIndex(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::CreateTimeSeries(query) => cache_scope_insert(scopes, &query.name),
@@ -5018,6 +5035,8 @@ impl RedDBRuntime {
             }
             QueryExpr::Truncate(ref truncate) => self.execute_truncate(query, truncate),
             QueryExpr::AlterTable(ref alter) => self.execute_alter_table(query, alter),
+            QueryExpr::CreateVcsRef(ref create) => self.execute_create_vcs_ref(query, create),
+            QueryExpr::DropVcsRef(ref drop_ref) => self.execute_drop_vcs_ref(query, drop_ref),
             QueryExpr::ExplainAlter(ref explain) => self.execute_explain_alter(query, explain),
             // Graph analytics commands
             QueryExpr::GraphCommand(ref cmd) => self.execute_graph_command(query, cmd),
