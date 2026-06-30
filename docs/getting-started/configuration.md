@@ -31,7 +31,7 @@ red server [flags]
 | `--vault` / `REDDB_VAULT=true` | | Enable encrypted auth/secret vault | `false` |
 | `--no-auth` / `REDDB_NO_AUTH=true` | | Hard-disable auth and vault for local/dev boots | `false` |
 | `--bootstrap-preset` / `REDDB_BOOTSTRAP_PRESET` | | First-boot preset: `simple`, `production`, `regulated`, `cloud` | `simple` |
-| `--bootstrap-manifest` / `REDDB_BOOTSTRAP_MANIFEST` | | First-boot manifest JSON path | |
+| `--bootstrap-manifest` / `REDDB_BOOTSTRAP_MANIFEST` | | First-boot manifest JSON path. Can supply the preset/admin intent with `password_file` secrets from mounted files. | |
 
 Recommended patterns:
 
@@ -53,6 +53,13 @@ red server \
 red server \
   --path ./data/reddb.rdb \
   --wire-bind 127.0.0.1:5051
+```
+
+```bash
+# First boot from a mounted manifest, with no secrets on argv
+red server \
+  --path /data/reddb.rdb \
+  --bootstrap-manifest /etc/reddb/bootstrap.json
 ```
 
 Rules of thumb:
