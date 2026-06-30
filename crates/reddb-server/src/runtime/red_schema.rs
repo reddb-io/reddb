@@ -13,6 +13,7 @@ use std::sync::Arc;
 use super::*;
 use crate::auth::policies::{ActionPattern, Effect, Policy, ResourcePattern, Statement};
 use crate::catalog::{CollectionModel, SchemaMode};
+use crate::runtime::mvcc::current_connection_id;
 use crate::storage::query::ast::{CompareOp, Expr, FieldRef, Filter, PolicyAction, UnaryOp};
 use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
 use crate::storage::schema::DataType;
@@ -150,6 +151,18 @@ pub(super) const HYPERTABLE_CHUNKS_INTERNAL: &str = "__red_schema_hypertable_chu
 // thread-discussion decision on #748.
 pub(super) const TIMESERIES_WRITES: &str = "red.timeseries_writes";
 pub(super) const TIMESERIES_WRITES_INTERNAL: &str = "__red_schema_timeseries_writes";
+pub(super) const COMMITS: &str = "red.commits";
+pub(super) const COMMITS_INTERNAL: &str = "__red_schema_commits";
+pub(super) const BRANCHES: &str = "red.branches";
+pub(super) const BRANCHES_INTERNAL: &str = "__red_schema_branches";
+pub(super) const TAGS: &str = "red.tags";
+pub(super) const TAGS_INTERNAL: &str = "__red_schema_tags";
+pub(super) const STATUS: &str = "red.status";
+pub(super) const STATUS_INTERNAL: &str = "__red_schema_status";
+pub(super) const CONFLICTS: &str = "red.conflicts";
+pub(super) const CONFLICTS_INTERNAL: &str = "__red_schema_conflicts";
+pub(super) const VERSIONED: &str = "red.versioned";
+pub(super) const VERSIONED_INTERNAL: &str = "__red_schema_versioned";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -539,6 +552,46 @@ const TIMESERIES_WRITES_COLUMNS: [&str; 5] = [
     "writes_count",
 ];
 
+const COMMIT_COLUMNS: [&str; 11] = [
+    "hash",
+    "root_xid",
+    "parents",
+    "height",
+    "author_name",
+    "author_email",
+    "committer_name",
+    "committer_email",
+    "message",
+    "timestamp_ms",
+    "signature",
+];
+
+const REF_COLUMNS: [&str; 4] = ["name", "kind", "target", "protected"];
+
+const STATUS_COLUMNS: [&str; 8] = [
+    "connection_id",
+    "head_ref",
+    "head_commit",
+    "detached",
+    "staged_changes",
+    "working_changes",
+    "unresolved_conflicts",
+    "merge_state_id",
+];
+
+const CONFLICT_COLUMNS: [&str; 8] = [
+    "id",
+    "collection",
+    "entity_id",
+    "base",
+    "ours",
+    "theirs",
+    "conflicting_paths",
+    "merge_state_id",
+];
+
+const VERSIONED_COLUMNS: [&str; 2] = ["collection", "versioned"];
+
 // Issue #746 — typed `red.graphs`. `supports_viewport` is the stable
 // capability indicator the Red UI graph explorer keys on (graph
 // viewport contract #744 has landed). `supports_algorithms` is a
@@ -639,6 +692,12 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (HYPERTABLE_CHUNKS, HYPERTABLE_CHUNKS_INTERNAL),
         (TIMESERIES, TIMESERIES_INTERNAL),
         (METRICS, METRICS_INTERNAL),
+        (COMMITS, COMMITS_INTERNAL),
+        (BRANCHES, BRANCHES_INTERNAL),
+        (TAGS, TAGS_INTERNAL),
+        (STATUS, STATUS_INTERNAL),
+        (CONFLICTS, CONFLICTS_INTERNAL),
+        (VERSIONED, VERSIONED_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -736,6 +795,18 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(HYPERTABLE_CHUNKS)
         || table.eq_ignore_ascii_case(TIMESERIES_WRITES_INTERNAL)
         || table.eq_ignore_ascii_case(TIMESERIES_WRITES)
+        || table.eq_ignore_ascii_case(COMMITS_INTERNAL)
+        || table.eq_ignore_ascii_case(COMMITS)
+        || table.eq_ignore_ascii_case(BRANCHES_INTERNAL)
+        || table.eq_ignore_ascii_case(BRANCHES)
+        || table.eq_ignore_ascii_case(TAGS_INTERNAL)
+        || table.eq_ignore_ascii_case(TAGS)
+        || table.eq_ignore_ascii_case(STATUS_INTERNAL)
+        || table.eq_ignore_ascii_case(STATUS)
+        || table.eq_ignore_ascii_case(CONFLICTS_INTERNAL)
+        || table.eq_ignore_ascii_case(CONFLICTS)
+        || table.eq_ignore_ascii_case(VERSIONED_INTERNAL)
+        || table.eq_ignore_ascii_case(VERSIONED)
 }
 
 pub(super) fn red_query(
@@ -810,6 +881,12 @@ pub(super) fn red_query(
         VirtualTableKind::TimeseriesWrites => {
             timeseries_writes_snapshot(runtime, tenant, visible_collections, query)
         }
+        VirtualTableKind::Commits => commits_snapshot(runtime, query)?,
+        VirtualTableKind::Branches => refs_snapshot(runtime, Some("refs/heads/"))?,
+        VirtualTableKind::Tags => refs_snapshot(runtime, Some("refs/tags/"))?,
+        VirtualTableKind::Status => status_snapshot(runtime)?,
+        VirtualTableKind::Conflicts => conflicts_snapshot(runtime)?,
+        VirtualTableKind::Versioned => versioned_snapshot(runtime, visible_collections)?,
     };
 
     let table_name = query.table.as_str();
@@ -938,6 +1015,12 @@ enum VirtualTableKind {
     Metrics,
     HypertableChunks,
     TimeseriesWrites,
+    Commits,
+    Branches,
+    Tags,
+    Status,
+    Conflicts,
+    Versioned,
 }
 
 impl VirtualTableKind {
@@ -977,6 +1060,11 @@ impl VirtualTableKind {
             Self::Metrics => &METRICS_COLUMNS,
             Self::HypertableChunks => &HYPERTABLE_CHUNK_COLUMNS,
             Self::TimeseriesWrites => &TIMESERIES_WRITES_COLUMNS,
+            Self::Commits => &COMMIT_COLUMNS,
+            Self::Branches | Self::Tags => &REF_COLUMNS,
+            Self::Status => &STATUS_COLUMNS,
+            Self::Conflicts => &CONFLICT_COLUMNS,
+            Self::Versioned => &VERSIONED_COLUMNS,
         }
     }
 
@@ -1016,6 +1104,12 @@ impl VirtualTableKind {
             Self::Metrics => METRICS,
             Self::HypertableChunks => HYPERTABLE_CHUNKS,
             Self::TimeseriesWrites => TIMESERIES_WRITES,
+            Self::Commits => COMMITS,
+            Self::Branches => BRANCHES,
+            Self::Tags => TAGS,
+            Self::Status => STATUS,
+            Self::Conflicts => CONFLICTS,
+            Self::Versioned => VERSIONED,
         }
     }
 }
@@ -1151,9 +1245,219 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     {
         return Ok(VirtualTableKind::TimeseriesWrites);
     }
+    if name.eq_ignore_ascii_case(COMMITS_INTERNAL) || name.eq_ignore_ascii_case(COMMITS) {
+        return Ok(VirtualTableKind::Commits);
+    }
+    if name.eq_ignore_ascii_case(BRANCHES_INTERNAL) || name.eq_ignore_ascii_case(BRANCHES) {
+        return Ok(VirtualTableKind::Branches);
+    }
+    if name.eq_ignore_ascii_case(TAGS_INTERNAL) || name.eq_ignore_ascii_case(TAGS) {
+        return Ok(VirtualTableKind::Tags);
+    }
+    if name.eq_ignore_ascii_case(STATUS_INTERNAL) || name.eq_ignore_ascii_case(STATUS) {
+        return Ok(VirtualTableKind::Status);
+    }
+    if name.eq_ignore_ascii_case(CONFLICTS_INTERNAL) || name.eq_ignore_ascii_case(CONFLICTS) {
+        return Ok(VirtualTableKind::Conflicts);
+    }
+    if name.eq_ignore_ascii_case(VERSIONED_INTERNAL) || name.eq_ignore_ascii_case(VERSIONED) {
+        return Ok(VirtualTableKind::Versioned);
+    }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
     )))
+}
+
+fn commits_snapshot(runtime: &RedDBRuntime, query: &TableQuery) -> RedDBResult<Vec<UnifiedRecord>> {
+    let schema = Arc::new(
+        COMMIT_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let hash = hash_filter(query);
+    let range = if let Some(hash) = hash.clone() {
+        crate::application::vcs::LogRange {
+            to: Some(hash),
+            limit: Some(1),
+            ..Default::default()
+        }
+    } else {
+        crate::application::vcs::LogRange::default()
+    };
+    Ok(runtime
+        .vcs_log(crate::application::vcs::LogInput {
+            connection_id: if hash.is_some() {
+                0
+            } else {
+                current_connection_id()
+            },
+            range,
+        })?
+        .into_iter()
+        .map(|commit| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(commit.hash),
+                    Value::UnsignedInteger(commit.root_xid),
+                    Value::Array(commit.parents.into_iter().map(Value::text).collect()),
+                    Value::UnsignedInteger(commit.height),
+                    Value::text(commit.author.name),
+                    Value::text(commit.author.email),
+                    Value::text(commit.committer.name),
+                    Value::text(commit.committer.email),
+                    Value::text(commit.message),
+                    Value::TimestampMs(commit.timestamp_ms),
+                    commit.signature.map(Value::text).unwrap_or(Value::Null),
+                ],
+            )
+        })
+        .collect())
+}
+
+fn hash_filter(query: &TableQuery) -> Option<String> {
+    fn visit(filter: &Filter) -> Option<String> {
+        match filter {
+            Filter::Compare {
+                field: FieldRef::TableColumn { column, .. },
+                op: CompareOp::Eq,
+                value: Value::Text(hash),
+            } if column == "hash" => Some(hash.to_string()),
+            Filter::And(left, right) => visit(left).or_else(|| visit(right)),
+            _ => None,
+        }
+    }
+    effective_table_filter(query).and_then(|filter| visit(&filter))
+}
+
+fn refs_snapshot(runtime: &RedDBRuntime, prefix: Option<&str>) -> RedDBResult<Vec<UnifiedRecord>> {
+    let schema = Arc::new(
+        REF_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    Ok(runtime
+        .vcs_list_refs(prefix)?
+        .into_iter()
+        .map(|reference| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(reference.name),
+                    Value::text(ref_kind_name(reference.kind)),
+                    Value::text(reference.target),
+                    Value::Boolean(reference.protected),
+                ],
+            )
+        })
+        .collect())
+}
+
+fn status_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedRecord>> {
+    let schema = Arc::new(
+        STATUS_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let status = runtime.vcs_status(crate::application::vcs::StatusInput {
+        connection_id: current_connection_id(),
+    })?;
+    Ok(vec![UnifiedRecord::with_schema(
+        schema,
+        vec![
+            Value::UnsignedInteger(status.connection_id),
+            status.head_ref.map(Value::text).unwrap_or(Value::Null),
+            status.head_commit.map(Value::text).unwrap_or(Value::Null),
+            Value::Boolean(status.detached),
+            Value::UnsignedInteger(status.staged_changes as u64),
+            Value::UnsignedInteger(status.working_changes as u64),
+            Value::UnsignedInteger(status.unresolved_conflicts as u64),
+            status
+                .merge_state_id
+                .map(Value::text)
+                .unwrap_or(Value::Null),
+        ],
+    )])
+}
+
+fn conflicts_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedRecord>> {
+    let schema = Arc::new(
+        CONFLICT_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let status = runtime.vcs_status(crate::application::vcs::StatusInput {
+        connection_id: current_connection_id(),
+    })?;
+    let Some(merge_state_id) = status.merge_state_id else {
+        return Ok(Vec::new());
+    };
+    Ok(runtime
+        .vcs_conflicts_list(&merge_state_id)?
+        .into_iter()
+        .map(|conflict| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(conflict.id),
+                    Value::text(conflict.collection),
+                    Value::text(conflict.entity_id),
+                    json_value(conflict.base),
+                    json_value(conflict.ours),
+                    json_value(conflict.theirs),
+                    Value::Array(
+                        conflict
+                            .conflicting_paths
+                            .into_iter()
+                            .map(Value::text)
+                            .collect(),
+                    ),
+                    Value::text(conflict.merge_state_id),
+                ],
+            )
+        })
+        .collect())
+}
+
+fn versioned_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&HashSet<String>>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let schema = Arc::new(
+        VERSIONED_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    Ok(runtime
+        .vcs_list_versioned()?
+        .into_iter()
+        .filter(|collection| collection_is_visible(collection, visible_collections))
+        .map(|collection| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![Value::text(collection), Value::Boolean(true)],
+            )
+        })
+        .collect())
+}
+
+fn ref_kind_name(kind: crate::application::vcs::RefKind) -> &'static str {
+    match kind {
+        crate::application::vcs::RefKind::Branch => "branch",
+        crate::application::vcs::RefKind::Tag => "tag",
+        crate::application::vcs::RefKind::Head => "head",
+    }
+}
+
+fn json_value(value: crate::json::Value) -> Value {
+    crate::json::to_vec(&value)
+        .map(Value::Json)
+        .unwrap_or(Value::Null)
 }
 
 fn governance_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {

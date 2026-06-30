@@ -3050,6 +3050,18 @@ impl<'a> Parser<'a> {
         result
     }
 
+    /// Desugar a `SHOW BRANCHES` / `SHOW TAGS` statement into a scan of the
+    /// matching VCS virtual table. Kept out of `parse_sql_command_inner` and
+    /// marked `#[inline(never)]` so its `TableQuery` locals do not inflate
+    /// that already-huge match frame, which is paid twice on the nested
+    /// `CREATE MATERIALIZED VIEW ... AS SELECT` parse path (issue #1569).
+    #[inline(never)]
+    fn parse_show_vcs_ref_table(&mut self, table: &str) -> Result<SqlCommand, ParseError> {
+        let mut query = TableQuery::new(table);
+        self.parse_table_clauses(&mut query)?;
+        Ok(SqlCommand::Select(query))
+    }
+
     fn parse_sql_command_inner(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {
             Token::Select => match self.parse_select_query()? {
@@ -3786,6 +3798,10 @@ impl<'a> Parser<'a> {
                         add_table_filter(&mut query, hide_internal);
                     }
                     Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("BRANCHES")? {
+                    self.parse_show_vcs_ref_table("red.branches")
+                } else if self.consume_ident_ci("TAGS")? {
+                    self.parse_show_vcs_ref_table("red.tags")
                 } else if self.consume(&Token::Vectors)? || self.consume_ident_ci("VECTORS")? {
                     Ok(SqlCommand::Select(parse_show_collections_by_model(
                         self, "vector",
