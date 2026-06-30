@@ -22,7 +22,6 @@ pub mod tree;
 pub(crate) mod ttl_payload;
 pub mod vcs;
 pub mod vcs_collections;
-pub(crate) mod vcs_payload;
 
 pub use admin::{AdminUseCases, ServerlessAnalyticsWarmupTarget, ServerlessWarmupPlan};
 pub use catalog::CatalogUseCases;
