@@ -2596,7 +2596,7 @@ fn apply_cloud_preset(
             )
             .map_err(|err| format!("attach allow-all policy: {err}"))?;
     }
-    install_cloud_guardrails(runtime, auth_store)?;
+    install_cloud_guardrails(runtime, auth_store, &head_id)?;
     auth_store
         .attach_policy(
             PrincipalRef::User(customer_id),
@@ -2631,6 +2631,7 @@ fn install_allow_all_policy(auth_store: &Arc<AuthStore>) -> Result<(), String> {
 fn install_cloud_guardrails(
     runtime: &RedDBRuntime,
     auth_store: &Arc<AuthStore>,
+    head_admin: &crate::auth::UserId,
 ) -> Result<(), String> {
     use crate::auth::policies::Policy;
     use crate::auth::registry::EvidenceRequirement;
@@ -2647,12 +2648,23 @@ fn install_cloud_guardrails(
                 }},
                 {{
                     "effect": "deny",
+                    "actions": [
+                        "user:delete",
+                        "user:disable",
+                        "user:password:change",
+                        "user:role:update"
+                    ],
+                    "resources": ["user:{head_admin}"]
+                }},
+                {{
+                    "effect": "deny",
                     "actions": ["config:write"],
                     "resources": ["config:{cloud}.*"]
                 }}
             ]
         }}"#,
         id = CLOUD_PROTECT_MANAGED_POLICY,
+        head_admin = head_admin,
         cloud = CLOUD_CONFIG_NAMESPACE,
     ))
     .map_err(|err| format!("compile cloud guardrail policy: {err}"))?;
@@ -3994,6 +4006,71 @@ mod tests {
             crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
             other => panic!("expected Text(cloud), got {other:?}"),
         }
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn cloud_preset_customer_cannot_disable_head_admin_or_drop_guardrail_policy() {
+        use crate::auth::Role;
+        use crate::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
+
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+
+        let bootstrap = BootstrapConfig {
+            preset: Some(PRESET_CLOUD.to_string()),
+            cloud_head_admin: Some("red_admin".to_string()),
+            cloud_head_admin_password: Some("head-pass".to_string()),
+            customer_admin: Some("admin".to_string()),
+            customer_admin_password: Some("customer-pass".to_string()),
+            ..BootstrapConfig::default()
+        };
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset_from_config(&runtime, &auth_store, &bootstrap)
+            .expect("cloud preset applies cleanly");
+        runtime.set_auth_store(Arc::clone(&auth_store));
+
+        set_current_auth_identity("admin".to_string(), Role::Admin);
+        let disable_head = runtime.execute_query("ALTER USER red_admin DISABLE");
+        let drop_guardrail =
+            runtime.execute_query(&format!("DROP POLICY '{}'", CLOUD_PROTECT_MANAGED_POLICY));
+        let create_user = runtime.execute_query("CREATE USER app_user WITH PASSWORD 'p' ROLE read");
+        let disable_user = runtime.execute_query("ALTER USER app_user DISABLE");
+        clear_current_auth_identity();
+
+        let disable_head_err = disable_head.expect_err("customer admin must not disable red_admin");
+        assert!(
+            disable_head_err.to_string().contains("user:disable"),
+            "error should name the denied lifecycle action: {disable_head_err}"
+        );
+        assert!(
+            auth_store
+                .get_user(None, "red_admin")
+                .expect("red_admin should still exist")
+                .enabled,
+            "denied mutation must leave red_admin enabled"
+        );
+
+        let drop_guardrail_err =
+            drop_guardrail.expect_err("customer admin must not drop cloud guardrail policy");
+        assert!(
+            drop_guardrail_err.to_string().contains("managed policy"),
+            "error should name the managed policy guardrail: {drop_guardrail_err}"
+        );
+        assert!(auth_store
+            .get_policy(CLOUD_PROTECT_MANAGED_POLICY)
+            .is_some());
+
+        create_user.expect("customer admin should retain normal create-user authority");
+        disable_user.expect("customer admin should retain normal user-disable authority");
+        assert!(
+            !auth_store
+                .get_user(None, "app_user")
+                .expect("app_user should exist")
+                .enabled,
+            "normal capability should still apply outside the reserved head admin"
+        );
 
         clear_preset_env();
     }
