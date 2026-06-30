@@ -159,6 +159,9 @@ pub enum QueryExpr {
     /// distinct estimates). Both accept an optional table target; omitting the
     /// target iterates every collection.
     MaintenanceCommand(MaintenanceCommand),
+    /// VCS working-set commands: CHECKPOINT, CHECKOUT, RESET, MERGE,
+    /// CHERRY PICK, REVERT, RESOLVE CONFLICT.
+    VcsCommand(VcsCommand),
     /// `CREATE SCHEMA [IF NOT EXISTS] name`
     ///
     /// Phase 1.3 (PG parity): schemas are logical namespaces stored in
@@ -657,6 +660,47 @@ pub enum MaintenanceCommand {
     /// Refreshes planner statistics (histogram, distinct estimates, null counts).
     /// Target `None` re-analyzes every collection.
     Analyze { target: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VcsCommand {
+    Checkpoint {
+        message: String,
+        author: Option<String>,
+    },
+    Checkout {
+        target: String,
+    },
+    Reset {
+        mode: VcsResetMode,
+        target: String,
+    },
+    Merge {
+        branch: String,
+    },
+    CherryPick {
+        commit: String,
+    },
+    Revert {
+        commit: String,
+    },
+    ResolveConflict {
+        key: String,
+        resolution: VcsConflictResolution,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcsResetMode {
+    Hard,
+    Soft,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcsConflictResolution {
+    Ours,
+    Theirs,
 }
 
 /// AST node for `EXPLAIN ALTER FOR <CreateTableStmt> [FORMAT JSON]`.
