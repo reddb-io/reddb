@@ -345,6 +345,7 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::ExplainMigration(_)
         | QueryExpr::EventsBackfill(_)
         | QueryExpr::EventsBackfillStatus { .. } => (None, None),
+        _ => (None, None),
     };
 
     (
