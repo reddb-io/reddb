@@ -1292,6 +1292,7 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
         || config.grpc_bind_addr.is_some()
         || config.http_bind_addr.is_some()
         || config.wire_bind_addr.is_some()
+        || config.wire_tls_bind_addr.is_some()
         || config.pg_bind_addr.is_some();
     if !has_any {
         return Err("at least one server bind address must be configured".into());
@@ -1307,6 +1308,7 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
             (true, false) => "red-server-grpc",
             (false, true) => "red-server-http",
             (false, false) if config.wire_bind_addr.is_some() => "red-server-wire",
+            (false, false) if config.wire_tls_bind_addr.is_some() => "red-server-wire-tls",
             (false, false) => "red-server-pg-wire",
         }
     };
@@ -1377,6 +1379,8 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
         (None, None) => {
             if let Some(wire_addr) = config.wire_bind_addr.clone() {
                 run_wire_only_server(config, wire_addr)
+            } else if let Some(wire_tls_addr) = config.wire_tls_bind_addr.clone() {
+                run_wire_tls_only_server(config, wire_tls_addr)
             } else if let Some(pg_addr) = config.pg_bind_addr.clone() {
                 run_pg_only_server(config, pg_addr)
             } else {
@@ -2018,6 +2022,47 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
         crate::wire::redwire::listener::start_redwire_listener_on(listener, wire_rt)
             .await
             .map_err(|e| e.to_string())
+    })
+}
+
+/// Serve only the TLS RedWire listener (`--wire-tls-bind` with no
+/// explicit plaintext `--wire-bind`, gRPC, or HTTP bind).
+///
+/// Issue #1588: the default router is suppressed whenever
+/// `--wire-tls-bind` is set (see `build_server_config`), so a
+/// TLS-only wire deployment lands here instead of colliding with the
+/// router on port 5050. The TLS listener owns the bind directly.
+#[inline(never)]
+fn run_wire_tls_only_server(
+    config: ServerCommandConfig,
+    wire_tls_addr: String,
+) -> Result<(), String> {
+    let rt_config = detect_runtime_config();
+    let workers = config.workers.unwrap_or(rt_config.suggested_workers);
+    let db_options = config.to_db_options()?;
+    // Resolve TLS material up front so a bad cert/key (or a failed
+    // auto-generation) fails the explicit bind before we open the
+    // runtime.
+    let tls_cfg = resolve_wire_tls_config(&config)?;
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(workers)
+        .thread_stack_size(rt_config.stack_size)
+        .build()
+        .map_err(|err| format!("tokio runtime: {err}"))?;
+
+    let (runtime, _auth_store, _telemetry_guard) =
+        build_runtime_and_auth_store(&config, db_options.clone())?;
+    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
+    let signal_runtime = runtime.clone();
+    tokio_runtime.block_on(async move {
+        spawn_lifecycle_signal_handler(signal_runtime).await;
+        spawn_pg_listener(&config, &runtime);
+        let wire_rt = Arc::new(runtime);
+        crate::wire::start_redwire_tls_listener(&wire_tls_addr, wire_rt, &tls_cfg)
+            .await
+            .map_err(|e| format!("explicit wire-tls listener bind {wire_tls_addr}: {e}"))
     })
 }
 
