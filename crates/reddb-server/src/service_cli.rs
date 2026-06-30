@@ -173,6 +173,15 @@ pub struct BootstrapConfig {
     pub cloud_head_admin_password: Option<String>,
     pub customer_admin: Option<String>,
     pub customer_admin_password: Option<String>,
+    /// `--bootstrap-cert-out <path>` (issue #1589). When set and the
+    /// first-boot self-bootstrap mints an unseal certificate, that
+    /// certificate hex is written to this file (in addition to the
+    /// stdout/stderr emission) so a distroless single-machine init can
+    /// read it back for the subsequent unseal via `REDDB_CERTIFICATE_FILE`
+    /// without scraping machine logs. Written only on the
+    /// bootstrap-creating boot; a re-boot against an existing vault does
+    /// not rewrite it.
+    pub cert_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,6 +535,16 @@ impl BootstrapConfig {
         self.manifest.clone().or_else(|| {
             env_nonempty(crate::cli::bootstrap_manifest::MANIFEST_ENV).map(PathBuf::from)
         })
+    }
+
+    /// Resolve the `--bootstrap-cert-out` target (issue #1589): the CLI
+    /// flag wins, else the `REDDB_BOOTSTRAP_CERT_OUT` env (with its
+    /// `_FILE` companion) — matching the flag/env pattern used by the
+    /// other bootstrap inputs.
+    fn selected_cert_out(&self) -> Option<PathBuf> {
+        self.cert_out
+            .clone()
+            .or_else(|| env_nonempty(BOOTSTRAP_CERT_OUT_ENV).map(PathBuf::from))
     }
 
     /// Classify the auth bootstrap this config would perform, for the
@@ -2350,6 +2369,9 @@ pub(crate) const BOOTSTRAP_FIRST_ADMIN_KEY: &str = "system.bootstrap.first_admin
 /// is canonical; `REDDB_PRESET` remains accepted for compatibility.
 pub(crate) const BOOTSTRAP_PRESET_ENV: &str = "REDDB_BOOTSTRAP_PRESET";
 pub(crate) const PRESET_ENV: &str = "REDDB_PRESET";
+/// Env equivalent of `--bootstrap-cert-out` (issue #1589). Honours the
+/// `_FILE` companion via [`env_nonempty`].
+pub(crate) const BOOTSTRAP_CERT_OUT_ENV: &str = "REDDB_BOOTSTRAP_CERT_OUT";
 pub(crate) const PRESET_SIMPLE: &str = "simple";
 pub(crate) const PRESET_PRODUCTION: &str = "production";
 pub(crate) const PRESET_REGULATED: &str = "regulated";
@@ -2421,18 +2443,24 @@ fn apply_preset_from_config(
         return Ok(());
     }
 
-    let first_admin_id = match preset.as_str() {
+    let (first_admin_id, certificate) = match preset.as_str() {
         PRESET_SIMPLE => {
             // `simple` is the default low-friction preset. Auth knobs
             // remain whatever the CLI/env set; we only persist the
             // bootstrap state so subsequent boots are idempotent.
-            None
+            (None, None)
         }
-        PRESET_PRODUCTION => Some(apply_production_preset_from_config(auth_store, bootstrap)?),
-        PRESET_CLOUD => Some(apply_cloud_preset(runtime, auth_store, bootstrap)?),
+        PRESET_PRODUCTION => {
+            let (id, cert) = apply_production_preset_from_config(auth_store, bootstrap)?;
+            (Some(id), cert)
+        }
+        PRESET_CLOUD => {
+            let (id, cert) = apply_cloud_preset(runtime, auth_store, bootstrap)?;
+            (Some(id), cert)
+        }
         PRESET_REGULATED => {
             apply_regulated_preset(runtime, auth_store)?;
-            None
+            (None, None)
         }
         other => {
             return Err(format!(
@@ -2441,15 +2469,45 @@ fn apply_preset_from_config(
         }
     };
 
+    // Issue #1589 — write the freshly minted unseal certificate to the
+    // caller-specified file so a distroless single-machine init can read
+    // it back for the next boot's `REDDB_CERTIFICATE_FILE` unseal. This
+    // path runs only on the bootstrap-creating boot (the completion
+    // marker short-circuits above before any cert is minted), so the file
+    // is written exactly once and a re-boot never churns it.
+    if let Some(cert) = certificate.as_deref() {
+        write_bootstrap_certificate(bootstrap, cert)?;
+    }
+
     persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref());
     tracing::info!(preset = %preset, "bootstrap preset applied");
+    Ok(())
+}
+
+/// Write the unseal certificate to `--bootstrap-cert-out` when that
+/// target is set (issue #1589). No-op when the flag/env is absent, so
+/// the certificate is still emitted on stderr by the preset as before.
+fn write_bootstrap_certificate(
+    bootstrap: &BootstrapConfig,
+    certificate_hex: &str,
+) -> Result<(), String> {
+    let Some(path) = bootstrap.selected_cert_out() else {
+        return Ok(());
+    };
+    std::fs::write(&path, certificate_hex)
+        .map_err(|err| format!("write --bootstrap-cert-out {}: {err}", path.display()))?;
+    tracing::info!(
+        target: "reddb::bootstrap",
+        path = %path.display(),
+        "first-boot self-bootstrap: wrote unseal certificate to --bootstrap-cert-out (consume via REDDB_CERTIFICATE_FILE on the next boot)"
+    );
     Ok(())
 }
 
 fn apply_production_preset_from_config(
     auth_store: &Arc<AuthStore>,
     bootstrap: &BootstrapConfig,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     use crate::auth::store::PrincipalRef;
     use crate::auth::UserId;
 
@@ -2468,7 +2526,8 @@ fn apply_production_preset_from_config(
     let result = auth_store
         .bootstrap(&username, &password)
         .map_err(|err| format!("bootstrap first admin: {err}"))?;
-    if let Some(cert) = result.certificate.as_deref() {
+    let certificate = result.certificate.clone();
+    if let Some(cert) = certificate.as_deref() {
         eprintln!("[reddb] CERTIFICATE: {}", cert);
         tracing::warn!(
             "vault certificate issued by REDDB_PRESET=production -- save it and update the runtime secret before restart"
@@ -2487,14 +2546,14 @@ fn apply_production_preset_from_config(
         )
         .map_err(|err| format!("attach allow-all policy: {err}"))?;
 
-    Ok(first_admin.to_string())
+    Ok((first_admin.to_string(), certificate))
 }
 
 fn apply_cloud_preset(
     runtime: &RedDBRuntime,
     auth_store: &Arc<AuthStore>,
     bootstrap: &BootstrapConfig,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     use crate::auth::store::PrincipalRef;
     use crate::auth::{Role, UserId};
 
@@ -2520,6 +2579,7 @@ fn apply_cloud_preset(
     let head = auth_store
         .bootstrap_system_admin(&head_username, &head_password)
         .map_err(|err| format!("bootstrap cloud head admin: {err}"))?;
+    let certificate = head.certificate.clone();
     let head_id = UserId::platform(head.user.username.clone());
 
     auth_store
@@ -2544,7 +2604,7 @@ fn apply_cloud_preset(
         )
         .map_err(|err| format!("attach cloud guardrail policy: {err}"))?;
 
-    Ok(head_id.to_string())
+    Ok((head_id.to_string(), certificate))
 }
 
 fn install_allow_all_policy(auth_store: &Arc<AuthStore>) -> Result<(), String> {

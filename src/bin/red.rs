@@ -3431,6 +3431,13 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 ),
                 cli::types::FlagSchema::new("customer-admin-password-file")
                     .with_description("File containing cloud customer admin password"),
+                cli::types::FlagSchema::new("bootstrap-cert-out").with_description(
+                    "Write the first-boot unseal certificate to this file (e.g. \
+                     /run/reddb/cert.pem) in addition to stderr, so a distroless init \
+                     can read it back for the next boot's REDDB_CERTIFICATE_FILE unseal. \
+                     Written only on the bootstrap-creating boot; a re-boot against the \
+                     existing vault does not rewrite it.",
+                ),
                 cli::types::FlagSchema::boolean("ui").with_description(
                     "Serve the pinned red-ui bundle as static assets on the HTTP surface \
                      (reach is governed by the bind address; default localhost)",
@@ -4117,6 +4124,10 @@ fn build_bootstrap_config(flags: &HashMap<String, FlagValue>) -> Result<Bootstra
             "customer-admin-password",
             "customer-admin-password-file",
         )?,
+        cert_out: flag_string(flags, "bootstrap-cert-out")
+            .filter(|value| !value.is_empty())
+            .or_else(|| env_string("REDDB_BOOTSTRAP_CERT_OUT"))
+            .map(PathBuf::from),
     })
 }
 
