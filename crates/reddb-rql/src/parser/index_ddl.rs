@@ -2,7 +2,7 @@
 
 use super::error::ParseError;
 use super::Parser;
-use crate::ast::{CreateIndexQuery, DropIndexQuery, IndexMethod, QueryExpr};
+use crate::ast::{CreateIndexQuery, DropIndexQuery, IndexMethod, QueryExpr, DEFAULT_H3_RESOLUTION};
 use crate::lexer::Token;
 
 impl<'a> Parser<'a> {
@@ -76,11 +76,17 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse index method identifier: HASH | BTREE | BITMAP | RTREE.
+    /// Parse index method identifier: HASH | BTREE | BITMAP | RTREE | H3.
     /// `HASH` is also a reserved keyword token, so we match both the
     /// keyword form and the ident form — otherwise `USING HASH`
     /// fails with "Unexpected token: HASH" even though the parser
     /// lists HASH as an expected option.
+    ///
+    /// `H3` additionally accepts an optional parenthesised resolution
+    /// (`USING H3 (12)`); when omitted it defaults to
+    /// [`DEFAULT_H3_RESOLUTION`]. The column list is already consumed
+    /// before `USING`, so the trailing `(...)` is unambiguously the
+    /// resolution argument.
     fn parse_index_method(&mut self) -> Result<IndexMethod, ParseError> {
         let peeked = self.peek().clone();
         if matches!(peeked, Token::Hash) {
@@ -89,7 +95,13 @@ impl<'a> Parser<'a> {
         }
         match peeked {
             Token::Ident(ref name) => {
-                let method = match name.to_ascii_uppercase().as_str() {
+                let upper = name.to_ascii_uppercase();
+                if upper == "H3" {
+                    self.advance()?;
+                    let resolution = self.parse_h3_resolution_opt()?;
+                    return Ok(IndexMethod::H3 { resolution });
+                }
+                let method = match upper.as_str() {
                     "HASH" => IndexMethod::Hash,
                     "BTREE" => IndexMethod::BTree,
                     "BITMAP" => IndexMethod::Bitmap,
@@ -97,7 +109,7 @@ impl<'a> Parser<'a> {
                     _ => {
                         return Err(ParseError::new(
                             format!(
-                                "unknown index method '{}', expected HASH, BTREE, BITMAP, or RTREE",
+                                "unknown index method '{}', expected HASH, BTREE, BITMAP, RTREE, or H3",
                                 name
                             ),
                             self.position(),
@@ -108,11 +120,34 @@ impl<'a> Parser<'a> {
                 Ok(method)
             }
             other => Err(ParseError::expected(
-                vec!["HASH", "BTREE", "BITMAP", "RTREE"],
+                vec!["HASH", "BTREE", "BITMAP", "RTREE", "H3"],
                 &other,
                 self.position(),
             )),
         }
+    }
+
+    /// Parse the optional `(resolution)` argument that follows `USING H3`.
+    /// Resolution must be an integer in H3's valid `0..=15` range; absence
+    /// of the parenthesised argument yields [`DEFAULT_H3_RESOLUTION`].
+    fn parse_h3_resolution_opt(&mut self) -> Result<u8, ParseError> {
+        if !self.consume(&Token::LParen)? {
+            return Ok(DEFAULT_H3_RESOLUTION);
+        }
+        let resolution = match self.peek().clone() {
+            Token::Integer(n) if (0..=15).contains(&n) => {
+                self.advance()?;
+                n as u8
+            }
+            other => {
+                return Err(ParseError::new(
+                    format!("H3 resolution must be an integer 0..=15, got {other:?}"),
+                    self.position(),
+                ));
+            }
+        };
+        self.expect(Token::RParen)?;
+        Ok(resolution)
     }
 
     fn parse_index_column_path(&mut self) -> Result<String, ParseError> {
@@ -202,6 +237,41 @@ mod tests {
             ));
             assert_eq!(query.method, expected);
         }
+    }
+
+    #[test]
+    fn parse_create_index_using_h3_defaults_resolution() {
+        let query = parse_create_index("CREATE INDEX idx_loc ON places (loc) USING H3");
+        assert_eq!(query.name, "idx_loc");
+        assert_eq!(query.table, "places");
+        assert_eq!(query.columns, vec!["loc"]);
+        assert_eq!(
+            query.method,
+            IndexMethod::H3 {
+                resolution: DEFAULT_H3_RESOLUTION
+            }
+        );
+    }
+
+    #[test]
+    fn parse_create_index_using_h3_explicit_resolution() {
+        let query = parse_create_index("CREATE INDEX idx_loc ON places (loc) USING H3 (12)");
+        assert_eq!(query.method, IndexMethod::H3 { resolution: 12 });
+
+        // Lowercase method ident is accepted too.
+        let query = parse_create_index("CREATE INDEX idx_loc ON places (loc) USING h3 (0)");
+        assert_eq!(query.method, IndexMethod::H3 { resolution: 0 });
+    }
+
+    #[test]
+    fn parse_create_index_using_h3_rejects_out_of_range_resolution() {
+        let mut p = parser("CREATE INDEX idx ON places (loc) USING H3 (16)");
+        p.expect(Token::Create).expect("CREATE");
+        let err = p.parse_create_index_query().unwrap_err();
+        assert!(
+            err.to_string().contains("H3 resolution must be an integer"),
+            "{err}"
+        );
     }
 
     #[test]

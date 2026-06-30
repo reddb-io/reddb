@@ -1120,7 +1120,7 @@ impl RegisteredIndex {
         match self.method {
             IndexMethodKind::Hash => std::borrow::Cow::Borrowed(self.name.as_str()),
             IndexMethodKind::BTree => std::borrow::Cow::Owned(format!("{}_hash", self.name)),
-            IndexMethodKind::Bitmap | IndexMethodKind::Spatial => {
+            IndexMethodKind::Bitmap | IndexMethodKind::Spatial | IndexMethodKind::H3 { .. } => {
                 std::borrow::Cow::Borrowed(self.name.as_str())
             }
         }
@@ -1133,7 +1133,23 @@ pub enum IndexMethodKind {
     Bitmap,
     Spatial,
     BTree,
+    /// H3 spatial index: the geo column's `(lat, lon)` is encoded to a
+    /// single H3 cell-id and stored in the sorted (disk-paged B-tree)
+    /// index, exactly like a single-column `BTree` index but with an
+    /// integer cell key in place of the raw column value. `resolution`
+    /// is the H3 grid level (0..=15). RAM stays O(working set), not
+    /// O(points) — no separate resident structure (PRD #1574, #1576).
+    H3 {
+        resolution: u8,
+    },
 }
+
+/// Default H3 resolution used when reconstructing an H3 index kind from
+/// the incremental-maintainer mirror, which does not carry the
+/// resolution. Mirrors `reddb_rql::ast::DEFAULT_H3_RESOLUTION`; the
+/// authoritative resolution is always persisted in the index registry,
+/// so this default is only a structural placeholder.
+pub(crate) const DEFAULT_H3_RESOLUTION: u8 = 9;
 
 /// Unified index store aggregating all secondary index managers.
 pub struct IndexStore {
@@ -1217,6 +1233,16 @@ impl IndexStore {
                 // Spatial indexing happens via insert with lat/lon
                 Ok(0)
             }
+            IndexMethodKind::H3 { resolution } => {
+                // Encode each existing row's geo column to its H3 cell-id
+                // and build a sorted (disk-paged B-tree) index over those
+                // u64 keys — identical machinery to a single-column BTree,
+                // only the stored key is the cell-id rather than the raw
+                // GeoPoint. No resident HashMap / R-tree is allocated.
+                let cell_entities = derive_h3_cell_entities(entities, col, resolution);
+                let count = self.sorted.build_index(collection, col, &cell_entities);
+                Ok(count)
+            }
             IndexMethodKind::BTree => {
                 // Multi-column BTree → composite sorted index.
                 // `CREATE INDEX idx_cc ON users (city, age) USING BTREE`
@@ -1274,7 +1300,10 @@ impl IndexStore {
                     let col = info.columns.first().map(|s| s.as_str()).unwrap_or("");
                     self.spatial.drop_index(collection, col)
                 }
-                IndexMethodKind::BTree => false,
+                // Sorted-backed indexes (BTree / H3) are removed from the
+                // registry above; the sorted manager has no per-index drop
+                // (mirrors the pre-existing BTree behaviour).
+                IndexMethodKind::BTree | IndexMethodKind::H3 { .. } => false,
             };
             true
         } else {
@@ -1362,10 +1391,11 @@ impl IndexStore {
                 .index_stats(&index.collection, &index.name)
                 .map(|stats| stats.total_entries as u64)
                 .unwrap_or(0),
-            IndexMethodKind::BTree => self
-                .sorted
-                .entry_count(&index.collection, &index.columns)
-                .unwrap_or(0) as u64,
+            IndexMethodKind::BTree | IndexMethodKind::H3 { .. } => {
+                self.sorted
+                    .entry_count(&index.collection, &index.columns)
+                    .unwrap_or(0) as u64
+            }
             IndexMethodKind::Bitmap => index
                 .columns
                 .first()
@@ -1504,6 +1534,11 @@ impl IndexStore {
                                 .insert(collection, hash_name, key, *entity_id)
                                 .map_err(|err| err.to_string())?;
                         }
+                        IndexMethodKind::H3 { resolution } => {
+                            if let Some(cell) = h3_cell_value(value.as_ref(), resolution) {
+                                self.sorted.insert_one(collection, col, &cell, *entity_id);
+                            }
+                        }
                         IndexMethodKind::Spatial => {}
                     }
                 }
@@ -1562,6 +1597,16 @@ impl IndexStore {
                             .insert(collection, &format!("{}_hash", idx.name), key, entity_id)
                             .map_err(|err| err.to_string())?;
                     }
+                    IndexMethodKind::H3 { resolution } => {
+                        if !self.sorted.has_index(collection, col) {
+                            return Err(format!(
+                                "sorted index for collection '{collection}' column '{col}' was not found"
+                            ));
+                        }
+                        if let Some(cell) = h3_cell_value(value.as_ref(), resolution) {
+                            self.sorted.insert_one(collection, col, &cell, entity_id);
+                        }
+                    }
                     IndexMethodKind::Spatial => {}
                 }
             }
@@ -1619,6 +1664,11 @@ impl IndexStore {
                             &key,
                             entity_id,
                         );
+                    }
+                    IndexMethodKind::H3 { resolution } => {
+                        if let Some(cell) = h3_cell_value(value.as_ref(), resolution) {
+                            self.sorted.delete_one(collection, col, &cell, entity_id);
+                        }
                     }
                     IndexMethodKind::Spatial => {}
                 }
@@ -1772,6 +1822,9 @@ impl From<IndexMethodKind> for IncMethodKind {
             IndexMethodKind::Bitmap => IncMethodKind::Bitmap,
             IndexMethodKind::Spatial => IncMethodKind::Spatial,
             IndexMethodKind::BTree => IncMethodKind::BTree,
+            // The maintainer mirror doesn't carry the H3 resolution; the
+            // sorted half is maintained via `index_entity_insert`.
+            IndexMethodKind::H3 { .. } => IncMethodKind::H3,
         }
     }
 }
@@ -1783,6 +1836,11 @@ impl From<IncMethodKind> for IndexMethodKind {
             IncMethodKind::Bitmap => IndexMethodKind::Bitmap,
             IncMethodKind::Spatial => IndexMethodKind::Spatial,
             IncMethodKind::BTree => IndexMethodKind::BTree,
+            // Resolution isn't carried by the mirror — placeholder only;
+            // the authoritative resolution lives in the index registry.
+            IncMethodKind::H3 => IndexMethodKind::H3 {
+                resolution: DEFAULT_H3_RESOLUTION,
+            },
         }
     }
 }
@@ -1821,7 +1879,10 @@ impl SecondaryIndexBackend for IndexStore {
                     .insert(collection, &aux, key.to_vec(), row_id)
                     .map_err(|e| e.to_string())
             }
-            IncMethodKind::Spatial => Ok(()),
+            // H3 has no auxiliary hash side-pocket; its sorted half is
+            // maintained by `index_entity_insert` (which has the raw
+            // GeoPoint Value + resolution). Spatial is likewise a no-op.
+            IncMethodKind::Spatial | IncMethodKind::H3 => Ok(()),
         }
     }
 
@@ -1844,7 +1905,7 @@ impl SecondaryIndexBackend for IndexStore {
                 let aux = format!("{}_hash", idx.name);
                 let _ = self.hash.remove(collection, &aux, key, row_id);
             }
-            IncMethodKind::Spatial => {}
+            IncMethodKind::Spatial | IncMethodKind::H3 => {}
         }
     }
 }
@@ -1928,6 +1989,51 @@ fn derive_index_entities_for_column(
         .collect()
 }
 
+/// Encode a geo column value to its H3 cell-id at `resolution`, wrapped
+/// as a `Value::UnsignedInteger` so it stores and range-scans through the
+/// ordinary sorted-index machinery. Mirrors the `H3_INDEX` RQL scalar
+/// (slice 1), which also yields an `UnsignedInteger`, so the index key
+/// family matches the query side.
+///
+/// Returns `None` when the value is not a `GeoPoint`, or when the
+/// coordinate fails to encode (`lat_lng_to_cell` returns the `0`
+/// sentinel) — those rows are simply absent from the index, exactly as
+/// an `Unsupported` value is absent from a BTree index.
+fn h3_cell_value(value: &Value, resolution: u8) -> Option<Value> {
+    let (lat, lon) = match value {
+        Value::GeoPoint(lat_micro, lon_micro) => (
+            crate::geo::micro_to_deg(*lat_micro),
+            crate::geo::micro_to_deg(*lon_micro),
+        ),
+        _ => return None,
+    };
+    let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
+    if cell == 0 {
+        return None;
+    }
+    Some(Value::UnsignedInteger(cell))
+}
+
+/// Build the `(entity, [(column, cell-id)])` rows for an H3 index from a
+/// collection's existing entities: resolve each row's geo column, encode
+/// it to its cell-id, and skip rows whose column is absent or not a geo
+/// point. The resulting rows feed `SortedIndexManager::build_index`
+/// unchanged.
+fn derive_h3_cell_entities(
+    entities: &[(EntityId, Vec<(String, Value)>)],
+    column: &str,
+    resolution: u8,
+) -> Vec<(EntityId, Vec<(String, Value)>)> {
+    entities
+        .iter()
+        .filter_map(|(entity_id, fields)| {
+            let value = index_field_value(fields, column)?;
+            let cell = h3_cell_value(value.as_ref(), resolution)?;
+            Some((*entity_id, vec![(column.to_string(), cell)]))
+        })
+        .collect()
+}
+
 /// Convert a Value to bytes for index key
 fn value_to_bytes(value: &Value) -> Vec<u8> {
     match value {
@@ -1946,6 +2052,64 @@ mod tests {
 
     fn ids(values: &[EntityId]) -> Vec<u64> {
         values.iter().map(|id| id.raw()).collect()
+    }
+
+    #[test]
+    fn h3_cell_value_encodes_geopoint_to_unsigned_cell() {
+        // Paris (Notre-Dame). i32 micro-degrees.
+        let paris = Value::GeoPoint(48_856_600, 2_352_200);
+        let cell = h3_cell_value(&paris, 9).expect("geopoint must encode to a cell");
+        match cell {
+            Value::UnsignedInteger(n) => {
+                assert_ne!(n, 0, "valid coordinate must not yield the 0 sentinel");
+                assert_eq!(
+                    n,
+                    crate::geo::h3::lat_lng_to_cell(48.8566, 2.3522, 9),
+                    "index key must match the slice-1 encode of the same point"
+                );
+            }
+            other => panic!("expected UnsignedInteger cell, got {other:?}"),
+        }
+
+        // Finer resolution yields a different (child) cell id.
+        let fine = h3_cell_value(&paris, 12).unwrap();
+        assert_ne!(
+            fine, cell,
+            "a finer resolution must produce a distinct cell"
+        );
+    }
+
+    #[test]
+    fn h3_cell_value_rejects_non_geopoint() {
+        assert!(h3_cell_value(&Value::Integer(5), 9).is_none());
+        assert!(h3_cell_value(&Value::text("48.8,2.3".to_string()), 9).is_none());
+    }
+
+    #[test]
+    fn derive_h3_cell_entities_skips_missing_and_non_geo_rows() {
+        let entities = vec![
+            (
+                EntityId::new(1),
+                vec![("loc".to_string(), Value::GeoPoint(48_856_600, 2_352_200))],
+            ),
+            // No `loc` column — skipped.
+            (
+                EntityId::new(2),
+                vec![("id".to_string(), Value::Integer(2))],
+            ),
+            // `loc` present but not a geo point — skipped.
+            (
+                EntityId::new(3),
+                vec![("loc".to_string(), Value::Integer(0))],
+            ),
+        ];
+        let derived = derive_h3_cell_entities(&entities, "loc", 9);
+        assert_eq!(derived.len(), 1, "only the valid geo row is indexed");
+        assert_eq!(derived[0].0, EntityId::new(1));
+        assert!(matches!(
+            derived[0].1.first(),
+            Some((c, Value::UnsignedInteger(_))) if c == "loc"
+        ));
     }
 
     #[test]
