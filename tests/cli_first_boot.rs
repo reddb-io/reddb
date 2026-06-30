@@ -452,9 +452,10 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
     );
 }
 
-/// Issue #1589 — `--bootstrap-cert-out` is documented in `red server --help`.
+/// Issue #1592 — first-boot flags and idempotency are documented in
+/// `red server --help`.
 #[test]
-fn server_help_documents_bootstrap_cert_out() {
+fn server_help_documents_first_boot_flags_and_idempotency() {
     let output = Command::new(red_binary())
         .args(["server", "--help"])
         .stdin(Stdio::null())
@@ -468,5 +469,17 @@ fn server_help_documents_bootstrap_cert_out() {
     assert!(
         help.contains("--bootstrap-cert-out"),
         "red server --help must document --bootstrap-cert-out.\nhelp:\n{help}"
+    );
+    assert!(
+        help.contains("manifest-driven first boot"),
+        "red server --help must explain manifest-driven first boot.\nhelp:\n{help}"
+    );
+    assert!(
+        help.contains("idempotent"),
+        "red server --help must document idempotent re-boot behavior.\nhelp:\n{help}"
+    );
+    assert!(
+        help.contains("REDDB_CERTIFICATE_FILE"),
+        "red server --help must connect cert capture to REDDB_CERTIFICATE_FILE.\nhelp:\n{help}"
     );
 }
