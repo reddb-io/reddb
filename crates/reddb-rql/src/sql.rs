@@ -1640,7 +1640,9 @@ fn is_vcs_command_head(name: &str) -> bool {
         || name.eq_ignore_ascii_case("MERGE")
         || name.eq_ignore_ascii_case("CHERRY")
         || name.eq_ignore_ascii_case("REVERT")
-        || name.eq_ignore_ascii_case("RESOLVE")
+    // NOTE: RESOLVE is intentionally excluded here — it is shared with the
+    // config surface (`RESOLVE CONFIG …`). The VCS `RESOLVE CONFLICT` shape is
+    // dispatched by a dedicated arm that peeks for the CONFLICT keyword.
 }
 
 impl SqlCommand {
@@ -2373,7 +2375,15 @@ impl<'a> Parser<'a> {
                     || name.eq_ignore_ascii_case("DECR")
                     || name.eq_ignore_ascii_case("INVALIDATE") =>
             {
-                if matches!(
+                // `RESOLVE CONFLICT …` is the VCS working-set verb, not config
+                // resolution — route it to the SQL/VCS command surface.
+                if name.eq_ignore_ascii_case("RESOLVE")
+                    && matches!(self.peek_next()?, Token::Ident(next) if next.eq_ignore_ascii_case("CONFLICT"))
+                {
+                    self.parse_sql_command()
+                        .map(SqlCommand::into_statement)
+                        .map(FrontendStatement::Sql)
+                } else if matches!(
                     self.peek_next()?,
                     Token::Ident(next) if next.eq_ignore_ascii_case("VAULT")
                 ) {
@@ -2658,9 +2668,9 @@ impl<'a> Parser<'a> {
                 VcsResetMode::Hard
             } else if self.consume_ident_ci("SOFT")? {
                 VcsResetMode::Soft
-            } else if self.consume_ident_ci("MIXED")? {
-                VcsResetMode::Mixed
             } else {
+                // MIXED is the default; consume the optional explicit keyword.
+                let _ = self.consume_ident_ci("MIXED")?;
                 VcsResetMode::Mixed
             };
             self.expect(Token::To)?;
@@ -3880,6 +3890,12 @@ impl<'a> Parser<'a> {
                 ))
             }
             Token::Ident(name) if is_vcs_command_head(name) => {
+                self.parse_vcs_command().map(SqlCommand::Vcs)
+            }
+            // RESOLVE CONFLICT is the VCS working-set verb. The frontend only
+            // routes RESOLVE here when CONFLICT follows; plain RESOLVE / RESOLVE
+            // CONFIG stays on the config surface and never reaches this arm.
+            Token::Ident(name) if name.eq_ignore_ascii_case("RESOLVE") => {
                 self.parse_vcs_command().map(SqlCommand::Vcs)
             }
             Token::Set => {

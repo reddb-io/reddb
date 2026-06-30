@@ -2175,6 +2175,12 @@ fn parse_runtime_vcs_command(query: &str) -> Option<RedDBResult<RuntimeVcsComman
         })());
     }
     if let Some(rest) = strip_keyword_ci(trimmed, "RESOLVE") {
+        // Only `RESOLVE CONFLICT …` is a VCS working-set verb. Plain RESOLVE /
+        // `RESOLVE CONFIG …` (config secret resolution) must fall through to the
+        // normal query surface — mirror the RESET/TENANT disambiguation above.
+        if strip_keyword_ci(rest, "CONFLICT").is_none() {
+            return None;
+        }
         return Some((|| {
             let rest = strip_keyword_ci(rest, "CONFLICT")
                 .ok_or_else(|| RedDBError::Query("expected CONFLICT in RESOLVE".to_string()))?;
