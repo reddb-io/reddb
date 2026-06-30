@@ -650,6 +650,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::ExplainMigration(_) => "explain_migration",
         QueryExpr::EventsBackfill(_) => "events_backfill",
         QueryExpr::EventsBackfillStatus { .. } => "events_backfill_status",
+        _ => "command",
     }
 }
 
