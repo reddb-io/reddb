@@ -343,15 +343,20 @@ pub(crate) fn current_secret_value(path: &str) -> Option<String> {
                 .map(|store| store.vault_kv_snapshot());
         }
         let values = resolver.values.as_ref()?;
-        values.get(&key).cloned().or_else(|| {
+        secret_value_from_snapshot(values, &key).or_else(|| {
             key.strip_prefix("red.vault/").and_then(|rest| {
-                values
-                    .get(rest)
-                    .cloned()
-                    .or_else(|| values.get(&format!("red.secret.{rest}")).cloned())
+                secret_value_from_snapshot(values, rest)
+                    .or_else(|| secret_value_from_snapshot(values, &format!("red.secret.{rest}")))
             })
         })
     })
+}
+
+fn secret_value_from_snapshot(values: &HashMap<String, String>, key: &str) -> Option<String> {
+    if key.starts_with("red.secret.") {
+        return None;
+    }
+    values.get(key).cloned()
 }
 
 struct SecretResolver {
@@ -436,6 +441,53 @@ pub(crate) fn update_current_secret_value(path: &str, value: Option<String>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_secret_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
+        CURRENT_SECRET_RESOLVER.with(|cell| {
+            cell.replace(Some(SecretResolver {
+                store: None,
+                values: Some(values),
+            }));
+        });
+        let result = f();
+        CURRENT_SECRET_RESOLVER.with(|cell| {
+            cell.replace(None);
+        });
+        result
+    }
+
+    #[test]
+    fn current_secret_value_does_not_fall_back_to_reserved_red_secret_namespace() {
+        let values = HashMap::from([
+            (
+                "red.secret.aes_key".to_string(),
+                "vault-aes-key".to_string(),
+            ),
+            (
+                "red.secret.ai.anthropic.default.api_key".to_string(),
+                "provider-key".to_string(),
+            ),
+            ("acme.key".to_string(), "user-value".to_string()),
+        ]);
+
+        with_secret_values(values, || {
+            assert_eq!(current_secret_value("red.vault/aes_key"), None);
+            assert_eq!(current_secret_value("red.vault/red.secret.aes_key"), None);
+            assert_eq!(
+                current_secret_value("red.vault/ai.anthropic.default.api_key"),
+                None
+            );
+            assert_eq!(
+                current_secret_value("red.vault/acme.key").as_deref(),
+                Some("user-value")
+            );
+        });
+    }
 }
 
 fn latest_config_snapshot(db: &RedDB) -> HashMap<String, Value> {

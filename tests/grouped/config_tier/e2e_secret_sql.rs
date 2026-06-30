@@ -72,9 +72,19 @@ fn set_secret_persists_to_vault_and_show_masks_value() {
         "vault keys after SET SECRET: {:?}",
         auth.vault_kv_keys()
     );
+    auth.vault_kv_try_set(
+        "red.secret.aes_key".to_string(),
+        "vault-aes-key".to_string(),
+    )
+    .expect("seed internal red.secret key");
+    auth.vault_kv_try_set(
+        "red.config.ai.default.provider".to_string(),
+        "anthropic".to_string(),
+    )
+    .expect("seed internal red.config key");
 
     let result = rt
-        .execute_query("SHOW SECRET mycompany.stripe")
+        .execute_query("SHOW SECRETS")
         .expect("SHOW SECRET should succeed");
     assert_eq!(result.result.records.len(), 1);
     let record = &result.result.records[0];
@@ -272,67 +282,58 @@ fn dollar_secret_reference_masks_projection_and_resolves_in_filter() {
 }
 
 #[test]
-fn dollar_red_secret_reference_uses_full_red_secret_path() {
-    let (_path, rt, _auth) = open_runtime_with_vault("secret_sql_dollar_red_ref");
+fn dollar_secret_reference_does_not_resolve_reserved_red_secret_namespace() {
+    let (_path, rt, auth) = open_runtime_with_vault("secret_sql_dollar_reserved_red_ref");
 
     rt.execute_query("CREATE TABLE tokens (id INT, token TEXT)")
         .expect("create table");
-    rt.execute_query("INSERT INTO tokens (id, token) VALUES (1, 'red-match'), (2, 'other')")
+    rt.execute_query("INSERT INTO tokens (id, token) VALUES (1, 'user-match'), (2, 'other')")
         .expect("insert rows");
-    rt.execute_query("SET SECRET red.secret.tokens.active = 'red-match'")
-        .expect("set red secret");
+    rt.execute_query("SET SECRET acme.key = 'user-match'")
+        .expect("set user secret");
+    auth.vault_kv_try_set(
+        "red.secret.aes_key".to_string(),
+        "vault-aes-key".to_string(),
+    )
+    .expect("seed internal AES key");
+    auth.vault_kv_try_set(
+        "red.secret.ai.anthropic.default.api_key".to_string(),
+        "provider-key".to_string(),
+    )
+    .expect("seed internal provider key");
+
+    let aes_alias = rt
+        .execute_query("SELECT $secret.aes_key AS secret_value FROM tokens LIMIT 1")
+        .expect("project AES alias");
+    assert_eq!(
+        aes_alias.result.records[0].get("secret_value"),
+        Some(&Value::Null)
+    );
+    let explicit_reserved = rt
+        .execute_query("SELECT $secret.red.secret.aes_key AS secret_value FROM tokens LIMIT 1")
+        .expect("project explicit reserved secret");
+    assert_eq!(
+        explicit_reserved.result.records[0].get("secret_value"),
+        Some(&Value::Null)
+    );
+    let provider_key = rt
+        .execute_query(
+            "SELECT $secret.ai.anthropic.default.api_key AS secret_value FROM tokens LIMIT 1",
+        )
+        .expect("project provider secret");
+    assert_eq!(
+        provider_key.result.records[0].get("secret_value"),
+        Some(&Value::Null)
+    );
 
     let filtered = rt
-        .execute_query("SELECT id FROM tokens WHERE token = $red.secret.tokens.active")
-        .expect("filter by red secret");
+        .execute_query("SELECT id FROM tokens WHERE token = $secret.acme.key")
+        .expect("filter by user secret");
     assert_eq!(filtered.result.records.len(), 1);
     assert_eq!(
         filtered.result.records[0].get("id"),
         Some(&Value::Integer(1))
     );
-}
-
-#[test]
-fn red_secrets_plural_alias_normalizes_to_red_secret() {
-    let (_path, rt, auth) = open_runtime_with_vault("secret_sql_red_secrets_plural");
-
-    rt.execute_query("CREATE TABLE tokens (id INT, token TEXT)")
-        .expect("create table");
-    rt.execute_query("INSERT INTO tokens (id, token) VALUES (1, 'plural-match'), (2, 'other')")
-        .expect("insert rows");
-    rt.execute_query("SET SECRET red.secrets.tokens.active = 'plural-match'")
-        .expect("set plural red secret");
-
-    assert_eq!(
-        auth.vault_kv_get("red.secret.tokens.active").as_deref(),
-        Some("plural-match")
-    );
-    assert!(
-        auth.vault_kv_get("red.secrets.tokens.active").is_none(),
-        "plural alias should not create a second physical namespace"
-    );
-
-    let shown = rt
-        .execute_query("SHOW SECRETS red.secrets.tokens")
-        .expect("show plural red secrets");
-    assert_eq!(shown.result.records.len(), 1);
-    assert_eq!(
-        shown.result.records[0].get("key"),
-        Some(&Value::Text("red.secret.tokens.active".into()))
-    );
-
-    let filtered = rt
-        .execute_query("SELECT id FROM tokens WHERE token = $red.secrets.tokens.active")
-        .expect("filter by plural red secret");
-    assert_eq!(filtered.result.records.len(), 1);
-    assert_eq!(
-        filtered.result.records[0].get("id"),
-        Some(&Value::Integer(1))
-    );
-
-    rt.execute_query("DELETE SECRET red.secrets.tokens.active")
-        .expect("delete plural red secret");
-    assert!(auth.vault_kv_get("red.secret.tokens.active").is_none());
 }
 
 #[test]
