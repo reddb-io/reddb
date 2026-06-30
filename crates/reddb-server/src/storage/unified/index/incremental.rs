@@ -63,6 +63,11 @@ pub enum IndexMethodKind {
     Bitmap,
     Spatial,
     BTree,
+    /// H3 spatial index (cell-id `u64` stored in the sorted B-tree).
+    /// The maintainer mirror does not carry the resolution — the
+    /// sorted half is maintained through `index_entity_insert`, which
+    /// reads the resolution from the runtime `IndexMethodKind::H3`.
+    H3,
 }
 
 /// One incremental change to a single secondary index.

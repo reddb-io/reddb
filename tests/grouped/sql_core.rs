@@ -15,6 +15,9 @@ mod e2e_composite_index;
 #[path = "mvcc_transactions/e2e_cross_model_tx.rs"]
 mod e2e_cross_model_tx;
 
+#[path = "schema_query_core/e2e_h3_index.rs"]
+mod e2e_h3_index;
+
 #[path = "locking_concurrency/e2e_ddl_concurrency.rs"]
 mod e2e_ddl_concurrency;
 

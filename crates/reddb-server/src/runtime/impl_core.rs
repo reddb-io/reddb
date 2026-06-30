@@ -1022,21 +1022,47 @@ fn named_bool(
     }
 }
 
+fn named_i64(
+    named: &std::collections::HashMap<String, crate::storage::schema::Value>,
+    key: &str,
+) -> Option<i64> {
+    match named.get(key) {
+        Some(crate::storage::schema::Value::Integer(value)) => Some(*value),
+        _ => None,
+    }
+}
+
 fn index_method_kind_as_str(method: super::index_store::IndexMethodKind) -> &'static str {
     match method {
         super::index_store::IndexMethodKind::Hash => "hash",
         super::index_store::IndexMethodKind::Bitmap => "bitmap",
         super::index_store::IndexMethodKind::Spatial => "spatial",
         super::index_store::IndexMethodKind::BTree => "btree",
+        // The H3 resolution rides in a sibling `resolution` column of the
+        // persisted descriptor; the method tag itself is just "h3".
+        super::index_store::IndexMethodKind::H3 { .. } => "h3",
     }
 }
 
-fn index_method_kind_from_str(raw: &str) -> Option<super::index_store::IndexMethodKind> {
+/// The H3 resolution to persist for an index. Non-H3 kinds persist `0`,
+/// which the rehydrate path ignores.
+fn index_method_kind_resolution(method: super::index_store::IndexMethodKind) -> u8 {
+    match method {
+        super::index_store::IndexMethodKind::H3 { resolution } => resolution,
+        _ => 0,
+    }
+}
+
+fn index_method_kind_from_str(
+    raw: &str,
+    resolution: u8,
+) -> Option<super::index_store::IndexMethodKind> {
     match raw {
         "hash" => Some(super::index_store::IndexMethodKind::Hash),
         "bitmap" => Some(super::index_store::IndexMethodKind::Bitmap),
         "spatial" | "rtree" => Some(super::index_store::IndexMethodKind::Spatial),
         "btree" => Some(super::index_store::IndexMethodKind::BTree),
+        "h3" => Some(super::index_store::IndexMethodKind::H3 { resolution }),
         _ => None,
     }
 }
@@ -9613,6 +9639,12 @@ impl RedDBRuntime {
                             )),
                         ),
                         (
+                            "resolution".to_string(),
+                            crate::storage::schema::Value::Integer(i64::from(
+                                index_method_kind_resolution(index.method),
+                            )),
+                        ),
+                        (
                             "unique".to_string(),
                             crate::storage::schema::Value::Boolean(index.unique),
                         ),
@@ -9714,8 +9746,11 @@ impl RedDBRuntime {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let Some(method) =
-                named_text(named, "method").and_then(|raw| index_method_kind_from_str(&raw))
+            let resolution = named_i64(named, "resolution")
+                .and_then(|v| u8::try_from(v).ok())
+                .unwrap_or(0);
+            let Some(method) = named_text(named, "method")
+                .and_then(|raw| index_method_kind_from_str(&raw, resolution))
             else {
                 continue;
             };

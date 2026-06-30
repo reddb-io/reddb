@@ -1433,6 +1433,9 @@ impl RedDBRuntime {
             IndexMethod::BTree => super::index_store::IndexMethodKind::BTree,
             IndexMethod::Bitmap => super::index_store::IndexMethodKind::Bitmap,
             IndexMethod::RTree => super::index_store::IndexMethodKind::Spatial,
+            IndexMethod::H3 { resolution } => {
+                super::index_store::IndexMethodKind::H3 { resolution }
+            }
         };
 
         // Extract fields from existing entities for indexing. Row

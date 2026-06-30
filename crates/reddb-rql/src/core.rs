@@ -848,6 +848,11 @@ pub enum ProbabilisticCommand {
     },
 }
 
+/// Default H3 resolution for `CREATE INDEX ... USING H3` when no
+/// explicit resolution is supplied. Resolution 9 ≈ ~150 m hex edge
+/// (PRD #1574 slice 2, #1576).
+pub const DEFAULT_H3_RESOLUTION: u8 = 9;
+
 /// Index type for CREATE INDEX ... USING <type>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexMethod {
@@ -855,6 +860,12 @@ pub enum IndexMethod {
     Hash,
     Bitmap,
     RTree,
+    /// H3 hexagonal spatial index: the `(lat, lon)` geo column is
+    /// encoded to a single H3 cell-id `u64` (at `resolution`) and stored
+    /// in the existing disk-paged B-tree (PRD #1574 slice 2, #1576).
+    H3 {
+        resolution: u8,
+    },
 }
 
 impl fmt::Display for IndexMethod {
@@ -864,6 +875,7 @@ impl fmt::Display for IndexMethod {
             Self::Hash => write!(f, "HASH"),
             Self::Bitmap => write!(f, "BITMAP"),
             Self::RTree => write!(f, "RTREE"),
+            Self::H3 { .. } => write!(f, "H3"),
         }
     }
 }
@@ -3334,6 +3346,7 @@ mod tests {
         assert_eq!(IndexMethod::Hash.to_string(), "HASH");
         assert_eq!(IndexMethod::Bitmap.to_string(), "BITMAP");
         assert_eq!(IndexMethod::RTree.to_string(), "RTREE");
+        assert_eq!(IndexMethod::H3 { resolution: 9 }.to_string(), "H3");
     }
 
     #[test]
