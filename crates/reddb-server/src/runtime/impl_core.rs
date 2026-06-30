@@ -11595,7 +11595,7 @@ impl RedDBRuntime {
                 AlterUserAttribute::Password(_) => "user:password:change",
                 _ => "user:update",
             };
-            if !auth_store.check_user_lifecycle_authz(&actor, grole, action, &target) {
+            if auth_store.has_explicit_user_lifecycle_deny(&actor, grole, action, &target) {
                 return Err(RedDBError::Query(format!(
                     "ALTER USER denied by IAM policy: action `{action}` resource `user:{target}`"
                 )));

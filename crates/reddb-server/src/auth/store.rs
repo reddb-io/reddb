@@ -1329,6 +1329,28 @@ impl AuthStore {
         self.check_policy_authz_with_role(actor, action, &resource, &ctx, actor_role)
     }
 
+    /// Returns `true` only when an IAM policy explicitly denies the
+    /// action on the target. `DefaultDeny` (no matching policy) is
+    /// treated as permitted, so this is safe to call after the caller
+    /// has already verified the actor's role — it only blocks protected
+    /// principals (e.g. the cloud-preset `red_admin` guardrail).
+    pub fn has_explicit_user_lifecycle_deny(
+        &self,
+        actor: &UserId,
+        actor_role: Role,
+        action: &str,
+        target: &UserId,
+    ) -> bool {
+        let resource = Self::user_lifecycle_resource(target);
+        let ctx = self.eval_context_for_principal(actor, actor_role, target.tenant.clone());
+        let pols = self.effective_policies(actor);
+        let refs: Vec<&Policy> = pols.iter().map(|p| p.as_ref()).collect();
+        matches!(
+            iam_policies::evaluate(&refs, action, &resource, &ctx),
+            iam_policies::Decision::Deny { .. }
+        )
+    }
+
     pub fn get_user(&self, tenant_id: Option<&str>, username: &str) -> Option<User> {
         let id = UserId::from_parts(tenant_id, username);
         self.get_user_cloned(&id).map(|u| User {
