@@ -267,6 +267,8 @@ impl JoinQueryBuilder {
             | QueryExpr::DropCollection(_)
             | QueryExpr::Truncate(_)
             | QueryExpr::AlterTable(_)
+            | QueryExpr::CreateVcsRef(_)
+            | QueryExpr::DropVcsRef(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)
             | QueryExpr::CreateIndex(_)
