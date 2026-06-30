@@ -29,7 +29,7 @@ CREATE TABLE hosts (
 
 ## Supported Column Types
 
-All 48 types from the [Type System](/types/overview.md) can be used as column types:
+All 50 types from the [Type System](/types/overview.md) can be used as column types:
 
 ```sql
 CREATE TABLE network_scan (
@@ -42,6 +42,11 @@ CREATE TABLE network_scan (
   metadata Json
 )
 ```
+
+For sensitive per-row data, use the `SECRET` and `PASSWORD` column types. The
+schema reference documents the write constructors, read behavior, and
+`VERIFY_PASSWORD` comparator in
+[Sensitive Column Types](/reference/schema.md#sensitive-column-types).
 
 ## Default TTL
 
