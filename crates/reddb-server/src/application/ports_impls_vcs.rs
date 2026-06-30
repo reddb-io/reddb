@@ -25,6 +25,10 @@ impl RuntimeVcsPort for RedDBRuntime {
         RedDBRuntime::vcs_tag_create(self, input)
     }
 
+    fn vcs_tag_delete(&self, name: &str) -> RedDBResult<()> {
+        RedDBRuntime::vcs_tag_delete(self, name)
+    }
+
     fn vcs_list_refs(&self, prefix: Option<&str>) -> RedDBResult<Vec<Ref>> {
         RedDBRuntime::vcs_list_refs(self, prefix)
     }
