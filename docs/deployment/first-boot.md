@@ -50,6 +50,26 @@ Admin credentials are supplied per preset:
   `--customer-admin` / `REDDB_CUSTOMER_ADMIN` (each with matching password and
   `-password-file` flags). The two usernames must differ.
 
+Instead of flags or env, `red server --bootstrap-manifest <path>` can supply
+the complete first-boot intent from mounted JSON. The intent manifest uses the
+same preset path as flags, but reads secrets from files:
+
+```json
+{
+  "bootstrap": {
+    "preset": "cloud",
+    "cloud_head_admin": {
+      "username": "cloud-admin",
+      "password_file": "/run/secrets/reddb-cloud-admin-password"
+    },
+    "customer_admin": {
+      "username": "customer-admin",
+      "password_file": "/run/secrets/reddb-customer-admin-password"
+    }
+  }
+}
+```
+
 The bootstrap-complete marker makes presets idempotent: a preset applies once
 and is skipped on every later boot of the same database.
 
@@ -154,13 +174,23 @@ platform users. Protection is policy-derived:
   - `user:password:change`
   - `user:role:update`
 
-Example manifest shape:
+Policy manifests can also seed explicit users, policies, attachments, managed
+guardrails, and config. Prefer `password_file` for users so mounted manifests do
+not contain plaintext secrets:
 
 ```json
 {
   "users": [
-    { "username": "cloud-admin", "password": "from-secret", "role": "admin" },
-    { "username": "customer-admin", "password": "from-secret", "role": "admin" }
+    {
+      "username": "cloud-admin",
+      "password_file": "/run/secrets/reddb-cloud-admin-password",
+      "role": "admin"
+    },
+    {
+      "username": "customer-admin",
+      "password_file": "/run/secrets/reddb-customer-admin-password",
+      "role": "admin"
+    }
   ],
   "policies": [
     {
@@ -203,9 +233,8 @@ Example manifest shape:
 }
 ```
 
-Render real password values from the Cloud secret manager into the mounted
-manifest at deploy time. Do not commit a manifest containing production
-passwords.
+Render password files from the Cloud secret manager into mounted files at
+deploy time. Do not commit production passwords or password-bearing manifests.
 
 The engine rejects `users[].system_owned` in bootstrap manifests and rejects
 `condition.system_owned` in policies. Cloud ownership must remain explicit in
