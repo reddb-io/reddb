@@ -3401,7 +3401,12 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::boolean("dev")
                     .with_description("Alias for --no-auth (local development convenience)."),
                 cli::types::FlagSchema::new("bootstrap-preset")
-                    .with_description("First-boot preset")
+                    .with_description(
+                        "First-boot preset. With --vault on a fresh --path, red server \
+                         self-bootstraps the paged vault in place (no separate `red bootstrap`) \
+                         then applies the preset and serves; a re-boot against the existing \
+                         vault just serves (idempotent — no re-bootstrap, no new certificate).",
+                    )
                     .with_choices(&["simple", "production", "regulated", "cloud"]),
                 cli::types::FlagSchema::new("bootstrap-manifest")
                     .with_description("Path to first-boot bootstrap manifest JSON"),
