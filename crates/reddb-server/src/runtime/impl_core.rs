@@ -1577,6 +1577,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 }
             }
         }
+        _ => {}
     }
 }
 
@@ -1994,6 +1995,209 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
         return None;
     }
     Some(rest)
+}
+
+fn parse_vcs_author(raw: &str) -> crate::application::vcs::Author {
+    let trimmed = raw.trim();
+    if let Some((name, rest)) = trimmed.rsplit_once('<') {
+        if let Some(email) = rest.strip_suffix('>') {
+            return crate::application::vcs::Author {
+                name: name.trim().to_string(),
+                email: email.trim().to_string(),
+            };
+        }
+    }
+    crate::application::vcs::Author {
+        name: trimmed.to_string(),
+        email: String::new(),
+    }
+}
+
+fn looks_like_commit_hash(value: &str) -> bool {
+    value.len() >= 7 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+enum RuntimeVcsCommand {
+    Checkpoint {
+        message: String,
+        author: Option<String>,
+    },
+    Checkout {
+        target: String,
+    },
+    Reset {
+        mode: RuntimeVcsResetMode,
+        target: String,
+    },
+    Merge {
+        branch: String,
+    },
+    CherryPick {
+        commit: String,
+    },
+    Revert {
+        commit: String,
+    },
+    ResolveConflict {
+        key: String,
+        resolution: RuntimeVcsConflictResolution,
+    },
+}
+
+enum RuntimeVcsResetMode {
+    Hard,
+    Soft,
+    Mixed,
+}
+
+enum RuntimeVcsConflictResolution {
+    Ours,
+    Theirs,
+}
+
+fn strip_keyword_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = input.trim_start();
+    if trimmed.len() < keyword.len() || !trimmed[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &trimmed[keyword.len()..];
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(rest.trim_start())
+    } else {
+        None
+    }
+}
+
+fn parse_vcs_quoted(input: &str) -> RedDBResult<(String, &str)> {
+    let trimmed = input.trim_start();
+    let rest = trimmed
+        .strip_prefix('\'')
+        .ok_or_else(|| RedDBError::Query("expected quoted string".to_string()))?;
+    let end = rest
+        .find('\'')
+        .ok_or_else(|| RedDBError::Query("unterminated quoted string".to_string()))?;
+    Ok((rest[..end].to_string(), rest[end + 1..].trim_start()))
+}
+
+fn parse_vcs_atom(input: &str) -> RedDBResult<(String, &str)> {
+    let trimmed = input.trim_start();
+    if trimmed.starts_with('\'') {
+        return parse_vcs_quoted(trimmed);
+    }
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    if end == 0 {
+        return Err(RedDBError::Query("expected VCS argument".to_string()));
+    }
+    Ok((trimmed[..end].to_string(), trimmed[end..].trim_start()))
+}
+
+fn expect_vcs_end(rest: &str) -> RedDBResult<()> {
+    if rest.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(RedDBError::Query(format!(
+            "unexpected token after VCS command: {}",
+            rest.trim()
+        )))
+    }
+}
+
+fn parse_runtime_vcs_command(query: &str) -> Option<RedDBResult<RuntimeVcsCommand>> {
+    let trimmed = query.trim_start();
+    if let Some(rest) = strip_keyword_ci(trimmed, "CHECKPOINT") {
+        return Some((|| {
+            let (message, rest) = parse_vcs_quoted(rest)?;
+            let rest = rest.trim_start();
+            let author = if let Some(author_rest) = strip_keyword_ci(rest, "AUTHOR") {
+                let (author, rest) = parse_vcs_quoted(author_rest)?;
+                expect_vcs_end(rest)?;
+                Some(author)
+            } else {
+                expect_vcs_end(rest)?;
+                None
+            };
+            Ok(RuntimeVcsCommand::Checkpoint { message, author })
+        })());
+    }
+    if let Some(rest) = strip_keyword_ci(trimmed, "CHECKOUT") {
+        return Some((|| {
+            let (target, rest) = parse_vcs_atom(rest)?;
+            expect_vcs_end(rest)?;
+            Ok(RuntimeVcsCommand::Checkout { target })
+        })());
+    }
+    if let Some(rest) = strip_keyword_ci(trimmed, "RESET") {
+        if strip_keyword_ci(rest, "TENANT").is_some() {
+            return None;
+        }
+        return Some((|| {
+            let mut rest = rest.trim_start();
+            let mode = if let Some(next) = strip_keyword_ci(rest, "HARD") {
+                rest = next;
+                RuntimeVcsResetMode::Hard
+            } else if let Some(next) = strip_keyword_ci(rest, "SOFT") {
+                rest = next;
+                RuntimeVcsResetMode::Soft
+            } else if let Some(next) = strip_keyword_ci(rest, "MIXED") {
+                rest = next;
+                RuntimeVcsResetMode::Mixed
+            } else {
+                RuntimeVcsResetMode::Mixed
+            };
+            let rest = strip_keyword_ci(rest, "TO")
+                .ok_or_else(|| RedDBError::Query("expected TO in RESET".to_string()))?;
+            let (target, rest) = parse_vcs_atom(rest)?;
+            expect_vcs_end(rest)?;
+            Ok(RuntimeVcsCommand::Reset { mode, target })
+        })());
+    }
+    if let Some(rest) = strip_keyword_ci(trimmed, "MERGE") {
+        return Some((|| {
+            let (branch, rest) = parse_vcs_atom(rest)?;
+            expect_vcs_end(rest)?;
+            Ok(RuntimeVcsCommand::Merge { branch })
+        })());
+    }
+    if let Some(rest) = strip_keyword_ci(trimmed, "CHERRY") {
+        return Some((|| {
+            let rest = strip_keyword_ci(rest, "PICK")
+                .ok_or_else(|| RedDBError::Query("expected PICK in CHERRY PICK".to_string()))?;
+            let (commit, rest) = parse_vcs_atom(rest)?;
+            expect_vcs_end(rest)?;
+            Ok(RuntimeVcsCommand::CherryPick { commit })
+        })());
+    }
+    if let Some(rest) = strip_keyword_ci(trimmed, "REVERT") {
+        return Some((|| {
+            let (commit, rest) = parse_vcs_atom(rest)?;
+            expect_vcs_end(rest)?;
+            Ok(RuntimeVcsCommand::Revert { commit })
+        })());
+    }
+    if let Some(rest) = strip_keyword_ci(trimmed, "RESOLVE") {
+        // Only `RESOLVE CONFLICT …` is a VCS working-set verb. Plain RESOLVE /
+        // `RESOLVE CONFIG …` (config secret resolution) must fall through to the
+        // normal query surface — the `?` early-returns None for non-CONFLICT,
+        // mirroring the RESET/TENANT disambiguation above.
+        let rest = strip_keyword_ci(rest, "CONFLICT")?;
+        return Some((|| {
+            let (key, rest) = parse_vcs_quoted(rest)?;
+            let rest = strip_keyword_ci(rest, "USING")
+                .ok_or_else(|| RedDBError::Query("expected USING in RESOLVE".to_string()))?;
+            let (resolution, rest) = if let Some(rest) = strip_keyword_ci(rest, "OURS") {
+                (RuntimeVcsConflictResolution::Ours, rest)
+            } else if let Some(rest) = strip_keyword_ci(rest, "THEIRS") {
+                (RuntimeVcsConflictResolution::Theirs, rest)
+            } else {
+                return Err(RedDBError::Query(
+                    "expected OURS or THEIRS in RESOLVE".to_string(),
+                ));
+            };
+            expect_vcs_end(rest)?;
+            Ok(RuntimeVcsCommand::ResolveConflict { key, resolution })
+        })());
+    }
+    None
 }
 
 /// Cheap prefix check for a leading `WITH` keyword. Used to gate the
@@ -4524,6 +4728,149 @@ impl RedDBRuntime {
         }
     }
 
+    fn execute_vcs_command(
+        &self,
+        query: &str,
+        mode: QueryMode,
+        cmd: RuntimeVcsCommand,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::application::vcs::{
+            Author, CheckoutInput, CheckoutTarget, CreateCommitInput, MergeInput, MergeOpts,
+            ResetInput, ResetMode,
+        };
+        use crate::application::VcsUseCases;
+
+        let conn_id = current_connection_id();
+        let vcs = VcsUseCases::new(self);
+        let default_author = || Author {
+            name: "rql".to_string(),
+            email: "rql@reddb.io".to_string(),
+        };
+
+        match cmd {
+            RuntimeVcsCommand::Checkpoint { message, author } => {
+                let author = author
+                    .as_deref()
+                    .map(parse_vcs_author)
+                    .unwrap_or_else(default_author);
+                let commit = vcs.commit(CreateCommitInput {
+                    connection_id: conn_id,
+                    message: message.clone(),
+                    author,
+                    committer: None,
+                    amend: false,
+                    allow_empty: true,
+                })?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("checkpoint {}", commit.hash),
+                    "vcs_checkpoint",
+                ))
+            }
+            RuntimeVcsCommand::Checkout { target } => {
+                let result = if target.starts_with("refs/tags/") {
+                    vcs.checkout(CheckoutInput {
+                        connection_id: conn_id,
+                        target: CheckoutTarget::Tag(target.clone()),
+                        force: false,
+                    })
+                } else if looks_like_commit_hash(&target) {
+                    vcs.checkout(CheckoutInput {
+                        connection_id: conn_id,
+                        target: CheckoutTarget::Commit(target.clone()),
+                        force: false,
+                    })
+                } else {
+                    vcs.checkout(CheckoutInput {
+                        connection_id: conn_id,
+                        target: CheckoutTarget::Branch(target.clone()),
+                        force: false,
+                    })
+                    .or_else(|_| {
+                        vcs.checkout(CheckoutInput {
+                            connection_id: conn_id,
+                            target: CheckoutTarget::Commit(target.clone()),
+                            force: false,
+                        })
+                    })
+                }?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("checked out {}", result.name),
+                    "vcs_checkout",
+                ))
+            }
+            RuntimeVcsCommand::Reset {
+                mode: reset_mode,
+                target,
+            } => {
+                let mode = match reset_mode {
+                    RuntimeVcsResetMode::Hard => ResetMode::Hard,
+                    RuntimeVcsResetMode::Soft => ResetMode::Soft,
+                    RuntimeVcsResetMode::Mixed => ResetMode::Mixed,
+                };
+                vcs.reset(ResetInput {
+                    connection_id: conn_id,
+                    target: target.clone(),
+                    mode,
+                })?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    "reset complete",
+                    "vcs_reset",
+                ))
+            }
+            RuntimeVcsCommand::Merge { branch } => {
+                let outcome = vcs.merge(MergeInput {
+                    connection_id: conn_id,
+                    from: branch.clone(),
+                    opts: MergeOpts::default(),
+                    author: default_author(),
+                })?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("merge complete; conflicts={}", outcome.conflicts.len()),
+                    "vcs_merge",
+                ))
+            }
+            RuntimeVcsCommand::CherryPick { commit } => {
+                let outcome = vcs.cherry_pick(conn_id, &commit, default_author())?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!(
+                        "cherry-pick complete; conflicts={}",
+                        outcome.conflicts.len()
+                    ),
+                    "vcs_cherry_pick",
+                ))
+            }
+            RuntimeVcsCommand::Revert { commit } => {
+                let reverted = vcs.revert(conn_id, &commit, default_author())?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("revert {}", reverted.hash),
+                    "vcs_revert",
+                ))
+            }
+            RuntimeVcsCommand::ResolveConflict { key, resolution } => {
+                let value = match resolution {
+                    RuntimeVcsConflictResolution::Ours => {
+                        crate::json::Value::String("ours".to_string())
+                    }
+                    RuntimeVcsConflictResolution::Theirs => {
+                        crate::json::Value::String("theirs".to_string())
+                    }
+                };
+                vcs.conflict_resolve(&key, value)?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    "conflict resolved",
+                    "vcs_resolve_conflict",
+                ))
+            }
+        }
+    }
+
     #[inline(never)]
     fn execute_query_inner(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         // ── ULTRA-TURBO: autocommit `SELECT * FROM t WHERE _entity_id = N` ──
@@ -4609,6 +4956,10 @@ impl RedDBRuntime {
             return Err(RedDBError::Query(
                 super::red_schema::READ_ONLY_ERROR.to_string(),
             ));
+        }
+
+        if let Some(command) = parse_runtime_vcs_command(query) {
+            return self.execute_vcs_command(query, detect_mode(query), command?);
         }
 
         if let Some(create_source) = super::analytics_source_catalog::parse_create_statement(query)?
@@ -6323,6 +6674,9 @@ impl RedDBRuntime {
             QueryExpr::ApplyMigration(ref q) => self.execute_apply_migration(query, q),
             QueryExpr::RollbackMigration(ref q) => self.execute_rollback_migration(query, q),
             QueryExpr::ExplainMigration(ref q) => self.execute_explain_migration(query, q),
+            _ => Err(RedDBError::Query(
+                "unsupported command in runtime dispatcher".to_string(),
+            )),
         };
 
         if !control_event_specs.is_empty() {

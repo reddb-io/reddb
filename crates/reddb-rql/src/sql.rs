@@ -13,7 +13,8 @@ use crate::ast::{
     JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand,
     QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
     RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
-    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VcsRefKind, VectorQuery,
+    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VcsCommand,
+    VcsConflictResolution, VcsRefKind, VcsResetMode, VectorQuery,
 };
 use crate::lexer::Token;
 use crate::parser::{ParseError, Parser, SafeTokenDisplay};
@@ -111,6 +112,7 @@ pub enum SqlCommand {
     ShowTenant,
     TransactionControl(TxnControl),
     Maintenance(MaintenanceCommand),
+    Vcs(VcsCommand),
     CreateSchema(CreateSchemaQuery),
     DropSchema(DropSchemaQuery),
     CreateSequence(CreateSequenceQuery),
@@ -1225,6 +1227,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_sql_command_covers_vcs_working_set_verbs() {
+        assert!(matches!(
+            sql_command("CHECKPOINT 'initial import' AUTHOR 'Ada <ada@reddb.io>'"),
+            SqlCommand::Vcs(VcsCommand::Checkpoint { .. })
+        ));
+        assert!(matches!(
+            sql_command("CHECKOUT main"),
+            SqlCommand::Vcs(VcsCommand::Checkout { .. })
+        ));
+        assert!(matches!(
+            sql_command("RESET HARD TO abc123"),
+            SqlCommand::Vcs(VcsCommand::Reset {
+                mode: VcsResetMode::Hard,
+                ..
+            })
+        ));
+        assert!(matches!(
+            sql_command("MERGE 'feature'"),
+            SqlCommand::Vcs(VcsCommand::Merge { .. })
+        ));
+        assert!(matches!(
+            sql_command("CHERRY PICK 'abc123'"),
+            SqlCommand::Vcs(VcsCommand::CherryPick { .. })
+        ));
+        assert!(matches!(
+            sql_command("REVERT 'abc123'"),
+            SqlCommand::Vcs(VcsCommand::Revert { .. })
+        ));
+        assert!(matches!(
+            sql_command("RESOLVE CONFLICT 'orders/1' USING THEIRS"),
+            SqlCommand::Vcs(VcsCommand::ResolveConflict {
+                resolution: VcsConflictResolution::Theirs,
+                ..
+            })
+        ));
+        assert!(matches!(
+            sql_command("RESET TENANT"),
+            SqlCommand::SetTenant(None)
+        ));
+    }
+
+    #[test]
     fn parse_sql_command_covers_iam_and_hypertable_dispatch_edges() {
         assert!(matches!(
             expr("CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'"),
@@ -1386,6 +1430,7 @@ pub enum SqlAdminCommand {
     ShowTenant,
     TransactionControl(TxnControl),
     Maintenance(MaintenanceCommand),
+    Vcs(VcsCommand),
     Grant(GrantStmt),
     Revoke(RevokeStmt),
     AlterUser(AlterUserStmt),
@@ -1497,6 +1542,7 @@ impl SqlStatement {
                 SqlCommand::TransactionControl(ctl)
             }
             SqlStatement::Admin(SqlAdminCommand::Maintenance(cmd)) => SqlCommand::Maintenance(cmd),
+            SqlStatement::Admin(SqlAdminCommand::Vcs(cmd)) => SqlCommand::Vcs(cmd),
             SqlStatement::Schema(SqlSchemaCommand::CreateSchema(q)) => SqlCommand::CreateSchema(q),
             SqlStatement::Schema(SqlSchemaCommand::DropSchema(q)) => SqlCommand::DropSchema(q),
             SqlStatement::Schema(SqlSchemaCommand::CreateSequence(q)) => {
@@ -1588,6 +1634,17 @@ pub fn parse_frontend(input: &str) -> Result<FrontendStatement, ParseError> {
     Ok(statement)
 }
 
+fn is_vcs_command_head(name: &str) -> bool {
+    name.eq_ignore_ascii_case("CHECKPOINT")
+        || name.eq_ignore_ascii_case("CHECKOUT")
+        || name.eq_ignore_ascii_case("MERGE")
+        || name.eq_ignore_ascii_case("CHERRY")
+        || name.eq_ignore_ascii_case("REVERT")
+    // NOTE: RESOLVE is intentionally excluded here — it is shared with the
+    // config surface (`RESOLVE CONFIG …`). The VCS `RESOLVE CONFLICT` shape is
+    // dispatched by a dedicated arm that peeks for the CONFLICT keyword.
+}
+
 impl SqlCommand {
     pub fn into_query_expr(self) -> QueryExpr {
         match self {
@@ -1632,6 +1689,7 @@ impl SqlCommand {
             SqlCommand::ShowTenant => QueryExpr::ShowTenant,
             SqlCommand::TransactionControl(ctl) => QueryExpr::TransactionControl(ctl),
             SqlCommand::Maintenance(cmd) => QueryExpr::MaintenanceCommand(cmd),
+            SqlCommand::Vcs(cmd) => QueryExpr::VcsCommand(cmd),
             SqlCommand::CreateSchema(q) => QueryExpr::CreateSchema(q),
             SqlCommand::DropSchema(q) => QueryExpr::DropSchema(q),
             SqlCommand::CreateSequence(q) => QueryExpr::CreateSequence(q),
@@ -1761,6 +1819,7 @@ impl SqlCommand {
                 SqlStatement::Admin(SqlAdminCommand::TransactionControl(ctl))
             }
             SqlCommand::Maintenance(cmd) => SqlStatement::Admin(SqlAdminCommand::Maintenance(cmd)),
+            SqlCommand::Vcs(cmd) => SqlStatement::Admin(SqlAdminCommand::Vcs(cmd)),
             SqlCommand::CreateSchema(q) => SqlStatement::Schema(SqlSchemaCommand::CreateSchema(q)),
             SqlCommand::DropSchema(q) => SqlStatement::Schema(SqlSchemaCommand::DropSchema(q)),
             SqlCommand::CreateSequence(q) => {
@@ -2316,7 +2375,15 @@ impl<'a> Parser<'a> {
                     || name.eq_ignore_ascii_case("DECR")
                     || name.eq_ignore_ascii_case("INVALIDATE") =>
             {
-                if matches!(
+                // `RESOLVE CONFLICT …` is the VCS working-set verb, not config
+                // resolution — route it to the SQL/VCS command surface.
+                if name.eq_ignore_ascii_case("RESOLVE")
+                    && matches!(self.peek_next()?, Token::Ident(next) if next.eq_ignore_ascii_case("CONFLICT"))
+                {
+                    self.parse_sql_command()
+                        .map(SqlCommand::into_statement)
+                        .map(FrontendStatement::Sql)
+                } else if matches!(
                     self.peek_next()?,
                     Token::Ident(next) if next.eq_ignore_ascii_case("VAULT")
                 ) {
@@ -2392,12 +2459,52 @@ impl<'a> Parser<'a> {
                 .parse_sql_command()
                 .map(SqlCommand::into_statement)
                 .map(FrontendStatement::Sql),
+            Token::Ident(name)
+                if is_vcs_command_head(name) || name.eq_ignore_ascii_case("RESET") =>
+            {
+                self.parse_sql_command()
+                    .map(SqlCommand::into_statement)
+                    .map(FrontendStatement::Sql)
+            }
             other => Err(ParseError::expected(
                 vec![
-                    "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
-                    "QUEUE", "EVENTS", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
-                    "RESET", "DESCRIBE", "DESC", "RANK", "ZRANK", "ZRANGE",
+                    "SELECT",
+                    "MATCH",
+                    "PATH",
+                    "FROM",
+                    "VECTOR",
+                    "HYBRID",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "TRUNCATE",
+                    "CREATE",
+                    "DROP",
+                    "ALTER",
+                    "GRAPH",
+                    "SEARCH",
+                    "ASK",
+                    "QUEUE",
+                    "EVENTS",
+                    "KV",
+                    "HLL",
+                    "TREE",
+                    "SKETCH",
+                    "FILTER",
+                    "SET",
+                    "SHOW",
+                    "RESET",
+                    "CHECKPOINT",
+                    "CHECKOUT",
+                    "MERGE",
+                    "CHERRY",
+                    "REVERT",
+                    "RESOLVE",
+                    "DESCRIBE",
+                    "DESC",
+                    "RANK",
+                    "ZRANK",
+                    "ZRANGE",
                 ],
                 other,
                 self.position(),
@@ -2522,6 +2629,120 @@ impl<'a> Parser<'a> {
         let raw = self.parse_integer()?;
         u64::try_from(raw)
             .map_err(|_| ParseError::value_out_of_range(field, "must be an unsigned integer", pos))
+    }
+
+    #[inline(never)]
+    fn parse_vcs_atom(&mut self, field: &'static str) -> Result<String, ParseError> {
+        match self.peek().clone() {
+            Token::Ident(value) | Token::String(value) => {
+                self.advance()?;
+                Ok(value)
+            }
+            Token::Integer(value) => {
+                self.advance()?;
+                Ok(value.to_string())
+            }
+            other => Err(ParseError::expected(vec![field], &other, self.position())),
+        }
+    }
+
+    #[inline(never)]
+    fn parse_vcs_command(&mut self) -> Result<VcsCommand, ParseError> {
+        let head = self.expect_ident()?;
+        if head.eq_ignore_ascii_case("CHECKPOINT") {
+            let message = self.parse_string()?;
+            let author = if self.consume_ident_ci("AUTHOR")? {
+                Some(self.parse_string()?)
+            } else {
+                None
+            };
+            return Ok(VcsCommand::Checkpoint { message, author });
+        }
+        if head.eq_ignore_ascii_case("CHECKOUT") {
+            return Ok(VcsCommand::Checkout {
+                target: self.parse_vcs_atom("commitish")?,
+            });
+        }
+        if head.eq_ignore_ascii_case("RESET") {
+            let mode = if self.consume_ident_ci("HARD")? {
+                VcsResetMode::Hard
+            } else if self.consume_ident_ci("SOFT")? {
+                VcsResetMode::Soft
+            } else {
+                // MIXED is the default; consume the optional explicit keyword.
+                let _ = self.consume_ident_ci("MIXED")?;
+                VcsResetMode::Mixed
+            };
+            self.expect(Token::To)?;
+            return Ok(VcsCommand::Reset {
+                mode,
+                target: self.parse_vcs_atom("commitish")?,
+            });
+        }
+        if head.eq_ignore_ascii_case("MERGE") {
+            return Ok(VcsCommand::Merge {
+                branch: self.parse_vcs_atom("branch")?,
+            });
+        }
+        if head.eq_ignore_ascii_case("CHERRY") {
+            if !self.consume_ident_ci("PICK")? {
+                return Err(ParseError::expected(
+                    vec!["PICK"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            return Ok(VcsCommand::CherryPick {
+                commit: self.parse_vcs_atom("commit")?,
+            });
+        }
+        if head.eq_ignore_ascii_case("REVERT") {
+            return Ok(VcsCommand::Revert {
+                commit: self.parse_vcs_atom("commit")?,
+            });
+        }
+        if head.eq_ignore_ascii_case("RESOLVE") {
+            if !self.consume_ident_ci("CONFLICT")? {
+                return Err(ParseError::expected(
+                    vec!["CONFLICT"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            let key = self.parse_string()?;
+            if !self.consume(&Token::Using)? {
+                return Err(ParseError::expected(
+                    vec!["USING"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            let resolution = if self.consume_ident_ci("OURS")? {
+                VcsConflictResolution::Ours
+            } else if self.consume_ident_ci("THEIRS")? {
+                VcsConflictResolution::Theirs
+            } else {
+                return Err(ParseError::expected(
+                    vec!["OURS", "THEIRS"],
+                    self.peek(),
+                    self.position(),
+                ));
+            };
+            return Ok(VcsCommand::ResolveConflict { key, resolution });
+        }
+        Err(ParseError::expected(
+            vec![
+                "CHECKPOINT",
+                "CHECKOUT",
+                "RESET",
+                "MERGE",
+                "CHERRY",
+                "REVERT",
+                "RESOLVE",
+            ],
+            self.peek(),
+            self.position(),
+        ))
     }
 
     /// Parse any SQL/RQL-style command into the canonical SQL frontend IR.
@@ -3668,6 +3889,15 @@ impl<'a> Parser<'a> {
                     self.position(),
                 ))
             }
+            Token::Ident(name) if is_vcs_command_head(name) => {
+                self.parse_vcs_command().map(SqlCommand::Vcs)
+            }
+            // RESOLVE CONFLICT is the VCS working-set verb. The frontend only
+            // routes RESOLVE here when CONFLICT follows; plain RESOLVE / RESOLVE
+            // CONFIG stays on the config surface and never reaches this arm.
+            Token::Ident(name) if name.eq_ignore_ascii_case("RESOLVE") => {
+                self.parse_vcs_command().map(SqlCommand::Vcs)
+            }
             Token::Set => {
                 self.advance()?;
                 if self.consume_ident_ci("CONFIG")? {
@@ -3720,16 +3950,16 @@ impl<'a> Parser<'a> {
                 }
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("RESET") => {
-                // RESET TENANT — session-local clear
-                self.advance()?;
-                if self.consume_ident_ci("TENANT")? {
+                // RESET TENANT clears session-local tenant state; every
+                // other RESET shape in this parser belongs to the VCS
+                // working-set command (`RESET [HARD|SOFT|MIXED] TO ...`).
+                if matches!(self.peek_next()?, Token::Ident(next) if next.eq_ignore_ascii_case("TENANT"))
+                {
+                    self.advance()?;
+                    self.advance()?;
                     Ok(SqlCommand::SetTenant(None))
                 } else {
-                    Err(ParseError::expected(
-                        vec!["TENANT"],
-                        self.peek(),
-                        self.position(),
-                    ))
+                    self.parse_vcs_command().map(SqlCommand::Vcs)
                 }
             }
             Token::Ident(name)
