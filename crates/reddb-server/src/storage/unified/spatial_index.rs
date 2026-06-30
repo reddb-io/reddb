@@ -1,7 +1,33 @@
-//! R-Tree Spatial Index
+//! R-Tree Spatial Index (opt-in, memory-capped)
 //!
-//! Provides efficient spatial queries on GeoPoint, Latitude, and Longitude data.
-//! Uses the `rstar` crate for R-tree implementation.
+//! Provides spatial queries on GeoPoint, Latitude, and Longitude data using
+//! the `rstar` crate for an in-RAM R-tree.
+//!
+//! # Status (PRD #1574 / #1578)
+//! This in-RAM R-tree is **no longer the default spatial index**. The default
+//! spatial backend is the disk-resident H3 index (cell-id `u64` over the paged
+//! B-tree), which keeps RAM at O(working set) rather than O(total points). This
+//! R-tree is reachable only via the explicit `CREATE INDEX … USING RTREE`
+//! opt-in and is **memory-capped** so it can never silently OOM the process —
+//! inserting past the byte budget is refused with [`SpatialIndexError::CapacityExceeded`].
+//!
+//! Trade-off: prefer the R-tree for **arbitrary shapes / exact small sets**
+//! held in RAM; prefer H3 (the default) for **points at scale, on disk**.
+//!
+//! The cap is configured by `RED_SPATIAL_RTREE_MAX_BYTES` (an approximate byte
+//! budget on the resident structure); see [`DEFAULT_RTREE_MAX_BYTES`].
+//!
+//! # Migration (existing R-tree spatial indexes → H3)
+//! To move a spatial column off the in-RAM R-tree onto the disk-resident
+//! default, recreate the index with the generic spatial method (or `USING H3`):
+//! ```sql
+//! DROP INDEX <name> ON <table>;
+//! CREATE INDEX <name> ON <table> (<col>) USING SPATIAL;  -- resolves to H3
+//! ```
+//! No data migration is required — the geo column is unchanged; only the index
+//! mechanism (and its RAM profile) changes. `SEARCH SPATIAL` results are
+//! identical on both paths (haversine-exact). Keep `USING RTREE` only for
+//! small, in-RAM, shape-oriented workloads that fit under the cap.
 //!
 //! # Supported queries
 //! - **Radius search**: Find all points within X km of a center point
@@ -16,9 +42,49 @@ use rstar::{primitives::GeomWithData, RTree, AABB};
 
 use super::entity::EntityId;
 
+/// Default approximate memory budget for a single in-RAM R-tree spatial
+/// index, used when `RED_SPATIAL_RTREE_MAX_BYTES` is unset. 256 MiB at the
+/// recalc footprint (~100–150 B/point) bounds a single index to ~1.7–2.5M
+/// points — generous for the "small/shape sets" the R-tree is now reserved
+/// for, while making the unbounded-OOM-at-scale failure mode impossible.
+/// Points at scale belong on the disk-resident H3 default (PRD #1574).
+pub const DEFAULT_RTREE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Environment override for [`DEFAULT_RTREE_MAX_BYTES`]. Mirrors the
+/// `RED_*_MAX_BYTES` convention used elsewhere (e.g. `RED_AUDIT_MAX_BYTES`).
+const RTREE_MAX_BYTES_ENV: &str = "RED_SPATIAL_RTREE_MAX_BYTES";
+
+/// Approximate resident cost of one indexed point, kept in lock-step with
+/// [`SpatialIndex::memory_bytes`]: one R-tree leaf entry plus the parallel
+/// `points` HashMap slot. Used to project the post-insert footprint when
+/// enforcing the cap.
+const PER_POINT_BYTES: usize = std::mem::size_of::<SpatialEntry>() + 32;
+
+/// Resolve the per-index R-tree byte budget from the environment, falling
+/// back to [`DEFAULT_RTREE_MAX_BYTES`].
+fn resolve_rtree_max_bytes() -> usize {
+    std::env::var(RTREE_MAX_BYTES_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_RTREE_MAX_BYTES)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpatialIndexError {
-    MissingIndex { collection: String, column: String },
+    MissingIndex {
+        collection: String,
+        column: String,
+    },
+    /// Inserting a *new* point would push the in-RAM R-tree past its
+    /// configured byte budget (`RED_SPATIAL_RTREE_MAX_BYTES`). The point is
+    /// NOT inserted — the structure refuses to grow rather than risk an OOM.
+    /// Use the disk-resident H3 index (the default) for points at scale.
+    CapacityExceeded {
+        collection: String,
+        column: String,
+        max_bytes: usize,
+        attempted_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for SpatialIndexError {
@@ -30,11 +96,34 @@ impl std::fmt::Display for SpatialIndexError {
                     "spatial index for column '{column}' was not found in collection '{collection}'"
                 )
             }
+            Self::CapacityExceeded {
+                collection,
+                column,
+                max_bytes,
+                attempted_bytes,
+            } => {
+                write!(
+                    f,
+                    "in-RAM R-tree spatial index for column '{column}' in collection \
+                     '{collection}' is memory-capped at {max_bytes} bytes \
+                     (RED_SPATIAL_RTREE_MAX_BYTES); insert would need ~{attempted_bytes} bytes. \
+                     Use the disk-resident H3 spatial index (USING H3 / the default) for points at scale."
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for SpatialIndexError {}
+
+/// Capacity-overflow signal raised by [`SpatialIndex::insert`], which does not
+/// know its own `(collection, column)` location. The owning
+/// [`SpatialIndexManager`] enriches it into [`SpatialIndexError::CapacityExceeded`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpatialCapacityError {
+    pub max_bytes: usize,
+    pub attempted_bytes: usize,
+}
 
 /// A 2D point in the R-tree, storing (lon, lat) in degrees with an associated EntityId.
 /// Note: rstar uses [x, y] convention, so we store (longitude, latitude).
@@ -65,16 +154,33 @@ pub struct SpatialIndex {
     points: HashMap<EntityId, (f64, f64)>,
     /// Column name
     pub column: String,
+    /// Approximate resident-byte budget; a *new*-point insert that would push
+    /// [`SpatialIndex::memory_bytes`] past this is refused (never silently
+    /// OOMs). Resolved from `RED_SPATIAL_RTREE_MAX_BYTES`.
+    max_bytes: usize,
 }
 
 impl SpatialIndex {
-    /// Create a new spatial index
+    /// Create a new spatial index with the environment-configured memory cap.
     pub fn new(column: impl Into<String>) -> Self {
+        Self::with_max_bytes(column, resolve_rtree_max_bytes())
+    }
+
+    /// Create a new spatial index with an explicit memory cap. Bypasses
+    /// `RED_SPATIAL_RTREE_MAX_BYTES` resolution so parallel tests don't race
+    /// on `set_var` (mirrors `AuditLogger::with_max_bytes`).
+    pub fn with_max_bytes(column: impl Into<String>, max_bytes: usize) -> Self {
         Self {
             tree: RTree::new(),
             points: HashMap::new(),
             column: column.into(),
+            max_bytes,
         }
+    }
+
+    /// The configured approximate memory budget (bytes).
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
     }
 
     /// Bulk-load from a list of (entity_id, lat, lon)
@@ -91,17 +197,39 @@ impl SpatialIndex {
             tree: RTree::bulk_load(entries),
             points,
             column: column.into(),
+            max_bytes: resolve_rtree_max_bytes(),
         }
     }
 
-    /// Insert a point
-    pub fn insert(&mut self, entity_id: EntityId, lat: f64, lon: f64) {
-        // Remove old entry if exists
+    /// Insert a point.
+    ///
+    /// Updating an existing entity (same `entity_id`) is always allowed — it
+    /// does not grow the structure. Inserting a *new* point that would push
+    /// the index past its configured byte budget is refused with
+    /// [`SpatialCapacityError`]; the point is not inserted.
+    pub fn insert(
+        &mut self,
+        entity_id: EntityId,
+        lat: f64,
+        lon: f64,
+    ) -> Result<(), SpatialCapacityError> {
+        // Remove old entry if exists (an update never grows the footprint).
         if let Some((old_lat, old_lon)) = self.points.remove(&entity_id) {
             self.tree.remove(&make_entry(old_lat, old_lon, entity_id));
+        } else {
+            // New point: refuse if it would breach the cap.
+            let projected = self.memory_bytes() + PER_POINT_BYTES;
+            if projected > self.max_bytes {
+                // Re-insert nothing; `points` already had no entry for this id.
+                return Err(SpatialCapacityError {
+                    max_bytes: self.max_bytes,
+                    attempted_bytes: projected,
+                });
+            }
         }
         self.tree.insert(make_entry(lat, lon, entity_id));
         self.points.insert(entity_id, (lat, lon));
+        Ok(())
     }
 
     /// Remove a point
@@ -251,8 +379,14 @@ impl SpatialIndexManager {
     ) -> Result<(), SpatialIndexError> {
         let mut indices = self.indices.write();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
-            index.insert(entity_id, lat, lon);
-            Ok(())
+            index
+                .insert(entity_id, lat, lon)
+                .map_err(|e| SpatialIndexError::CapacityExceeded {
+                    collection: collection.to_string(),
+                    column: column.to_string(),
+                    max_bytes: e.max_bytes,
+                    attempted_bytes: e.attempted_bytes,
+                })
         } else {
             Err(SpatialIndexError::MissingIndex {
                 collection: collection.to_string(),
@@ -395,13 +529,13 @@ mod tests {
         let mut idx = SpatialIndex::new("location");
 
         // Paris
-        idx.insert(EntityId::new(1), 48.8566, 2.3522);
+        idx.insert(EntityId::new(1), 48.8566, 2.3522).unwrap();
         // London
-        idx.insert(EntityId::new(2), 51.5074, -0.1278);
+        idx.insert(EntityId::new(2), 51.5074, -0.1278).unwrap();
         // Berlin
-        idx.insert(EntityId::new(3), 52.5200, 13.4050);
+        idx.insert(EntityId::new(3), 52.5200, 13.4050).unwrap();
         // Tokyo (far away)
-        idx.insert(EntityId::new(4), 35.6762, 139.6503);
+        idx.insert(EntityId::new(4), 35.6762, 139.6503).unwrap();
 
         // Search 500km from Paris — should find Paris + London, not Berlin or Tokyo
         let results = idx.search_radius(48.8566, 2.3522, 500.0, 10);
@@ -414,9 +548,9 @@ mod tests {
     #[test]
     fn test_spatial_bbox() {
         let mut idx = SpatialIndex::new("location");
-        idx.insert(EntityId::new(1), 48.8566, 2.3522); // Paris
-        idx.insert(EntityId::new(2), 51.5074, -0.1278); // London
-        idx.insert(EntityId::new(3), 35.6762, 139.6503); // Tokyo
+        idx.insert(EntityId::new(1), 48.8566, 2.3522).unwrap(); // Paris
+        idx.insert(EntityId::new(2), 51.5074, -0.1278).unwrap(); // London
+        idx.insert(EntityId::new(3), 35.6762, 139.6503).unwrap(); // Tokyo
 
         // Bounding box covering Europe
         let results = idx.search_bbox(40.0, -10.0, 55.0, 20.0, 10);
@@ -429,9 +563,9 @@ mod tests {
     #[test]
     fn test_spatial_nearest() {
         let mut idx = SpatialIndex::new("location");
-        idx.insert(EntityId::new(1), 48.8566, 2.3522); // Paris
-        idx.insert(EntityId::new(2), 51.5074, -0.1278); // London
-        idx.insert(EntityId::new(3), 52.5200, 13.4050); // Berlin
+        idx.insert(EntityId::new(1), 48.8566, 2.3522).unwrap(); // Paris
+        idx.insert(EntityId::new(2), 51.5074, -0.1278).unwrap(); // London
+        idx.insert(EntityId::new(3), 52.5200, 13.4050).unwrap(); // Berlin
 
         // Nearest to Brussels (50.85, 4.35)
         let results = idx.search_nearest(50.8503, 4.3517, 2);
@@ -443,8 +577,8 @@ mod tests {
     #[test]
     fn test_spatial_remove() {
         let mut idx = SpatialIndex::new("location");
-        idx.insert(EntityId::new(1), 48.8566, 2.3522);
-        idx.insert(EntityId::new(2), 51.5074, -0.1278);
+        idx.insert(EntityId::new(1), 48.8566, 2.3522).unwrap();
+        idx.insert(EntityId::new(2), 51.5074, -0.1278).unwrap();
         assert_eq!(idx.len(), 2);
 
         idx.remove(EntityId::new(1));
@@ -520,5 +654,77 @@ mod tests {
                 column: "location".to_string(),
             }
         );
+    }
+
+    /// Cap with headroom for exactly one point. The in-RAM R-tree must
+    /// refuse a *second, new* point rather than grow unbounded (PRD #1574 /
+    /// #1578) — it never silently OOMs.
+    #[test]
+    fn test_spatial_insert_refuses_new_point_past_memory_cap() {
+        let cap = std::mem::size_of::<SpatialIndex>() + PER_POINT_BYTES;
+        let mut idx = SpatialIndex::with_max_bytes("location", cap);
+
+        // First new point fits under the cap.
+        idx.insert(EntityId::new(1), 48.8566, 2.3522)
+            .expect("first point should fit under the cap");
+        assert_eq!(idx.len(), 1);
+
+        // Second *new* point would breach the cap → refused, not inserted.
+        let err = idx
+            .insert(EntityId::new(2), 51.5074, -0.1278)
+            .expect_err("second new point must be refused past the cap");
+        assert_eq!(err.max_bytes, cap);
+        assert!(err.attempted_bytes > cap, "{err:?}");
+        assert_eq!(idx.len(), 1, "refused point must not be inserted");
+
+        // Updating an *existing* entity is always allowed — it does not grow
+        // the structure, so the cap does not apply.
+        idx.insert(EntityId::new(1), 40.0, -3.0)
+            .expect("update of existing point must be allowed at the cap");
+        assert_eq!(idx.len(), 1);
+    }
+
+    /// The manager enriches the capacity overflow into a
+    /// `SpatialIndexError::CapacityExceeded` carrying `(collection, column)`.
+    #[test]
+    fn test_spatial_manager_surfaces_capacity_error() {
+        let mgr = SpatialIndexManager::new();
+        // Inject a tiny-cap index directly (the public `create_index` resolves
+        // the env-configured cap; the test wants a deterministic small one).
+        let cap = std::mem::size_of::<SpatialIndex>() + PER_POINT_BYTES;
+        mgr.indices.write().insert(
+            ("sites".to_string(), "location".to_string()),
+            SpatialIndex::with_max_bytes("location", cap),
+        );
+
+        mgr.insert("sites", "location", EntityId::new(1), 48.8566, 2.3522)
+            .expect("first point should fit");
+
+        let err = mgr
+            .insert("sites", "location", EntityId::new(2), 51.5074, -0.1278)
+            .expect_err("manager must surface the capacity overflow");
+        match err {
+            SpatialIndexError::CapacityExceeded {
+                collection,
+                column,
+                max_bytes,
+                ..
+            } => {
+                assert_eq!(collection, "sites");
+                assert_eq!(column, "location");
+                assert_eq!(max_bytes, cap);
+            }
+            other => panic!("expected CapacityExceeded, got {other:?}"),
+        }
+    }
+
+    /// A freshly constructed index always carries a finite, positive budget —
+    /// there is no unbounded-RAM default. The const default is itself bounded.
+    #[test]
+    fn test_spatial_default_cap_is_bounded() {
+        let idx = SpatialIndex::new("location");
+        assert!(idx.max_bytes() > 0);
+        assert!(DEFAULT_RTREE_MAX_BYTES > 0);
+        assert!(DEFAULT_RTREE_MAX_BYTES < usize::MAX);
     }
 }
