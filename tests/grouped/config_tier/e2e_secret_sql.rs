@@ -3,8 +3,10 @@ mod support;
 
 use std::sync::Arc;
 
+use reddb::auth::enforcement_mode::PolicyEnforcementMode;
 use reddb::auth::vault::Vault;
-use reddb::auth::{AuthConfig, AuthStore};
+use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
+use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
@@ -55,6 +57,79 @@ fn attach_vault(rt: &RedDBRuntime, certificate_hex: &str) -> Arc<AuthStore> {
     );
     rt.set_auth_store(Arc::clone(&auth));
     auth
+}
+
+fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
+    set_current_auth_identity(name.to_string(), role);
+    let out = f();
+    clear_current_auth_identity();
+    out
+}
+
+fn attach_secret_policy(auth: &AuthStore, id: &str, actions: &[&str], resources: &[&str]) {
+    if auth.get_user(None, "alice").is_none() {
+        auth.create_user("alice", "p", Role::Write).unwrap();
+    }
+    let actions = actions
+        .iter()
+        .map(|action| format!(r#""{action}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let resources = resources
+        .iter()
+        .map(|resource| format!(r#""{resource}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let policy = format!(
+        r#"{{
+            "id":"{id}",
+            "version":1,
+            "statements":[{{"effect":"allow","actions":[{actions}],"resources":[{resources}]}}]
+        }}"#
+    );
+    auth.put_policy(reddb::auth::policies::Policy::from_json_str(&policy).unwrap())
+        .unwrap();
+    auth.attach_policy(
+        reddb::auth::store::PrincipalRef::User(UserId::platform("alice")),
+        id,
+    )
+    .unwrap();
+}
+
+fn attach_policy_to_user(
+    auth: &AuthStore,
+    user: &str,
+    id: &str,
+    actions: &[&str],
+    resources: &[&str],
+) {
+    if auth.get_user(None, user).is_none() {
+        auth.create_user(user, "p", Role::Write).unwrap();
+    }
+    let actions = actions
+        .iter()
+        .map(|action| format!(r#""{action}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let resources = resources
+        .iter()
+        .map(|resource| format!(r#""{resource}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let policy = format!(
+        r#"{{
+            "id":"{id}",
+            "version":1,
+            "statements":[{{"effect":"allow","actions":[{actions}],"resources":[{resources}]}}]
+        }}"#
+    );
+    auth.put_policy(reddb::auth::policies::Policy::from_json_str(&policy).unwrap())
+        .unwrap();
+    auth.attach_policy(
+        reddb::auth::store::PrincipalRef::User(UserId::platform(user)),
+        id,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -279,6 +354,118 @@ fn dollar_secret_reference_masks_projection_and_resolves_in_filter() {
         filtered.result.records[0].get("id"),
         Some(&Value::Integer(1))
     );
+}
+
+#[test]
+fn dollar_secret_reference_requires_secret_read_policy_in_policy_only_mode() {
+    let (_path, rt, auth) = open_runtime_with_vault("secret_sql_iam_read_policy_only");
+    auth.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+
+    auth.vault_kv_try_set("acme.key".to_string(), "match-me".to_string())
+        .expect("seed secret directly");
+    rt.execute_query("CREATE TABLE tokens (id INT, token TEXT)")
+        .expect("create table");
+    rt.execute_query("INSERT INTO tokens (id, token) VALUES (1, 'match-me')")
+        .expect("insert row");
+    attach_policy_to_user(
+        &auth,
+        "alice",
+        "select-tokens",
+        &["select"],
+        &["table:tokens", "column:tokens.id", "column:tokens.token"],
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT id FROM tokens WHERE token = $secret.acme.key")
+    })
+    .expect("denied secret reads resolve as missing values");
+    assert!(denied.result.records.is_empty());
+
+    attach_secret_policy(
+        &auth,
+        "secret-read-acme",
+        &["secret:read"],
+        &["secret:acme.*"],
+    );
+    let allowed = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT id FROM tokens WHERE token = $secret.acme.key")
+    })
+    .expect("secret:read policy should allow the secret reference");
+    assert_eq!(allowed.result.records.len(), 1);
+    assert_eq!(
+        allowed.result.records[0].get("id"),
+        Some(&Value::Integer(1))
+    );
+}
+
+#[test]
+fn secret_writes_require_secret_write_policy_in_policy_only_mode() {
+    let (_path, rt, auth) = open_runtime_with_vault("secret_sql_iam_write_policy_only");
+    auth.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+
+    let denied_set = as_user("alice", Role::Write, || {
+        rt.execute_query("SET SECRET acme.key = 'val'")
+    })
+    .expect_err("SET SECRET should require secret:write");
+    assert!(denied_set.to_string().contains("secret:write"));
+    assert!(auth.vault_kv_get("acme.key").is_none());
+
+    attach_secret_policy(
+        &auth,
+        "secret-write-acme",
+        &["secret:write"],
+        &["secret:acme.key"],
+    );
+    as_user("alice", Role::Write, || {
+        rt.execute_query("SET SECRET acme.key = 'val'")
+    })
+    .expect("secret:write should allow SET SECRET");
+    assert_eq!(auth.vault_kv_get("acme.key").as_deref(), Some("val"));
+
+    let denied_delete = as_user("bob", Role::Write, || {
+        rt.execute_query("DELETE SECRET acme.key")
+    })
+    .expect_err("DELETE SECRET should require secret:write");
+    assert!(denied_delete.to_string().contains("secret:write"));
+
+    as_user("alice", Role::Write, || {
+        rt.execute_query("DELETE SECRET acme.key")
+    })
+    .expect("secret:write should allow DELETE SECRET");
+    assert!(auth.vault_kv_get("acme.key").is_none());
+}
+
+#[test]
+fn legacy_rbac_admin_can_read_and_write_user_managed_secrets_without_policy() {
+    let (_path, rt, auth) = open_runtime_with_vault("secret_sql_iam_legacy_admin");
+    auth.set_enforcement_mode(PolicyEnforcementMode::LegacyRbac);
+
+    as_user("admin", Role::Admin, || {
+        rt.execute_query("SET SECRET acme.key = 'legacy'")
+    })
+    .expect("legacy admin should write user-managed secrets");
+
+    rt.execute_query("CREATE TABLE tokens (id INT, token TEXT)")
+        .expect("create table");
+    rt.execute_query("INSERT INTO tokens (id, token) VALUES (1, 'legacy')")
+        .expect("insert row");
+    auth.create_user("admin", "p", Role::Admin).unwrap();
+    attach_policy_to_user(&auth, "admin", "select-any", &["select"], &["table:any"]);
+    let read = as_user("admin", Role::Admin, || {
+        rt.execute_query("SELECT $secret.acme.key AS s")
+    })
+    .expect("legacy admin should read user-managed secrets");
+    assert_eq!(read.result.records.len(), 1);
+    assert_eq!(
+        read.result.records[0].get("s"),
+        Some(&Value::Text("***".into()))
+    );
+
+    as_user("admin", Role::Admin, || {
+        rt.execute_query("DELETE SECRET acme.key")
+    })
+    .expect("legacy admin should delete user-managed secrets");
+    assert!(auth.vault_kv_get("acme.key").is_none());
 }
 
 #[test]
