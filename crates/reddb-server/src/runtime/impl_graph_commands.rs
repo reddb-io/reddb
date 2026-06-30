@@ -865,12 +865,21 @@ impl RedDBRuntime {
                     ));
                 }
                 use crate::storage::unified::spatial_index::haversine_km;
-                let _ = column; // Column indicates which field holds geo data
+                // When the geo column carries an H3 index, gather candidates
+                // from a covering kRing over the disk B-tree cell ids; the
+                // ring is a provable superset of the in-radius rows, so the
+                // haversine post-filter below yields byte-identical results
+                // to the full scan. Without an H3 index, scan every row
+                // exactly as before (PRD #1574 slice 3).
+                let h3_candidates = self.h3_radius_candidate_ids(
+                    collection,
+                    column,
+                    *center_lat,
+                    *center_lon,
+                    *radius_km,
+                );
                 let store = self.inner.db.store();
-                let entities = store
-                    .get_collection(collection)
-                    .map(|m| m.query_all(|_| true))
-                    .unwrap_or_default();
+                let entities = scan_collection_with_candidates(&store, collection, &h3_candidates);
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
                 for entity in &entities {
@@ -920,12 +929,15 @@ impl RedDBRuntime {
                             .to_string(),
                     ));
                 }
-                let _ = column;
+                // Cover the bbox with a kRing big enough to enclose its
+                // farthest corner from the centre, scan those cells off the
+                // H3 disk index, then apply the exact bbox filter. The ring
+                // is a superset of the box, so results match the full scan.
+                let h3_candidates = self.h3_bbox_candidate_ids(
+                    collection, column, *min_lat, *min_lon, *max_lat, *max_lon,
+                );
                 let store = self.inner.db.store();
-                let entities = store
-                    .get_collection(collection)
-                    .map(|m| m.query_all(|_| true))
-                    .unwrap_or_default();
+                let entities = scan_collection_with_candidates(&store, collection, &h3_candidates);
 
                 let mut result = UnifiedResult::with_columns(vec!["entity_id".into()]);
                 let mut count = 0;
@@ -969,12 +981,16 @@ impl RedDBRuntime {
                     ));
                 }
                 use crate::storage::unified::spatial_index::haversine_km;
-                let _ = column;
+                // Expand rings outward off the H3 disk index until the K-th
+                // nearest candidate is provably closer than any unscanned
+                // cell, then post-filter exactly as the full scan does. When
+                // no H3 index covers the column (or the cover can't be
+                // proven within the ring cap), fall back to the full scan so
+                // results stay byte-identical (PRD #1574 slice 3).
+                let h3_candidates =
+                    self.h3_nearest_candidate_ids(collection, column, *lat, *lon, *k);
                 let store = self.inner.db.store();
-                let entities = store
-                    .get_collection(collection)
-                    .map(|m| m.query_all(|_| true))
-                    .unwrap_or_default();
+                let entities = scan_collection_with_candidates(&store, collection, &h3_candidates);
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
                 for entity in &entities {
@@ -1264,5 +1280,197 @@ fn extract_geo_from_entity(entity: &UnifiedEntity) -> Option<(f64, f64)> {
             None
         }
         _ => None,
+    }
+}
+
+/// Collect the entities a spatial post-filter runs over. With an H3 cover
+/// (`Some`), the collection scan is restricted to the candidate entity ids
+/// while preserving `query_all` order, so the downstream stable sort and
+/// early-LIMIT behaviour stay byte-identical to the full scan. Without a
+/// cover (`None`), every row is scanned exactly as before (PRD #1574 slice 3).
+fn scan_collection_with_candidates(
+    store: &std::sync::Arc<crate::storage::unified::store::UnifiedStore>,
+    collection: &str,
+    candidates: &Option<std::collections::HashSet<u64>>,
+) -> Vec<UnifiedEntity> {
+    match candidates {
+        Some(ids) => store
+            .get_collection(collection)
+            .map(|m| m.query_all(|e| ids.contains(&e.id.raw())))
+            .unwrap_or_default(),
+        None => store
+            .get_collection(collection)
+            .map(|m| m.query_all(|_| true))
+            .unwrap_or_default(),
+    }
+}
+
+/// Cells covering a disk of `radius_km` around `(lat, lon)` at `resolution`.
+///
+/// Sizes the kRing as `ceil(radius_km / edge_km) + 1`: one grid step spans
+/// at least one edge length, so the division over-estimates the ring count,
+/// and the extra ring is the boundary margin that prevents the geohash-style
+/// edge miss. Returns an empty vec — signalling the caller to fall back to
+/// the full scan — for an un-encodable coordinate or a cover so large it
+/// would be cheaper to scan the collection than to enumerate the cells.
+fn h3_cover_cells(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> Vec<u64> {
+    let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
+    if cell == 0 {
+        return Vec::new();
+    }
+    let edge_km = crate::geo::h3::edge_length_km(resolution).max(f64::MIN_POSITIVE);
+    // Cap the cover so a large radius over a fine resolution cannot blow up
+    // into hundreds of millions of cells; beyond it the full scan is cheaper.
+    const MAX_COVER_RING: u32 = 128;
+    let k_f = (radius_km / edge_km).ceil() + 1.0;
+    if !k_f.is_finite() || k_f > f64::from(MAX_COVER_RING) {
+        return Vec::new();
+    }
+    crate::geo::h3::grid_disk(cell, k_f as u32)
+}
+
+impl RedDBRuntime {
+    /// Resolution of the H3 index registered on `(collection, column)`, if
+    /// the column is covered by one. `None` for any other (or no) index.
+    fn h3_index_resolution(&self, collection: &str, column: &str) -> Option<u8> {
+        match self
+            .inner
+            .index_store
+            .find_index_for_column(collection, column)?
+            .method
+        {
+            super::index_store::IndexMethodKind::H3 { resolution } => Some(resolution),
+            _ => None,
+        }
+    }
+
+    /// Map a set of H3 cell ids to the entity ids stored under them in the
+    /// disk B-tree (sorted) index via per-cell point lookups. `None` when no
+    /// cells were supplied or the column has no sorted index entry.
+    fn h3_cell_candidate_ids(
+        &self,
+        collection: &str,
+        column: &str,
+        cells: &[u64],
+    ) -> Option<std::collections::HashSet<u64>> {
+        if cells.is_empty() {
+            return None;
+        }
+        let keys: Vec<_> = cells
+            .iter()
+            .filter_map(|c| {
+                crate::storage::schema::value_to_canonical_key(&Value::UnsignedInteger(*c))
+            })
+            .collect();
+        let ids = self.inner.index_store.sorted.in_lookup_limited(
+            collection,
+            column,
+            &keys,
+            usize::MAX,
+        )?;
+        Some(ids.into_iter().map(|id| id.raw()).collect())
+    }
+
+    /// Covering-kRing candidate ids for a RADIUS query, or `None` to fall
+    /// back to the full scan (no H3 index, un-encodable centre, or a cover
+    /// too large to enumerate).
+    fn h3_radius_candidate_ids(
+        &self,
+        collection: &str,
+        column: &str,
+        center_lat: f64,
+        center_lon: f64,
+        radius_km: f64,
+    ) -> Option<std::collections::HashSet<u64>> {
+        let resolution = self.h3_index_resolution(collection, column)?;
+        let cells = h3_cover_cells(center_lat, center_lon, radius_km, resolution);
+        self.h3_cell_candidate_ids(collection, column, &cells)
+    }
+
+    /// Covering-kRing candidate ids for a BBOX query: cover a disk centred on
+    /// the box whose radius reaches its farthest corner, then let the exact
+    /// bbox filter trim it. `None` falls back to the full scan.
+    fn h3_bbox_candidate_ids(
+        &self,
+        collection: &str,
+        column: &str,
+        min_lat: f64,
+        min_lon: f64,
+        max_lat: f64,
+        max_lon: f64,
+    ) -> Option<std::collections::HashSet<u64>> {
+        let resolution = self.h3_index_resolution(collection, column)?;
+        let center_lat = (min_lat + max_lat) / 2.0;
+        let center_lon = (min_lon + max_lon) / 2.0;
+        let radius_km = [
+            (min_lat, min_lon),
+            (min_lat, max_lon),
+            (max_lat, min_lon),
+            (max_lat, max_lon),
+        ]
+        .into_iter()
+        .map(|(la, lo)| crate::geo::haversine_km(center_lat, center_lon, la, lo))
+        .fold(0.0_f64, f64::max);
+        let cells = h3_cover_cells(center_lat, center_lon, radius_km, resolution);
+        self.h3_cell_candidate_ids(collection, column, &cells)
+    }
+
+    /// Ring-expansion candidate ids for a NEAREST-K query. Expands the cover
+    /// outward until the K-th nearest candidate is provably closer than any
+    /// point in an unscanned cell, returning that superset. `None` (→ full
+    /// scan) when the column has no H3 index, the centre is un-encodable, or
+    /// the proof is not reached within the ring cap (e.g. fewer than K rows).
+    fn h3_nearest_candidate_ids(
+        &self,
+        collection: &str,
+        column: &str,
+        lat: f64,
+        lon: f64,
+        k: usize,
+    ) -> Option<std::collections::HashSet<u64>> {
+        let resolution = self.h3_index_resolution(collection, column)?;
+        if k == 0 {
+            return None;
+        }
+        let center = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
+        if center == 0 {
+            return None;
+        }
+        let edge_km = crate::geo::h3::edge_length_km(resolution).max(f64::MIN_POSITIVE);
+        // Bound the expansion so an index holding fewer than K points cannot
+        // loop forever; past the cap the exact full scan takes over.
+        const MAX_RING: u32 = 64;
+        let store = self.inner.db.store();
+        for r in 0..=MAX_RING {
+            let cells = crate::geo::h3::grid_disk(center, r);
+            let Some(ids) = self.h3_cell_candidate_ids(collection, column, &cells) else {
+                continue;
+            };
+            if ids.len() < k {
+                continue;
+            }
+            let candidates = Some(ids);
+            let mut dists: Vec<f64> =
+                scan_collection_with_candidates(&store, collection, &candidates)
+                    .iter()
+                    .filter_map(|e| {
+                        extract_geo_from_entity(e)
+                            .map(|(elat, elon)| crate::geo::haversine_km(lat, lon, elat, elon))
+                    })
+                    .collect();
+            if dists.len() < k {
+                continue;
+            }
+            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let d_k = dists[k - 1];
+            // A point in any unscanned cell (grid distance > r) lies at least
+            // `r * edge_km` from the centre — a conservative lower bound. Once
+            // that already meets or exceeds the current K-th distance, the
+            // cover is a proven superset of the true nearest-K.
+            if f64::from(r) * edge_km >= d_k {
+                return candidates;
+            }
+        }
+        None
     }
 }
