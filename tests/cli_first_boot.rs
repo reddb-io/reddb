@@ -61,6 +61,38 @@ fn spawn_server(args: &[&str], stderr_path: &Path) -> ServerChild {
         .env_remove("REDDB_BOOTSTRAP_PRESET")
         .env_remove("REDDB_PRESET")
         .env_remove("REDDB_BOOTSTRAP_MANIFEST")
+        .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
+        .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_AUTH")
+        .env_remove("REDDB_REQUIRE_AUTH")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn red server");
+    ServerChild {
+        child,
+        stderr_path: stderr_path.to_path_buf(),
+    }
+}
+
+/// Spawn `red server` like [`spawn_server`], but with `REDDB_CERTIFICATE_FILE`
+/// pointed at `cert_file` so a reboot can unseal the existing vault from the
+/// certificate written by an earlier `--bootstrap-cert-out` boot (issue #1589).
+fn spawn_server_with_cert_file(args: &[&str], stderr_path: &Path, cert_file: &Path) -> ServerChild {
+    let stderr_file = File::create(stderr_path).expect("create stderr file");
+    let child = Command::new(red_binary())
+        .args(args)
+        .env_remove("REDDB_CERTIFICATE")
+        .env_remove("REDDB_USERNAME")
+        .env_remove("REDDB_PASSWORD")
+        .env_remove("REDDB_USERNAME_FILE")
+        .env_remove("REDDB_PASSWORD_FILE")
+        .env("REDDB_CERTIFICATE_FILE", cert_file)
+        .env_remove("REDDB_BOOTSTRAP_PRESET")
+        .env_remove("REDDB_PRESET")
+        .env_remove("REDDB_BOOTSTRAP_MANIFEST")
+        .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
         .env_remove("REDDB_VAULT")
         .env_remove("REDDB_AUTH")
         .env_remove("REDDB_REQUIRE_AUTH")
@@ -91,6 +123,41 @@ fn wait_until_serving(server: &mut ServerChild, addr: &str, timeout: Duration) -
         std::thread::sleep(Duration::from_millis(150));
     }
     false
+}
+
+/// Poll until `path` exists (the spawned server is still alive), or the
+/// process exits / the timeout elapses. Returns `true` only when the file
+/// appeared while the server was running. More robust than a bare TCP
+/// probe: it ties the wait to the artifact under test and cannot be fooled
+/// by a stale listener on the same ephemeral port.
+fn wait_for_file(server: &mut ServerChild, path: &Path, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if path.exists() {
+            return true;
+        }
+        if let Ok(Some(_status)) = server.child.try_wait() {
+            return path.exists(); // exited — accept only if the file landed
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    path.exists()
+}
+
+/// Poll the server's stderr until it contains `needle` (proof the boot
+/// reached that log line), the process exits, or the timeout elapses.
+fn wait_for_stderr_contains(server: &mut ServerChild, needle: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if server.stderr().contains(needle) {
+            return true;
+        }
+        if let Ok(Some(_status)) = server.child.try_wait() {
+            return server.stderr().contains(needle);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    server.stderr().contains(needle)
 }
 
 /// Wait for the process to exit, returning its exit code (or `None` on
@@ -256,5 +323,150 @@ fn no_intent_fresh_path_keeps_vault_gate_error() {
     assert!(
         !paged_layout_marker(&db_path).exists(),
         "no-intent boot must not self-create a paged vault"
+    );
+}
+
+/// Issue #1589 — first boot with `--bootstrap-cert-out <path>` writes the
+/// freshly minted unseal certificate to `<path>` (in addition to the
+/// stdout/stderr emission). The written file is consumable via
+/// `REDDB_CERTIFICATE_FILE` to unseal on a subsequent boot, and a re-boot
+/// against the existing vault does not rewrite/churn the file.
+#[test]
+fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
+    let dir = support::temp_data_dir("first-boot-cert-out");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let head_pw = dir.join("head.pw");
+    let customer_pw = dir.join("customer.pw");
+    std::fs::write(&head_pw, "head-secret\n").unwrap();
+    std::fs::write(&customer_pw, "customer-secret\n").unwrap();
+    let head_pw_s = head_pw.to_str().unwrap();
+    let customer_pw_s = customer_pw.to_str().unwrap();
+    let cert_out = dir.join("cert.pem");
+    let cert_out_s = cert_out.to_str().unwrap();
+    let port = free_port();
+    let http_addr = format!("127.0.0.1:{port}");
+
+    assert!(!db_path.exists(), "fresh volume precondition");
+    assert!(
+        !cert_out.exists(),
+        "cert-out must not exist before first boot"
+    );
+
+    let mut cloud_with_cert_out =
+        cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
+    cloud_with_cert_out.push("--bootstrap-cert-out");
+    cloud_with_cert_out.push(cert_out_s);
+
+    // ---- First boot: mint the vault + write the certificate file. ----
+    let stderr_path = dir.join("server.stderr");
+    let mut server = spawn_server(&cloud_with_cert_out, &stderr_path);
+    // The cert file is written during preset application, before listeners
+    // come up; poll for it directly rather than probing the port.
+    let wrote_cert = wait_for_file(&mut server, &cert_out, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        wrote_cert,
+        "--bootstrap-cert-out file was not written.\nstderr:\n{stderr}"
+    );
+    assert!(
+        paged_layout_marker(&db_path).exists(),
+        "first boot must create the paged vault in place.\nstderr:\n{stderr}"
+    );
+    drop(server); // kill + reap
+
+    // The certificate holds a usable 32-byte (64 hex chars) unseal cert.
+    let cert_first = std::fs::read_to_string(&cert_out).expect("read cert-out");
+    let cert_trimmed = cert_first.trim();
+    assert_eq!(
+        cert_trimmed.len(),
+        64,
+        "expected a 64-hex-char certificate, got {:?}",
+        cert_trimmed
+    );
+    assert!(
+        cert_trimmed.bytes().all(|b| b.is_ascii_hexdigit()),
+        "certificate must be hex, got {:?}",
+        cert_trimmed
+    );
+    let mtime_first = std::fs::metadata(&cert_out)
+        .and_then(|m| m.modified())
+        .expect("cert-out mtime");
+
+    // ---- Round-trip: a fresh boot with NO bootstrap intent unseals the
+    // existing vault from the written file via REDDB_CERTIFICATE_FILE. The
+    // bootstrapped operational-directory vault requires the certificate on
+    // every subsequent boot, so a clean serve here proves the file we wrote
+    // is a usable unseal certificate. ----
+    let stderr_path2 = dir.join("server2.stderr");
+    let mut server2 = spawn_server_with_cert_file(
+        &[
+            "server",
+            "--path",
+            &db_path_str,
+            "--vault",
+            "true",
+            "--http",
+            "--http-bind",
+            &http_addr,
+        ],
+        &stderr_path2,
+        &cert_out,
+    );
+    let serving2 =
+        wait_for_stderr_contains(&mut server2, "listener online", Duration::from_secs(30));
+    let stderr2 = server2.stderr();
+    assert!(
+        serving2,
+        "the written certificate must unseal via REDDB_CERTIFICATE_FILE on a subsequent boot.\nstderr:\n{stderr2}"
+    );
+    drop(server2);
+
+    // ---- No churn: a re-boot against the existing vault — even with the
+    // bootstrap intent and `--bootstrap-cert-out` re-passed — must NOT
+    // rewrite the certificate file. The completion marker short-circuits
+    // preset re-application before any cert is minted or written. The cert
+    // env unseals the existing vault so the boot reaches that point. ----
+    let stderr_path3 = dir.join("server3.stderr");
+    let mut server3 = spawn_server_with_cert_file(&cloud_with_cert_out, &stderr_path3, &cert_out);
+    let rebooted =
+        wait_for_stderr_contains(&mut server3, "listener online", Duration::from_secs(30));
+    let stderr3 = server3.stderr();
+    assert!(
+        rebooted,
+        "re-boot against the existing vault must serve.\nstderr:\n{stderr3}"
+    );
+    drop(server3);
+
+    let cert_second = std::fs::read_to_string(&cert_out).expect("read cert-out after reboot");
+    assert_eq!(
+        cert_first, cert_second,
+        "re-boot must not rewrite the cert-out file (content churned)"
+    );
+    let mtime_second = std::fs::metadata(&cert_out)
+        .and_then(|m| m.modified())
+        .expect("cert-out mtime after reboot");
+    assert_eq!(
+        mtime_first, mtime_second,
+        "re-boot must not rewrite the cert-out file (mtime churned)"
+    );
+}
+
+/// Issue #1589 — `--bootstrap-cert-out` is documented in `red server --help`.
+#[test]
+fn server_help_documents_bootstrap_cert_out() {
+    let output = Command::new(red_binary())
+        .args(["server", "--help"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run red server --help");
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        help.contains("--bootstrap-cert-out"),
+        "red server --help must document --bootstrap-cert-out.\nhelp:\n{help}"
     );
 }
