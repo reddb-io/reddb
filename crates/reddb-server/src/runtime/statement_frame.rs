@@ -204,6 +204,9 @@ fn statement_kind(query: &str) -> &'static str {
         }
         return "write";
     }
+    if first.eq_ignore_ascii_case("RESET") && !second.eq_ignore_ascii_case("TENANT") {
+        return "write";
+    }
     // ASCII-uppercase compare without allocating: SQL keywords are ASCII.
     let mut buf = [0u8; 16];
     let bytes = first.as_bytes();
@@ -215,7 +218,8 @@ fn statement_kind(query: &str) -> &'static str {
         b"SELECT" | b"WITH" | b"SHOW" | b"EXPLAIN" | b"DESCRIBE" | b"DESC" | b"RANK"
         | b"APPROX" | b"APPROXIMATE" | b"ZRANK" | b"ZRANGE" | b"LIST" | b"WATCH" | b"GET"
         | b"HISTORY" => "read",
-        b"INSERT" | b"UPDATE" | b"DELETE" | b"UPSERT" | b"MERGE" | b"COPY" | b"TRUNCATE" => "write",
+        b"INSERT" | b"UPDATE" | b"DELETE" | b"UPSERT" | b"MERGE" | b"COPY" | b"TRUNCATE"
+        | b"CHECKPOINT" | b"CHECKOUT" | b"CHERRY" | b"REVERT" | b"RESOLVE" => "write",
         b"CREATE" | b"ALTER" | b"DROP" | b"REINDEX" | b"VACUUM" | b"ANALYZE" => "ddl",
         b"GRANT" | b"REVOKE" => "admin",
         b"BEGIN" | b"START" | b"COMMIT" | b"ROLLBACK" | b"SAVEPOINT" | b"RELEASE" | b"END"
