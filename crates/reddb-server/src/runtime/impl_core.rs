@@ -5498,6 +5498,7 @@ impl RedDBRuntime {
                 let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
                     RedDBError::Query("SET SECRET requires an enabled, unsealed vault".to_string())
                 })?;
+                self.check_secret_write_privilege(&auth_store, key)?;
                 if matches!(value, Value::Null) {
                     auth_store
                         .vault_kv_try_delete(key)
@@ -5529,6 +5530,7 @@ impl RedDBRuntime {
                         "DELETE SECRET requires an enabled, unsealed vault".to_string(),
                     )
                 })?;
+                self.check_secret_write_privilege(&auth_store, key)?;
                 let deleted = auth_store
                     .vault_kv_try_delete(key)
                     .map_err(|err| RedDBError::Query(err.to_string()))?;
@@ -11078,6 +11080,37 @@ impl RedDBRuntime {
                 )))
             }
         }
+    }
+
+    fn check_secret_write_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        key: &str,
+    ) -> RedDBResult<()> {
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let tenant = current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("secret".to_string(), key.to_string());
+        if let Some(tenant) = &tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = runtime_iam_context(role, tenant.as_deref());
+        if auth_store.check_policy_authz_with_role(
+            &principal,
+            "secret:write",
+            &resource,
+            &ctx,
+            role,
+        ) {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{}` action=`secret:write` resource=`secret:{}` denied by IAM policy",
+            principal, key
+        )))
     }
 
     /// IAM privilege check for a granular queue operation (issue #755 /
