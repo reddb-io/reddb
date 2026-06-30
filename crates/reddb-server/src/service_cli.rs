@@ -371,7 +371,7 @@ impl ServerCommandConfig {
         options.storage_profile = self.storage_profile.validate()?;
 
         let no_auth = self.no_auth || env_truthy("REDDB_NO_AUTH") || env_truthy("REDDB_DEV");
-        let preset = self.bootstrap.resolved_preset();
+        let preset = self.bootstrap.resolved_preset_for_options()?;
         let preset_requires_auth = matches!(preset.as_str(), PRESET_PRODUCTION | PRESET_CLOUD);
 
         if self.auth || env_truthy("REDDB_AUTH") || preset_requires_auth {
@@ -529,6 +529,17 @@ impl BootstrapConfig {
             .map(str::to_string)
             .or_else(|| env_nonempty(BOOTSTRAP_PRESET_ENV).or_else(|| env_nonempty(PRESET_ENV)))
             .unwrap_or_else(|| PRESET_SIMPLE.to_string())
+    }
+
+    fn resolved_preset_for_options(&self) -> Result<String, String> {
+        if let Some(path) = self.selected_manifest() {
+            if let Some(manifest_bootstrap) =
+                crate::cli::bootstrap_manifest::bootstrap_config_from_manifest_file(&path)?
+            {
+                return Ok(manifest_bootstrap.resolved_preset());
+            }
+        }
+        Ok(self.resolved_preset())
     }
 
     fn selected_manifest(&self) -> Option<PathBuf> {
@@ -2432,6 +2443,12 @@ fn apply_preset_from_config(
     }
 
     if let Some(path) = bootstrap.selected_manifest() {
+        if let Some(manifest_bootstrap) =
+            crate::cli::bootstrap_manifest::bootstrap_config_from_manifest_file(&path)?
+        {
+            apply_preset_from_config(runtime, auth_store, &manifest_bootstrap)?;
+            return Ok(());
+        }
         let first_admin_id = crate::cli::bootstrap_manifest::apply_manifest_file(
             runtime,
             auth_store,
@@ -4104,6 +4121,91 @@ mod tests {
             "cloud-specific env password must not beat CLI alias"
         );
 
+        clear_preset_env();
+    }
+
+    #[test]
+    fn bootstrap_intent_manifest_matches_cloud_flag_path() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+
+        let manifest_dir = std::env::current_dir()
+            .expect("current dir")
+            .join(".red/tmp/bootstrap-manifest-tests");
+        std::fs::create_dir_all(&manifest_dir).expect("create manifest test dir");
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let head_password = manifest_dir.join(format!("head-{unique}.secret"));
+        let customer_password = manifest_dir.join(format!("customer-{unique}.secret"));
+        let manifest_path = manifest_dir.join(format!("intent-{unique}.json"));
+        std::fs::write(&head_password, "head-pass\n").expect("write head secret");
+        std::fs::write(&customer_password, "customer-pass\n").expect("write customer secret");
+        std::fs::write(
+            &manifest_path,
+            format!(
+                r#"{{
+                    "bootstrap": {{
+                        "preset": "cloud",
+                        "cloud_head_admin": {{
+                            "username": "head",
+                            "password_file": "{}"
+                        }},
+                        "customer_admin": {{
+                            "username": "customer",
+                            "password_file": "{}"
+                        }}
+                    }}
+                }}"#,
+                head_password.display(),
+                customer_password.display()
+            ),
+        )
+        .expect("write manifest");
+
+        let mut config = no_auth_test_config(false);
+        config.bootstrap.manifest = Some(manifest_path.clone());
+        let options = config.to_db_options().expect("manifest options");
+        assert!(options.auth.enabled);
+        assert!(options.auth.require_auth);
+        assert!(options.auth.vault_enabled);
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset_from_config(&runtime, &auth_store, &config.bootstrap)
+            .expect("manifest intent applies cleanly");
+
+        auth_store
+            .authenticate("head", "head-pass")
+            .expect("head password comes from file");
+        auth_store
+            .authenticate("customer", "customer-pass")
+            .expect("customer password comes from file");
+        assert!(auth_store.get_user(None, "head").is_some());
+        assert!(auth_store.get_user(None, "customer").is_some());
+        assert!(auth_store
+            .get_policy(CLOUD_PROTECT_MANAGED_POLICY)
+            .is_some());
+        match runtime
+            .db()
+            .store()
+            .get_config(BOOTSTRAP_PRESET_KEY)
+            .expect("preset key persisted")
+        {
+            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
+            other => panic!("expected Text(cloud), got {other:?}"),
+        }
+
+        apply_preset_from_config(&runtime, &auth_store, &config.bootstrap)
+            .expect("second boot is idempotent");
+
+        let _ = std::fs::remove_file(&manifest_path);
+        let _ = std::fs::remove_file(&head_password);
+        let _ = std::fs::remove_file(&customer_password);
         clear_preset_env();
     }
 
