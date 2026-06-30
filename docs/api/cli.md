@@ -71,7 +71,7 @@ red server [--grpc] [--http] [--grpc-bind 127.0.0.1:55055] [--http-bind 127.0.0.
 | `--vault` | | `false` | Enable encrypted auth/secret vault |
 | `--no-auth` | | `false` | Hard-disable auth and vault for local/dev boots |
 | `--bootstrap-preset` | | `simple` | First-boot preset: `simple`, `production`, `regulated`, `cloud` |
-| `--bootstrap-manifest` | | | First-boot manifest JSON path |
+| `--bootstrap-manifest` | | | First-boot manifest JSON path; can supply preset/admin intent with `password_file` secrets |
 | `--bootstrap-admin` | | | First admin username for production/cloud bootstrap |
 | `--bootstrap-admin-password-file` | | | File containing first admin password |
 | `--cloud-head-admin` | | | Cloud preset head/platform admin username |
@@ -96,6 +96,9 @@ red server --http --bind 0.0.0.0:5000
 
 # Primary mode with vault
 red server --path ./data/primary.rdb --role primary --vault --grpc-bind 0.0.0.0:55055 --http-bind 0.0.0.0:5000
+
+# First boot from mounted files, with no secrets on argv
+red server --path /data/reddb.rdb --bootstrap-manifest /etc/reddb/bootstrap.json
 ```
 
 ## red service
