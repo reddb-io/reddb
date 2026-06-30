@@ -51,6 +51,10 @@ pub enum QueryExpr {
     Truncate(TruncateQuery),
     /// ALTER TABLE name ADD/DROP/RENAME COLUMN
     AlterTable(AlterTableQuery),
+    /// CREATE BRANCH/TAG ref DDL
+    CreateVcsRef(CreateVcsRefQuery),
+    /// DROP BRANCH/TAG ref DDL
+    DropVcsRef(DropVcsRefQuery),
     /// GRAPH subcommand (NEIGHBORHOOD, SHORTEST_PATH, etc.)
     GraphCommand(GraphCommand),
     /// SEARCH subcommand (SIMILAR, TEXT, HYBRID)
@@ -2143,6 +2147,27 @@ pub struct TruncateQuery {
     pub name: String,
     pub model: Option<CollectionModel>,
     pub if_exists: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcsRefKind {
+    Branch,
+    Tag,
+}
+
+/// CREATE BRANCH 'name' [FROM commitish] / CREATE TAG 'name' [AT commitish]
+#[derive(Debug, Clone)]
+pub struct CreateVcsRefQuery {
+    pub kind: VcsRefKind,
+    pub name: String,
+    pub target: Option<String>,
+}
+
+/// DROP BRANCH 'name' / DROP TAG 'name'
+#[derive(Debug, Clone)]
+pub struct DropVcsRefQuery {
+    pub kind: VcsRefKind,
+    pub name: String,
 }
 
 /// ALTER TABLE name operations
