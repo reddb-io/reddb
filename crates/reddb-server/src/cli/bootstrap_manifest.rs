@@ -115,6 +115,7 @@ fn bootstrap_config_from_manifest_json(raw: &str) -> Result<Option<BootstrapConf
             .as_ref()
             .map(|principal| principal.username.clone()),
         customer_admin_password: customer.map(|principal| principal.password),
+        ..BootstrapConfig::default()
     }))
 }
 
