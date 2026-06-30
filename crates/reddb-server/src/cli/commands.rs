@@ -377,7 +377,9 @@ fn server_flags() -> Vec<FlagSchema> {
             )
             .with_choices(&["simple", "production", "regulated", "cloud"]),
         FlagSchema::new("bootstrap-manifest").with_description(
-            "Path to first-boot bootstrap manifest JSON (preset/admins; secrets via password_file)",
+            "Path to manifest-driven first boot JSON. Applied once on a fresh database \
+                 before serving; later boots observe bootstrap state and skip re-applying \
+                 the manifest (idempotent).",
         ),
         FlagSchema::new("bootstrap-admin")
             .with_description("First admin username for production/cloud bootstrap"),
