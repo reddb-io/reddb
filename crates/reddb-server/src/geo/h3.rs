@@ -60,6 +60,17 @@ pub fn grid_disk(cell: u64, k: u32) -> Vec<u64> {
     }
 }
 
+/// Average hexagon edge length, in kilometres, for an H3 resolution.
+///
+/// Sourced from h3o's per-resolution average-edge table. Used by the
+/// spatial query path to size the covering kRing for a radius search
+/// (`k ≈ radius_km / edge_km`): one grid step spans at least one edge
+/// length, so dividing the radius by the edge length over-estimates the
+/// ring count, which keeps the cover a safe superset (PRD #1574 slice 3).
+pub fn edge_length_km(res: u8) -> f64 {
+    clamp_resolution(res).edge_length_km()
+}
+
 /// Truncate `cell` to its ancestor cell at the coarser resolution
 /// `res` (hierarchical parent).
 ///
@@ -127,6 +138,18 @@ mod tests {
         assert_eq!(coarse, lat_lng_to_cell(PARIS_LAT, PARIS_LON, 5));
         // A "parent" finer than the cell's own resolution has no answer.
         assert_eq!(cell_to_parent(fine, 12), 0);
+    }
+
+    #[test]
+    fn edge_length_km_is_positive_and_shrinks_with_resolution() {
+        // Coarser resolutions have longer edges than finer ones, and the
+        // length is always a usable positive number for the cover sizing.
+        let coarse = edge_length_km(5);
+        let fine = edge_length_km(12);
+        assert!(coarse > 0.0 && fine > 0.0);
+        assert!(coarse > fine, "edge length must shrink as resolution grows");
+        // Out-of-range bytes clamp to res 15 rather than panicking.
+        assert!(edge_length_km(200) > 0.0);
     }
 
     #[test]

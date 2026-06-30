@@ -181,3 +181,160 @@ fn h3_index_survives_restart_rebuilt_from_catalog() {
         "rehydrated H3 index must not allocate a resident R-tree"
     );
 }
+
+// ── SEARCH SPATIAL parity: H3 ring scan vs full scan (PRD #1574 slice 3) ─────
+//
+// `SEARCH SPATIAL RADIUS/BBOX/NEAREST` must return byte-identical results
+// whether the geo column carries an H3 index (covering-ring scan over the
+// disk B-tree) or no index at all (full collection scan + haversine). The
+// parity is asserted on the SAME table and the SAME runtime: the queries run
+// once with no index (full scan), then again after `CREATE INDEX … USING H3`
+// (the ring scan), so the underlying entity store — and therefore the
+// `entity_id` ordering for equidistant ties — is identical between the two
+// runs. Only the index mechanism changes.
+
+/// A geo corpus chosen to exercise cell boundaries: points cluster around
+/// central Paris in *different* res-9 cells, plus an exact duplicate of the
+/// centre (a 0-km tie that must keep its store order on both paths) and
+/// far-away outliers in other regions.
+const GEO_CORPUS: &[(i64, &str)] = &[
+    (1, "48.8566,2.3522"),     // Notre-Dame (centre)
+    (2, "48.8606,2.3376"),     // Louvre, ~1.2 km
+    (3, "48.8530,2.3499"),     // ~0.4 km
+    (4, "48.8738,2.2950"),     // Arc de Triomphe, ~4.5 km
+    (5, "48.8584,2.2945"),     // Eiffel Tower, ~4.2 km
+    (6, "48.8000,2.3000"),     // ~6.7 km
+    (7, "49.0000,2.5000"),     // ~20 km
+    (8, "48.8566,2.3522"),     // exact duplicate of the centre (0-km tie)
+    (9, "51.5074,-0.1278"),    // London, ~344 km
+    (10, "-23.5505,-46.6333"), // São Paulo, far hemisphere
+];
+
+fn seed_geo_corpus(table: &str) -> RedDBRuntime {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query(&format!("CREATE TABLE {table} (id INT, loc GEOPOINT)"))
+        .unwrap();
+    for (id, loc) in GEO_CORPUS {
+        rt.execute_query(&format!(
+            "INSERT INTO {table} (id, loc) VALUES ({id}, '{loc}')"
+        ))
+        .unwrap();
+    }
+    rt
+}
+
+/// Ordered `(entity_id, distance_km_bits)` rows for exact comparison. The
+/// distance is compared by raw bits so two haversine computations are held
+/// to byte-for-byte equality; rows without a `distance_km` column (BBOX)
+/// contribute a `0` placeholder, which is identical on both paths.
+fn spatial_rows(rt: &RedDBRuntime, query: &str) -> Vec<(u64, u64)> {
+    let res = rt.execute_query(query).expect("spatial query must execute");
+    res.result
+        .records
+        .iter()
+        .map(|r| {
+            let id = match r.get("entity_id") {
+                Some(Value::UnsignedInteger(n)) => *n,
+                other => panic!("missing entity_id: {other:?}"),
+            };
+            let dist = match r.get("distance_km") {
+                Some(Value::Float(f)) => f.to_bits(),
+                _ => 0,
+            };
+            (id, dist)
+        })
+        .collect()
+}
+
+/// For each query: run the full scan (no index), create the H3 index, run
+/// the ring scan, and assert the two are byte-identical.
+fn assert_h3_parity(create_index: &str, queries: &[String]) {
+    let rt = seed_geo_corpus("places");
+    let baseline: Vec<Vec<(u64, u64)>> = queries.iter().map(|q| spatial_rows(&rt, q)).collect();
+    rt.execute_query(create_index).unwrap();
+    for (q, expected) in queries.iter().zip(&baseline) {
+        assert_eq!(
+            &spatial_rows(&rt, q),
+            expected,
+            "H3 ring scan diverged from full scan for: {q}"
+        );
+    }
+}
+
+#[test]
+fn h3_radius_parity_with_full_scan() {
+    // Tight radii land on res-9 cell boundaries (the +1 ring margin must
+    // still find the neighbouring in-radius points); large radii exceed the
+    // cover cap and fall back to the full scan — both must match.
+    let queries: Vec<String> = [
+        (48.8566, 2.3522, 0.5),
+        (48.8566, 2.3522, 1.0),
+        (48.8566, 2.3522, 5.0),
+        (48.8584, 2.2945, 2.0),
+        (48.8566, 2.3522, 50.0),
+        (48.8566, 2.3522, 500.0),
+        (48.8566, 2.3522, 20000.0),
+    ]
+    .iter()
+    .map(|(clat, clon, r)| {
+        format!("SEARCH SPATIAL RADIUS {clat} {clon} {r} COLLECTION places COLUMN loc")
+    })
+    .collect();
+    assert_h3_parity("CREATE INDEX idx ON places (loc) USING H3", &queries);
+}
+
+#[test]
+fn h3_nearest_parity_with_full_scan() {
+    let queries: Vec<String> = [
+        (48.8566, 2.3522, 1),
+        (48.8566, 2.3522, 4),
+        (48.8566, 2.3522, 6),
+        (48.8584, 2.2945, 3),
+        // K larger than the corpus → ring expansion exhausts and the cover
+        // proof falls back to the full scan; results must still match.
+        (48.8566, 2.3522, 50),
+    ]
+    .iter()
+    .map(|(lat, lon, k)| {
+        format!("SEARCH SPATIAL NEAREST {lat} {lon} K {k} COLLECTION places COLUMN loc")
+    })
+    .collect();
+    assert_h3_parity("CREATE INDEX idx ON places (loc) USING H3 (9)", &queries);
+}
+
+#[test]
+fn h3_bbox_parity_with_full_scan() {
+    let queries: Vec<String> = [
+        (48.84, 2.33, 48.87, 2.36),   // tight box around the centre cluster
+        (48.80, 2.25, 48.90, 2.40),   // wider Paris box
+        (48.00, 2.00, 50.00, 3.00),   // region-scale box
+        (-90.0, -180.0, 90.0, 180.0), // whole globe
+    ]
+    .iter()
+    .map(|(min_lat, min_lon, max_lat, max_lon)| {
+        format!(
+            "SEARCH SPATIAL BBOX {min_lat} {min_lon} {max_lat} {max_lon} COLLECTION places COLUMN loc"
+        )
+    })
+    .collect();
+    assert_h3_parity("CREATE INDEX idx ON places (loc) USING H3", &queries);
+}
+
+#[test]
+fn h3_radius_uses_disk_btree_not_rtree() {
+    // The H3 radius path must run off the sorted disk B-tree cell index and
+    // never allocate the in-RAM rstar R-tree for the column.
+    let rt = seed_geo_corpus("places");
+    rt.execute_query("CREATE INDEX idx ON places (loc) USING H3")
+        .unwrap();
+    let _ = rt
+        .execute_query("SEARCH SPATIAL RADIUS 48.8566 2.3522 5.0 COLLECTION places COLUMN loc")
+        .unwrap();
+    assert!(
+        rt.index_store_ref()
+            .spatial
+            .index_stats("places", "loc")
+            .is_err(),
+        "an H3 radius query must not create a resident rstar R-tree"
+    );
+}
