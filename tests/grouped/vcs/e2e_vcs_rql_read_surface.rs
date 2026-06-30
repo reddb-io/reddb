@@ -53,6 +53,17 @@ fn integer(record: &UnifiedRecord, field: &str) -> i64 {
     }
 }
 
+fn ref_target(rt: &RedDBRuntime, table: &str, name: &str) -> Option<String> {
+    let refs = rt
+        .execute_query(&format!("SELECT name, target FROM {table}"))
+        .expect("query refs");
+    refs.result
+        .records
+        .iter()
+        .find(|record| text(record, "name") == name)
+        .map(|record| text(record, "target").to_string())
+}
+
 #[test]
 fn rql_exposes_vcs_refs_commits_status_and_versioned_collections() {
     let rt = rt();
@@ -180,5 +191,71 @@ fn rql_exposes_vcs_refs_commits_status_and_versioned_collections() {
         .expect("red.lca");
     assert_eq!(lca.result.records.len(), 1);
     assert_eq!(text(&lca.result.records[0], "lca"), c1);
+    clear_current_connection_id();
+}
+
+#[test]
+fn rql_create_and_drop_branch_ddl_updates_red_branches() {
+    let rt = rt();
+    let c1 = commit(&rt, 77, "root");
+    let c2 = commit(&rt, 77, "second");
+
+    set_current_connection_id(77);
+    rt.execute_query("CREATE BRANCH 'rql-default'")
+        .expect("create branch from current head");
+    rt.execute_query(&format!("CREATE BRANCH 'rql-from-root' FROM '{c1}'"))
+        .expect("create branch from explicit commit");
+
+    assert_eq!(
+        ref_target(&rt, "red.branches", "refs/heads/rql-default"),
+        Some(c2)
+    );
+    assert_eq!(
+        ref_target(&rt, "red.branches", "refs/heads/rql-from-root"),
+        Some(c1)
+    );
+
+    rt.execute_query("DROP BRANCH 'rql-default'")
+        .expect("drop branch from current head");
+    rt.execute_query("DROP BRANCH 'rql-from-root'")
+        .expect("drop branch from explicit commit");
+    assert_eq!(
+        ref_target(&rt, "red.branches", "refs/heads/rql-default"),
+        None
+    );
+    assert_eq!(
+        ref_target(&rt, "red.branches", "refs/heads/rql-from-root"),
+        None
+    );
+    clear_current_connection_id();
+}
+
+#[test]
+fn rql_create_and_drop_tag_ddl_updates_red_tags() {
+    let rt = rt();
+    let c1 = commit(&rt, 88, "root");
+    let c2 = commit(&rt, 88, "second");
+
+    set_current_connection_id(88);
+    rt.execute_query("CREATE TAG 'rql-default'")
+        .expect("create tag at current head");
+    rt.execute_query(&format!("CREATE TAG 'rql-at-root' AT '{c1}'"))
+        .expect("create tag at explicit commit");
+
+    assert_eq!(
+        ref_target(&rt, "red.tags", "refs/tags/rql-default"),
+        Some(c2)
+    );
+    assert_eq!(
+        ref_target(&rt, "red.tags", "refs/tags/rql-at-root"),
+        Some(c1)
+    );
+
+    rt.execute_query("DROP TAG 'rql-default'")
+        .expect("drop tag at current head");
+    rt.execute_query("DROP TAG 'rql-at-root'")
+        .expect("drop tag at explicit commit");
+    assert_eq!(ref_target(&rt, "red.tags", "refs/tags/rql-default"), None);
+    assert_eq!(ref_target(&rt, "red.tags", "refs/tags/rql-at-root"), None);
     clear_current_connection_id();
 }
