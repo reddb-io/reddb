@@ -280,6 +280,8 @@ impl JoinQueryBuilder {
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::ShowSecrets { .. }
+            | QueryExpr::SetKv { .. }
+            | QueryExpr::DeleteKv { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
