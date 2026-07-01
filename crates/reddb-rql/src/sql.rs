@@ -108,6 +108,13 @@ pub enum SqlCommand {
     ShowSecrets {
         prefix: Option<String>,
     },
+    SetKv {
+        key: String,
+        value: Value,
+    },
+    DeleteKv {
+        key: String,
+    },
     SetTenant(Option<String>),
     ShowTenant,
     TransactionControl(TxnControl),
@@ -1426,6 +1433,13 @@ pub enum SqlAdminCommand {
     ShowSecrets {
         prefix: Option<String>,
     },
+    SetKv {
+        key: String,
+        value: Value,
+    },
+    DeleteKv {
+        key: String,
+    },
     SetTenant(Option<String>),
     ShowTenant,
     TransactionControl(TxnControl),
@@ -1536,6 +1550,10 @@ impl SqlStatement {
             SqlStatement::Admin(SqlAdminCommand::ShowSecrets { prefix }) => {
                 SqlCommand::ShowSecrets { prefix }
             }
+            SqlStatement::Admin(SqlAdminCommand::SetKv { key, value }) => {
+                SqlCommand::SetKv { key, value }
+            }
+            SqlStatement::Admin(SqlAdminCommand::DeleteKv { key }) => SqlCommand::DeleteKv { key },
             SqlStatement::Admin(SqlAdminCommand::SetTenant(value)) => SqlCommand::SetTenant(value),
             SqlStatement::Admin(SqlAdminCommand::ShowTenant) => SqlCommand::ShowTenant,
             SqlStatement::Admin(SqlAdminCommand::TransactionControl(ctl)) => {
@@ -1685,6 +1703,8 @@ impl SqlCommand {
             SqlCommand::SetSecret { key, value } => QueryExpr::SetSecret { key, value },
             SqlCommand::DeleteSecret { key } => QueryExpr::DeleteSecret { key },
             SqlCommand::ShowSecrets { prefix } => QueryExpr::ShowSecrets { prefix },
+            SqlCommand::SetKv { key, value } => QueryExpr::SetKv { key, value },
+            SqlCommand::DeleteKv { key } => QueryExpr::DeleteKv { key },
             SqlCommand::SetTenant(value) => QueryExpr::SetTenant(value),
             SqlCommand::ShowTenant => QueryExpr::ShowTenant,
             SqlCommand::TransactionControl(ctl) => QueryExpr::TransactionControl(ctl),
@@ -1813,6 +1833,10 @@ impl SqlCommand {
             SqlCommand::ShowSecrets { prefix } => {
                 SqlStatement::Admin(SqlAdminCommand::ShowSecrets { prefix })
             }
+            SqlCommand::SetKv { key, value } => {
+                SqlStatement::Admin(SqlAdminCommand::SetKv { key, value })
+            }
+            SqlCommand::DeleteKv { key } => SqlStatement::Admin(SqlAdminCommand::DeleteKv { key }),
             SqlCommand::SetTenant(value) => SqlStatement::Admin(SqlAdminCommand::SetTenant(value)),
             SqlCommand::ShowTenant => SqlStatement::Admin(SqlAdminCommand::ShowTenant),
             SqlCommand::TransactionControl(ctl) => {
@@ -3389,6 +3413,13 @@ impl<'a> Parser<'a> {
                     let key =
                         Self::normalize_secret_admin_path(self.parse_dotted_admin_path(true)?);
                     Ok(SqlCommand::DeleteSecret { key })
+                } else if matches!(self.peek_next()?, Token::Kv) {
+                    // DELETE KV key — remove a plain user KV entry. `KV`
+                    // lexes as a keyword token, not an identifier.
+                    self.advance()?; // DELETE
+                    self.advance()?; // KV
+                    let key = self.parse_dotted_admin_path(true)?;
+                    Ok(SqlCommand::DeleteKv { key })
                 } else {
                     match self.parse_delete_query()? {
                         QueryExpr::Delete(query) => Ok(SqlCommand::Delete(query)),
@@ -3914,6 +3945,15 @@ impl<'a> Parser<'a> {
                     self.expect(Token::Eq)?;
                     let value = self.parse_literal_value()?;
                     Ok(SqlCommand::SetSecret { key, value })
+                } else if self.consume(&Token::Kv)? {
+                    // SET KV key = value — plain user KV entry (sibling to
+                    // SET SECRET). Stored in an independent flat-map, gated
+                    // by `kv:write`. `KV` lexes as a keyword token, not an
+                    // identifier, so match it directly.
+                    let key = self.parse_dotted_admin_path(true)?;
+                    self.expect(Token::Eq)?;
+                    let value = self.parse_literal_value()?;
+                    Ok(SqlCommand::SetKv { key, value })
                 } else if self.consume_ident_ci("TENANT")? {
                     // SET TENANT 'id'  |  SET TENANT = 'id'  |
                     // SET TENANT NULL  |  SET TENANT = NULL
@@ -3933,7 +3973,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     Err(ParseError::expected(
-                        vec!["CONFIG", "SECRET", "TENANT"],
+                        vec!["CONFIG", "SECRET", "KV", "TENANT"],
                         self.peek(),
                         self.position(),
                     ))
