@@ -144,6 +144,12 @@ pub(super) fn evaluate_runtime_expr_with_db(
                     .map(Value::text)
                     .or(Some(Value::Null));
             }
+            if upper == "__KV_REF" {
+                // `$kv.<path>` — plain user KV entry, gated by `kv:read`.
+                // Absent or denied resolves to NULL (never an error).
+                let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
+                return crate::runtime::impl_core::current_kv_value(&key).or(Some(Value::Null));
+            }
             // For Week 3 we route through the existing evaluate_scalar_function
             // dispatcher, which speaks the legacy Projection::Function
             // argument convention (Column("LIT:…"), Column("TYPE:…"), etc.).
