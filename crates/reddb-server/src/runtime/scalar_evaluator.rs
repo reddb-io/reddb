@@ -279,6 +279,7 @@ fn function_requires_runtime_db(upper: &str) -> bool {
         "CONFIG"
             | "KV"
             | "__SECRET_REF"
+            | "__KV_REF"
             | "ML_CLASSIFY"
             | "ML_PREDICT_PROBA"
             | "SEMANTIC_CACHE_GET"
