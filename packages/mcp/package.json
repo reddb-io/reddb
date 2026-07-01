@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/mcp",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "Zero-install npx launcher for the RedDB MCP surface — fetches the matching red binary and spawns `red mcp` over stdio.",
   "type": "module",
   "bin": {

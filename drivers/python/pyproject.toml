@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "reddb"
-version = "1.19.0"
+version = "1.20.0"
 description = "Official Python driver for RedDB — embedded engine and gRPC remote in one package."
 readme = "README.md"
 license = { text = "MIT" }
