@@ -348,6 +348,54 @@ impl UnifiedStore {
         saved
     }
 
+    /// Append a plain user KV entry to the `red_kv` collection (#1602).
+    ///
+    /// `red_kv` is an independent flat-map store, separate from the vault
+    /// (encrypted secrets) and `red_config`. Entries are append-only:
+    /// each write inserts a new row and the highest entity id wins, so a
+    /// later `SET KV` supersedes an earlier one for the same key.
+    /// `$kv.<key>` reads resolve against the latest snapshot.
+    pub fn set_kv_entry(&self, key: &str, value: crate::storage::schema::Value) {
+        self.append_kv_row(key, value, false);
+    }
+
+    /// Append a tombstone row for a plain user KV entry, hiding the key
+    /// from subsequent `$kv.<key>` reads and `latest_kv_snapshot` scans.
+    pub fn delete_kv_entry(&self, key: &str) {
+        self.append_kv_row(key, crate::storage::schema::Value::Null, true);
+    }
+
+    fn append_kv_row(&self, key: &str, value: crate::storage::schema::Value, tombstone: bool) {
+        let _ = self.get_or_create_collection("red_kv");
+        let entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TableRow {
+                table: Arc::from("red_kv"),
+                row_id: 0,
+            },
+            EntityData::Row(RowData {
+                columns: Vec::new(),
+                named: Some(
+                    [
+                        (
+                            "key".to_string(),
+                            crate::storage::schema::Value::text(key.to_string()),
+                        ),
+                        ("value".to_string(), value),
+                        (
+                            "tombstone".to_string(),
+                            crate::storage::schema::Value::Boolean(tombstone),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                schema: None,
+            }),
+        );
+        let _ = self.insert_auto("red_kv", entity);
+    }
+
     /// Read a single config value from `red_config` by dot-notation key.
     pub fn get_config(&self, key: &str) -> Option<crate::storage::schema::Value> {
         let manager = self.get_collection("red_config")?;
