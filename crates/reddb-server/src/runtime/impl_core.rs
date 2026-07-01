@@ -992,11 +992,12 @@ pub use super::execution_context::{
     SnapshotBundle, SnapshotContext,
 };
 pub(crate) use super::execution_context::{
-    current_auth_identity, current_config_value, current_role_projected, current_scope_override,
-    current_secret_value, current_snapshot_requires_index_fallback, current_user_projected,
-    has_scope_override_active, parse_set_local_tenant, update_current_config_value,
-    update_current_secret_value, xids_visible_under_current_snapshot, ConfigSnapshotGuard,
-    CurrentSnapshotGuard, ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
+    current_auth_identity, current_config_value, current_kv_value, current_role_projected,
+    current_scope_override, current_secret_value, current_snapshot_requires_index_fallback,
+    current_user_projected, has_scope_override_active, parse_set_local_tenant,
+    update_current_config_value, update_current_kv_value, update_current_secret_value,
+    xids_visible_under_current_snapshot, ConfigSnapshotGuard, CurrentSnapshotGuard, KvStoreGuard,
+    ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
 };
 
 fn table_row_index_fields(
@@ -1561,6 +1562,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::SetSecret { .. }
         | QueryExpr::DeleteSecret { .. }
         | QueryExpr::ShowSecrets { .. }
+        | QueryExpr::SetKv { .. }
+        | QueryExpr::DeleteKv { .. }
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::TransactionControl(_)
@@ -2319,12 +2322,15 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
         "pg_try_advisory_lock",
         "pg_advisory_unlock",
         "random()",
-        // `$config.<path>` / `$secret.<path>` resolve mutable runtime config /
-        // vault state at execution time (#1370). A cached result would serve a
-        // stale value after a later `SET CONFIG` / `SET SECRET`, so treat any
-        // query referencing them as volatile (never result-cache it).
+        // `$config.<path>` / `$secret.<path>` / `$kv.<path>` resolve mutable
+        // runtime config / vault / plain-KV state at execution time (#1370,
+        // #1602). A cached result would serve a stale value after a later
+        // `SET CONFIG` / `SET SECRET` / `SET KV`, and would also skip the
+        // per-key IAM gate re-check, so treat any query referencing them as
+        // volatile (never result-cache it).
         "$config",
         "$secret",
+        "$kv",
         // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
         // omitted for now — they ARE volatile but today's tests rely
         // on caching them. Revisit once a tighter volatility story
@@ -5567,6 +5573,51 @@ impl RedDBRuntime {
                     },
                 ))
             }
+            // SET KV key = value — plain user KV entry (#1602). Stored in
+            // the independent `red_kv` flat-map, gated by `kv:write`.
+            QueryExpr::SetKv { ref key, ref value } => {
+                if key.starts_with("red.secret.") || key.starts_with("red.secrets.") {
+                    return Err(RedDBError::Query(
+                        "red.secret.* is reserved for vault secrets; use SET SECRET".to_string(),
+                    ));
+                }
+                if key.starts_with("red.config.") {
+                    return Err(RedDBError::Query(
+                        "red.config.* is reserved for config; use SET CONFIG".to_string(),
+                    ));
+                }
+                self.check_kv_write_privilege(key)?;
+                if matches!(value, Value::Null) {
+                    self.inner.db.store().delete_kv_entry(key);
+                    update_current_kv_value(key, None);
+                    self.invalidate_result_cache();
+                    return Ok(RuntimeQueryResult::ok_message(
+                        query.to_string(),
+                        &format!("kv deleted: {key}"),
+                        "delete_kv",
+                    ));
+                }
+                self.inner.db.store().set_kv_entry(key, value.clone());
+                update_current_kv_value(key, Some(value.clone()));
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("kv set: {key}"),
+                    "set_kv",
+                ))
+            }
+            // DELETE KV key — remove a plain user KV entry.
+            QueryExpr::DeleteKv { ref key } => {
+                self.check_kv_write_privilege(key)?;
+                self.inner.db.store().delete_kv_entry(key);
+                update_current_kv_value(key, None);
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("kv deleted: {key}"),
+                    "delete_kv",
+                ))
+            }
             // SHOW SECRET[S] [prefix]
             QueryExpr::ShowSecrets { ref prefix } => {
                 let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
@@ -6966,6 +7017,10 @@ impl RedDBRuntime {
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
         let _config_snapshot_guard = ConfigSnapshotGuard::install(Arc::clone(&self.inner.db));
         let _secret_store_guard = SecretStoreGuard::install(self.inner.auth_store.read().clone());
+        let _kv_store_guard = KvStoreGuard::install(
+            Arc::clone(&self.inner.db),
+            self.inner.auth_store.read().clone(),
+        );
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
         // whose `tq.table` matches a registered view with the view's
         // underlying query. Safe to call even when no views are registered.
@@ -11131,6 +11186,36 @@ impl RedDBRuntime {
         }
         Err(RedDBError::Query(format!(
             "permission denied: principal=`{}` action=`secret:write` resource=`secret:{}` denied by IAM policy",
+            principal, key
+        )))
+    }
+
+    /// IAM gate for `SET KV` / `DELETE KV` writes (#1602). Mirrors
+    /// [`Self::check_secret_write_privilege`] but on the `kv:write` verb
+    /// and the `kv:<key>` resource. Unlike secrets, plain KV needs no
+    /// vault, so an absent auth store (embedded / anonymous) passes.
+    /// In `LegacyRbac` mode the admin role passes without an explicit
+    /// policy; in `PolicyOnly` mode a missing grant is denied.
+    fn check_kv_write_privilege(&self, key: &str) -> RedDBResult<()> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let tenant = current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("kv".to_string(), key.to_string());
+        if let Some(tenant) = &tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = runtime_iam_context(role, tenant.as_deref());
+        if auth_store.check_policy_authz_with_role(&principal, "kv:write", &resource, &ctx, role) {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{}` action=`kv:write` resource=`kv:{}` denied by IAM policy",
             principal, key
         )))
     }
