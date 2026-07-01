@@ -454,6 +454,8 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::SetSecret { .. }
         | QueryExpr::DeleteSecret { .. }
         | QueryExpr::ShowSecrets { .. }
+        | QueryExpr::SetKv { .. }
+        | QueryExpr::DeleteKv { .. }
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::CreateTimeSeries(_)
@@ -835,6 +837,8 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::SetSecret { .. } => "set_secret",
         QueryExpr::DeleteSecret { .. } => "delete_secret",
         QueryExpr::ShowSecrets { .. } => "show_secrets",
+        QueryExpr::SetKv { .. } => "set_kv",
+        QueryExpr::DeleteKv { .. } => "delete_kv",
         QueryExpr::SetTenant(_) => "set_tenant",
         QueryExpr::ShowTenant => "show_tenant",
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
