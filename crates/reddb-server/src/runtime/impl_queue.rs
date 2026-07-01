@@ -1765,6 +1765,114 @@ impl RedDBRuntime {
                 .build(),
         );
     }
+
+    /// Whether `collection` is declared as a queue model. Used to route a
+    /// `CLAIM` through the [`QueueLifecycle`] seam instead of the raw
+    /// row-update path (#1609).
+    pub(super) fn is_queue_collection(&self, collection: &str) -> bool {
+        self.db()
+            .collection_contract_arc(collection)
+            .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Queue)
+            .unwrap_or(false)
+    }
+
+    /// Route a queue-collection `CLAIM` through the [`QueueLifecycle`]
+    /// delivery seam (ADR 0020, #1609).
+    ///
+    /// A `CLAIM` on a queue collection is a delivery *acquisition* — select
+    /// and lock pending messages — not a raw UPDATE of the underlying queue
+    /// rows. Dispatching here keeps the `QueueLifecycle` state machine
+    /// (ACK/NACK, retry, DLQ, pending delivery, replica replay) the sole
+    /// authority for delivery state, instead of `execute_update_inner_tracked`
+    /// mutating queue storage directly.
+    ///
+    /// Shapes the delivery seam cannot express are rejected up front with a
+    /// clear [`RedDBError::InvalidOperation`] rather than silently falling
+    /// back to raw storage mutation (see [`validate_queue_claim_shape`]).
+    pub(super) fn execute_queue_shaped_claim(
+        &self,
+        raw_query: &str,
+        query: &UpdateQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        validate_queue_claim_shape(query)?;
+
+        let queue = query.table.as_str();
+        let store = self.inner.db.store();
+        ensure_queue_exists(store.as_ref(), queue)?;
+
+        // A queue-shaped CLAIM maps onto WORK-mode delivery: each message is
+        // reserved for exactly one consumer. FANOUT queues fan every message
+        // to every group, which a single-target CLAIM cannot express — those
+        // must be consumed through GROUP READ.
+        let config = load_queue_config(store.as_ref(), queue);
+        if config.mode != QueueMode::Work {
+            return Err(RedDBError::InvalidOperation(format!(
+                "CLAIM on queue '{queue}' cannot be expressed: FANOUT delivery \
+                 must be consumed through GROUP READ, not a queue-shaped CLAIM"
+            )));
+        }
+
+        // Attribute the delivery to the WORK default consumer group (the same
+        // group an unqualified `QUEUE READ` uses), so the pending locks the
+        // lifecycle records resolve for a later ACK/NACK by delivery id.
+        let group = resolve_read_group(store.as_ref(), queue, None, "", &config)?;
+        let count = query.claim_limit.unwrap_or(0) as usize;
+        let (lifecycle, _ps, txn) = runtime_lifecycle(self, queue);
+        let delivered = lifecycle
+            .deliver(&txn, queue, &group, count)
+            .map_err(map_qse)?;
+
+        let mut result = UnifiedResult::with_columns(vec!["delivery_id".into(), "payload".into()]);
+        for message in &delivered {
+            let mut record = UnifiedRecord::new();
+            record.set("delivery_id", Value::text(message.delivery_id.clone()));
+            record.set("payload", message.payload.clone());
+            result.push(record);
+        }
+        let affected_rows = delivered.len() as u64;
+        if affected_rows > 0 {
+            self.invalidate_result_cache();
+        }
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "queue_claim",
+            engine: "runtime-queue",
+            result,
+            affected_rows,
+            statement_type: "update",
+            bookmark: None,
+        })
+    }
+}
+
+/// Reject `CLAIM` shapes that [`QueueLifecycle`] delivery cannot express
+/// (#1609). Queue delivery is strictly FIFO (oldest-available first) and
+/// acquires *up to* N available messages:
+///
+/// - a descending `ORDER BY` contradicts FIFO delivery order, and
+/// - `CLAIM EXACT` demands an all-or-nothing batch the delivery seam does
+///   not offer.
+///
+/// Both surface a clear [`RedDBError::InvalidOperation`] instead of a
+/// silent raw storage mutation.
+fn validate_queue_claim_shape(query: &UpdateQuery) -> RedDBResult<()> {
+    if query.order_by.iter().any(|clause| !clause.ascending) {
+        return Err(RedDBError::InvalidOperation(format!(
+            "CLAIM on queue '{}' cannot be expressed: a descending ORDER BY \
+             conflicts with FIFO queue delivery order",
+            query.table
+        )));
+    }
+    if query.claim_exact {
+        return Err(RedDBError::InvalidOperation(format!(
+            "CLAIM EXACT on queue '{}' cannot be expressed: queue delivery \
+             acquires up to N available messages, not an exact-or-nothing batch",
+            query.table
+        )));
+    }
+    Ok(())
 }
 
 fn ensure_queue_exists(store: &UnifiedStore, queue: &str) -> RedDBResult<()> {
