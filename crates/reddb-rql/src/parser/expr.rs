@@ -395,10 +395,18 @@ impl<'a> Parser<'a> {
             } else if path_lc.starts_with("red.config.") {
                 let rest = path_lc.trim_start_matches("red.config.");
                 ("CONFIG", format!("red.config/{rest}"))
+            } else if let Some(rest) = path_lc
+                .strip_prefix("kv.")
+                .or_else(|| path_lc.strip_prefix("red.kv."))
+            {
+                // `$kv.<path>` resolves a plain (non-encrypted) user KV
+                // entry — sibling to `$secret.*`, distinct backing store
+                // (#1602). Desugars to `__KV_REF("red.kv/<path>")`.
+                ("__KV_REF", format!("red.kv/{rest}"))
             } else {
                 return Err(ParseError::new(
                     format!(
-                        "unknown $ reference `${path}`; expected $secret.*, $red.secret.*, $red.secrets.*, $config.*, or $red.config.*"
+                        "unknown $ reference `${path}`; expected $secret.*, $red.secret.*, $red.secrets.*, $config.*, $red.config.*, $kv.*, or $red.kv.*"
                     ),
                     self.position(),
                 ));
