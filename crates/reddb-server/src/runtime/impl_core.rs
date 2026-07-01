@@ -992,11 +992,12 @@ pub use super::execution_context::{
     SnapshotBundle, SnapshotContext,
 };
 pub(crate) use super::execution_context::{
-    current_auth_identity, current_config_value, current_role_projected, current_scope_override,
-    current_secret_value, current_snapshot_requires_index_fallback, current_user_projected,
-    has_scope_override_active, parse_set_local_tenant, update_current_config_value,
-    update_current_secret_value, xids_visible_under_current_snapshot, ConfigSnapshotGuard,
-    CurrentSnapshotGuard, ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
+    current_auth_identity, current_config_value, current_kv_value, current_role_projected,
+    current_scope_override, current_secret_value, current_snapshot_requires_index_fallback,
+    current_user_projected, has_scope_override_active, parse_set_local_tenant,
+    update_current_config_value, update_current_kv_value, update_current_secret_value,
+    xids_visible_under_current_snapshot, ConfigSnapshotGuard, CurrentSnapshotGuard, KvStoreGuard,
+    ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
 };
 
 fn table_row_index_fields(
@@ -1561,6 +1562,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::SetSecret { .. }
         | QueryExpr::DeleteSecret { .. }
         | QueryExpr::ShowSecrets { .. }
+        | QueryExpr::SetKv { .. }
+        | QueryExpr::DeleteKv { .. }
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::TransactionControl(_)
@@ -2325,6 +2328,7 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
         // query referencing them as volatile (never result-cache it).
         "$config",
         "$secret",
+        "$kv",
         // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
         // omitted for now — they ARE volatile but today's tests rely
         // on caching them. Revisit once a tighter volatility story
@@ -5567,6 +5571,54 @@ impl RedDBRuntime {
                     },
                 ))
             }
+            // SET KV key = value — plain (non-encrypted) user KV entry (#1602)
+            QueryExpr::SetKv { ref key, ref value } => {
+                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+                    RedDBError::Query("SET KV requires an auth store".to_string())
+                })?;
+                self.check_kv_write_privilege(&auth_store, key)?;
+                // `SET KV k = NULL` deletes, mirroring `SET SECRET`.
+                if matches!(value, Value::Null) {
+                    auth_store.plain_kv_delete(key);
+                    update_current_kv_value(key, None);
+                    self.invalidate_result_cache();
+                    return Ok(RuntimeQueryResult::ok_message(
+                        query.to_string(),
+                        &format!("kv deleted: {key}"),
+                        "delete_kv",
+                    ));
+                }
+                let value = secret_sql_value_to_string(value)?;
+                auth_store.plain_kv_set(key.clone(), value.clone());
+                update_current_kv_value(key, Some(value));
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("kv set: {key}"),
+                    "set_kv",
+                ))
+            }
+            // DELETE KV key
+            QueryExpr::DeleteKv { ref key } => {
+                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+                    RedDBError::Query("DELETE KV requires an auth store".to_string())
+                })?;
+                self.check_kv_write_privilege(&auth_store, key)?;
+                let deleted = auth_store.plain_kv_delete(key);
+                if deleted {
+                    update_current_kv_value(key, None);
+                }
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("kv deleted: {key}"),
+                    if deleted {
+                        "delete_kv"
+                    } else {
+                        "delete_kv_not_found"
+                    },
+                ))
+            }
             // SHOW SECRET[S] [prefix]
             QueryExpr::ShowSecrets { ref prefix } => {
                 let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
@@ -6966,6 +7018,7 @@ impl RedDBRuntime {
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
         let _config_snapshot_guard = ConfigSnapshotGuard::install(Arc::clone(&self.inner.db));
         let _secret_store_guard = SecretStoreGuard::install(self.inner.auth_store.read().clone());
+        let _kv_store_guard = KvStoreGuard::install(self.inner.auth_store.read().clone());
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
         // whose `tq.table` matches a registered view with the view's
         // underlying query. Safe to call even when no views are registered.
@@ -11131,6 +11184,36 @@ impl RedDBRuntime {
         }
         Err(RedDBError::Query(format!(
             "permission denied: principal=`{}` action=`secret:write` resource=`secret:{}` denied by IAM policy",
+            principal, key
+        )))
+    }
+
+    /// IAM gate for `SET KV` / `DELETE KV` writes (#1602). Mirrors
+    /// [`Self::check_secret_write_privilege`]: embedded/anonymous callers
+    /// (no thread-local identity) pass, and `LegacyRbac` lets admins
+    /// through by default. Under `PolicyOnly` a principal needs an explicit
+    /// `kv:write` grant on `kv:<key>`.
+    fn check_kv_write_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        key: &str,
+    ) -> RedDBResult<()> {
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let tenant = current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("kv".to_string(), key.to_string());
+        if let Some(tenant) = &tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = runtime_iam_context(role, tenant.as_deref());
+        if auth_store.check_policy_authz_with_role(&principal, "kv:write", &resource, &ctx, role) {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{}` action=`kv:write` resource=`kv:{}` denied by IAM policy",
             principal, key
         )))
     }
