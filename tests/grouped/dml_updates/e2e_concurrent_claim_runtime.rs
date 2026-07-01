@@ -135,7 +135,7 @@ fn partial_claim_rollback_releases_locks_for_reclaim() {
     let rt = runtime();
     seed_ready_pool(&rt, "partial_rollback", 3);
 
-    set_current_connection_id(1608_01);
+    set_current_connection_id(160_801);
     exec(&rt, "BEGIN");
     let first = exec(
         &rt,
@@ -224,7 +224,7 @@ fn exact_claim_in_explicit_transaction_commit_then_rollback() {
     seed_ready_pool(&rt, "exact_txn", 4);
 
     // Commit path — the claim becomes durable after COMMIT.
-    set_current_connection_id(1608_02);
+    set_current_connection_id(160_802);
     exec(&rt, "BEGIN");
     let committed = exec(
         &rt,
