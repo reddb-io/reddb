@@ -1709,6 +1709,15 @@ impl RedDBRuntime {
                 query.table
             )));
         }
+        // Queue-shaped CLAIM (ADR 0020, #1609): a CLAIM on a queue collection
+        // is a QueueLifecycle delivery acquisition, not a raw row UPDATE.
+        // Route it through the lifecycle seam before the table-shaped
+        // contract / RLS gates below (which would reject an UPDATE against a
+        // queue's declared model) so QueueLifecycle stays the sole authority
+        // for delivery state.
+        if query.claim_limit.is_some() && self.is_queue_collection(&query.table) {
+            return self.execute_queue_shaped_claim(raw_query, query);
+        }
         // CollectionContract gate (#50): runs the APPEND ONLY guard
         // (and any future contract bits) before RLS / RETURNING work
         // so the operator's immutability declaration is honoured
