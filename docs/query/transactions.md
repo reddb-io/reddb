@@ -70,6 +70,10 @@ CREATE TABLE inventory_units (
   reservation_key TEXT
 );
 
+-- A concurrent CLAIM must order candidates through a compatible index
+-- (ADR 0063). The reservation below claims `ORDER BY unit_id`, so index it.
+CREATE INDEX idx_inventory_units_unit_id ON inventory_units (unit_id);
+
 CREATE TABLE reservation_idempotency (
   idempotency_key TEXT PRIMARY KEY,
   reservation_id TEXT,
