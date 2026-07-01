@@ -343,6 +343,18 @@ pub const ACTIONS: &[ActionEntry] = &[
         lifecycle_state: LifecycleState::Active,
         gates_description: "invalidate cached KV entries",
     },
+    ActionEntry {
+        name: "kv:read",
+        category: ActionCategory::Config,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read plain user KV entries via $kv.*",
+    },
+    ActionEntry {
+        name: "kv:write",
+        category: ActionCategory::Config,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "set or delete plain user KV entries",
+    },
     // -- Admin -----------------------------------------------------------
     ActionEntry {
         name: "admin:bootstrap",
@@ -904,6 +916,8 @@ mod tests {
         "policy:detach",
         "policy:simulate",
         "kv:invalidate",
+        "kv:read",
+        "kv:write",
         "admin:bootstrap",
         "admin:audit-read",
         "admin:reload",
