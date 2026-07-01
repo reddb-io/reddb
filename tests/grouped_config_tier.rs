@@ -18,6 +18,9 @@ mod e2e_config_vault_observation;
 #[path = "grouped/config_tier/e2e_secret_sql.rs"]
 mod e2e_secret_sql;
 
+#[path = "grouped/config_tier/e2e_kv_sql.rs"]
+mod e2e_kv_sql;
+
 #[path = "grouped/config_tier/e2e_issue_480_tier_default_promotion_contract.rs"]
 mod e2e_issue_480_tier_default_promotion_contract;
 
