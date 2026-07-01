@@ -74,7 +74,7 @@ jobs:
       - name: Restore main coverage baseline
         if: github.event_name == 'pull_request'
         id: cache-baseline
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: coverage-baseline.json
           key: parser-coverage-main-${{ github.event.pull_request.base.sha }}
@@ -175,7 +175,7 @@ jobs:
       # Path matches the restore step so cache keys are symmetric.
       - name: Save main coverage baseline
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: coverage-baseline.json
           key: parser-coverage-main-${{ github.sha }}
