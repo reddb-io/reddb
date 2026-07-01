@@ -7,7 +7,7 @@ use super::impl_core::{
     collections_referenced, current_auth_identity, current_connection_id, current_tenant,
     has_with_prefix, intent_lock_modes_for, peek_top_level_as_of_with_table,
     query_has_volatile_builtin, query_is_ask_statement, ConfigSnapshotGuard, CurrentSnapshotGuard,
-    SecretStoreGuard, SnapshotContext, TxLocalTenantGuard,
+    KvStoreGuard, SecretStoreGuard, SnapshotContext, TxLocalTenantGuard,
 };
 use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
 use crate::api::{RedDBError, RedDBResult};
@@ -299,6 +299,7 @@ pub(super) struct StatementFrameGuards {
     _tx_local_guard: TxLocalTenantGuard,
     _config_snapshot_guard: ConfigSnapshotGuard,
     _secret_store_guard: SecretStoreGuard,
+    _kv_store_guard: KvStoreGuard,
     _snapshot_guard: CurrentSnapshotGuard,
 }
 
@@ -381,6 +382,7 @@ impl StatementExecutionFrame {
             _tx_local_guard: TxLocalTenantGuard::install(self.tx_local_tenant.clone()),
             _config_snapshot_guard: ConfigSnapshotGuard::install(Arc::clone(&runtime.inner.db)),
             _secret_store_guard: SecretStoreGuard::install(runtime.inner.auth_store.read().clone()),
+            _kv_store_guard: KvStoreGuard::install(runtime.inner.auth_store.read().clone()),
             _snapshot_guard: CurrentSnapshotGuard::install(SnapshotContext {
                 snapshot: self.snapshot.clone(),
                 manager: Arc::clone(&runtime.inner.snapshot_manager),
