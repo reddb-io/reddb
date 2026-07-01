@@ -2244,6 +2244,9 @@ pub(super) fn evaluate_scalar_function_with_db(
     if func_name.eq_ignore_ascii_case("__SECRET_REF") {
         return evaluate_projection_secret_ref(args);
     }
+    if func_name.eq_ignore_ascii_case("__KV_REF") {
+        return evaluate_projection_kv_ref(args);
+    }
     if matches!(
         func_name.to_ascii_uppercase().as_str(),
         "ML_CLASSIFY" | "ML_PREDICT_PROBA" | "SEMANTIC_CACHE_GET" | "SEMANTIC_CACHE_PUT" | "EMBED"
@@ -3303,6 +3306,15 @@ fn evaluate_projection_secret_ref(args: &[Projection]) -> Option<Value> {
     } else {
         Some(Value::Null)
     }
+}
+
+fn evaluate_projection_kv_ref(args: &[Projection]) -> Option<Value> {
+    // `$kv.<path>` — plain (non-encrypted) user KV entry. Unlike secrets
+    // there is nothing to mask; the value is returned as-is, subject to
+    // the `kv:read` gate applied inside `current_kv_value`. Absent or
+    // denied resolves to NULL.
+    let key = projection_path_text(args.first()?)?.to_ascii_lowercase();
+    crate::runtime::impl_core::current_kv_value(&key).or(Some(Value::Null))
 }
 
 fn projection_path_text(projection: &Projection) -> Option<String> {
