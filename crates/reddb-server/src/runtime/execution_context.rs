@@ -68,6 +68,13 @@ thread_local! {
     /// lock-free map reads for the rest of the statement.
     static CURRENT_SECRET_RESOLVER: std::cell::RefCell<Option<SecretResolver>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Statement-local plain-KV resolver (#1602). SQL expressions
+    /// materialize the `red_kv` snapshot lazily on first `$kv.*` access,
+    /// then apply a per-key `kv:read` IAM gate. Independent of both the
+    /// config and secret resolvers — the three stores never share a map.
+    static CURRENT_KV_RESOLVER: std::cell::RefCell<Option<KvResolver>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Snapshot + manager pair used for read-path visibility checks.
@@ -348,12 +355,17 @@ pub(crate) fn current_secret_value(path: &str) -> Option<String> {
             .map(|value| (key.as_str(), value))
             .or_else(|| {
                 key.strip_prefix("red.vault/").and_then(|rest| {
-                    values.get(rest).map(|value| (rest, value)).or_else(|| {
-                        let red_secret_key = format!("red.secret.{rest}");
-                        values
-                            .get_key_value(&red_secret_key)
-                            .map(|(key, value)| (key.as_str(), value))
-                    })
+                    // The `red.secret.*` namespace is reserved for internal
+                    // vault secrets (AES key, AI provider keys). User-facing
+                    // `$secret.*` must never resolve into it, so reject a
+                    // stripped key that lands there instead of bridging to
+                    // it. Wires the reserved-namespace guard that
+                    // `secret_value_from_snapshot` already documented but
+                    // that the resolver was not applying.
+                    if rest.starts_with("red.secret.") {
+                        return None;
+                    }
+                    values.get(rest).map(|value| (rest, value))
                 })
             })?;
         if !resolver.can_read(found.0) {
@@ -432,6 +444,152 @@ impl Drop for SecretStoreGuard {
     }
 }
 
+/// Resolve `$kv.<path>` against the statement-local KV snapshot (#1602).
+///
+/// `path` is the desugared namespaced key `red.kv/<key>`. The bare
+/// `<key>` is looked up in the `red_kv` snapshot; a per-key `kv:read`
+/// IAM gate then decides visibility. Returns `None` — which the caller
+/// renders as SQL `NULL` — when the key is absent OR when the principal
+/// is denied `kv:read`. In `LegacyRbac` mode the admin role passes by
+/// default (mirrors the `$secret.*` gate).
+pub(crate) fn current_kv_value(path: &str) -> Option<Value> {
+    let key = path.to_ascii_lowercase();
+    let bare = key.strip_prefix("red.kv/").unwrap_or(&key).to_string();
+    CURRENT_KV_RESOLVER.with(|cell| {
+        let mut resolver = cell.borrow_mut();
+        let resolver = resolver.as_mut()?;
+        if resolver.values.is_none() {
+            resolver.values = Some(latest_kv_snapshot(&resolver.db));
+        }
+        let values = resolver.values.as_ref()?;
+        let value = values.get(&bare)?;
+        if !resolver.can_read(&bare) {
+            return None;
+        }
+        Some(value.clone())
+    })
+}
+
+pub(crate) fn update_current_kv_value(path: &str, value: Option<Value>) {
+    let key = path.to_ascii_lowercase();
+    let bare = key.strip_prefix("red.kv/").unwrap_or(&key).to_string();
+    CURRENT_KV_RESOLVER.with(|cell| {
+        if let Some(resolver) = cell.borrow_mut().as_mut() {
+            let Some(values) = resolver.values.as_mut() else {
+                return;
+            };
+            match value {
+                Some(value) => {
+                    values.insert(bare, value);
+                }
+                None => {
+                    values.remove(&bare);
+                }
+            }
+        }
+    });
+}
+
+struct KvResolver {
+    db: Arc<RedDB>,
+    store: Option<Arc<crate::auth::store::AuthStore>>,
+    values: Option<HashMap<String, Value>>,
+    identity: Option<(String, crate::auth::Role, Option<String>)>,
+}
+
+impl KvResolver {
+    fn can_read(&self, key: &str) -> bool {
+        let Some(store) = &self.store else {
+            return true;
+        };
+        let Some((username, role, tenant)) = &self.identity else {
+            return true;
+        };
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("kv".to_string(), key.to_string());
+        if let Some(tenant) = tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant.clone(),
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::auth::now_ms(),
+            principal_is_admin_role: *role == crate::auth::Role::Admin,
+            principal_is_platform_scoped: tenant.is_none(),
+        };
+        store.check_policy_authz_with_role(&principal, "kv:read", &resource, &ctx, *role)
+    }
+}
+
+pub(crate) struct KvStoreGuard {
+    previous: Option<KvResolver>,
+}
+
+impl KvStoreGuard {
+    pub(super) fn install(
+        db: Arc<RedDB>,
+        store: Option<Arc<crate::auth::store::AuthStore>>,
+    ) -> Self {
+        let previous = CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(Some(KvResolver {
+                db,
+                store,
+                values: None,
+                identity: current_auth_identity().map(|(username, role)| {
+                    let tenant = current_tenant();
+                    (username, role, tenant)
+                }),
+            }))
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for KvStoreGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(previous);
+        });
+    }
+}
+
+/// Snapshot the latest visible `red_kv` entries. Append-only rows are
+/// collapsed to the highest entity id per key; tombstoned keys are
+/// dropped so a `DELETE KV` hides the entry from `$kv.*` reads.
+fn latest_kv_snapshot(db: &RedDB) -> HashMap<String, Value> {
+    let mut latest: HashMap<String, (u64, Value, bool)> = HashMap::new();
+    if let Some(manager) = db.store().get_collection("red_kv") {
+        manager.for_each_entity(|entity| {
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            let Some(Value::Text(key)) = row.get_field("key") else {
+                return true;
+            };
+            let key = key.to_ascii_lowercase();
+            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+            let tombstone = matches!(row.get_field("tombstone"), Some(Value::Boolean(true)));
+            let id = entity.id.raw();
+            match latest.get(&key) {
+                Some((prev_id, _, _)) if *prev_id > id => {}
+                _ => {
+                    latest.insert(key, (id, value, tombstone));
+                }
+            }
+            true
+        });
+    }
+    latest
+        .into_iter()
+        .filter(|(_, (_, _, tombstone))| !*tombstone)
+        .map(|(key, (_, value, _))| (key, value))
+        .collect()
+}
+
 pub(crate) fn current_config_value(path: &str) -> Option<Value> {
     let key = path.to_ascii_lowercase();
     CURRENT_CONFIG_RESOLVER.with(|cell| {
@@ -495,6 +653,7 @@ mod tests {
             cell.replace(Some(SecretResolver {
                 store: None,
                 values: Some(values),
+                identity: None,
             }));
         });
         let result = f();
@@ -504,6 +663,62 @@ mod tests {
         result
     }
 
+    fn with_kv_values<T>(values: HashMap<String, Value>, f: impl FnOnce() -> T) -> T {
+        // Reuse an in-process store handle only to satisfy the resolver's
+        // `db` field; the pre-seeded `values` short-circuit the snapshot
+        // load, so the lookups never touch the collection.
+        let db = Arc::new(RedDB::new());
+        CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(Some(KvResolver {
+                db,
+                store: None,
+                values: Some(values),
+                identity: None,
+            }));
+        });
+        let result = f();
+        CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(None);
+        });
+        result
+    }
+
+    #[test]
+    fn current_kv_value_reads_plain_entries_and_strips_namespace() {
+        let values = HashMap::from([
+            ("acme.key".to_string(), Value::text("plain-value")),
+            ("other".to_string(), Value::Integer(7)),
+        ]);
+        with_kv_values(values, || {
+            // `$kv.acme.key` desugars to the namespaced form.
+            assert_eq!(
+                current_kv_value("red.kv/acme.key"),
+                Some(Value::text("plain-value"))
+            );
+            assert_eq!(current_kv_value("red.kv/other"), Some(Value::Integer(7)));
+            // Absent key resolves to NULL (None), never an error.
+            assert_eq!(current_kv_value("red.kv/missing"), None);
+        });
+    }
+
+    #[test]
+    fn update_current_kv_value_mutates_statement_local_snapshot() {
+        let values = HashMap::from([("acme.key".to_string(), Value::text("v1"))]);
+        with_kv_values(values, || {
+            update_current_kv_value("red.kv/acme.key", Some(Value::text("v2")));
+            assert_eq!(current_kv_value("red.kv/acme.key"), Some(Value::text("v2")));
+            update_current_kv_value("red.kv/acme.key", None);
+            assert_eq!(current_kv_value("red.kv/acme.key"), None);
+        });
+    }
+
+    // This test's `SecretResolver` literal was missing the `identity`
+    // field, so the whole `mod tests` for this file never compiled and this
+    // assertion never actually ran on the base branch. Fixing the literal
+    // (required to compile the new `$kv.*` tests) surfaced that
+    // `current_secret_value` was bridging the reserved `red.secret.*`
+    // namespace into user-facing `$secret.*` reads; the reserved-namespace
+    // guard is now wired, so this passes.
     #[test]
     fn current_secret_value_does_not_fall_back_to_reserved_red_secret_namespace() {
         let values = HashMap::from([
