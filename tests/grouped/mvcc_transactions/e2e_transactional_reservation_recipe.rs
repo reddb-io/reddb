@@ -54,6 +54,12 @@ fn setup_reservation_schema(rt: &RedDBRuntime) {
         "CREATE TABLE inventory_units \
          (sku TEXT, unit_id INT PRIMARY KEY, status TEXT, reservation_key TEXT)",
     );
+    // ADR 0063: the reservation claim orders by `unit_id`, which must be
+    // served through a compatible index.
+    exec(
+        rt,
+        "CREATE INDEX idx_inventory_units_unit_id ON inventory_units (unit_id)",
+    );
     exec(
         rt,
         "CREATE TABLE reservation_idempotency \

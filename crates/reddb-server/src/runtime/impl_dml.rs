@@ -1832,11 +1832,36 @@ impl RedDBRuntime {
             .map(|(res, _)| res)
     }
 
+    /// Enforce the concurrent-claim ORDER BY index-gate (ADR 0063, #1607).
+    ///
+    /// A `CLAIM LIMIT n` / `CLAIM EXACT n` on a logical-identity model (tables
+    /// and documents) must order its candidates through a compatible index; the
+    /// planner rejects an ordering no index on the collection can serve rather
+    /// than falling back to a broad write-path sort. KV (key identity) and graph
+    /// nodes/edges are exempt — their claim identity is intrinsic, not a user
+    /// ORDER BY column that needs a secondary index.
+    fn enforce_claim_order_by_index_gate(&self, query: &UpdateQuery) -> RedDBResult<()> {
+        if query.claim_limit.is_none()
+            || !matches!(query.target, UpdateTarget::Rows | UpdateTarget::Documents)
+        {
+            return Ok(());
+        }
+        let available_indexes: Vec<Vec<String>> = self
+            .index_store_ref()
+            .list_indices(&query.table)
+            .into_iter()
+            .map(|index| index.columns)
+            .collect();
+        reddb_rql::planner::check_claim_order_by_index_gate(query, &available_indexes)
+            .map_err(RedDBError::InvalidOperation)
+    }
+
     fn execute_update_inner_tracked(
         &self,
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
+        self.enforce_claim_order_by_index_gate(query)?;
         let store = self.inner.db.store();
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
@@ -5004,6 +5029,9 @@ mod tests {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         rt.execute_query("CREATE TABLE claim_metric_locked (id INT, rank INT, status TEXT)")
             .expect("create table");
+        // ADR 0063: index-backed claim ordering on `rank`.
+        rt.execute_query("CREATE INDEX idx_claim_metric_locked_rank ON claim_metric_locked (rank)")
+            .expect("create index");
         rt.execute_query(
             "INSERT INTO claim_metric_locked (id, rank, status) VALUES \
              (1, 10, 'ready'), (2, 20, 'ready')",

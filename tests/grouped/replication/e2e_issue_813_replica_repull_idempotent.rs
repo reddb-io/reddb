@@ -286,6 +286,8 @@ fn claim_update_replay_applies_primary_winner_not_replica_candidate() {
         "claim_jobs",
         &[
             "CREATE TABLE claim_jobs (id INTEGER, rank INTEGER, status TEXT)",
+            // ADR 0063: index-backed claim ordering on `rank`.
+            "CREATE INDEX idx_claim_jobs_rank ON claim_jobs (rank)",
             "INSERT INTO claim_jobs (id, rank, status) VALUES (1, 10, 'ready')",
             "INSERT INTO claim_jobs (id, rank, status) VALUES (2, 20, 'ready')",
             "UPDATE claim_jobs SET status = 'claimed' WHERE status = 'ready' \

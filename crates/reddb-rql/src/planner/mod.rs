@@ -17,10 +17,14 @@
 //! ([`reddb_types`], ADR 0052), so the crate graph stays acyclic — no
 //! `reddb-io-rql -> reddb-server` back-edge.
 
+pub mod claim_gate;
 pub mod optimizer;
 pub mod pathkeys;
 pub mod projections;
 pub mod rewriter;
 
+pub use claim_gate::{
+    check_claim_order_by_index_gate, claim_order_columns, claim_order_is_index_backed,
+};
 pub use optimizer::{OptimizationPass, QueryOptimizer};
 pub use rewriter::{QueryRewriter, RewriteContext, RewriteRule};

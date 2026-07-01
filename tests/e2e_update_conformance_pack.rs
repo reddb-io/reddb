@@ -274,6 +274,12 @@ fn claim_candidate_selection_requires_read_visibility() {
         &rt,
         "CREATE TABLE claim_read_tasks (id INT, tenant_id TEXT, rank INT, status TEXT)",
     );
+    // ADR 0063: a concurrent CLAIM must order candidates through a compatible
+    // index; `ORDER BY rank` requires an index on `rank`.
+    exec(
+        &rt,
+        "CREATE INDEX idx_claim_read_rank ON claim_read_tasks (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO claim_read_tasks (id, tenant_id, rank, status) VALUES \
@@ -320,6 +326,11 @@ fn claim_exact_miss_counts_only_read_visible_candidates() {
     exec(
         &rt,
         "CREATE TABLE claim_exact_read_tasks (id INT, tenant_id TEXT, rank INT, status TEXT)",
+    );
+    // ADR 0063: index-backed claim ordering on `rank`.
+    exec(
+        &rt,
+        "CREATE INDEX idx_claim_exact_read_rank ON claim_exact_read_tasks (rank)",
     );
     exec(
         &rt,
@@ -375,6 +386,11 @@ fn claim_state_transition_requires_update_policy() {
     exec(
         &rt,
         "CREATE TABLE claim_update_tasks (id INT, tenant_id TEXT, rank INT, status TEXT)",
+    );
+    // ADR 0063: index-backed claim ordering on `rank`.
+    exec(
+        &rt,
+        "CREATE INDEX idx_claim_update_rank ON claim_update_tasks (rank)",
     );
     exec(
         &rt,
