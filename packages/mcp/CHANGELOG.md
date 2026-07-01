@@ -1,5 +1,13 @@
 # @reddb-io/mcp
 
+## 1.20.0
+
+### Minor Changes
+
+- Add `$kv.X` SQL syntax for plain user KV store
+
+  Introduces `SET KV <key> = <value>`, `DELETE KV <key>`, and `$kv.<path>` inline references that desugar to `__KV_REF("red.kv/<path>")`. Access is gated by `kv:read` / `kv:write` IAM policies. Protects `red.secret.*` namespace from `$secret.X` resolution regardless of IAM role.
+
 ## 1.18.0
 
 ## 1.17.0

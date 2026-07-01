@@ -1,5 +1,7 @@
 # @reddb-io/internal-version-compare
 
+## 1.20.0
+
 ## 1.18.0
 
 ## 1.17.0
