@@ -611,6 +611,8 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::ShowConfig { .. } => "show_config",
         QueryExpr::SetSecret { .. } => "set_secret",
         QueryExpr::DeleteSecret { .. } => "delete_secret",
+        QueryExpr::SetKv { .. } => "set_kv",
+        QueryExpr::DeleteKv { .. } => "delete_kv",
         QueryExpr::ShowSecrets { .. } => "show_secrets",
         QueryExpr::SetTenant(_) => "set_tenant",
         QueryExpr::ShowTenant => "show_tenant",
