@@ -127,6 +127,11 @@ pub struct AuthStore {
     /// Encrypted key-value store for arbitrary secrets.
     /// Persisted to vault alongside users/api_keys.
     vault_kv: RwLock<HashMap<String, String>>,
+    /// Plain (non-encrypted) user key-value store for `$kv.*` / `SET KV`
+    /// (#1602). Deliberately isolated from `vault_kv` (encrypted secrets)
+    /// and from the runtime config store — three independent flat-maps,
+    /// no mixing. Backs the `kv:read` / `kv:write` IAM-gated resolver.
+    plain_kv: RwLock<HashMap<String, String>>,
     /// Per-user GRANT rows. Persisted via `vault_kv` under the
     /// `red.acl.grants.<tenant>/<user>` key prefix so existing snapshot
     /// logic keeps working without modification. See `privileges` module
@@ -388,6 +393,7 @@ impl AuthStore {
             pager: None,
             keypair: RwLock::new(None),
             vault_kv: RwLock::new(HashMap::new()),
+            plain_kv: RwLock::new(HashMap::new()),
             grants: RwLock::new(HashMap::new()),
             public_grants: RwLock::new(Vec::new()),
             user_attributes: RwLock::new(HashMap::new()),
@@ -944,6 +950,54 @@ impl AuthStore {
     /// List all keys in the vault KV store.
     pub fn vault_kv_keys(&self) -> Vec<String> {
         self.vault_kv
+            .read()
+            .map(|kv| kv.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------
+    // Plain KV — non-encrypted user key-value store (#1602)
+    //
+    // A sibling to the vault KV above, but stored in its own flat-map
+    // with no encryption. Backs `$kv.*` / `SET KV` / `DELETE KV` and is
+    // gated by `kv:read` / `kv:write` at the runtime layer. Kept fully
+    // separate from `vault_kv` (secrets) and the config store.
+    // -----------------------------------------------------------------
+
+    /// Read a value from the plain KV store. Returns `None` if not set.
+    pub fn plain_kv_get(&self, key: &str) -> Option<String> {
+        self.plain_kv
+            .read()
+            .ok()
+            .and_then(|kv| kv.get(key).cloned())
+    }
+
+    /// Snapshot plain KV values for statement-local resolution.
+    pub fn plain_kv_snapshot(&self) -> HashMap<String, String> {
+        self.plain_kv
+            .read()
+            .map(|kv| kv.clone())
+            .unwrap_or_default()
+    }
+
+    /// Write a value to the plain KV store.
+    pub fn plain_kv_set(&self, key: String, value: String) {
+        if let Ok(mut kv) = self.plain_kv.write() {
+            kv.insert(key, value);
+        }
+    }
+
+    /// Delete a value from the plain KV store. Returns true if it existed.
+    pub fn plain_kv_delete(&self, key: &str) -> bool {
+        self.plain_kv
+            .write()
+            .map(|mut kv| kv.remove(key).is_some())
+            .unwrap_or(false)
+    }
+
+    /// List all keys in the plain KV store.
+    pub fn plain_kv_keys(&self) -> Vec<String> {
+        self.plain_kv
             .read()
             .map(|kv| kv.keys().cloned().collect())
             .unwrap_or_default()
