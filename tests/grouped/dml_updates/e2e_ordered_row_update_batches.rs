@@ -79,7 +79,10 @@ fn claim_exact_updates_requested_cardinality_when_available() {
         "CREATE TABLE exact_claim_success (id INT, rank INT, status TEXT)",
     );
     // ADR 0063: index-backed claim ordering on `rank`.
-    exec(&rt, "CREATE INDEX idx_exact_claim_success_rank ON exact_claim_success (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_exact_claim_success_rank ON exact_claim_success (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO exact_claim_success (id, rank, status) VALUES \
@@ -108,7 +111,10 @@ fn claim_exact_miss_reports_zero_and_applies_no_partial_write() {
         "CREATE TABLE exact_claim_miss (id INT, rank INT, status TEXT)",
     );
     // ADR 0063: index-backed claim ordering on `rank`.
-    exec(&rt, "CREATE INDEX idx_exact_claim_miss_rank ON exact_claim_miss (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_exact_claim_miss_rank ON exact_claim_miss (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO exact_claim_miss (id, rank, status) VALUES \
@@ -135,7 +141,10 @@ fn claim_inside_transaction_publishes_on_commit() {
         "CREATE TABLE tx_claim_commit (id INT, rank INT, status TEXT)",
     );
     // ADR 0063: index-backed claim ordering on `rank`.
-    exec(&rt, "CREATE INDEX idx_tx_claim_commit_rank ON tx_claim_commit (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_tx_claim_commit_rank ON tx_claim_commit (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO tx_claim_commit (id, rank, status) VALUES \
@@ -171,7 +180,10 @@ fn claim_inside_transaction_releases_on_rollback() {
         "CREATE TABLE tx_claim_rollback (id INT, rank INT, status TEXT)",
     );
     // ADR 0063: index-backed claim ordering on `rank`.
-    exec(&rt, "CREATE INDEX idx_tx_claim_rollback_rank ON tx_claim_rollback (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_tx_claim_rollback_rank ON tx_claim_rollback (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO tx_claim_rollback (id, rank, status) VALUES \
@@ -209,7 +221,10 @@ fn competing_claim_skips_uncommitted_claim_lock() {
         "CREATE TABLE tx_claim_skip (id INT, rank INT, status TEXT)",
     );
     // ADR 0063: index-backed claim ordering on `rank`.
-    exec(&rt, "CREATE INDEX idx_tx_claim_skip_rank ON tx_claim_skip (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_tx_claim_skip_rank ON tx_claim_skip (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO tx_claim_skip (id, rank, status) VALUES \
@@ -250,7 +265,10 @@ fn ordinary_dml_against_claimed_row_keeps_mvcc_conflict_behavior() {
         "CREATE TABLE tx_claim_dml (id INT, rank INT, status TEXT, note TEXT)",
     );
     // ADR 0063: index-backed claim ordering on `rank`.
-    exec(&rt, "CREATE INDEX idx_tx_claim_dml_rank ON tx_claim_dml (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_tx_claim_dml_rank ON tx_claim_dml (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO tx_claim_dml (id, rank, status, note) VALUES \
@@ -291,7 +309,10 @@ fn claim_metrics_increment_for_success_and_miss_with_bounded_labels() {
         "CREATE TABLE claim_metric_jobs (id INT, rank INT, status TEXT)",
     );
     // ADR 0063: index-backed claim ordering on `rank`.
-    exec(&rt, "CREATE INDEX idx_claim_metric_jobs_rank ON claim_metric_jobs (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_claim_metric_jobs_rank ON claim_metric_jobs (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO claim_metric_jobs (id, rank, status) VALUES \

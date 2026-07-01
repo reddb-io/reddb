@@ -276,7 +276,10 @@ fn claim_candidate_selection_requires_read_visibility() {
     );
     // ADR 0063: a concurrent CLAIM must order candidates through a compatible
     // index; `ORDER BY rank` requires an index on `rank`.
-    exec(&rt, "CREATE INDEX idx_claim_read_rank ON claim_read_tasks (rank)");
+    exec(
+        &rt,
+        "CREATE INDEX idx_claim_read_rank ON claim_read_tasks (rank)",
+    );
     exec(
         &rt,
         "INSERT INTO claim_read_tasks (id, tenant_id, rank, status) VALUES \

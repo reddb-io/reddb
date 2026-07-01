@@ -120,8 +120,14 @@ mod tests {
         );
         let err = check_claim_order_by_index_gate(&query, &[])
             .expect_err("claim without a covering index should be rejected");
-        assert!(err.contains("rank"), "message should name the column: {err}");
-        assert!(err.contains("tasks"), "message should name the collection: {err}");
+        assert!(
+            err.contains("rank"),
+            "message should name the column: {err}"
+        );
+        assert!(
+            err.contains("tasks"),
+            "message should name the collection: {err}"
+        );
     }
 
     #[test]
