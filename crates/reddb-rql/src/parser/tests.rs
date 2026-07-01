@@ -2238,6 +2238,27 @@ fn test_parse_delete_secret() {
 }
 
 #[test]
+fn test_parse_set_kv() {
+    let query = parse("SET KV acme.key = 'val'").unwrap();
+    if let QueryExpr::SetKv { key, value } = query {
+        assert_eq!(key, "acme.key");
+        assert_eq!(value, reddb_types::types::Value::Text("val".into()));
+    } else {
+        panic!("Expected SetKv");
+    }
+}
+
+#[test]
+fn test_parse_delete_kv() {
+    let query = parse("DELETE KV acme.key").unwrap();
+    if let QueryExpr::DeleteKv { key } = query {
+        assert_eq!(key, "acme.key");
+    } else {
+        panic!("Expected DeleteKv");
+    }
+}
+
+#[test]
 fn test_parse_show_secret_prefix() {
     let query = parse("SHOW SECRET mycompany.stripe").unwrap();
     if let QueryExpr::ShowSecrets { prefix } = query {
