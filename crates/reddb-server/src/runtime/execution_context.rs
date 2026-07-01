@@ -343,12 +343,23 @@ pub(crate) fn current_secret_value(path: &str) -> Option<String> {
                 .map(|store| store.vault_kv_snapshot());
         }
         let values = resolver.values.as_ref()?;
-        secret_value_from_snapshot(values, &key).or_else(|| {
-            key.strip_prefix("red.vault/").and_then(|rest| {
-                secret_value_from_snapshot(values, rest)
-                    .or_else(|| secret_value_from_snapshot(values, &format!("red.secret.{rest}")))
-            })
-        })
+        let found = values
+            .get(&key)
+            .map(|value| (key.as_str(), value))
+            .or_else(|| {
+                key.strip_prefix("red.vault/").and_then(|rest| {
+                    values.get(rest).map(|value| (rest, value)).or_else(|| {
+                        let red_secret_key = format!("red.secret.{rest}");
+                        values
+                            .get_key_value(&red_secret_key)
+                            .map(|(key, value)| (key.as_str(), value))
+                    })
+                })
+            })?;
+        if !resolver.can_read(found.0) {
+            return None;
+        }
+        Some(found.1.clone())
     })
 }
 
@@ -362,6 +373,34 @@ fn secret_value_from_snapshot(values: &HashMap<String, String>, key: &str) -> Op
 struct SecretResolver {
     store: Option<Arc<crate::auth::store::AuthStore>>,
     values: Option<HashMap<String, String>>,
+    identity: Option<(String, crate::auth::Role, Option<String>)>,
+}
+
+impl SecretResolver {
+    fn can_read(&self, key: &str) -> bool {
+        let Some(store) = &self.store else {
+            return true;
+        };
+        let Some((username, role, tenant)) = &self.identity else {
+            return true;
+        };
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("secret".to_string(), key.to_string());
+        if let Some(tenant) = tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant.clone(),
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::auth::now_ms(),
+            principal_is_admin_role: *role == crate::auth::Role::Admin,
+            principal_is_platform_scoped: tenant.is_none(),
+        };
+        store.check_policy_authz_with_role(&principal, "secret:read", &resource, &ctx, *role)
+    }
 }
 
 pub(crate) struct SecretStoreGuard {
@@ -374,6 +413,10 @@ impl SecretStoreGuard {
             cell.replace(Some(SecretResolver {
                 store,
                 values: None,
+                identity: current_auth_identity().map(|(username, role)| {
+                    let tenant = current_tenant();
+                    (username, role, tenant)
+                }),
             }))
         });
         Self { previous }
