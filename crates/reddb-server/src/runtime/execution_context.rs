@@ -68,6 +68,12 @@ thread_local! {
     /// lock-free map reads for the rest of the statement.
     static CURRENT_SECRET_RESOLVER: std::cell::RefCell<Option<SecretResolver>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Statement-local plain-KV resolver (#1602). Mirrors the secret
+    /// resolver but reads the non-encrypted `plain_kv` store and gates on
+    /// `kv:read`. Materialized lazily on the first `$kv.*` access.
+    static CURRENT_KV_RESOLVER: std::cell::RefCell<Option<KvResolver>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Snapshot + manager pair used for read-path visibility checks.
@@ -378,6 +384,11 @@ struct SecretResolver {
 
 impl SecretResolver {
     fn can_read(&self, key: &str) -> bool {
+        // `red.secret.*` is the internal system-secrets namespace. Never
+        // expose it via `$secret.X` regardless of IAM role — not even admin.
+        if key.starts_with("red.secret.") {
+            return false;
+        }
         let Some(store) = &self.store else {
             return true;
         };
@@ -430,6 +441,131 @@ impl Drop for SecretStoreGuard {
             cell.replace(previous);
         });
     }
+}
+
+/// Resolve `$kv.<path>` from the plain (non-encrypted) KV store (#1602).
+///
+/// The parser desugars `$kv.<path>` to `__KV_REF("red.kv/<path>")`; this
+/// strips the `red.kv/` prefix and looks up the bare key in the
+/// statement-local snapshot, gating each hit on `kv:read`. Returns `None`
+/// (→ SQL NULL) when the key is absent or the principal is denied — never
+/// an error, mirroring the secret resolver's deny-to-NULL behaviour.
+pub(crate) fn current_kv_value(path: &str) -> Option<String> {
+    let key = path.to_ascii_lowercase();
+    CURRENT_KV_RESOLVER.with(|cell| {
+        let mut resolver = cell.borrow_mut();
+        let resolver = resolver.as_mut()?;
+        if resolver.values.is_none() {
+            resolver.values = resolver
+                .store
+                .as_ref()
+                .map(|store| store.plain_kv_snapshot());
+        }
+        let values = resolver.values.as_ref()?;
+        // Accept both the namespaced `red.kv/<key>` form (from the
+        // `$kv.*` desugar) and the bare key (from `update_current_kv_value`
+        // after a `SET KV`).
+        let found = values
+            .get(&key)
+            .map(|value| (key.as_str(), value))
+            .or_else(|| {
+                key.strip_prefix("red.kv/")
+                    .and_then(|rest| values.get(rest).map(|value| (rest, value)))
+            })?;
+        if !resolver.can_read(found.0) {
+            return None;
+        }
+        Some(found.1.clone())
+    })
+}
+
+struct KvResolver {
+    store: Option<Arc<crate::auth::store::AuthStore>>,
+    values: Option<HashMap<String, String>>,
+    identity: Option<(String, crate::auth::Role, Option<String>)>,
+}
+
+impl KvResolver {
+    fn can_read(&self, key: &str) -> bool {
+        let Some(store) = &self.store else {
+            return true;
+        };
+        let Some((username, role, tenant)) = &self.identity else {
+            return true;
+        };
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("kv".to_string(), key.to_string());
+        if let Some(tenant) = tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant.clone(),
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::auth::now_ms(),
+            principal_is_admin_role: *role == crate::auth::Role::Admin,
+            principal_is_platform_scoped: tenant.is_none(),
+        };
+        store.check_policy_authz_with_role(&principal, "kv:read", &resource, &ctx, *role)
+    }
+}
+
+pub(crate) struct KvStoreGuard {
+    // Boxed to keep the stack footprint of nested guards small. Each
+    // StatementFrameGuards is live for the full recursive call depth of a
+    // materialized-view refresh chain; unboxed KvResolver (≈120 B) would
+    // push those deep paths past the 8 MB stack limit.
+    previous: Option<Box<KvResolver>>,
+}
+
+impl KvStoreGuard {
+    pub(super) fn install(store: Option<Arc<crate::auth::store::AuthStore>>) -> Self {
+        let previous = CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(Some(KvResolver {
+                store,
+                values: None,
+                identity: current_auth_identity().map(|(username, role)| {
+                    let tenant = current_tenant();
+                    (username, role, tenant)
+                }),
+            }))
+        });
+        Self {
+            previous: previous.map(Box::new),
+        }
+    }
+}
+
+impl Drop for KvStoreGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take().map(|b| *b);
+        CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(previous);
+        });
+    }
+}
+
+/// Update the statement-local KV snapshot after a `SET KV` / `DELETE KV`
+/// so a subsequent `$kv.*` read in the same statement observes the write.
+pub(crate) fn update_current_kv_value(path: &str, value: Option<String>) {
+    let key = path.to_ascii_lowercase();
+    CURRENT_KV_RESOLVER.with(|cell| {
+        if let Some(resolver) = cell.borrow_mut().as_mut() {
+            let Some(values) = resolver.values.as_mut() else {
+                return;
+            };
+            match value {
+                Some(value) => {
+                    values.insert(key, value);
+                }
+                None => {
+                    values.remove(&key);
+                }
+            }
+        }
+    });
 }
 
 pub(crate) fn current_config_value(path: &str) -> Option<Value> {
@@ -495,6 +631,7 @@ mod tests {
             cell.replace(Some(SecretResolver {
                 store: None,
                 values: Some(values),
+                identity: None,
             }));
         });
         let result = f();
@@ -529,6 +666,52 @@ mod tests {
                 current_secret_value("red.vault/acme.key").as_deref(),
                 Some("user-value")
             );
+        });
+    }
+
+    fn with_kv_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
+        CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(Some(KvResolver {
+                store: None,
+                values: Some(values),
+                identity: None,
+            }));
+        });
+        let result = f();
+        CURRENT_KV_RESOLVER.with(|cell| {
+            cell.replace(None);
+        });
+        result
+    }
+
+    #[test]
+    fn current_kv_value_resolves_namespaced_and_bare_keys() {
+        let values = HashMap::from([("acme.key".to_string(), "plain-value".to_string())]);
+
+        with_kv_values(values, || {
+            // `$kv.acme.key` desugars to `red.kv/acme.key`.
+            assert_eq!(
+                current_kv_value("red.kv/acme.key").as_deref(),
+                Some("plain-value")
+            );
+            // Bare-key lookup (post-`SET KV` snapshot update) also resolves.
+            assert_eq!(current_kv_value("acme.key").as_deref(), Some("plain-value"));
+            // Unknown keys resolve to None (→ SQL NULL), never an error.
+            assert_eq!(current_kv_value("red.kv/missing.key"), None);
+        });
+    }
+
+    #[test]
+    fn update_current_kv_value_reflects_in_resolver() {
+        with_kv_values(HashMap::new(), || {
+            assert_eq!(current_kv_value("red.kv/feature.flag"), None);
+            update_current_kv_value("feature.flag", Some("on".to_string()));
+            assert_eq!(
+                current_kv_value("red.kv/feature.flag").as_deref(),
+                Some("on")
+            );
+            update_current_kv_value("feature.flag", None);
+            assert_eq!(current_kv_value("red.kv/feature.flag"), None);
         });
     }
 }

@@ -39,6 +39,9 @@ mod e2e_rls_universal;
 #[path = "config_tier/e2e_secret_sql.rs"]
 mod e2e_secret_sql;
 
+#[path = "config_tier/e2e_kv_sql.rs"]
+mod e2e_kv_sql;
+
 #[path = "config_tier/e2e_system_config_vault.rs"]
 mod e2e_system_config_vault;
 

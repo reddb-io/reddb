@@ -992,11 +992,12 @@ pub use super::execution_context::{
     SnapshotBundle, SnapshotContext,
 };
 pub(crate) use super::execution_context::{
-    current_auth_identity, current_config_value, current_role_projected, current_scope_override,
-    current_secret_value, current_snapshot_requires_index_fallback, current_user_projected,
-    has_scope_override_active, parse_set_local_tenant, update_current_config_value,
-    update_current_secret_value, xids_visible_under_current_snapshot, ConfigSnapshotGuard,
-    CurrentSnapshotGuard, ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
+    current_auth_identity, current_config_value, current_kv_value, current_role_projected,
+    current_scope_override, current_secret_value, current_snapshot_requires_index_fallback,
+    current_user_projected, has_scope_override_active, parse_set_local_tenant,
+    update_current_config_value, update_current_kv_value, update_current_secret_value,
+    xids_visible_under_current_snapshot, ConfigSnapshotGuard, CurrentSnapshotGuard, KvStoreGuard,
+    ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
 };
 
 fn table_row_index_fields(
@@ -1561,6 +1562,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::SetSecret { .. }
         | QueryExpr::DeleteSecret { .. }
         | QueryExpr::ShowSecrets { .. }
+        | QueryExpr::SetKv { .. }
+        | QueryExpr::DeleteKv { .. }
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::TransactionControl(_)
@@ -2325,6 +2328,7 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
         // query referencing them as volatile (never result-cache it).
         "$config",
         "$secret",
+        "$kv",
         // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
         // omitted for now — they ARE volatile but today's tests rely
         // on caching them. Revisit once a tighter volatility story
@@ -3337,6 +3341,11 @@ impl RedDBRuntime {
             let weak_inner = Arc::downgrade(&runtime.inner);
             std::thread::Builder::new()
                 .name("reddb-mv-scheduler".into())
+                // Rust's default for spawned threads is 2 MiB, which is too
+                // small for the query-execution path that refresh_due_materialized_views
+                // runs (StatementExecutionFrame + guards per view). Match the
+                // 8 MiB that the OS gives the main thread.
+                .stack_size(8 * 1024 * 1024)
                 .spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     let Some(inner) = weak_inner.upgrade() else {
@@ -4701,7 +4710,10 @@ impl RedDBRuntime {
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
         let execution_query = rewritten_query.as_deref().unwrap_or(query);
         let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
-        let _frame_guards = frame.install(self);
+        // Box the guards so the ~640-byte StatementFrameGuards struct lives on
+        // the heap rather than the call stack — important for recursive paths
+        // (view refresh, nested queries) where the stack can be as small as 2 MB.
+        let _frame_guards = Box::new(frame.install(self));
         let _log_span = crate::telemetry::span::query_span(query).entered();
 
         let expr = self.rewrite_view_refs(expr);
@@ -5038,7 +5050,7 @@ impl RedDBRuntime {
         let execution_query = rewritten_query.as_deref().unwrap_or(query);
 
         let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
-        let _frame_guards = frame.install(self);
+        let _frame_guards = Box::new(frame.install(self));
 
         // Phase 6 logging: enter a span stamped with conn_id / tenant
         // / query_len. Every downstream tracing::info!/warn!/error!
@@ -5564,6 +5576,54 @@ impl RedDBRuntime {
                         "delete_secret"
                     } else {
                         "delete_secret_not_found"
+                    },
+                ))
+            }
+            // SET KV key = value — plain (non-encrypted) user KV entry (#1602)
+            QueryExpr::SetKv { ref key, ref value } => {
+                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+                    RedDBError::Query("SET KV requires an auth store".to_string())
+                })?;
+                self.check_kv_write_privilege(&auth_store, key)?;
+                // `SET KV k = NULL` deletes, mirroring `SET SECRET`.
+                if matches!(value, Value::Null) {
+                    auth_store.plain_kv_delete(key);
+                    update_current_kv_value(key, None);
+                    self.invalidate_result_cache();
+                    return Ok(RuntimeQueryResult::ok_message(
+                        query.to_string(),
+                        &format!("kv deleted: {key}"),
+                        "delete_kv",
+                    ));
+                }
+                let value = secret_sql_value_to_string(value)?;
+                auth_store.plain_kv_set(key.clone(), value.clone());
+                update_current_kv_value(key, Some(value));
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("kv set: {key}"),
+                    "set_kv",
+                ))
+            }
+            // DELETE KV key
+            QueryExpr::DeleteKv { ref key } => {
+                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+                    RedDBError::Query("DELETE KV requires an auth store".to_string())
+                })?;
+                self.check_kv_write_privilege(&auth_store, key)?;
+                let deleted = auth_store.plain_kv_delete(key);
+                if deleted {
+                    update_current_kv_value(key, None);
+                }
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("kv deleted: {key}"),
+                    if deleted {
+                        "delete_kv"
+                    } else {
+                        "delete_kv_not_found"
                     },
                 ))
             }
@@ -11131,6 +11191,36 @@ impl RedDBRuntime {
         }
         Err(RedDBError::Query(format!(
             "permission denied: principal=`{}` action=`secret:write` resource=`secret:{}` denied by IAM policy",
+            principal, key
+        )))
+    }
+
+    /// IAM gate for `SET KV` / `DELETE KV` writes (#1602). Mirrors
+    /// [`Self::check_secret_write_privilege`]: embedded/anonymous callers
+    /// (no thread-local identity) pass, and `LegacyRbac` lets admins
+    /// through by default. Under `PolicyOnly` a principal needs an explicit
+    /// `kv:write` grant on `kv:<key>`.
+    fn check_kv_write_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        key: &str,
+    ) -> RedDBResult<()> {
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let tenant = current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("kv".to_string(), key.to_string());
+        if let Some(tenant) = &tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = runtime_iam_context(role, tenant.as_deref());
+        if auth_store.check_policy_authz_with_role(&principal, "kv:write", &resource, &ctx, role) {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{}` action=`kv:write` resource=`kv:{}` denied by IAM policy",
             principal, key
         )))
     }

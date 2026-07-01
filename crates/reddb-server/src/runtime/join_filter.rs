@@ -2158,6 +2158,8 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::ShowConfig { .. } => "show_config",
         QueryExpr::SetSecret { .. } => "set_secret",
         QueryExpr::DeleteSecret { .. } => "delete_secret",
+        QueryExpr::SetKv { .. } => "set_kv",
+        QueryExpr::DeleteKv { .. } => "delete_kv",
         QueryExpr::ShowSecrets { .. } => "show_secrets",
         QueryExpr::SetTenant(_) => "set_tenant",
         QueryExpr::ShowTenant => "show_tenant",
@@ -2243,6 +2245,9 @@ pub(super) fn evaluate_scalar_function_with_db(
     }
     if func_name.eq_ignore_ascii_case("__SECRET_REF") {
         return evaluate_projection_secret_ref(args);
+    }
+    if func_name.eq_ignore_ascii_case("__KV_REF") {
+        return evaluate_projection_kv_ref(args);
     }
     if matches!(
         func_name.to_ascii_uppercase().as_str(),
@@ -3303,6 +3308,16 @@ fn evaluate_projection_secret_ref(args: &[Projection]) -> Option<Value> {
     } else {
         Some(Value::Null)
     }
+}
+
+/// Resolve `$kv.*` in a projection. Unlike secrets, plain KV values are
+/// not masked — the resolver already enforces `kv:read`, and denied/absent
+/// keys fall through to NULL (#1602).
+fn evaluate_projection_kv_ref(args: &[Projection]) -> Option<Value> {
+    let key = projection_path_text(args.first()?)?.to_ascii_lowercase();
+    crate::runtime::impl_core::current_kv_value(&key)
+        .map(Value::text)
+        .or(Some(Value::Null))
 }
 
 fn projection_path_text(projection: &Projection) -> Option<String> {
