@@ -179,6 +179,20 @@ fn batch_contains_text(actions: &[Vec<u8>], needle: &str) -> bool {
         .any(|action| action_contains_text(action, needle))
 }
 
+/// Tear the final `bytes` off the WAL tail, corrupting the last commit
+/// batch so recovery must drop it — the deterministic proxy for a crash
+/// mid-commit, before the batch was fully durable.
+fn truncate_wal_tail(path: &Path, bytes: u64) {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("open wal");
+    let len = file.metadata().expect("wal metadata").len();
+    file.set_len(len - bytes).expect("truncate wal");
+    file.sync_all().expect("sync truncated wal");
+}
+
 #[test]
 fn transactions_doc_includes_canonical_reservation_recipe_without_external_coordinator() {
     assert!(
@@ -342,4 +356,134 @@ fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
         batch_contains_text(reservation_batch, "reservation_work"),
         "commit batch must include downstream queue work"
     );
+}
+
+#[test]
+fn reservation_commit_survives_wal_crash_recovery() {
+    // After a clean COMMIT, a simulated crash (drop with no graceful close)
+    // leaves the WAL as the only record of the transaction. Reopening the
+    // store replays that batch and all three effects — claim, idempotency
+    // key, queue work — come back together.
+    let db = support::temp_db_file("transactional-reservation-crash-recover");
+
+    {
+        let rt = persistent_runtime(&db);
+        setup_reservation_schema(&rt);
+        set_current_connection_id(145604);
+        let outcome = reserve_units(&rt, "reserve-crash", 2);
+        assert_eq!(
+            outcome,
+            ReservationAttempt::Created {
+                reservation_id: "resv-reserve-crash".to_string(),
+                units_claimed: 2,
+            }
+        );
+        clear_current_connection_id();
+        // Scope ends: the runtime drops without an explicit close, exactly
+        // as after a process crash — only the durable WAL remains.
+    }
+
+    let rt = persistent_runtime(&db);
+    set_current_connection_id(145614);
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT unit_id FROM inventory_units \
+             WHERE reservation_key = 'reserve-crash' AND status = 'claimed'"
+        ),
+        2,
+        "recovery must restore the claimed resource units"
+    );
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT reservation_id FROM reservation_idempotency \
+             WHERE idempotency_key = 'reserve-crash'"
+        ),
+        1,
+        "recovery must restore the idempotency key row"
+    );
+    assert_eq!(
+        exec(&rt, "QUEUE PEEK reservation_work 10")
+            .result
+            .records
+            .len(),
+        1,
+        "recovery must restore the queued downstream work"
+    );
+    clear_current_connection_id();
+}
+
+#[test]
+fn reservation_torn_commit_recovers_to_no_partial_state() {
+    // A crash mid-commit — the reservation transaction's single commit batch
+    // torn at the WAL tail — must recover to no partial state. None of the
+    // three effects survive: the resource stays available, no idempotency key
+    // exists, and the queue is empty.
+    let db = support::temp_db_file("transactional-reservation-torn-commit");
+    let wal_path = reddb_file::unified_wal_path(db.path());
+    let stable_image = db.path().with_extension("stable-copy");
+
+    {
+        let rt = persistent_runtime(&db);
+        setup_reservation_schema(&rt);
+        // Fold the schema and seeded rows into the data file, then snapshot
+        // it, so the WAL tail carries only the reservation commit batch.
+        rt.checkpoint().expect("checkpoint pre-reservation prefix");
+        std::fs::copy(db.path(), &stable_image).expect("copy stable image");
+
+        set_current_connection_id(145605);
+        let outcome = reserve_units(&rt, "reserve-torn", 2);
+        assert_eq!(
+            outcome,
+            ReservationAttempt::Created {
+                reservation_id: "resv-reserve-torn".to_string(),
+                units_claimed: 2,
+            }
+        );
+        clear_current_connection_id();
+    }
+
+    // Restore the pre-reservation data file and tear the tail of the
+    // reservation commit batch: the crash happened before it was durable.
+    std::fs::copy(&stable_image, db.path()).expect("restore stable image");
+    let _ = std::fs::remove_file(&stable_image);
+    truncate_wal_tail(&wal_path, 1);
+
+    let rt = persistent_runtime(&db);
+    set_current_connection_id(145615);
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT unit_id FROM inventory_units WHERE status = 'available'"
+        ),
+        3,
+        "a torn commit must leave every resource unit available"
+    );
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT unit_id FROM inventory_units WHERE reservation_key = 'reserve-torn'"
+        ),
+        0,
+        "a torn commit must leave no claimed resource state"
+    );
+    assert_eq!(
+        row_count(
+            &rt,
+            "SELECT reservation_id FROM reservation_idempotency \
+             WHERE idempotency_key = 'reserve-torn'"
+        ),
+        0,
+        "a torn commit must leave no idempotency key row"
+    );
+    assert_eq!(
+        exec(&rt, "QUEUE PEEK reservation_work 10")
+            .result
+            .records
+            .len(),
+        0,
+        "a torn commit must leave no queued downstream work"
+    );
+    clear_current_connection_id();
 }
