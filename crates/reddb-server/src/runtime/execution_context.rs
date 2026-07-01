@@ -384,6 +384,11 @@ struct SecretResolver {
 
 impl SecretResolver {
     fn can_read(&self, key: &str) -> bool {
+        // `red.secret.*` is the internal system-secrets namespace. Never
+        // expose it via `$secret.X` regardless of IAM role — not even admin.
+        if key.starts_with("red.secret.") {
+            return false;
+        }
         let Some(store) = &self.store else {
             return true;
         };
