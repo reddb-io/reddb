@@ -513,7 +513,11 @@ impl KvResolver {
 }
 
 pub(crate) struct KvStoreGuard {
-    previous: Option<KvResolver>,
+    // Boxed to keep the stack footprint of nested guards small. Each
+    // StatementFrameGuards is live for the full recursive call depth of a
+    // materialized-view refresh chain; unboxed KvResolver (≈120 B) would
+    // push those deep paths past the 8 MB stack limit.
+    previous: Option<Box<KvResolver>>,
 }
 
 impl KvStoreGuard {
@@ -528,13 +532,15 @@ impl KvStoreGuard {
                 }),
             }))
         });
-        Self { previous }
+        Self {
+            previous: previous.map(Box::new),
+        }
     }
 }
 
 impl Drop for KvStoreGuard {
     fn drop(&mut self) {
-        let previous = self.previous.take();
+        let previous = self.previous.take().map(|b| *b);
         CURRENT_KV_RESOLVER.with(|cell| {
             cell.replace(previous);
         });

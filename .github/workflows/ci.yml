@@ -383,6 +383,14 @@ jobs:
         # cap. nextest runs every test in a global parallel process pool (sleeps
         # overlap) and the `ci` profile enforces a hard per-test timeout
         # (.config/nextest.toml) so a hung test is killed, not the whole run.
+        #
+        # RUST_MIN_STACK=8M: libtest spawns each #[test] fn in a new thread
+        # with Rust's 2 MiB default stack.  Query-execution paths (view
+        # refresh chains, StatementExecutionFrame guards) need more headroom;
+        # 8 MiB matches the OS main-thread default and prevents SIGABRT on
+        # overflow without changing production behaviour.
+        env:
+          RUST_MIN_STACK: "8388608"
         run: cargo nextest run --workspace --locked --profile ci
       - name: Doctests (nextest does not execute doctests)
         run: cargo test --workspace --locked --doc

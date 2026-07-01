@@ -3341,6 +3341,11 @@ impl RedDBRuntime {
             let weak_inner = Arc::downgrade(&runtime.inner);
             std::thread::Builder::new()
                 .name("reddb-mv-scheduler".into())
+                // Rust's default for spawned threads is 2 MiB, which is too
+                // small for the query-execution path that refresh_due_materialized_views
+                // runs (StatementExecutionFrame + guards per view). Match the
+                // 8 MiB that the OS gives the main thread.
+                .stack_size(8 * 1024 * 1024)
                 .spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     let Some(inner) = weak_inner.upgrade() else {
@@ -4705,7 +4710,10 @@ impl RedDBRuntime {
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
         let execution_query = rewritten_query.as_deref().unwrap_or(query);
         let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
-        let _frame_guards = frame.install(self);
+        // Box the guards so the ~640-byte StatementFrameGuards struct lives on
+        // the heap rather than the call stack — important for recursive paths
+        // (view refresh, nested queries) where the stack can be as small as 2 MB.
+        let _frame_guards = Box::new(frame.install(self));
         let _log_span = crate::telemetry::span::query_span(query).entered();
 
         let expr = self.rewrite_view_refs(expr);
@@ -5042,7 +5050,7 @@ impl RedDBRuntime {
         let execution_query = rewritten_query.as_deref().unwrap_or(query);
 
         let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
-        let _frame_guards = frame.install(self);
+        let _frame_guards = Box::new(frame.install(self));
 
         // Phase 6 logging: enter a span stamped with conn_id / tenant
         // / query_len. Every downstream tracing::info!/warn!/error!
@@ -7018,7 +7026,6 @@ impl RedDBRuntime {
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
         let _config_snapshot_guard = ConfigSnapshotGuard::install(Arc::clone(&self.inner.db));
         let _secret_store_guard = SecretStoreGuard::install(self.inner.auth_store.read().clone());
-        let _kv_store_guard = KvStoreGuard::install(self.inner.auth_store.read().clone());
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
         // whose `tq.table` matches a registered view with the view's
         // underlying query. Safe to call even when no views are registered.
