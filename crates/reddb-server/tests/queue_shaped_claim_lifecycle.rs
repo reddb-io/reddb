@@ -56,13 +56,19 @@ fn queue_claim_acquires_deliveries_and_locks_them() {
         .expect("queue claim succeeds");
     assert_eq!(first.affected_rows, 2, "claims up to the requested limit");
     let first_ids = delivery_ids(&first);
-    assert_eq!(first_ids.len(), 2, "each claimed message carries a delivery_id");
+    assert_eq!(
+        first_ids.len(),
+        2,
+        "each claimed message carries a delivery_id"
+    );
 
     // The first two deliveries are locked under the lifecycle, so a second
     // claim skips them and only acquires the one remaining message. A raw
     // storage mutation would not hold delivery locks this way.
     let second = rt
-        .execute_query("UPDATE qclaim SET status = 'processing' CLAIM LIMIT 5 ORDER BY enqueued_at ASC")
+        .execute_query(
+            "UPDATE qclaim SET status = 'processing' CLAIM LIMIT 5 ORDER BY enqueued_at ASC",
+        )
         .expect("second queue claim succeeds");
     assert_eq!(
         second.affected_rows, 1,
@@ -77,7 +83,9 @@ fn queue_claim_delivery_id_is_a_real_lifecycle_handle() {
     exec(&rt, "QUEUE PUSH qack 'payload-1'");
 
     let claimed = rt
-        .execute_query("UPDATE qack SET status = 'processing' CLAIM LIMIT 1 ORDER BY enqueued_at ASC")
+        .execute_query(
+            "UPDATE qack SET status = 'processing' CLAIM LIMIT 1 ORDER BY enqueued_at ASC",
+        )
         .expect("queue claim succeeds");
     assert_eq!(claimed.affected_rows, 1);
     let delivery_id = delivery_ids(&claimed)
@@ -95,7 +103,9 @@ fn queue_claim_delivery_id_is_a_real_lifecycle_handle() {
 
     // The queue is now drained: no message remains to claim.
     let empty = rt
-        .execute_query("UPDATE qack SET status = 'processing' CLAIM LIMIT 5 ORDER BY enqueued_at ASC")
+        .execute_query(
+            "UPDATE qack SET status = 'processing' CLAIM LIMIT 5 ORDER BY enqueued_at ASC",
+        )
         .expect("claim on drained queue succeeds");
     assert_eq!(empty.affected_rows, 0, "acked delivery is not re-claimable");
 }
@@ -126,7 +136,9 @@ fn queue_claim_exact_is_rejected() {
     exec(&rt, "QUEUE PUSH qexact 'job-1'");
 
     let err = rt
-        .execute_query("UPDATE qexact SET status = 'processing' CLAIM EXACT 3 ORDER BY enqueued_at ASC")
+        .execute_query(
+            "UPDATE qexact SET status = 'processing' CLAIM EXACT 3 ORDER BY enqueued_at ASC",
+        )
         .expect_err("CLAIM EXACT cannot be expressed through queue delivery");
     let msg = format!("{err:?}");
     assert!(

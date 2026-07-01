@@ -1772,9 +1772,7 @@ impl RedDBRuntime {
     pub(super) fn is_queue_collection(&self, collection: &str) -> bool {
         self.db()
             .collection_contract_arc(collection)
-            .map(|contract| {
-                contract.declared_model == crate::catalog::CollectionModel::Queue
-            })
+            .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Queue)
             .unwrap_or(false)
     }
 
@@ -1824,8 +1822,7 @@ impl RedDBRuntime {
             .deliver(&txn, queue, &group, count)
             .map_err(map_qse)?;
 
-        let mut result =
-            UnifiedResult::with_columns(vec!["delivery_id".into(), "payload".into()]);
+        let mut result = UnifiedResult::with_columns(vec!["delivery_id".into(), "payload".into()]);
         for message in &delivered {
             let mut record = UnifiedRecord::new();
             record.set("delivery_id", Value::text(message.delivery_id.clone()));
