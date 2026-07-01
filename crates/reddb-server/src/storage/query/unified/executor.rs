@@ -200,6 +200,8 @@ impl UnifiedExecutor {
             | QueryExpr::ShowConfig { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::SetKv { .. }
+            | QueryExpr::DeleteKv { .. }
             | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
@@ -446,6 +448,8 @@ impl UnifiedExecutor {
             | QueryExpr::ShowConfig { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::SetKv { .. }
+            | QueryExpr::DeleteKv { .. }
             | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
