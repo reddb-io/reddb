@@ -12,6 +12,9 @@ mod e2e_append_only;
 #[path = "dml_updates/e2e_compound_assignment.rs"]
 mod e2e_compound_assignment;
 
+#[path = "dml_updates/e2e_concurrent_claim_runtime.rs"]
+mod e2e_concurrent_claim_runtime;
+
 #[path = "locking_concurrency/e2e_concurrent_writes.rs"]
 mod e2e_concurrent_writes;
 
