@@ -316,6 +316,8 @@ impl CostEstimator {
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::ShowSecrets { .. }
+            | QueryExpr::SetKv { .. }
+            | QueryExpr::DeleteKv { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
@@ -413,6 +415,8 @@ impl CostEstimator {
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::ShowSecrets { .. }
+            | QueryExpr::SetKv { .. }
+            | QueryExpr::DeleteKv { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
