@@ -110,6 +110,11 @@ pub enum QueryExpr {
     DeleteSecret { key: String },
     /// SHOW SECRET[S] [prefix]
     ShowSecrets { prefix: Option<String> },
+    /// SET KV key = value — store a plain (non-encrypted) user KV entry.
+    /// Sibling to `SetSecret`; backed by an independent flat-map store.
+    SetKv { key: String, value: Value },
+    /// DELETE KV key — remove a plain user KV entry.
+    DeleteKv { key: String },
     /// `SET TENANT 'id'` / `SET TENANT = 'id'` / `RESET TENANT`
     ///
     /// Session-scoped multi-tenancy handle. Populates a per-connection
