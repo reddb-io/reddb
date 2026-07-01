@@ -56,6 +56,8 @@ fn err_string(rt: &RedDBRuntime, sql: &str) -> String {
 fn document_claim_updates_ordered_subset_with_returning() {
     let rt = runtime();
     exec(&rt, "CREATE DOCUMENT doc_claim_tasks");
+    // ADR 0063: a concurrent CLAIM orders candidates through a compatible index.
+    exec(&rt, "CREATE INDEX idx_doc_claim_tasks_priority ON doc_claim_tasks (priority)");
     exec(
         &rt,
         r#"INSERT INTO doc_claim_tasks DOCUMENT (body) VALUES ('{"name":"slow","priority":30,"status":"ready"}')"#,
@@ -143,6 +145,11 @@ fn document_claim_locks_skip_and_release_on_rollback() {
     let rt = runtime();
     set_current_connection_id(145401);
     exec(&rt, "CREATE DOCUMENT doc_claim_lock_tasks");
+    // ADR 0063: a concurrent CLAIM orders candidates through a compatible index.
+    exec(
+        &rt,
+        "CREATE INDEX idx_doc_claim_lock_priority ON doc_claim_lock_tasks (priority)",
+    );
     exec(
         &rt,
         r#"INSERT INTO doc_claim_lock_tasks DOCUMENT (body) VALUES ('{"name":"a","priority":10,"status":"ready"}')"#,
