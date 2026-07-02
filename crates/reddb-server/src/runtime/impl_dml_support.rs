@@ -176,7 +176,11 @@ pub(super) fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>
 }
 
 /// Find a required column value and return it as-is.
-pub(super) fn find_column_value(columns: &[String], values: &[Value], name: &str) -> RedDBResult<Value> {
+pub(super) fn find_column_value(
+    columns: &[String],
+    values: &[Value],
+    name: &str,
+) -> RedDBResult<Value> {
     for (i, col) in columns.iter().enumerate() {
         if col.eq_ignore_ascii_case(name) {
             return Ok(values[i].clone());
@@ -232,7 +236,11 @@ pub(super) fn find_document_body_json(
     }
 }
 
-pub(super) fn find_column_value_f64(columns: &[String], values: &[Value], name: &str) -> RedDBResult<f64> {
+pub(super) fn find_column_value_f64(
+    columns: &[String],
+    values: &[Value],
+    name: &str,
+) -> RedDBResult<f64> {
     let val = find_column_value(columns, values, name)?;
     match val {
         Value::Float(n) => Ok(n),
@@ -328,7 +336,11 @@ pub(super) fn resolve_edge_endpoint_any(
 }
 
 /// Find a required column value and coerce to u64.
-pub(super) fn find_column_value_u64(columns: &[String], values: &[Value], name: &str) -> RedDBResult<u64> {
+pub(super) fn find_column_value_u64(
+    columns: &[String],
+    values: &[Value],
+    name: &str,
+) -> RedDBResult<u64> {
     let val = find_column_value(columns, values, name)?;
     match val {
         Value::Integer(n) => Ok(n as u64),
@@ -343,7 +355,11 @@ pub(super) fn find_column_value_u64(columns: &[String], values: &[Value], name: 
 }
 
 /// Find an optional column value as f32.
-pub(super) fn find_column_value_f32_opt(columns: &[String], values: &[Value], name: &str) -> Option<f32> {
+pub(super) fn find_column_value_f32_opt(
+    columns: &[String],
+    values: &[Value],
+    name: &str,
+) -> Option<f32> {
     for (i, col) in columns.iter().enumerate() {
         if col.eq_ignore_ascii_case(name) {
             return match &values[i] {
@@ -451,7 +467,10 @@ pub(super) fn is_timeseries_insert_column(column: &str) -> bool {
     )
 }
 
-pub(super) fn find_timeseries_timestamp_ns(columns: &[String], values: &[Value]) -> RedDBResult<Option<u64>> {
+pub(super) fn find_timeseries_timestamp_ns(
+    columns: &[String],
+    values: &[Value],
+) -> RedDBResult<Option<u64>> {
     let mut found = None;
 
     for alias in ["timestamp_ns", "timestamp", "time"] {
@@ -485,7 +504,9 @@ pub(super) fn find_timeseries_tags(
     Ok(std::collections::HashMap::new())
 }
 
-pub(super) fn parse_timeseries_tags(value: &Value) -> RedDBResult<std::collections::HashMap<String, String>> {
+pub(super) fn parse_timeseries_tags(
+    value: &Value,
+) -> RedDBResult<std::collections::HashMap<String, String>> {
     match value {
         Value::Null => Ok(std::collections::HashMap::new()),
         Value::Json(bytes) => parse_timeseries_tags_json(bytes),
@@ -681,7 +702,10 @@ pub(super) fn storage_value_to_metadata_value(value: &Value) -> MetadataValue {
     }
 }
 
-pub(super) fn sql_literal_to_metadata_value(field: &str, value: &Value) -> RedDBResult<MetadataValue> {
+pub(super) fn sql_literal_to_metadata_value(
+    field: &str,
+    value: &Value,
+) -> RedDBResult<MetadataValue> {
     match value {
         Value::Null => Ok(MetadataValue::Null),
         Value::Integer(value) if *value >= 0 => Ok(metadata_u64_to_value(*value as u64)),
@@ -812,7 +836,11 @@ pub(super) fn dotted_tail_already_set(value: &Value, tail: &str) -> bool {
 /// * `Value::text(s)` if `s` is valid JSON → same as Json
 /// * anything else → error (user supplied a scalar where we need
 ///   a JSON container)
-pub(super) fn merge_dotted_tenant(current: Value, tail: &str, tenant_id: &str) -> RedDBResult<Value> {
+pub(super) fn merge_dotted_tenant(
+    current: Value,
+    tail: &str,
+    tenant_id: &str,
+) -> RedDBResult<Value> {
     let mut root = match current {
         Value::Null => crate::json::Value::Object(Default::default()),
         Value::Json(bytes) | Value::Blob(bytes) => {
