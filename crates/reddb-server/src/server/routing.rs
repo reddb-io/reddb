@@ -430,16 +430,6 @@ impl RedDBServer {
             },
             ("GET", "/grpc") => self.handle_grpc_discovery(),
 
-            // Eventual Consistency endpoints
-            ("GET", "/ec/status") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "eventual-consistency")
-                {
-                    return deny;
-                }
-                handlers_ec::handle_ec_global_status(&self.runtime)
-            }
-
             // Geo endpoints
             ("POST", "/geo/distance") => handlers_geo::handle_geo_distance(body),
             ("POST", "/geo/bearing") => handlers_geo::handle_geo_bearing(body),
@@ -455,102 +445,15 @@ impl RedDBServer {
             // Log endpoints (handled dynamically below for /logs/{name}/...)
 
             // CDC & Backup endpoints
-            ("GET", "/changes") => self.handle_cdc_poll(&query),
-            ("GET", "/backup/status") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "backup-status")
-                {
-                    return deny;
-                }
-                self.handle_backup_status()
-            }
-            ("POST", "/backup/trigger") => self.handle_backup_trigger(),
             ("GET", "/recovery/restore-points") => self.handle_restore_points(),
 
             // Replication endpoints
-            ("GET", "/replication/status") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "replication-status")
-                {
-                    return deny;
-                }
-                self.handle_replication_status()
-            }
-
-            // Topology graph (#803) — built-in `red.topology.cluster` analytics,
-            // aggregated into the PRD #794 nodes/edges/groups/metadata document.
-            ("GET", "/v1/topology/graph") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "topology-graph")
-                {
-                    return deny;
-                }
-                self.handle_topology_graph()
-            }
             ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),
-            ("POST", "/admin/replication/rejoin/confirm-rewind") => {
-                self.handle_admin_replication_confirm_rewind(body)
-            }
 
-            ("POST", "/admin/shutdown") => self.handle_admin_shutdown(),
-            ("POST", "/admin/drain") => self.handle_admin_drain(),
-            // PLAN.md Phase 3.2 / 3.3 — admin restore + backup.
-            ("POST", "/admin/restore") => self.handle_admin_restore(body),
-            ("POST", "/admin/backup") => self.handle_admin_backup(&query),
-            // PLAN.md Phase 4.3 — dynamic read-only toggle.
-            ("POST", "/admin/readonly") => self.handle_admin_readonly(body),
-            // Issue #148 — Blob Cache admin maintenance endpoints
-            // (closes sweeper.rs flag #4 + the operator UX gap from #148).
-            ("POST", "/admin/blob_cache/sweep") => self.handle_admin_blob_cache_sweep(body),
-            ("POST", "/admin/blob_cache/flush_namespace") => {
-                self.handle_admin_blob_cache_flush_namespace(body)
-            }
-            // Issue #195 — optimistic-lock compare-and-set on the result cache.
-            ("POST", "/admin/cache/compare-and-set") => {
-                self.handle_admin_blob_cache_compare_and_set(body)
-            }
-            // Issue #198 — blob cache stats endpoint.
-            ("GET", "/admin/blob_cache/stats") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "blob-cache-stats")
-                {
-                    return deny;
-                }
-                self.handle_admin_blob_cache_stats(&query)
-            }
-            // PLAN.md Phase 11.6 — manual replica → primary promotion.
-            ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
-            ("GET", "/admin/status") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "admin-status")
-                {
-                    return deny;
-                }
-                self.handle_admin_status()
-            }
-            // Red UI cluster status snapshot (#738) — single aggregated
-            // contract so the UI doesn't need to stitch /admin/status,
-            // /replication/status, /backup/status, /ready/* together.
-            ("GET", "/cluster/status") => {
-                if let Some(deny) =
-                    self.check_ops_http_policy(&headers, "ops:read:cluster", "cluster-status")
-                {
-                    return deny;
-                }
-                self.handle_cluster_status()
-            }
             // Red UI feature & capability discovery (#752). Two levels:
             // static/system capabilities and the effective principal
             // view. Both are on the public allowlist in `is_authorized`.
             ("GET", "/capabilities") => self.handle_capabilities(),
-            // SOC 2 / HIPAA structured audit query — JSONL/JSON over
-            // the active `.audit.log` plus rotated archives.
-            ("GET", "/admin/audit") => {
-                if let Some(deny) = self.check_ops_http_policy(&headers, "ops:admin", "audit") {
-                    return deny;
-                }
-                self.handle_admin_audit_query(&query)
-            }
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();
@@ -637,33 +540,6 @@ impl RedDBServer {
                     503
                 };
                 json_response(status, self.health_json_with_transport(&report))
-            }
-            ("GET", "/deployment/profiles") => {
-                let profile = query
-                    .get("profile")
-                    .and_then(|value| deployment_profile_from_token(value.as_str()));
-                json_response(
-                    200,
-                    match profile {
-                        Some(profile) => {
-                            crate::presentation::deployment_json::deployment_profile_json(
-                                match profile {
-                                    DeploymentProfile::Embedded => crate::presentation::deployment_json::DeploymentProfileView::Embedded,
-                                    DeploymentProfile::Server => crate::presentation::deployment_json::DeploymentProfileView::Server,
-                                    DeploymentProfile::Serverless => crate::presentation::deployment_json::DeploymentProfileView::Serverless,
-                                },
-                            )
-                        }
-                        None => crate::presentation::deployment_json::deployment_profiles_catalog_json(
-                            &[
-                                crate::presentation::deployment_json::DeploymentProfileView::Embedded,
-                                crate::presentation::deployment_json::DeploymentProfileView::Server,
-                                crate::presentation::deployment_json::DeploymentProfileView::Serverless,
-                            ],
-                            "Use /deployment/profiles?profile=serverless to get the exact serverless contract.",
-                        ),
-                    },
-                )
             }
             ("GET", "/catalog/readiness") => {
                 let native = self.native_use_cases();
@@ -1153,90 +1029,6 @@ impl RedDBServer {
                     }
                 }
 
-                // IAM policy admin endpoints (Agent #28 lane).
-                if path == "/admin/policies" {
-                    return match method.as_str() {
-                        "GET" => self.handle_iam_policy_list(),
-                        _ => json_error(405, "method not allowed"),
-                    };
-                }
-                if path == "/admin/policies/simulate" && method == "POST" {
-                    return self.handle_iam_simulate(body);
-                }
-                if path == "/admin/policies/lint" {
-                    return match method.as_str() {
-                        "POST" => self.handle_iam_policy_lint(body),
-                        _ => json_error(405, "method not allowed"),
-                    };
-                }
-                if path == "/admin/policies/migrate-mode" {
-                    return match method.as_str() {
-                        "POST" => self.handle_iam_policy_migrate_mode(body),
-                        _ => json_error(405, "method not allowed"),
-                    };
-                }
-                if path == "/admin/policies/actions" {
-                    return match method.as_str() {
-                        "GET" => self.handle_iam_policy_actions(),
-                        _ => json_error(405, "method not allowed"),
-                    };
-                }
-                if let Some(rest) = path.strip_prefix("/admin/policies/") {
-                    let id = rest.trim_matches('/');
-                    if !id.is_empty() && !id.contains('/') {
-                        return match method.as_str() {
-                            "PUT" => self.handle_iam_policy_put(&headers, id, body),
-                            "GET" => self.handle_iam_policy_get(id),
-                            "DELETE" => self.handle_iam_policy_delete(&headers, id),
-                            _ => json_error(405, "method not allowed"),
-                        };
-                    }
-                }
-                if let Some(rest) = path.strip_prefix("/admin/users/") {
-                    // /admin/users/:user/policies/:policy_id  PUT|DELETE
-                    // /admin/users/:user/groups/:group       PUT|DELETE
-                    // /admin/users/:user/effective-permissions GET
-                    if let Some((user, tail)) = rest.split_once('/') {
-                        if tail == "effective-permissions" && method == "GET" {
-                            return self.handle_iam_effective_permissions(user, &query);
-                        }
-                        if let Some(group) = tail.strip_prefix("groups/") {
-                            let group = group.trim_matches('/');
-                            if !group.is_empty() && !group.contains('/') {
-                                return match method.as_str() {
-                                    "PUT" => self.handle_iam_add_user_group(user, group),
-                                    "DELETE" => self.handle_iam_remove_user_group(user, group),
-                                    _ => json_error(405, "method not allowed"),
-                                };
-                            }
-                        }
-                        if let Some(pid) = tail.strip_prefix("policies/") {
-                            let pid = pid.trim_matches('/');
-                            if !pid.is_empty() && !pid.contains('/') {
-                                return match method.as_str() {
-                                    "PUT" => self.handle_iam_attach_user(&headers, user, pid),
-                                    "DELETE" => self.handle_iam_detach_user(&headers, user, pid),
-                                    _ => json_error(405, "method not allowed"),
-                                };
-                            }
-                        }
-                    }
-                }
-                if let Some(rest) = path.strip_prefix("/admin/groups/") {
-                    if let Some((group, tail)) = rest.split_once('/') {
-                        if let Some(pid) = tail.strip_prefix("policies/") {
-                            let pid = pid.trim_matches('/');
-                            if !pid.is_empty() && !pid.contains('/') {
-                                return match method.as_str() {
-                                    "PUT" => self.handle_iam_attach_group(&headers, group, pid),
-                                    "DELETE" => self.handle_iam_detach_group(&headers, group, pid),
-                                    _ => json_error(405, "method not allowed"),
-                                };
-                            }
-                        }
-                    }
-                }
-
                 // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
                 if let Some(rest) = path.strip_prefix("/logs/") {
                     let parts: Vec<&str> = rest.split('/').collect();
@@ -1254,51 +1046,6 @@ impl RedDBServer {
                                 handlers_log::handle_log_retention(&self.runtime, log_name)
                             }
                             _ => json_error(405, "method not allowed for log endpoint"),
-                        };
-                    }
-                }
-
-                // EC dynamic routes: /ec/{collection}/{field}/{action}
-                if let Some(rest) = path.strip_prefix("/ec/") {
-                    let parts: Vec<&str> = rest.split('/').collect();
-                    if parts.len() >= 3 {
-                        let ec_collection = parts[0];
-                        let ec_field = parts[1];
-                        let ec_action = parts[2];
-                        return match (method.as_str(), ec_action) {
-                            ("POST", "add") => handlers_ec::handle_ec_mutate(
-                                &self.runtime,
-                                ec_collection,
-                                ec_field,
-                                "add",
-                                body,
-                            ),
-                            ("POST", "sub") => handlers_ec::handle_ec_mutate(
-                                &self.runtime,
-                                ec_collection,
-                                ec_field,
-                                "sub",
-                                body,
-                            ),
-                            ("POST", "set") => handlers_ec::handle_ec_mutate(
-                                &self.runtime,
-                                ec_collection,
-                                ec_field,
-                                "set",
-                                body,
-                            ),
-                            ("POST", "consolidate") => handlers_ec::handle_ec_consolidate(
-                                &self.runtime,
-                                ec_collection,
-                                ec_field,
-                            ),
-                            ("GET", "status") => handlers_ec::handle_ec_status(
-                                &self.runtime,
-                                ec_collection,
-                                ec_field,
-                                &query,
-                            ),
-                            _ => json_error(405, "method not allowed for EC endpoint"),
                         };
                     }
                 }
@@ -1919,6 +1666,41 @@ impl RedDBServer {
             "admin.status" => Some(self.handle_admin_status()),
             "admin.blob_cache.stats" => Some(self.handle_admin_blob_cache_stats(query)),
             "ops.ec.status" => Some(handlers_ec::handle_ec_global_status(&self.runtime)),
+            "ops.ec.add" | "ops.ec.sub" | "ops.ec.set" => {
+                let collection = matched.params.get("collection")?;
+                let field = matched.params.get("field")?;
+                let operation = match matched.spec.id {
+                    "ops.ec.add" => "add",
+                    "ops.ec.sub" => "sub",
+                    _ => "set",
+                };
+                Some(handlers_ec::handle_ec_mutate(
+                    &self.runtime,
+                    collection,
+                    field,
+                    operation,
+                    body.to_vec(),
+                ))
+            }
+            "ops.ec.consolidate" => {
+                let collection = matched.params.get("collection")?;
+                let field = matched.params.get("field")?;
+                Some(handlers_ec::handle_ec_consolidate(
+                    &self.runtime,
+                    collection,
+                    field,
+                ))
+            }
+            "ops.ec.field_status" => {
+                let collection = matched.params.get("collection")?;
+                let field = matched.params.get("field")?;
+                Some(handlers_ec::handle_ec_status(
+                    &self.runtime,
+                    collection,
+                    field,
+                    query,
+                ))
+            }
             "ops.backup.status" => Some(self.handle_backup_status()),
             "ops.backup.trigger" => Some(self.handle_backup_trigger()),
             "ops.recovery.restore_points" => Some(self.handle_restore_points()),
