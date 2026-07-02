@@ -1418,6 +1418,7 @@ pub mod locking;
 pub(crate) mod materialization_limit;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
+pub(crate) mod mvcc_lifecycle;
 pub(crate) mod node_load_telemetry;
 pub(crate) mod occupancy_sampler;
 pub(crate) mod primary_queue_store;
