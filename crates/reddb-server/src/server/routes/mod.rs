@@ -59,6 +59,45 @@ mod tests {
     }
 
     #[test]
+    fn discovered_ec_dynamic_routes_resolve_through_catalog() {
+        let catalog = build_discovered_route_catalog().unwrap();
+
+        for (method, path, id) in [
+            (RouteMethod::Post, "/ec/orders/total/add", "ops.ec.add"),
+            (RouteMethod::Post, "/ec/orders/total/sub", "ops.ec.sub"),
+            (RouteMethod::Post, "/ec/orders/total/set", "ops.ec.set"),
+            (
+                RouteMethod::Post,
+                "/ec/orders/total/consolidate",
+                "ops.ec.consolidate",
+            ),
+            (
+                RouteMethod::Get,
+                "/ec/orders/total/status",
+                "ops.ec.field_status",
+            ),
+        ] {
+            let matched = catalog
+                .find(method, path)
+                .unwrap_or_else(|| panic!("missing EC route {path}"));
+            assert_eq!(matched.spec.id, id, "unexpected id for {path}");
+            assert_eq!(
+                matched.params.get("collection").map(String::as_str),
+                Some("orders")
+            );
+            assert_eq!(
+                matched.params.get("field").map(String::as_str),
+                Some("total")
+            );
+        }
+
+        // The global `/ec/status` exact route still wins over the dynamic
+        // `/ec/:collection/:field/status` pattern.
+        let global = catalog.find(RouteMethod::Get, "/ec/status").unwrap();
+        assert_eq!(global.spec.id, "ops.ec.status");
+    }
+
+    #[test]
     fn discovered_routes_carry_canonical_aliases() {
         let catalog = build_discovered_route_catalog().unwrap();
 

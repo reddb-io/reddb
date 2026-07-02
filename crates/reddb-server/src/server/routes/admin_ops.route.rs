@@ -4,7 +4,7 @@ use crate::server::route_catalog::{
 };
 use crate::server::routes::common::{
     ADMIN_TOKEN_MIDDLEWARE, ALL_SURFACES, PUBLIC_ADMIN_SURFACES, PUBLIC_MIDDLEWARE,
-    PUBLIC_NO_QUOTA_MIDDLEWARE,
+    PUBLIC_NO_QUOTA_MIDDLEWARE, PUBLIC_SURFACES, STANDARD_MIDDLEWARE,
 };
 
 const ADMIN_SURFACES: &[ListenerSurface] = &[ListenerSurface::Public, ListenerSurface::Admin];
@@ -66,6 +66,19 @@ const OPS_PUBLIC_PROBE: RouteGroupDefaults = RouteGroupDefaults {
     surfaces: ALL_SURFACES,
     stability: RouteStability::Stable,
     middlewares: PUBLIC_NO_QUOTA_MIDDLEWARE,
+};
+
+// Eventual-consistency per-field mutation + status endpoints. The legacy
+// dispatcher served these from the untyped `/ec/{collection}/{field}/{action}`
+// fallthrough (authenticated user, public listener only, quota-gated, no ops
+// policy); the discovered group reproduces that surface/auth/middleware shape.
+const OPS_EC_FIELD: RouteGroupDefaults = RouteGroupDefaults {
+    family: "ops",
+    audience: RouteAudience::Client,
+    auth: RouteAuth::UserRequired,
+    surfaces: PUBLIC_SURFACES,
+    stability: RouteStability::Stable,
+    middlewares: STANDARD_MIDDLEWARE,
 };
 
 const ADMIN_STATUS_ALIASES: &[RouteAlias] = &[RouteAlias::canonical(
@@ -391,6 +404,42 @@ const OPS_PUBLIC_ROUTES: &[RouteEntry] = &[
     ),
 ];
 
+const OPS_EC_FIELD_ROUTES: &[RouteEntry] = &[
+    RouteEntry::with_aliases(
+        "ops.ec.add",
+        RouteMethod::Post,
+        "/ec/:collection/:field/add",
+        ops_aliases!(RouteMethod::Post, "/v1/ops/ec/:collection/:field/add"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.ec.sub",
+        RouteMethod::Post,
+        "/ec/:collection/:field/sub",
+        ops_aliases!(RouteMethod::Post, "/v1/ops/ec/:collection/:field/sub"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.ec.set",
+        RouteMethod::Post,
+        "/ec/:collection/:field/set",
+        ops_aliases!(RouteMethod::Post, "/v1/ops/ec/:collection/:field/set"),
+    ),
+    RouteEntry::with_aliases(
+        "ops.ec.consolidate",
+        RouteMethod::Post,
+        "/ec/:collection/:field/consolidate",
+        ops_aliases!(
+            RouteMethod::Post,
+            "/v1/ops/ec/:collection/:field/consolidate"
+        ),
+    ),
+    RouteEntry::with_aliases(
+        "ops.ec.field_status",
+        RouteMethod::Get,
+        "/ec/:collection/:field/status",
+        ops_aliases!(RouteMethod::Get, "/v1/ops/ec/:collection/:field/status"),
+    ),
+];
+
 pub(crate) fn register(registry: &mut RouteRegistry) {
     registry.routes(ADMIN_MUTATION, ADMIN_MUTATION_ROUTES);
     registry.routes(
@@ -405,4 +454,5 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
     registry.routes(OPS_READ, OPS_READ_ROUTES);
     registry.routes(OPS_PUBLIC_PROBE, OPS_PUBLIC_PROBE_ROUTES);
     registry.routes(OPS_PUBLIC, OPS_PUBLIC_ROUTES);
+    registry.routes(OPS_EC_FIELD, OPS_EC_FIELD_ROUTES);
 }
