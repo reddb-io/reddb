@@ -1379,6 +1379,7 @@ mod impl_config;
 pub(crate) mod impl_core;
 mod impl_ddl;
 mod impl_dml;
+mod impl_dml_support;
 mod impl_ec;
 mod impl_events;
 mod impl_graph;
