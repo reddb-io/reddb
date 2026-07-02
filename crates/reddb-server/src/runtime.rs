@@ -1457,6 +1457,7 @@ pub mod snapshot_reuse;
 mod statement_frame;
 mod table_row_mvcc_resolver;
 pub mod turbo_crash_inject;
+mod vcs_command;
 mod vector_index;
 pub mod vector_turbo_kind;
 pub(crate) mod window_phase;
