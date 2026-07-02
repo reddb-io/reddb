@@ -43,7 +43,6 @@ pub(super) fn parse_canonical_field_ref(value: &str) -> RedDBResult<FieldRef> {
     )))
 }
 
-
 pub(super) fn project_runtime_record(
     source: &UnifiedRecord,
     projections: &[Projection],
@@ -575,7 +574,6 @@ fn json_value_contains(value: &JsonValue, needle: &str) -> bool {
         JsonValue::Null | JsonValue::Object(_) => false,
     }
 }
-
 
 /// Map a legacy public-identity column name to its canonical rid-envelope
 /// field. The rid-envelope refactor exposes identity under `rid` /
