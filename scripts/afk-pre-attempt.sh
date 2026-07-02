@@ -38,7 +38,8 @@ fi
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 INSTRUCTION="Follow .red/CONTEXT.md and STYLE.md (TigerStyle subset per ADR 0056). \
-Before committing, run \`scripts/lint-no-untyped-serialization.sh\` and \`cargo fmt --all\` in your worktree. \
+Run \`scripts/lint-no-untyped-serialization.sh\` before committing. \
+FORMATTING IS A TERMINAL STEP: as your FINAL action before signalling DONE — AFTER all per-file commits — run \`cargo fmt --all\`; if it changed anything, \`git add -u && git commit -m 'style: cargo fmt'\`. NEVER signal DONE with an unformatted tree: the \`lint:root\` feedback gate runs \`cargo fmt --check\` and will bounce the whole attempt to blocked:validation before merge. \
 Do NOT introduce bare \`.unwrap()\` outside the whitelist — it is a ratchet violation. \
 Do NOT edit \`docs/conformance/\`, \`testdata/conformance/\`, the contract matrix scripts, or \`.red/adr/\`; CODEOWNERS blocks these and the pre_merge drift-guard (ADR 0062) will reject the PR. \
 Do NOT add a new Cargo dependency without a \`# track: issue-XXXX\` comment on the same line — the drift-guard requires a tracking issue. \
