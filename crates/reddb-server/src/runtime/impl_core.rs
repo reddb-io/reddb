@@ -3206,7 +3206,7 @@ impl RedDBRuntime {
             for value in record.values_mut() {
                 if let Value::Secret(ref bytes) = value {
                     if let Some(plain) =
-                        super::impl_dml::decrypt_secret_payload(&key, bytes.as_slice())
+                        super::impl_dml_crypto::decrypt_secret_payload(&key, bytes.as_slice())
                     {
                         if let Ok(text) = String::from_utf8(plain) {
                             *value = Value::text(text);
