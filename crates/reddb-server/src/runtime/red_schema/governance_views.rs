@@ -78,7 +78,10 @@ pub(super) fn managed_policies_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRe
         .collect()
 }
 
-pub(super) fn control_events_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<UnifiedRecord> {
+pub(super) fn control_events_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+) -> Vec<UnifiedRecord> {
     let schema = Arc::new(
         CONTROL_EVENT_COLUMNS
             .iter()
@@ -146,7 +149,10 @@ pub(super) fn users_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Ve
         .collect()
 }
 
-pub(super) fn api_keys_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<UnifiedRecord> {
+pub(super) fn api_keys_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+) -> Vec<UnifiedRecord> {
     let schema = Arc::new(
         API_KEY_COLUMNS
             .iter()

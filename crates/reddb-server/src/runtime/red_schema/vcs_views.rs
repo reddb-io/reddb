@@ -6,7 +6,10 @@
 
 use super::*;
 
-pub(super) fn commits_snapshot(runtime: &RedDBRuntime, query: &TableQuery) -> RedDBResult<Vec<UnifiedRecord>> {
+pub(super) fn commits_snapshot(
+    runtime: &RedDBRuntime,
+    query: &TableQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let schema = Arc::new(
         COMMIT_COLUMNS
             .iter()
@@ -69,7 +72,10 @@ pub(super) fn hash_filter(query: &TableQuery) -> Option<String> {
     effective_table_filter(query).and_then(|filter| visit(&filter))
 }
 
-pub(super) fn refs_snapshot(runtime: &RedDBRuntime, prefix: Option<&str>) -> RedDBResult<Vec<UnifiedRecord>> {
+pub(super) fn refs_snapshot(
+    runtime: &RedDBRuntime,
+    prefix: Option<&str>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let schema = Arc::new(
         REF_COLUMNS
             .iter()

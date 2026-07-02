@@ -845,7 +845,9 @@ pub(super) fn red_query(
         VirtualTableKind::ShowCreate => show_create_snapshot(runtime, visible_collections, query)?,
         VirtualTableKind::ShowIndexes => show_indexes_snapshot(runtime, visible_collections),
         VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
-        VirtualTableKind::Policies => governance_views::policies_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Policies => {
+            governance_views::policies_snapshot(runtime, tenant, visible_collections)
+        }
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
         VirtualTableKind::Subscriptions => subscriptions_snapshot(runtime, visible_collections),
         VirtualTableKind::Retention => retention_snapshot(runtime, visible_collections),
@@ -858,12 +860,16 @@ pub(super) fn red_query(
             analytics_sources_snapshot(runtime, visible_collections)
         }
         VirtualTableKind::SchemaRegistry => schema_registry_snapshot(runtime),
-        VirtualTableKind::GovernanceRegistry => governance_views::governance_registry_snapshot(runtime),
+        VirtualTableKind::GovernanceRegistry => {
+            governance_views::governance_registry_snapshot(runtime)
+        }
         VirtualTableKind::GovernanceRegistryHistory => {
             governance_views::governance_registry_history_snapshot(runtime)
         }
         VirtualTableKind::ManagedPolicies => governance_views::managed_policies_snapshot(runtime),
-        VirtualTableKind::ControlEvents => governance_views::control_events_snapshot(runtime, tenant),
+        VirtualTableKind::ControlEvents => {
+            governance_views::control_events_snapshot(runtime, tenant)
+        }
         VirtualTableKind::Users => governance_views::users_snapshot(runtime, tenant),
         VirtualTableKind::ApiKeys => governance_views::api_keys_snapshot(runtime, tenant),
         VirtualTableKind::ControlCapabilities => governance_views::control_capabilities_snapshot(),
