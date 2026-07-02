@@ -1,9 +1,9 @@
 # ADR 0002 — Promote MVCC transaction coordinator into production
 
-**Status:** Draft (open for human review)
+**Status:** Superseded
 **Date:** 2026-05-04
 **Supersedes:** —
-**Superseded by:** —
+**Superseded by:** [ADR 0065](0065-transaction-manager-v2-rewrite.md) — TM v2 rewritten over the #1383 MVCC history store instead of promoting the dormant coordinator
 **Related issues:** [#27](https://github.com/reddb-io/reddb/issues/27),
 [#28](https://github.com/reddb-io/reddb/issues/28),
 [#29](https://github.com/reddb-io/reddb/issues/29),
