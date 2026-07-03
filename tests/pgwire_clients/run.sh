@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RED_BIN="${RED_BIN:-/home/cyber/.cache/cargo-target/debug/red}"
+if [[ -z "${RED_BIN:-}" ]]; then
+  TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+  RED_BIN="${TARGET_DIR}/debug/red"
+fi
 PG_PORT="${PG_PORT:-55432}"
 PROXY_PORT="${PROXY_PORT:-55433}"
 AI_PORT="${AI_PORT:-55436}"
