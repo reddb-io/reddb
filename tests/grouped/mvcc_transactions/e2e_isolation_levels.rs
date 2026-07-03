@@ -94,18 +94,39 @@ fn text_cell(row: &reddb::storage::query::unified::UnifiedRecord, column: &str) 
     }
 }
 
+fn int_cell(row: &reddb::storage::query::unified::UnifiedRecord, column: &str) -> i64 {
+    match row.get(column) {
+        Some(Value::Integer(value)) => *value,
+        Some(Value::UnsignedInteger(value)) => *value as i64,
+        other => panic!("expected integer in {column}, got {other:?}"),
+    }
+}
+
 #[test]
 fn begin_isolation_level_round_trips_to_transaction_status() {
     let rt = rt();
 
-    for (offset, (sql, requested)) in [
-        ("BEGIN ISOLATION LEVEL READ UNCOMMITTED", "read_uncommitted"),
-        ("BEGIN ISOLATION LEVEL READ COMMITTED", "read_committed"),
+    for (offset, (sql, requested, effective)) in [
+        (
+            "BEGIN ISOLATION LEVEL READ UNCOMMITTED",
+            "read_uncommitted",
+            "snapshot_isolation",
+        ),
+        (
+            "BEGIN ISOLATION LEVEL READ COMMITTED",
+            "read_committed",
+            "read_committed",
+        ),
         (
             "BEGIN ISOLATION LEVEL REPEATABLE READ",
             "snapshot_isolation",
+            "snapshot_isolation",
         ),
-        ("BEGIN ISOLATION LEVEL SNAPSHOT", "snapshot_isolation"),
+        (
+            "BEGIN ISOLATION LEVEL SNAPSHOT",
+            "snapshot_isolation",
+            "snapshot_isolation",
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -121,13 +142,79 @@ fn begin_isolation_level_round_trips_to_transaction_status() {
         assert_eq!(text_cell(row, "isolation_level"), requested, "{sql}");
         assert_eq!(
             text_cell(row, "effective_isolation_level"),
-            "snapshot_isolation",
+            effective,
             "{sql}"
         );
 
         try_exec(&rt, "COMMIT").expect("COMMIT should close the tx");
     }
 
+    clear_current_connection_id();
+}
+
+#[test]
+fn read_committed_refreshes_snapshot_per_statement_but_snapshot_does_not() {
+    let rt = rt();
+    set_current_connection_id(9970);
+    try_exec(&rt, "CREATE TABLE rc_statement_snap (id INT, label TEXT)").unwrap();
+    try_exec(
+        &rt,
+        "INSERT INTO rc_statement_snap (id, label) VALUES (1, 'base')",
+    )
+    .unwrap();
+
+    try_exec(&rt, "BEGIN ISOLATION LEVEL READ COMMITTED").unwrap();
+    let rc_first = select_count(&rt, "SELECT * FROM rc_statement_snap");
+    assert_eq!(rc_first, 1, "RC first statement sees initial row");
+
+    set_current_connection_id(9971);
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(
+        &rt,
+        "INSERT INTO rc_statement_snap (id, label) VALUES (2, 'concurrent')",
+    )
+    .unwrap();
+    try_exec(&rt, "COMMIT").unwrap();
+
+    set_current_connection_id(9970);
+    let rc_second = select_count(&rt, "SELECT * FROM rc_statement_snap");
+    assert_eq!(rc_second, 2, "RC next statement sees concurrent commit");
+    try_exec(&rt, "COMMIT").unwrap();
+
+    set_current_connection_id(9972);
+    try_exec(
+        &rt,
+        "CREATE TABLE snapshot_statement_snap (id INT, label TEXT)",
+    )
+    .unwrap();
+    try_exec(
+        &rt,
+        "INSERT INTO snapshot_statement_snap (id, label) VALUES (1, 'base')",
+    )
+    .unwrap();
+    try_exec(&rt, "BEGIN ISOLATION LEVEL SNAPSHOT").unwrap();
+    let snapshot_first = select_count(&rt, "SELECT * FROM snapshot_statement_snap");
+    assert_eq!(
+        snapshot_first, 1,
+        "SNAPSHOT first statement sees initial row"
+    );
+
+    set_current_connection_id(9973);
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(
+        &rt,
+        "INSERT INTO snapshot_statement_snap (id, label) VALUES (2, 'concurrent')",
+    )
+    .unwrap();
+    try_exec(&rt, "COMMIT").unwrap();
+
+    set_current_connection_id(9972);
+    let snapshot_second = select_count(&rt, "SELECT * FROM snapshot_statement_snap");
+    assert_eq!(
+        snapshot_second, 1,
+        "SNAPSHOT keeps the transaction-begin snapshot"
+    );
+    try_exec(&rt, "COMMIT").unwrap();
     clear_current_connection_id();
 }
 
@@ -148,6 +235,48 @@ fn writer_sees_own_uncommitted_row() {
 
     let after = select_count(&rt, "SELECT * FROM ryo WHERE id = 1");
     assert_eq!(after, 0, "rollback must hide the writer's own row");
+    clear_current_connection_id();
+}
+
+#[test]
+fn read_committed_keeps_own_writes_visible_across_statement_snapshots() {
+    let rt = rt();
+    set_current_connection_id(9980);
+    try_exec(&rt, "CREATE TABLE rc_own_writes (id INT, label TEXT)").unwrap();
+    try_exec(&rt, "BEGIN ISOLATION LEVEL READ COMMITTED").unwrap();
+    try_exec(
+        &rt,
+        "INSERT INTO rc_own_writes (id, label) VALUES (1, 'parent')",
+    )
+    .unwrap();
+    let first = rt
+        .execute_query("SELECT id FROM rc_own_writes")
+        .expect("select own write");
+    assert_eq!(first.result.records.len(), 1);
+    assert_eq!(int_cell(&first.result.records[0], "id"), 1);
+
+    set_current_connection_id(9981);
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(
+        &rt,
+        "INSERT INTO rc_own_writes (id, label) VALUES (2, 'other')",
+    )
+    .unwrap();
+    try_exec(&rt, "COMMIT").unwrap();
+
+    set_current_connection_id(9980);
+    let second = rt
+        .execute_query("SELECT id FROM rc_own_writes")
+        .expect("select own and concurrent writes");
+    let mut ids: Vec<i64> = second
+        .result
+        .records
+        .iter()
+        .map(|row| int_cell(row, "id"))
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2]);
+    try_exec(&rt, "ROLLBACK").unwrap();
     clear_current_connection_id();
 }
 
