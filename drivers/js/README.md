@@ -164,6 +164,71 @@ try {
 directly via `tx.query()`. Open another `connect()` handle for independent
 concurrent transactions.
 
+### Isolation levels
+
+The default isolation is **snapshot isolation** (each transaction reads a
+consistent MVCC snapshot). To request a stronger level, issue the isolation
+clause with the opening statement via `db.query()`:
+
+```js
+await db.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+await db.query("INSERT INTO audit (action) VALUES ('serializable write')")
+await db.query('COMMIT')
+```
+
+RedDB accepts the PG-compatible spellings `READ UNCOMMITTED`,
+`READ COMMITTED`, `REPEATABLE READ` (= `SNAPSHOT`), and `SERIALIZABLE`.
+`SERIALIZABLE` engages the serializable-snapshot-isolation (SSI) path, which
+can abort a transaction at commit with a serialization conflict (see below).
+
+### Serialization conflicts & retries
+
+Under snapshot / serializable isolation, two transactions that write the same
+row on overlapping snapshots resolve **first-committer-wins**: the later
+transaction is aborted with a **retryable serialization conflict**. It
+surfaces as a `RedDBError` with code `QUERY_ERROR` whose message begins
+`serialization conflict`. This is the one error class you should catch and
+**retry** rather than surface to the user:
+
+```js
+import { connect, RedDBError } from '@reddb-io/sdk'
+
+const db = await connect('file:///var/lib/reddb/data.rdb')
+
+/** True only for the retryable first-committer-wins conflict. */
+function isSerializationConflict(err) {
+  return (
+    err instanceof RedDBError &&
+    err.code === 'QUERY_ERROR' &&
+    /serialization conflict/i.test(err.message)
+  )
+}
+
+/** Run a transaction, retrying with backoff on serialization conflicts. */
+async function withRetry(fn, { maxRetries = 5 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await db.transaction(fn)
+    } catch (err) {
+      if (isSerializationConflict(err) && attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 2 ** attempt * 5)) // backoff
+        continue
+      }
+      throw err // not retryable, or out of attempts
+    }
+  }
+}
+
+// Concurrent debits stay consistent — losers retry against the fresh snapshot.
+await withRetry(async (tx) => {
+  const { rows } = await tx.query('SELECT balance FROM accounts WHERE id = $1', 1)
+  await tx.query('UPDATE accounts SET balance = $1 WHERE id = $2', rows[0].balance - 10, 1)
+})
+```
+
+Only conflicts are retried — a syntax error, a constraint violation, or any
+other `QUERY_ERROR` propagates on the first attempt.
+
 ## Connection URIs
 
 | URI                        | Mode                                 |
@@ -299,6 +364,54 @@ await db.queues.len('jobs')
 await db.queues.purge('jobs')
 ```
 
+## Graph, vector and time-series
+
+RedDB is one multi-model engine: graphs, vectors and time-series live in the
+same database and are reached through `db.query()` (dedicated helpers arrive in
+Helper Spec v1.1). Every snippet below is executed on each release by
+[`test/readme-examples.test.mjs`](test/readme-examples.test.mjs).
+
+**Graph** — nodes and edges in a `network` collection, then a shortest-path
+traversal (the first user row gets `rid` 1024):
+
+```js
+await db.query("INSERT INTO network NODE (label, node_type) VALUES ('gateway', 'Host')")
+await db.query("INSERT INTO network NODE (label, node_type) VALUES ('app', 'Host')")
+await db.query("INSERT INTO network NODE (label, node_type) VALUES ('db', 'Host')")
+await db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1025, 1.0)")
+await db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1025, 1026, 1.0)")
+await db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1026, 5.0)")
+
+const path = await db.query("GRAPH SHORTEST_PATH '1024' TO '1026' ALGORITHM dijkstra")
+path.rows[0].total_weight   // 2 — two 1.0 hops beat the single 5.0 edge
+```
+
+**Vector** — store embeddings, then rank by similarity. A vector bind value is
+a single `$N` param, so it goes in the params array as one element
+(`[[1.0, 0.0]]`), not the variadic form:
+
+```js
+await db.query("INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'gateway runbook')")
+await db.query("INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.0, 1.0], 'database manual')")
+
+const hits = await db.query('SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1', [[1.0, 0.0]])
+hits.rows[0].score   // 1 — the identical vector scores exactly 1
+```
+
+**Time-series** — declare a series with retention + downsampling, ingest
+points (timestamps are nanoseconds), then bucket them:
+
+```js
+await db.query('CREATE TIMESERIES metrics RETENTION 7 d CHUNK_SIZE 64 DOWNSAMPLE 1h:5m:avg')
+await db.query("INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 10.0, '{\"host\":\"srv-a\"}', 0)")
+await db.query("INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 20.0, '{\"host\":\"srv-a\"}', 60000000000)")
+
+const rollup = await db.query(
+  'SELECT time_bucket(5m) AS bucket, avg(value) AS avg_value, count(*) AS samples ' +
+    "FROM metrics WHERE metric = 'cpu.usage' GROUP BY time_bucket(5m)",
+)
+```
+
 ## SDK Helper Spec conformance
 
 This driver implements **SDK Helper Spec v1.0**
@@ -354,12 +467,16 @@ with `INVALID_ARGUMENT`.
 | `wire.graph.sql_round_trip`          | reachable via `db.query` (no v1.0 case) |
 | `wire.timeseries.sql_round_trip`     | reachable via `db.query` (no v1.0 case) |
 
-**Out-of-scope in v1.0** (reach via raw `db.query` until v1.1, per spec):
-first-class `vectors.*`, `graph.*`, `timeseries.*`, and `probabilistic.*`
-helpers; KV TTL (`kv.expire`) and gRPC watch; priority queues, consumer
-groups, dead-letter routing; transaction isolation-level arguments and
-cross-shard transactions; JSON Patch / nested / array-positional document
-patches (top-level merge only).
+**Out-of-scope in v1.0 helpers** (reach via raw `db.query` until v1.1, per
+spec): first-class `vectors.*`, `graph.*`, `timeseries.*`, and
+`probabilistic.*` helpers (see [Graph, vector and
+time-series](#graph-vector-and-time-series)); KV TTL (`kv.expire`) and gRPC
+watch; priority queues, consumer groups, dead-letter routing; cross-shard
+transactions; JSON Patch / nested / array-positional document patches
+(top-level merge only). Transaction **isolation levels** and the retryable
+serialization-conflict class are available today through raw `db.query` — see
+[Isolation levels](#isolation-levels) and [Serialization conflicts &
+retries](#serialization-conflicts--retries).
 
 Run the conformance harness against a locally built binary:
 
