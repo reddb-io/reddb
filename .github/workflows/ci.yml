@@ -480,6 +480,57 @@ jobs:
       - name: C++ RedWire parameter fixtures
         run: /tmp/reddb-cpp-param-conformance/value_codec_test
 
+  driver-runnable-examples:
+    # Issue #1657 — execute the runnable README examples for the priority
+    # official SDKs (js `@reddb-io/sdk` + python) against a real embedded
+    # engine on every driver change, so the docs (one example per data model
+    # plus the serialization-conflict retry contract) can never drift from the
+    # released API. The JS suite needs the `red` binary; the Python driver
+    # statically links the engine, so `maturin develop` is self-contained.
+    name: Driver Runnable Examples
+    needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 35
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: driver-runnable-examples-rust-1.91.0
+          cache-on-failure: "true"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Build red (embedded engine for the JS SDK)
+        run: cargo build --locked --bin red
+      - name: JS SDK runnable README examples
+        working-directory: drivers/js
+        env:
+          REDDB_BINARY_PATH: ${{ github.workspace }}/target/debug/red
+        run: |
+          node test/readme-examples.test.mjs
+          node test/conformance.test.mjs
+      - name: Python driver runnable README examples (maturin develop + pytest)
+        working-directory: drivers/python
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip maturin pytest
+          maturin develop
+          python -m pytest tests/test_readme_examples.py -q
+
   publish-dry-run:
     # Catches crates.io packaging issues (missing include paths, stale
     # path-only deps, license mismatch) before they bite at release
