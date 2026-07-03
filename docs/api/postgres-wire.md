@@ -25,6 +25,17 @@ red server \
 psql -h 127.0.0.1 -p 5432 -U reddb reddb
 ```
 
+When RedDB auth is enabled, PG-wire requests a cleartext password during
+startup and verifies it against the same auth store used by native transports:
+
+```bash
+PGPASSWORD=s3cret psql -h 127.0.0.1 -p 5432 -U reddb reddb
+```
+
+The legacy trust behavior is only for loopback binds with no auth store
+configured. If PG-wire is bound to a non-loopback address, configure auth before
+exposing the listener.
+
 Then any supported SQL:
 
 ```sql
@@ -69,7 +80,7 @@ path; parameterized calls use the extended protocol.
 
 ```rust
 let (client, conn) = tokio_postgres::connect(
-    "host=localhost port=5432 user=reddb",
+    "host=localhost port=5432 user=reddb password=s3cret",
     tokio_postgres::NoTls,
 ).await?;
 tokio::spawn(async move { conn.await.unwrap() });
@@ -82,7 +93,7 @@ let rows = client
 ### Go (`pgx`)
 
 ```go
-conn, err := pgx.Connect(ctx, "postgres://reddb@localhost:5432/reddb")
+conn, err := pgx.Connect(ctx, "postgres://reddb:s3cret@localhost:5432/reddb")
 rows, err := conn.Query(ctx, "SELECT id, email FROM users WHERE id = $1", 42)
 ask, err := conn.Query(ctx, "ASK $1::text STRICT OFF LIMIT 5", "why did login fail?")
 ```
@@ -91,7 +102,7 @@ ask, err := conn.Query(ctx, "ASK $1::text STRICT OFF LIMIT 5", "why did login fa
 
 ```python
 import psycopg
-with psycopg.connect("host=localhost port=5432 user=reddb") as conn:
+with psycopg.connect("host=localhost port=5432 user=reddb password=s3cret") as conn:
     with conn.cursor() as cur:
         cur.execute("SELECT id, email FROM users WHERE id = %s", (42,))
         for row in cur.fetchall():
