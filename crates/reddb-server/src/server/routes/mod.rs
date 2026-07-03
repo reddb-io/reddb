@@ -98,6 +98,98 @@ mod tests {
     }
 
     #[test]
+    fn discovered_geo_routes_resolve_through_catalog() {
+        let catalog = build_discovered_route_catalog().unwrap();
+        for (path, id) in [
+            ("/geo/distance", "geo.distance"),
+            ("/geo/bearing", "geo.bearing"),
+            ("/geo/midpoint", "geo.midpoint"),
+            ("/geo/destination", "geo.destination"),
+            ("/geo/bounding-box", "geo.bounding_box"),
+        ] {
+            let matched = catalog
+                .find(RouteMethod::Post, path)
+                .unwrap_or_else(|| panic!("missing geo route {path}"));
+            assert_eq!(matched.spec.id, id, "unexpected id for {path}");
+        }
+    }
+
+    #[test]
+    fn discovered_collection_entity_routes_resolve_with_params() {
+        let catalog = build_discovered_route_catalog().unwrap();
+        for (method, id) in [
+            (RouteMethod::Get, "collections.entities.get"),
+            (RouteMethod::Patch, "collections.entities.patch"),
+            (RouteMethod::Put, "collections.entities.put"),
+            (RouteMethod::Delete, "collections.entities.delete"),
+        ] {
+            let matched = catalog
+                .find(method, "/collections/orders/entities/42")
+                .unwrap_or_else(|| panic!("missing entity route for {id}"));
+            assert_eq!(matched.spec.id, id);
+            assert_eq!(
+                matched.params.get("collection").map(String::as_str),
+                Some("orders")
+            );
+            assert_eq!(matched.params.get("id").map(String::as_str), Some("42"));
+        }
+    }
+
+    #[test]
+    fn discovered_collection_dynamic_routes_do_not_shadow_each_other() {
+        let catalog = build_discovered_route_catalog().unwrap();
+
+        // The bare `DELETE /collections/:collection` DDL arm must not swallow
+        // the more-specific entity / tree delete patterns.
+        let bare = catalog
+            .find(RouteMethod::Delete, "/collections/orders")
+            .expect("bare collection drop resolves");
+        assert_eq!(bare.spec.id, "collections.drop");
+        assert_eq!(
+            bare.params.get("collection").map(String::as_str),
+            Some("orders")
+        );
+
+        let entity = catalog
+            .find(RouteMethod::Delete, "/collections/orders/entities/7")
+            .expect("entity delete resolves");
+        assert_eq!(entity.spec.id, "collections.entities.delete");
+
+        let tree_drop = catalog
+            .find(RouteMethod::Delete, "/collections/orders/trees/hierarchy")
+            .expect("tree drop resolves");
+        assert_eq!(tree_drop.spec.id, "collections.trees.drop");
+        assert_eq!(
+            tree_drop.params.get("tree").map(String::as_str),
+            Some("hierarchy")
+        );
+
+        let tree_node = catalog
+            .find(
+                RouteMethod::Delete,
+                "/collections/orders/trees/hierarchy/nodes/3",
+            )
+            .expect("tree node delete resolves");
+        assert_eq!(tree_node.spec.id, "collections.trees.nodes.delete");
+        assert_eq!(tree_node.params.get("node").map(String::as_str), Some("3"));
+
+        // The exact `/collections` listing arm wins over any dynamic
+        // `/collections/:collection` pattern.
+        let list = catalog.find(RouteMethod::Get, "/collections").unwrap();
+        assert_eq!(list.spec.id, "collections.list");
+
+        // Per-collection action arms remain distinct from the bulk variants.
+        let documents = catalog
+            .find(RouteMethod::Post, "/collections/orders/documents")
+            .expect("documents create resolves");
+        assert_eq!(documents.spec.id, "collections.documents.create");
+        let bulk_documents = catalog
+            .find(RouteMethod::Post, "/collections/orders/bulk/documents")
+            .expect("bulk documents create resolves");
+        assert_eq!(bulk_documents.spec.id, "collections.bulk.documents");
+    }
+
+    #[test]
     fn discovered_routes_carry_canonical_aliases() {
         let catalog = build_discovered_route_catalog().unwrap();
 
