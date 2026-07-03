@@ -1,10 +1,7 @@
 use super::*;
 use super::{
-    evaluate_ml_scalar,
-    evaluate_projection_config_function,
-    evaluate_projection_kv_function,
-    evaluate_projection_kv_ref,
-    evaluate_projection_secret_ref,
+    evaluate_ml_scalar, evaluate_projection_config_function, evaluate_projection_kv_function,
+    evaluate_projection_kv_ref, evaluate_projection_secret_ref,
 };
 
 pub(crate) fn query_expr_name(expr: &QueryExpr) -> &'static str {
@@ -831,7 +828,11 @@ fn cast_value_to(src: &Value, target: crate::storage::schema::types::DataType) -
     }
 }
 
-pub(super) fn resolve_scalar_arg(args: &[Projection], index: usize, source: &UnifiedRecord) -> Option<Value> {
+pub(super) fn resolve_scalar_arg(
+    args: &[Projection],
+    index: usize,
+    source: &UnifiedRecord,
+) -> Option<Value> {
     let arg = args.get(index)?;
     eval_projection_value(arg, source)
 }
