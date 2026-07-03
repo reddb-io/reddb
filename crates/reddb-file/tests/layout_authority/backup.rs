@@ -7,7 +7,20 @@ fn server_does_not_own_backup_or_wal_archive_manifest_codecs() {
     let wal_mod = read(root.join("crates/reddb-server/src/storage/wal/mod.rs"));
     let runtime_backup = read(root.join("crates/reddb-server/src/runtime/impl_backup.rs"));
     let api = read(root.join("crates/reddb-server/src/api.rs"));
-    let runtime_core = read(root.join("crates/reddb-server/src/runtime/impl_core.rs"));
+    // impl_core.rs was split into runtime/impl_*.rs sub-modules; scan them all so this
+    // authority check follows the code (e.g. backup_wal_prefix now lives in impl_lifecycle.rs).
+    let runtime_dir = root.join("crates/reddb-server/src/runtime");
+    let mut runtime_core = String::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&runtime_dir)
+        .expect("runtime dir readable")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("rs"))
+        .collect();
+    entries.sort();
+    for path in entries {
+        runtime_core.push_str(&read(path));
+        runtime_core.push('\n');
+    }
     let service_cli = read(root.join("crates/reddb-server/src/service_cli.rs"));
     let recovery = read(root.join("crates/reddb-server/src/storage/wal/recovery.rs"));
     let file = read(root.join("crates/reddb-file/src/backup_manifest.rs"));
