@@ -1,3 +1,9 @@
+//! Retired transaction lock-manager scaffolding.
+//!
+//! ADR 0065 keeps this file for historical reference but gates it out of
+//! the normal build. The live transaction engine is optimistic and has no
+//! transaction lock waits or deadlock detection machinery.
+//!
 //! Lock Management for Transactions
 //!
 //! Provides pessimistic concurrency control with deadlock detection.
