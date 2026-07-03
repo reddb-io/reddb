@@ -105,7 +105,10 @@ pub(super) fn collection_tenant(
     }
 }
 
-pub(super) fn row_text(row: &crate::storage::unified::entity::RowData, field: &str) -> Option<String> {
+pub(super) fn row_text(
+    row: &crate::storage::unified::entity::RowData,
+    field: &str,
+) -> Option<String> {
     match row.get_field(field)?.clone() {
         Value::Text(value) => Some(value.to_string()),
         Value::NodeRef(value) => Some(value),
