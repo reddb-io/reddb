@@ -1382,6 +1382,8 @@ mod impl_cdc;
 mod impl_config;
 mod impl_config_secret;
 pub(crate) mod impl_core;
+mod impl_core_outer_scope;
+mod impl_core_result_cache_scopes;
 mod impl_ddl;
 mod impl_dml;
 mod impl_dml_batch;
