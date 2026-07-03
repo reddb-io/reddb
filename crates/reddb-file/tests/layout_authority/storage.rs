@@ -509,7 +509,8 @@ fn server_runtime_uses_file_owned_default_database_path() {
     let runtime_files = [
         "crates/reddb-server/src/engine.rs",
         "crates/reddb-server/src/storage/unified/devx/reddb/impl_core_a.rs",
-        "crates/reddb-server/src/runtime/impl_core.rs",
+        // default_database_path() moved from impl_core.rs to impl_lifecycle.rs in the split.
+        "crates/reddb-server/src/runtime/impl_lifecycle.rs",
     ];
 
     for file in runtime_files {

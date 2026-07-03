@@ -413,7 +413,23 @@ fn server_does_not_redeclare_blob_cache_l2_file_format() {
         }
     }
 
-    let runtime = read(root.join("crates/reddb-server/src/runtime/impl_core.rs"));
+    // impl_core.rs was split into runtime/impl_*.rs sub-modules; scan them all so this
+    // authority check follows the code (result_cache_l2_path now lives in impl_lifecycle.rs).
+    let runtime = {
+        let dir = root.join("crates/reddb-server/src/runtime");
+        let mut acc = String::new();
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("runtime dir readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("rs"))
+            .collect();
+        entries.sort();
+        for path in entries {
+            acc.push_str(&read(path));
+            acc.push('\n');
+        }
+        acc
+    };
     assert!(
         !runtime.contains("with_extension(\"result-cache.l2\")")
             && !runtime.contains("\"result-cache.l2\""),
