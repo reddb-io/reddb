@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{Page, PageType, Pager, PagerConfig};
+use crate::storage::transaction::snapshot::SnapshotManager;
 use crate::storage::wal::{
     CheckpointError, CheckpointMode, CheckpointResult, Checkpointer, Transaction,
     TransactionManager, TxError,
@@ -225,10 +226,12 @@ impl Database {
         let pager =
             Pager::open(&path, pager_config).map_err(|e| DatabaseError::Pager(e.to_string()))?;
         let pager = Arc::new(pager);
+        let snapshot_manager = Arc::new(SnapshotManager::new());
 
         // Perform crash recovery if WAL exists
         if wal_path.exists() && !config.read_only {
             let recovery_result = Checkpointer::recover(&pager, &wal_path)?;
+            snapshot_manager.observe_committed_xid(recovery_result.max_transaction_id);
             if recovery_result.pages_checkpointed > 0 {
                 tracing::info!(
                     transactions = recovery_result.transactions_processed,
@@ -240,7 +243,12 @@ impl Database {
 
         // Create transaction manager
         let tx_manager = Arc::new(
-            TransactionManager::new(Arc::clone(&pager), &wal_path).map_err(DatabaseError::Io)?,
+            TransactionManager::new_with_snapshot_manager(
+                Arc::clone(&pager),
+                &wal_path,
+                snapshot_manager,
+            )
+            .map_err(DatabaseError::Io)?,
         );
 
         // P6.T1 — bgwriter wiring is gated behind `REDDB_BGWRITER=1`

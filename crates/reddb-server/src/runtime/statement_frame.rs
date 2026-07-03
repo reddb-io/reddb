@@ -254,6 +254,7 @@ pub(super) struct StatementExecutionFrame {
     tx_local_tenant: Option<Option<String>>,
     snapshot: Snapshot,
     own_xids: HashSet<Xid>,
+    serializable_reader: Option<Xid>,
     cache_key: String,
     is_volatile_query: bool,
     cache_safe: bool,
@@ -312,10 +313,16 @@ impl StatementExecutionFrame {
     pub(super) fn build(runtime: &RedDBRuntime, query: &str) -> RedDBResult<Self> {
         let conn_id = current_connection_id();
         let tx_local_tenant = runtime.inner.tx_local_tenants.read().get(&conn_id).cloned();
-        let own_xids = runtime.own_transaction_xids(conn_id);
+        let tx_context = runtime.inner.tx_contexts.read().get(&conn_id).cloned();
+        let own_xids = own_transaction_xids(tx_context.as_ref());
+        let serializable_reader = tx_context
+            .as_ref()
+            .filter(|ctx| {
+                ctx.isolation == crate::storage::transaction::IsolationLevel::Serializable
+            })
+            .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor) = runtime.statement_snapshot(query)?;
-        let requires_index_fallback =
-            as_of_floor.is_some() || runtime.inner.tx_contexts.read().contains_key(&conn_id);
+        let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
         let cache_key = result_cache_key(query);
         let is_volatile_query = query_has_volatile_builtin(query) || query_is_ask_statement(query);
         let cache_safe = runtime.result_cache_safe(conn_id);
@@ -355,6 +362,7 @@ impl StatementExecutionFrame {
             tx_local_tenant,
             snapshot,
             own_xids,
+            serializable_reader,
             cache_key,
             is_volatile_query,
             cache_safe,
@@ -388,6 +396,7 @@ impl StatementExecutionFrame {
                 manager: Arc::clone(&runtime.inner.snapshot_manager),
                 own_xids: self.own_xids.clone(),
                 requires_index_fallback: self.requires_index_fallback,
+                serializable_reader: self.serializable_reader,
             }),
         }
     }
@@ -796,6 +805,22 @@ impl ReadFrame for EffectiveScope {
     }
 }
 
+fn own_transaction_xids(
+    ctx: Option<&crate::storage::transaction::snapshot::TxnContext>,
+) -> HashSet<Xid> {
+    let mut set = HashSet::new();
+    if let Some(ctx) = ctx {
+        set.insert(ctx.xid);
+        for (_, sub) in &ctx.savepoints {
+            set.insert(*sub);
+        }
+        for sub in &ctx.released_sub_xids {
+            set.insert(*sub);
+        }
+    }
+    set
+}
+
 impl RedDBRuntime {
     /// Build the AI command `EffectiveScope` from the current
     /// statement thread-locals + auth store.
@@ -905,20 +930,6 @@ pub(crate) mod test_support {
 }
 
 impl RedDBRuntime {
-    fn own_transaction_xids(&self, conn_id: u64) -> HashSet<Xid> {
-        let mut set = HashSet::new();
-        if let Some(ctx) = self.inner.tx_contexts.read().get(&conn_id) {
-            set.insert(ctx.xid);
-            for (_, sub) in &ctx.savepoints {
-                set.insert(*sub);
-            }
-            for sub in &ctx.released_sub_xids {
-                set.insert(*sub);
-            }
-        }
-        set
-    }
-
     /// Resolve the snapshot for the current statement, returning
     /// the snapshot itself and (when AS OF is in effect) the
     /// resolved xid floor. The floor is the same xid carried inside

@@ -10,7 +10,7 @@ RedDB v0.1 (Beta) has the following known limitations:
 | Automatic sharding runtime | In progress | Cluster range ownership/routing foundations exist; production automatic placement and distributed serving are not supported yet. See [Cluster Sharding](../architecture/cluster-sharding.md). |
 | Full RBAC granularity | Partial | Three roles: admin, write, read |
 | Cross-model transactions | Partial (single-node) | Transaction control can cover multiple model paths that use RedDB's shared visibility resolver, but the new history-store MVCC guarantee is table-row-first. Non-table models retain their documented behavior until each path adopts the history-store resolver. Cross-node distributed transactions are not supported. |
-| `SERIALIZABLE` isolation | Rejected at parse time | Parser accepts `READ COMMITTED` / `REPEATABLE READ` / `SNAPSHOT` (all map to snapshot). SSI is future work. |
+| Full SERIALIZABLE isolation | Partial | `BEGIN ISOLATION LEVEL SERIALIZABLE` enables SSI rw-antidependency checks for SQL table rows. Predicate ranges, phantoms beyond materialized logical-row reads, multi-model SSI, and distributed serializability are future work. |
 | Autovacuum | Not supported | Manual `VACUUM` reclaims table-row history and tombstones. There is no background autovacuum daemon. |
 | Historical secondary indexes | Not supported | Table-row correctness uses current indexes with MVCC recheck and fallback. Dedicated historical indexes are future performance work. |
 | Distributed query planner | Not supported | Local cost-based planner |
