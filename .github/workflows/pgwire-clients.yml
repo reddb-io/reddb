@@ -63,7 +63,6 @@ jobs:
 
       - name: Run real-client PG-Wire conformance
         env:
-          RED_BIN: target/debug/red
           LOG_FILE: ${{ runner.temp }}/reddb-pgwire360.log
         run: bash tests/pgwire_clients/run.sh
 
