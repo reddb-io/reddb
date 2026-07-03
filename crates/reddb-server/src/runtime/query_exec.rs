@@ -404,29 +404,62 @@ fn project_scalar_via_evaluator(
             continue;
         };
         let col_name = super::join_filter::projection_name(proj);
-        let value = match evaluator::evaluate(expr, empty_row) {
-            Ok(v) => v,
-            // Fall back for CONFIG, KV, ML_* and any other special-cased
-            // functions the evaluator does not cover yet.
-            Err(evaluator::EvalError::UnknownFunction { .. }) => {
-                super::join_filter::project_runtime_record_with_db(
-                    db,
-                    source,
-                    std::slice::from_ref(proj),
-                    None,
-                    None,
-                    false,
-                    false,
-                )
-                .get(col_name.as_str())
-                .cloned()
-                .unwrap_or(Value::Null)
+        let value = if let Some(value) = session_context_scalar_value(expr) {
+            value
+        } else {
+            match evaluator::evaluate(expr, empty_row) {
+                Ok(v) => v,
+                // Fall back for CONFIG, KV, ML_* and any other special-cased
+                // functions the evaluator does not cover yet.
+                Err(evaluator::EvalError::UnknownFunction { .. }) => {
+                    super::join_filter::project_runtime_record_with_db(
+                        db,
+                        source,
+                        std::slice::from_ref(proj),
+                        None,
+                        None,
+                        false,
+                        false,
+                    )
+                    .get(col_name.as_str())
+                    .cloned()
+                    .unwrap_or(Value::Null)
+                }
+                Err(err) => return Err(RedDBError::Query(err.to_string())),
             }
-            Err(err) => return Err(RedDBError::Query(err.to_string())),
         };
         record.set(&col_name, value);
     }
     Ok(record)
+}
+
+fn session_context_scalar_value(expr: &Expr) -> Option<Value> {
+    let name = match expr {
+        Expr::FunctionCall { name, args, .. } if args.is_empty() => name.as_str(),
+        Expr::Column {
+            field: FieldRef::TableColumn { table, column },
+            ..
+        } if table.is_empty() => column.as_str(),
+        _ => return None,
+    };
+    match name.to_ascii_uppercase().as_str() {
+        "CURRENT_TENANT" => Some(
+            super::impl_core::current_tenant()
+                .map(Value::text)
+                .unwrap_or(Value::Null),
+        ),
+        "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
+            super::impl_core::current_user_projected()
+                .map(Value::text)
+                .unwrap_or(Value::Null),
+        ),
+        "CURRENT_ROLE" => Some(
+            super::impl_core::current_role_projected()
+                .map(Value::text)
+                .unwrap_or(Value::Null),
+        ),
+        _ => None,
+    }
 }
 
 pub(super) fn evaluate_runtime_document_filter(
