@@ -12,10 +12,15 @@ import (
 func main() {
 	ctx := context.Background()
 	port := os.Getenv("PGPORT")
-	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://reddb@127.0.0.1:%s/reddb?sslmode=disable", port))
+	user := os.Getenv("PGUSER")
+	if user == "" {
+		user = "reddb"
+	}
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://%s@127.0.0.1:%s/reddb?sslmode=disable", user, port))
 	if err != nil {
 		panic(err)
 	}
+	cfg.Password = os.Getenv("PGPASSWORD")
 	cfg.RuntimeParams["application_name"] = "pgwire360-pgx"
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
