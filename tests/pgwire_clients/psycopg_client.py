@@ -4,8 +4,10 @@ import psycopg
 
 
 port = os.environ["PGPORT"]
+user = os.environ.get("PGUSER", "reddb")
+password = os.environ.get("PGPASSWORD", "")
 conn = psycopg.connect(
-    f"host=127.0.0.1 port={port} user=reddb dbname=reddb sslmode=disable application_name=pgwire360-psycopg",
+    f"host=127.0.0.1 port={port} user={user} password={password} dbname=reddb sslmode=disable application_name=pgwire360-psycopg",
     autocommit=True,
 )
 cur = conn.cursor()
