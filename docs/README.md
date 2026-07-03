@@ -311,6 +311,10 @@ red connect 127.0.0.1:55055
     <h4>Installation</h4>
     <p>Install from GitHub Releases, npx, or source.</p>
   </a>
+  <a href="#/getting-started/relational-sql" class="card">
+    <h4>Model Quickstarts</h4>
+    <p>Run a first query for each RedDB data model.</p>
+  </a>
   <a href="#/query/search-commands" class="card">
     <h4>ASK & Search</h4>
     <p>Ask questions, semantic search, and context retrieval.</p>
