@@ -93,6 +93,14 @@ impl RedDBRuntime {
         table: &TableQuery,
         frame: &dyn super::super::statement_frame::ReadFrame,
     ) -> RedDBResult<()> {
+        // A source-free scalar SELECT (`SELECT CURRENT_USER()`, `SELECT 1`,
+        // ...) parses to the synthetic `any` table but reads no user rows,
+        // so table-read authorization does not apply. Secret/KV/CONFIG
+        // scalars carry their own action gates enforced at execution time,
+        // so skipping the table gate here does not weaken those.
+        if super::super::query_exec::table_query_is_implicit_scalar_select(table) {
+            return Ok(());
+        }
         let Some((username, role)) = frame.identity() else {
             return Ok(());
         };
