@@ -65,7 +65,7 @@ jobs:
         env:
           RED_BIN: target/debug/red
           LOG_FILE: ${{ runner.temp }}/reddb-pgwire360.log
-        run: tests/pgwire_clients/run.sh
+        run: bash tests/pgwire_clients/run.sh
 
       - name: Upload PG-Wire proxy log
         if: always()
