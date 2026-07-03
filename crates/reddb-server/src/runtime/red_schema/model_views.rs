@@ -5,6 +5,7 @@
 //! `red.timeseries`, `red.metrics`, `red.hypertable_chunks`, and
 //! `red.timeseries_writes`.
 
+use super::helpers::*;
 use super::*;
 
 /// Issue #745 — typed `red.tables` projection. Model-shaped view over
