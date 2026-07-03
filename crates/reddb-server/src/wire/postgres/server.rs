@@ -49,7 +49,8 @@ struct PgPortal {
     #[allow(dead_code)]
     result_format_codes: Vec<i16>,
     row_description_sent: bool,
-    described_result: Option<crate::runtime::RuntimeQueryResult>,
+    result: Option<crate::runtime::RuntimeQueryResult>,
+    row_offset: usize,
 }
 
 impl Default for PgWireConfig {
@@ -316,7 +317,8 @@ where
             params,
             result_format_codes: msg.result_format_codes,
             row_description_sent: false,
-            described_result: None,
+            result: None,
+            row_offset: 0,
         },
     );
     write_frame(stream, &BackendMessage::BindComplete).await
@@ -379,7 +381,8 @@ where
                 };
                 emit_row_description_for_result(stream, &result).await?;
                 portal.row_description_sent = true;
-                portal.described_result = Some(result);
+                portal.result = Some(result);
+                portal.row_offset = 0;
                 Ok(())
             } else {
                 write_frame(stream, &BackendMessage::NoData).await
@@ -406,18 +409,41 @@ where
         .await?;
         return Ok(());
     };
-    let _max_rows = msg.max_rows;
-    let was_described = portal.row_description_sent || portal.described_result.is_some();
-    portal.row_description_sent = false;
-    let result = match portal.described_result.take() {
-        Some(result) => Ok(result),
-        None => execute_pg_query_result(runtime, &portal.sql, &portal.params),
-    };
-    match result {
-        Ok(result) if was_described => {
-            emit_success_result_without_row_description(stream, &result).await
+    if portal.result.is_none() {
+        match execute_pg_query_result(runtime, &portal.sql, &portal.params) {
+            Ok(result) => {
+                portal.result = Some(result);
+                portal.row_offset = 0;
+            }
+            Err(err) => {
+                let code = classify_sqlstate(&err);
+                send_error(stream, code, &err).await?;
+                return Ok(());
+            }
         }
-        Ok(result) => emit_success_result(stream, &result).await,
+    }
+
+    let result = portal.result.as_ref().expect("portal result populated");
+    match emit_portal_execution(
+        stream,
+        result,
+        portal.row_description_sent,
+        portal.row_offset,
+        msg.max_rows,
+    )
+    .await
+    {
+        Ok(PortalExecution::Complete) => {
+            portal.result = None;
+            portal.row_offset = 0;
+            portal.row_description_sent = false;
+            Ok(())
+        }
+        Ok(PortalExecution::Suspended { next_row_offset }) => {
+            portal.row_offset = next_row_offset;
+            portal.row_description_sent = true;
+            Ok(())
+        }
         Err(err) => {
             let code = classify_sqlstate(&err);
             send_error(stream, code, &err).await
@@ -864,6 +890,97 @@ where
     Ok(())
 }
 
+enum PortalExecution {
+    Complete,
+    Suspended { next_row_offset: usize },
+}
+
+async fn emit_portal_execution<S>(
+    stream: &mut S,
+    result: &crate::runtime::RuntimeQueryResult,
+    row_description_sent: bool,
+    row_offset: usize,
+    max_rows: u32,
+) -> Result<PortalExecution, String>
+where
+    S: AsyncWrite + Unpin,
+{
+    if result.statement == "ask" && row_description_sent {
+        emit_success_result_without_row_description(stream, result)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(PortalExecution::Complete)
+    } else if result.statement == "ask" {
+        emit_success_result(stream, result)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(PortalExecution::Complete)
+    } else if result_returns_rows(result) {
+        emit_row_returning_portal_execution(
+            stream,
+            result,
+            row_description_sent,
+            row_offset,
+            max_rows,
+        )
+        .await
+    } else if row_description_sent {
+        emit_success_result_without_row_description(stream, result)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(PortalExecution::Complete)
+    } else {
+        emit_success_result(stream, result)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(PortalExecution::Complete)
+    }
+}
+
+async fn emit_row_returning_portal_execution<S>(
+    stream: &mut S,
+    result: &crate::runtime::RuntimeQueryResult,
+    row_description_sent: bool,
+    row_offset: usize,
+    max_rows: u32,
+) -> Result<PortalExecution, String>
+where
+    S: AsyncWrite + Unpin,
+{
+    if !row_description_sent {
+        emit_result_row_description(stream, &result.result)
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+
+    let total_rows = result.result.records.len();
+    let remaining_rows = total_rows.saturating_sub(row_offset);
+    let rows_to_emit = if max_rows == 0 {
+        remaining_rows
+    } else {
+        remaining_rows.min(max_rows as usize)
+    };
+    emit_result_data_rows_range(stream, &result.result, row_offset, rows_to_emit)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let next_row_offset = row_offset + rows_to_emit;
+    if next_row_offset < total_rows {
+        write_frame(stream, &BackendMessage::PortalSuspended)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(PortalExecution::Suspended { next_row_offset })
+    } else {
+        write_frame(
+            stream,
+            &BackendMessage::CommandComplete(format!("SELECT {}", total_rows)),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(PortalExecution::Complete)
+    }
+}
+
 async fn emit_row_description_for_result<S>(
     stream: &mut S,
     result: &crate::runtime::RuntimeQueryResult,
@@ -952,6 +1069,18 @@ async fn emit_result_data_rows<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    emit_result_data_rows_range(stream, result, 0, result.records.len()).await
+}
+
+async fn emit_result_data_rows_range<S>(
+    stream: &mut S,
+    result: &crate::storage::query::unified::UnifiedResult,
+    row_offset: usize,
+    row_count: usize,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
     let columns: Vec<String> = if !result.columns.is_empty() {
         result.columns.clone()
     } else if let Some(first) = result.records.first() {
@@ -959,7 +1088,7 @@ where
     } else {
         Vec::new()
     };
-    for record in &result.records {
+    for record in result.records.iter().skip(row_offset).take(row_count) {
         let fields: Vec<Option<Vec<u8>>> = columns
             .iter()
             .map(|col| record_get(record, col).and_then(value_to_pg_wire_bytes))
