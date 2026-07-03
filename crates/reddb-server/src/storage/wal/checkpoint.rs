@@ -45,6 +45,8 @@ pub enum CheckpointMode {
 pub struct CheckpointResult {
     /// Number of transactions processed
     pub transactions_processed: u64,
+    /// Highest transaction id observed while scanning the WAL.
+    pub max_transaction_id: u64,
     /// Number of pages checkpointed
     pub pages_checkpointed: u64,
     /// Number of records processed
@@ -104,6 +106,10 @@ struct PendingWrite {
     lsn: u64,
 }
 
+fn result_observe_tx_id(max_transaction_id: &mut u64, tx_id: u64) {
+    *max_transaction_id = (*max_transaction_id).max(tx_id);
+}
+
 /// Checkpoint manager
 ///
 /// Responsible for transferring committed transactions from the WAL to the main database file.
@@ -155,6 +161,7 @@ impl Checkpointer {
         let mut pending_writes: Vec<PendingWrite> = Vec::new();
         let mut records_processed: u64 = 0;
         let mut last_lsn: u64 = 0;
+        let mut max_transaction_id: u64 = 0;
 
         for record_result in wal_reader.iter() {
             let (lsn, record) = record_result.map_err(CheckpointError::Io)?;
@@ -163,12 +170,15 @@ impl Checkpointer {
 
             match record {
                 WalRecord::Begin { tx_id } => {
+                    result_observe_tx_id(&mut max_transaction_id, tx_id);
                     tx_states.insert(tx_id, TxState::Active);
                 }
                 WalRecord::Commit { tx_id } => {
+                    result_observe_tx_id(&mut max_transaction_id, tx_id);
                     tx_states.insert(tx_id, TxState::Committed);
                 }
                 WalRecord::Rollback { tx_id } => {
+                    result_observe_tx_id(&mut max_transaction_id, tx_id);
                     tx_states.insert(tx_id, TxState::Aborted);
                 }
                 WalRecord::PageWrite {
@@ -176,6 +186,7 @@ impl Checkpointer {
                     page_id,
                     data,
                 } => {
+                    result_observe_tx_id(&mut max_transaction_id, tx_id);
                     pending_writes.push(PendingWrite {
                         tx_id,
                         page_id,
@@ -189,7 +200,8 @@ impl Checkpointer {
                     // Checkpoint marker - we can skip records before this LSN
                     // For now, we process everything
                 }
-                WalRecord::TxCommitBatch { .. } => {
+                WalRecord::TxCommitBatch { tx_id, .. } => {
+                    result_observe_tx_id(&mut max_transaction_id, tx_id);
                     // Store-level logical commit batches are replayed by
                     // UnifiedStore, not by the pager page checkpoint path.
                 }
@@ -201,7 +213,8 @@ impl Checkpointer {
                         crate::runtime::turbo_crash_inject::InjectionPoint::MidCheckpoint,
                     );
                 }
-                WalRecord::FullPageImage { .. } => {
+                WalRecord::FullPageImage { tx_id, .. } => {
+                    result_observe_tx_id(&mut max_transaction_id, tx_id);
                     // FPI records (gh-478) are consumed by the pager
                     // recovery path before redo, not by checkpoint
                     // accounting.
@@ -290,6 +303,7 @@ impl Checkpointer {
 
         Ok(CheckpointResult {
             transactions_processed: committed_txs.len() as u64,
+            max_transaction_id,
             pages_checkpointed,
             records_processed,
             checkpoint_lsn: last_lsn,
@@ -546,6 +560,7 @@ mod tests {
 
         // Only committed transactions (1 and 3) should be processed
         assert_eq!(result.transactions_processed, 2);
+        assert_eq!(result.max_transaction_id, 3);
         assert_eq!(result.pages_checkpointed, 2);
 
         // Verify pages
