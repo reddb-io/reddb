@@ -238,8 +238,8 @@ columns or top-level document, KV, node, or edge properties named `rid`,
 | --- | --- | --- |
 | `BEGIN [WORK\|TRANSACTION]` | `BEGIN` | supported |
 | `START TRANSACTION` | `START TRANSACTION ISOLATION LEVEL SNAPSHOT` | supported |
-| Isolation clauses | `BEGIN ISOLATION LEVEL REPEATABLE READ` | partial: maps to snapshot isolation |
-| `SERIALIZABLE` | `BEGIN ISOLATION LEVEL SERIALIZABLE` | not yet |
+| Isolation clauses | `BEGIN ISOLATION LEVEL REPEATABLE READ` | supported: weaker modes use snapshot isolation |
+| `SERIALIZABLE` | `BEGIN ISOLATION LEVEL SERIALIZABLE` | partial: SSI for SQL table rows |
 | `COMMIT` / `ROLLBACK` | `COMMIT` | supported |
 | Savepoints | `SAVEPOINT s1`, `ROLLBACK TO s1`, `RELEASE s1` | supported |
 | SDK wrapper | `await db.transaction(async (tx) => tx.insert('t', row))` | supported |
