@@ -32,7 +32,7 @@ jobs:
       rc_version: ${{ steps.plan.outputs.rc_version }}
       rc_tag: ${{ steps.plan.outputs.rc_tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Compute release candidate version
         id: plan
         env:
@@ -64,7 +64,7 @@ jobs:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@1.91.0
       - uses: ./.github/actions/install-protoc
@@ -238,7 +238,7 @@ jobs:
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -274,7 +274,7 @@ jobs:
     # internal path dependency cycles (notably wire <-> grpc-proto) that make exact
     # RC version rewriting unsafe; stable release publishing remains authoritative.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.91.0
       - uses: ./.github/actions/install-protoc
         with:
