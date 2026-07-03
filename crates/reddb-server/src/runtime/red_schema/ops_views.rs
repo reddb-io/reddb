@@ -5,6 +5,7 @@
 //! `red.schema_registry`, `red.subscriptions`, `red.retention`,
 //! `red.materialized_views`, `red.queue_pending`, and `red.queues`.
 
+use super::helpers::*;
 use super::*;
 
 pub(super) fn schema_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
@@ -626,17 +627,6 @@ fn row_u64(row: &crate::storage::unified::entity::RowData, field: &str) -> Optio
     match row.get_field(field)? {
         Value::UnsignedInteger(v) => Some(*v),
         Value::Integer(v) if *v >= 0 => Some(*v as u64),
-        _ => None,
-    }
-}
-fn value_as_ms(value: &crate::storage::schema::Value) -> Option<i64> {
-    use crate::storage::schema::Value;
-    match value {
-        Value::TimestampMs(v) => Some(*v),
-        Value::Timestamp(v) => Some(v.saturating_mul(1_000)),
-        Value::BigInt(v) => Some(*v),
-        Value::UnsignedInteger(v) => i64::try_from(*v).ok(),
-        Value::Integer(v) => Some(*v),
         _ => None,
     }
 }
