@@ -39,6 +39,36 @@ ROLLBACK TO SAVEPOINT s1;
 COMMIT;
 ```
 
+## Authentication
+
+The PG listener verifies credentials against the same IAM auth store the
+native transports use, so a statement executed over PG-Wire flows through the
+identical policy gates — a principal denied `secret:read` by policy gets the
+same denial over PG-Wire as over RedWire.
+
+- **With an auth store configured**, the server requests a password
+  (`AuthenticationCleartextPassword`) after the startup message and verifies
+  the client's `PasswordMessage` against the store. The authenticated identity
+  (user + role + tenant) is installed per-connection and drives IAM on every
+  subsequent statement, so `CURRENT_USER()` / `CURRENT_ROLE()` /
+  `CURRENT_TENANT()` reflect the logged-in principal. Supply the password (and
+  optional `tenant`) in the connection string:
+
+  ```bash
+  psql "host=127.0.0.1 port=5432 user=alice password=secret dbname=reddb"
+  ```
+
+  A wrong password or a missing user both fail with SQLSTATE `28P01`
+  (`password authentication failed`) and the connection is closed — the error
+  is identical for both cases, so there is no user-existence oracle.
+
+- **With no auth store configured**, the listener falls back to *trust* auth
+  **for loopback binds only** (`127.0.0.1` / `::1` / `localhost`): any local
+  client connects without a password under the ambient embedded identity. A
+  startup warning is logged whenever this fallback is active. A non-loopback
+  bind with no credentials configured refuses every connection with `28P01`;
+  it never grants unauthenticated access off loopback.
+
 ## Safe Parameter Binding Status
 
 The PG listener supports PostgreSQL's extended protocol (`Parse` / `Bind` /
