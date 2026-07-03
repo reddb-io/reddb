@@ -34,6 +34,13 @@ language (RQL). RedWire (`red://` / `reds://`) is the principal transport.\n\n",
 hand. See `AGENTS.md` for the human/agent overview. Each section below is \
 emitted from source so it cannot drift from the engine.\n\n",
     );
+    out.push_str(
+        "New to RedDB? Every data model has a runnable, five-minute quickstart under \
+`docs/getting-started/` — one per model (relational, document, key-value, \
+graph, vector, time-series, queue, spatial, VCS/time-travel, and ASK/RAG), \
+indexed at `docs/getting-started/quickstarts.md`. Each quickstart's RQL is \
+executed by the docs CI lane, so its examples stay runnable.\n\n",
+    );
     out.push_str(&reddb_rql::knowledge::rql_llms_section());
     out.push_str("\n\n");
     out.push_str(&reddb_types::knowledge::type_llms_section());
