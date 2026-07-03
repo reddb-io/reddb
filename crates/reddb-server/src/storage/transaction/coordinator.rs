@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
+use crate::storage::query::ast::IsolationLevel;
+
 /// Transaction ID
 pub type TxnId = u64;
 
@@ -129,20 +131,6 @@ pub enum TxnState {
     Committed,
     /// Aborted
     Aborted,
-}
-
-/// Isolation level
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IsolationLevel {
-    /// Read uncommitted (no isolation)
-    ReadUncommitted,
-    /// Read committed (see committed values)
-    ReadCommitted,
-    /// Repeatable read / Snapshot isolation
-    #[default]
-    SnapshotIsolation,
-    /// Serializable (full isolation)
-    Serializable,
 }
 
 /// Transaction configuration
