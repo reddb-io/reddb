@@ -36,25 +36,30 @@ If you need transactional behavior right now, go through the active path:
 use crate::storage::wal::transaction::TransactionManager as ActiveTM;
 ```
 
-### 2. Active XIDs come from a single `AtomicU64`, not from this module
+### 2. Active XIDs come from `SnapshotManager`, not from this module
 
-`src/storage/wal/transaction.rs:34-40` defines the production XID
-allocator:
+The production XID allocator is
+`storage::transaction::snapshot::SnapshotManager`. The active page-level
+WAL transaction manager (`src/storage/wal/transaction.rs`) receives an
+`Arc<SnapshotManager>` and calls `begin()` / `commit()` / `rollback()` on
+that shared authority for its WAL `tx_id`s. Row MVCC xids, savepoint
+sub-xids, autocommit born-committed xids, and page-WAL transaction ids
+therefore live in one monotonic space.
 
-```rust
-static NEXT_TX_ID: AtomicU64 = AtomicU64::new(1);
-fn next_transaction_id() -> u64 {
-    NEXT_TX_ID.fetch_add(1, Ordering::SeqCst)
-}
-```
+On startup, runtime MVCC rehydrates the floor by scanning persisted
+`xmin` / `xmax` values, while page-WAL recovery reports the highest WAL
+transaction id it observed so the snapshot manager can advance past any
+replayed WAL ids before new transactions begin.
 
 `coordinator::TransactionManager` has its own `next_id: AtomicU64`
-(`coordinator.rs:319`). **The two are not coordinated.** Mixing them gives
-you two non-overlapping XID spaces and breaks visibility checks.
+(`coordinator.rs:319`) because this module is still dormant test
+scaffolding. **Do not use that allocator for production xids.** Mixing it
+with the active snapshot manager gives you a second XID space and breaks
+cross-layer correlation.
 
-When (not if) we promote `coordinator` to production, the active allocator
-must be retired or both must funnel through a single shared atomic. Until
-then, do **not** call `coordinator::TransactionManager` outside its tests.
+When (not if) we promote `coordinator` to production, its allocator must
+be retired or changed to delegate to `SnapshotManager`. Until then, do
+**not** call `coordinator::TransactionManager` outside its tests.
 
 ### 3. MVCC visibility lives in the btree version chain, not in row headers
 
