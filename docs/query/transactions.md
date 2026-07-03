@@ -270,8 +270,8 @@ COMMIT — xid=427 committed
 ## Isolation levels
 
 `BEGIN` / `START TRANSACTION` accepts an optional `ISOLATION LEVEL`
-clause. All accepted modes run under the same snapshot engine today
-— the level is a PG compatibility shim:
+clause. Weaker PG-compatible modes use the snapshot engine; `SERIALIZABLE`
+adds SSI rw-antidependency checks for SQL table rows:
 
 | Requested level       | Actual semantics                 |
 |-----------------------|----------------------------------|
@@ -280,15 +280,21 @@ clause. All accepted modes run under the same snapshot engine today
 | `REPEATABLE READ`     | Snapshot (PG maps RR→snapshot too) |
 | `SNAPSHOT`            | Snapshot                         |
 | _(omitted)_           | Snapshot (default)               |
-| `SERIALIZABLE`        | **Rejected** — see below         |
+| `SERIALIZABLE`        | Serializable Snapshot Isolation for table rows |
 
-`SERIALIZABLE` is rejected at parse time rather than silently
-degraded: real SSI (Serializable Snapshot Isolation with predicate
-locking) is a tracked future milestone, and quietly accepting the
-keyword while providing weaker guarantees would mislead callers
-who depend on the anomaly protection SSI provides. Switch the
-statement to `REPEATABLE READ` (or omit the clause) to use the
-current snapshot engine.
+Serializable transactions record visible SQL table-row reads by stable
+logical row id. When a concurrent serializable transaction writes a newer
+version of the same logical row, RedDB records the rw-antidependency edge.
+At commit, a transaction that would complete a dangerous structure of two
+consecutive rw-antidependency edges aborts with the existing retryable
+`serialization conflict` error class.
+
+SSI state is retained while overlapping transactions can still need it:
+read sets and rw edges are dropped when transactions commit or roll back
+and the active serializable overlap drains. This follows the same retention
+boundary as the oldest-active MVCC machinery; a long-running serializable
+transaction can therefore retain concurrent committed SSI metadata until it
+finishes.
 
 ## Limitations
 
@@ -296,8 +302,9 @@ current snapshot engine.
   Full multi-model rollout is out of scope for this slice; non-table
   models either use the shared resolver where implemented or retain
   their existing documented behavior.
-- `SERIALIZABLE` isolation and SSI are out of scope. RedDB rejects
-  `SERIALIZABLE` instead of silently downgrading it.
+- Serializable isolation currently covers SQL table rows. Predicate ranges,
+  phantom protection beyond materialized logical-row reads, and full
+  multi-model SSI are out of scope.
 - Manual `VACUUM` is supported for table-row history and tombstone GC.
   An autovacuum daemon is out of scope.
 - Current secondary indexes plus MVCC recheck/fallback provide the
