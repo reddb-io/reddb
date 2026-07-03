@@ -45,6 +45,101 @@ async fn postgres_extended_query_binds_and_returns_rows() {
 }
 
 #[tokio::test]
+async fn postgres_extended_describe_statement_emits_parameter_description() {
+    let (addr, _server) = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
+
+    write_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body(
+            "sel",
+            "SELECT $1::int, $2::text",
+            &[PgOid::Unknown.as_u32(), PgOid::Text.as_u32()],
+        ),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'D', describe_body(b'S', "sel")).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+
+    let frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        b"1tnZ"
+    );
+    assert_eq!(
+        decode_parameter_description(&frames[1].1),
+        vec![PgOid::Int4.as_u32(), PgOid::Text.as_u32()]
+    );
+
+    write_frontend_frame(&mut stream, b'X', Vec::new()).await;
+}
+
+#[tokio::test]
+async fn postgres_extended_execute_with_max_rows_suspends_portal() {
+    let (addr, _server) = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
+
+    write_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'Q',
+        query_body("CREATE TABLE pg_ext_cursor_items (id INT)"),
+    )
+    .await;
+    read_until_ready(&mut stream).await;
+    write_frontend_frame(
+        &mut stream,
+        b'Q',
+        query_body("INSERT INTO pg_ext_cursor_items (id) VALUES (1), (2), (3)"),
+    )
+    .await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body("cursor_stmt", "SELECT id FROM pg_ext_cursor_items", &[]),
+    )
+    .await;
+    write_frontend_frame(
+        &mut stream,
+        b'B',
+        bind_body("cursor", "cursor_stmt", &[], &[], &[]),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'E', execute_body("cursor", 2)).await;
+    write_frontend_frame(&mut stream, b'E', execute_body("cursor", 0)).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+
+    let frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        b"12TDDsDCZ"
+    );
+    assert_eq!(
+        decode_data_row(&frames[3].1)[0].as_deref(),
+        Some(b"1".as_slice())
+    );
+    assert_eq!(
+        decode_data_row(&frames[4].1)[0].as_deref(),
+        Some(b"2".as_slice())
+    );
+    assert_eq!(
+        decode_data_row(&frames[6].1)[0].as_deref(),
+        Some(b"3".as_slice())
+    );
+    assert_eq!(decode_command_complete(&frames[7].1), "SELECT 3");
+
+    write_frontend_frame(&mut stream, b'X', Vec::new()).await;
+}
+
+#[tokio::test]
 async fn postgres_extended_execute_emits_row_description_without_describe() {
     let (addr, _server) = start_server().await;
     let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
@@ -461,6 +556,22 @@ fn decode_row_description(body: &[u8]) -> Vec<(String, u32)> {
         columns.push((name, type_oid));
     }
     columns
+}
+
+fn decode_parameter_description(body: &[u8]) -> Vec<u32> {
+    let count = i16::from_be_bytes([body[0], body[1]]) as usize;
+    let mut pos = 2;
+    let mut oids = Vec::with_capacity(count);
+    for _ in 0..count {
+        oids.push(u32::from_be_bytes([
+            body[pos],
+            body[pos + 1],
+            body[pos + 2],
+            body[pos + 3],
+        ]));
+        pos += 4;
+    }
+    oids
 }
 
 fn decode_command_complete(body: &[u8]) -> &str {
