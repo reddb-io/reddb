@@ -58,6 +58,114 @@ with reddb.connect("memory://") as db:
     print(db.query("SELECT * FROM users"))
 ```
 
+## Graph, vector and time-series
+
+RedDB is one multi-model engine: graphs, vectors and time-series live in the
+same database and are reached through `db.query()` (dedicated helpers arrive in
+Helper Spec v1.1). Every snippet below is executed on each release by
+[`tests/test_readme_examples.py`](tests/test_readme_examples.py).
+
+**Graph** — nodes and edges in a `network` collection, then a shortest-path
+traversal (the first user row gets `rid` 1024):
+
+```python
+db.query("INSERT INTO network NODE (label, node_type) VALUES ('gateway', 'Host')")
+db.query("INSERT INTO network NODE (label, node_type) VALUES ('app', 'Host')")
+db.query("INSERT INTO network NODE (label, node_type) VALUES ('db', 'Host')")
+db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1025, 1.0)")
+db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1025, 1026, 1.0)")
+db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1026, 5.0)")
+
+path = db.query("GRAPH SHORTEST_PATH '1024' TO '1026' ALGORITHM dijkstra")
+path["rows"][0]["total_weight"]   # 2 — two 1.0 hops beat the single 5.0 edge
+```
+
+**Vector** — store embeddings, then rank by similarity. A Python list of floats
+binds as a single `Vector` param:
+
+```python
+db.query("INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'gateway runbook')")
+db.query("INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.0, 1.0], 'database manual')")
+
+hits = db.query("SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1", [1.0, 0.0])
+hits["rows"][0]["score"]   # 1 — the identical vector scores exactly 1
+```
+
+**Time-series** — declare a series with retention + downsampling, ingest points
+(timestamps are nanoseconds), then bucket them:
+
+```python
+db.query("CREATE TIMESERIES metrics RETENTION 7 d CHUNK_SIZE 64 DOWNSAMPLE 1h:5m:avg")
+db.query("INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 10.0, '{\"host\":\"srv-a\"}', 0)")
+db.query("INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 20.0, '{\"host\":\"srv-a\"}', 60000000000)")
+
+rollup = db.query(
+    "SELECT time_bucket(5m) AS bucket, avg(value) AS avg_value, count(*) AS samples "
+    "FROM metrics WHERE metric = 'cpu.usage' GROUP BY time_bucket(5m)"
+)
+```
+
+## Isolation levels
+
+The default isolation is **snapshot isolation** (each transaction reads a
+consistent MVCC snapshot). To request a stronger level, issue the isolation
+clause with the opening statement via `db.query()`:
+
+```python
+db.query("BEGIN ISOLATION LEVEL SERIALIZABLE")
+db.query("INSERT INTO audit (action) VALUES ('serializable write')")
+db.query("COMMIT")
+```
+
+RedDB accepts the PG-compatible spellings `READ UNCOMMITTED`, `READ COMMITTED`,
+`REPEATABLE READ` (= `SNAPSHOT`), and `SERIALIZABLE`. `SERIALIZABLE` engages the
+serializable-snapshot-isolation (SSI) path, which can abort a transaction at
+commit with a serialization conflict (see below).
+
+## Serialization conflicts & retries
+
+Under snapshot / serializable isolation, two transactions that write the same
+row on overlapping snapshots resolve **first-committer-wins**: the later
+transaction is aborted with a **retryable serialization conflict**. It surfaces
+as a `ValueError` of the form `[QUERY_ERROR] serialization conflict: ...`. This
+is the one error class you should catch and **retry** rather than surface to
+the user:
+
+```python
+import time
+import reddb
+
+db = reddb.connect("file:///var/lib/reddb/data.rdb")
+
+def is_serialization_conflict(err: Exception) -> bool:
+    """True only for the retryable first-committer-wins conflict."""
+    msg = str(err)
+    return "QUERY_ERROR" in msg and "serialization conflict" in msg.lower()
+
+def with_retry(fn, max_retries: int = 5):
+    """Run a transaction, retrying with backoff on serialization conflicts."""
+    attempt = 0
+    while True:
+        try:
+            return db.tx.run(fn)
+        except ValueError as err:
+            if is_serialization_conflict(err) and attempt < max_retries:
+                attempt += 1
+                time.sleep(2 ** attempt * 0.005)  # backoff
+                continue
+            raise  # not retryable, or out of attempts
+
+# Concurrent debits stay consistent — losers retry against the fresh snapshot.
+def debit(tx):
+    balance = db.query("SELECT balance FROM accounts WHERE id = $1", 1)["rows"][0]["balance"]
+    db.query("UPDATE accounts SET balance = $1 WHERE id = $2", balance - 10, 1)
+
+with_retry(debit)
+```
+
+Only conflicts are retried — a syntax error, a constraint violation, or any
+other `QUERY_ERROR` propagates on the first attempt.
+
 ## Parameterized queries
 
 `db.query(sql, *params)` binds positional `$N` placeholders without
@@ -81,9 +189,9 @@ with reddb.connect("memory://") as db:
     rows = db.query("SELECT * FROM users WHERE id = $1", params=[2])["rows"]
     rows = db.query("SELECT * FROM users WHERE id = $1", params=(2,))["rows"]
 
-    # vector parameter for SEARCH SIMILAR
+    # vector parameter for SEARCH SIMILAR (a list of floats binds as one Vector)
     db.query(
-        "SEARCH SIMILAR $1 IN embeddings LIMIT $2",
+        "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2",
         [0.1, 0.2, 0.3], 10,
     )
 
@@ -203,7 +311,8 @@ Conformance command:
 ```bash
 python -m pytest drivers/python/tests/test_smoke.py drivers/python/tests/test_helpers.py \
   drivers/python/tests/test_documents_conformance.py \
-  drivers/python/tests/test_conformance.py
+  drivers/python/tests/test_conformance.py \
+  drivers/python/tests/test_readme_examples.py
 ```
 
 ### SDK Helper Spec conformance
@@ -251,11 +360,15 @@ if you need them (spec §7.2).
 | `wire.timeseries.sql_round_trip`     | provisional (raw `query()`) |
 | `wire.probabilistic.hll_round_trip`  | provisional (raw `query()`) |
 
-**Out of scope in v1.0** (reachable via raw `db.query` until lifted into
-helpers in v1.x, per spec §8–§11): first-class `vectors.*`, `graph.*`,
-`timeseries.*`, and `probabilistic.*` helpers; queue priority / consumer
+**Out of scope in v1.0 helpers** (reachable via raw `db.query` until lifted
+into helpers in v1.x, per spec §8–§11): first-class `vectors.*`, `graph.*`,
+`timeseries.*`, and `probabilistic.*` helpers (see [Graph, vector and
+time-series](#graph-vector-and-time-series)); queue priority / consumer
 groups / dead-letter routing (§6); `kv.expire` TTL helper and gRPC
-`kv.watch` (§5); isolation-level argument and cross-shard transactions (§7).
+`kv.watch` (§5); cross-shard transactions (§7). Transaction **isolation
+levels** and the retryable serialization-conflict class are available today
+through raw `db.query` — see [Isolation levels](#isolation-levels) and
+[Serialization conflicts & retries](#serialization-conflicts--retries).
 Helpers are embedded-only today; over `grpc://` they raise `NOT_SUPPORTED`.
 
 ### Low-level (advanced)
