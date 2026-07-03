@@ -107,10 +107,9 @@ pub(crate) const MAX_CURSOR_BATCH_SIZE: usize = 10_000;
 // Isolation model: `read_committed_deferred`. Reads inside a transaction
 // observe the latest *committed* state; they do **not** see writes the
 // same session has buffered via `insert` / `delete` / `bulk_insert`.
-// Atomicity is best-effort — a global commit lock serializes replays, but
-// auto-committed writes from other sessions may interleave between
-// commits. Strict atomicity requires funnelling every write through a
-// single session.
+// Commit replay opens a real engine transaction and relies on the live
+// SnapshotManager xid/FCW path for ordering and rollback. Reads before
+// commit still do not see this session's buffered writes.
 
 /// Per-connection session that tracks the currently open transaction
 /// and any active streaming cursors.
@@ -478,10 +477,9 @@ fn dispatch_method(
 
             // Drive the replay through a real engine transaction so
             // failures roll back the buffered write_set atomically.
-            // Replaces the legacy `commit_lock`-serialised replay:
-            // cross-session ordering is now provided by the
-            // snapshot-manager's xid allocation, which is what the
-            // SQL `BEGIN`/`COMMIT` path has used since #31.
+            // Cross-session ordering is provided by the same
+            // SnapshotManager xid allocation used by SQL
+            // `BEGIN`/`COMMIT`.
             let replay: Result<(u64, usize), (usize, String)> = (|| {
                 runtime
                     .execute_query("BEGIN")
