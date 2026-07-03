@@ -1,3 +1,8 @@
+//! Retired coordinator savepoint-manager scaffolding.
+//!
+//! ADR 0065 keeps this file for historical reference but gates it out of
+//! the normal build. Live savepoints are implemented by TxnContext sub-xids.
+//!
 //! Savepoint Management
 //!
 //! Enables partial rollback within transactions.
