@@ -10,8 +10,8 @@ use crate::ast::{
     DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVcsRefQuery, DropVectorQuery,
     DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef,
     Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
-    JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand,
-    QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
+    IsolationLevel, JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction,
+    ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
     RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
     TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VcsCommand,
     VcsConflictResolution, VcsRefKind, VcsResetMode, VectorQuery,
@@ -363,7 +363,9 @@ mod tests {
         assert!(matches!(expr("SHOW TENANT"), QueryExpr::ShowTenant));
         assert!(matches!(
             expr("BEGIN ISOLATION LEVEL SNAPSHOT"),
-            QueryExpr::TransactionControl(TxnControl::Begin)
+            QueryExpr::TransactionControl(TxnControl::Begin(Some(
+                IsolationLevel::SnapshotIsolation
+            )))
         ));
         assert!(matches!(
             expr("ROLLBACK TO SAVEPOINT sp1"),
@@ -1213,16 +1215,29 @@ mod tests {
 
     #[test]
     fn parse_sql_command_covers_transaction_isolation_edges() {
-        for input in [
-            "BEGIN ISOLATION LEVEL READ UNCOMMITTED",
-            "BEGIN ISOLATION LEVEL READ COMMITTED",
-            "BEGIN ISOLATION LEVEL REPEATABLE READ",
-            "START TRANSACTION ISOLATION LEVEL SNAPSHOT",
+        for (input, expected) in [
+            (
+                "BEGIN ISOLATION LEVEL READ UNCOMMITTED",
+                IsolationLevel::ReadUncommitted,
+            ),
+            (
+                "BEGIN ISOLATION LEVEL READ COMMITTED",
+                IsolationLevel::ReadCommitted,
+            ),
+            (
+                "BEGIN ISOLATION LEVEL REPEATABLE READ",
+                IsolationLevel::SnapshotIsolation,
+            ),
+            (
+                "START TRANSACTION ISOLATION LEVEL SNAPSHOT",
+                IsolationLevel::SnapshotIsolation,
+            ),
         ] {
             assert!(
                 matches!(
                     sql_command(input),
-                    SqlCommand::TransactionControl(TxnControl::Begin)
+                    SqlCommand::TransactionControl(TxnControl::Begin(Some(level)))
+                        if level == expected
                 ),
                 "{input}"
             );
@@ -4329,13 +4344,11 @@ impl<'a> Parser<'a> {
                     // The level identifier can span multiple words
                     // (READ UNCOMMITTED / READ COMMITTED / REPEATABLE
                     // READ). Collect them case-insensitively.
-                    let mut parts: Vec<String> = Vec::new();
-                    if self.consume_ident_ci("READ")? {
-                        parts.push("READ".to_string());
+                    let isolation = if self.consume_ident_ci("READ")? {
                         if self.consume_ident_ci("UNCOMMITTED")? {
-                            parts.push("UNCOMMITTED".to_string());
+                            IsolationLevel::ReadUncommitted
                         } else if self.consume_ident_ci("COMMITTED")? {
-                            parts.push("COMMITTED".to_string());
+                            IsolationLevel::ReadCommitted
                         } else {
                             return Err(ParseError::expected(
                                 vec!["UNCOMMITTED", "COMMITTED"],
@@ -4344,7 +4357,6 @@ impl<'a> Parser<'a> {
                             ));
                         }
                     } else if self.consume_ident_ci("REPEATABLE")? {
-                        parts.push("REPEATABLE".to_string());
                         if !self.consume_ident_ci("READ")? {
                             return Err(ParseError::expected(
                                 vec!["READ"],
@@ -4352,9 +4364,9 @@ impl<'a> Parser<'a> {
                                 self.position(),
                             ));
                         }
-                        parts.push("READ".to_string());
+                        IsolationLevel::SnapshotIsolation
                     } else if self.consume_ident_ci("SNAPSHOT")? {
-                        parts.push("SNAPSHOT".to_string());
+                        IsolationLevel::SnapshotIsolation
                     } else if self.consume_ident_ci("SERIALIZABLE")? {
                         return Err(ParseError::new(
                             "ISOLATION LEVEL SERIALIZABLE is not yet supported — reddb \
@@ -4370,11 +4382,13 @@ impl<'a> Parser<'a> {
                             self.peek(),
                             self.position(),
                         ));
-                    }
-                    // All accepted modes map to our snapshot engine today.
-                    let _ = parts;
+                    };
+                    Ok(SqlCommand::TransactionControl(TxnControl::Begin(Some(
+                        isolation,
+                    ))))
+                } else {
+                    Ok(SqlCommand::TransactionControl(TxnControl::Begin(None)))
                 }
-                Ok(SqlCommand::TransactionControl(TxnControl::Begin))
             }
             // COMMIT [WORK | TRANSACTION]
             Token::Commit => {
