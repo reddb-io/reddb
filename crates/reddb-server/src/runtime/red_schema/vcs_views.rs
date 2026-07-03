@@ -143,8 +143,15 @@ pub(super) fn status_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<Unified
                 .map(Value::text)
                 .unwrap_or(Value::Null),
             isolation
-                .map(isolation_level_name)
-                .map(Value::text)
+                .map(|level| match level {
+                    crate::storage::transaction::IsolationLevel::ReadCommitted => {
+                        Value::text("read_committed")
+                    }
+                    crate::storage::transaction::IsolationLevel::Serializable => {
+                        Value::text("serializable")
+                    }
+                    _ => Value::text("snapshot_isolation"),
+                })
                 .unwrap_or(Value::Null),
         ],
     )])
