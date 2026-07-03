@@ -1,7 +1,7 @@
 //! PostgreSQL v3 wire protocol message framing (Phase 3.1 PG parity).
 //!
 //! Implements the bits of the PG v3 protocol RedDB needs for simple
-//! query support: startup negotiation, authentication (trust), the
+//! query support: startup negotiation, cleartext password authentication, the
 //! simple query flow (`Q` → `T`/`D`*/`C`/`Z`), and error reporting.
 //!
 //! The full PG reference lives at:
@@ -84,7 +84,7 @@ pub enum FrontendMessage {
     Execute(ExecuteMessage),
     /// `C` — Close a prepared statement or portal.
     Close(CloseMessage),
-    /// `p` — password / SASL response. Payload is ignored for `trust` auth.
+    /// `p` — password / SASL response.
     PasswordMessage(Vec<u8>),
     /// `X` — Terminate.
     Terminate,
@@ -157,6 +157,8 @@ impl StartupParams {
 pub enum BackendMessage {
     /// `R` — AuthenticationOk (subtype 0).
     AuthenticationOk,
+    /// `R` — AuthenticationCleartextPassword (subtype 3).
+    AuthenticationCleartextPassword,
     /// `S` — ParameterStatus (server_version, client_encoding, ...).
     ParameterStatus { name: String, value: String },
     /// `K` — BackendKeyData (cancel key).
@@ -406,6 +408,10 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
         BackendMessage::AuthenticationOk => {
             // Subtype 0 = AuthenticationOk.
             (b'R', vec![0, 0, 0, 0])
+        }
+        BackendMessage::AuthenticationCleartextPassword => {
+            // Subtype 3 = AuthenticationCleartextPassword.
+            (b'R', vec![0, 0, 0, 3])
         }
         BackendMessage::ParameterStatus { name, value } => {
             let mut buf = Vec::with_capacity(name.len() + value.len() + 2);
