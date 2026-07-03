@@ -5,6 +5,7 @@
 //! `red.control_events`, `red.users`, `red.api_keys`,
 //! `red.control_capabilities`, `red.policy.actions`, and `red.policies`.
 
+use super::helpers::*;
 use super::*;
 
 pub(super) fn governance_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
