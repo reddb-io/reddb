@@ -8,6 +8,8 @@ PROXY_PORT="${PROXY_PORT:-55433}"
 AI_PORT="${AI_PORT:-55436}"
 LOG_FILE="${LOG_FILE:-$(mktemp /tmp/reddb-pgwire360-log.XXXXXX)}"
 DB_PATH="${DB_PATH:-$(mktemp /tmp/reddb-pgwire360-db.XXXXXX).rdb}"
+PGUSER="${PGUSER:-reddb}"
+PGPASSWORD="${PGPASSWORD:-}"
 
 cleanup() {
   if [[ -n "${PROXY_PID:-}" ]]; then kill "$PROXY_PID" 2>/dev/null || true; fi
@@ -20,11 +22,15 @@ python3 "$ROOT/tests/pgwire_clients/mock_ai.py" \
   --listen "127.0.0.1:${AI_PORT}" &
 AI_PID=$!
 
+SERVER_ARGS=(server --pg-bind "127.0.0.1:${PG_PORT}" --path "$DB_PATH" --no-log-file)
+if [[ -n "$PGPASSWORD" ]]; then
+  SERVER_ARGS+=(--auth --require-auth --bootstrap-admin "$PGUSER" --bootstrap-admin-password "$PGPASSWORD")
+fi
 REDDB_AI_PROVIDER=openai \
 REDDB_OPENAI_API_KEY=test-key \
 REDDB_OPENAI_API_BASE="http://127.0.0.1:${AI_PORT}/v1" \
 REDDB_OPENAI_PROMPT_MODEL=mock-chat \
-"$RED_BIN" server --pg-bind "127.0.0.1:${PG_PORT}" --path "$DB_PATH" --no-log-file &
+"$RED_BIN" "${SERVER_ARGS[@]}" &
 SERVER_PID=$!
 
 python3 "$ROOT/tests/pgwire_clients/proxy.py" \
@@ -49,6 +55,8 @@ PY
 
 docker run --rm --network host \
   -e PGPORT="$PROXY_PORT" \
+  -e PGUSER="$PGUSER" \
+  -e PGPASSWORD="$PGPASSWORD" \
   -v "$ROOT/tests/pgwire_clients:/clients:ro" \
   -w /clients \
   python:3.12-slim \
@@ -56,6 +64,8 @@ docker run --rm --network host \
 
 docker run --rm --network host \
   -e PGPORT="$PROXY_PORT" \
+  -e PGUSER="$PGUSER" \
+  -e PGPASSWORD="$PGPASSWORD" \
   -v "$ROOT/tests/pgwire_clients:/clients:ro" \
   -w /clients \
   golang:1.24 \
@@ -63,6 +73,8 @@ docker run --rm --network host \
 
 docker run --rm --network host \
   -e PGPORT="$PROXY_PORT" \
+  -e PGUSER="$PGUSER" \
+  -e PGPASSWORD="$PGPASSWORD" \
   -v "$ROOT/tests/pgwire_clients:/clients:ro" \
   -w /clients \
   maven:3.9-eclipse-temurin-17 \
