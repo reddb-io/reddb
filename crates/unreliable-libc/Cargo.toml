@@ -31,6 +31,12 @@ path = "src/bin/wal_workload.rs"
 name = "typed_workload"
 path = "src/bin/typed_workload.rs"
 
+# The seeded TM commit-path workload (#1651), driven under the shim so a real
+# power-cut can crash each commit-path scenario mid-write.
+[[bin]]
+name = "tm_commit_path_workload"
+path = "src/bin/tm_commit_path_workload.rs"
+
 [dependencies]
 reddb-file = { workspace = true }
 reddb-types = { workspace = true }
