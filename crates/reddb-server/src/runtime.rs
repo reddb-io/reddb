@@ -1053,7 +1053,7 @@ struct RuntimeInner {
     /// and wired through DML/DDL dispatch in later P1 tasks.
     /// Dormant until P1.T3 flips the read path to `(Global,IS) →
     /// (Collection,IS)` and P1.T4/T5 pick up writes/DDL.
-    lock_manager: Arc<crate::storage::transaction::lock::LockManager>,
+    lock_manager: Arc<crate::runtime::lock_manager::LockManager>,
     /// Perf-parity env-var overrides (`REDDB_<UP_DOTTED_KEY>`).
     /// Populated once at boot, read by every config getter; takes
     /// precedence over the persisted red_config value so operators
@@ -1432,6 +1432,7 @@ pub mod lease_lifecycle;
 pub mod lease_loop;
 pub mod lease_timer_wheel;
 pub mod lifecycle;
+pub mod lock_manager;
 pub mod locking;
 pub(crate) mod materialization_limit;
 pub(crate) mod metric_descriptor_catalog;

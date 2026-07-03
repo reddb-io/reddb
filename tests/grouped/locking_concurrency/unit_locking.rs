@@ -6,8 +6,8 @@
 use std::sync::Arc;
 use std::thread;
 
+use reddb::runtime::lock_manager::{LockManager, LockMode};
 use reddb::runtime::locking::{AcquireError, LockerGuard, Resource};
-use reddb::storage::transaction::lock::{LockManager, LockMode};
 
 fn mgr() -> Arc<LockManager> {
     Arc::new(LockManager::with_defaults())

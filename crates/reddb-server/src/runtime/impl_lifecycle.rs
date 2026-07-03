@@ -123,7 +123,7 @@ impl RedDBRuntime {
     /// Handle to the intent-lock manager for tests + introspection.
     /// Production code acquires via `LockerGuard::new(rt.lock_manager())`
     /// rather than touching the manager directly.
-    pub fn lock_manager(&self) -> std::sync::Arc<crate::storage::transaction::lock::LockManager> {
+    pub fn lock_manager(&self) -> std::sync::Arc<crate::runtime::lock_manager::LockManager> {
         self.inner.lock_manager.clone()
     }
 
@@ -282,11 +282,11 @@ impl RedDBRuntime {
                                 _ => 5000,
                             }
                         });
-                    let cfg = crate::storage::transaction::lock::LockConfig {
+                    let cfg = crate::runtime::lock_manager::LockConfig {
                         default_timeout: std::time::Duration::from_millis(timeout_ms),
                         ..Default::default()
                     };
-                    crate::storage::transaction::lock::LockManager::new(cfg)
+                    crate::runtime::lock_manager::LockManager::new(cfg)
                 }),
                 rls_policies: parking_lot::RwLock::new(HashMap::new()),
                 rls_enabled_tables: parking_lot::RwLock::new(HashSet::new()),

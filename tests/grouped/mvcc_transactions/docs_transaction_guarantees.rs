@@ -4,6 +4,9 @@
 //! table-row guarantee to every RedDB model.
 
 const TRANSACTIONS_DOC: &str = include_str!("../../../docs/query/transactions.md");
+const TRANSACTION_MODULE_README: &str =
+    include_str!("../../../crates/reddb-server/src/storage/transaction/README.md");
+const RPC_STDIO: &str = include_str!("../../../crates/reddb-server/src/rpc_stdio.rs");
 const LIMITATIONS_DOC: &str = include_str!("../../../docs/reference/limitations.md");
 
 fn assert_contains(haystack: &str, needle: &str) {
@@ -89,4 +92,17 @@ fn docs_do_not_claim_history_store_mvcc_for_every_model() {
         LIMITATIONS_DOC,
         "Non-table models retain their documented behavior until each path adopts the history-store resolver",
     );
+}
+
+#[test]
+fn internal_transaction_docs_do_not_name_retired_commit_lock() {
+    for haystack in [TRANSACTION_MODULE_README, RPC_STDIO] {
+        assert_not_contains(haystack, "commit_lock");
+        assert_not_contains(haystack, "global commit lock");
+    }
+
+    assert_contains(TRANSACTION_MODULE_README, "SnapshotManager");
+    assert_contains(TRANSACTION_MODULE_README, "first-committer-wins");
+    assert_contains(TRANSACTION_MODULE_README, "sub-xid");
+    assert_contains(TRANSACTION_MODULE_README, "autocommit");
 }

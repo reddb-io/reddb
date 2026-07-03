@@ -1,3 +1,9 @@
+//! Retired coordinator transaction-log scaffolding.
+//!
+//! ADR 0065 keeps this file for historical reference but gates it out of
+//! the normal build. Live durability is handled by the WAL/page transaction
+//! path, while live MVCC commit ordering comes from SnapshotManager xids.
+//!
 //! Write-Ahead Log (WAL) for Transaction Durability
 //!
 //! Provides crash recovery through sequential logging.

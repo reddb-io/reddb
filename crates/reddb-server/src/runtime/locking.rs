@@ -1,6 +1,6 @@
 //! Intent-lock hierarchy adapter — `Resource` naming + `LockerGuard` RAII.
 //!
-//! Thin layer over `crate::storage::transaction::lock::LockManager`
+//! Thin layer over `crate::runtime::lock_manager::LockManager`
 //! that gives the runtime dispatch paths a typed API:
 //!
 //! - Read dispatch: `(Global, IS) → (Collection, IS)`
@@ -26,7 +26,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::storage::transaction::lock::{LockManager, LockMode, LockResult, TxnId};
+use crate::runtime::lock_manager::{LockManager, LockMode, LockResult, TxnId};
 
 /// Hierarchical resources the runtime locks on. The byte-key encoding
 /// prefixes each level with a discriminator so `Collection("global")`

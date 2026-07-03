@@ -1,12 +1,8 @@
-//! Retired transaction lock-manager scaffolding.
+//! Intent lock management for runtime dispatch.
 //!
-//! ADR 0065 keeps this file for historical reference but gates it out of
-//! the normal build. The live transaction engine is optimistic and has no
-//! transaction lock waits or deadlock detection machinery.
-//!
-//! Lock Management for Transactions
-//!
-//! Provides pessimistic concurrency control with deadlock detection.
+//! This is the live runtime lock manager used by dispatch-time
+//! collection and DDL locking. It is deliberately separate from the
+//! retired transaction coordinator modules described by ADR 0065.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{

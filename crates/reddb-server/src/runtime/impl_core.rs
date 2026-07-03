@@ -177,10 +177,10 @@ pub(super) fn query_is_ask_statement(sql: &str) -> bool {
 pub(super) fn intent_lock_modes_for(
     expr: &QueryExpr,
 ) -> Option<(
-    crate::storage::transaction::lock::LockMode,
-    crate::storage::transaction::lock::LockMode,
+    crate::runtime::lock_manager::LockMode,
+    crate::runtime::lock_manager::LockMode,
 )> {
-    use crate::storage::transaction::lock::LockMode::{Exclusive, IntentExclusive, IntentShared};
+    use crate::runtime::lock_manager::LockMode::{Exclusive, IntentExclusive, IntentShared};
 
     match expr {
         // Reads — IS / IS.
@@ -1404,8 +1404,9 @@ impl RedDBRuntime {
 
                 let (kind, msg) = match ctl {
                     TxnControl::Begin(requested_isolation) => {
-                        let isolation =
-                            requested_isolation.unwrap_or(IsolationLevel::SnapshotIsolation);
+                        let isolation = requested_isolation
+                            .map(IsolationLevel::from)
+                            .unwrap_or(IsolationLevel::SnapshotIsolation);
                         let mgr = Arc::clone(&self.inner.snapshot_manager);
                         let xid = mgr.begin();
                         if isolation == IsolationLevel::Serializable {
