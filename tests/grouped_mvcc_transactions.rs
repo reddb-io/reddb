@@ -18,6 +18,9 @@ mod e2e_mvcc_dml_target_scans;
 #[path = "grouped/mvcc_transactions/e2e_mvcc_first_committer_wins.rs"]
 mod e2e_mvcc_first_committer_wins;
 
+#[path = "grouped/mvcc_transactions/e2e_concurrent_multi_writer_harness.rs"]
+mod e2e_concurrent_multi_writer_harness;
+
 #[path = "grouped/mvcc_transactions/e2e_mvcc_index_recheck.rs"]
 mod e2e_mvcc_index_recheck;
 
