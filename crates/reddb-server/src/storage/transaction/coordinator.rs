@@ -1,3 +1,9 @@
+//! Retired transaction coordinator scaffolding.
+//!
+//! ADR 0065 keeps this file for historical reference but gates it out of
+//! the normal build. The live engine uses optimistic SnapshotManager +
+//! first-committer-wins checks, not this pessimistic coordinator.
+//!
 //! Transaction Coordinator
 //!
 //! Central coordinator for transaction lifecycle management.
