@@ -68,10 +68,31 @@ jobs:
       - run: echo "docs-only — contract matrix unaffected"
 
   docs-matrix:
+    # Issue #1656 — the getting-started quickstarts (docs/getting-started/
+    # quickstart-*.md) are executable: tests/docs_getting_started_quickstarts.rs
+    # runs each page's RQL against an in-memory RedDB so a quickstart cannot
+    # rot. On code PRs the workspace Test Suite already runs that target; but a
+    # docs-only PR (which edits a quickstart's `.md`) skips ci.yml entirely
+    # (#1307), so this docs lane must execute the quickstarts itself. That needs
+    # the workspace to build — including reddb-grpc-proto, whose build.rs
+    # requires protoc — so this job installs the toolchain + protoc rather than
+    # echoing. It keeps the required "Docs Match Contract Matrix" context name.
     name: Docs Match Contract Matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - run: echo "docs-only — covered by ci.yml on code PRs"
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-docs-quickstarts-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Execute getting-started quickstarts
+        run: cargo test --locked --test docs_getting_started_quickstarts
 
   helm-chart:
     name: Helm Chart
