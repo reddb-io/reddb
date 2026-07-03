@@ -42,7 +42,45 @@ ORDER BY rid DESC
 LIMIT 20
 ```
 
+## Creating a Document Collection
+
+Create the collection before inserting into it. Documents use their own DDL — a
+bare collection name, no column list:
+
+```sql
+CREATE DOCUMENT events
+```
+
+`IF NOT EXISTS` is supported and makes the statement idempotent:
+
+```sql
+CREATE DOCUMENT IF NOT EXISTS events
+```
+
+> [!WARNING]
+> RedDB documents are **schemaless** — you do **not** declare columns, and
+> PostgreSQL-style DDL does not apply. The following are **not** supported and
+> will fail to parse:
+>
+> - `CREATE TABLE events DOCUMENT (id UUID PRIMARY KEY, body JSONB NOT NULL, ...)`
+>   → use `CREATE DOCUMENT events` instead.
+> - Generated columns such as
+>   `ALTER TABLE events ADD COLUMN kind TEXT GENERATED ALWAYS AS (body->>'kind') STORED`
+>   → unnecessary. RedDB automatically flattens top-level fields of each
+>   document `body` into queryable columns, so `SELECT kind FROM events` works
+>   with no generated column. See [SQL First](#sql-first) above.
+
 ## Creating Documents
+
+Once the collection exists, insert documents. Over SQL, use the explicit
+`DOCUMENT` insert form (the JSON payload is the document `body`):
+
+```sql
+INSERT INTO events DOCUMENT (body)
+VALUES ('{"event_type":"login","user_id":"u_abc123"}')
+```
+
+The HTTP, gRPC, and MCP surfaces below are equivalent.
 
 <!-- tabs:start -->
 
