@@ -241,6 +241,7 @@ impl RedDBRuntime {
         conn_id: u64,
         snapshot: &crate::storage::transaction::snapshot::Snapshot,
         own_xids: &std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+        isolation: crate::storage::transaction::IsolationLevel,
     ) -> RedDBResult<()> {
         let versioned_updates = self
             .inner
@@ -257,6 +258,7 @@ impl RedDBRuntime {
             .cloned()
             .unwrap_or_default();
 
+        let mut serializable_write_set = std::collections::HashSet::new();
         let store = self.inner.db.store();
         for (collection, old_id, new_id, xid, previous_xmax) in versioned_updates {
             let Some(manager) = store.get_collection(&collection) else {
@@ -266,6 +268,7 @@ impl RedDBRuntime {
                 continue;
             };
             let logical_id = old.logical_id();
+            serializable_write_set.insert((collection.clone(), logical_id));
             if self.xid_conflicts_with_snapshot(previous_xmax, snapshot, own_xids) {
                 return Err(Self::conflict_error(&collection, logical_id, previous_xmax));
             }
@@ -289,6 +292,7 @@ impl RedDBRuntime {
                 continue;
             };
             let logical_id = entity.logical_id();
+            serializable_write_set.insert((collection.clone(), logical_id));
             if self.xid_conflicts_with_snapshot(previous_xmax, snapshot, own_xids) {
                 return Err(Self::conflict_error(&collection, logical_id, previous_xmax));
             }
@@ -298,6 +302,20 @@ impl RedDBRuntime {
                 return Err(Self::conflict_error(&collection, logical_id, entity.xmax));
             }
             self.check_logical_row_conflict(&collection, logical_id, &[id], snapshot, own_xids)?;
+        }
+
+        if isolation == crate::storage::transaction::IsolationLevel::Serializable
+            && self
+                .inner
+                .snapshot_manager
+                .serializable_commit_would_be_dangerous(
+                    *own_xids.iter().min().unwrap_or(&0),
+                    &serializable_write_set,
+                )
+        {
+            return Err(RedDBError::Query(
+                "serialization conflict: serializable transaction would complete rw-antidependency dangerous structure".to_string(),
+            ));
         }
 
         Ok(())
