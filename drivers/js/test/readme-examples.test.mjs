@@ -133,5 +133,101 @@ await example('readme: errors', async (db) => {
   assert(typeof raised.code === 'string', 'error exposes a code')
 })
 
+// README "Graph, vector and time-series" — graph traversal
+await example('readme: graph traversal', async (db) => {
+  // The first user-inserted item in a fresh database gets rid 1024
+  // (1..1023 are reserved), so these three nodes are 1024, 1025, 1026.
+  await db.query("INSERT INTO network NODE (label, node_type) VALUES ('gateway', 'Host')")
+  await db.query("INSERT INTO network NODE (label, node_type) VALUES ('app', 'Host')")
+  await db.query("INSERT INTO network NODE (label, node_type) VALUES ('db', 'Host')")
+  await db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1025, 1.0)")
+  await db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1025, 1026, 1.0)")
+  await db.query("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1026, 5.0)")
+
+  const path = await db.query("GRAPH SHORTEST_PATH '1024' TO '1026' ALGORITHM dijkstra")
+  assert(Array.isArray(path.rows), 'graph shortest_path returns rows')
+  // Dijkstra prefers the two 1.0-weight hops over the single 5.0 edge.
+  assert(path.rows[0].total_weight === 2, 'cheapest path totals weight 2')
+})
+
+// README "Graph, vector and time-series" — vector search
+await example('readme: vector search', async (db) => {
+  await db.query("INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'gateway runbook')")
+  await db.query("INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.0, 1.0], 'database manual')")
+
+  // A vector bind value is a single $N param, so it goes in the params
+  // array as one element: [[1.0, 0.0]], not the variadic form.
+  const hits = await db.query('SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1', [[1.0, 0.0]])
+  assert(hits.rows.length === 1, 'vector search returns the nearest row')
+  assert(hits.rows[0].score === 1, 'the identical vector scores exactly 1')
+})
+
+// README "Graph, vector and time-series" — time-series rollup
+await example('readme: timeseries rollup', async (db) => {
+  await db.query('CREATE TIMESERIES metrics RETENTION 7 d CHUNK_SIZE 64 DOWNSAMPLE 1h:5m:avg')
+  await db.query("INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 10.0, '{\"host\":\"srv-a\"}', 0)")
+  await db.query("INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 20.0, '{\"host\":\"srv-a\"}', 60000000000)")
+  await db.query("INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 30.0, '{\"host\":\"srv-b\"}', 300000000000)")
+
+  const rollup = await db.query(
+    'SELECT time_bucket(5m) AS bucket, avg(value) AS avg_value, count(*) AS samples ' +
+      "FROM metrics WHERE metric = 'cpu.usage' GROUP BY time_bucket(5m)",
+  )
+  assert(rollup.rows.length === 2, 'two five-minute buckets')
+})
+
+// README "Isolation levels" — BEGIN ISOLATION LEVEL ... via raw query
+await example('readme: isolation level', async (db) => {
+  await db.query('CREATE TABLE audit (action TEXT)')
+  await db.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+  await db.query("INSERT INTO audit (action) VALUES ('serializable write')")
+  await db.query('COMMIT')
+  const r = await db.query('SELECT action FROM audit')
+  assert((r.rows ?? []).length === 1, 'serializable transaction commits')
+})
+
+// README "Serialization conflicts & retries" — classifier + retry loop
+await example('readme: serialization retry', async (db) => {
+  // A serialization conflict surfaces as a RedDBError with code
+  // QUERY_ERROR whose message begins "serialization conflict".
+  const isSerializationConflict = (err) =>
+    err instanceof RedDBError &&
+    err.code === 'QUERY_ERROR' &&
+    /serialization conflict/i.test(err.message)
+
+  async function withRetry(fn, { maxRetries = 5 } = {}) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await db.transaction(fn)
+      } catch (err) {
+        if (isSerializationConflict(err) && attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 2 ** attempt * 5))
+          continue
+        }
+        throw err
+      }
+    }
+  }
+
+  await db.query('CREATE TABLE ledger (entry TEXT)')
+  const result = await withRetry(async (tx) => {
+    await tx.query("INSERT INTO ledger (entry) VALUES ('committed')")
+    return 'ok'
+  })
+  assert(result === 'ok', 'retry loop runs the transaction to commit')
+
+  // The classifier only fires for real serialization conflicts.
+  assert(
+    isSerializationConflict(
+      new RedDBError('QUERY_ERROR', 'serialization conflict: table row accounts/1 was modified by concurrent transaction 42'),
+    ),
+    'classifies a serialization conflict',
+  )
+  assert(
+    !isSerializationConflict(new RedDBError('QUERY_ERROR', 'syntax error near FROM')),
+    'ignores unrelated query errors',
+  )
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)
