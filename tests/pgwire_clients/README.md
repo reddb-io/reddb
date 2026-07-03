@@ -15,7 +15,7 @@ Run it locally after building `red`:
 
 ```sh
 cargo build --locked --bin red
-RED_BIN=target/debug/red bash tests/pgwire_clients/run.sh
+bash tests/pgwire_clients/run.sh
 ```
 
 ## Adding a client
