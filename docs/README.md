@@ -95,6 +95,9 @@ that data lives.
 | Time-Series | Metrics, telemetry, bucketed aggregations | `SELECT avg(value) FROM cpu_metrics GROUP BY time_bucket(5m)` |
 | Queues | Jobs, retries, consumer groups, DLQ | `QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 5` |
 
+New here? Every model has a runnable, five-minute quickstart — see
+[Quickstarts by Model](/getting-started/quickstarts.md).
+
 For the distinction between user-facing models, native persisted entity kinds, and supporting
 structures such as indexes and probabilistic sketches, see
 [Data Model Overview](/data-models/overview.md).
