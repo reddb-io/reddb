@@ -24,7 +24,6 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use parking_lot::{Mutex, MutexGuard};
@@ -33,14 +32,7 @@ use super::append_coordinator::WalAppendCoordinator;
 use super::record::WalRecord;
 use super::writer::WalWriter;
 use crate::storage::engine::{Page, Pager, PAGE_SIZE};
-
-/// Global transaction ID counter
-static NEXT_TX_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Generate a new unique transaction ID
-fn next_transaction_id() -> u64 {
-    NEXT_TX_ID.fetch_add(1, Ordering::SeqCst)
-}
+use crate::storage::transaction::snapshot::SnapshotManager;
 
 /// Transaction state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +198,7 @@ impl Transaction {
         if self.write_set.is_empty() {
             self.state = TxState::Committed;
             self.manager.unregister_transaction(self.id);
+            self.manager.snapshot_manager.commit(self.id);
             return Ok(());
         }
 
@@ -260,6 +253,7 @@ impl Transaction {
 
         // Unregister from manager
         self.manager.unregister_transaction(self.id);
+        self.manager.snapshot_manager.commit(self.id);
 
         Ok(())
     }
@@ -293,6 +287,7 @@ impl Transaction {
 
         // Unregister from manager
         self.manager.unregister_transaction(self.id);
+        self.manager.snapshot_manager.rollback(self.id);
 
         Ok(())
     }
@@ -315,6 +310,7 @@ impl Drop for Transaction {
                 .coordinator
                 .commit_at_least(target, &self.manager.wal);
             self.manager.unregister_transaction(self.id);
+            self.manager.snapshot_manager.rollback(self.id);
         }
     }
 }
@@ -334,6 +330,8 @@ pub struct TransactionManager {
     wal_path: PathBuf,
     /// Active transaction IDs
     active_transactions: RwLock<Vec<u64>>,
+    /// Shared XID authority used by row MVCC and page-level WAL transactions.
+    snapshot_manager: Arc<SnapshotManager>,
     /// Lock-free append coordinator. Replaces the per-commit
     /// `wal.lock()` that used to serialise 16 concurrent writers
     /// (Roadmap #2 / issue #157). Writers reserve an LSN range via
@@ -353,6 +351,15 @@ impl TransactionManager {
     /// * `pager` - The pager to use for page I/O
     /// * `wal_path` - Path to the WAL file
     pub fn new(pager: Arc<Pager>, wal_path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::new_with_snapshot_manager(pager, wal_path, Arc::new(SnapshotManager::new()))
+    }
+
+    /// Create a transaction manager using the provided snapshot/XID manager.
+    pub fn new_with_snapshot_manager(
+        pager: Arc<Pager>,
+        wal_path: impl AsRef<Path>,
+        snapshot_manager: Arc<SnapshotManager>,
+    ) -> io::Result<Self> {
         let wal_path = wal_path.as_ref().to_path_buf();
         let wal = WalWriter::open(&wal_path)?;
         let initial_current = wal.current_lsn();
@@ -363,6 +370,7 @@ impl TransactionManager {
             wal: Mutex::new(wal),
             wal_path,
             active_transactions: RwLock::new(Vec::new()),
+            snapshot_manager,
             coordinator: WalAppendCoordinator::new(initial_current, initial_durable),
         })
     }
@@ -391,7 +399,7 @@ impl TransactionManager {
 
     /// Begin a new transaction
     pub fn begin(self: &Arc<Self>) -> Result<Transaction, TxError> {
-        let tx_id = next_transaction_id();
+        let tx_id = self.snapshot_manager.begin();
 
         // Route the Begin record through the coordinator (same
         // ordering guarantees as commit/rollback). Begin is not
@@ -710,6 +718,36 @@ mod tests {
 
         tx2.rollback().expect("rollback() should succeed");
         assert!(!tm.has_active_transactions());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn page_wal_transactions_allocate_from_snapshot_manager() {
+        let dir = temp_dir();
+        let _ = fs::create_dir_all(&dir);
+        let db_path = dir.join("test.db");
+        let wal_path = temp_wal_path(&dir, "snapshot-xid");
+
+        let pager = Arc::new(Pager::open_default(&db_path).expect("open_default() should succeed"));
+        let snapshot_manager =
+            Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        let row_xid = snapshot_manager.begin();
+        snapshot_manager.commit(row_xid);
+
+        let tm = Arc::new(
+            TransactionManager::new_with_snapshot_manager(
+                Arc::clone(&pager),
+                &wal_path,
+                Arc::clone(&snapshot_manager),
+            )
+            .expect("new() should succeed"),
+        );
+
+        let tx = tm.begin().expect("begin() should succeed");
+        assert_eq!(tx.id(), row_xid + 1);
+        tx.commit().expect("commit() should succeed");
+        assert_eq!(snapshot_manager.peek_next_xid(), row_xid + 2);
 
         cleanup(&dir);
     }
