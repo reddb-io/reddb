@@ -642,7 +642,7 @@ pub struct DropSequenceQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxnControl {
     /// `BEGIN [WORK | TRANSACTION]`, `START TRANSACTION`
-    Begin,
+    Begin(Option<IsolationLevel>),
     /// `COMMIT [WORK | TRANSACTION]`, `END`
     Commit,
     /// `ROLLBACK [WORK | TRANSACTION]`
@@ -653,6 +653,20 @@ pub enum TxnControl {
     ReleaseSavepoint(String),
     /// `ROLLBACK TO [SAVEPOINT] name`
     RollbackToSavepoint(String),
+}
+
+/// Transaction isolation level requested by `BEGIN ISOLATION LEVEL ...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IsolationLevel {
+    /// `READ UNCOMMITTED`
+    ReadUncommitted,
+    /// `READ COMMITTED`
+    ReadCommitted,
+    /// `REPEATABLE READ` / `SNAPSHOT`
+    #[default]
+    SnapshotIsolation,
+    /// `SERIALIZABLE`
+    Serializable,
 }
 
 /// Maintenance command variants. See [`QueryExpr::MaintenanceCommand`].
