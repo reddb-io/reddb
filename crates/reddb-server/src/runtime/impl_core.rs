@@ -1403,13 +1403,15 @@ impl RedDBRuntime {
                 let conn_id = current_connection_id();
 
                 let (kind, msg) = match ctl {
-                    TxnControl::Begin => {
+                    TxnControl::Begin(requested_isolation) => {
+                        let isolation =
+                            requested_isolation.unwrap_or(IsolationLevel::SnapshotIsolation);
                         let mgr = Arc::clone(&self.inner.snapshot_manager);
                         let xid = mgr.begin();
                         let snapshot = mgr.snapshot(xid);
                         let ctx = TxnContext {
                             xid,
-                            isolation: IsolationLevel::SnapshotIsolation,
+                            isolation,
                             snapshot,
                             savepoints: Vec::new(),
                             released_sub_xids: Vec::new(),
