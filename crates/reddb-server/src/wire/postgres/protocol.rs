@@ -177,6 +177,8 @@ pub enum BackendMessage {
     CloseComplete,
     /// `t` — ParameterDescription.
     ParameterDescription(Vec<u32>),
+    /// `s` — PortalSuspended.
+    PortalSuspended,
     /// `n` — NoData.
     NoData,
     /// `E` — ErrorResponse with severity + code + message.
@@ -474,6 +476,7 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
             }
             (b't', buf)
         }
+        BackendMessage::PortalSuspended => (b's', Vec::new()),
         BackendMessage::NoData => (b'n', Vec::new()),
         BackendMessage::ErrorResponse {
             severity,
