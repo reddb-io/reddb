@@ -58,7 +58,7 @@ docker run --rm --network host \
   -e PGPORT="$PROXY_PORT" \
   -v "$ROOT/tests/pgwire_clients:/clients:ro" \
   -w /clients \
-  golang:1.24 \
+  golang:1.25 \
   sh -lc 'export PATH=/usr/local/go/bin:$PATH; go mod download && go run pgx_client.go'
 
 docker run --rm --network host \
