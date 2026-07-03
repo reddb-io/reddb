@@ -15,6 +15,9 @@
 //!   persists **typed values spanning every supported [`reddb_types::Value`]
 //!   variant** and asserts the recovered committed values equal exactly the
 //!   pre-crash committed state, layered on top of the structural `oracle`.
+//! * [`tm_commit_path`] — TM v2 slice 8 (#1651): commit-path fault-injection
+//!   scenarios for FCW-before-WAL, WAL-append-before-finalize, savepoints, and
+//!   concurrent writers, layered on the same WAL oracle.
 //! * [`vfs`] — the in-process counterpart to the shim (DST Fatia, #1355): a
 //!   minimal `Vfs` / `VfsFile` durable-I/O trait pair with a production-default
 //!   [`StdVfs`](vfs::StdVfs) and a seed-driven, fault-injecting
@@ -34,12 +37,18 @@
 pub mod oracle;
 pub mod prng;
 pub mod superblock;
+pub mod tm_commit_path;
 pub mod value_equivalence;
 pub mod vfs;
 pub mod wal_workload;
 
 pub use oracle::{recover_and_check, RecoveryError, RecoveryReport};
 pub use prng::SplitMix64;
+pub use tm_commit_path::{
+    assert_tm_recovery_matches, recover_tm_commit_path, run_tm_commit_path_workload,
+    run_tm_commit_path_workload_on, tm_commit_path_scenarios, TmCommitPathModel,
+    TmCommitPathScenario, TmCommittedTx, TmRecoveredTx, TmWrite,
+};
 pub use value_equivalence::{
     canonical_value_corpus, recover_committed_values, run_typed_workload, CommittedTx,
     EquivalenceError, RecoveredTx, TypedModel,

@@ -119,7 +119,7 @@ test-chaos-all:
 	$(MAKE) test-dst-storage
 
 test-dst-storage:
-	cargo test --locked -p unreliable-libc --test sim_power_cut_recovery --test value_equivalence_recovery --test power_cut_recovery
+	cargo test --locked -p unreliable-libc --test sim_power_cut_recovery --test value_equivalence_recovery --test power_cut_recovery --test tm_commit_path_recovery
 
 test-dst-sweep:
 	cargo test --locked -p reddb-io-server replication::dst::tests::dst_seed_sweep -- --ignored

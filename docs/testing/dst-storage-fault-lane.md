@@ -25,6 +25,26 @@ The lane currently runs these suites:
   committed values match the model's committed prefix.
 - `power_cut_recovery`: Linux `LD_PRELOAD` shim coverage for real process kills,
   short writes, and injected I/O failures around the WAL workload.
+- `tm_commit_path_recovery`: TM v2 commit-path campaign for the four #1651
+  scenario families:
+  `fcw_before_wal_append`, `wal_append_before_finalize`,
+  `savepoint_release_rollback`, and `concurrent_writers`.
+
+## Documented Seeds
+
+The TM commit-path campaign sweeps seeds `0..15` by default. `SEED=<n>` pins a
+single reproduction seed across all four scenario families:
+
+```bash
+SEED=7 cargo test --locked -p unreliable-libc --test tm_commit_path_recovery
+```
+
+Each scenario runs as a seeded workload, injects a crash through deterministic
+WAL truncation, the in-process `SimVfs` power-cut path, and on Linux the
+`LD_PRELOAD` power-cut shim. Restart first runs the shared WAL recovery oracle,
+then asserts the TM-specific invariant: single-transaction scenarios recover as
+fully absent or fully committed, the concurrent-writer scenario recovers only a
+transaction prefix, and savepoint sub-xids are never orphan-visible.
 
 ## CI Signal
 
