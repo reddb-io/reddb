@@ -568,7 +568,7 @@ const COMMIT_COLUMNS: [&str; 11] = [
 
 const REF_COLUMNS: [&str; 4] = ["name", "kind", "target", "protected"];
 
-const STATUS_COLUMNS: [&str; 8] = [
+const STATUS_COLUMNS: [&str; 10] = [
     "connection_id",
     "head_ref",
     "head_commit",
@@ -577,6 +577,8 @@ const STATUS_COLUMNS: [&str; 8] = [
     "working_changes",
     "unresolved_conflicts",
     "merge_state_id",
+    "isolation_level",
+    "effective_isolation_level",
 ];
 
 const CONFLICT_COLUMNS: [&str; 8] = [
