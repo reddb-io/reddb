@@ -35,6 +35,15 @@ pub struct PgWireConfig {
     /// sniff this to enable/disable features. RedDB advertises a
     /// recent-enough version to get the broadest client support.
     pub server_version: String,
+    /// Optional TLS material. When set, an `SSLRequest` is answered with
+    /// `'S'` and the connection is upgraded via a rustls handshake before
+    /// the startup flow continues over the encrypted stream. The cert/key
+    /// surface is the *same* [`WireTlsConfig`] the native RedWire listener
+    /// uses — the two transports share one cert config rather than
+    /// inventing a parallel one. `None` leaves the historical behaviour:
+    /// `SSLRequest` is declined with `'N'` and clients continue in
+    /// plaintext.
+    pub tls: Option<crate::wire::tls::WireTlsConfig>,
 }
 
 /// The authenticated identity resolved during the PG-Wire startup
@@ -72,6 +81,7 @@ impl Default for PgWireConfig {
         Self {
             bind_addr: "127.0.0.1:5432".to_string(),
             server_version: "15.0 (RedDB 3.1)".to_string(),
+            tls: None,
         }
     }
 }
@@ -202,9 +212,19 @@ pub async fn start_pg_wire_listener(
              loopback-only. Configure auth before exposing this listener."
         );
     }
+    // Build the shared TLS acceptor once, up front, so a bad cert/key
+    // fails the whole listener rather than every individual connection.
+    // The acceptor is cheap to clone (an `Arc` internally) and is handed
+    // to each connection so `SSLRequest` can be answered with `'S'` and
+    // the rustls handshake performed before the startup flow resumes.
+    let tls_acceptor = match config.tls.as_ref() {
+        Some(tls_cfg) => Some(crate::wire::tls::build_tls_acceptor(tls_cfg)?),
+        None => None,
+    };
     tracing::info!(
         transport = "pg-wire",
         bind = %config.bind_addr,
+        tls = tls_acceptor.is_some(),
         "listener online"
     );
     let cfg = Arc::new(config);
@@ -212,9 +232,10 @@ pub async fn start_pg_wire_listener(
         let (stream, peer) = listener.accept().await?;
         let rt = Arc::clone(&runtime);
         let cfg = Arc::clone(&cfg);
+        let acceptor = tls_acceptor.clone();
         let peer_str = peer.to_string();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, rt, cfg).await {
+            if let Err(e) = handle_connection(stream, rt, cfg, acceptor).await {
                 tracing::warn!(
                     transport = "pg-wire",
                     peer = %peer_str,
@@ -226,35 +247,49 @@ pub async fn start_pg_wire_listener(
     }
 }
 
-/// Drive one connection's lifetime: startup → authentication → query loop.
+/// Drive one connection's lifetime: SSL negotiation → startup →
+/// authentication → query loop.
+///
+/// The first frame may be `SSLRequest` / `GSSENCRequest` (pre-auth
+/// negotiation) or a plain `Startup`. When a TLS acceptor is present an
+/// `SSLRequest` is answered with `'S'` and the socket is upgraded via a
+/// rustls handshake; the rest of the session (a fresh `Startup`,
+/// authentication, and the query loop) then runs over the encrypted
+/// stream. Without an acceptor — or for `GSSENCRequest`, which we never
+/// support — the request is declined with `'N'` and the client continues
+/// in plaintext on the same socket.
 pub(crate) async fn handle_connection<S>(
     mut stream: S,
     runtime: Arc<RedDBRuntime>,
     config: Arc<PgWireConfig>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), PgWireError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    // Handshake. The first frame may be SSLRequest / GSSENCRequest
-    // (pre-auth negotiation) or a plain Startup. Loop once to cover
-    // SSL-not-supported path: reply 'N' and expect the client to send
-    // a regular Startup next. On success the loop yields the connection's
-    // authenticated identity (`None` for loopback trust connections).
-    let auth_context = loop {
+    loop {
         match read_startup(&mut stream).await? {
-            FrontendMessage::SslRequest | FrontendMessage::GssEncRequest => {
+            FrontendMessage::SslRequest => {
+                if let Some(acceptor) = tls_acceptor.as_ref() {
+                    // 'S' = SSL supported. Perform the rustls handshake and
+                    // hand the encrypted stream to the session driver.
+                    write_raw_byte(&mut stream, b'S').await?;
+                    let tls_stream = acceptor.accept(stream).await?;
+                    return serve_session_after_tls(tls_stream, runtime, config).await;
+                }
                 // 'N' = not supported — client continues in plaintext and
                 // re-sends a normal Startup on the same socket.
                 write_raw_byte(&mut stream, b'N').await?;
                 continue;
             }
+            FrontendMessage::GssEncRequest => {
+                // GSSAPI encryption is never offered; decline and let the
+                // client retry with SSLRequest or plaintext Startup.
+                write_raw_byte(&mut stream, b'N').await?;
+                continue;
+            }
             FrontendMessage::Startup(params) => {
-                match authenticate_startup(&mut stream, &runtime, &config, &params).await? {
-                    Some(context) => break context,
-                    // Authentication failed: the error frame was already
-                    // sent and the socket must close.
-                    None => return Ok(()),
-                }
+                return run_pg_session(stream, runtime, config, false, params).await;
             }
             FrontendMessage::Unknown { .. } => {
                 // CancelRequest: no response expected; drop the socket.
@@ -266,7 +301,60 @@ where
                 )));
             }
         }
-    };
+    }
+}
+
+/// Continue the startup flow after a successful TLS upgrade. The client
+/// now sends a fresh `Startup` over the encrypted stream; a second
+/// `SSLRequest` / `GSSENCRequest` cannot be honoured (no nested
+/// encryption) and is declined with `'N'`.
+async fn serve_session_after_tls<S>(
+    mut stream: tokio_rustls::server::TlsStream<S>,
+    runtime: Arc<RedDBRuntime>,
+    config: Arc<PgWireConfig>,
+) -> Result<(), PgWireError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    loop {
+        match read_startup(&mut stream).await? {
+            FrontendMessage::SslRequest | FrontendMessage::GssEncRequest => {
+                write_raw_byte(&mut stream, b'N').await?;
+                continue;
+            }
+            FrontendMessage::Startup(params) => {
+                return run_pg_session(stream, runtime, config, true, params).await;
+            }
+            FrontendMessage::Unknown { .. } => return Ok(()),
+            other => {
+                return Err(PgWireError::Protocol(format!(
+                    "unexpected startup frame: {other:?}"
+                )));
+            }
+        }
+    }
+}
+
+/// Authenticate a `Startup` and drive the query loop over `stream`.
+/// `over_tls` records whether the transport is encrypted, which gates the
+/// cleartext-password posture in [`authenticate_startup`].
+async fn run_pg_session<S>(
+    mut stream: S,
+    runtime: Arc<RedDBRuntime>,
+    config: Arc<PgWireConfig>,
+    over_tls: bool,
+    params: super::protocol::StartupParams,
+) -> Result<(), PgWireError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let auth_context =
+        match authenticate_startup(&mut stream, &runtime, &config, over_tls, &params).await? {
+            Some(context) => context,
+            // Authentication failed: the error frame was already sent and
+            // the socket must close.
+            None => return Ok(()),
+        };
 
     let mut prepared: HashMap<String, PgPreparedStatement> = HashMap::new();
     let mut portals: HashMap<String, PgPortal> = HashMap::new();
@@ -842,6 +930,13 @@ fn is_ask_query(sql: &str) -> bool {
 ///     an unconfigured listener must never grant unauthenticated access
 ///     off loopback.
 ///
+/// TLS posture: a cleartext password may only cross an *unencrypted* link
+/// on a loopback bind. On a non-loopback bind we refuse to even challenge
+/// for a password unless the connection is already over TLS (`over_tls`),
+/// so a client using `sslmode=disable` against a remote listener never
+/// leaks its password in the clear. Loopback and TLS connections are
+/// challenged as before.
+///
 /// Returns `Ok(Some(context))` once the connection is ready for queries
 /// (`context` is `None` for trust connections), or `Ok(None)` when
 /// authentication failed and the error frame has already been sent.
@@ -852,6 +947,7 @@ async fn authenticate_startup<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
     config: &PgWireConfig,
+    over_tls: bool,
     params: &super::protocol::StartupParams,
 ) -> Result<Option<Option<PgAuthContext>>, PgWireError>
 where
@@ -867,6 +963,20 @@ where
         send_error(stream, "28P01", "password authentication failed").await?;
         return Ok(None);
     };
+
+    // Refuse to challenge for a cleartext password over an unencrypted
+    // non-loopback link: it would traverse the network in the clear.
+    // Clients must connect with `sslmode=require` (TLS) to authenticate
+    // against a remote bind.
+    if !over_tls && !is_loopback_bind(&config.bind_addr) {
+        send_error(
+            stream,
+            "28000",
+            "cleartext password authentication requires TLS on non-loopback binds",
+        )
+        .await?;
+        return Ok(None);
+    }
 
     write_frame(stream, &BackendMessage::AuthenticationCleartextPassword).await?;
     let password = match read_frame(stream).await? {
@@ -1604,7 +1714,9 @@ mod tests {
         let config = Arc::new(PgWireConfig::default());
         let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(async move {
-            handle_connection(server_io, runtime, config).await.unwrap();
+            handle_connection(server_io, runtime, config, None)
+                .await
+                .unwrap();
         });
 
         write_startup_params(&mut client_io, &[("user", "alice")]).await;
@@ -1639,7 +1751,9 @@ mod tests {
         let config = Arc::new(PgWireConfig::default());
         let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(async move {
-            handle_connection(server_io, runtime, config).await.unwrap();
+            handle_connection(server_io, runtime, config, None)
+                .await
+                .unwrap();
         });
 
         write_startup_params(&mut client_io, &[("user", "alice"), ("tenant", "acme")]).await;
@@ -1678,7 +1792,9 @@ mod tests {
         let config = Arc::new(PgWireConfig::default());
         let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(async move {
-            handle_connection(server_io, runtime, config).await.unwrap();
+            handle_connection(server_io, runtime, config, None)
+                .await
+                .unwrap();
         });
 
         write_startup(&mut client_io).await;
@@ -1713,6 +1829,47 @@ mod tests {
         assert_eq!(decode_command_complete(&frames[4].1), "SELECT 1");
 
         write_frontend_frame(&mut client_io, b'X', Vec::new()).await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_loopback_plaintext_refuses_cleartext_password_without_tls() {
+        // Posture (issue #1653): a cleartext password may not be challenged
+        // over an unencrypted non-loopback link. The server must refuse
+        // *before* sending AuthenticationCleartextPassword, so a driver
+        // using sslmode=disable against a remote bind never leaks its
+        // password in the clear. `tls_acceptor = None` + no SSLRequest is
+        // exactly that plaintext, no-TLS path.
+        let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        let auth = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        auth.create_user("alice", "secret", Role::Write).unwrap();
+        runtime.set_auth_store(auth);
+
+        // Non-loopback bind: the wildcard address is not a loopback host.
+        let config = Arc::new(PgWireConfig {
+            bind_addr: "0.0.0.0:5432".to_string(),
+            ..PgWireConfig::default()
+        });
+        let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            handle_connection(server_io, runtime, config, None)
+                .await
+                .unwrap();
+        });
+
+        write_startup_params(&mut client_io, &[("user", "alice")]).await;
+        // The refusal arrives directly — never an 'R' cleartext challenge.
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'E', "expected an ErrorResponse, not a challenge");
+        assert_eq!(error_response_field(&body, b'C'), Some("28000"));
+
+        // The connection is closed after the refusal.
+        let mut eof = [0u8; 1];
+        assert_eq!(client_io.read(&mut eof).await.unwrap(), 0);
         server.await.unwrap();
     }
 
