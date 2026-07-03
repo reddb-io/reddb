@@ -36,23 +36,26 @@ If you pick the wrong path, the numbers can still "look valid" while measuring t
 
 The current Cargo bench targets are:
 
-- `bench_embedded`
-- `bench_insert`
-- `perf_sweep`
+- `blob_cache_bench`
+- `cache_ring_contention_bench`
+- `concurrent_commit_bench`
+- `row_id_intersection_bench`
 
 Run them like this:
 
 ```bash
-cargo bench --bench bench_embedded
-cargo bench --bench bench_insert
-cargo bench --bench perf_sweep
+cargo bench -p reddb-io-server --bench blob_cache_bench
+cargo bench -p reddb-io-server --bench cache_ring_contention_bench
+cargo bench -p reddb-io-server --bench concurrent_commit_bench
+cargo bench -p reddb-io-server --bench row_id_intersection_bench
 ```
 
 What each one is for:
 
-- `bench_embedded`: macro-style embedded runtime benchmarks across rows, docs, graph, vector, KV, and query paths
-- `bench_insert`: persistent bulk insert benchmark
-- `perf_sweep`: microbenchmarks for hot-path primitives such as filter execution and WAL behavior
+- `blob_cache_bench`: blob cache L1/L2 behavior and Redis comparison cells
+- `cache_ring_contention_bench`: cache ring contention microbenchmarks
+- `concurrent_commit_bench`: TM concurrent commit throughput at 1/2/4/8 connections under low and high row-conflict rates
+- `row_id_intersection_bench`: row-id intersection strategy microbenchmarks
 
 Criterion outputs usually land under:
 
@@ -135,7 +138,7 @@ cargo bench --bench bench_embedded
 Or for a focused run:
 
 ```bash
-cargo bench --bench perf_sweep
+cargo bench -p reddb-io-server --bench concurrent_commit_bench
 ```
 
 Use this when you want:
