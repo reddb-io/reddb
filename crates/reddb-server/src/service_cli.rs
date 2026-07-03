@@ -1808,16 +1808,46 @@ async fn spawn_wire_listeners(
 /// share a port.
 fn spawn_pg_listener(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
     if let Some(pg_addr) = config.pg_bind_addr.clone() {
+        let tls = resolve_pg_wire_tls(config);
         let rt = Arc::new(runtime.clone());
         tokio::spawn(async move {
             let cfg = crate::wire::PgWireConfig {
                 bind_addr: pg_addr,
+                tls,
                 ..Default::default()
             };
             if let Err(e) = crate::wire::start_pg_wire_listener(cfg, rt).await {
                 tracing::error!(err = %e, "pg wire listener error");
             }
         });
+    }
+}
+
+/// Resolve the TLS material the PG-Wire listener shares with the native
+/// wire transport, if any.
+///
+/// Policy: when the operator has enabled wire TLS — an explicit cert/key
+/// pair or a `--wire-tls-bind` that auto-generates a self-signed dev cert
+/// — the PG-Wire listener answers `SSLRequest` with `'S'` over the *same*
+/// cert config (`resolve_wire_tls_config`) rather than inventing a
+/// parallel surface. With no wire TLS configured the listener stays
+/// plaintext and declines `SSLRequest` with `'N'`. A config error degrades
+/// to plaintext rather than killing the listener.
+fn resolve_pg_wire_tls(config: &ServerCommandConfig) -> Option<crate::wire::WireTlsConfig> {
+    let tls_configured = config.wire_tls_bind_addr.is_some()
+        || (config.wire_tls_cert.is_some() && config.wire_tls_key.is_some());
+    if !tls_configured {
+        return None;
+    }
+    match resolve_wire_tls_config(config) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::error!(
+                err = %e,
+                "pg wire TLS config error; listener will run plaintext"
+            );
+            None
+        }
     }
 }
 
@@ -2112,11 +2142,13 @@ fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<()
     let (runtime, _auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
+    let pg_tls = resolve_pg_wire_tls(&config);
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
         let cfg = crate::wire::PgWireConfig {
             bind_addr: pg_addr,
+            tls: pg_tls,
             ..Default::default()
         };
         crate::wire::start_pg_wire_listener(cfg, Arc::new(runtime))
