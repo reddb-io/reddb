@@ -12,6 +12,8 @@ name: TLA+ Model Check
 #                     -- single-writer fencing, election safety, partitions,
 #                        and crash/recovery durability in one bounded model.
 #   * SafeReconfig    -- every membership change preserves quorum overlap.
+#   * CommitProtocol  -- optimistic MVCC visibility, FCW, savepoints, and
+#                        SSI dangerous-structure aborts.
 #
 # TLC exits non-zero on a violated invariant, which fails the job (and so
 # the build). The models are sized to finish in CI seconds-to-minutes.
@@ -49,6 +51,7 @@ jobs:
           - Durability
           - ReplicationSafetyEnvelope
           - SafeReconfig
+          - CommitProtocol
     name: model-check (${{ matrix.spec }})
     steps:
       - uses: actions/checkout@v7
