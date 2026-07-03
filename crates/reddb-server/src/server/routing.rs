@@ -431,11 +431,6 @@ impl RedDBServer {
             ("GET", "/grpc") => self.handle_grpc_discovery(),
 
             // Geo endpoints
-            ("POST", "/geo/distance") => handlers_geo::handle_geo_distance(body),
-            ("POST", "/geo/bearing") => handlers_geo::handle_geo_bearing(body),
-            ("POST", "/geo/midpoint") => handlers_geo::handle_geo_midpoint(body),
-            ("POST", "/geo/destination") => handlers_geo::handle_geo_destination(body),
-            ("POST", "/geo/bounding-box") => handlers_geo::handle_geo_bounding_box(body),
 
             // Vector clustering
             ("POST", "/vectors/cluster") => {
@@ -854,20 +849,6 @@ impl RedDBServer {
                 ),
                 Err(err) => json_error(404, err.to_string()),
             },
-            ("GET", "/graph/projections") => match self.catalog_use_cases().graph_projections() {
-                Ok(projections) => json_response(
-                    200,
-                    crate::presentation::admin_json::graph_projections_json(&projections),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/graph/jobs") => match self.catalog_use_cases().analytics_jobs() {
-                Ok(jobs) => json_response(
-                    200,
-                    crate::presentation::admin_json::analytics_jobs_json(&jobs),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
             ("GET", "/roots") => match self.native_use_cases().collection_roots() {
                 Ok(roots) => json_response(
                     200,
@@ -882,13 +863,6 @@ impl RedDBServer {
                 ),
                 Err(err) => json_error(404, err.to_string()),
             },
-            ("GET", "/exports") => match self.native_use_cases().exports() {
-                Ok(exports) => json_response(
-                    200,
-                    crate::presentation::native_json::exports_json(&exports),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
             ("GET", "/indexes") => json_response(
                 200,
                 crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
@@ -899,22 +873,6 @@ impl RedDBServer {
                     &self.catalog_use_cases().stats(),
                 ),
             ),
-            ("GET", "/collections") => {
-                let values = self
-                    .catalog_use_cases()
-                    .collections()
-                    .into_iter()
-                    .map(JsonValue::String)
-                    .collect();
-                let mut object = Map::new();
-                object.insert("collections".to_string(), JsonValue::Array(values));
-                json_response(200, JsonValue::Object(object))
-            }
-            ("POST", "/collections") => self.handle_create_collection(body),
-            ("POST", "/checkpoint") => match self.native_use_cases().checkpoint() {
-                Ok(()) => json_ok("checkpoint completed"),
-                Err(err) => json_error(500, err.to_string()),
-            },
             ("POST", "/snapshot") => match self.native_use_cases().create_snapshot() {
                 Ok(snapshot) => json_response(
                     200,
@@ -971,8 +929,6 @@ impl RedDBServer {
             ("POST", "/serverless/warmup") => self.handle_serverless_warmup(body),
             ("POST", "/tick") => self.handle_serverless_reclaim(body),
             ("POST", "/serverless/reclaim") => self.handle_serverless_reclaim(body),
-            ("POST", "/export") => self.handle_export(body),
-            ("POST", "/indexes/rebuild") => self.handle_rebuild_indexes(body, None),
             ("POST", "/retention/apply") => {
                 match self.native_use_cases().apply_retention_policy() {
                     Ok(()) => json_ok("retention policy applied"),
@@ -983,29 +939,6 @@ impl RedDBServer {
                 Ok(()) => json_ok("maintenance completed"),
                 Err(err) => json_error(500, err.to_string()),
             },
-            ("POST", "/graph/neighborhood") => self.handle_graph_neighborhood(body),
-            ("POST", "/graph/traverse") => self.handle_graph_traverse(body),
-            ("POST", "/graph/shortest-path") => self.handle_graph_shortest_path(body),
-            ("POST", "/graph/analytics/components") => self.handle_graph_components(body),
-            ("POST", "/graph/analytics/centrality") => self.handle_graph_centrality(body),
-            ("POST", "/graph/analytics/community") => self.handle_graph_community(body),
-            ("POST", "/graph/analytics/clustering") => self.handle_graph_clustering(body),
-            ("POST", "/graph/analytics/pagerank/personalized") => {
-                self.handle_graph_personalized_pagerank(body)
-            }
-            ("POST", "/graph/analytics/hits") => self.handle_graph_hits(body),
-            ("POST", "/graph/analytics/cycles") => self.handle_graph_cycles(body),
-            ("POST", "/graph/analytics/topological-sort") => {
-                self.handle_graph_topological_sort(body)
-            }
-            ("POST", "/graph/analytics/properties") => self.handle_graph_properties(body),
-            ("POST", "/graph/projections") => self.handle_graph_projection_upsert(body),
-            ("POST", "/graph/jobs") => self.handle_analytics_job_upsert(body),
-            ("POST", "/graph/jobs/queue") => self.handle_analytics_job_queue(body),
-            ("POST", "/graph/jobs/start") => self.handle_analytics_job_start(body),
-            ("POST", "/graph/jobs/complete") => self.handle_analytics_job_complete(body),
-            ("POST", "/graph/jobs/stale") => self.handle_analytics_job_stale(body),
-            ("POST", "/graph/jobs/fail") => self.handle_analytics_job_fail(body),
 
             _ => {
                 // `GET /catalog/collections/{name}` — Red UI metadata
@@ -1051,30 +984,6 @@ impl RedDBServer {
                 }
 
                 if method == "GET" {
-                    if let Some(collection) = collection_from_schema_path(&path) {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "select", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_describe_collection(collection);
-                    }
-                    if let Some(collection) = collection_from_scan_path(&path) {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "select", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_scan(collection, &query);
-                    }
-                    if let Some((collection, id)) = collection_entity_path(&path) {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "select", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_get_entity(collection, id);
-                    }
                     if let Some(collection) = collection_from_native_vector_artifact_path(&path) {
                         return match self.native_use_cases().inspect_vector_artifact(
                             InspectNativeArtifactInput {
@@ -1090,20 +999,6 @@ impl RedDBServer {
                             ),
                             Err(err) => json_error(404, err.to_string()),
                         };
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "indexes") {
-                        return json_response(
-                            200,
-                            crate::presentation::admin_json::indexes_json(
-                                &self.catalog_use_cases().indexes_for_collection(collection),
-                            ),
-                        );
-                    }
-                    // Issue #524 — chain-tip endpoint. Returns the cached tip
-                    // for a `KIND blockchain` collection so a client can
-                    // construct the next INSERT without scanning the chain.
-                    if let Some(collection) = collection_from_action_path(&path, "chain-tip") {
-                        return handle_chain_tip(&self.runtime, collection);
                     }
                 }
                 if let Some(response) =
@@ -1189,148 +1084,6 @@ impl RedDBServer {
                     };
                 }
                 if method == "POST" {
-                    // Issue #525 — admin-gated verify-chain + clear-integrity
-                    // endpoints.  Both require `RED_ADMIN_TOKEN` when one is
-                    // configured (operator surface, not application auth).
-                    if let Some(collection) = collection_from_action_path(&path, "verify-chain") {
-                        if !admin_token_ok(&headers) {
-                            return json_error(401, "verify-chain requires admin token");
-                        }
-                        return handle_verify_chain(&self.runtime, collection);
-                    }
-                    if let Some(collection) =
-                        collection_from_action_path(&path, "clear-integrity-flag")
-                    {
-                        if !admin_token_ok(&headers) {
-                            return json_error(401, "clear-integrity-flag requires admin token");
-                        }
-                        return handle_clear_integrity_flag(&self.runtime, collection);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "trees") {
-                        return self.handle_create_tree(collection, body);
-                    }
-                    if let Some((collection, tree_name)) =
-                        collection_tree_action_path(&path, "nodes")
-                    {
-                        return self.handle_tree_insert_node(collection, tree_name, body);
-                    }
-                    if let Some((collection, tree_name)) =
-                        collection_tree_action_path(&path, "move")
-                    {
-                        return self.handle_tree_move(collection, tree_name, body);
-                    }
-                    if let Some((collection, tree_name)) =
-                        collection_tree_action_path(&path, "validate")
-                    {
-                        return self.handle_tree_validate(collection, tree_name);
-                    }
-                    if let Some((collection, tree_name)) =
-                        collection_tree_action_path(&path, "rebalance")
-                    {
-                        return self.handle_tree_rebalance(collection, tree_name, body);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "bulk/documents") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_bulk_create(
-                            collection,
-                            body,
-                            Self::handle_create_document,
-                        );
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "bulk/rows") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_bulk_create_rows_fast(collection, body);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "bulk/nodes") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_bulk_create(collection, body, Self::handle_create_node);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "bulk/edges") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_bulk_create(collection, body, Self::handle_create_edge);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "bulk/vectors") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_bulk_create(
-                            collection,
-                            body,
-                            Self::handle_create_vector,
-                        );
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "rows") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_create_row(collection, body);
-                    }
-                    // Issue #582 — Analytics slice 4. BatchInsertEndpoint
-                    // accepts an array body, enforces all-or-nothing
-                    // commit + AnalyticsSchemaRegistry validation, and
-                    // dedups by `Idempotency-Key` header.
-                    if let Some(collection) = collection_from_action_path(&path, "batch") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        let idempotency_key =
-                            headers.get("idempotency-key").map(|value| value.as_str());
-                        return self.handle_batch_insert(collection, body, idempotency_key);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "nodes") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_create_node(collection, body);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "edges") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_create_edge(collection, body);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "vectors") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_create_vector(collection, body);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "documents") {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "insert", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_create_document(collection, body);
-                    }
                     if let Some(name) = index_named_action_path(&path, "enable") {
                         return match self.admin_use_cases().set_index_enabled(&name, true) {
                             Ok(index) => json_response(
@@ -1394,36 +1147,6 @@ impl RedDBServer {
                             Err(err) => json_error(400, err.to_string()),
                         };
                     }
-                    if let Some(name) = graph_projection_named_action_path(&path, "materialize") {
-                        return self.materialize_graph_projection_transition(&name);
-                    }
-                    if let Some(name) = graph_projection_named_action_path(&path, "materializing") {
-                        return match self
-                            .admin_use_cases()
-                            .mark_graph_projection_materializing(&name)
-                        {
-                            Ok(projection) => {
-                                json_response(200, graph_projection_json(&projection))
-                            }
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = graph_projection_named_action_path(&path, "fail") {
-                        return match self.admin_use_cases().fail_graph_projection(&name) {
-                            Ok(projection) => {
-                                json_response(200, graph_projection_json(&projection))
-                            }
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = graph_projection_named_action_path(&path, "stale") {
-                        return match self.admin_use_cases().mark_graph_projection_stale(&name) {
-                            Ok(projection) => {
-                                json_response(200, graph_projection_json(&projection))
-                            }
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
                     if let Some(collection) =
                         collection_from_native_vector_artifact_warmup_path(&path)
                     {
@@ -1441,57 +1164,6 @@ impl RedDBServer {
                             ),
                             Err(err) => json_error(404, err.to_string()),
                         };
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "similar") {
-                        return self.handle_similar(collection, body);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "ivf/search") {
-                        return self.handle_ivf_search(collection, body);
-                    }
-                    if let Some(collection) = collection_from_action_path(&path, "indexes/rebuild")
-                    {
-                        return self.handle_rebuild_indexes(body, Some(collection));
-                    }
-                }
-                if method == "PATCH" {
-                    if let Some((collection, id)) = collection_entity_path(&path) {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "update", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_patch_entity(collection, id, body);
-                    }
-                }
-                if method == "PUT" {
-                    if let Some((collection, id)) = collection_entity_path(&path) {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "update", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_replace_document(collection, id, body);
-                    }
-                }
-                if method == "DELETE" {
-                    if let Some((collection, tree_name, node_id)) = collection_tree_node_path(&path)
-                    {
-                        return self.handle_tree_delete_node(collection, tree_name, node_id);
-                    }
-                    if let Some((collection, tree_name)) = collection_tree_bare_path(&path) {
-                        return self.handle_drop_tree(collection, tree_name);
-                    }
-                    // DDL: DELETE /collections/:name
-                    if let Some(name) = collection_from_bare_path(&path) {
-                        return self.handle_drop_collection(name);
-                    }
-                    if let Some((collection, id)) = collection_entity_path(&path) {
-                        if let Some(deny) =
-                            self.check_collection_http_policy(&headers, "delete", collection)
-                        {
-                            return deny;
-                        }
-                        return self.handle_delete_entity(collection, id);
                     }
                 }
                 // `red server --ui` (#1047, ADR 0051): no API route
@@ -2296,6 +1968,233 @@ impl RedDBServer {
                 let collection = matched.params.get("collection")?;
                 Some(self.handle_rebuild_indexes(body.to_vec(), Some(collection)))
             }
+            "collections.list" => {
+                let values = self
+                    .catalog_use_cases()
+                    .collections()
+                    .into_iter()
+                    .map(JsonValue::String)
+                    .collect();
+                let mut object = Map::new();
+                object.insert("collections".to_string(), JsonValue::Array(values));
+                Some(json_response(200, JsonValue::Object(object)))
+            }
+            "collections.create" => Some(self.handle_create_collection(body.to_vec())),
+            "collections.drop" => {
+                let collection = matched.params.get("collection")?;
+                Some(self.handle_drop_collection(collection))
+            }
+            "collections.schema" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "select", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_describe_collection(collection))
+            }
+            "collections.scan" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "select", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_scan(collection, query))
+            }
+            "collections.chain_tip" => {
+                let collection = matched.params.get("collection")?;
+                Some(handle_chain_tip(&self.runtime, collection))
+            }
+            "collections.entities.get" => {
+                let collection = matched.params.get("collection")?;
+                let id = matched.params.get("id")?.parse::<u64>().ok()?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "select", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_get_entity(collection, id))
+            }
+            "collections.entities.patch" => {
+                let collection = matched.params.get("collection")?;
+                let id = matched.params.get("id")?.parse::<u64>().ok()?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "update", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_patch_entity(collection, id, body.to_vec()))
+            }
+            "collections.entities.put" => {
+                let collection = matched.params.get("collection")?;
+                let id = matched.params.get("id")?.parse::<u64>().ok()?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "update", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_replace_document(collection, id, body.to_vec()))
+            }
+            "collections.entities.delete" => {
+                let collection = matched.params.get("collection")?;
+                let id = matched.params.get("id")?.parse::<u64>().ok()?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "delete", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_delete_entity(collection, id))
+            }
+            "collections.verify_chain" => {
+                let collection = matched.params.get("collection")?;
+                if !admin_token_ok(headers) {
+                    return Some(json_error(401, "verify-chain requires admin token"));
+                }
+                Some(handle_verify_chain(&self.runtime, collection))
+            }
+            "collections.clear_integrity_flag" => {
+                let collection = matched.params.get("collection")?;
+                if !admin_token_ok(headers) {
+                    return Some(json_error(401, "clear-integrity-flag requires admin token"));
+                }
+                Some(handle_clear_integrity_flag(&self.runtime, collection))
+            }
+            "collections.trees.create" => {
+                let collection = matched.params.get("collection")?;
+                Some(self.handle_create_tree(collection, body.to_vec()))
+            }
+            "collections.trees.nodes.insert" => {
+                let collection = matched.params.get("collection")?;
+                let tree = matched.params.get("tree")?;
+                Some(self.handle_tree_insert_node(collection, tree, body.to_vec()))
+            }
+            "collections.trees.move" => {
+                let collection = matched.params.get("collection")?;
+                let tree = matched.params.get("tree")?;
+                Some(self.handle_tree_move(collection, tree, body.to_vec()))
+            }
+            "collections.trees.validate" => {
+                let collection = matched.params.get("collection")?;
+                let tree = matched.params.get("tree")?;
+                Some(self.handle_tree_validate(collection, tree))
+            }
+            "collections.trees.rebalance" => {
+                let collection = matched.params.get("collection")?;
+                let tree = matched.params.get("tree")?;
+                Some(self.handle_tree_rebalance(collection, tree, body.to_vec()))
+            }
+            "collections.trees.nodes.delete" => {
+                let collection = matched.params.get("collection")?;
+                let tree = matched.params.get("tree")?;
+                let node = matched.params.get("node")?.parse::<u64>().ok()?;
+                Some(self.handle_tree_delete_node(collection, tree, node))
+            }
+            "collections.trees.drop" => {
+                let collection = matched.params.get("collection")?;
+                let tree = matched.params.get("tree")?;
+                Some(self.handle_drop_tree(collection, tree))
+            }
+            "collections.bulk.documents" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_bulk_create(
+                    collection,
+                    body.to_vec(),
+                    Self::handle_create_document,
+                ))
+            }
+            "collections.bulk.rows" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_bulk_create_rows_fast(collection, body.to_vec()))
+            }
+            "collections.bulk.nodes" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_bulk_create(collection, body.to_vec(), Self::handle_create_node))
+            }
+            "collections.bulk.edges" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_bulk_create(collection, body.to_vec(), Self::handle_create_edge))
+            }
+            "collections.bulk.vectors" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_bulk_create(collection, body.to_vec(), Self::handle_create_vector))
+            }
+            "collections.rows.create" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_create_row(collection, body.to_vec()))
+            }
+            "collections.batch.insert" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                let idempotency_key = headers.get("idempotency-key").map(|value| value.as_str());
+                Some(self.handle_batch_insert(collection, body.to_vec(), idempotency_key))
+            }
+            "collections.nodes.create" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_create_node(collection, body.to_vec()))
+            }
+            "collections.edges.create" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_create_edge(collection, body.to_vec()))
+            }
+            "collections.vectors.create" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_create_vector(collection, body.to_vec()))
+            }
+            "collections.documents.create" => {
+                let collection = matched.params.get("collection")?;
+                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
+                {
+                    return Some(deny);
+                }
+                Some(self.handle_create_document(collection, body.to_vec()))
+            }
+            "collections.similar" => {
+                let collection = matched.params.get("collection")?;
+                Some(self.handle_similar(collection, body.to_vec()))
+            }
+            "collections.ivf.search" => {
+                let collection = matched.params.get("collection")?;
+                Some(self.handle_ivf_search(collection, body.to_vec()))
+            }
+            "geo.distance" => Some(handlers_geo::handle_geo_distance(body.to_vec())),
+            "geo.bearing" => Some(handlers_geo::handle_geo_bearing(body.to_vec())),
+            "geo.midpoint" => Some(handlers_geo::handle_geo_midpoint(body.to_vec())),
+            "geo.destination" => Some(handlers_geo::handle_geo_destination(body.to_vec())),
+            "geo.bounding_box" => Some(handlers_geo::handle_geo_bounding_box(body.to_vec())),
             "graph.neighborhood" => Some(self.handle_graph_neighborhood(body.to_vec())),
             "graph.traverse" => Some(self.handle_graph_traverse(body.to_vec())),
             "graph.shortest_path" => Some(self.handle_graph_shortest_path(body.to_vec())),
@@ -5386,86 +5285,6 @@ fn handle_clear_integrity_flag(
     json_response(200, crate::json::Value::Object(obj))
 }
 
-fn collection_from_scan_path(path: &str) -> Option<&str> {
-    let prefix = "/collections/";
-    let suffix = "/scan";
-    let trimmed = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
-    let collection = trimmed.trim_matches('/');
-    if collection.is_empty() {
-        None
-    } else {
-        Some(collection)
-    }
-}
-
-fn collection_from_action_path<'a>(path: &'a str, action: &str) -> Option<&'a str> {
-    let prefix = "/collections/";
-    let suffix = format!("/{action}");
-    let trimmed = path.strip_prefix(prefix)?.strip_suffix(&suffix)?;
-    let collection = trimmed.trim_matches('/');
-    if collection.is_empty() {
-        None
-    } else {
-        Some(collection)
-    }
-}
-
-fn collection_entity_path(path: &str) -> Option<(&str, u64)> {
-    let prefix = "/collections/";
-    let suffix = "/entities/";
-    let trimmed = path.strip_prefix(prefix)?;
-    let (collection, id) = trimmed.split_once(suffix)?;
-    let collection = collection.trim_matches('/');
-    let id = id.trim_matches('/').parse::<u64>().ok()?;
-    if collection.is_empty() {
-        None
-    } else {
-        Some((collection, id))
-    }
-}
-
-fn collection_tree_bare_path(path: &str) -> Option<(&str, &str)> {
-    let prefix = "/collections/";
-    let trimmed = path.strip_prefix(prefix)?;
-    let (collection, tree_name) = trimmed.split_once("/trees/")?;
-    let collection = collection.trim_matches('/');
-    let tree_name = tree_name.trim_matches('/');
-    if collection.is_empty() || tree_name.is_empty() || tree_name.contains('/') {
-        None
-    } else {
-        Some((collection, tree_name))
-    }
-}
-
-fn collection_tree_action_path<'a>(path: &'a str, action: &str) -> Option<(&'a str, &'a str)> {
-    let prefix = "/collections/";
-    let suffix = format!("/{action}");
-    let trimmed = path.strip_prefix(prefix)?.strip_suffix(&suffix)?;
-    let (collection, tree_name) = trimmed.split_once("/trees/")?;
-    let collection = collection.trim_matches('/');
-    let tree_name = tree_name.trim_matches('/');
-    if collection.is_empty() || tree_name.is_empty() || tree_name.contains('/') {
-        None
-    } else {
-        Some((collection, tree_name))
-    }
-}
-
-fn collection_tree_node_path(path: &str) -> Option<(&str, &str, u64)> {
-    let prefix = "/collections/";
-    let trimmed = path.strip_prefix(prefix)?;
-    let (head, node_id) = trimmed.split_once("/nodes/")?;
-    let (collection, tree_name) = head.split_once("/trees/")?;
-    let collection = collection.trim_matches('/');
-    let tree_name = tree_name.trim_matches('/');
-    let node_id = node_id.trim_matches('/').parse::<u64>().ok()?;
-    if collection.is_empty() || tree_name.is_empty() || tree_name.contains('/') {
-        None
-    } else {
-        Some((collection, tree_name, node_id))
-    }
-}
-
 fn index_named_action_path(path: &str, action: &str) -> Option<String> {
     let prefix = "/indexes/";
     let suffix = format!("/{action}");
@@ -5498,18 +5317,6 @@ fn collection_from_native_vector_artifact_warmup_path(path: &str) -> Option<&str
         None
     } else {
         Some(collection)
-    }
-}
-
-fn graph_projection_named_action_path(path: &str, action: &str) -> Option<String> {
-    let prefix = "/graph/projections/";
-    let suffix = format!("/{action}");
-    let trimmed = path.strip_prefix(prefix)?.strip_suffix(&suffix)?;
-    let name = trimmed.trim_matches('/');
-    if name.is_empty() || name.contains('/') {
-        None
-    } else {
-        Some(name.to_string())
     }
 }
 
@@ -5557,31 +5364,6 @@ fn collection_kv_watch_path(path: &str) -> Option<(String, String)> {
         let collection = percent_decode_path_segment(collection).ok()?;
         let key = percent_decode_path_segment(key).ok()?;
         Some((collection, key))
-    }
-}
-
-/// Match `/collections/:name/schema` to extract the collection name.
-fn collection_from_schema_path(path: &str) -> Option<&str> {
-    let prefix = "/collections/";
-    let suffix = "/schema";
-    let trimmed = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
-    let name = trimmed.trim_matches('/');
-    if name.is_empty() || name.contains('/') {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-/// Match bare `/collections/:name` (no further sub-path) to extract the collection name.
-fn collection_from_bare_path(path: &str) -> Option<&str> {
-    let prefix = "/collections/";
-    let trimmed = path.strip_prefix(prefix)?;
-    let name = trimmed.trim_matches('/');
-    if name.is_empty() || name.contains('/') {
-        None
-    } else {
-        Some(name)
     }
 }
 
