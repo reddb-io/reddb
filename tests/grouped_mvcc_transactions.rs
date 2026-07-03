@@ -36,5 +36,8 @@ mod e2e_savepoint_update_reversal;
 #[path = "grouped/mvcc_transactions/e2e_savepoints.rs"]
 mod e2e_savepoints;
 
+#[path = "grouped/mvcc_transactions/e2e_ssi_serializable.rs"]
+mod e2e_ssi_serializable;
+
 #[path = "grouped/mvcc_transactions/e2e_txcommitbatch_wal.rs"]
 mod e2e_txcommitbatch_wal;

@@ -33,6 +33,8 @@ fn transaction_docs_name_supported_table_row_guarantees() {
         "Recovery applies only complete, valid commit batches",
         "manual `VACUUM`",
         "serialization conflict",
+        "Serializable Snapshot Isolation",
+        "rw-antidependency",
         "history store",
     ] {
         assert_contains(TRANSACTIONS_DOC, required);
@@ -43,7 +45,7 @@ fn transaction_docs_name_supported_table_row_guarantees() {
 fn transaction_docs_name_explicit_deferrals() {
     for required in [
         "Full multi-model rollout is out of scope",
-        "`SERIALIZABLE` isolation and SSI are out of scope",
+        "full\n  multi-model SSI are out of scope",
         "An autovacuum daemon is out of scope",
         "Historical secondary indexes are out\n  of scope",
         "cross-node transaction atomicity are out of scope",

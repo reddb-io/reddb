@@ -1112,7 +1112,10 @@ mod tests {
             sql_command_result("CREATE VIEW v WITH RETENTION 1 h AS SELECT * FROM users").is_err()
         );
         assert!(sql_command_result("CREATE TABLE bad WITH ANALYTICS (centrality)").is_err());
-        assert!(sql_command_result("BEGIN ISOLATION LEVEL SERIALIZABLE").is_err());
+        assert!(matches!(
+            sql_command("BEGIN ISOLATION LEVEL SERIALIZABLE"),
+            SqlCommand::TransactionControl(TxnControl::Begin(Some(IsolationLevel::Serializable)))
+        ));
         assert!(sql_command_result("EVENTS BACKFILL STATUS users").is_err());
     }
 
@@ -1231,6 +1234,10 @@ mod tests {
             (
                 "START TRANSACTION ISOLATION LEVEL SNAPSHOT",
                 IsolationLevel::SnapshotIsolation,
+            ),
+            (
+                "BEGIN ISOLATION LEVEL SERIALIZABLE",
+                IsolationLevel::Serializable,
             ),
         ] {
             assert!(
@@ -4328,13 +4335,9 @@ impl<'a> Parser<'a> {
             // BEGIN [WORK | TRANSACTION] [ISOLATION LEVEL <mode>]
             // START TRANSACTION [ISOLATION LEVEL <mode>]
             //
-            // We only implement SNAPSHOT ISOLATION (our default). We
-            // accept READ UNCOMMITTED / READ COMMITTED / REPEATABLE
-            // READ / SNAPSHOT as PG-compatible no-ops, but reject
-            // SERIALIZABLE outright — the previous behaviour of
-            // silently degrading to snapshot made the parser
-            // dishonest. Real SSI (Serializable Snapshot Isolation)
-            // is tracked as a future milestone.
+            // SNAPSHOT ISOLATION is the default. READ UNCOMMITTED /
+            // READ COMMITTED / REPEATABLE READ are accepted for
+            // PG-compatible syntax; SERIALIZABLE requests the SSI path.
             Token::Begin | Token::Start => {
                 self.advance()?;
                 let _ = self.consume(&Token::Work)? || self.consume(&Token::Transaction)?;
@@ -4368,14 +4371,7 @@ impl<'a> Parser<'a> {
                     } else if self.consume_ident_ci("SNAPSHOT")? {
                         IsolationLevel::SnapshotIsolation
                     } else if self.consume_ident_ci("SERIALIZABLE")? {
-                        return Err(ParseError::new(
-                            "ISOLATION LEVEL SERIALIZABLE is not yet supported — reddb \
-                             currently provides SNAPSHOT ISOLATION (which PG calls \
-                             REPEATABLE READ). Use REPEATABLE READ / SNAPSHOT / \
-                             READ COMMITTED, or omit ISOLATION LEVEL for the default."
-                                .to_string(),
-                            self.position(),
-                        ));
+                        IsolationLevel::Serializable
                     } else {
                         return Err(ParseError::expected(
                             vec!["READ", "REPEATABLE", "SNAPSHOT", "SERIALIZABLE"],

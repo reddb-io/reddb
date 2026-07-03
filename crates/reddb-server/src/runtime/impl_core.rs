@@ -1408,6 +1408,9 @@ impl RedDBRuntime {
                             requested_isolation.unwrap_or(IsolationLevel::SnapshotIsolation);
                         let mgr = Arc::clone(&self.inner.snapshot_manager);
                         let xid = mgr.begin();
+                        if isolation == IsolationLevel::Serializable {
+                            mgr.begin_serializable(xid);
+                        }
                         let snapshot = mgr.snapshot(xid);
                         let ctx = TxnContext {
                             xid,
@@ -1437,6 +1440,7 @@ impl RedDBRuntime {
                                     conn_id,
                                     &ctx.snapshot,
                                     &own_xids,
+                                    ctx.isolation,
                                 ) {
                                     for (_, sub) in &ctx.savepoints {
                                         self.inner.snapshot_manager.rollback(*sub);

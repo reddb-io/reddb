@@ -1,9 +1,6 @@
 //! Transaction isolation level acceptance tests.
 //!
-//! reddb today runs all transactions under snapshot isolation. The
-//! parser accepts READ UNCOMMITTED / READ COMMITTED / REPEATABLE
-//! READ / SNAPSHOT as PG-compatibility no-ops and rejects
-//! SERIALIZABLE explicitly rather than silently downgrading.
+//! reddb accepts PG isolation-level syntax and routes SERIALIZABLE to SSI.
 
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::schema::Value;
@@ -48,19 +45,12 @@ fn begin_accepts_snapshot() {
 }
 
 #[test]
-fn begin_rejects_serializable_with_clear_message() {
+fn begin_accepts_serializable() {
     let rt = rt();
     set_current_connection_id(9904);
-    let err = try_exec(&rt, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE").unwrap_err();
-    assert!(
-        err.contains("SERIALIZABLE"),
-        "error should mention SERIALIZABLE: {err}"
-    );
-    assert!(
-        err.to_ascii_lowercase().contains("not yet supported")
-            || err.to_ascii_lowercase().contains("not supported"),
-        "error should say unsupported: {err}"
-    );
+    try_exec(&rt, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        .expect("SERIALIZABLE should be accepted");
+    try_exec(&rt, "COMMIT").expect("COMMIT should close the tx");
     clear_current_connection_id();
 }
 
@@ -126,6 +116,11 @@ fn begin_isolation_level_round_trips_to_transaction_status() {
             "BEGIN ISOLATION LEVEL SNAPSHOT",
             "snapshot_isolation",
             "snapshot_isolation",
+        ),
+        (
+            "BEGIN ISOLATION LEVEL SERIALIZABLE",
+            "serializable",
+            "serializable",
         ),
     ]
     .into_iter()

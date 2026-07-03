@@ -96,6 +96,7 @@ pub struct SnapshotContext {
     pub manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
     pub own_xids: std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
     pub requires_index_fallback: bool,
+    pub serializable_reader: Option<crate::storage::transaction::snapshot::Xid>,
 }
 
 /// Install a connection id on the current thread for the duration of a
@@ -882,7 +883,11 @@ pub fn entity_visible_under_current_snapshot(
         let Some(ctx) = guard.as_ref() else {
             return true;
         };
-        visibility_check(ctx, entity.xmin, entity.xmax)
+        let visible = visibility_check(ctx, entity.xmin, entity.xmax);
+        if visible {
+            record_serializable_read(ctx, entity);
+        }
+        visible
     })
 }
 
@@ -1017,9 +1022,32 @@ pub fn entity_visible_with_context(
         return false;
     }
     match ctx {
-        Some(ctx) => visibility_check(ctx, entity.xmin, entity.xmax),
+        Some(ctx) => {
+            let visible = visibility_check(ctx, entity.xmin, entity.xmax);
+            if visible {
+                record_serializable_read(ctx, entity);
+            }
+            visible
+        }
         None => true,
     }
+}
+
+fn record_serializable_read(
+    ctx: &SnapshotContext,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) {
+    let Some(reader) = ctx.serializable_reader else {
+        return;
+    };
+    if !matches!(
+        &entity.kind,
+        crate::storage::unified::entity::EntityKind::TableRow { .. }
+    ) {
+        return;
+    }
+    ctx.manager
+        .record_serializable_read(reader, entity.kind.collection(), entity.logical_id());
 }
 
 #[inline]
