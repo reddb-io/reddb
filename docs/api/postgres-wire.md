@@ -145,10 +145,15 @@ shape:
 | ErrorResponse (`E`) | ✅ |
 | Cleartext password auth | ✅ |
 | SSL request (rejected with `N`) | ✅ |
-| Extended query (Parse / Bind / Describe / Execute) | ✅ |
+| Extended query (Parse / Bind / Describe / Execute / Close / Sync) | ✅ |
+| Prepared statements and portals | ✅ |
+| ParameterDescription (`t`) on Describe-statement | ✅ |
+| Row-limited Execute + PortalSuspended (`s`) | ✅ |
 | SCRAM-SHA-256 auth | 🟡 Planned |
 | TLS-wrapped connection | 🟡 Planned |
+| GSSAPI encryption | 🟡 Out of scope |
 | COPY protocol | 🟡 Use `COPY FROM 'file'` instead |
+| LISTEN / NOTIFY | 🟡 Out of scope |
 
 ## Type mapping
 
