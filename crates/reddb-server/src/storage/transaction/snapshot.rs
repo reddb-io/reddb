@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::IsolationLevel;
+use crate::storage::unified::entity::EntityId;
 
 /// Default autocommit-xid pool batch size. Each refill reserves this
 /// many xids in a single `fetch_add` so back-to-back autocommit inserts
@@ -143,6 +144,16 @@ pub struct SnapshotManager {
     autocommit_pool: parking_lot::Mutex<AutocommitPool>,
 }
 
+pub(crate) type LogicalRowKey = (String, EntityId);
+
+#[derive(Default)]
+struct SerializableTxnState {
+    read_set: HashSet<LogicalRowKey>,
+    incoming_rw: HashSet<Xid>,
+    outgoing_rw: HashSet<Xid>,
+    committed: bool,
+}
+
 #[derive(Default)]
 struct AutocommitPool {
     next: Xid,
@@ -162,6 +173,7 @@ struct ManagerState {
     /// to zero removes the entry. `prune_aborted` skips any xid present
     /// here so its row versions stay readable.
     pinned: HashMap<Xid, u32>,
+    serializable: HashMap<Xid, SerializableTxnState>,
 }
 
 impl SnapshotManager {
@@ -202,6 +214,10 @@ impl SnapshotManager {
         // Also clear from aborted set in case of prior rollback_to call
         // that touched this xid (defensive; normally a no-op).
         state.aborted.remove(&xid);
+        if let Some(ssi) = state.serializable.get_mut(&xid) {
+            ssi.committed = true;
+        }
+        Self::prune_serializable_state(&mut state);
     }
 
     /// Allocate an xid that is *born committed* — for autocommit
@@ -253,6 +269,80 @@ impl SnapshotManager {
         let mut state = self.state.write();
         state.active.remove(&xid);
         state.aborted.insert(xid);
+        state.serializable.remove(&xid);
+        for ssi in state.serializable.values_mut() {
+            ssi.incoming_rw.remove(&xid);
+            ssi.outgoing_rw.remove(&xid);
+        }
+        Self::prune_serializable_state(&mut state);
+    }
+
+    pub(crate) fn begin_serializable(&self, xid: Xid) {
+        self.state.write().serializable.entry(xid).or_default();
+    }
+
+    pub(crate) fn record_serializable_read(
+        &self,
+        reader: Xid,
+        collection: &str,
+        logical_id: EntityId,
+    ) {
+        let mut state = self.state.write();
+        if let Some(ssi) = state.serializable.get_mut(&reader) {
+            ssi.read_set.insert((collection.to_string(), logical_id));
+        }
+    }
+
+    pub(crate) fn serializable_commit_would_be_dangerous(
+        &self,
+        writer: Xid,
+        write_set: &HashSet<LogicalRowKey>,
+    ) -> bool {
+        if write_set.is_empty() {
+            return false;
+        }
+
+        let mut state = self.state.write();
+        if !state.serializable.contains_key(&writer) {
+            return false;
+        }
+
+        let readers: Vec<Xid> = state
+            .serializable
+            .iter()
+            .filter_map(|(&reader, ssi)| {
+                if reader != writer && !ssi.read_set.is_disjoint(write_set) {
+                    Some(reader)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for reader in readers {
+            if let Some(reader_state) = state.serializable.get_mut(&reader) {
+                reader_state.outgoing_rw.insert(writer);
+            }
+            if let Some(writer_state) = state.serializable.get_mut(&writer) {
+                writer_state.incoming_rw.insert(reader);
+            }
+        }
+
+        let Some(writer_state) = state.serializable.get(&writer) else {
+            return false;
+        };
+        let has_incoming = !writer_state.incoming_rw.is_empty();
+        let has_outgoing_to_committed = writer_state
+            .outgoing_rw
+            .iter()
+            .any(|xid| state.serializable.get(xid).is_some_and(|ssi| ssi.committed));
+        has_incoming && has_outgoing_to_committed
+    }
+
+    fn prune_serializable_state(state: &mut ManagerState) {
+        if state.active.is_empty() {
+            state.serializable.clear();
+        }
     }
 
     /// Is this xid known to have rolled back? Called by the read path to
