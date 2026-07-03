@@ -8,10 +8,18 @@ import java.sql.Statement;
 public final class JdbcClient {
     public static void main(String[] args) throws Exception {
         String port = System.getenv("PGPORT");
+        String user = System.getenv("PGUSER");
+        if (user == null || user.isEmpty()) {
+            user = "reddb";
+        }
+        String password = System.getenv("PGPASSWORD");
+        if (password == null) {
+            password = "";
+        }
         String url = "jdbc:postgresql://127.0.0.1:" + port + "/reddb"
                 + "?sslmode=disable&preferQueryMode=extended&prepareThreshold=1"
                 + "&ApplicationName=pgwire360-jdbc";
-        try (Connection conn = DriverManager.getConnection(url, "reddb", "")) {
+        try (Connection conn = DriverManager.getConnection(url, user, password)) {
             conn.setAutoCommit(true);
             try (Statement st = conn.createStatement()) {
                 st.execute("CREATE TABLE jdbc_items (id INT, name TEXT)");
