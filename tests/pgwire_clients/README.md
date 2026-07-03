@@ -15,7 +15,7 @@ Run it locally after building `red`:
 
 ```sh
 cargo build --locked --bin red
-RED_BIN=target/debug/red tests/pgwire_clients/run.sh
+RED_BIN=target/debug/red bash tests/pgwire_clients/run.sh
 ```
 
 ## Adding a client
@@ -27,4 +27,4 @@ RED_BIN=target/debug/red tests/pgwire_clients/run.sh
    stable because CI failure output uses it to identify the failing client.
 4. Set a unique `application_name` in the client connection string.
 5. Add the expected statements for that application name to `assert_extended.py`.
-6. Run `tests/pgwire_clients/run.sh` and confirm the final frame audit passes.
+6. Run `bash tests/pgwire_clients/run.sh` and confirm the final frame audit passes.
