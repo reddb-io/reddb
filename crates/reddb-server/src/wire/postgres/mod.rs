@@ -16,9 +16,16 @@
 //!   `PortalSuspended`.
 //! * Minimal row description using a small OID mapping table.
 //! * ReadyForQuery + Command­Complete + ErrorResponse framing.
+//! * TLS: `SSLRequest` is answered with `'S'` and the connection is
+//!   upgraded via a rustls handshake when the listener carries TLS
+//!   material, sharing the native wire's cert/key config
+//!   (`PgWireConfig::tls`). Without TLS material `SSLRequest` is declined
+//!   with `'N'` and the client continues in plaintext. A cleartext
+//!   password is only challenged over an encrypted link or a loopback bind
+//!   (see `authenticate_startup`).
 //!
 //! Not in this phase (future 3.1.x):
-//! * SASL / SCRAM auth, TLS, GSSAPI encryption.
+//! * SASL / SCRAM auth, GSSAPI encryption.
 //! * Function-call protocol.
 //! * COPY protocol.
 //! * NOTIFY / LISTEN.
