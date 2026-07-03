@@ -17,6 +17,7 @@ use super::protocol::{
     DescribeTarget, FrontendMessage, PgWireError, TransactionStatus,
 };
 use super::types::{pg_param_to_value, value_to_pg_wire_bytes, PgOid};
+use crate::auth::Role;
 use crate::runtime::ai::ask_response_envelope::{
     AskResult, Citation, Mode, SourceRow, Validation, ValidationError, ValidationWarning,
 };
@@ -34,6 +35,13 @@ pub struct PgWireConfig {
     /// sniff this to enable/disable features. RedDB advertises a
     /// recent-enough version to get the broadest client support.
     pub server_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct PgAuthContext {
+    username: String,
+    role: Role,
+    tenant: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +96,67 @@ fn run_runtime_blocking<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
+fn execute_with_pg_auth_context<T>(
+    _runtime: &RedDBRuntime,
+    auth_context: Option<&PgAuthContext>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let Some(auth_context) = auth_context else {
+        return f();
+    };
+    let _guard = PgAuthContextGuard::install(auth_context);
+    f()
+}
+
+struct PgAuthContextGuard {
+    previous_tenant: Option<String>,
+}
+
+impl PgAuthContextGuard {
+    fn install(auth_context: &PgAuthContext) -> Self {
+        let previous_tenant = crate::runtime::mvcc::current_tenant();
+        match &auth_context.tenant {
+            Some(tenant) => crate::runtime::mvcc::set_current_tenant(tenant.clone()),
+            None => crate::runtime::mvcc::clear_current_tenant(),
+        }
+        crate::runtime::mvcc::set_current_auth_identity(
+            auth_context.username.clone(),
+            auth_context.role,
+        );
+        Self { previous_tenant }
+    }
+}
+
+impl Drop for PgAuthContextGuard {
+    fn drop(&mut self) {
+        crate::runtime::mvcc::clear_current_auth_identity();
+        match self.previous_tenant.take() {
+            Some(tenant) => crate::runtime::mvcc::set_current_tenant(tenant),
+            None => crate::runtime::mvcc::clear_current_tenant(),
+        }
+    }
+}
+
+fn is_loopback_bind(bind_addr: &str) -> bool {
+    let host = bind_addr
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_matches(['[', ']']))
+        .unwrap_or(bind_addr);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|addr| addr.is_loopback())
+        .unwrap_or(false)
+}
+
+fn password_from_message(payload: &[u8]) -> Option<String> {
+    let nul = payload.iter().position(|&b| b == 0)?;
+    std::str::from_utf8(&payload[..nul])
+        .ok()
+        .map(|password| password.to_string())
+}
+
 /// Spawn the PG wire listener. Blocks until the listener errors out.
 /// Each connection is handled in its own tokio task.
 pub async fn start_pg_wire_listener(
@@ -95,6 +164,18 @@ pub async fn start_pg_wire_listener(
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
+    if runtime
+        .auth_store()
+        .map(|store| !store.is_enabled())
+        .unwrap_or(true)
+        && is_loopback_bind(&config.bind_addr)
+    {
+        tracing::warn!(
+            transport = "pg-wire",
+            bind = %config.bind_addr,
+            "PG-Wire trust authentication is active; configure auth before exposing this listener"
+        );
+    }
     tracing::info!(
         transport = "pg-wire",
         bind = %config.bind_addr,
@@ -132,7 +213,7 @@ where
     // (pre-auth negotiation) or a plain Startup. Loop once to cover
     // SSL-not-supported path: reply 'N' and expect the client to send
     // a regular Startup next.
-    loop {
+    let auth_context = loop {
         match read_startup(&mut stream).await? {
             FrontendMessage::SslRequest | FrontendMessage::GssEncRequest => {
                 // 'N' = not supported — client continues in plaintext and
@@ -141,8 +222,12 @@ where
                 continue;
             }
             FrontendMessage::Startup(params) => {
-                send_auth_ok(&mut stream, &config, &params).await?;
-                break;
+                let context =
+                    match authenticate_startup(&mut stream, &runtime, &config, &params).await? {
+                        Some(context) => context,
+                        None => return Ok(()),
+                    };
+                break context;
             }
             FrontendMessage::Unknown { .. } => {
                 // CancelRequest: no response expected; drop the socket.
@@ -154,7 +239,7 @@ where
                 )));
             }
         }
-    }
+    };
 
     let mut prepared: HashMap<String, PgPreparedStatement> = HashMap::new();
     let mut portals: HashMap<String, PgPortal> = HashMap::new();
@@ -169,7 +254,7 @@ where
 
         match frame {
             FrontendMessage::Query(sql) => {
-                handle_simple_query(&mut stream, &runtime, &sql).await?;
+                handle_simple_query(&mut stream, &runtime, auth_context.as_ref(), &sql).await?;
             }
             FrontendMessage::Parse(msg) => {
                 handle_parse(&mut stream, &mut prepared, msg).await?;
@@ -178,10 +263,25 @@ where
                 handle_bind(&mut stream, &prepared, &mut portals, msg).await?;
             }
             FrontendMessage::Describe(msg) => {
-                handle_describe(&mut stream, &runtime, &prepared, &mut portals, msg).await?;
+                handle_describe(
+                    &mut stream,
+                    &runtime,
+                    auth_context.as_ref(),
+                    &prepared,
+                    &mut portals,
+                    msg,
+                )
+                .await?;
             }
             FrontendMessage::Execute(msg) => {
-                handle_execute(&mut stream, &runtime, &mut portals, msg).await?;
+                handle_execute(
+                    &mut stream,
+                    &runtime,
+                    auth_context.as_ref(),
+                    &mut portals,
+                    msg,
+                )
+                .await?;
             }
             FrontendMessage::Close(msg) => {
                 handle_close(&mut stream, &mut prepared, &mut portals, msg).await?;
@@ -325,6 +425,7 @@ where
 async fn handle_describe<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
+    auth_context: Option<&PgAuthContext>,
     prepared: &HashMap<String, PgPreparedStatement>,
     portals: &mut HashMap<String, PgPortal>,
     msg: super::protocol::DescribeMessage,
@@ -369,7 +470,12 @@ where
                 portal.row_description_sent = true;
                 Ok(())
             } else if is_row_returning_query(&portal.sql) {
-                let result = match execute_pg_query_result(runtime, &portal.sql, &portal.params) {
+                let result = match execute_pg_query_result(
+                    runtime,
+                    auth_context,
+                    &portal.sql,
+                    &portal.params,
+                ) {
                     Ok(result) => result,
                     Err(err) => {
                         let code = classify_sqlstate(&err);
@@ -391,6 +497,7 @@ where
 async fn handle_execute<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
+    auth_context: Option<&PgAuthContext>,
     portals: &mut HashMap<String, PgPortal>,
     msg: super::protocol::ExecuteMessage,
 ) -> Result<(), PgWireError>
@@ -411,7 +518,7 @@ where
     portal.row_description_sent = false;
     let result = match portal.described_result.take() {
         Some(result) => Ok(result),
-        None => execute_pg_query_result(runtime, &portal.sql, &portal.params),
+        None => execute_pg_query_result(runtime, auth_context, &portal.sql, &portal.params),
     };
     match result {
         Ok(result) if was_described => {
@@ -475,6 +582,7 @@ fn bind_pg_params(
 
 fn execute_pg_query_result(
     runtime: &RedDBRuntime,
+    auth_context: Option<&PgAuthContext>,
     sql: &str,
     params: &[Value],
 ) -> Result<crate::runtime::RuntimeQueryResult, String> {
@@ -493,15 +601,20 @@ fn execute_pg_query_result(
                 statement_type: "select",
                 bookmark: None,
             }),
-            Ok(None) => {
-                run_runtime_blocking(|| runtime.execute_query(sql)).map_err(|err| err.to_string())
-            }
+            Ok(None) => run_runtime_blocking(|| {
+                execute_with_pg_auth_context(runtime, auth_context, || runtime.execute_query(sql))
+            })
+            .map_err(|err| err.to_string()),
             Err(err) => Err(err.to_string()),
         };
     }
 
-    run_runtime_blocking(|| runtime.execute_query_with_params(sql, params))
-        .map_err(|err| err.to_string())
+    run_runtime_blocking(|| {
+        execute_with_pg_auth_context(runtime, auth_context, || {
+            runtime.execute_query_with_params(sql, params)
+        })
+    })
+    .map_err(|err| err.to_string())
 }
 
 fn try_execute_pg_scalar_select(
@@ -664,7 +777,54 @@ fn is_ask_query(sql: &str) -> bool {
     sql.trim_start().to_ascii_lowercase().starts_with("ask")
 }
 
-async fn send_auth_ok<S>(
+async fn authenticate_startup<S>(
+    stream: &mut S,
+    runtime: &RedDBRuntime,
+    config: &PgWireConfig,
+    params: &super::protocol::StartupParams,
+) -> Result<Option<Option<PgAuthContext>>, PgWireError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let auth_store = runtime.auth_store().filter(|store| store.is_enabled());
+    let trust_allowed = auth_store.is_none() && is_loopback_bind(&config.bind_addr);
+    let Some(auth_store) = auth_store else {
+        if trust_allowed {
+            send_startup_ready(stream, config, params).await?;
+            return Ok(Some(None));
+        }
+        send_error(stream, "28P01", "password authentication failed").await?;
+        return Ok(None);
+    };
+
+    write_frame(stream, &BackendMessage::AuthenticationCleartextPassword).await?;
+    let password = match read_frame(stream).await? {
+        FrontendMessage::PasswordMessage(payload) => password_from_message(&payload),
+        _ => None,
+    };
+    let username = params.get("user").unwrap_or("");
+    let tenant = params.get("tenant");
+    let Some(password) = password else {
+        send_error(stream, "28P01", "password authentication failed").await?;
+        return Ok(None);
+    };
+    let session = match auth_store.authenticate_in_tenant(tenant, username, &password) {
+        Ok(session) => session,
+        Err(_) => {
+            send_error(stream, "28P01", "password authentication failed").await?;
+            return Ok(None);
+        }
+    };
+
+    send_startup_ready(stream, config, params).await?;
+    Ok(Some(Some(PgAuthContext {
+        username: session.username,
+        role: session.role,
+        tenant: session.tenant_id,
+    })))
+}
+
+async fn send_startup_ready<S>(
     stream: &mut S,
     config: &PgWireConfig,
     params: &super::protocol::StartupParams,
@@ -672,7 +832,6 @@ async fn send_auth_ok<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    // Phase 3.1: trust auth. We always send AuthenticationOk.
     write_frame(stream, &BackendMessage::AuthenticationOk).await?;
 
     // Standard ParameterStatus frames. Drivers gate capabilities on these.
@@ -721,6 +880,7 @@ where
 async fn handle_simple_query<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
+    auth_context: Option<&PgAuthContext>,
     sql: &str,
 ) -> Result<(), PgWireError>
 where
@@ -759,7 +919,9 @@ where
             statement_type: "select",
             bookmark: None,
         }),
-        Ok(None) => run_runtime_blocking(|| runtime.execute_query(sql)),
+        Ok(None) => run_runtime_blocking(|| {
+            execute_with_pg_auth_context(runtime, auth_context, || runtime.execute_query(sql))
+        }),
         Err(err) => Err(err),
     };
 
@@ -1243,6 +1405,7 @@ fn classify_sqlstate(msg: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::api::RedDBOptions;
+    use crate::auth::{AuthConfig, AuthStore, Role};
     use crate::runtime::RuntimeQueryResult;
     use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::UnifiedResult;
@@ -1287,6 +1450,83 @@ mod tests {
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].as_deref(), Some(b"42".as_slice()));
         assert_eq!(decode_command_complete(&frames[4].1), "SELECT 1");
+
+        write_frontend_frame(&mut client_io, b'X', Vec::new()).await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enabled_auth_store_rejects_bad_pgwire_password_with_28p01() {
+        let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        let auth = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        auth.create_user("alice", "secret", Role::Write).unwrap();
+        runtime.set_auth_store(auth);
+
+        let config = Arc::new(PgWireConfig::default());
+        let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            handle_connection(server_io, runtime, config).await.unwrap();
+        });
+
+        write_startup_params(&mut client_io, &[("user", "alice")]).await;
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'R');
+        assert_eq!(i32::from_be_bytes(body[..4].try_into().unwrap()), 3);
+
+        write_frontend_frame(&mut client_io, b'p', cstring_body("wrong")).await;
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'E');
+        assert_eq!(error_response_field(&body, b'C'), Some("28P01"));
+
+        let mut eof = [0u8; 1];
+        assert_eq!(client_io.read(&mut eof).await.unwrap(), 0);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pgwire_password_auth_installs_statement_identity() {
+        let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        let auth = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        auth.create_user_in_tenant(Some("acme"), "alice", "secret", Role::Write)
+            .unwrap();
+        runtime.set_auth_store(auth);
+
+        let config = Arc::new(PgWireConfig::default());
+        let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            handle_connection(server_io, runtime, config).await.unwrap();
+        });
+
+        write_startup_params(&mut client_io, &[("user", "alice"), ("tenant", "acme")]).await;
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'R');
+        assert_eq!(i32::from_be_bytes(body[..4].try_into().unwrap()), 3);
+        write_frontend_frame(&mut client_io, b'p', cstring_body("secret")).await;
+        read_until_ready(&mut client_io).await;
+
+        write_frontend_frame(
+            &mut client_io,
+            b'Q',
+            cstring_body("SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_TENANT()"),
+        )
+        .await;
+        let frames = read_until_ready(&mut client_io).await;
+        assert_eq!(
+            frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            b"TDCZ"
+        );
+        let cells = decode_data_row(&frames[1].1);
+        assert_eq!(cells[0].as_deref(), Some(b"alice".as_slice()));
+        assert_eq!(cells[1].as_deref(), Some(b"write".as_slice()));
+        assert_eq!(cells[2].as_deref(), Some(b"acme".as_slice()));
 
         write_frontend_frame(&mut client_io, b'X', Vec::new()).await;
         server.await.unwrap();
@@ -1468,9 +1708,16 @@ mod tests {
     }
 
     async fn write_startup<W: AsyncWrite + Unpin>(stream: &mut W) {
+        write_startup_params(stream, &[("user", "reddb")]).await;
+    }
+
+    async fn write_startup_params<W: AsyncWrite + Unpin>(stream: &mut W, params: &[(&str, &str)]) {
         let mut payload = Vec::new();
         payload.extend_from_slice(&crate::wire::postgres::protocol::PG_PROTOCOL_V3.to_be_bytes());
-        payload.extend_from_slice(b"user\0reddb\0");
+        for (name, value) in params {
+            push_pg_cstring(&mut payload, name);
+            push_pg_cstring(&mut payload, value);
+        }
         payload.push(0);
         let len = (payload.len() + 4) as u32;
         stream.write_all(&len.to_be_bytes()).await.unwrap();
@@ -1566,6 +1813,26 @@ mod tests {
         push_pg_cstring(&mut out, portal);
         out.extend_from_slice(&max_rows.to_be_bytes());
         out
+    }
+
+    fn cstring_body(value: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_pg_cstring(&mut out, value);
+        out
+    }
+
+    fn error_response_field(body: &[u8], field_tag: u8) -> Option<&str> {
+        let mut pos = 0;
+        while pos < body.len() && body[pos] != 0 {
+            let tag = body[pos];
+            pos += 1;
+            let end = body[pos..].iter().position(|&b| b == 0)? + pos;
+            if tag == field_tag {
+                return std::str::from_utf8(&body[pos..end]).ok();
+            }
+            pos = end + 1;
+        }
+        None
     }
 
     fn push_pg_cstring(out: &mut Vec<u8>, value: &str) {
