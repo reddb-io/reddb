@@ -4,6 +4,7 @@
 //! `red.commits`, `red.branches`, `red.tags`, `red.status`,
 //! `red.conflicts`, and `red.versioned`.
 
+use super::helpers::*;
 use super::*;
 
 pub(super) fn commits_snapshot(
@@ -188,18 +189,4 @@ pub(super) fn versioned_snapshot(
             )
         })
         .collect())
-}
-
-pub(super) fn ref_kind_name(kind: crate::application::vcs::RefKind) -> &'static str {
-    match kind {
-        crate::application::vcs::RefKind::Branch => "branch",
-        crate::application::vcs::RefKind::Tag => "tag",
-        crate::application::vcs::RefKind::Head => "head",
-    }
-}
-
-pub(super) fn json_value(value: crate::json::Value) -> Value {
-    crate::json::to_vec(&value)
-        .map(Value::Json)
-        .unwrap_or(Value::Null)
 }
