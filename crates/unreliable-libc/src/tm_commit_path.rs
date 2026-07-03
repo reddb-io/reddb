@@ -320,11 +320,9 @@ pub fn recover_tm_commit_path(dir: &Path) -> io::Result<Vec<TmRecoveredTx>> {
     let mut open: BTreeMap<u64, TxBuilder> = BTreeMap::new();
     let mut committed = Vec::new();
 
-    loop {
-        let frame = match decode_main_wal_record_frame(&mut cursor, version, WORKLOAD_TERM) {
-            Ok(Some((_term, frame))) => frame,
-            Ok(None) | Err(_) => break,
-        };
+    while let Ok(Some((_term, frame))) =
+        decode_main_wal_record_frame(&mut cursor, version, WORKLOAD_TERM)
+    {
         match frame {
             MainWalRecordFrame::Begin { tx_id } => {
                 open.insert(tx_id, TxBuilder::default());
