@@ -1,0 +1,76 @@
+name: PG-Wire Client Conformance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/pgwire-clients.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/reddb-server/**'
+      - 'src/bin/red.rs'
+      - 'tests/pgwire_clients/**'
+      - 'tests/grouped/redwire_protocol/postgres_wire_extended.rs'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '.github/workflows/pgwire-clients.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/reddb-server/**'
+      - 'src/bin/red.rs'
+      - 'tests/pgwire_clients/**'
+      - 'tests/grouped/redwire_protocol/postgres_wire_extended.rs'
+  workflow_dispatch:
+
+concurrency:
+  group: pgwire-clients-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  pgwire-clients:
+    name: PG-Wire Clients (psycopg, pgx, pgjdbc)
+    if: github.actor != 'dependabot[bot]'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-pgwire-clients-rust-1.91.0
+          cache-on-failure: "true"
+
+      - name: Build RedDB server
+        run: cargo build --locked --bin red
+
+      - name: Run real-client PG-Wire conformance
+        env:
+          RED_BIN: target/debug/red
+          LOG_FILE: ${{ runner.temp }}/reddb-pgwire360.log
+        run: tests/pgwire_clients/run.sh
+
+      - name: Upload PG-Wire proxy log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgwire-client-proxy-log
+          path: ${{ runner.temp }}/reddb-pgwire360.log
+          if-no-files-found: ignore
