@@ -403,786 +403,25 @@ impl RedDBServer {
         if Self::discovered_route_method_not_allowed(&method, &path) {
             return json_error(405, "method not allowed");
         }
-        // Cataloged routes must not silently fall through to the legacy matcher.
+        // A cataloged path whose handler declined (returned `None`) is a
+        // canonical 404 — it must not fall through to the UI bundle surface.
         if Self::discovered_route(&method, &path).is_some() {
             return json_error(404, "not found");
         }
 
-        match (method.as_str(), path.as_str()) {
-            ("GET", "/config") => self.handle_config_export(),
-            ("POST", "/config") => self.handle_config_import(body),
-            ("POST", "/ai/ask") => self.handle_ai_ask(body),
-            ("POST", "/ai/embeddings") => self.handle_ai_embeddings(body),
-            ("POST", "/ai/prompt") => self.handle_ai_prompt(body),
-            ("POST", "/ai/credentials") => self.handle_ai_credentials(body),
-            ("POST", "/ai/models") => self.handle_ai_model_register(body),
-            ("GET", "/ai/models") => self.handle_ai_model_list(),
-
-            // Self-describing entrypoints for first-run/devex.
-            // With `red server --ui` (#1047), `/` serves the bundle's
-            // `index.html` so a browser hitting the root loads the UI;
-            // the API discovery document stays the answer when `--ui`
-            // is off.
-            ("GET", "/") => match self.ui_dir() {
-                Some(ui_dir) => crate::server::ui_static::serve_bundle_asset(ui_dir, "/")
-                    .unwrap_or_else(|| self.handle_root_discovery()),
-                None => self.handle_root_discovery(),
-            },
-            ("GET", "/grpc") => self.handle_grpc_discovery(),
-
-            // Geo endpoints
-
-            // Vector clustering
-            ("POST", "/vectors/cluster") => {
-                handlers_vector::handle_vector_cluster(&self.runtime, body)
-            }
-
-            // Log endpoints (handled dynamically below for /logs/{name}/...)
-
-            // CDC & Backup endpoints
-            ("GET", "/recovery/restore-points") => self.handle_restore_points(),
-
-            // Replication endpoints
-            ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),
-
-            // Red UI feature & capability discovery (#752). Two levels:
-            // static/system capabilities and the effective principal
-            // view. Both are on the public allowlist in `is_authorized`.
-            ("GET", "/capabilities") => self.handle_capabilities(),
-
-            ("GET", "/health") => {
-                let report = self.native_use_cases().health();
-                let status = if report.allows_serving_traffic() {
-                    200
-                } else {
-                    503
-                };
-                json_response(status, self.health_json_with_transport(&report))
-            }
-            ("GET", "/ready/query") => {
-                let ready = self.native_use_cases().readiness().query;
-                let status = if ready { 200 } else { 503 };
-                json_response(
-                    status,
-                    crate::presentation::catalog_json::readiness_json("query", ready),
-                )
-            }
-            ("GET", "/ready/write") => {
-                let ready = self.native_use_cases().readiness().write;
-                let status = if ready { 200 } else { 503 };
-                json_response(
-                    status,
-                    crate::presentation::catalog_json::readiness_json("write", ready),
-                )
-            }
-            ("GET", "/ready/repair") => {
-                let ready = self.native_use_cases().readiness().repair;
-                let status = if ready { 200 } else { 503 };
-                json_response(
-                    status,
-                    crate::presentation::catalog_json::readiness_json("repair", ready),
-                )
-            }
-            ("GET", "/ready/serverless") => {
-                let native = self.native_use_cases();
-                let readiness = native.readiness();
-                let health = native.health();
-                let authority = native.physical_authority_status();
-                let (query_ready, write_ready, repair_ready) = (
-                    readiness.query_serverless,
-                    readiness.write_serverless,
-                    readiness.repair_serverless,
-                );
-                let ready = query_ready && write_ready && repair_ready;
-                let status = if ready { 200 } else { 503 };
-                json_response(
-                    status,
-                    serverless_readiness_summary_to_json(
-                        query_ready,
-                        write_ready,
-                        repair_ready,
-                        &health,
-                        &authority,
-                    ),
-                )
-            }
-            ("GET", "/ready/serverless/query") => {
-                let ready = self.native_use_cases().readiness().query_serverless;
-                json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("query", ready),
-                )
-            }
-            ("GET", "/ready/serverless/write") => {
-                let ready = self.native_use_cases().readiness().write_serverless;
-                json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("write", ready),
-                )
-            }
-            ("GET", "/ready/serverless/repair") => {
-                let ready = self.native_use_cases().readiness().repair_serverless;
-                json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("repair", ready),
-                )
-            }
-            ("GET", "/ready") => {
-                let report = self.native_use_cases().health();
-                let status = if report.allows_serving_traffic() {
-                    200
-                } else {
-                    503
-                };
-                json_response(status, self.health_json_with_transport(&report))
-            }
-            ("GET", "/catalog/readiness") => {
-                let native = self.native_use_cases();
-                let readiness = native.readiness();
-                let health = native.health();
-                let authority = native.physical_authority_status();
-                json_response(
-                    200,
-                    crate::presentation::ops_json::catalog_readiness_json(
-                        readiness.query,
-                        readiness.write,
-                        readiness.repair,
-                        &health,
-                        &authority,
-                    ),
-                )
-            }
-            ("GET", "/catalog") => {
-                let snapshot = self.catalog_use_cases().snapshot();
-                let native = self.native_use_cases();
-                let readiness = native.readiness();
-                let health = native.health();
-                let authority = native.physical_authority_status();
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_model_snapshot_with_readiness_json(
-                        &snapshot,
-                        crate::presentation::ops_json::catalog_readiness_json(
-                            readiness.query,
-                            readiness.write,
-                            readiness.repair,
-                            &health,
-                            &authority,
-                        ),
-                    ),
-                )
-            }
-            ("GET", "/catalog/attention") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_attention_summary_json(
-                    &self.catalog_use_cases().attention_summary(),
-                ),
-            ),
-            ("GET", "/catalog/collections/readiness") => {
-                let catalog = self.catalog_use_cases().snapshot();
-                deprecated_catalog_response(
-                    "/catalog/collections/readiness",
-                    json_response(
-                        200,
-                        crate::presentation::catalog_json::catalog_collection_readiness_json(
-                            &catalog.collections,
-                        ),
-                    ),
-                )
-            }
-            ("GET", "/catalog/collections/readiness/attention") => deprecated_catalog_response(
-                "/catalog/collections/readiness/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_collection_attention_json(
-                        &self.catalog_use_cases().collection_attention(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/consistency") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_consistency_json(
-                    &self.catalog_use_cases().consistency_report(),
-                ),
-            ),
-            ("GET", "/catalog/indexes/declared") => deprecated_catalog_response(
-                "/catalog/indexes/declared",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(
-                        &self.catalog_use_cases().declared_indexes(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/indexes/operational") => deprecated_catalog_response(
-                "/catalog/indexes/operational",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(
-                        &self.catalog_use_cases().indexes(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/indexes/status") => deprecated_catalog_response(
-                "/catalog/indexes/status",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_index_statuses_json(
-                        &self.catalog_use_cases().index_statuses(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/indexes/attention") => deprecated_catalog_response(
-                "/catalog/indexes/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_index_attention_json(
-                        &self.catalog_use_cases().index_attention(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/graph/projections/declared") => deprecated_catalog_response(
-                "/catalog/graph/projections/declared",
-                match self.catalog_use_cases().graph_projections() {
-                    Ok(projections) => json_response(
-                        200,
-                        crate::presentation::admin_json::graph_projections_json(&projections),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            ),
-            ("GET", "/catalog/graph/projections/operational") => deprecated_catalog_response(
-                "/catalog/graph/projections/operational",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::graph_projections_json(
-                        &self.catalog_use_cases().operational_graph_projections(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/graph/projections/status") => deprecated_catalog_response(
-                "/catalog/graph/projections/status",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
-                        &self.catalog_use_cases().graph_projection_statuses(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/graph/projections/attention") => deprecated_catalog_response(
-                "/catalog/graph/projections/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_graph_projection_attention_json(
-                        &self.catalog_use_cases().graph_projection_attention(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/analytics-jobs/declared") => deprecated_catalog_response(
-                "/catalog/analytics-jobs/declared",
-                match self.catalog_use_cases().analytics_jobs() {
-                    Ok(jobs) => json_response(
-                        200,
-                        crate::presentation::admin_json::analytics_jobs_json(&jobs),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            ),
-            ("GET", "/catalog/analytics-jobs/operational") => deprecated_catalog_response(
-                "/catalog/analytics-jobs/operational",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::analytics_jobs_json(
-                        &self.catalog_use_cases().operational_analytics_jobs(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/analytics-jobs/status") => deprecated_catalog_response(
-                "/catalog/analytics-jobs/status",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
-                        &self.catalog_use_cases().analytics_job_statuses(),
-                    ),
-                ),
-            ),
-            ("GET", "/catalog/analytics-jobs/attention") => deprecated_catalog_response(
-                "/catalog/analytics-jobs/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_analytics_job_attention_json(
-                        &self.catalog_use_cases().analytics_job_attention(),
-                    ),
-                ),
-            ),
-            ("GET", "/physical/metadata") => match self.native_use_cases().physical_metadata() {
-                Ok(metadata) => json_response(200, metadata.to_json_value()),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/physical/native-header") => match self.native_use_cases().native_header() {
-                Ok(header) => json_response(
-                    200,
-                    crate::presentation::native_json::native_header_json(header),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/physical/native-collection-roots") => {
-                match self.native_use_cases().native_collection_roots() {
-                    Ok(roots) => json_response(
-                        200,
-                        crate::presentation::native_json::collection_roots_json(&roots),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/physical/native-manifest") => {
-                match self.native_use_cases().native_manifest_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::native_json::native_manifest_summary_json(&summary),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/physical/native-registry") => {
-                match self.native_use_cases().native_registry_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::ops_json::native_registry_summary_json(&summary),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/physical/native-recovery") => match self
-                .native_use_cases()
-                .native_recovery_summary()
-            {
-                Ok(summary) => json_response(
-                    200,
-                    crate::presentation::native_state_json::native_recovery_summary_json(&summary),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/physical/native-catalog") => match self
-                .native_use_cases()
-                .native_catalog_summary()
-            {
-                Ok(summary) => json_response(
-                    200,
-                    crate::presentation::native_state_json::native_catalog_summary_json(&summary),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/physical/native-metadata-state") => {
-                match self.native_use_cases().native_metadata_state_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_metadata_state_summary_json(
-                            &summary,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/physical/authority") => json_response(
-                200,
-                crate::presentation::ops_json::physical_authority_status_json(
-                    &self.native_use_cases().physical_authority_status(),
-                ),
-            ),
-            ("GET", "/physical/native-state") => {
-                match self.native_use_cases().native_physical_state() {
-                    Ok(state) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_physical_state_json(
-                            &state,
-                            crate::presentation::native_json::native_header_json,
-                            crate::presentation::native_json::collection_roots_json,
-                            crate::presentation::native_json::native_manifest_summary_json,
-                            crate::presentation::ops_json::native_registry_summary_json,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/physical/native-vector-artifacts") => {
-                match self.native_use_cases().native_vector_artifact_pages() {
-                    Ok(summaries) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_pages_json(
-                            &summaries,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/physical/native-vector-artifacts/inspect") => {
-                match self.native_use_cases().inspect_vector_artifacts() {
-                    Ok(batch) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_batch_json(
-                            &batch,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/physical/native-header/repair-policy") => {
-                match self.native_use_cases().native_header_repair_policy() {
-                    Ok(policy) => json_response(
-                        200,
-                        crate::presentation::native_json::repair_policy_json(&policy),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/manifest") => match self.native_use_cases().manifest_events_filtered(
-                query.get("collection").map(String::as_str),
-                query.get("kind").map(String::as_str),
-                query
-                    .get("since_snapshot")
-                    .and_then(|value| value.parse::<u64>().ok()),
-            ) {
-                Ok(events) => json_response(
-                    200,
-                    crate::presentation::native_json::manifest_events_json(&events),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/roots") => match self.native_use_cases().collection_roots() {
-                Ok(roots) => json_response(
-                    200,
-                    crate::presentation::native_json::collection_roots_json(&roots),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/snapshots") => match self.native_use_cases().snapshots() {
-                Ok(snapshots) => json_response(
-                    200,
-                    crate::presentation::native_json::snapshots_json(&snapshots),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/indexes") => json_response(
-                200,
-                crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
-            ),
-            ("GET", "/stats") => json_response(
-                200,
-                crate::presentation::query_result_json::runtime_stats_json(
-                    &self.catalog_use_cases().stats(),
-                ),
-            ),
-            ("POST", "/snapshot") => match self.native_use_cases().create_snapshot() {
-                Ok(snapshot) => json_response(
-                    200,
-                    crate::presentation::native_json::snapshot_descriptor_json(&snapshot),
-                ),
-                Err(err) => json_error(500, err.to_string()),
-            },
-            ("POST", "/physical/native-header/repair") => {
-                match self.native_use_cases().repair_native_header_from_metadata() {
-                    Ok(policy) => json_response(
-                        200,
-                        crate::presentation::native_json::repair_policy_json(&policy),
-                    ),
-                    Err(err) => json_error(500, err.to_string()),
-                }
-            }
-            ("POST", "/physical/metadata/rebuild") => {
-                match self
-                    .native_use_cases()
-                    .rebuild_physical_metadata_from_native_state()
-                {
-                    Ok(true) => json_ok("physical metadata rebuilt from native state"),
-                    Ok(false) => {
-                        json_error(409, "native state is not available for metadata rebuild")
-                    }
-                    Err(err) => json_error(500, err.to_string()),
-                }
-            }
-            ("POST", "/physical/native-state/repair") => {
-                match self
-                    .native_use_cases()
-                    .repair_native_physical_state_from_metadata()
-                {
-                    Ok(true) => json_ok("native physical state republished from physical metadata"),
-                    Ok(false) => json_error(
-                        409,
-                        "native physical state repair is not available in this mode",
-                    ),
-                    Err(err) => json_error(500, err.to_string()),
-                }
-            }
-            ("POST", "/physical/native-vector-artifacts/warmup") => {
-                match self.native_use_cases().warmup_vector_artifacts() {
-                    Ok(batch) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_batch_json(
-                            &batch,
-                        ),
-                    ),
-                    Err(err) => json_error(500, err.to_string()),
-                }
-            }
-            ("POST", "/serverless/attach") => self.handle_serverless_attach(body),
-            ("POST", "/serverless/warmup") => self.handle_serverless_warmup(body),
-            ("POST", "/tick") => self.handle_serverless_reclaim(body),
-            ("POST", "/serverless/reclaim") => self.handle_serverless_reclaim(body),
-            ("POST", "/retention/apply") => {
-                match self.native_use_cases().apply_retention_policy() {
-                    Ok(()) => json_ok("retention policy applied"),
-                    Err(err) => json_error(500, err.to_string()),
-                }
-            }
-            ("POST", "/maintenance") => match self.native_use_cases().run_maintenance() {
-                Ok(()) => json_ok("maintenance completed"),
-                Err(err) => json_error(500, err.to_string()),
-            },
-
-            _ => {
-                // `GET /catalog/collections/{name}` — Red UI metadata
-                // contract (#736). Strip the prefix and dispatch only
-                // when the tail looks like a single collection name —
-                // the exact-match arms above (`/catalog/collections/readiness`,
-                // `/catalog/collections/readiness/attention`) already
-                // took priority, so a trailing `/readiness*` segment
-                // can never reach here.
-                if method == "GET" {
-                    if let Some(rest) = path.strip_prefix("/catalog/collections/") {
-                        let name = rest.trim_matches('/');
-                        if !name.is_empty() && !name.contains('/') {
-                            if let Some(deny) =
-                                self.check_collection_http_policy(&headers, "select", name)
-                            {
-                                return deny;
-                            }
-                            return self.handle_collection_ui_metadata(name, &headers);
-                        }
-                    }
-                }
-
-                // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
-                if let Some(rest) = path.strip_prefix("/logs/") {
-                    let parts: Vec<&str> = rest.split('/').collect();
-                    if parts.len() >= 2 {
-                        let log_name = parts[0];
-                        let action = parts[1];
-                        return match (method.as_str(), action) {
-                            ("POST", "append") => {
-                                handlers_log::handle_log_append(&self.runtime, log_name, body)
-                            }
-                            ("GET", "query") => {
-                                handlers_log::handle_log_query(&self.runtime, log_name, &query)
-                            }
-                            ("POST", "retention") => {
-                                handlers_log::handle_log_retention(&self.runtime, log_name)
-                            }
-                            _ => json_error(405, "method not allowed for log endpoint"),
-                        };
-                    }
-                }
-
-                if method == "GET" {
-                    if let Some(collection) = collection_from_native_vector_artifact_path(&path) {
-                        return match self.native_use_cases().inspect_vector_artifact(
-                            InspectNativeArtifactInput {
-                                collection: collection.to_string(),
-                                artifact_kind: query.get("kind").cloned(),
-                            },
-                        ) {
-                            Ok(artifact) => json_response(
-                                200,
-                                crate::presentation::native_state_json::native_vector_artifact_inspection_json(
-                                    &artifact,
-                                ),
-                            ),
-                            Err(err) => json_error(404, err.to_string()),
-                        };
-                    }
-                }
-                if let Some(response) =
-                    self.handle_v1_keyed_route(method.as_str(), &path, &query, &body)
+        // `red server --ui` (#1047, ADR 0051): no catalog route matched —
+        // fall back to the static bundle surface. This runs last so a bundle
+        // asset can never shadow a real endpoint; a missing asset returns
+        // `None` and we drop to the canonical 404 below.
+        if method == "GET" {
+            if let Some(ui_dir) = self.ui_dir() {
+                if let Some(response) = crate::server::ui_static::serve_bundle_asset(ui_dir, &path)
                 {
                     return response;
                 }
-                // AI model registry: /ai/models/{name} and
-                // cache actions /ai/models/{name}/{pull|cache}.
-                if let Some(rest) = path.strip_prefix("/ai/models/") {
-                    let rest = rest.trim_matches('/');
-                    if !rest.is_empty() {
-                        if let Some((model_name, action)) = rest.split_once('/') {
-                            if !model_name.is_empty() && !model_name.contains('/') {
-                                return match (method.as_str(), action) {
-                                    ("POST", "pull") => self.handle_ai_model_pull(model_name, body),
-                                    ("GET", "cache") => {
-                                        self.handle_ai_model_cache_status(model_name)
-                                    }
-                                    ("DELETE", "cache") => {
-                                        self.handle_ai_model_cache_drop(model_name)
-                                    }
-                                    _ => json_error(
-                                        405,
-                                        "method not allowed for /ai/models/{name}/{action}",
-                                    ),
-                                };
-                            }
-                        } else if !rest.contains('/') {
-                            return match method.as_str() {
-                                "GET" => self.handle_ai_model_get(rest),
-                                "PUT" => self.handle_ai_model_update(rest, body),
-                                _ => json_error(405, "method not allowed for /ai/models/{name}"),
-                            };
-                        }
-                    }
-                }
-                // Config key routes: /config/{key.path}
-                if let Some(config_key) = path.strip_prefix("/config/") {
-                    let config_key = config_key.trim_matches('/');
-                    if !config_key.is_empty() {
-                        return match method.as_str() {
-                            "GET" => self.handle_config_get_key(config_key),
-                            "PUT" => self.handle_config_set_key(config_key, body),
-                            "DELETE" => self.handle_config_delete_key(config_key),
-                            _ => json_error(405, "method not allowed"),
-                        };
-                    }
-                }
-
-                // KV routes: /collections/{collection}/kvs/{key}
-                if let Some(collection) = collection_kv_invalidate_tags_path(&path) {
-                    return match method.as_str() {
-                        "POST" => self.handle_invalidate_kv_tags(collection, body),
-                        _ => json_error(405, "method not allowed for KV tag invalidation endpoint"),
-                    };
-                }
-                if let Some((collection, key)) = collection_kv_watch_path(&path) {
-                    return match method.as_str() {
-                        "GET" => self.handle_watch_kv(&collection, &key, &query),
-                        _ => json_error(405, "method not allowed for KV watch endpoint"),
-                    };
-                }
-                if let Some((collection, key)) = collection_kv_path(&path) {
-                    let policy_action = match method.as_str() {
-                        "GET" => "select",
-                        "PUT" => "insert",
-                        "PATCH" => "update",
-                        "DELETE" => "delete",
-                        _ => return json_error(405, "method not allowed for KV endpoint"),
-                    };
-                    if let Some(deny) =
-                        self.check_collection_http_policy(&headers, policy_action, &collection)
-                    {
-                        return deny;
-                    }
-                    return match method.as_str() {
-                        "GET" => self.handle_get_kv(&collection, &key),
-                        "PUT" => self.handle_put_kv(&collection, &key, body),
-                        "PATCH" => self.handle_patch_kv(&collection, &key, body),
-                        "DELETE" => self.handle_delete_kv(&collection, &key),
-                        _ => json_error(405, "method not allowed for KV endpoint"),
-                    };
-                }
-                if method == "POST" {
-                    if let Some(name) = index_named_action_path(&path, "enable") {
-                        return match self.admin_use_cases().set_index_enabled(&name, true) {
-                            Ok(index) => json_response(
-                                200,
-                                crate::presentation::admin_json::index_json(&index),
-                            ),
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = index_named_action_path(&path, "disable") {
-                        return match self.admin_use_cases().set_index_enabled(&name, false) {
-                            Ok(index) => json_response(
-                                200,
-                                crate::presentation::admin_json::index_json(&index),
-                            ),
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = index_named_action_path(&path, "warmup") {
-                        return match self.admin_use_cases().warmup_index(&name) {
-                            Ok(index) => json_response(
-                                200,
-                                crate::presentation::admin_json::index_json(&index),
-                            ),
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = index_named_action_path(&path, "building") {
-                        return match self.admin_use_cases().mark_index_building(&name) {
-                            Ok(index) => json_response(
-                                200,
-                                crate::presentation::admin_json::index_json(&index),
-                            ),
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = index_named_action_path(&path, "fail") {
-                        return match self.admin_use_cases().fail_index(&name) {
-                            Ok(index) => json_response(
-                                200,
-                                crate::presentation::admin_json::index_json(&index),
-                            ),
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = index_named_action_path(&path, "stale") {
-                        return match self.admin_use_cases().mark_index_stale(&name) {
-                            Ok(index) => json_response(
-                                200,
-                                crate::presentation::admin_json::index_json(&index),
-                            ),
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(name) = index_named_action_path(&path, "ready") {
-                        return match self.admin_use_cases().mark_index_ready(&name) {
-                            Ok(index) => json_response(
-                                200,
-                                crate::presentation::admin_json::index_json(&index),
-                            ),
-                            Err(err) => json_error(400, err.to_string()),
-                        };
-                    }
-                    if let Some(collection) =
-                        collection_from_native_vector_artifact_warmup_path(&path)
-                    {
-                        return match self.native_use_cases().warmup_vector_artifact(
-                            InspectNativeArtifactInput {
-                                collection: collection.to_string(),
-                                artifact_kind: query.get("kind").cloned(),
-                            },
-                        ) {
-                            Ok(artifact) => json_response(
-                                200,
-                                crate::presentation::native_state_json::native_vector_artifact_inspection_json(
-                                    &artifact,
-                                ),
-                            ),
-                            Err(err) => json_error(404, err.to_string()),
-                        };
-                    }
-                }
-                // `red server --ui` (#1047, ADR 0051): no API route
-                // matched — fall back to the static bundle surface. This
-                // runs last so a bundle asset can never shadow a real
-                // endpoint; a missing asset returns `None` and we drop to
-                // the canonical 404 below.
-                if method == "GET" {
-                    if let Some(ui_dir) = self.ui_dir() {
-                        if let Some(response) =
-                            crate::server::ui_static::serve_bundle_asset(ui_dir, &path)
-                        {
-                            return response;
-                        }
-                    }
-                }
-                json_error(404, format!("route not found: {} {}", method, path))
             }
         }
+        json_error(404, format!("route not found: {} {}", method, path))
     }
 
     pub(crate) fn resolve_projection_payload(
@@ -2304,8 +1543,184 @@ impl RedDBServer {
             "prometheus.remote_write" => {
                 Some(self.handle_prometheus_remote_write(query, headers, body.to_vec()))
             }
+            // Routing 3/3 (#1643) leftovers migrated from the legacy matcher.
+            "root.index" => Some(match self.ui_dir() {
+                Some(ui_dir) => crate::server::ui_static::serve_bundle_asset(ui_dir, "/")
+                    .unwrap_or_else(|| self.handle_root_discovery()),
+                None => self.handle_root_discovery(),
+            }),
+            "config.export" => Some(self.handle_config_export()),
+            "config.import" => Some(self.handle_config_import(body.to_vec())),
+            "config.key" => self.handle_config_key_route(method, path, body),
+            "keyed.v1.kv" | "keyed.v1.config" | "keyed.v1.vault" => {
+                self.handle_v1_keyed_route(method, path, query, body)
+            }
+            "kv.dynamic.kvs" | "kv.dynamic.kv" => {
+                self.handle_collection_kv_route(method, path, query, headers, body)
+            }
+            "logs.dynamic" => {
+                let name = matched.params.get("name")?;
+                let action = matched.params.get("action")?;
+                Some(match (method, action.as_str()) {
+                    ("POST", "append") => {
+                        handlers_log::handle_log_append(&self.runtime, name, body.to_vec())
+                    }
+                    ("GET", "query") => handlers_log::handle_log_query(&self.runtime, name, query),
+                    ("POST", "retention") => {
+                        handlers_log::handle_log_retention(&self.runtime, name)
+                    }
+                    _ => json_error(405, "method not allowed for log endpoint"),
+                })
+            }
+            "indexes.action" => {
+                let name = matched.params.get("name")?;
+                let action = matched.params.get("action")?;
+                self.handle_index_action_route(method, name, action)
+            }
+            "vectors.cluster" => Some(handlers_vector::handle_vector_cluster(
+                &self.runtime,
+                body.to_vec(),
+            )),
+            "serverless.attach" => Some(self.handle_serverless_attach(body.to_vec())),
+            "serverless.warmup" => Some(self.handle_serverless_warmup(body.to_vec())),
+            "serverless.reclaim" | "serverless.tick" => {
+                Some(self.handle_serverless_reclaim(body.to_vec()))
+            }
+            "physical.native_vector_artifacts.by_collection" => {
+                let collection = matched.params.get("collection")?;
+                Some(match self.native_use_cases().inspect_vector_artifact(
+                    InspectNativeArtifactInput {
+                        collection: collection.to_string(),
+                        artifact_kind: query.get("kind").cloned(),
+                    },
+                ) {
+                    Ok(artifact) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
+                            &artifact,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
+            "physical.native_vector_artifacts.by_collection.warmup" => {
+                let collection = matched.params.get("collection")?;
+                Some(match self.native_use_cases().warmup_vector_artifact(
+                    InspectNativeArtifactInput {
+                        collection: collection.to_string(),
+                        artifact_kind: query.get("kind").cloned(),
+                    },
+                ) {
+                    Ok(artifact) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
+                            &artifact,
+                        ),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                })
+            }
             _ => None,
         }
+    }
+
+    /// Routing 3/3 (#1643) — `/config/{key.path}` GET/PUT/DELETE. Re-runs the
+    /// legacy `strip_prefix("/config/")` parse so multi-segment keys and the
+    /// bare-`/config` fall-through (→ canonical 404) are preserved.
+    fn handle_config_key_route(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        let config_key = path.strip_prefix("/config/")?.trim_matches('/');
+        if config_key.is_empty() {
+            return None;
+        }
+        Some(match method {
+            "GET" => self.handle_config_get_key(config_key),
+            "PUT" => self.handle_config_set_key(config_key, body.to_vec()),
+            "DELETE" => self.handle_config_delete_key(config_key),
+            _ => json_error(405, "method not allowed"),
+        })
+    }
+
+    /// Routing 3/3 (#1643) — the KV collection surface. Re-runs the legacy
+    /// helper parsing (percent-decode, multi-segment keys, `/kv/` vs `/kvs/`
+    /// watch alias) in the same order the legacy matcher used, returning
+    /// `None` when none of the shapes match so the caller falls through to
+    /// the canonical 404.
+    fn handle_collection_kv_route(
+        &self,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        if let Some(collection) = collection_kv_invalidate_tags_path(path) {
+            return Some(match method {
+                "POST" => self.handle_invalidate_kv_tags(collection, body.to_vec()),
+                _ => json_error(405, "method not allowed for KV tag invalidation endpoint"),
+            });
+        }
+        if let Some((collection, key)) = collection_kv_watch_path(path) {
+            return Some(match method {
+                "GET" => self.handle_watch_kv(&collection, &key, query),
+                _ => json_error(405, "method not allowed for KV watch endpoint"),
+            });
+        }
+        if let Some((collection, key)) = collection_kv_path(path) {
+            let policy_action = match method {
+                "GET" => "select",
+                "PUT" => "insert",
+                "PATCH" => "update",
+                "DELETE" => "delete",
+                _ => return Some(json_error(405, "method not allowed for KV endpoint")),
+            };
+            if let Some(deny) =
+                self.check_collection_http_policy(headers, policy_action, &collection)
+            {
+                return Some(deny);
+            }
+            return Some(match method {
+                "GET" => self.handle_get_kv(&collection, &key),
+                "PUT" => self.handle_put_kv(&collection, &key, body.to_vec()),
+                "PATCH" => self.handle_patch_kv(&collection, &key, body.to_vec()),
+                "DELETE" => self.handle_delete_kv(&collection, &key),
+                _ => json_error(405, "method not allowed for KV endpoint"),
+            });
+        }
+        None
+    }
+
+    /// Routing 3/3 (#1643) — index lifecycle actions
+    /// (`POST /indexes/:name/:action`). Non-POST methods and unknown actions
+    /// return `None` so the caller falls through to the canonical 404, exactly
+    /// as the legacy `if method == "POST"` guard did.
+    fn handle_index_action_route(
+        &self,
+        method: &str,
+        name: &str,
+        action: &str,
+    ) -> Option<HttpResponse> {
+        if method != "POST" {
+            return None;
+        }
+        let result = match action {
+            "enable" => self.admin_use_cases().set_index_enabled(name, true),
+            "disable" => self.admin_use_cases().set_index_enabled(name, false),
+            "warmup" => self.admin_use_cases().warmup_index(name),
+            "building" => self.admin_use_cases().mark_index_building(name),
+            "fail" => self.admin_use_cases().fail_index(name),
+            "stale" => self.admin_use_cases().mark_index_stale(name),
+            "ready" => self.admin_use_cases().mark_index_ready(name),
+            _ => return None,
+        };
+        Some(match result {
+            Ok(index) => json_response(200, crate::presentation::admin_json::index_json(&index)),
+            Err(err) => json_error(400, err.to_string()),
+        })
     }
 
     fn rewrite_route_alias(mut request: HttpRequest) -> HttpRequest {
@@ -2668,6 +2083,127 @@ pub(crate) fn resolve_bearer_role(
 fn token_fingerprint(token: &str) -> String {
     let digest = crate::crypto::sha256(token.as_bytes());
     crate::utils::to_hex_prefix(&digest, 8)
+}
+
+// Chain-integrity + capacity-audit handlers (relocated in routing 3/3,
+// #1643) so they sit with their handler siblings above the test module
+// rather than below it.
+/// Issue #524 — `GET /collections/:name/chain-tip`. Returns the cached chain
+/// tip JSON. 404 when the collection is not a `KIND blockchain` or has no
+/// rows yet (the engine guarantees a genesis row on creation, so the 404
+/// branch effectively means "wrong kind / collection absent").
+fn handle_chain_tip(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
+    let Some(tip) = runtime.chain_tip_for_collection(collection) else {
+        return json_error(
+            404,
+            format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"),
+        );
+    };
+    let server_time = crate::runtime::blockchain_kind::now_ms();
+    let mut hex = String::with_capacity(64);
+    for b in tip.hash.iter() {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    let mut obj = crate::json::Map::new();
+    obj.insert(
+        "block_height".to_string(),
+        crate::json::Value::Number(tip.height as f64),
+    );
+    obj.insert("hash".to_string(), crate::json::Value::String(hex));
+    obj.insert(
+        "timestamp".to_string(),
+        crate::json::Value::Number(tip.timestamp_ms as f64),
+    );
+    obj.insert(
+        "server_time".to_string(),
+        crate::json::Value::Number(server_time as f64),
+    );
+    json_response(200, crate::json::Value::Object(obj))
+}
+
+/// Issue #525 — admin-token gate for verify-chain + clear-integrity endpoints.
+/// When `RED_ADMIN_TOKEN` is unset the endpoints stay open (dev installs).
+/// When set, callers must present a matching `Authorization: Bearer <token>`.
+fn admin_token_ok(headers: &BTreeMap<String, String>) -> bool {
+    let Some(expected) = read_admin_token() else {
+        return true;
+    };
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    crate::crypto::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+}
+
+/// Issue #525 — `POST /collections/:name/verify-chain`.
+fn handle_verify_chain(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
+    let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
+        return json_error(
+            404,
+            format!(
+                "verify-chain: collection '{collection}' is not a blockchain or does not exist"
+            ),
+        );
+    };
+    let mut obj = crate::json::Map::new();
+    obj.insert(
+        "checked".to_string(),
+        crate::json::Value::Number(outcome.checked as f64),
+    );
+    obj.insert("ok".to_string(), crate::json::Value::Bool(outcome.ok));
+    obj.insert(
+        "first_bad_height".to_string(),
+        match outcome.first_bad_height {
+            Some(h) => crate::json::Value::Number(h as f64),
+            None => crate::json::Value::Null,
+        },
+    );
+    json_response(200, crate::json::Value::Object(obj))
+}
+
+/// Issue #525 — `POST /collections/:name/clear-integrity-flag`.
+fn handle_clear_integrity_flag(
+    runtime: &crate::runtime::RedDBRuntime,
+    collection: &str,
+) -> HttpResponse {
+    if !runtime.clear_chain_integrity_flag(collection) {
+        return json_error(
+            404,
+            format!(
+                "clear-integrity-flag: collection '{collection}' is not a blockchain or does not exist"
+            ),
+        );
+    }
+    let mut obj = crate::json::Map::new();
+    obj.insert("ok".to_string(), crate::json::Value::Bool(true));
+    obj.insert(
+        "collection".to_string(),
+        crate::json::Value::String(collection.to_string()),
+    );
+    json_response(200, crate::json::Value::Object(obj))
+}
+
+/// Issue #767 / S8 — record a `stream.closed { reason: capacity_refused }`
+/// audit event whenever the capacity guard refuses an open. The brief
+/// requires audit coverage of every state transition; capacity_refused
+/// is the only one that never produces a lease handle.
+fn emit_capacity_refused_audit(
+    runtime: &crate::runtime::RedDBRuntime,
+    principal: &str,
+    err: &crate::server::output_stream::AcquireError,
+) {
+    use crate::server::output_stream::AcquireError;
+    let (limit, current) = match err {
+        AcquireError::GlobalExhausted { limit, current } => (*limit, *current),
+        AcquireError::PrincipalExhausted { limit, current, .. } => (*limit, *current),
+    };
+    crate::server::output_stream::audit_stream_capacity_refused(
+        runtime,
+        principal,
+        err.code(),
+        limit,
+        current,
+    );
 }
 
 #[cfg(test)]
@@ -5190,136 +4726,6 @@ mod tests {
     }
 }
 
-/// Issue #524 — `GET /collections/:name/chain-tip`. Returns the cached chain
-/// tip JSON. 404 when the collection is not a `KIND blockchain` or has no
-/// rows yet (the engine guarantees a genesis row on creation, so the 404
-/// branch effectively means "wrong kind / collection absent").
-fn handle_chain_tip(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
-    let Some(tip) = runtime.chain_tip_for_collection(collection) else {
-        return json_error(
-            404,
-            format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"),
-        );
-    };
-    let server_time = crate::runtime::blockchain_kind::now_ms();
-    let mut hex = String::with_capacity(64);
-    for b in tip.hash.iter() {
-        hex.push_str(&format!("{b:02x}"));
-    }
-    let mut obj = crate::json::Map::new();
-    obj.insert(
-        "block_height".to_string(),
-        crate::json::Value::Number(tip.height as f64),
-    );
-    obj.insert("hash".to_string(), crate::json::Value::String(hex));
-    obj.insert(
-        "timestamp".to_string(),
-        crate::json::Value::Number(tip.timestamp_ms as f64),
-    );
-    obj.insert(
-        "server_time".to_string(),
-        crate::json::Value::Number(server_time as f64),
-    );
-    json_response(200, crate::json::Value::Object(obj))
-}
-
-/// Issue #525 — admin-token gate for verify-chain + clear-integrity endpoints.
-/// When `RED_ADMIN_TOKEN` is unset the endpoints stay open (dev installs).
-/// When set, callers must present a matching `Authorization: Bearer <token>`.
-fn admin_token_ok(headers: &BTreeMap<String, String>) -> bool {
-    let Some(expected) = read_admin_token() else {
-        return true;
-    };
-    let presented = headers
-        .get("authorization")
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    crate::crypto::constant_time_eq(presented.as_bytes(), expected.as_bytes())
-}
-
-/// Issue #525 — `POST /collections/:name/verify-chain`.
-fn handle_verify_chain(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
-    let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
-        return json_error(
-            404,
-            format!(
-                "verify-chain: collection '{collection}' is not a blockchain or does not exist"
-            ),
-        );
-    };
-    let mut obj = crate::json::Map::new();
-    obj.insert(
-        "checked".to_string(),
-        crate::json::Value::Number(outcome.checked as f64),
-    );
-    obj.insert("ok".to_string(), crate::json::Value::Bool(outcome.ok));
-    obj.insert(
-        "first_bad_height".to_string(),
-        match outcome.first_bad_height {
-            Some(h) => crate::json::Value::Number(h as f64),
-            None => crate::json::Value::Null,
-        },
-    );
-    json_response(200, crate::json::Value::Object(obj))
-}
-
-/// Issue #525 — `POST /collections/:name/clear-integrity-flag`.
-fn handle_clear_integrity_flag(
-    runtime: &crate::runtime::RedDBRuntime,
-    collection: &str,
-) -> HttpResponse {
-    if !runtime.clear_chain_integrity_flag(collection) {
-        return json_error(
-            404,
-            format!(
-                "clear-integrity-flag: collection '{collection}' is not a blockchain or does not exist"
-            ),
-        );
-    }
-    let mut obj = crate::json::Map::new();
-    obj.insert("ok".to_string(), crate::json::Value::Bool(true));
-    obj.insert(
-        "collection".to_string(),
-        crate::json::Value::String(collection.to_string()),
-    );
-    json_response(200, crate::json::Value::Object(obj))
-}
-
-fn index_named_action_path(path: &str, action: &str) -> Option<String> {
-    let prefix = "/indexes/";
-    let suffix = format!("/{action}");
-    let trimmed = path.strip_prefix(prefix)?.strip_suffix(&suffix)?;
-    let name = trimmed.trim_matches('/');
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
-}
-
-fn collection_from_native_vector_artifact_path(path: &str) -> Option<&str> {
-    let prefix = "/physical/native-vector-artifacts/";
-    let trimmed = path.strip_prefix(prefix)?;
-    let collection = trimmed.trim_matches('/');
-    if collection.is_empty() || collection.contains('/') {
-        None
-    } else {
-        Some(collection)
-    }
-}
-
-fn collection_from_native_vector_artifact_warmup_path(path: &str) -> Option<&str> {
-    let prefix = "/physical/native-vector-artifacts/";
-    let suffix = "/warmup";
-    let trimmed = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
-    let collection = trimmed.trim_matches('/');
-    if collection.is_empty() || collection.contains('/') {
-        None
-    } else {
-        Some(collection)
-    }
-}
-
 /// Match `/collections/:name/kvs/invalidate_tags`.
 fn collection_kv_invalidate_tags_path(path: &str) -> Option<&str> {
     let prefix = "/collections/";
@@ -5443,29 +4849,6 @@ pub(crate) fn principal_for(headers: &BTreeMap<String, String>) -> String {
 ///   `Retry-After: <seconds>`  header
 ///   `{"ok": false, "error": {"code": <code>, "limit": N, "current": M,
 ///                            "principal": "..."?}}`
-/// Issue #767 / S8 — record a `stream.closed { reason: capacity_refused }`
-/// audit event whenever the capacity guard refuses an open. The brief
-/// requires audit coverage of every state transition; capacity_refused
-/// is the only one that never produces a lease handle.
-fn emit_capacity_refused_audit(
-    runtime: &crate::runtime::RedDBRuntime,
-    principal: &str,
-    err: &crate::server::output_stream::AcquireError,
-) {
-    use crate::server::output_stream::AcquireError;
-    let (limit, current) = match err {
-        AcquireError::GlobalExhausted { limit, current } => (*limit, *current),
-        AcquireError::PrincipalExhausted { limit, current, .. } => (*limit, *current),
-    };
-    crate::server::output_stream::audit_stream_capacity_refused(
-        runtime,
-        principal,
-        err.code(),
-        limit,
-        current,
-    );
-}
-
 pub(crate) fn stream_capacity_refusal_response(
     err: &crate::server::output_stream::AcquireError,
 ) -> HttpResponse {
