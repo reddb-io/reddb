@@ -1,10 +1,9 @@
-# TLA+ specs for the replication consensus core
+# TLA+ specs for RedDB safety models
 
-Formal models of RedDB's term-based, quorum-gated replication safety
-(issue #841, PRD #819). Each module asserts **one** safety property and is
-model-checked by TLC in CI (`.github/workflows/tla-check.yml`). The models are
-deliberately small (3 nodes / 3 terms) so they exhaust their state space in
-seconds-to-minutes, not hours.
+Formal models of RedDB's replication and transaction safety contracts. Each
+module asserts a focused bounded safety envelope and is model-checked by TLC in
+CI (`.github/workflows/tla-check.yml`). The models are deliberately small so
+they exhaust their state space in seconds-to-minutes, not hours.
 
 The randomized executable counterpart is the
 [replication Maelstrom-style protocol model](../../docs/testing/replication-maelstrom-model.md).
@@ -16,7 +15,9 @@ Jepsen-style cluster harness.
 | --- | --- | --- |
 | [`ElectionSafety.tla`](ElectionSafety.tla) | No two nodes hold primary in the same term. | `replication/election.rs` (`Voter::consider`, `quorum_threshold`); ADR 0030 "no two primaries in a term" (#834). |
 | [`Durability.tla`](Durability.tla) | A write at/below the commit watermark is never rolled back (`CommittedNeverRolledBack` + `LeaderCompleteness`). | ADR 0030 commit-watermark / `NeverRollbackCommitted`; ADR 0032 `(term, lsn)` framing; `replication/quorum.rs`, `commit_waiter.rs`, `rollback.rs`. |
+| [`ReplicationSafetyEnvelope.tla`](ReplicationSafetyEnvelope.tla) | Single-writer fencing, election safety, partition behavior, and crash/recovery durability in one bounded model. | ADR 0030 / ADR 0032; writer fencing, quorum commit, crash/restart recovery. |
 | [`SafeReconfig.tla`](SafeReconfig.tla) | Every membership change preserves quorum overlap (old and new quorums intersect). | ADR 0030 membership rules; Raft single-server change. |
+| [`CommitProtocol.tla`](CommitProtocol.tla) | Optimistic MVCC commit safety: no lost update under FCW, stable snapshot reads, and SSI-admitted histories are serializable. | ADR 0065 TM v2; `SnapshotManager::begin` / `snapshot` / `commit`; `visibility::is_visible`; SQL table-row commit conflict checks; `TxnContext` savepoint sub-xids. |
 
 ## How the models mirror the implementation
 
@@ -41,6 +42,40 @@ Jepsen-style cluster harness.
   safe Raft rule), and TLC checks that a quorum of the pre-change config always
   intersects a quorum of the post-change config. `JumpBreaksOverlap` documents
   why a multi-member jump is unsafe, so the property is not vacuous.
+* **Commit protocol** — `Begin` abstracts `SnapshotManager::begin()` plus
+  `snapshot()`: xids are allocated monotonically, and the begin snapshot records
+  the active in-progress set. `VisibleWriter` mirrors
+  `storage::transaction::visibility::is_visible`: writers with future xids or
+  xids active in the reader's snapshot are hidden. `Commit` performs the live
+  first-committer-wins check over logical rows before admitting writes. The
+  savepoint actions model `TxnContext` sub-xid frames: `SAVEPOINT` allocates a
+  frame, `ROLLBACK TO` removes that frame's writes, and `RELEASE` keeps them for
+  parent commit. For SSI, `NewRwEdges` records rw-antidependencies and
+  `AbortSSI` rejects a commit that would create a dangerous structure. The
+  serializability invariant compares every all-SSI admitted history against a
+  serial-execution oracle on the same bounded rows.
+
+## Commit protocol non-vacuity
+
+`CommitProtocol.tla` names the witness predicates checked while developing the
+bounded model:
+
+* `FCWConflictReached` — the state space contains a commit-time FCW abort for
+  overlapping transactions that write the same logical row.
+* `DangerousStructureReached` — the state space contains an SSI abort caused by
+  two consecutive rw-antidependency edges.
+* `OptimisticAdmitsMoreThan2PL` — the state space contains an all-SSI history
+  with a read/write overlap admitted by the optimistic protocol, documenting
+  that the model is not equivalent to naive strict two-phase locking.
+
+The CI config keeps all transactions on the SSI path (`EnabledLevels = {"SSI"}`)
+because SSI includes the Snapshot Isolation visibility and FCW checks while
+making the serial-oracle property non-vacuous in a small three-transaction,
+two-row model. For local reachability checks, temporarily add
+`NoFCWConflictReached`, `NoDangerousStructureReached`, or
+`NoOptimisticAdmitsMoreThan2PL` as an invariant; TLC must reject the model with
+a counterexample reaching the corresponding witness state. These negated
+witness invariants are not in CI because their success condition is failure.
 
 ## Running locally
 
@@ -50,7 +85,7 @@ Needs a JDK (17+) and `tla2tools.jar` (pinned to `v1.8.0` in CI):
 curl -fsSL -o tla2tools.jar \
   https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
 
-# Check one module (repeat for Durability, SafeReconfig):
+# Check one module (repeat for Durability, SafeReconfig, CommitProtocol):
 java -XX:+UseParallelGC -cp tla2tools.jar tlc2.TLC \
   -deadlock -config ElectionSafety.cfg ElectionSafety.tla
 ```
