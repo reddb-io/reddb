@@ -171,6 +171,8 @@ jobs:
           node-version: '22'
       - name: Check public docs match the contract matrix
         run: node scripts/gen-docs-from-matrix.mjs --check
+      - name: Execute getting-started quickstarts
+        run: cargo test --test docs_getting_started_quickstarts
       - name: Doc-generation tooling contract test
         run: node --test scripts/docs_matrix_contract.test.mjs
 
